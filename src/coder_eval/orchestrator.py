@@ -11,6 +11,7 @@ from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .agent import Agent
 from .agents.watchdog import ThreadedWatchdog
@@ -37,6 +38,7 @@ from .models import (
     EvaluationResult,
     FinalStatus,
     JudgeCriterionResult,
+    LiteLLMRoute,
     PostRunCommand,
     PostRunResult,
     PreRunCommand,
@@ -48,6 +50,7 @@ from .models import (
     TokenUsage,
     TurnRecord,
     UserMessage,
+    resolve_evaluation_route,
     resolve_route,
 )
 from .orchestration.early_stop import EarlyStopWatcher, validate_early_stop
@@ -115,16 +118,21 @@ async def _pump_stream(
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
 
 
-def _format_routing(route: ApiRoute) -> str:
+def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
     """Format the route name for the ``API routing:`` log line.
 
     For ``DirectRoute`` the resolved judge transport is appended so the choice
     (anthropic / none) is visible on every run, not only in the persisted
-    ``environment_info`` record.
+    ``environment_info`` record. For ``LiteLLMRoute`` the model is shown — the
+    ``effective_model`` (the resolved ``agent.model``, e.g. from ``--model``)
+    when supplied, else the route's own default — so the line reflects what the
+    agent will actually send rather than the route-level fallback.
     """
     name = ROUTE_NAMES[type(route)]
     if isinstance(route, DirectRoute):
         return f"{name} (judge transport: {route.judge_transport or 'none'})"
+    if isinstance(route, LiteLLMRoute):
+        return f"{name} (model: {effective_model or route.model or 'default'})"
     return name
 
 
@@ -361,6 +369,11 @@ class Orchestrator:
 
         # API routing (initialized in _setup)
         self.route: ApiRoute | None = None
+        # Route for the evaluation side (llm_judge / agent_judge / simulated user):
+        # pinned to a constant Claude backend so grading stays comparable when the
+        # agent runs on an open-weight (LiteLLM) model. Equals self.route for the
+        # Direct/Bedrock backends.
+        self.eval_route: ApiRoute | None = None
 
         # Result tracking
         self.result: EvaluationResult | None = None
@@ -516,6 +529,12 @@ class Orchestrator:
                 )
 
                 logger.error(f"Task timed out: {e}")
+
+                # Recover the turn in flight when the watchdog killed the agent.
+                # Nothing else on this path does: the cancel arrives as a
+                # BaseException, so it never reaches the retry executor's
+                # per-attempt hook that drains the slot on a turn-level timeout.
+                await self._drain_killed_turn()
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
                 # statuses so per-task records preserve the failure mode.
@@ -598,6 +617,40 @@ class Orchestrator:
                     raise teardown_interrupt
 
         return self.result
+
+    async def _drain_killed_turn(self) -> None:
+        """Move a hard-killed turn's partial record from the agent onto the result.
+
+        The only reader of ``pending_turn`` on the task-timeout path. Ordering
+        matters both ways: it must run before ``_cleanup`` (whose ``agent.stop()``
+        clears the slot) and before ``_finalize_result``, so the recovered turn
+        feeds token aggregation and command stats like any other.
+
+        Best-effort: a task killed before its first turn has nothing parked, and
+        this runs on the way to a saved row, so it must not raise.
+        """
+        if self.agent is None or self.result is None:
+            return
+        try:
+            partial = self.agent.pending_turn
+            # `pending_turn` is a slot any agent implementation fills, so a non-record
+            # here would fail validation during teardown and take the row down with it.
+            if not isinstance(partial, TurnRecord):
+                logger.debug("[%s] Hard-killed task preserved no partial turn", self.task.task_id)
+                return
+            self.result.iterations.append(partial)
+            await self.agent.discard_pending_turn()
+            usage = partial.token_usage
+            logger.info(
+                "[%s] Recovered the hard-killed turn: %d tokens, %s",
+                self.task.task_id,
+                usage.total_tokens if usage is not None else 0,
+                f"${usage.total_cost_usd:.4f}"
+                if usage is not None and usage.total_cost_usd is not None
+                else "unpriced",
+            )
+        except Exception:
+            logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
 
     def _finalize_result(self, start_time: float) -> None:
         """Finalize the evaluation result: scores, telemetry, and persistence."""
@@ -890,8 +943,11 @@ class Orchestrator:
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
             self.route = resolve_route(settings)
-            logger.info("API routing: %s", _format_routing(self.route))
-            self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+            self.eval_route = resolve_evaluation_route(settings, self.route)
+            logger.info(
+                "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
+            )
+            self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
             self._record_route_environment_info()
             return
 
@@ -957,8 +1013,9 @@ class Orchestrator:
 
         # Determine API routing from settings.api_backend enum
         self.route = resolve_route(settings)
-        logger.info("API routing: %s", _format_routing(self.route))
-        self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+        self.eval_route = resolve_evaluation_route(settings, self.route)
+        logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
+        self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
 
         # Create and start the agent. For a no-op (type: none) task this dispatches
         # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
@@ -1074,6 +1131,12 @@ class Orchestrator:
         assert self.result is not None
         assert self.route is not None
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
+        # The evaluation side (llm_judge / agent_judge / simulated user) may run on
+        # a different, constant backend — pinned to Claude when the agent is on
+        # LiteLLM — so record it: a run then shows what actually graded/simulated
+        # it, distinct from the agent's api_routing.
+        if self.eval_route is not None:
+            self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
         if isinstance(self.route, BedrockRoute):
             self.result.environment_info["aws_region"] = self.route.region
             if self.route.model:
@@ -1082,6 +1145,12 @@ class Orchestrator:
             # Record which transport llm_judge will use under DirectRoute so the
             # choice is visible in run artifacts (and not just the startup log).
             self.result.environment_info["judge_transport"] = self.route.judge_transport or "none"
+        elif isinstance(self.route, LiteLLMRoute):
+            # Host only (never the base_url or auth token) — mirrors the Codex
+            # agent's host-only recording so secrets stay out of run artifacts.
+            self.result.environment_info["litellm_base_url_host"] = urlparse(self.route.base_url).hostname or ""
+            if self.route.model:
+                self.result.environment_info["litellm_model"] = self.route.model
         # Agent-specific routing (e.g. Codex custom-endpoint / Azure). No-op for
         # the evaluate-only path (no agent) and for agents that add nothing.
         if self.agent is not None:
@@ -1290,7 +1359,7 @@ class Orchestrator:
         every judge call across the dialog.
 
         Ledger key is ``(position, criterion_type)`` — a stable criterion
-        identity. ``check_all`` rebuilds ``success_criteria_results`` in the
+        identity. ``check_all_async`` rebuilds ``success_criteria_results`` in the
         same order as ``task.success_criteria`` every turn (the positional
         alignment ``calculate_weighted_score`` enforces via ``zip(strict=True)``),
         so ``position`` is stable across turns; pairing it with the type makes
@@ -1346,8 +1415,7 @@ class Orchestrator:
                 task_file=self.task_file,
                 cached_reference=self._reference_code,
             )
-            criteria_results = await asyncio.to_thread(
-                self.success_checker.check_all,
+            criteria_results = await self.success_checker.check_all_async(
                 self.task.success_criteria,
                 reference_code=reference_code,
                 reference_dir=reference_dir,
@@ -1392,7 +1460,7 @@ class Orchestrator:
         self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
-        # Record early-stop info (if the watcher tripped) BEFORE check_all, so it
+        # Record early-stop info (if the watcher tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
         self.result.early_stop = self._early_stop_watcher.info if self._early_stop_watcher is not None else None
 
@@ -1405,8 +1473,7 @@ class Orchestrator:
             task_file=self.task_file,
             cached_reference=self._reference_code,
         )
-        criteria_results = await asyncio.to_thread(
-            self.success_checker.check_all,
+        criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_code=reference_code,
             reference_dir=reference_dir,
@@ -1485,7 +1552,7 @@ class Orchestrator:
 
         The block lifted verbatim from the three identical sites (per-turn,
         budget-gate fallback, end-of-dialog): (re)load the reference, run
-        ``check_all`` off the event loop, fold this turn's judge usage into the
+        ``check_all_async``, fold this turn's judge usage into the
         dialog-wide accumulator, store the results, and recompute the weighted score.
         Whether to additionally set ``all_passed`` and emit a ``CriteriaCheckEvent`` is
         left to the caller — those differ across the sites (the budget-gate fallback
@@ -1498,8 +1565,7 @@ class Orchestrator:
             task_file=self.task_file,
             cached_reference=self._reference_code,
         )
-        criteria_results = await asyncio.to_thread(
-            self.success_checker.check_all,
+        criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_code=reference_code,
             reference_dir=reference_dir,
@@ -1660,7 +1726,10 @@ class Orchestrator:
             config=sim_config,
             task_description=self.task.description,
             initial_prompt=initial_prompt,
-            route=self.route,
+            # Pin the simulated user to the constant Claude eval route, not the
+            # agent's (possibly open-weight) route, so the simulator behaves
+            # identically across the models under test.
+            route=self.eval_route,
         )
         await simulator.start()
 

@@ -109,13 +109,36 @@ class SubAgentRunner:
         # submit_verdict tool). NOT routed through ``sdk_options`` —
         # ``mcp_servers`` is in ``_FRAMEWORK_OWNED_SDK_FIELDS``.
         self._extra_mcp_servers = extra_mcp_servers or {}
-        # Public attribute so the criterion can read it after ``run()`` returns.
+        # Public attribute so the criterion can read it after ``run_async()`` returns.
         # When the caller passes ``capture=None`` the runner doesn't expose one,
         # matching the opt-in-per-construction contract for the verdict channel.
         self.capture = capture
 
-    def run(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
+    async def run_async(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
+
+        Async so a genuine network/subprocess wait yields the event loop instead
+        of pinning a thread-pool thread — lets ``SuccessChecker.check_all_async``
+        await this directly without pinning a thread. (``check_all_async``
+        currently runs criteria sequentially; running this concurrently with
+        other judge-type criteria is deferred to a follow-up PR.) The blocking
+        filesystem work (``copytree``/``rmtree``) is pushed to a worker thread
+        via ``asyncio.to_thread`` so it doesn't block the loop either.
+
+        Cancellation safety: ``run_async`` is awaited directly on the
+        orchestrator's own loop (not under its own ``asyncio.run`` on a worker
+        thread), so it is reachable by cancellation (e.g. the ``task_timeout``
+        watchdog cancelling the orchestrator task) at any ``await`` — including
+        mid-``copytree``. ``asyncio.to_thread`` is NOT itself cancellable (the
+        worker thread keeps running after the awaiting coroutine raises
+        ``CancelledError``), so every such call here is wrapped in
+        ``asyncio.shield`` and tracked in ``self._pending`` — the ``finally``
+        below awaits any still-in-flight one BEFORE ``rmtree``, so an orphan
+        thread can never recreate files in ``judge_dir`` after cleanup already
+        ran. ``judge_dir`` itself is bound with a plain synchronous
+        ``tempfile.mkdtemp`` (a single fast syscall — offloading it via
+        ``to_thread`` only widens the cancellation window for no benefit, since
+        a bare syscall isn't itself an await point cancellation can land on).
 
         Raises ``TurnTimeoutError`` when the agent exceeds ``turn_timeout``.
         """
@@ -124,13 +147,16 @@ class SubAgentRunner:
         assert src_dir is not None, "sandbox not initialized"
 
         judge_dir = Path(tempfile.mkdtemp(prefix="sub_agent_"))
+        pending: list[asyncio.Task[Any]] = []
         try:
             # Copy the sandbox into an isolated temp dir. The sub-agent never touches
             # the original sandbox, so later criteria are unaffected by whatever it
             # does. Symlinks are skipped (vs preserved) so a malicious
             # `creds -> /root/.aws/credentials` plant can't leak host files to a
             # Bash-enabled sub-agent.
-            shutil.copytree(
+            await self._shielded_to_thread(
+                pending,
+                shutil.copytree,
                 src_dir,
                 judge_dir,
                 symlinks=True,
@@ -156,7 +182,7 @@ class SubAgentRunner:
             if self._reference_dir is not None:
                 ref_dest = judge_dir / "_reference"
                 if ref_dest.exists():
-                    shutil.rmtree(ref_dest, ignore_errors=True)
+                    await self._shielded_to_thread(pending, shutil.rmtree, ref_dest, ignore_errors=True)
                 # Deliberately NO ``dirs_exist_ok=True`` here. The rmtree above
                 # is the canonical clear; if any file survives (read-only flag,
                 # ENOTEMPTY race, hostile permission bits), we want copytree to
@@ -164,7 +190,9 @@ class SubAgentRunner:
                 # into agent-planted content under the same path. Loud failure on
                 # a partial-rmtree edge case is preferred over silently grading
                 # against a tampered ``_reference/``.
-                shutil.copytree(
+                await self._shielded_to_thread(
+                    pending,
+                    shutil.copytree,
                     self._reference_dir,
                     ref_dest,
                     symlinks=True,
@@ -182,18 +210,13 @@ class SubAgentRunner:
                 max_turns,
                 self._agent_config.allowed_tools,
             )
-            # Safe because callers run check_all via asyncio.to_thread, so this
-            # invocation is on a worker thread with no active event loop. A direct
-            # async caller would get RuntimeError — acceptable for the architecture.
-            turn = asyncio.run(
-                self._run_agent(
-                    agent,
-                    judge_dir,
-                    user_msg,
-                    max_turns,
-                    turn_timeout,
-                    plugin_tools_dir=self._sandbox.plugin_tools_dir,
-                )
+            turn = await self._run_agent(
+                agent,
+                judge_dir,
+                user_msg,
+                max_turns,
+                turn_timeout,
+                plugin_tools_dir=self._sandbox.plugin_tools_dir,
             )
             logger.info(
                 "sub_agent: finished (duration=%.1fs, tokens=%s)",
@@ -202,7 +225,36 @@ class SubAgentRunner:
             )
             return turn
         finally:
-            shutil.rmtree(judge_dir, ignore_errors=True)
+            # Any shielded to_thread call above keeps running on its worker thread even
+            # after a cancellation unwinds us into this `finally` — awaiting it here
+            # (not itself re-cancelled: asyncio delivers a given cancel() as a single
+            # CancelledError at the point it lands, not to every subsequent await in the
+            # same coroutine) lets it actually finish BEFORE we rmtree, so an orphan
+            # thread can never recreate files in judge_dir after cleanup already ran.
+            if pending:
+                await asyncio.gather(*(t for t in pending if not t.done()), return_exceptions=True)
+            # Deliberately NOT `await asyncio.to_thread(...)` here: a bare await inside
+            # `finally` is itself cancellable — cancelling right as this line is reached
+            # would skip the cleanup and leak the (now up-to-date) sandbox copy with no
+            # reaper. rmtree is a best-effort, bounded filesystem op; call it
+            # synchronously so cancellation can't interrupt it mid-cleanup.
+            shutil.rmtree(judge_dir, ignore_errors=True)  # noqa: CE002
+
+    @staticmethod
+    async def _shielded_to_thread(pending: list[asyncio.Task[Any]], func: Any, *args: Any, **kwargs: Any) -> Any:
+        """``await asyncio.to_thread(func, *args, **kwargs)``, but shielded from
+        cancellation and tracked in ``pending`` so ``run_async``'s ``finally``
+        can wait for it to actually finish before cleaning up ``judge_dir``.
+
+        ``asyncio.shield`` makes the AWAIT here cancellable (a cancellation
+        still propagates to the caller immediately, unwinding into `finally`
+        as normal) while the underlying worker-thread task keeps running
+        independently in the background — ``pending`` is how `finally` finds
+        it again to wait for it rather than leaving it to race the cleanup.
+        """
+        task = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+        pending.append(task)
+        return await asyncio.shield(task)
 
     @staticmethod
     async def _run_agent(

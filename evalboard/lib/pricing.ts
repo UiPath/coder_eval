@@ -50,6 +50,20 @@ export const PRICING: Record<string, Pricing> = {
     "gemini-3.1-pro-preview-customtools": p(2, 12, 2, 0.2),
     "gemini-3.5-flash": p(1.5, 9, 1.5, 0.15),
     "gemini-3-flash-preview": p(1.5, 9, 1.5, 0.15),
+    // OpenRouter open-weight models (litellm backend). Mirror of pricing.py;
+    // these providers cache implicitly (cache_write == input, unused) so only
+    // cache_read carries a discounted rate. NOTE: OpenRouter routes per-request,
+    // so these rates are only accurate when the litellm config pins the provider
+    // (sort: price) — otherwise the billed rate can differ from the headline.
+    "moonshotai/kimi-k3": p(3, 15, 3, 0.3),
+    "z-ai/glm-5.2": p(0.826, 2.596, 0.826, 0.1534),
+    "deepseek/deepseek-v4-pro": p(0.435, 0.87, 0.435, 0.003625),
+    // Bedrock open-weight models (litellm backend, eu-north-1). Mirror of pricing.py.
+    // The recorded model_used arrives prefixed (e.g. "converse/zai.glm-5"), so
+    // resolvePricing strips the routing/region prefixes before lookup.
+    "deepseek.v3.2": p(0.74, 2.22, 0.74, 0),
+    "zai.glm-5": p(1.2, 3.84, 1.2, 0),
+    "moonshotai.kimi-k2.5": p(0.72, 3.6, 0.72, 0),
 };
 
 function p(
@@ -66,21 +80,45 @@ function p(
     };
 }
 
-// Resolve pricing for a model id, tolerating undated aliases (the recorded
-// model is usually the canonical id like "claude-sonnet-4-6", but be lenient
-// about a trailing date suffix). Matches the Python source's exact-match
-// semantics, plus a date-suffix strip — deliberately NO loose prefix match: a
-// substring fallback would silently price `gpt-5-mini` at full `gpt-5` rates,
-// presenting a multi-x overcharge as an authoritative-looking figure. Unknown
-// ids return null (render "—") rather than a wrong number.
+// Strip the LiteLLM/Bedrock routing + region/vendor prefixes back to the bare
+// pricing key — mirror of src/coder_eval/pricing.py::_normalize_model, since the
+// recorded model_used arrives qualified (e.g. "converse/zai.glm-5",
+// "eu.anthropic.claude-sonnet-4-6"). Idempotent on already-bare ids.
+const _ROUTING_PREFIXES = ["bedrock/converse/", "bedrock/", "converse/"];
+const _REGION_PREFIXES = ["eu.", "us.", "apac.", "global."];
+function normalizeModel(model: string): string {
+    let m = model.trim();
+    for (const pre of _ROUTING_PREFIXES) {
+        if (m.startsWith(pre)) {
+            m = m.slice(pre.length);
+            break;
+        }
+    }
+    for (const pre of _REGION_PREFIXES) {
+        if (m.startsWith(pre)) {
+            m = m.slice(pre.length);
+            break;
+        }
+    }
+    if (m.startsWith("anthropic.")) m = m.slice("anthropic.".length);
+    return m;
+}
+
+// Resolve pricing for a model id, tolerating routing/region prefixes and undated
+// aliases (the recorded model is usually the canonical id like "claude-sonnet-4-6",
+// but LiteLLM/Bedrock runs record it prefixed, and some carry a trailing date).
+// Deliberately NO loose *substring* match: that would silently price `gpt-5-mini`
+// at full `gpt-5` rates, presenting a multi-x overcharge as an authoritative-looking
+// figure. Unknown ids return null (render "—") rather than a wrong number.
 //
 // Object.hasOwn (not `PRICING[model]` truthiness) guards against a degenerate
 // id like "constructor"/"toString" resolving to an inherited prototype member.
 export function resolvePricing(model: string | null): Pricing | null {
     if (!model) return null;
-    if (Object.hasOwn(PRICING, model)) return PRICING[model];
+    const norm = normalizeModel(model);
+    if (Object.hasOwn(PRICING, norm)) return PRICING[norm];
     // Try stripping a trailing -YYYYMMDD date.
-    const undated = model.replace(/-\d{8}$/, "");
+    const undated = norm.replace(/-\d{8}$/, "");
     if (Object.hasOwn(PRICING, undated)) return PRICING[undated];
     return null;
 }

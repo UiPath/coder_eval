@@ -38,6 +38,14 @@ describe("resolvePricing", () => {
     test("knows the current default opus id", () => {
         expect(resolvePricing("claude-opus-4-8")?.outputPerMTok).toBe(75);
     });
+
+    test("strips LiteLLM/Bedrock routing + region prefixes (recorded model_used is qualified)", () => {
+        // The recorded model arrives prefixed on litellm/Bedrock runs; without the
+        // strip these rendered "—" for the whole cost column.
+        expect(resolvePricing("converse/zai.glm-5")?.outputPerMTok).toBe(3.84);
+        expect(resolvePricing("bedrock/converse/deepseek.v3.2")?.inputPerMTok).toBe(0.74);
+        expect(resolvePricing("eu.anthropic.claude-sonnet-4-6")?.outputPerMTok).toBe(15);
+    });
 });
 
 describe("tokenBucketUsd", () => {

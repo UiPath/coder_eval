@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,7 @@ from ..models import (
     TaskResult,
 )
 from ..path_utils import format_task_log_id
+from ..pricing import unpriced_models
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info, looks_like_version
@@ -36,6 +37,47 @@ from .config import BatchRunConfig, resolve_preservation_mode
 
 
 logger = logging.getLogger(__name__)
+
+
+def _run_models(resolved_tasks: list[ResolvedTask]) -> Iterator[str | None]:
+    """Every model id this run pins up front: subject agents and judge criteria.
+
+    A criterion's model is always priced from the rate card (no judge backend
+    reports a cost), so it matters more here than the agent's, which only falls
+    back to the card on a turn the backend never priced.
+    """
+    for rt in resolved_tasks:
+        yield rt.task.agent.model if rt.task.agent else None
+        for criterion in rt.task.success_criteria:
+            yield getattr(criterion, "model", None)
+
+
+def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
+    """Pre-flight the rate card against the models this run will use.
+
+    The rate card is a static table baked into the installed version, so a model
+    released after it has no rate and its tokens book no money. A warning rather
+    than a refusal, so a brand-new model stays evaluable the day it ships: cost is
+    what degrades, not the evaluation. What the run actually lost is counted after
+    the fact by ``RunSummary.tasks_cost_incomplete``.
+
+    Only models pinned in the task YAML are visible here; one deferred to the route
+    resolves inside the agent and can't be pre-flighted.
+
+    Returns:
+        The sorted, de-duplicated unpriced model ids (empty when all are priced).
+    """
+    missing = unpriced_models(_run_models(resolved_tasks))
+    if not missing:
+        return []
+    logger.warning(
+        "No pricing rate for %s. Turns the agent's own backend prices are unaffected, but any "
+        + "judge call, timed-out turn or killed partial will book its tokens with no cost, so "
+        + "run-level totals will understate the bill (RunSummary.cost_complete reports false). "
+        + "Add the rate to coder_eval.pricing or register it from a plugin via register_pricing().",
+        ", ".join(repr(m) for m in missing),
+    )
+    return missing
 
 
 async def run_batch(
@@ -74,6 +116,8 @@ async def run_batch(
     from ..orchestrator import Orchestrator
 
     start_time = datetime.now()
+
+    check_pricing_coverage(resolved_tasks)
 
     if on_batch_start is not None:
         on_batch_start(len(resolved_tasks))

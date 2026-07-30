@@ -16,6 +16,7 @@ from coder_eval.models import (
     FileExistsCriterion,
     SandboxConfig,
     TaskDefinition,
+    TokenUsage,
     TurnRecord,
 )
 from coder_eval.orchestrator import Orchestrator
@@ -189,7 +190,7 @@ async def test_no_timeout_when_none(tmp_path) -> None:
     mock_agent.communicate = AsyncMock(return_value=_make_turn_record())
     orchestrator.agent = mock_agent
 
-    orchestrator.success_checker.check_all = MagicMock(  # type: ignore[union-attr]
+    orchestrator.success_checker.check_all_async = AsyncMock(  # type: ignore[union-attr]
         return_value=[CriterionResult(criterion_type="file_exists", description="test", score=1.0)]
     )
 
@@ -225,6 +226,87 @@ async def test_task_timeout_hard_kills_agent(tmp_path) -> None:
     result = await orchestrator.run()
     assert result.final_status == "TIMEOUT"
     mock_agent.kill_sync.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_recovers_the_killed_turn(tmp_path) -> None:
+    """A hard-killed task's spend lands on the result instead of vanishing.
+
+    The agent parks the interrupted turn on ``pending_turn`` when it is cancelled,
+    and the task-timeout handler is the only reader of that slot: the cancel is a
+    BaseException, so it never reaches the retry executor's per-attempt hook that
+    drains it on a turn-level timeout. Without the drain the row reports no turns
+    and no cost for a task that spent real money.
+    """
+    task = _make_task(task_timeout=0.1)
+    run_dir = tmp_path / "run" / "timeout_test"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+
+    partial = TurnRecord(
+        iteration=1,
+        user_input="test prompt",
+        agent_output="<partial record>",
+        crashed=True,
+        token_usage=TokenUsage(uncached_input_tokens=40_000, output_tokens=2_000, total_cost_usd=0.15),
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.pending_turn = partial
+    mock_agent.discard_pending_turn = AsyncMock()
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    async def slow_loop():
+        await asyncio.sleep(10)
+        return False
+
+    orchestrator._evaluation_loop = slow_loop  # type: ignore[method-assign]
+
+    result = await orchestrator.run()
+
+    assert result.final_status == "TIMEOUT"
+    assert result.iterations == [partial]
+    assert result.total_token_usage is not None
+    assert result.total_token_usage.output_tokens == 2_000
+    assert result.total_token_usage.total_cost_usd == pytest.approx(0.15)
+    # Drained through the documented contract, so the slot is left clean.
+    mock_agent.discard_pending_turn.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_with_nothing_to_recover_still_lands(tmp_path) -> None:
+    """A task killed before its first turn has nothing parked, and that is not an error.
+
+    The recovery is best-effort and runs on the way to a saved row, so an empty slot
+    must leave the TIMEOUT row intact rather than raising through teardown.
+    """
+    task = _make_task(task_timeout=0.1)
+    run_dir = tmp_path / "run" / "timeout_test"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+
+    mock_agent = MagicMock()
+    mock_agent.pending_turn = None
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    async def slow_loop():
+        await asyncio.sleep(10)
+        return False
+
+    orchestrator._evaluation_loop = slow_loop  # type: ignore[method-assign]
+
+    result = await orchestrator.run()
+
+    assert result.final_status == "TIMEOUT"
+    assert result.iterations == []
 
 
 @pytest.mark.asyncio
@@ -325,7 +407,7 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
     orchestrator.sandbox = mock_sandbox
 
     mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
+    mock_checker.check_all_async = AsyncMock(
         return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
     )
     orchestrator.success_checker = mock_checker

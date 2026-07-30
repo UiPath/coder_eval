@@ -19,7 +19,7 @@
 | - Token budget | 1 | 0 | — |
 | - Cost budget | 0 | 1 | — |
 | Errors | 0 | 0 | — |
-| Success Rate | 50.0% | 50.0% | — |
+| Pass Rate | 50.0% | 50.0% | — |
 | Score | 0.700 ± 0.283 | 0.825 ± 0.177 | 0.658 |
 | Avg Duration (s) | 35.0 ± 7.1 | 55.0 ± 7.1 | 0.106 |
 | Assistant Turns | 5.5 ± 0.7 | 7.5 ± 0.7 | 0.106 |

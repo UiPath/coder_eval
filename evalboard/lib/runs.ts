@@ -1229,6 +1229,9 @@ interface MessageEntry {
 export interface TurnEntry {
     commands?: CommandEntry[];
     messages?: MessageEntry[];
+    // Model the turn ran on (iteration `model_used`). Used to price the synthetic
+    // reconciliation row, which carries no model of its own.
+    model_used?: string | null;
     token_usage?: TokenUsageEntry | null;
     result_summary?: {
         result?: string | null;
@@ -1747,8 +1750,23 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 reasoningTokens: null,
                 thinkingOutputTokens: null,
                 textOutputTokens: null,
-                model: null,
-                costUsd: null,
+                // Price the reconciliation row so summing the Cost column across
+                // the stream reproduces the turn total. Critical for providers
+                // (e.g. OpenRouter/LiteLLM) whose per-message stream is sparse and
+                // dumps most tokens into this one row — leaving it uncosted made
+                // the visible per-row costs sum to far less than the real total.
+                // Excluded from the cost simulator (by role), and the authoritative
+                // task total_cost_usd is unaffected (it reads the backend aggregate,
+                // not a sum of per-message costUsd), so there is no double-count.
+                model: turn.model_used ?? null,
+                costUsd: messageCostUsd({
+                    model: turn.model_used ?? null,
+                    inputTokens: typeof msg.input_tokens === "number" ? msg.input_tokens : null,
+                    outputTokens: typeof msg.output_tokens === "number" ? msg.output_tokens : null,
+                    cacheWriteTokens:
+                        typeof msg.cache_creation_tokens === "number" ? msg.cache_creation_tokens : null,
+                    cacheReadTokens: typeof msg.cache_read_tokens === "number" ? msg.cache_read_tokens : null,
+                }),
                 note: typeof msg.note === "string" ? msg.note : null,
             });
         }

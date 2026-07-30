@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
@@ -280,6 +280,7 @@ class _CodexTurnState:
         self.iteration = iteration
         self.turn_start_time = turn_start_time
         self.timeout_hit = False
+        self.stopped_early_hit = False
         self.finalized = False
 
         # Live pump scratch (set during streaming).
@@ -634,6 +635,10 @@ class _CodexTurnState:
 class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
+    # The notification pump has a between-items guard where the cooperative
+    # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
+    supports_cooperative_stop: ClassVar[bool] = True
+
     def __init__(
         self,
         config: CodexAgentConfig,
@@ -740,10 +745,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds
             max_turns: Hard cap on inner-loop turns (unused for Codex single-turn)
-            should_stop: Accepted for ``Agent.communicate`` override compatibility
-                and ignored — Codex does not support cooperative early-stop
-                (``supports_cooperative_stop`` is False), so the orchestrator
-                never passes it.
+            should_stop: Cooperative early-stop callback, polled after each
+                dispatched notification. When it returns True the pump breaks,
+                the in-flight turn is interrupted (best-effort) and the turn
+                finalizes cleanly as ``STOPPED_EARLY`` (``crashed=False``).
 
         Returns:
             TurnRecord containing the complete interaction
@@ -822,7 +827,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     # return; a crash skips this, so finalize reads the crash
                     # defaults (None/"") and falls back to the captured messages.
                     state.result_turn, state.sdk_token_usage, state.result_text = await self._run_turn_with_streaming(
-                        state
+                        state, should_stop
                     )
                 except asyncio.CancelledError:
                     if state.timeout_hit:
@@ -831,9 +836,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 except Exception as e:
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
-                    self._finalize_and_raise_crash(
-                        state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
-                    )
+                    if state.stopped_early_hit:
+                        # The turn already stopped cleanly; escalating to a crash
+                        # would trigger the orchestrator's retry with the watcher's
+                        # decision still latched → immediate stop-at-turn-0 on the
+                        # retry (wasted spend). Fall through to the clean tail.
+                        self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+                    else:
+                        self._finalize_and_raise_crash(
+                            state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
+                        )
 
             if state.timeout_hit:
                 # Watchdog fired but the pump finished before the cancel landed.
@@ -852,21 +864,29 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # stays balanced and the pending-turn contract holds. finalize is
             # idempotent, so the timeout case is a no-op here.
             if not state.finalized:
-                self._state = AgentState.ERROR
-                state.finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")
+                self._finalize_external_cancel(state.finalize)
             raise
         except Exception as e:
             # Catches failures OUTSIDE the inner turn block — notably thread_start
             # and _format_turn_result. Without this, such errors escape as a bare
             # exception: the orchestrator never drains pending_turn and _iteration
             # stays incremented, violating the pending-turn contract.
-            self._finalize_and_raise_crash(state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e)
+            if state.stopped_early_hit and not state.timeout_hit:
+                # Same retry-poisoning guard as the inner handler: a cooperative
+                # stop already happened, so finalize cleanly instead of crashing.
+                self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+            else:
+                self._finalize_and_raise_crash(
+                    state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
+                )
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
 
         # The TurnRecord is the EventCollector's reduction of the emitted events.
-        state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
+        # Precedence matches Claude: timeout (raised above) > stopped_early > completed.
+        status = AgentEndStatus.STOPPED_EARLY if state.stopped_early_hit else AgentEndStatus.COMPLETED
+        state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
     async def stop(self) -> None:
@@ -1380,7 +1400,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.warning(f"Failed to format turn result: {e}")
             return str(turn_result)
 
-    async def _run_turn_with_streaming(self, state: _CodexTurnState) -> tuple[Any, Any, str]:
+    async def _run_turn_with_streaming(
+        self, state: _CodexTurnState, should_stop: Callable[[], bool] | None = None
+    ) -> tuple[Any, Any, str]:
         """Drive ``turn.stream()`` through the per-turn state, emitting the standard
         event protocol; returns ``(turn_result, latest_token_usage, agent_text)``.
 
@@ -1388,6 +1410,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
         boundaries; this drives the inner notification pump. ``state`` accumulates
         commands, the assistant transcript, sub-agent spawns and per-generation
         tokens — all mutated in place so a mid-turn crash keeps the partial.
+
+        The cooperative ``should_stop`` poll runs AFTER ``state.dispatch`` (the
+        emission that lets the watcher latch on the deciding tool call) and BEFORE
+        the next notification is pulled — the deciding item is kept, the next is
+        not. No-op when ``should_stop is None`` (behaviorally identical to before).
         """
         # Create the turn handle (starts the turn but doesn't block) + event stream.
         turn_handle = await self._run_async(self.thread.turn, state.user_input)
@@ -1405,6 +1432,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     break
                 if state.dispatch(notification):  # True on a valid turn/completed
                     break
+                if should_stop is not None and should_stop():
+                    state.stopped_early_hit = True
+                    self._log.debug("Cooperative stop requested; ending notification pump at this boundary")
+                    self._interrupt_active_turn()  # best-effort; stops server-side spend
+                    break
         finally:
             self._active_turn_handle = None
             # Close any orphan tool (item/started without item/completed), flush any
@@ -1415,7 +1447,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             with contextlib.suppress(Exception):
                 await self._run_async(stream.close)
 
-        if state.turn_result is None:
+        if state.turn_result is None and not state.stopped_early_hit:
             raise RuntimeError("Turn did not complete (no turn/completed notification received)")
 
         # Belt-and-suspenders: if streaming surfaced no assistant transcript,
@@ -1427,7 +1459,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # and nest them under the spawning Agent call. The parent stream never
         # carries the child's commands (Limited persistence drops them), but its
         # rollout always persists the raw function_call/local_shell_call items.
-        if state.spawned_children:
+        # Skipped on a cooperative stop: children may have no rollout yet and the
+        # run is already decided — recovery adds nothing the armed gate uses.
+        if state.spawned_children and not state.stopped_early_hit:
             await self._recover_subagent_tool_calls(
                 state.spawned_children,
                 state.collab_results,

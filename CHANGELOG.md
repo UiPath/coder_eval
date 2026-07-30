@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.9.1 (2026-07-29)
+
+### Features
+
+- **agents**: Extend cooperative early stop to codex and antigravity
+  ([`b849421`](https://github.com/UiPath/coder_eval/commit/b8494218af6870feff2a9809e3050e96da849cd8))
+
+
+## v0.9.0 (2026-07-28)
+
+### Features
+
+- **criteria**: Async-primary BaseCriterion contract with CheckerMisuseError escalation
+  ([#60](https://github.com/UiPath/coder_eval/pull/60))
+
 ## v0.8.10 (2026-07-24)
 
 ### Bug Fixes

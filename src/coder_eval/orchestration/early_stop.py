@@ -25,7 +25,7 @@ immediately after dispatching each message, so a latch on the call breaks the
 loop before the result message is ever pulled.
 
 Live verdicts only *trigger* the stop; the authoritative scores always come
-from the standard ``check_all`` on the frozen trajectory after the cut.
+from the standard ``check_all_async`` on the frozen trajectory after the cut.
 
 Precision trade-off: a pass-stop cuts the run the instant every *pass-armed*
 criterion is decided, so a *fail-armed* criterion (e.g. a distractor) that would
@@ -159,7 +159,7 @@ def validate_early_stop(task: TaskDefinition) -> None:
     if not supports:
         raise EarlyStopConfigError(
             "run_limits.stop_early requires an agent that supports cooperative stopping "
-            + f"(currently Claude Code); agent type {agent_type!r} does not."
+            + f"(claude-code, codex, antigravity); agent type {agent_type!r} does not."
         )
 
     # (2) Arming requires at least one stop criterion.

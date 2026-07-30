@@ -1098,7 +1098,9 @@ function ReconciliationRow({ m, unit }: { m: MessageEvent; unit: Unit }) {
                 <span className="tabular-nums text-right text-amber-700">
                     {fmtTok(m.outputTokens, "output")}
                 </span>
-                <span className="text-right text-gray-400">—</span>
+                <span className="tabular-nums text-right text-amber-700">
+                    {m.costUsd != null ? fmtUsd(m.costUsd) : "—"}
+                </span>
             </div>
         </li>
     );

@@ -212,7 +212,9 @@ def test_generate_markdown_basic():
     assert "Succeeded**: 2" in report_md
     assert "Failed**: 1" in report_md
     assert "Errors**: 0" in report_md
-    assert "Success Rate**: 66.7%" in report_md
+    assert "Pass Rate**: 66.7% (2/3)" in report_md
+    # No errors in this run, so no error-share line to explain the denominator.
+    assert "Error Share" not in report_md
 
     # Check P0 aggregate metrics
     assert "Avg Reliability Score**:" in report_md
@@ -259,7 +261,8 @@ def test_generate_markdown_empty_tasks():
     report_md = ReportGenerator.generate_markdown(summary)
 
     assert "Total Tasks**: 0" in report_md
-    assert "Success Rate**: 0.0%" in report_md
+    # A run with no tasks has no pass rate; 0.0% would read as "everything failed".
+    assert "Pass Rate**: n/a (0/0)" in report_md
     # No aggregate metrics when there are no tasks
     assert "Avg Reliability Score" not in report_md
     assert "Generation Metrics" not in report_md

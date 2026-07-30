@@ -225,7 +225,7 @@ class TestSingleShotEnforcement:
         orch.agent = mock_agent
 
         mock_checker = MagicMock()
-        mock_checker.check_all = MagicMock(
+        mock_checker.check_all_async = AsyncMock(
             return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
         )
         orch.success_checker = mock_checker
@@ -361,7 +361,7 @@ class TestSimulationBudgetAbort:
         orch.agent = mock_agent
 
         mock_checker = MagicMock()
-        mock_checker.check_all = MagicMock(
+        mock_checker.check_all_async = AsyncMock(
             return_value=[CriterionResult(criterion_type="file_exists", description="x", score=0.0)]
         )
         orch.success_checker = mock_checker
@@ -475,7 +475,7 @@ class TestExpectedTurnsSingleShot:
         mock_agent.communicate = AsyncMock(return_value=turn)
         orch.agent = mock_agent
         mock_checker = MagicMock()
-        mock_checker.check_all = MagicMock(
+        mock_checker.check_all_async = AsyncMock(
             return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
         )
         orch.success_checker = mock_checker
@@ -521,7 +521,7 @@ class TestExpectedTurnsSimulation:
         orch.agent = mock_agent
 
         mock_checker = MagicMock()
-        mock_checker.check_all = MagicMock(
+        mock_checker.check_all_async = AsyncMock(
             return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
         )
         orch.success_checker = mock_checker
@@ -574,7 +574,7 @@ class TestExpectedTurnsSimulation:
         orch.agent = mock_agent
 
         mock_checker = MagicMock()
-        mock_checker.check_all = MagicMock(
+        mock_checker.check_all_async = AsyncMock(
             return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
         )
         orch.success_checker = mock_checker

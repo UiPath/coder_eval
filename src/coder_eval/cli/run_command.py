@@ -4,6 +4,9 @@ import asyncio
 import logging
 import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -12,7 +15,7 @@ import click
 import typer
 from tqdm import tqdm
 
-from ..config import settings
+from ..config import Settings, settings
 from ..logging_config import setup_logging
 from ..models import PreservationMode, ResolvedTask, RunSummary, TaskResult
 from ..orchestration.config import BatchRunConfig
@@ -64,6 +67,46 @@ def _resolve_experiment_path(experiment: Path | None) -> Path | None:
         available = sorted(p.stem for p in experiments_dir.glob("*.yaml") if p.stem != "default")
     hint = f" Available: {', '.join(available)}" if available else ""
     raise typer.BadParameter(f"Experiment not found: {experiment}.{hint}")
+
+
+def _litellm_preflight_error(current_settings: Settings) -> str | None:
+    """Return an error message if the ``litellm`` backend's external proxy is
+    unreachable, else ``None``.
+
+    Only applies when ``api_backend=litellm`` with an explicit ``LITELLM_BASE_URL``
+    (the manual proxy / always-on-sidecar path). Without this check a dead proxy
+    makes the Claude SDK hang on the endpoint instead of failing fast. Any HTTP
+    response (even non-200) counts as reachable — only a connection/timeout error
+    is treated as "proxy down".
+    """
+    from ..models import ApiBackend
+
+    if current_settings.api_backend != ApiBackend.LITELLM or not current_settings.litellm_base_url:
+        return None
+    base_url = current_settings.litellm_base_url
+    # Reject a scheme-less/non-http(s) URL with a clear message instead of letting
+    # urlopen raise a bare ValueError ("unknown url type") that escapes as a
+    # traceback. Also makes the `# nosec B310` below honest — the scheme is now
+    # constrained to http(s), which is exactly what B310 audits.
+    if urllib.parse.urlsplit(base_url).scheme not in ("http", "https"):
+        return (
+            f"LITELLM_BASE_URL must be an http(s) URL, got {base_url!r}. "
+            "Set it to e.g. http://localhost:4000 (or unset LITELLM_BASE_URL and switch backends)."
+        )
+    url = f"{base_url.rstrip('/')}/health/liveliness"
+    try:
+        # B310: url is built from the operator-configured LITELLM_BASE_URL, whose
+        # scheme is validated to http(s) just above — not untrusted input; this
+        # only probes reachability of that proxy endpoint.
+        urllib.request.urlopen(url, timeout=5).close()  # nosec B310
+    except urllib.error.HTTPError:
+        return None  # server responded (up), just not 200 on this path
+    except (urllib.error.URLError, OSError) as exc:
+        return (
+            f"LiteLLM proxy not reachable at {current_settings.litellm_base_url} (tried {url}): {exc}. "
+            "Start it (e.g. litellm/start-litellm.sh) or unset LITELLM_BASE_URL."
+        )
+    return None
 
 
 def _build_overrides(
@@ -225,7 +268,7 @@ def run_command(
         None,
         "--backend",
         "-b",
-        click_type=click.Choice(["direct", "bedrock"], case_sensitive=False),
+        click_type=click.Choice(["direct", "bedrock", "litellm"], case_sensitive=False),
         help="API backend (default: from API_BACKEND env var)",
     ),
     experiment: Path | None = typer.Option(  # noqa: B008
@@ -459,6 +502,13 @@ async def _run_all_tasks(
             "ExperimentProvided": experiment_path is not None,
         },
     )
+
+    # Fail fast if the litellm backend points at an unreachable external proxy —
+    # otherwise the agent hangs on the dead endpoint instead of erroring.
+    preflight_error = await asyncio.to_thread(_litellm_preflight_error, settings)
+    if preflight_error:
+        console.print(f"[red]{preflight_error}[/red]")
+        raise typer.Exit(1)
 
     try:
         # Always run through experiment layer (defaults to experiments/default.yaml)

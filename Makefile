@@ -15,11 +15,17 @@ install:  ## Install project with dev + uipath dependencies (hash-verified from 
 	uv sync --frozen --extra dev --extra uipath
 	uv run pre-commit install
 
+# `.github/scripts/` is in scope on purpose: release tooling that lives in a real
+# module (rather than inline in a workflow `run:` heredoc) is exactly what ruff,
+# pyright and pytest can see — leaving it unlinted would forfeit the reason it was
+# extracted.
+LINT_PATHS := src/ tests/ .github/scripts/
+
 format:  ## Auto-format code with ruff
-	uv run ruff format src/ tests/
+	uv run ruff format $(LINT_PATHS)
 
 check:  ## Run linting checks
-	uv run ruff check src/ tests/
+	uv run ruff check $(LINT_PATHS)
 
 lint:  ## Run custom architectural lint rules (CE001+)
 	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
@@ -42,8 +48,8 @@ test-cov:  ## Run tests with coverage report
 
 
 verify:  ## Run all verification steps (CI equivalent)
-	uv run ruff format --check src/ tests/
-	uv run ruff check src/ tests/
+	uv run ruff format --check $(LINT_PATHS)
+	uv run ruff check $(LINT_PATHS)
 	uv run pyright
 	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
 	# uv run pip-audit --desc --skip-editable
