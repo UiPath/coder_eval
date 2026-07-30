@@ -18,7 +18,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG = _REPO_ROOT / "litellm" / "litellm-config.yaml"
 _COST_LOGGER = _REPO_ROOT / "litellm" / "cost_logger.py"
 
-_OPENROUTER_MODELS = {"moonshotai/kimi-k3", "z-ai/glm-5.2", "deepseek/deepseek-v4-pro"}
 _CALLBACK = "cost_logger.proxy_handler_instance"
 
 
@@ -31,12 +30,15 @@ class TestLitellmConfigShape:
         assert _load()["litellm_settings"]["callbacks"] == _CALLBACK
 
     def test_openrouter_models_capture_usage_and_pin_providers(self):
-        by_name = {m["model_name"]: m for m in _load()["model_list"]}
-        for name in _OPENROUTER_MODELS:
-            assert name in by_name, f"{name} missing from litellm-config model_list"
-            extra = by_name[name]["litellm_params"]["extra_body"]
+        # Derive the OpenRouter set from the config (not a hardcoded literal) so a
+        # future openrouter/* entry missing usage.include is caught automatically —
+        # otherwise it silently regresses to static pricing.
+        models = [m for m in _load()["model_list"] if str(m["litellm_params"]["model"]).startswith("openrouter/")]
+        assert models, "no openrouter/* models in litellm-config model_list"
+        for model in models:
+            extra = model["litellm_params"]["extra_body"]
             # usage.include drives the actual-cost capture (cost_logger reads usage.cost).
-            assert extra["usage"]["include"] is True
+            assert extra["usage"]["include"] is True, model["model_name"]
             provider = extra["provider"]
             assert provider["sort"] == "price"
             # Bounded to a vetted set, no silent fallback outside it.

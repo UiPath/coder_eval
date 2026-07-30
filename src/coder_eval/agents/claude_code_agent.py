@@ -685,6 +685,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 ``_FRAMEWORK_OWNED_SDK_FIELDS`` and explicitly denied via
                 ``sdk_options`` for security. The judge criterion is the only
                 caller today.
+            cost_log_tags: LiteLLM-only correlation headers (``x-ce-run-id`` /
+                ``x-ce-task-id`` / ``x-ce-attempt``, with ``x-ce-iteration`` appended
+                per turn) stamped into ``ANTHROPIC_CUSTOM_HEADERS`` so a proxy-side
+                cost callback can attribute each call's real cost back to this run.
+                None on Direct/Bedrock.
         """
         self.config = config
         self.route = route or DirectRoute()
@@ -753,6 +758,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             plugin_tools_dir: Fallback canonical ``node_modules/@uipath`` to export as
                 ``PLUGIN_TOOLS_DIR`` when the process environment doesn't already
                 provide one. An external ``PLUGIN_TOOLS_DIR`` always wins.
+            cost_log_tags: LiteLLM-only correlation headers stamped (newline-separated
+                ``Name: Value``) into ``ANTHROPIC_CUSTOM_HEADERS``. Values must be
+                single-line ASCII (validated here) — the header block is CR/LF-delimited.
 
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
@@ -827,6 +835,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     # usage.cost + cache buckets back to this run/task/turn. Claude
                     # Code forwards ANTHROPIC_CUSTOM_HEADERS (newline-separated
                     # `Name: Value`) verbatim, incl. to a non-anthropic base URL.
+                    #
+                    # Sanitize at the seam: x-ce-task-id carries the author-defined
+                    # task_id/variant_id, so a value with a CR/LF would inject extra
+                    # headers into every SDK->proxy request (forged cost attribution,
+                    # or an auth/routing header override). Non-ASCII also breaks the
+                    # latin-1 header encoding. Reject both loudly rather than emit them.
+                    for name, value in cost_log_tags.items():
+                        joined = f"{name}{value}"
+                        if "\r" in joined or "\n" in joined or not joined.isascii():
+                            raise ValueError(f"cost_log_tags {name!r} must be single-line ASCII (got {value!r})")
                     env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{k}: {v}" for k, v in cost_log_tags.items())
                 return {**base_env, **env}, cr.model
 

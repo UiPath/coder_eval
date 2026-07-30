@@ -344,6 +344,13 @@ class TestBuildSdkEnvCustom:
                 AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route, cost_log_tags={"x-ce-run-id": "r"}
             )
 
+    def test_cost_log_tags_reject_header_injection(self):
+        # A task_id/variant_id carrying a CR/LF would inject extra headers into every
+        # SDK->proxy request; the seam must reject it (single-line ASCII only).
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        with pytest.raises(ValueError, match="single-line ASCII"):
+            ClaudeCodeAgent._build_sdk_env(route, cost_log_tags={"x-ce-task-id": "ok\nAuthorization: Bearer forged"})
+
 
 class TestResolveEffectiveModelCustom:
     """_resolve_effective_model() on the LiteLLM route — no prefixing."""

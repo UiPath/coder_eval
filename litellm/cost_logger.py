@@ -32,6 +32,7 @@ proxy may run in its own ephemeral environment
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -51,8 +52,13 @@ _TAG_PREFIX = "x-ce-"
 
 
 def _num(value: Any) -> float | int | None:
-    """Keep only real numbers (reject bool, which is an int subclass, and strings)."""
-    return value if isinstance(value, int | float) and not isinstance(value, bool) else None
+    """Keep only real, FINITE numbers (reject bool — an int subclass — strings, and
+    NaN/Inf). A non-finite cost would serialize as a bare ``NaN`` token (invalid JSON
+    that breaks parsing the whole ``task.json``) and make the ``max_usd`` gate's
+    ``cost > limit`` silently never fire, so it is filtered at this boundary."""
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+        return value
+    return None
 
 
 def _to_dict(obj: Any) -> dict[str, Any]:
@@ -204,12 +210,6 @@ class CostLogger(CustomLogger):
                 model=model,
                 call_id=response.get("id"),
             )
-            if record is not None and os.environ.get("CODER_EVAL_COST_DEBUG"):
-                # Diagnostic (off by default): surface the id-shaped fields the
-                # callback can see, so we can tell whether the Anthropic transcript
-                # message_id (msg_...) is reachable here — the deterministic join
-                # key — or only OpenRouter's gen- id.
-                record["_debug"] = _debug_ids(kwargs, response, slo)
             append_record(record)
         except Exception:
             # A logging callback must NEVER break the proxy's response path.
@@ -220,32 +220,6 @@ class CostLogger(CustomLogger):
 
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
         self._emit(kwargs, response_obj)
-
-
-def _debug_ids(kwargs: dict[str, Any], response: dict[str, Any], slo: Any) -> dict[str, Any]:
-    """Collect id-shaped fields + key inventory from the callback payload (enabled
-    by ``CODER_EVAL_COST_DEBUG``). Used once to determine whether the Anthropic
-    ``msg_...`` message id (the transcript join key) is reachable in the callback,
-    or only OpenRouter's ``gen-...`` id — deciding whether the harness can join
-    per-generation by id instead of by position.
-    """
-    slo = slo if isinstance(slo, dict) else {}
-    # Any string that looks like a message/generation id, wherever it sits shallowly.
-    prefixes = ("msg_", "gen-", "chatcmpl")
-    candidates: dict[str, str] = {}
-    for source_name, container in (("response", response), ("kwargs", kwargs), ("slo", slo)):
-        if isinstance(container, dict):
-            for key, value in container.items():
-                if isinstance(value, str) and value.startswith(prefixes):
-                    candidates[f"{source_name}.{key}"] = value
-    return {
-        "response_id": response.get("id"),
-        "response_message_id": response.get("message_id"),
-        "response_keys": sorted(response.keys()),
-        "usage_keys": sorted((response.get("usage") or {}).keys()) if isinstance(response.get("usage"), dict) else None,
-        "slo_keys": sorted(slo.keys()),
-        "id_candidates": candidates,
-    }
 
 
 # The instance litellm-config.yaml references: `callbacks: cost_logger.proxy_handler_instance`.
