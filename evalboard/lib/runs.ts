@@ -2205,11 +2205,16 @@ export async function resolveSafePath(
     // `<variant>/<task-id>/artifacts/...` — the variant is "default" for a
     // single-config run and a model name (e.g. "kimi-k3") in an A/B run.
     // Extract both so the narrow fetch hits the right blobs without pulling the
-    // whole run. Anything that isn't that two-segment task shape (run-level
-    // files, or the nested activation layout) falls back to the run summary.
+    // whole run. This is only a prefetch optimization; the realpath containment
+    // check below is the actual security boundary, so an input that isn't that
+    // clean two-segment task shape (run-level files, the nested activation
+    // layout, OR any traversal like "../..") just falls back to the run summary
+    // and lets the containment check reject it — we must never hand a "."/".."
+    // segment to ensureTaskDir, which throws on it (isValidId admits dots).
     const parts = relPath.split("/");
-    if (parts.length >= 2 && parts[0] !== "activation" && parts[1]) {
-        if (!isValidId(parts[0]) || !isValidId(parts[1])) return null;
+    const safeSeg = (s: string | undefined): s is string =>
+        !!s && isValidId(s) && s !== "." && s !== "..";
+    if (parts[0] !== "activation" && safeSeg(parts[0]) && safeSeg(parts[1])) {
         await ensureTaskDir(runId, parts[1], RUNS_DIR, parts[0]);
     } else {
         await ensureRunSummary(runId, RUNS_DIR);
