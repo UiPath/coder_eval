@@ -1,0 +1,67 @@
+// Pivot the flat RunPoint[] into the wide, one-column-per-harness shape recharts
+// needs to draw several lines on one chart.
+//
+// Each run belongs to exactly one harness, so a row carries a value for that
+// harness's column and leaves the others undefined. Every <Line> then uses
+// connectNulls to bridge its own gaps, which is what turns sparse interleaved
+// runs (claude-code nightly, codex twice a week) into one continuous line each
+// rather than a single zigzag across incomparable harnesses.
+
+import { harnessColor } from "@/lib/harness";
+import type { RunPoint } from "@/lib/overview";
+
+// Which per-run rate to plot. Both metrics live on the same RunPoint, so the
+// two overview charts share this module and differ only by this key.
+export type HarnessMetric = "successRate" | "turnBudgetRate";
+
+export interface HarnessSeries {
+    harness: string;
+    // Column name in the pivoted rows. Prefixed and sanitized because recharts
+    // reads a dataKey containing "." as a nested object path, which would
+    // silently resolve to undefined for a harness id with a dot in it.
+    dataKey: string;
+    color: string;
+}
+
+export interface HarnessChartData {
+    rows: Array<Record<string, number>>;
+    series: HarnessSeries[];
+}
+
+export function seriesKey(harness: string): string {
+    return `h_${harness.replace(/[^\w]/g, "_")}`;
+}
+
+export function pivotByHarness(
+    points: RunPoint[],
+    harnesses: string[],
+    metric: HarnessMetric,
+): HarnessChartData {
+    const series: HarnessSeries[] = harnesses.map((harness) => ({
+        harness,
+        dataKey: seriesKey(harness),
+        color: harnessColor(harness),
+    }));
+
+    // Merge on timestamp so two harnesses that happen to start a run in the same
+    // second share one row instead of producing two points recharts would render
+    // stacked on the same x.
+    const byTimestamp = new Map<number, Record<string, number>>();
+    for (const p of points) {
+        if (p[metric] == null) continue;
+        let row = byTimestamp.get(p.timestamp);
+        if (!row) {
+            row = { timestamp: p.timestamp };
+            byTimestamp.set(p.timestamp, row);
+        }
+        row[seriesKey(p.harness)] = p[metric] as number;
+    }
+
+    const rows = [...byTimestamp.values()].sort(
+        (a, b) => a.timestamp - b.timestamp,
+    );
+    // Drop series with no plotted point in this window — an empty line would put
+    // an entry in the legend for a harness the chart never draws.
+    const present = series.filter((s) => rows.some((r) => s.dataKey in r));
+    return { rows, series: present };
+}

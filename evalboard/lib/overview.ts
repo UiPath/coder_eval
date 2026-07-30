@@ -15,12 +15,21 @@ import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./review
 import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
-import { DEFAULT_HARNESS, KNOWN_HARNESSES, normalizeHarness } from "./harness";
+import {
+    DEFAULT_HARNESS,
+    KNOWN_HARNESSES,
+    normalizeHarness,
+    orderHarnesses,
+} from "./harness";
 import type { Window } from "./reviews-types";
 
 export interface RunPoint {
     runId: string;
     timestamp: number; // ms since epoch (UTC); used as the chart x-coordinate
+    // The harness this run ran on, normalized (legacy runs fold to claude-code).
+    // Every run belongs to exactly one harness, so the charts split the points
+    // into one series per harness and color each by identity.
+    harness: string;
     successRate: number | null;
     // % of budgeted tasks whose visible turns stayed within 1.5× their
     // expected_turns budget. Only tasks carrying a positive expected_turns
@@ -80,6 +89,10 @@ export interface TagCount {
 
 export interface OverviewData {
     runs: RunPoint[]; // one point per run, no daily aggregation
+    // The harnesses actually present in `runs`, in stable display order. Drives
+    // the chart's series list and legend, so a harness with no runs in the
+    // window contributes no empty line.
+    harnesses: string[];
     windowStart: number; // ms — chart x-domain start
     windowEnd: number; // ms — chart x-domain end
     skills: TagCount[];
@@ -554,6 +567,8 @@ export async function getOverview(
     // When tag or q is active, scope each run's rate to only matching tasks.
     const runPoints: RunPoint[] = [];
 
+    const seenHarnesses = new Set<string>();
+
     for (const { id, overview, reviewTagsByTask } of perRun) {
         if (!overview || overview.tasks.length === 0) continue;
         const date = parseRunIdDate(id);
@@ -576,10 +591,13 @@ export async function getOverview(
             (t) => t.status === "SUCCESS",
         ).length;
         const rate = (succeeded / matching.length) * 100;
+        const runHarness = normalizeHarness(overview.harness);
+        seenHarnesses.add(runHarness);
 
         runPoints.push({
             runId: id,
             timestamp: date.getTime(),
+            harness: runHarness,
             successRate: rate,
             turnBudgetRate: turnBudgetRateForTasks(matching),
         });
@@ -597,6 +615,7 @@ export async function getOverview(
 
     return {
         runs: runPoints,
+        harnesses: orderHarnesses(seenHarnesses),
         windowStart,
         windowEnd,
         skills,
@@ -684,11 +703,21 @@ export async function getRunListing(
     tag: string | null,
     q: string | null,
     limit: number | null, // null = unlimited
+    // When set, scope the listing (and therefore the window rollup that feeds
+    // the summary tiles) to one harness. null = all harnesses. Applied at the
+    // same seam as the chart's scope in getOverview, so the tiles, the charts,
+    // and the table always describe the same set of runs.
+    harness: string | null = null,
 ): Promise<RunListing> {
     // Exclude ad-hoc runs from the main listing — they appear in their own
     // section (getAdhocRunListing). totalInWindow therefore counts only
-    // pipeline runs, matching the chart above it.
-    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
+    // pipeline runs in scope, matching the chart above it.
+    const perRun = (await loadWindowData(window)).filter(
+        (r) =>
+            !r.adhoc &&
+            (harness == null ||
+                normalizeHarness(r.overview?.harness) === harness),
+    );
     // Run IDs are timestamped — newest first by lexical compare.
     const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
     const totalInWindow = sorted.length;

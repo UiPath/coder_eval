@@ -22,6 +22,14 @@ const HARNESS_LOGO: Record<string, { src: string; label: string; short: string }
         label: "Antigravity · Google Gemini",
         short: "Antigravity",
     },
+    // The Delegate SDK harness is UiPath's own (the coder_eval_uipath plugin),
+    // so its vendor mark is the UiPath logo already served for the site header
+    // rather than a per-harness file under /harness.
+    "delegate-sdk": {
+        src: "/uipath.png",
+        label: "Delegate SDK · UiPath",
+        short: "Delegate SDK",
+    },
 };
 
 // Short human label for a harness id ("Claude Code"), for selectors and prose.
@@ -30,7 +38,15 @@ export function harnessShortLabel(harness: string): string {
     return HARNESS_LOGO[harness]?.short ?? harness;
 }
 
-export function HarnessBadge({ harness }: { harness?: string | null }) {
+export function HarnessBadge({
+    harness,
+    // Square edge in px. Defaults to the runs-table size; the chart legend asks
+    // for a smaller mark so the logo sits inside a line of 11px text.
+    size = 20,
+}: {
+    harness?: string | null;
+    size?: number;
+}) {
     const key = harness ?? "claude-code";
     const logo = HARNESS_LOGO[key];
     // Unknown harness: show the raw id rather than a misleading logo.
@@ -42,8 +58,8 @@ export function HarnessBadge({ harness }: { harness?: string | null }) {
             src={logo.src}
             alt={logo.label}
             title={logo.label}
-            width={20}
-            height={20}
+            width={size}
+            height={size}
             className="rounded-sm"
         />
     );

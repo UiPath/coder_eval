@@ -106,6 +106,7 @@ export default async function PathToGaPage({
                 {runsInWindow > 0 ? (
                     <DailySuccessChart
                         data={overview.runs}
+                        harnesses={overview.harnesses}
                         windowStart={overview.windowStart}
                         windowEnd={overview.windowEnd}
                     />

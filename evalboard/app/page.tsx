@@ -6,7 +6,7 @@ import {
     listRecentHarnesses,
     type TagCount,
 } from "@/lib/overview";
-import { parseHarnessParam, DEFAULT_HARNESS } from "@/lib/harness";
+import { parseHarnessScope } from "@/lib/harness";
 import { fmtDuration, fmtRunTime, fmtTimestamp, passClass } from "@/lib/format";
 import { WindowSelector } from "./_components/window-selector";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
@@ -48,24 +48,32 @@ function parseQ(raw: string | string[] | undefined): string | null {
     return trimmed ? trimmed.slice(0, 200) : null;
 }
 
-function parseLimit(raw: string | string[] | undefined): number | null {
+// Hard ceiling on how far the tables can be paged out. Both sections grow a
+// page at a time and never expose a "show all" jump: every extra row is another
+// run.json read behind the window load, and an unbounded expansion on a busy
+// window is the one interaction that can stall the page. A hand-typed
+// `?limit=` above this clamps here rather than being honored.
+const MAX_LIMIT = 500;
+
+function parsePagedLimit(
+    raw: string | string[] | undefined,
+    fallback: number,
+): number {
     const v = Array.isArray(raw) ? raw[0] : raw;
-    if (v === "all") return null;
-    if (!v) return DEFAULT_LIMIT;
+    if (!v) return fallback;
     const n = parseInt(v, 10);
-    if (!Number.isFinite(n) || n <= 0) return DEFAULT_LIMIT;
-    return Math.min(n, 10000);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.min(n, MAX_LIMIT);
+}
+
+function parseLimit(raw: string | string[] | undefined): number {
+    return parsePagedLimit(raw, DEFAULT_LIMIT);
 }
 
 // Separate from the main table's `limit` so expanding one section doesn't
-// reset the other's pagination. null = show all matching ad-hoc runs.
-function parseAdhocLimit(raw: string | string[] | undefined): number | null {
-    const v = Array.isArray(raw) ? raw[0] : raw;
-    if (v === "all") return null;
-    if (!v) return ADHOC_LIMIT;
-    const n = parseInt(v, 10);
-    if (!Number.isFinite(n) || n <= 0) return ADHOC_LIMIT;
-    return Math.min(n, 10000);
+// reset the other's pagination.
+function parseAdhocLimit(raw: string | string[] | undefined): number {
+    return parsePagedLimit(raw, ADHOC_LIMIT);
 }
 
 function fmtCost(c: number | null): string {
@@ -110,18 +118,21 @@ export default async function Page({
     const window = parseWindow(params.window);
     const activeTag = parseTag(params.tag);
     const q = parseQ(params.q);
-    const harness = parseHarnessParam(params.h);
+    // null = every harness, and that is the default: the page opens on the
+    // cross-harness comparison and narrows from there.
+    const harness = parseHarnessScope(params.h);
     const limit = parseLimit(params.limit);
     const adhocLimit = parseAdhocLimit(params.alimit);
     const isFiltered = activeTag != null || q != null;
 
-    // The analytics block (chart + rails) is scoped to one harness so the
-    // success line stops zigzagging across incomparable harnesses. The run
-    // LIST stays all-harness — seeing every recent run is the page's job, and
-    // the Harness column already disambiguates each row.
+    // One harness scope drives everything on the page: the charts split into a
+    // line per harness in the window, and the summary tiles + run list are
+    // filtered to the same set. Picking a harness therefore recomputes the
+    // tiles and the charts and narrows the table, instead of re-scoping the
+    // analytics block while the table silently kept showing every harness.
     const [overview, listing, adhoc, harnesses] = await Promise.all([
         getOverview(window, activeTag, q, harness),
-        getRunListing(window, activeTag, q, limit),
+        getRunListing(window, activeTag, q, limit, harness),
         getAdhocRunListing(adhocLimit),
         listRecentHarnesses(),
     ]);
@@ -134,7 +145,8 @@ export default async function Page({
     const matchedCount = listing.matchedCount;
     const totalInWindow = listing.totalInWindow;
     const tableTotalLabel = isFiltered ? matchedCount : totalInWindow;
-    const hasMore = limit != null && shownCount < tableTotalLabel;
+    // More rows exist AND the page cap still has room for them.
+    const hasMore = shownCount < Math.min(tableTotalLabel, MAX_LIMIT);
 
     // Current URL params, normalized to scalars. Spread as the base of every
     // href so toggling one section (main `limit` or ad-hoc `alimit`) carries
@@ -143,9 +155,9 @@ export default async function Page({
     const rawAlimit = Array.isArray(params.alimit)
         ? params.alimit[0]
         : params.alimit;
-    // Omit the default harness from URLs to keep them clean; carry a non-default
+    // Omit the all-harness scope from URLs to keep them clean; carry a narrowed
     // scope through every self-link so it isn't reset by pagination/clear.
-    const hParam = harness === DEFAULT_HARNESS ? undefined : harness;
+    const hParam = harness ?? undefined;
     const base = {
         window,
         tag: activeTag,
@@ -155,19 +167,30 @@ export default async function Page({
         alimit: rawAlimit,
     };
 
+    // Both tables grow one page at a time. There is deliberately no "show all"
+    // link: each row is backed by a run.json read, so an unbounded jump is the
+    // one click that can hang the page on a busy window.
+    const nextPageSize = Math.min(
+        DEFAULT_LIMIT,
+        Math.min(tableTotalLabel, MAX_LIMIT) - shownCount,
+    );
     const showMoreHref = buildHref({
         ...base,
-        limit: Math.min(tableTotalLabel, shownCount + DEFAULT_LIMIT),
+        limit: shownCount + nextPageSize,
     });
-    const showAllHref = buildHref({ ...base, limit: "all" });
     const clearAllHref = buildHref({ window, h: hParam });
 
     // Ad-hoc section disclosure: rows are filtered (by `q`) then capped to
-    // adhocLimit; offer "Show all" while more match than are shown, and a
-    // collapse back to the default once expanded past it.
-    const adhocExpandable = adhoc.rows.length < adhoc.total;
-    const adhocExpanded = adhocLimit == null && adhoc.total > ADHOC_LIMIT;
-    const adhocShowAllHref = buildHref({ ...base, alimit: "all" });
+    // adhocLimit; page in another ADHOC_LIMIT while more match than are shown,
+    // and offer a collapse back to the default once expanded past it.
+    const adhocRemaining = Math.min(adhoc.total, MAX_LIMIT) - adhoc.rows.length;
+    const adhocExpandable = adhocRemaining > 0;
+    const adhocNextPageSize = Math.min(ADHOC_LIMIT, adhocRemaining);
+    const adhocExpanded = adhoc.rows.length > ADHOC_LIMIT;
+    const adhocShowMoreHref = buildHref({
+        ...base,
+        alimit: adhoc.rows.length + adhocNextPageSize,
+    });
     const adhocShowLessHref = buildHref({ ...base, alimit: undefined });
 
     return (
@@ -236,8 +259,11 @@ export default async function Page({
                             ) : (
                                 <>
                                     Success rate per{" "}
-                                    {harnessShortLabel(harness)} run across the
-                                    last {window} · {overview.runs.length} run
+                                    {harness
+                                        ? `${harnessShortLabel(harness)} run`
+                                        : "run, one line per harness,"}{" "}
+                                    across the last {window} ·{" "}
+                                    {overview.runs.length} run
                                     {overview.runs.length === 1 ? "" : "s"}
                                 </>
                             )}
@@ -247,12 +273,14 @@ export default async function Page({
                         <HarnessSelector
                             current={harness}
                             harnesses={harnesses}
+                            includeAll
                         />
                         <WindowSelector current={window} />
                     </div>
                 </div>
                 <DailySuccessChart
                     data={overview.runs}
+                    harnesses={overview.harnesses}
                     windowStart={overview.windowStart}
                     windowEnd={overview.windowEnd}
                 />
@@ -268,6 +296,7 @@ export default async function Page({
                     </p>
                     <TurnBudgetChart
                         data={overview.runs}
+                        harnesses={overview.harnesses}
                         windowStart={overview.windowStart}
                         windowEnd={overview.windowEnd}
                     />
@@ -330,21 +359,11 @@ export default async function Page({
                                 scroll={false}
                                 className="text-studio-blue hover:underline"
                             >
-                                Show{" "}
-                                {Math.min(
-                                    DEFAULT_LIMIT,
-                                    tableTotalLabel - shownCount,
-                                )}{" "}
-                                more
+                                Show {nextPageSize} more
                             </Link>
-                            <span className="text-gray-300">·</span>
-                            <Link
-                                href={showAllHref}
-                                scroll={false}
-                                className="text-studio-blue hover:underline"
-                            >
-                                Show all ({tableTotalLabel})
-                            </Link>
+                            <span className="text-gray-400 tabular-nums">
+                                {shownCount} of {tableTotalLabel}
+                            </span>
                         </div>
                     ) : undefined
                 }
@@ -463,13 +482,16 @@ export default async function Page({
                                 <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-gray-100 bg-gray-50 text-xs">
                                     {adhocExpandable && (
                                         <Link
-                                            href={adhocShowAllHref}
+                                            href={adhocShowMoreHref}
                                             scroll={false}
                                             className="text-studio-blue hover:underline"
                                         >
-                                            Show all ({adhoc.total})
+                                            Show {adhocNextPageSize} more
                                         </Link>
                                     )}
+                                    <span className="text-gray-400 tabular-nums">
+                                        {adhoc.rows.length} of {adhoc.total}
+                                    </span>
                                     {adhocExpanded && (
                                         <Link
                                             href={adhocShowLessHref}

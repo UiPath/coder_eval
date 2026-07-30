@@ -1,6 +1,5 @@
 import Link from "next/link";
 import type { TagCount } from "@/lib/overview";
-import { DEFAULT_HARNESS } from "@/lib/harness";
 import type { Window } from "@/lib/reviews-types";
 
 type Variant = "neutral" | "rose" | "indigo";
@@ -42,10 +41,11 @@ function hrefForTag(
     if (window) params.set("window", window);
     if (tag) params.set("tag", tag);
     if (q) params.set("q", q);
-    // Preserve the active harness scope across tag clicks (omit the default to
-    // keep URLs clean). Without this, filtering by a tag would silently reset a
-    // codex/antigravity view back to claude-code.
-    if (harness && harness !== DEFAULT_HARNESS) params.set("h", harness);
+    // Preserve the active harness scope across tag clicks. null is the
+    // all-harness default and is expressed as the param's absence, so there is
+    // nothing to carry. Without this, filtering by a tag would silently widen a
+    // codex/antigravity view back out to every harness.
+    if (harness) params.set("h", harness);
     const qs = params.toString();
     return qs ? `${basePath}?${qs}` : basePath;
 }
