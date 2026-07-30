@@ -127,6 +127,12 @@ from coder_eval.models.results import (
     TaskConfigRecord,
     ThresholdCheck,
     TurnRecord,
+    eval_overhead_cost,
+    eval_result_total_cost,
+    judge_cost_usd,
+    row_cost_incomplete,
+    simulator_cost_usd,
+    sum_costs,
 )
 
 # Routing
@@ -293,6 +299,14 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TaskConfigRecord",
     "RunSummary",
     "SkippedTask",
+    # Cost helpers, shared by RunSummary's computed fields and the reports so
+    # every surface agrees on what a total costs and which rows lost money.
+    "row_cost_incomplete",
+    "eval_overhead_cost",
+    "sum_costs",
+    "eval_result_total_cost",
+    "judge_cost_usd",
+    "simulator_cost_usd",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
     # Judge

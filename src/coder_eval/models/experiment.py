@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from coder_eval.models.enums import FinalStatus
 from coder_eval.models.limits import RunLimits
@@ -194,7 +194,12 @@ class VariantResult(BaseModel):  # noqa: CE009 -- persisted result model; round-
 
 
 class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; round-trip leniency like models/results.py
-    """Aggregated statistics for a single variant across all tasks."""
+    """Aggregated statistics for a single variant across all tasks.
+
+    ``pass_rate`` uses the same denominator as ``RunSummary.pass_rate``: every task
+    the variant ran, errors included as misses. Otherwise an A/B whose variants
+    error at different rates compares two different denominators.
+    """
 
     variant_id: str
     tasks_run: int
@@ -227,6 +232,12 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
             total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pass_rate(self) -> float | None:
+        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant."""
+        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
 
 
 class TaskExperimentSummary(BaseModel):  # noqa: CE009 -- persisted result model; round-trip leniency like models/results.py

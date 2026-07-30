@@ -145,13 +145,14 @@ simulator force `[]` for the same reason.)
   UiPath CLI plugin discovery; when unset the sandbox derives it from the resolved
   `uip` binary. See [User Guide → Environment Variables](../USER_GUIDE.md#environment-variables).
 
-## Early stop (Claude-only)
+## Early stop
 
-Claude Code is the only agent that supports the cooperative early-stop seam. With
+Claude Code supports the cooperative early-stop seam, as do the
+[Codex](CODEX.md) and [Antigravity](ANTIGRAVITY.md) agents. With
 `run_limits.stop_early: true`, a single-shot run ends cleanly at the next
 tool-call boundary once its **armed** criteria (`stop_when: pass|fail|decided`) are
 decided — so a raised `max_turns` isn't wasted on a smoke run. Early stop errors at
-resolution for any other agent. See the
+resolution for any agent that does not declare `supports_cooperative_stop`. See the
 [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) for the full contract.
 
 ## Telemetry

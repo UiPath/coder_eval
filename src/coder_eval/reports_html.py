@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from coder_eval.models import FinalStatus
+from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
 
 if TYPE_CHECKING:
@@ -335,8 +335,9 @@ def _render_header(result: EvaluationResult) -> str:
     subtitle = _esc(result.task_description.strip().splitlines()[0] if result.task_description else "")
     turns_count = result.total_assistant_turns or 0
     cost_badge = ""
-    if result.total_token_usage and result.total_token_usage.total_cost_usd is not None:
-        cost_badge = f'<span class="badge neutral">${result.total_token_usage.total_cost_usd:.4f}</span>'
+    task_cost = eval_result_total_cost(result)
+    if task_cost is not None:
+        cost_badge = f'<span class="badge neutral">${task_cost:.4f}</span>'
     expected_turns_badge = ""
     overage = expected_turns_overage(result)
     if overage is not None:
@@ -870,12 +871,13 @@ def _render_error_details(result: EvaluationResult) -> str:
 
 
 def _render_token_usage(result: EvaluationResult) -> str:
-    """Render Token Usage section — totals + cost."""
+    """Render Token Usage section — totals + cost (agent + judge + simulator)."""
     tu = result.total_token_usage
     if tu is None:
         return ""
     total = tu.total_tokens
-    cost_str = f"${tu.total_cost_usd:.4f}" if tu.total_cost_usd is not None else "N/A"
+    task_cost = eval_result_total_cost(result)
+    cost_str = f"${task_cost:.4f}" if task_cost is not None else "N/A"
     uncached_fmt = f"{tu.uncached_input_tokens:,}"
     cache_write_fmt = f"{tu.cache_creation_input_tokens:,}"
     cache_read_fmt = f"{tu.cache_read_input_tokens:,}"
@@ -1167,7 +1169,7 @@ def _render_variant_generation_metrics(eval_results: list[EvaluationResult]) -> 
 
 
 def _render_variant_token_usage(eval_results: list[EvaluationResult]) -> str:
-    """Aggregate token usage across all tasks in a variant."""
+    """Aggregate token usage across all tasks in a variant. Cost is the whole bill."""
     usages = [r.total_token_usage for r in eval_results if r.total_token_usage is not None]
     if not usages:
         return ""
@@ -1176,8 +1178,8 @@ def _render_variant_token_usage(eval_results: list[EvaluationResult]) -> str:
     cache_write = sum(u.cache_creation_input_tokens for u in usages)
     cache_read = sum(u.cache_read_input_tokens for u in usages)
     total = input_tok + output_tok + cache_write + cache_read
-    costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
-    cost_str = f"${sum(costs):.4f}" if costs else "N/A"
+    variant_cost = sum_costs(*(eval_result_total_cost(r) for r in eval_results))
+    cost_str = f"${variant_cost:.4f}" if variant_cost is not None else "N/A"
     return f"""
 <h2>Token Usage</h2>
 <div class="card">
@@ -1320,13 +1322,11 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     rows.append(_row("Failed", [str(result.variant_aggregates[vid].tasks_failed) for vid in result.variant_ids], None))
     rows.append(_row("Errors", [str(result.variant_aggregates[vid].tasks_error) for vid in result.variant_ids], None))
 
-    def _success_rate(vid: str) -> str:
-        agg = result.variant_aggregates[vid]
-        evaluable = agg.tasks_run - agg.tasks_error
-        rate = (agg.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0.0
-        return f"{rate:.1f}%"
+    def _pass_rate(vid: str) -> str:
+        rate = result.variant_aggregates[vid].pass_rate
+        return f"{rate * 100:.1f}%" if rate is not None else "n/a"
 
-    rows.append(_row("Success Rate", [_success_rate(vid) for vid in result.variant_ids], None))
+    rows.append(_row("Pass Rate", [_pass_rate(vid) for vid in result.variant_ids], None))
 
     rows.append(
         _row(

@@ -147,6 +147,17 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
             raise AgentCrashError(message) from cause
         raise AgentCrashError(message)
 
+    def _finalize_external_cancel(self, finalize: _FinalizeFn) -> None:
+        """Finalize a turn cancelled from outside (the task watchdog) as a crash. Does NOT raise.
+
+        Only the ``crashed`` branch parks the record on ``pending_turn``; finalizing
+        as ``COMPLETED`` drops it, and the unwinding frame takes the return value
+        with it, so a killed turn's telemetry survives only via this path. The caller
+        re-raises the ``CancelledError`` afterwards.
+        """
+        self._state = AgentState.ERROR
+        finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")
+
     def _capture_partial_turn(self, collector: EventCollector) -> None:
         """Build the crashed partial ``TurnRecord`` into ``pending_turn`` (best-effort).
 

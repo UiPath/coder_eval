@@ -11,7 +11,7 @@
 - **Succeeded**: 1
 - **Failed**: 1 (incl. 1 token budget, 0 cost budget exceeded)
 - **Errors**: 0
-- **Success Rate**: 50.0%
+- **Pass Rate**: 50.0% (1/2)
 - **Avg Reliability Score**: 0.625
 - **Avg Generation Latency**: 10.2s
 - **Total Assistant Turns**: 4
