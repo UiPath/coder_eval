@@ -22,16 +22,15 @@ describe("RunIdentity", () => {
         render(
             <RunIdentity
                 harness="delegate-sdk"
-                model="claude-sonnet-5"
+                model="virtuoso-1-5"
                 modelCount={1}
             />,
         );
-        // The UiPath mark stands in for the Delegate SDK harness, which has no
-        // file of its own under /harness.
-        expect(
-            screen.getByAltText("Delegate SDK · UiPath"),
-        ).toBeInTheDocument();
-        expect(screen.getByText("Delegate SDK")).toBeInTheDocument();
+        // The UiPath mark stands in for the Delegate harness, which has no file
+        // of its own under /harness. The id stays `delegate-sdk` (that is what
+        // run.json carries); only the label is shortened.
+        expect(screen.getByAltText("Delegate · UiPath")).toBeInTheDocument();
+        expect(screen.getByText("Delegate")).toBeInTheDocument();
     });
 
     test("flags a multi-model run instead of claiming the dominant one", () => {
