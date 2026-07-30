@@ -98,6 +98,7 @@ def build_cost_record(
         "run_id": tags.get(f"{_TAG_PREFIX}run-id"),
         "task_id": tags.get(f"{_TAG_PREFIX}task-id"),
         "iteration": tags.get(f"{_TAG_PREFIX}iteration"),
+        "attempt": tags.get(f"{_TAG_PREFIX}attempt"),
         "call_id": call_id,
         "model": model,
         # OpenRouter's real routed-provider price. NOT LiteLLM's response_cost.

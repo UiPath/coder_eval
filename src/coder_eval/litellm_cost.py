@@ -99,6 +99,7 @@ def apply_actual_cost(
     *,
     run_id: str,
     task_id: str,
+    attempt: str | None = None,
     records: list[dict[str, Any]],
 ) -> int:
     """Override each turn's cost with the proxy's real per-call cost and attach the
@@ -109,13 +110,23 @@ def apply_actual_cost(
         result: the run's ``EvaluationResult`` (its ``iterations`` are the turns).
         run_id / task_id: the correlation tags the agent stamped (``x-ce-run-id`` /
             ``x-ce-task-id``); only records matching BOTH are joined.
+        attempt: the per-attempt nonce (``x-ce-attempt``). When given, records must
+            also match it — so a re-run into the same ``--run-dir`` (same run_id) does
+            not re-match, and double-count, a prior attempt's rows in the append-only
+            log. ``None`` disables the check (records without the tag still join).
         records: rows from :func:`load_cost_records`.
 
     Returns:
         The number of turns that received real cost (0 => everything kept its
         static estimate, e.g. an empty/mismatched log).
     """
-    mine = [r for r in records if r.get("run_id") == run_id and r.get("task_id") == task_id]
+    mine = [
+        r
+        for r in records
+        if r.get("run_id") == run_id
+        and r.get("task_id") == task_id
+        and (attempt is None or r.get("attempt") == attempt)
+    ]
     if not mine:
         return 0
 

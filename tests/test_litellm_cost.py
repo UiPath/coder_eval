@@ -146,6 +146,21 @@ class TestApplyActualCost:
         assert result.iterations[0].token_usage.total_cost_usd == 0.42
         assert result.iterations[0].provider_call_costs == []
 
+    def test_attempt_nonce_prevents_rerun_double_count(self):
+        # The append-only log holds a PRIOR attempt's rows AND this attempt's rows
+        # under the same (run_id, task_id, iteration). The attempt nonce scopes the
+        # join to THIS attempt, so cost is not summed across both (reproduced the
+        # $0.06-for-$0.03 double-count the review flagged).
+        result = _result([_turn(0, static_cost=0.5)])
+        records = [
+            {**_rec(0, 0.03, call_id="old"), "attempt": "prev"},
+            {**_rec(0, 0.03, call_id="new"), "attempt": "curr"},
+        ]
+        applied = apply_actual_cost(result, run_id="R", task_id="T", attempt="curr", records=records)
+        assert applied == 1
+        assert result.iterations[0].token_usage.total_cost_usd == 0.03  # this attempt only, not 0.06
+        assert [c.call_id for c in result.iterations[0].provider_call_costs] == ["new"]
+
     def test_transactional_no_mutation_when_a_record_is_malformed(self):
         # A well-formed JSON row with a wrong-typed cost raises while building the
         # per-call breakdown. The whole join must abort with NO turn mutated (the
@@ -197,12 +212,15 @@ class TestOrchestratorJoinHook:
         run_dir.mkdir()
         log = tmp_path / "costs.jsonl"
         run_id = hash_identifier(run_dir.as_posix())
-        log.write_text(f'{{"run_id":"{run_id}","task_id":"calc","iteration":"0","cost":0.09,"cache_read":5}}\n')
+        log.write_text(
+            f'{{"run_id":"{run_id}","task_id":"calc","iteration":"0","attempt":"att1","cost":0.09,"cache_read":5}}\n'
+        )
         monkeypatch.setattr(orch_mod.settings, "litellm_cost_log", str(log))
         fake = SimpleNamespace(
             route=LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="deepseek/deepseek-v4-pro"),
             result=_result([_turn(0, static_cost=0.5)]),
-            run_dir=run_dir,
+            _cost_correlation_run_id=run_id,
+            _cost_attempt_nonce="att1",
             _log_task_id="calc",
         )
         orch_mod.Orchestrator._join_litellm_actual_cost(fake)
@@ -214,7 +232,8 @@ class TestOrchestratorJoinHook:
         fake = SimpleNamespace(
             route=LiteLLMRoute(base_url="http://x:4000", auth_token="k"),
             result=_result([_turn(0, static_cost=0.5)]),
-            run_dir=tmp_path,
+            _cost_correlation_run_id="R",
+            _cost_attempt_nonce="att1",
             _log_task_id="calc",
         )
         orch_mod.Orchestrator._join_litellm_actual_cost(fake)  # missing file → no-op, no raise
@@ -230,14 +249,15 @@ class TestOrchestratorJoinHook:
         log = tmp_path / "costs.jsonl"
         run_id = hash_identifier(run_dir.as_posix())
         log.write_text(
-            f'{{"run_id":"{run_id}","task_id":"calc","iteration":"0","cost":0.03}}\n'
-            f'{{"run_id":"{run_id}","task_id":"calc","iteration":"1","cost":0.05}}\n'
+            f'{{"run_id":"{run_id}","task_id":"calc","iteration":"0","attempt":"att1","cost":0.03}}\n'
+            f'{{"run_id":"{run_id}","task_id":"calc","iteration":"1","attempt":"att1","cost":0.05}}\n'
         )
         monkeypatch.setattr(orch_mod.settings, "litellm_cost_log", str(log))
         fake = SimpleNamespace(
             route=LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="deepseek/deepseek-v4-pro"),
             result=_result([_turn(0, static_cost=0.5), _turn(1, static_cost=0.5)]),
-            run_dir=run_dir,
+            _cost_correlation_run_id=run_id,
+            _cost_attempt_nonce="att1",
             _log_task_id="calc",
         )
         orch_mod.Orchestrator._join_litellm_actual_cost(fake)

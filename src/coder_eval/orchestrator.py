@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -345,6 +346,12 @@ class Orchestrator:
         """
         self.task = task
         self.run_dir = run_dir
+        # Per-attempt nonce for the LiteLLM cost-log join. The proxy log is
+        # append-only and the run_id is a deterministic hash of run_dir, so a
+        # re-run into the same --run-dir would otherwise re-match (and double-count)
+        # a prior attempt's rows. A fresh nonce per Orchestrator (one per process
+        # invocation) scopes the join to THIS attempt's records.
+        self._cost_attempt_nonce = uuid.uuid4().hex
         self.preservation_mode = preservation_mode
         self.workspace_dir = workspace_dir
         self.task_file = task_file
@@ -898,6 +905,17 @@ class Orchestrator:
             )
             self._expected_turns_warning_emitted = True
 
+    @property
+    def _cost_correlation_run_id(self) -> str:
+        """The LiteLLM cost-log correlation run id — a stable hash of the run dir.
+
+        Single accessor used by BOTH the stamp site (``_create_agent``, into
+        ``x-ce-run-id``) and the join site (``_join_litellm_actual_cost``); keeping
+        the derivation in one place means the two can't drift and silently revert
+        every turn to static pricing.
+        """
+        return hash_identifier(self.run_dir.as_posix())
+
     def _join_litellm_actual_cost(self) -> None:
         """Override per-turn cost with the proxy-captured ACTUAL per-call OpenRouter
         cost (and attach the per-call cache breakdown) for the open-weight backend.
@@ -911,12 +929,23 @@ class Orchestrator:
         try:
             applied = apply_actual_cost(
                 self.result,
-                run_id=hash_identifier(self.run_dir.as_posix()),
+                run_id=self._cost_correlation_run_id,
                 task_id=self._log_task_id,
+                attempt=self._cost_attempt_nonce,
                 records=load_cost_records(settings.litellm_cost_log),
             )
             if applied:
                 logger.info("LiteLLM actual-cost join: real per-call cost applied to %d turn(s)", applied)
+            else:
+                # Tags were stamped but nothing matched (file absent, proxy never
+                # wrote, wrong path, or a run/task/attempt mismatch). The run stays
+                # on the static rate card — warn so it isn't mistaken for the real bill.
+                logger.warning(
+                    "LiteLLM actual-cost join found no matching records in %s (run=%s task=%s); cost stays static",
+                    settings.litellm_cost_log,
+                    self._cost_correlation_run_id,
+                    self._log_task_id,
+                )
         except Exception:
             logger.warning("LiteLLM actual-cost join failed; keeping static pricing", exc_info=True)
 
@@ -1262,8 +1291,9 @@ class Orchestrator:
             and registration.agent_class.supports_cost_log_tags
         ):
             kwargs["cost_log_tags"] = {
-                "x-ce-run-id": hash_identifier(self.run_dir.as_posix()),
+                "x-ce-run-id": self._cost_correlation_run_id,
                 "x-ce-task-id": self._log_task_id,
+                "x-ce-attempt": self._cost_attempt_nonce,
             }
         return create_agent(self.task.agent.type, self.task.agent, route=self.route, **kwargs)
 

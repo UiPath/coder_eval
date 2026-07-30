@@ -33,7 +33,7 @@ WARM_USAGE = {
     "cost": 0.0006692671,
     "prompt_tokens_details": {"cached_tokens": 4096, "cache_write_tokens": 0},
 }
-TAGS = {"x-ce-run-id": "abc123", "x-ce-task-id": "calc/v1", "x-ce-iteration": "2"}
+TAGS = {"x-ce-run-id": "abc123", "x-ce-task-id": "calc/v1", "x-ce-iteration": "2", "x-ce-attempt": "att9"}
 
 
 class TestBuildCostRecord:
@@ -48,6 +48,7 @@ class TestBuildCostRecord:
         assert rec["run_id"] == "abc123"
         assert rec["task_id"] == "calc/v1"
         assert rec["iteration"] == "2"
+        assert rec["attempt"] == "att9"  # per-attempt nonce for rerun de-dup
         assert rec["model"] == "deepseek/deepseek-v4-pro"
 
     def test_reads_anthropic_shaped_usage(self, cl):
