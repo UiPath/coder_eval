@@ -48,37 +48,52 @@ export function HarnessSelector({
         current == null || harnesses.includes(current)
             ? harnesses
             : [current, ...harnesses];
+    // shrink-0 + whitespace-nowrap: a segment must keep its label on one line
+    // and never compress, so on a narrow screen the control scrolls (see the
+    // wrapper) instead of wrapping "Claude Code" onto two lines and stretching
+    // the whole page past the viewport.
     const segment = (active: boolean) =>
-        `flex items-center gap-1.5 px-3 py-1 ${
+        `flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 sm:px-3 ${
             active
                 ? "bg-studio-blue text-white"
                 : "bg-white text-gray-700 hover:bg-gray-50"
         }`;
+    // Below `sm` the vendor logo carries the identity on its own (each button
+    // keeps the full name as its accessible label and tooltip) — five spelled-out
+    // segments don't fit on a phone, and the chart legend below names every line.
+    const label = (text: string) => (
+        <span className="hidden sm:inline">{text}</span>
+    );
     return (
-        <div className="inline-flex border border-gray-200 rounded-md overflow-hidden text-sm">
+        <div className="flex max-w-full overflow-x-auto rounded-md border border-gray-200 text-sm">
             {includeAll && (
                 <button
                     type="button"
                     onClick={() => set(null)}
                     aria-pressed={current == null}
-                    className={segment(current == null)}
+                    className={`${segment(current == null)} rounded-l-md`}
                     title="Every harness, one line each"
                 >
                     All
                 </button>
             )}
-            {opts.map((h) => {
+            {opts.map((h, i) => {
                 const active = h === current;
+                const name = harnessShortLabel(h);
                 return (
                     <button
                         key={h}
                         type="button"
                         onClick={() => set(h)}
                         aria-pressed={active}
-                        className={segment(active)}
+                        aria-label={name}
+                        title={name}
+                        className={`${segment(active)} ${
+                            !includeAll && i === 0 ? "rounded-l-md" : ""
+                        } ${i === opts.length - 1 ? "rounded-r-md" : ""}`}
                     >
                         <HarnessBadge harness={h} />
-                        {harnessShortLabel(h)}
+                        {label(name)}
                     </button>
                 );
             })}

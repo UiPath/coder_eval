@@ -1,4 +1,5 @@
-import { fmtDuration, fmtUsd, passClass } from "@/lib/format";
+import { fmtDuration, fmtUsd } from "@/lib/format";
+import { passClass } from "@/lib/pass-rate";
 import type { RunListingTotals } from "@/lib/overview";
 import type { Window } from "@/lib/reviews-types";
 
@@ -33,10 +34,14 @@ function Tile({
 }
 
 // Front-page window rollup: total spend + shape of the runs in scope. Every
-// tile is summed over the same set — `runCount` is the matched-run count
-// (`matchedCount`), which is exactly what `totals` folds in, so the Runs tile
-// can never disagree with the Cost/Tasks/Pass/Compute tiles. The totals are
-// scoped to matching tasks whenever a filter is active.
+// tile is summed over the same set — `runCount` and `totals` both come from
+// getWindowRollup, so the Runs tile can never disagree with the
+// Cost/Tasks/Pass/Compute tiles. The totals are scoped to matching tasks
+// whenever a filter is active.
+//
+// This describes the window the charts plot, NOT however far the run table below
+// is paged out; the tiles carry the window in their sub-labels so the difference
+// is legible.
 export function WindowSummary({
     totals,
     window,

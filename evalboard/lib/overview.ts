@@ -163,11 +163,21 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
 
 export interface RunListing {
     rows: RunListingRow[]; // after filter + limit, newest first
-    totalInWindow: number;
-    matchedCount: number; // post-filter, pre-limit
-    // Rollup across all matched runs (pre-limit) — powers the front-page
-    // window summary; independent of the `rows` limit.
+    // Every pipeline run in the store, not just the ones loaded for this page.
+    // Free to compute (it's the id count), so the table can say "20 of 94"
+    // without reading 94 run.json files.
+    totalCandidates: number;
+    // Another page exists behind `rows`. Derived from over-fetching by one
+    // rather than from a total match count: counting matches would mean loading
+    // every run in history on every render.
+    hasMore: boolean;
+}
+
+// Rollup over a time window, independent of the table's pagination. The tiles
+// read this so they describe the same set of runs the charts plot.
+export interface WindowRollup {
     totals: RunListingTotals;
+    runCount: number; // matched pipeline runs in the window
 }
 
 const FETCH_CONCURRENCY = 16;
@@ -698,102 +708,142 @@ export async function getTagTaskBreakdown(
     return rows.sort((a, b) => a.taskId.localeCompare(b.taskId));
 }
 
-export async function getRunListing(
+// Project one loaded run into a table row under the active tag/q filter, or
+// null when the run has nothing matching in it. Pure over an already-loaded
+// PerRun, so both the lazy row scan (getRunListing) and the window rollup
+// (getWindowRollup) decide "does this run count?" the same way — the two used to
+// be one loop, and the tiles disagreeing with the table would be invisible.
+// Exported for unit testing.
+export function projectRunRow(
+    { id, overview, reviewTagsByTask }: PerRun,
+    tag: string | null,
+    needle: string | null,
+): RunListingRow | null {
+    if (!overview) return null;
+
+    // Default to the whole-run slice; narrow to matching tasks if a filter is
+    // active AND any task matches. When `q` matches only the run ID
+    // (date-fragment "pin a run" use case), we keep the whole-run slice so the
+    // row shows real totals rather than 0/—/—.
+    let scopedTasks = overview.tasks;
+    let scopedCost = overview.totalCostUsd;
+    let scopedDur = overview.taskDurationSeconds;
+
+    if (tag != null || needle != null) {
+        const matching = overview.tasks.filter((t) => {
+            const passesTag =
+                tag == null || taskMatchesTag(t, reviewTagsByTask, tag);
+            const passesQ =
+                needle == null || taskMatchesQuery(t, reviewTagsByTask, needle);
+            return passesTag && passesQ;
+        });
+        const idMatchesQ = needle != null && id.toLowerCase().includes(needle);
+        if (matching.length === 0 && !idMatchesQ) return null;
+
+        if (matching.length > 0) {
+            // Scope cost/duration to matching tasks. Cost sums any task with a
+            // recorded value; duration is only meaningful when every matching
+            // task has a duration recorded (otherwise the partial sum would
+            // understate the slice — mirrors readRunOverview's whole-run rule).
+            let costSum = 0;
+            let costHasAny = false;
+            let durSum = 0;
+            let durAllPresent = true;
+            for (const t of matching) {
+                if (t.totalCostUsd != null) {
+                    costSum += t.totalCostUsd;
+                    costHasAny = true;
+                }
+                if (t.durationSeconds != null) {
+                    durSum += t.durationSeconds;
+                } else {
+                    durAllPresent = false;
+                }
+            }
+            scopedTasks = matching;
+            scopedCost = costHasAny ? costSum : null;
+            scopedDur = durAllPresent ? durSum : null;
+        }
+    }
+
+    return {
+        id,
+        tasksSucceeded: scopedTasks.filter((t) => t.status === "SUCCESS").length,
+        tasksRun: scopedTasks.length,
+        totalCostUsd: scopedCost,
+        taskDurationSeconds: scopedDur,
+        harness: overview.harness ?? null,
+    };
+}
+
+// The tiles' rollup: every matched pipeline run in the window, whatever the
+// table is currently paged to. Reads the same memoized window load the charts
+// do, so the two always describe one set of runs.
+export async function getWindowRollup(
     window: Window,
     tag: string | null,
     q: string | null,
-    limit: number | null, // null = unlimited
-    // When set, scope the listing (and therefore the window rollup that feeds
-    // the summary tiles) to one harness. null = all harnesses. Applied at the
-    // same seam as the chart's scope in getOverview, so the tiles, the charts,
-    // and the table always describe the same set of runs.
+    harness: string | null = null,
+): Promise<WindowRollup> {
+    const needle = q?.trim().toLowerCase() || null;
+    const rows: RunListingRow[] = [];
+    for (const r of await loadWindowData(window)) {
+        // Ad-hoc uploads aren't pipeline cadence — they have their own section
+        // and are excluded here exactly as they are from the charts.
+        if (r.adhoc) continue;
+        if (harness != null && normalizeHarness(r.overview?.harness) !== harness)
+            continue;
+        const row = projectRunRow(r, tag, needle);
+        if (row) rows.push(row);
+    }
+    return { totals: summarizeListing(rows), runCount: rows.length };
+}
+
+// The run table. Unlike the rollup above, this is NOT date-bounded: it pages
+// back through the whole store, a screenful at a time, so history older than the
+// charts' window is still reachable without a time-window control.
+//
+// Rows are loaded lazily because a run.json is multi-MB — reading all of history
+// to count matches would cost hundreds of MB of parsing per render. So the depth
+// of the read is the depth of the page: `hasMore` comes from over-fetching a
+// single row rather than from a total, and the only free count (every pipeline
+// candidate in the store) is reported separately as `totalCandidates`.
+export async function getRunListing(
+    tag: string | null,
+    q: string | null,
+    limit: number,
+    // When set, scope the listing to one harness — applied at the same seam as
+    // the chart's scope in getOverview, so the tiles, the charts, and the table
+    // always describe the same set of runs. null = all harnesses.
     harness: string | null = null,
 ): Promise<RunListing> {
-    // Exclude ad-hoc runs from the main listing — they appear in their own
-    // section (getAdhocRunListing). totalInWindow therefore counts only
-    // pipeline runs in scope, matching the chart above it.
-    const perRun = (await loadWindowData(window)).filter(
-        (r) =>
-            !r.adhoc &&
-            (harness == null ||
-                normalizeHarness(r.overview?.harness) === harness),
-    );
-    // Run IDs are timestamped — newest first by lexical compare.
-    const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
-    const totalInWindow = sorted.length;
-
+    // Ad-hoc ids aren't date-shaped, so this drops them (they have their own
+    // section) without loading anything. Newest-first: ids are timestamps.
+    const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) != null);
     const needle = q?.trim().toLowerCase() || null;
-    const needsFilter = tag != null || needle != null;
+    const hasFilter = tag != null || needle != null || harness != null;
+    const isMatch = hasFilter
+        ? (r: PerRun) =>
+              (harness == null ||
+                  normalizeHarness(r.overview?.harness) === harness) &&
+              projectRunRow(r, tag, needle) != null
+        : undefined;
 
-    const matched: RunListingRow[] = [];
-    for (const { id, overview, reviewTagsByTask } of sorted) {
-        if (!overview) continue;
+    // Over-fetch by one: if the extra row materializes, another page exists.
+    const loaded = await collectPipelineRuns(
+        ids,
+        limit + 1,
+        cachedLoadPerRun,
+        isMatch,
+    );
+    const rows = loaded
+        .map((r) => projectRunRow(r, tag, needle))
+        .filter((row): row is RunListingRow => row != null);
 
-        // Default to the whole-run slice; narrow to matching tasks if a
-        // filter is active AND any task matches. When `q` matches only the
-        // run ID (date-fragment "pin a run" use case), we keep the whole-run
-        // slice so the row shows real totals rather than 0/—/—.
-        let scopedTasks = overview.tasks;
-        let scopedCost = overview.totalCostUsd;
-        let scopedDur = overview.taskDurationSeconds;
-
-        if (needsFilter) {
-            const matching = overview.tasks.filter((t) => {
-                const passesTag =
-                    tag == null || taskMatchesTag(t, reviewTagsByTask, tag);
-                const passesQ =
-                    needle == null ||
-                    taskMatchesQuery(t, reviewTagsByTask, needle);
-                return passesTag && passesQ;
-            });
-            const idMatchesQ =
-                needle != null && id.toLowerCase().includes(needle);
-            if (matching.length === 0 && !idMatchesQ) continue;
-
-            if (matching.length > 0) {
-                // Scope cost/duration to matching tasks. Cost sums any task
-                // with a recorded value; duration is only meaningful when
-                // every matching task has a duration recorded (otherwise the
-                // partial sum would understate the slice — mirrors
-                // readRunOverview's whole-run rule).
-                let costSum = 0;
-                let costHasAny = false;
-                let durSum = 0;
-                let durAllPresent = true;
-                for (const t of matching) {
-                    if (t.totalCostUsd != null) {
-                        costSum += t.totalCostUsd;
-                        costHasAny = true;
-                    }
-                    if (t.durationSeconds != null) {
-                        durSum += t.durationSeconds;
-                    } else {
-                        durAllPresent = false;
-                    }
-                }
-                scopedTasks = matching;
-                scopedCost = costHasAny ? costSum : null;
-                scopedDur = durAllPresent ? durSum : null;
-            }
-        }
-
-        matched.push({
-            id,
-            tasksSucceeded: scopedTasks.filter((t) => t.status === "SUCCESS")
-                .length,
-            tasksRun: scopedTasks.length,
-            totalCostUsd: scopedCost,
-            taskDurationSeconds: scopedDur,
-            harness: overview.harness ?? null,
-        });
-    }
-
-    const rows = limit == null ? matched : matched.slice(0, limit);
     return {
-        rows,
-        totalInWindow,
-        matchedCount: matched.length,
-        totals: summarizeListing(matched),
+        rows: rows.slice(0, limit),
+        totalCandidates: ids.length,
+        hasMore: rows.length > limit,
     };
 }
 

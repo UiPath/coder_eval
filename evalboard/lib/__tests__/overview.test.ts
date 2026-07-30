@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
     buildAdhocRows,
     collectPipelineRuns,
+    projectRunRow,
     summarizeListing,
     turnBudgetRateForTasks,
     type PerRun,
@@ -472,5 +473,119 @@ describe("buildAdhocRows", () => {
         expect(row.title).toBe("My run");
         expect(row.tasksSucceeded).toBe(1);
         expect(row.tasksRun).toBe(2);
+    });
+});
+
+// projectRunRow is the single definition of "does this run count, and with which
+// tasks" — the summary tiles (getWindowRollup) and the paged run table
+// (getRunListing) both go through it. They used to be one loop; if they ever
+// disagreed, the tiles would describe a different set of runs than the table
+// below them with nothing failing.
+describe("projectRunRow", () => {
+    function run(id: string, tasks: RunOverviewTask[], extra?: Partial<PerRun>): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                tasks,
+                totalCostUsd: 10,
+                taskDurationSeconds: 100,
+                componentShas: [],
+            },
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+            ...extra,
+        };
+    }
+
+    test("unfiltered, reports whole-run totals", () => {
+        const row = projectRunRow(
+            run("r", [
+                task({ taskId: "a", status: "SUCCESS" }),
+                task({ taskId: "b", status: "FAILURE" }),
+            ]),
+            null,
+            null,
+        );
+        expect(row).toMatchObject({
+            id: "r",
+            tasksSucceeded: 1,
+            tasksRun: 2,
+            totalCostUsd: 10,
+            taskDurationSeconds: 100,
+        });
+    });
+
+    test("drops a run with no task matching the tag", () => {
+        const row = projectRunRow(
+            run("r", [task({ taskId: "a", tags: ["smoke"] })]),
+            "path-to-ga",
+            null,
+        );
+        expect(row).toBeNull();
+    });
+
+    test("scopes cost and duration to the matching tasks", () => {
+        // The row's numbers have to describe the filtered slice, not the run —
+        // otherwise filtering to one tag still shows the whole run's spend.
+        const row = projectRunRow(
+            run("r", [
+                task({
+                    taskId: "a",
+                    tags: ["keep"],
+                    totalCostUsd: 3,
+                    durationSeconds: 30,
+                }),
+                task({ taskId: "b", totalCostUsd: 99, durationSeconds: 999 }),
+            ]),
+            "keep",
+            null,
+        );
+        expect(row).toMatchObject({
+            tasksRun: 1,
+            totalCostUsd: 3,
+            taskDurationSeconds: 30,
+        });
+    });
+
+    test("nulls a scoped duration when any matching task lacks one", () => {
+        // A partial sum understates the slice, which reads as a fast run rather
+        // than an unmeasured one.
+        const row = projectRunRow(
+            run("r", [
+                task({ taskId: "a", tags: ["keep"], durationSeconds: 30 }),
+                task({ taskId: "b", tags: ["keep"], durationSeconds: null }),
+            ]),
+            "keep",
+            null,
+        );
+        expect(row?.taskDurationSeconds).toBeNull();
+    });
+
+    test("a query matching only the run id keeps the whole-run slice", () => {
+        // Pinning a run by pasting a date fragment must not show 0 tasks just
+        // because no task name contains the date.
+        const row = projectRunRow(
+            run("2026-07-30_04-38-11", [task({ taskId: "a" })]),
+            null,
+            "07-30",
+        );
+        expect(row).toMatchObject({ tasksRun: 1 });
+    });
+
+    test("returns null for a run whose run.json could not be read", () => {
+        const r = run("r", []);
+        expect(projectRunRow({ ...r, overview: null }, null, null)).toBeNull();
+    });
+
+    test("carries the harness through for the table's badge column", () => {
+        const r = run("r", [task({ taskId: "a" })]);
+        const withHarness = {
+            ...r,
+            overview: { ...r.overview!, harness: "codex" },
+        };
+        expect(projectRunRow(withHarness, null, null)?.harness).toBe("codex");
     });
 });

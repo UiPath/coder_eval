@@ -3,13 +3,14 @@ import {
     getAdhocRunListing,
     getOverview,
     getRunListing,
+    getWindowRollup,
     listRecentHarnesses,
     type TagCount,
 } from "@/lib/overview";
 import { parseHarnessScope } from "@/lib/harness";
-import { fmtDuration, fmtRunTime, fmtTimestamp, passClass } from "@/lib/format";
-import { WindowSelector } from "./_components/window-selector";
-import { WINDOWS, type Window } from "@/lib/reviews-types";
+import { fmtDuration, fmtRunTime, fmtTimestamp } from "@/lib/format";
+import { passClass } from "@/lib/pass-rate";
+import { type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
 import { TurnBudgetChart } from "./_overview/turn-budget-chart";
 import { WindowSummary } from "./_overview/window-summary";
@@ -25,10 +26,11 @@ export const dynamic = "force-dynamic";
 const DEFAULT_LIMIT = 20;
 const ADHOC_LIMIT = 10;
 
-function parseWindow(raw: string | string[] | undefined): Window {
-    const v = Array.isArray(raw) ? raw[0] : raw;
-    return WINDOWS.includes(v as Window) ? (v as Window) : "30d";
-}
+// The charts and the summary tiles cover a fixed 30 days. There is no window
+// control: the run table pages back through all of history on its own (see
+// getRunListing), which is what a shorter window was really being used for, and
+// a 30-day chart is the one that shows a trend rather than a few points.
+const WINDOW: Window = "30d";
 
 function parseTag(raw: string | string[] | undefined): string | null {
     const v = Array.isArray(raw) ? raw[0] : raw;
@@ -50,9 +52,9 @@ function parseQ(raw: string | string[] | undefined): string | null {
 
 // Hard ceiling on how far the tables can be paged out. Both sections grow a
 // page at a time and never expose a "show all" jump: every extra row is another
-// run.json read behind the window load, and an unbounded expansion on a busy
-// window is the one interaction that can stall the page. A hand-typed
-// `?limit=` above this clamps here rather than being honored.
+// multi-MB run.json read, so an unbounded jump is the one interaction that can
+// stall the page. Well above the store's run count, so in practice you can keep
+// expanding to the oldest run; a hand-typed `?limit=` above this clamps here.
 const MAX_LIMIT = 500;
 
 function parsePagedLimit(
@@ -106,7 +108,6 @@ export default async function Page({
     searchParams,
 }: {
     searchParams: Promise<{
-        window?: string;
         tag?: string;
         q?: string;
         h?: string;
@@ -115,7 +116,6 @@ export default async function Page({
     }>;
 }) {
     const params = await searchParams;
-    const window = parseWindow(params.window);
     const activeTag = parseTag(params.tag);
     const q = parseQ(params.q);
     // null = every harness, and that is the default: the page opens on the
@@ -130,9 +130,10 @@ export default async function Page({
     // filtered to the same set. Picking a harness therefore recomputes the
     // tiles and the charts and narrows the table, instead of re-scoping the
     // analytics block while the table silently kept showing every harness.
-    const [overview, listing, adhoc, harnesses] = await Promise.all([
-        getOverview(window, activeTag, q, harness),
-        getRunListing(window, activeTag, q, limit, harness),
+    const [overview, rollup, listing, adhoc, harnesses] = await Promise.all([
+        getOverview(WINDOW, activeTag, q, harness),
+        getWindowRollup(WINDOW, activeTag, q, harness),
+        getRunListing(activeTag, q, limit, harness),
         getAdhocRunListing(adhocLimit),
         listRecentHarnesses(),
     ]);
@@ -142,11 +143,14 @@ export default async function Page({
     const reviewTags = filterTagsByQuery(overview.reviewTags, q);
 
     const shownCount = listing.rows.length;
-    const matchedCount = listing.matchedCount;
-    const totalInWindow = listing.totalInWindow;
-    const tableTotalLabel = isFiltered ? matchedCount : totalInWindow;
-    // More rows exist AND the page cap still has room for them.
-    const hasMore = shownCount < Math.min(tableTotalLabel, MAX_LIMIT);
+    // Another page exists AND the page cap still has room for it. Under a
+    // filter there is no total to count against: proving how many older runs
+    // match would mean reading all of them, so the table reports what it has
+    // and offers another page while one is there.
+    const hasMore = listing.hasMore && shownCount < MAX_LIMIT;
+    const tableCountLabel = isFiltered
+        ? `${shownCount} matching`
+        : `${shownCount} of ${listing.totalCandidates}`;
 
     // Current URL params, normalized to scalars. Spread as the base of every
     // href so toggling one section (main `limit` or ad-hoc `alimit`) carries
@@ -159,7 +163,6 @@ export default async function Page({
     // scope through every self-link so it isn't reset by pagination/clear.
     const hParam = harness ?? undefined;
     const base = {
-        window,
         tag: activeTag,
         q,
         h: hParam,
@@ -169,16 +172,13 @@ export default async function Page({
 
     // Both tables grow one page at a time. There is deliberately no "show all"
     // link: each row is backed by a run.json read, so an unbounded jump is the
-    // one click that can hang the page on a busy window.
-    const nextPageSize = Math.min(
-        DEFAULT_LIMIT,
-        Math.min(tableTotalLabel, MAX_LIMIT) - shownCount,
-    );
+    // one click that can hang the page.
+    const nextPageSize = Math.min(DEFAULT_LIMIT, MAX_LIMIT - shownCount);
     const showMoreHref = buildHref({
         ...base,
         limit: shownCount + nextPageSize,
     });
-    const clearAllHref = buildHref({ window, h: hParam });
+    const clearAllHref = buildHref({ h: hParam });
 
     // Ad-hoc section disclosure: rows are filtered (by `q`) then capped to
     // adhocLimit; page in another ADHOC_LIMIT while more match than are shown,
@@ -206,14 +206,14 @@ export default async function Page({
             </div>
 
             <WindowSummary
-                totals={listing.totals}
-                window={window}
-                runCount={matchedCount}
+                totals={rollup.totals}
+                window={WINDOW}
+                runCount={rollup.runCount}
                 isFiltered={isFiltered}
             />
 
             {/* The analytics block — daily success / turn-budget charts, the
-                window selector, and the colored skill/review/tag rail — is an
+                harness selector, and the colored skill/review/tag rail — is an
                 internal-only surface (see lib/edition.ts). The public OSS
                 edition drops it so the front page is just the run list. */}
             {isInternal && (
@@ -244,12 +244,12 @@ export default async function Page({
                                             </span>
                                         </>
                                     )}{" "}
-                                    over the last {window} ·{" "}
+                                    over the last {WINDOW} ·{" "}
                                     {overview.runs.length} run
                                     {overview.runs.length === 1 ? "" : "s"}
                                     {" · "}
                                     <Link
-                                        href={buildHref({ window, h: hParam })}
+                                        href={buildHref({ h: hParam })}
                                         scroll={false}
                                         className="text-studio-blue hover:underline"
                                     >
@@ -262,20 +262,22 @@ export default async function Page({
                                     {harness
                                         ? `${harnessShortLabel(harness)} run`
                                         : "run, one line per harness,"}{" "}
-                                    across the last {window} ·{" "}
+                                    across the last {WINDOW} ·{" "}
                                     {overview.runs.length} run
                                     {overview.runs.length === 1 ? "" : "s"}
                                 </>
                             )}
                         </p>
                     </div>
-                    <div className="flex items-center gap-3">
+                    {/* min-w-0 + flex-wrap: the two segmented controls are wider
+                        than a phone together, so they stack rather than pushing
+                        the whole page past the viewport. */}
+                    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
                         <HarnessSelector
                             current={harness}
                             harnesses={harnesses}
                             includeAll
                         />
-                        <WindowSelector current={window} />
                     </div>
                 </div>
                 <DailySuccessChart
@@ -309,7 +311,7 @@ export default async function Page({
                             taskTags={taskTags}
                             reviewTags={reviewTags}
                             activeTag={activeTag}
-                            window={window}
+                            window={WINDOW}
                             q={q}
                             harness={harness}
                             limit={24}
@@ -334,9 +336,7 @@ export default async function Page({
                         Runs
                     </h2>
                     <span className="text-xs text-gray-500 tabular-nums">
-                        {isFiltered
-                            ? `${shownCount} of ${matchedCount} matching · ${totalInWindow} in ${window}`
-                            : `${shownCount} of ${totalInWindow} in ${window}`}
+                        {tableCountLabel}
                     </span>
                     {isFiltered && (
                         <Link
@@ -362,7 +362,7 @@ export default async function Page({
                                 Show {nextPageSize} more
                             </Link>
                             <span className="text-gray-400 tabular-nums">
-                                {shownCount} of {tableTotalLabel}
+                                {tableCountLabel}
                             </span>
                         </div>
                     ) : undefined
@@ -402,7 +402,11 @@ export default async function Page({
                                     key={r.id}
                                     className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
                                 >
-                                    <td className="py-3 px-4">
+                                    {/* nowrap: the table already scrolls inside
+                                        its own container, so a narrow screen
+                                        should scroll it rather than break the
+                                        timestamp across three lines. */}
+                                    <td className="py-3 px-4 whitespace-nowrap">
                                         <Link
                                             href={`/runs/${r.id}`}
                                             className="font-mono text-xs text-gray-900 hover:text-studio-blue font-semibold tabular-nums"

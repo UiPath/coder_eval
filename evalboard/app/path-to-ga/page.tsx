@@ -4,12 +4,12 @@ import {
     getTagTaskBreakdown,
     listRecentHarnesses,
 } from "@/lib/overview";
-import { parseHarnessParam } from "@/lib/harness";
+import { parseHarnessScope } from "@/lib/harness";
 import { humanizeTaskId } from "@/lib/format";
-import { WindowSelector } from "../_components/window-selector";
+import { passClass } from "@/lib/pass-rate";
 import { HarnessSelector } from "../_components/harness-selector";
 import { harnessShortLabel } from "../_components/harness-badge";
-import { WINDOWS, type Window } from "@/lib/reviews-types";
+import { type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "../_overview/daily-chart";
 import { TableScroll } from "../_components/scroll-table";
 import { StatusPill } from "@/lib/pills";
@@ -18,32 +18,26 @@ export const dynamic = "force-dynamic";
 
 const TAG = "path-to-ga";
 
-function parseWindow(raw: string | string[] | undefined): Window {
-    const v = Array.isArray(raw) ? raw[0] : raw;
-    return WINDOWS.includes(v as Window) ? (v as Window) : "30d";
-}
-
-function passClass(pct: number | null): string {
-    if (pct == null) return "text-gray-500";
-    if (pct >= 80) return "text-green-700";
-    if (pct >= 50) return "text-gray-700";
-    return "text-red-700";
-}
+// Fixed 30-day window, matching the front page: no window control, since the
+// readiness question is "where is this task now, and how did it get here" rather
+// than "how did it look in a 1-day slice".
+const WINDOW: Window = "30d";
 
 export default async function PathToGaPage({
     searchParams,
 }: {
-    searchParams: Promise<{ window?: string; h?: string }>;
+    searchParams: Promise<{ h?: string }>;
 }) {
     const params = await searchParams;
-    const window = parseWindow(params.window);
-    const harness = parseHarnessParam(params.h);
+    // null = every harness, and that is the default. The chart draws a line per
+    // harness, so the readiness of a task on each is comparable side by side
+    // rather than requiring four page loads. Picking a harness narrows the
+    // chart, the headline numbers, and the task table together.
+    const harness = parseHarnessScope(params.h);
 
-    // Scope to one harness — readiness of a task is per-harness, and a blended
-    // chart/pass-rate mixes incomparable regimes.
     const [overview, taskRows, harnesses] = await Promise.all([
-        getOverview(window, TAG, null, harness),
-        getTagTaskBreakdown(window, TAG, harness),
+        getOverview(WINDOW, TAG, null, harness),
+        getTagTaskBreakdown(WINDOW, TAG, harness),
         listRecentHarnesses(),
     ]);
 
@@ -63,13 +57,18 @@ export default async function PathToGaPage({
                     </h1>
                     <p className="text-sm text-gray-500">
                         Score for every task tagged{" "}
-                        <span className="font-mono text-gray-700">{TAG}</span> on{" "}
-                        {harnessShortLabel(harness)}.
+                        <span className="font-mono text-gray-700">{TAG}</span>
+                        {harness
+                            ? ` on ${harnessShortLabel(harness)}.`
+                            : ", across every harness."}
                     </p>
                 </div>
-                <div className="flex items-center gap-3">
-                    <HarnessSelector current={harness} harnesses={harnesses} />
-                    <WindowSelector current={window} />
+                <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+                    <HarnessSelector
+                        current={harness}
+                        harnesses={harnesses}
+                        includeAll
+                    />
                 </div>
             </div>
 
@@ -82,7 +81,7 @@ export default async function PathToGaPage({
                                 : "—"}
                         </div>
                         <div className="text-xs text-gray-500">
-                            avg pass rate over the last {window}
+                            avg pass rate over the last {WINDOW}
                         </div>
                     </div>
                     <div>
@@ -112,13 +111,26 @@ export default async function PathToGaPage({
                     />
                 ) : (
                     <p className="text-sm text-gray-500 py-8 text-center">
-                        No {TAG} runs in the last {window}.
+                        No {TAG} runs in the last {WINDOW}.
                     </p>
                 )}
             </section>
 
             <div className="space-y-2">
-                <h2 className="text-sm font-semibold text-gray-900">Tasks</h2>
+                <div className="flex flex-wrap items-baseline gap-2">
+                    <h2 className="text-sm font-semibold text-gray-900">
+                        Tasks
+                    </h2>
+                    {/* Unscoped, a task's appearances span harnesses, so its rate
+                        pools regimes that aren't strictly comparable. Say so
+                        rather than let the number read as one harness's. */}
+                    {!harness && (
+                        <span className="text-xs text-gray-500">
+                            pooled across harnesses · pick one above to separate
+                            them
+                        </span>
+                    )}
+                </div>
                 <TableScroll>
                     <table className="w-full text-sm">
                         <thead>
@@ -193,7 +205,7 @@ export default async function PathToGaPage({
                                         className="py-6 px-4 text-center text-sm text-gray-500"
                                     >
                                         No tasks tagged {TAG} in the last{" "}
-                                        {window}.
+                                        {WINDOW}.
                                     </td>
                                 </tr>
                             )}
