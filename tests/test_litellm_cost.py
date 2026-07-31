@@ -219,6 +219,19 @@ class TestApplyActualCost:
         assert result.iterations[1].token_usage.total_cost_usd == 0.6  # survivor stays static
         assert result.iterations[1].provider_call_costs == []
 
+    def test_orphaned_iteration_records_are_warned(self, caplog):
+        # A cost record tagged with an iteration NO turn has (e.g. a stale log) is
+        # surfaced as orphaned spend, not silently ignored; the real turn still joins.
+        import logging
+
+        result = _result([_turn(0, static_cost=0.5)])
+        records = [_rec(0, 0.02, call_id="a"), _rec(5, 0.09, call_id="orphan")]  # iteration 5: no turn
+        with caplog.at_level(logging.WARNING):
+            applied = apply_actual_cost(result, run_id="R", task_id="T", records=records)
+        assert applied == 1
+        assert result.iterations[0].token_usage.total_cost_usd == 0.02
+        assert "matched no turn" in caplog.text and "'5'" in caplog.text
+
     def test_provider_is_attached_to_the_breakdown(self):
         result = _result([_turn(0, static_cost=0.5)])
         rec = {**_rec(0, 0.02), "provider": "fireworks"}

@@ -155,10 +155,8 @@ def apply_actual_cost(
     # breakdown (_to_call) validates each record, so a malformed row raises HERE,
     # before any mutation, and the caller keeps static pricing for the whole run
     # rather than persisting a half-joined mix.
-    matched_iterations: set[str] = set()
     creditable: dict[str, list[ProviderCallCost]] = {}  # iteration -> usable calls (only when fully priced)
     for iteration, recs in by_iteration.items():
-        matched_iterations.add(iteration)
         calls = [_to_call(record) for record in recs]
         usable = [c for c in calls if not _reports_no_usage(c)]  # drop degenerate no-usage calls
         unpriced = [c.call_id for c in usable if c.cost_usd is None]
@@ -198,7 +196,11 @@ def apply_actual_cost(
             turn.token_usage.total_cost_usd = total
         applied += 1
 
-    orphans = sorted(set(by_iteration) - matched_iterations)
+    # Orphaned spend: cost records tagged with an iteration NO turn has (a stale
+    # log, or a crash before the turn was recorded). Surface it so real spend that
+    # couldn't be attributed to any turn is visible, not silently dropped.
+    turn_iterations = {str(t.iteration) for t in turns}
+    orphans = sorted(set(by_iteration) - turn_iterations)
     if orphans:
         logger.warning(
             "LiteLLM actual-cost: %d cost-record iteration(s) %s matched no turn (run=%s task=%s); spend unbooked",
