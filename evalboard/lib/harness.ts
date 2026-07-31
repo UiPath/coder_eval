@@ -56,21 +56,34 @@ export function parseHarnessScope(
     return /^[\w.-]{1,64}$/.test(trimmed) ? trimmed : null;
 }
 
-// Series color per harness, for the multi-harness overview charts. Color is
-// bound to the HARNESS, not to its position in the series list — a filter that
-// drops one harness must not repaint the others.
+// Series color per harness, for the multi-harness overview charts, the scope
+// selector's dots, and the legends. Each is the vendor's own mark, so a line,
+// the segment that filters to it, and the logo beside them all read as the same
+// harness. Color is bound to the HARNESS, not to its position in the series
+// list — a filter that drops one harness must not repaint the others.
 //
-// Values are slots 1/2/3(dark step)/7 of the validated categorical palette. As
-// an ordered set on a light surface they clear every hard gate: lightness band,
-// chroma floor, adjacent-pair CVD separation (worst ΔE 8.4 protan), the
-// normal-vision floor (worst ΔE 27.1), and 3:1 contrast. Re-run the palette
-// validator before adding a fifth entry rather than eyeballing a new hue — the
-// obvious next slots (yellow, magenta) both fail contrast on white.
+// Validated as a categorical set against a white chart surface over ALL pairs,
+// not just adjacent ones: worst normal-vision ΔE 22.8, worst CVD ΔE 16.6
+// (protan), every entry clears 3:1 contrast. Two deliberate departures from a
+// synthetic palette, both forced by using real vendor marks:
+//
+//   - codex is OpenAI's near-black, which fails the lightness-band and
+//     chroma-floor checks the way every gray does. It stays: it has the highest
+//     contrast of the four, and no surface identifies it by color alone (chart
+//     legend, tooltip, and selector all pair the color with the vendor logo and
+//     the harness name).
+//   - delegate-sdk is NOT UiPath orange (#FA4616), even though that is the
+//     brand color. Against Anthropic's coral it scores ΔE 9.5 normal-vision /
+//     5.1 deutan — below the hard floor, i.e. two lines a full-color reader
+//     cannot tell apart. It takes the nearest deep red that separates instead.
+//
+// Re-run the palette validator before adding a fifth entry rather than
+// eyeballing a new hue.
 const HARNESS_COLORS: Record<string, string> = {
-    "claude-code": "#2a78d6", // blue
-    codex: "#eb6834", // orange
-    antigravity: "#199e70", // aqua
-    "delegate-sdk": "#4a3aa7", // violet
+    "claude-code": "#d97757", // Anthropic coral
+    codex: "#171717", // OpenAI near-black
+    antigravity: "#4285f4", // Google blue
+    "delegate-sdk": "#9b1c1c", // deep red (UiPath orange collides with Anthropic)
 };
 
 // Neutral for any harness with no reserved slot. Deliberately NOT a generated

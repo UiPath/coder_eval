@@ -187,14 +187,37 @@ export default async function Page({
 
     return (
         <div className="space-y-6">
-            <div className="space-y-1">
-                <h1 className="text-xl font-semibold text-gray-900">
-                    Recent runs
-                </h1>
-                <p className="text-sm text-gray-500">
-                    Click a run to drill into tasks, criteria, artifacts,
-                    and logs.
-                </p>
+            {/* The harness scope sits in the PAGE header, above the tiles and
+                beside the page title, because that is what it governs: the
+                summary tiles, both charts, and the run list all recompute
+                together. Buried in the chart card it read as a chart control
+                while the numbers above it silently covered every harness. Same
+                position as the selector on Path to GA, trends, and the
+                watchlist. Internal-only, like the analytics block below. */}
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1">
+                    <h1 className="text-xl font-semibold text-gray-900">
+                        Recent runs
+                    </h1>
+                    <p className="text-sm text-gray-500">
+                        Click a run to drill into tasks, criteria, artifacts,
+                        and logs.
+                    </p>
+                </div>
+                {isInternal && (
+                    <div className="flex min-w-0 max-w-full flex-col items-start gap-1 sm:items-end">
+                        <HarnessSelector
+                            current={harness}
+                            harnesses={harnesses}
+                            includeAll
+                        />
+                        <p className="text-[11px] text-gray-500">
+                            {harness
+                                ? `Everything below is scoped to ${harnessShortLabel(harness)}`
+                                : "Scopes every tile, chart, and row below"}
+                        </p>
+                    </div>
+                )}
             </div>
 
             <WindowSummary
@@ -204,73 +227,61 @@ export default async function Page({
                 isFiltered={isNarrowed}
             />
 
-            {/* The analytics block — daily success / turn-budget charts, the
-                harness selector, and the colored skill/review/tag rail — is an
-                internal-only surface (see lib/edition.ts). The public OSS
-                edition drops it so the front page is just the run list. */}
+            {/* The analytics block — daily success / turn-budget charts and the
+                colored skill/review/tag rail — is an internal-only surface (see
+                lib/edition.ts). The public OSS edition drops it so the front
+                page is just the run list. */}
             {isInternal && (
             <section className="border border-gray-200 rounded-lg bg-white p-4 space-y-4">
-                <div className="flex flex-wrap items-baseline justify-between gap-3">
-                    <div>
-                        <h2 className="text-sm font-semibold text-gray-900">
-                            Daily Success Rate (%)
-                        </h2>
-                        <p className="text-xs text-gray-500">
-                            {activeTag || q ? (
-                                <>
-                                    Scoped to{" "}
-                                    {activeTag && (
-                                        <>
-                                            tag{" "}
-                                            <span className="font-mono text-gray-700">
-                                                {activeTag}
-                                            </span>
-                                        </>
-                                    )}
-                                    {activeTag && q && " and "}
-                                    {q && (
-                                        <>
-                                            search{" "}
-                                            <span className="font-mono text-gray-700">
-                                                {q}
-                                            </span>
-                                        </>
-                                    )}{" "}
-                                    over the last {WINDOW} ·{" "}
-                                    {overview.runs.length} run
-                                    {overview.runs.length === 1 ? "" : "s"}
-                                    {" · "}
-                                    <Link
-                                        href={buildHref({ h: hParam })}
-                                        scroll={false}
-                                        className="text-studio-blue hover:underline"
-                                    >
-                                        clear
-                                    </Link>
-                                </>
-                            ) : (
-                                <>
-                                    Success rate per{" "}
-                                    {harness
-                                        ? `${harnessShortLabel(harness)} run`
-                                        : "run, one line per harness,"}{" "}
-                                    across the last {WINDOW} ·{" "}
-                                    {overview.runs.length} run
-                                    {overview.runs.length === 1 ? "" : "s"}
-                                </>
-                            )}
-                        </p>
-                    </div>
-                    {/* min-w-0 + flex-wrap: the two segmented controls are wider
-                        than a phone together, so they stack rather than pushing
-                        the whole page past the viewport. */}
-                    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-                        <HarnessSelector
-                            current={harness}
-                            harnesses={harnesses}
-                            includeAll
-                        />
-                    </div>
+                <div>
+                    <h2 className="text-sm font-semibold text-gray-900">
+                        Daily Success Rate (%)
+                    </h2>
+                    <p className="text-xs text-gray-500">
+                        {activeTag || q ? (
+                            <>
+                                Scoped to{" "}
+                                {activeTag && (
+                                    <>
+                                        tag{" "}
+                                        <span className="font-mono text-gray-700">
+                                            {activeTag}
+                                        </span>
+                                    </>
+                                )}
+                                {activeTag && q && " and "}
+                                {q && (
+                                    <>
+                                        search{" "}
+                                        <span className="font-mono text-gray-700">
+                                            {q}
+                                        </span>
+                                    </>
+                                )}{" "}
+                                over the last {WINDOW} ·{" "}
+                                {overview.runs.length} run
+                                {overview.runs.length === 1 ? "" : "s"}
+                                {" · "}
+                                <Link
+                                    href={buildHref({ h: hParam })}
+                                    scroll={false}
+                                    className="text-studio-blue hover:underline"
+                                >
+                                    clear
+                                </Link>
+                            </>
+                        ) : (
+                            <>
+                                Success rate per{" "}
+                                {harness
+                                    ? `${harnessShortLabel(harness)} run`
+                                    : "run, one line per harness,"}{" "}
+                                across the last {WINDOW} ·{" "}
+                                {overview.runs.length} run
+                                {overview.runs.length === 1 ? "" : "s"}
+                            </>
+                        )}
+                    </p>
                 </div>
                 <DailySuccessChart
                     data={overview.runs}
