@@ -5,6 +5,7 @@ import { useCallback, useMemo, useState } from "react";
 import type { ActivationScore, TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
+import { passBarClass, passClass } from "@/lib/pass-rate";
 import { perTaskPassCounts, statusCategory } from "@/lib/status";
 import { ChipLegend } from "@/app/_overview/tag-rail";
 import { CollapsibleRail } from "@/app/_components/collapsible-rail";
@@ -404,10 +405,15 @@ export function RunView({
                         const totalN = hasRepeats
                             ? metrics.taskTotal
                             : metrics.total;
+                        // null when nothing ran, so an empty run reads neutral
+                        // rather than as a measured 0%.
+                        const tone = totalN > 0 ? pct : null;
                         return (
                             <>
                                 <div className="flex items-baseline gap-2 mt-1">
-                                    <span className="text-2xl font-semibold text-gray-900 tabular-nums">
+                                    <span
+                                        className={`text-2xl font-semibold tabular-nums ${passClass(tone)}`}
+                                    >
                                         {pct.toFixed(0)}%
                                     </span>
                                     <span className="text-sm text-gray-500 tabular-nums">
@@ -424,9 +430,13 @@ export function RunView({
                                         replicate runs
                                     </div>
                                 )}
+                                {/* The meter was unconditionally green, so a 77%
+                                    run still read as healthy at a glance. It now
+                                    carries the same traffic-light cutoffs as the
+                                    number beside it. */}
                                 <div className="mt-3 h-2 bg-gray-100 rounded-full overflow-hidden">
                                     <div
-                                        className="h-full bg-green-500"
+                                        className={`h-full ${passBarClass(tone)}`}
                                         style={{ width: `${pct}%` }}
                                     />
                                 </div>

@@ -8,6 +8,7 @@ import {
 } from "@/lib/trends";
 import type { TagCount } from "@/lib/overview";
 import { fmtRunTime, fmtDuration, humanizeTaskId } from "@/lib/format";
+import { passClassRatio } from "@/lib/pass-rate";
 import {
     displayedTurns,
     fmtTurnsCount,
@@ -43,12 +44,6 @@ function fmtScore(s: number | null): string {
 function fmtCount(n: number | null): string {
     if (n == null) return "—";
     return n.toFixed(0);
-}
-
-function passRateClass(rate: number, hasRuns: boolean): string {
-    if (!hasRuns) return "text-gray-500";
-    if (rate >= 1.0) return "text-green-700";
-    return "text-red-700";
 }
 
 type SortKey =
@@ -379,7 +374,11 @@ function TaskRow({
     pending: boolean;
     onToggle: () => void;
 }) {
-    const rateClass = passRateClass(t.passRate, t.totalRuns > 0);
+    // Same traffic-light cutoffs as every other pass rate on the site
+    // (lib/pass-rate.ts). This used to be green only at a perfect 100%, which
+    // painted a task that passed 9 of its last 10 runs the same red as one that
+    // never passed.
+    const rateClass = passClassRatio(t.totalRuns > 0 ? t.passRate : null);
     return (
         <>
             <tr

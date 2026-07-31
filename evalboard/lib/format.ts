@@ -49,17 +49,6 @@ export function fmtUsd(n: number | null | undefined): string {
     return `$${n.toFixed(digits)}`;
 }
 
-// Pass-rate → Tailwind text color. Shared by the front-page run table
-// (page.tsx) and the window summary tile so the >=80 green / >=50 gray / else
-// red thresholds live in one place. `hasTasks` distinguishes "0%" (red) from
-// "no tasks yet" (neutral gray); pct is null exactly when hasTasks is false.
-export function passClass(pct: number | null, hasTasks: boolean): string {
-    if (!hasTasks || pct == null) return "text-gray-500";
-    if (pct >= 80) return "text-green-700";
-    if (pct >= 50) return "text-gray-700";
-    return "text-red-700";
-}
-
 export function fmtDuration(s: number | null): string {
     if (s == null) return "—";
     // Round once on the total to avoid `1m 60s` from rounding the remainder.
