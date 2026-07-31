@@ -15,7 +15,6 @@ describe("parseProviderCalls", () => {
                 provider_call_costs: [
                     {
                         call_id: "call-abc",
-                        provider: "openrouter",
                         cost_usd: 0.0021,
                         input_tokens: 715,
                         cache_read_tokens: 4096,
@@ -30,7 +29,6 @@ describe("parseProviderCalls", () => {
         expect(out[0].iteration).toBe(1);
         expect(out[0].calls[0]).toEqual({
             callId: "call-abc",
-            provider: "openrouter",
             costUsd: 0.0021,
             inputTokens: 715,
             cacheReadTokens: 4096,
@@ -49,7 +47,6 @@ describe("parseProviderCalls", () => {
         ]);
         expect(out[0].calls[0]).toEqual({
             callId: null,
-            provider: null,
             costUsd: 0.5,
             inputTokens: null,
             cacheReadTokens: null,
@@ -97,7 +94,6 @@ beforeEach(async () => {
                     provider_call_costs: [
                         {
                             call_id: "call-1",
-                            provider: "openrouter",
                             cost_usd: 0.0012,
                             input_tokens: 100,
                             cache_read_tokens: 200,
@@ -106,7 +102,6 @@ beforeEach(async () => {
                         },
                         {
                             call_id: "call-2",
-                            provider: "openrouter",
                             cost_usd: 0.0034,
                             input_tokens: 300,
                             cache_read_tokens: 0,
@@ -136,7 +131,6 @@ describe("readTaskDetail: providerCalls", () => {
         expect(turn.calls).toHaveLength(2);
         expect(turn.calls[0]).toEqual({
             callId: "call-1",
-            provider: "openrouter",
             costUsd: 0.0012,
             inputTokens: 100,
             cacheReadTokens: 200,

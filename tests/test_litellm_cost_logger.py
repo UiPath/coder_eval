@@ -40,12 +40,9 @@ TAGS = {"x-ce-run-id": "abc123", "x-ce-task-id": "calc/v1", "x-ce-iteration": "2
 
 class TestBuildCostRecord:
     def test_reads_real_usage_cost_and_cache(self, cl):
-        rec = cl.build_cost_record(
-            WARM_USAGE, TAGS, model="deepseek/deepseek-v4-pro", provider="fireworks", call_id="gen-1"
-        )
+        rec = cl.build_cost_record(WARM_USAGE, TAGS, model="deepseek/deepseek-v4-pro", call_id="gen-1")
         assert rec is not None
         assert rec["cost"] == 0.0006692671  # OpenRouter usage.cost, the REAL price
-        assert rec["provider"] == "fireworks"  # routed upstream, for the per-call table
         assert rec["input"] == 4811
         assert rec["cache_read"] == 4096
         assert rec["cache_write"] == 0
@@ -151,7 +148,7 @@ class TestAppendAndEmit:
         path = tmp_path / "costs.jsonl"
         monkeypatch.setenv("LITELLM_COST_LOG", str(path))
         kwargs = {"litellm_params": {"metadata": {"headers": dict(TAGS)}}, "model": "deepseek/deepseek-v4-pro"}
-        response_obj = {"id": "gen-9", "provider": "Baidu", "model": "deepseek/deepseek-v4-pro", "usage": WARM_USAGE}
+        response_obj = {"id": "gen-9", "model": "deepseek/deepseek-v4-pro", "usage": WARM_USAGE}
         cl.proxy_handler_instance._emit(kwargs, response_obj)
         rec = json.loads(path.read_text().splitlines()[0])
         assert rec["run_id"] == "abc123" and rec["cost"] == 0.0006692671 and rec["cache_read"] == 4096

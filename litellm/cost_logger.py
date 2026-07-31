@@ -88,7 +88,6 @@ def build_cost_record(
     tags: dict[str, str],
     *,
     model: str | None,
-    provider: str | None = None,
     call_id: str | None,
 ) -> dict[str, Any] | None:
     """Build one per-call JSONL record from an OpenAI-shaped ``usage`` dict plus
@@ -108,9 +107,6 @@ def build_cost_record(
         "attempt": tags.get(f"{_TAG_PREFIX}attempt"),
         "call_id": call_id,
         "model": model,
-        # OpenRouter's actually-routed upstream (e.g. 'fireworks'); best-effort — may
-        # be null if the Anthropic-translated response doesn't surface it.
-        "provider": provider,
         # OpenRouter's real routed-provider price. NOT LiteLLM's response_cost.
         "cost": cost,
         "input": input_total,
@@ -208,15 +204,10 @@ class CostLogger(CustomLogger):
                 or lp.get("model")
                 or (slo.get("model") if isinstance(slo, dict) else None)
             )
-            usage = _to_dict(response.get("usage"))
-            # OpenRouter surfaces the routed upstream in a few spots depending on the
-            # path; best-effort (null-tolerant — the harness/table just show blank).
-            provider = response.get("provider") or usage.get("provider") or response.get("provider_name")
             record = build_cost_record(
-                usage,
+                _to_dict(response.get("usage")),
                 extract_tags(kwargs),
                 model=model,
-                provider=provider,
                 call_id=response.get("id"),
             )
             append_record(record)

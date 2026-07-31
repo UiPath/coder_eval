@@ -170,8 +170,8 @@ fields so subclass keys round-trip.
 `messages` (`list[TranscriptMessage]`, discriminated on `role`:
 `user`/`assistant`/`reconciliation`), `provider_call_costs`
 (`list[ProviderCallCost]` — one row per real upstream call with its ACTUAL cost +
-cache buckets + routed `provider`, captured proxy-side on the LiteLLM open-weight
-backend and rendered by the evalboard as a per-call table; empty on every other
+cache buckets, captured proxy-side on the LiteLLM open-weight backend and rendered
+by the evalboard as a per-call table; empty on every other
 backend), `num_turns`, `max_turns_exhausted`,
 `result_summary` (`{is_error, subtype, stop_reason, result}`), `crashed`,
 `crash_reason`.

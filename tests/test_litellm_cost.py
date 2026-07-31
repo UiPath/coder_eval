@@ -232,12 +232,6 @@ class TestApplyActualCost:
         assert result.iterations[0].token_usage.total_cost_usd == 0.02
         assert "matched no turn" in caplog.text and "'5'" in caplog.text
 
-    def test_provider_is_attached_to_the_breakdown(self):
-        result = _result([_turn(0, static_cost=0.5)])
-        rec = {**_rec(0, 0.02), "provider": "fireworks"}
-        apply_actual_cost(result, run_id="R", task_id="T", records=[rec])
-        assert result.iterations[0].provider_call_costs[0].provider == "fireworks"
-
 
 class TestOrchestratorJoinHook:
     """The orchestrator method is called as an unbound function on a minimal

@@ -591,9 +591,6 @@ export function ProviderCallTableSection({
                                         <th className="py-2 px-3 font-medium">
                                             Call
                                         </th>
-                                        <th className="py-2 px-3 font-medium">
-                                            Provider
-                                        </th>
                                         <th className="py-2 px-3 font-medium text-right">
                                             Input
                                         </th>
@@ -620,9 +617,6 @@ export function ProviderCallTableSection({
                                             <td className="py-2 px-3 font-mono text-xs text-gray-900">
                                                 {shortCallId(c.callId)}
                                             </td>
-                                            <td className="py-2 px-3 text-xs text-gray-700">
-                                                {c.provider ?? "—"}
-                                            </td>
                                             <td className="py-2 px-3 text-right tabular-nums text-gray-700">
                                                 {fmtCallTok(c.inputTokens)}
                                             </td>
@@ -645,7 +639,7 @@ export function ProviderCallTableSection({
                                     <tr className="border-t border-gray-200 bg-gray-50 font-medium">
                                         <td
                                             className="py-2 px-3 text-xs text-gray-600"
-                                            colSpan={6}
+                                            colSpan={5}
                                         >
                                             Turn total
                                         </td>

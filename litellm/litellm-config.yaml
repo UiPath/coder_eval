@@ -46,10 +46,9 @@ model_list:
   # `allow_fallbacks: true` lets routing fall over to the NEXT provider in that set
   # when the cheapest is saturated — so a contended provider no longer 429s with
   # nowhere to go (the original single-pin failure). Fallback is bounded to the
-  # vetted `only` set, and cost_logger.py records the ACTUAL routed provider +
-  # usage.cost per call, so a fallover is both billed correctly and visible (the
-  # per-call table shows which upstream served each call). Cost is exact regardless
-  # of which listed provider serves the call.
+  # vetted `only` set, and cost_logger.py records each call's real usage.cost, so a
+  # fallover to another listed provider is still billed correctly. Cost is exact
+  # regardless of which listed provider serves the call.
   #
   # extra_body.usage.include (set on every model below): ask OpenRouter to return
   # the ACTUAL per-call usage.cost + cache tokens for the provider it routed to. The

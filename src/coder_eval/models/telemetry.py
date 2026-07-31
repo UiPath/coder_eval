@@ -127,9 +127,6 @@ class ProviderCallCost(BaseModel):
     """
 
     call_id: str | None = Field(default=None, description="Upstream generation id (e.g. OpenRouter gen-...).")
-    provider: str | None = Field(
-        default=None, description="Upstream provider OpenRouter routed to (e.g. 'fireworks'), if reported."
-    )
     cost_usd: float | None = Field(default=None, description="Real per-call cost (OpenRouter usage.cost), if reported.")
     input_tokens: int | None = Field(default=None, description="Prompt tokens for this call (incl. cached).")
     cache_read_tokens: int | None = Field(default=None, description="Cached prompt tokens served on this call.")

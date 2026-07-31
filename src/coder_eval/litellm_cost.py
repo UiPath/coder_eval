@@ -10,7 +10,7 @@ onto the matching turns at the TURN level:
   calls' real cost (the bill), replacing the static rate-card estimate;
 * the per-call breakdown is attached as ``TurnRecord.provider_call_costs`` — a
   deterministic audit record (one row per real proxy call, with its real cost +
-  cache buckets + provider) that the evalboard renders as a per-call table.
+  cache buckets) that the evalboard renders as a per-call table.
 
 Token buckets are LEFT UNTOUCHED (SDK-authoritative): the join only writes cost,
 so the ``EventCollector`` remains the single writer of the message token-bucket
@@ -91,7 +91,6 @@ def load_cost_records(path: str | Path) -> list[dict[str, Any]]:
 def _to_call(record: dict[str, Any]) -> ProviderCallCost:
     return ProviderCallCost(
         call_id=record.get("call_id"),
-        provider=record.get("provider"),
         cost_usd=record.get("cost"),
         input_tokens=record.get("input"),
         cache_read_tokens=record.get("cache_read"),

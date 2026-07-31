@@ -289,7 +289,6 @@ export interface TaskDetail extends TaskResultSummary {
 // on non-LiteLLM backends.
 export interface ProviderCallEntry {
     callId: string | null;
-    provider: string | null;
     costUsd: number | null;
     inputTokens: number | null;
     cacheReadTokens: number | null;
@@ -1221,7 +1220,6 @@ interface MessageEntry {
 // as serialized in task.json; mapped to ProviderCallEntry (camelCase).
 interface ProviderCallEntryRaw {
     call_id?: string | null;
-    provider?: string | null;
     cost_usd?: number | null;
     input_tokens?: number | null;
     cache_read_tokens?: number | null;
@@ -1798,7 +1796,6 @@ export function parseProviderCalls(
         if (raw.length === 0) return;
         const calls: ProviderCallEntry[] = raw.map((c) => ({
             callId: typeof c.call_id === "string" ? c.call_id : null,
-            provider: typeof c.provider === "string" ? c.provider : null,
             costUsd: typeof c.cost_usd === "number" ? c.cost_usd : null,
             inputTokens: typeof c.input_tokens === "number" ? c.input_tokens : null,
             cacheReadTokens:
