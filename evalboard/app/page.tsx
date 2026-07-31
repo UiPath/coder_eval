@@ -6,10 +6,10 @@ import {
     listRecentHarnesses,
     type TagCount,
 } from "@/lib/overview";
-import { parseHarnessParam, DEFAULT_HARNESS } from "@/lib/harness";
-import { fmtDuration, fmtRunTime, fmtTimestamp, passClass } from "@/lib/format";
-import { WindowSelector } from "./_components/window-selector";
-import { WINDOWS, type Window } from "@/lib/reviews-types";
+import { parseHarnessScope } from "@/lib/harness";
+import { fmtDuration, fmtRunTime, fmtTimestamp } from "@/lib/format";
+import { passClass } from "@/lib/pass-rate";
+import { type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
 import { TurnBudgetChart } from "./_overview/turn-budget-chart";
 import { WindowSummary } from "./_overview/window-summary";
@@ -25,10 +25,11 @@ export const dynamic = "force-dynamic";
 const DEFAULT_LIMIT = 20;
 const ADHOC_LIMIT = 10;
 
-function parseWindow(raw: string | string[] | undefined): Window {
-    const v = Array.isArray(raw) ? raw[0] : raw;
-    return WINDOWS.includes(v as Window) ? (v as Window) : "30d";
-}
+// The charts and the summary tiles cover a fixed 30 days. There is no window
+// control: the run table pages back through all of history on its own (see
+// getRunListing), which is what a shorter window was really being used for, and
+// a 30-day chart is the one that shows a trend rather than a few points.
+const WINDOW: Window = "30d";
 
 function parseTag(raw: string | string[] | undefined): string | null {
     const v = Array.isArray(raw) ? raw[0] : raw;
@@ -48,24 +49,23 @@ function parseQ(raw: string | string[] | undefined): string | null {
     return trimmed ? trimmed.slice(0, 200) : null;
 }
 
-function parseLimit(raw: string | string[] | undefined): number | null {
-    const v = Array.isArray(raw) ? raw[0] : raw;
-    if (v === "all") return null;
-    if (!v) return DEFAULT_LIMIT;
-    const n = parseInt(v, 10);
-    if (!Number.isFinite(n) || n <= 0) return DEFAULT_LIMIT;
-    return Math.min(n, 10000);
-}
+// Hard ceiling on how far the tables can be paged out, since every row is
+// another multi-MB run.json read. Well above the store's run count, so in
+// practice you can keep expanding to the oldest run; a hand-typed `?limit=`
+// above this clamps here.
+const MAX_LIMIT = 500;
 
-// Separate from the main table's `limit` so expanding one section doesn't
-// reset the other's pagination. null = show all matching ad-hoc runs.
-function parseAdhocLimit(raw: string | string[] | undefined): number | null {
+// The two sections page independently (`limit` / `alimit`) so expanding one
+// doesn't reset the other.
+function parsePagedLimit(
+    raw: string | string[] | undefined,
+    fallback: number,
+): number {
     const v = Array.isArray(raw) ? raw[0] : raw;
-    if (v === "all") return null;
-    if (!v) return ADHOC_LIMIT;
+    if (!v) return fallback;
     const n = parseInt(v, 10);
-    if (!Number.isFinite(n) || n <= 0) return ADHOC_LIMIT;
-    return Math.min(n, 10000);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.min(n, MAX_LIMIT);
 }
 
 function fmtCost(c: number | null): string {
@@ -98,7 +98,6 @@ export default async function Page({
     searchParams,
 }: {
     searchParams: Promise<{
-        window?: string;
         tag?: string;
         q?: string;
         h?: string;
@@ -107,21 +106,28 @@ export default async function Page({
     }>;
 }) {
     const params = await searchParams;
-    const window = parseWindow(params.window);
     const activeTag = parseTag(params.tag);
     const q = parseQ(params.q);
-    const harness = parseHarnessParam(params.h);
-    const limit = parseLimit(params.limit);
-    const adhocLimit = parseAdhocLimit(params.alimit);
+    // null = every harness, and that is the default: the page opens on the
+    // cross-harness comparison and narrows from there.
+    const harness = parseHarnessScope(params.h);
+    const limit = parsePagedLimit(params.limit, DEFAULT_LIMIT);
+    const adhocLimit = parsePagedLimit(params.alimit, ADHOC_LIMIT);
+    // Tasks WITHIN a run are narrowed: drives the "Matching tasks" column header
+    // and the clear-filters link.
     const isFiltered = activeTag != null || q != null;
+    // The set of RUNS is narrowed, harness scope included: drives every "n of N"
+    // count, since N only means "everything" when nothing is scoped.
+    const isNarrowed = isFiltered || harness != null;
 
-    // The analytics block (chart + rails) is scoped to one harness so the
-    // success line stops zigzagging across incomparable harnesses. The run
-    // LIST stays all-harness — seeing every recent run is the page's job, and
-    // the Harness column already disambiguates each row.
+    // One harness scope drives everything on the page: the charts split into a
+    // line per harness in the window, and the summary tiles + run list are
+    // filtered to the same set. Picking a harness therefore recomputes the
+    // tiles and the charts and narrows the table, instead of re-scoping the
+    // analytics block while the table silently kept showing every harness.
     const [overview, listing, adhoc, harnesses] = await Promise.all([
-        getOverview(window, activeTag, q, harness),
-        getRunListing(window, activeTag, q, limit),
+        getOverview(WINDOW, activeTag, q, harness),
+        getRunListing(activeTag, q, limit, harness),
         getAdhocRunListing(adhocLimit),
         listRecentHarnesses(),
     ]);
@@ -131,10 +137,14 @@ export default async function Page({
     const reviewTags = filterTagsByQuery(overview.reviewTags, q);
 
     const shownCount = listing.rows.length;
-    const matchedCount = listing.matchedCount;
-    const totalInWindow = listing.totalInWindow;
-    const tableTotalLabel = isFiltered ? matchedCount : totalInWindow;
-    const hasMore = limit != null && shownCount < tableTotalLabel;
+    // Another page exists AND the page cap still has room for it. Under a
+    // filter there is no total to count against: proving how many older runs
+    // match would mean reading all of them, so the table reports what it has
+    // and offers another page while one is there.
+    const hasMore = listing.hasMore && shownCount < MAX_LIMIT;
+    const tableCountLabel = isNarrowed
+        ? `${shownCount} matching`
+        : `${shownCount} of ${listing.totalCandidates}`;
 
     // Current URL params, normalized to scalars. Spread as the base of every
     // href so toggling one section (main `limit` or ad-hoc `alimit`) carries
@@ -143,11 +153,10 @@ export default async function Page({
     const rawAlimit = Array.isArray(params.alimit)
         ? params.alimit[0]
         : params.alimit;
-    // Omit the default harness from URLs to keep them clean; carry a non-default
+    // Omit the all-harness scope from URLs to keep them clean; carry a narrowed
     // scope through every self-link so it isn't reset by pagination/clear.
-    const hParam = harness === DEFAULT_HARNESS ? undefined : harness;
+    const hParam = harness ?? undefined;
     const base = {
-        window,
         tag: activeTag,
         q,
         h: hParam,
@@ -155,104 +164,121 @@ export default async function Page({
         alimit: rawAlimit,
     };
 
+    // Both tables grow one page at a time, up to MAX_LIMIT.
+    const nextPageSize = Math.min(DEFAULT_LIMIT, MAX_LIMIT - shownCount);
     const showMoreHref = buildHref({
         ...base,
-        limit: Math.min(tableTotalLabel, shownCount + DEFAULT_LIMIT),
+        limit: shownCount + nextPageSize,
     });
-    const showAllHref = buildHref({ ...base, limit: "all" });
-    const clearAllHref = buildHref({ window, h: hParam });
+    const clearAllHref = buildHref({ h: hParam });
 
     // Ad-hoc section disclosure: rows are filtered (by `q`) then capped to
-    // adhocLimit; offer "Show all" while more match than are shown, and a
-    // collapse back to the default once expanded past it.
-    const adhocExpandable = adhoc.rows.length < adhoc.total;
-    const adhocExpanded = adhocLimit == null && adhoc.total > ADHOC_LIMIT;
-    const adhocShowAllHref = buildHref({ ...base, alimit: "all" });
+    // adhocLimit; page in another ADHOC_LIMIT while more match than are shown,
+    // and offer a collapse back to the default once expanded past it.
+    const adhocRemaining = Math.min(adhoc.total, MAX_LIMIT) - adhoc.rows.length;
+    const adhocExpandable = adhocRemaining > 0;
+    const adhocNextPageSize = Math.min(ADHOC_LIMIT, adhocRemaining);
+    const adhocExpanded = adhoc.rows.length > ADHOC_LIMIT;
+    const adhocShowMoreHref = buildHref({
+        ...base,
+        alimit: adhoc.rows.length + adhocNextPageSize,
+    });
     const adhocShowLessHref = buildHref({ ...base, alimit: undefined });
 
     return (
         <div className="space-y-6">
-            <div className="space-y-1">
-                <h1 className="text-xl font-semibold text-gray-900">
-                    Recent runs
-                </h1>
-                <p className="text-sm text-gray-500">
-                    Click a run to drill into tasks, criteria, artifacts,
-                    and logs.
-                </p>
+            {/* The harness scope sits in the PAGE header, above the tiles and
+                beside the page title, because that is what it governs: the
+                summary tiles, both charts, and the run list all recompute
+                together. Buried in the chart card it read as a chart control
+                while the numbers above it silently covered every harness. Same
+                position as the selector on Path to GA, trends, and the
+                watchlist. Internal-only, like the analytics block below. */}
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1">
+                    <h1 className="text-xl font-semibold text-gray-900">
+                        Recent runs
+                    </h1>
+                    <p className="text-sm text-gray-500">
+                        Click a run to drill into tasks, criteria, artifacts,
+                        and logs.
+                    </p>
+                </div>
+                {isInternal && (
+                    <HarnessSelector
+                        current={harness}
+                        harnesses={harnesses}
+                        includeAll
+                    />
+                )}
             </div>
 
             <WindowSummary
-                totals={listing.totals}
-                window={window}
-                runCount={matchedCount}
-                isFiltered={isFiltered}
+                totals={overview.totals}
+                window={WINDOW}
+                runCount={overview.runCount}
+                isFiltered={isNarrowed}
             />
 
-            {/* The analytics block — daily success / turn-budget charts, the
-                window selector, and the colored skill/review/tag rail — is an
-                internal-only surface (see lib/edition.ts). The public OSS
-                edition drops it so the front page is just the run list. */}
+            {/* The analytics block — daily success / turn-budget charts and the
+                colored skill/review/tag rail — is an internal-only surface (see
+                lib/edition.ts). The public OSS edition drops it so the front
+                page is just the run list. */}
             {isInternal && (
             <section className="border border-gray-200 rounded-lg bg-white p-4 space-y-4">
-                <div className="flex flex-wrap items-baseline justify-between gap-3">
-                    <div>
-                        <h2 className="text-sm font-semibold text-gray-900">
-                            Daily Success Rate (%)
-                        </h2>
-                        <p className="text-xs text-gray-500">
-                            {activeTag || q ? (
-                                <>
-                                    Scoped to{" "}
-                                    {activeTag && (
-                                        <>
-                                            tag{" "}
-                                            <span className="font-mono text-gray-700">
-                                                {activeTag}
-                                            </span>
-                                        </>
-                                    )}
-                                    {activeTag && q && " and "}
-                                    {q && (
-                                        <>
-                                            search{" "}
-                                            <span className="font-mono text-gray-700">
-                                                {q}
-                                            </span>
-                                        </>
-                                    )}{" "}
-                                    over the last {window} ·{" "}
-                                    {overview.runs.length} run
-                                    {overview.runs.length === 1 ? "" : "s"}
-                                    {" · "}
-                                    <Link
-                                        href={buildHref({ window, h: hParam })}
-                                        scroll={false}
-                                        className="text-studio-blue hover:underline"
-                                    >
-                                        clear
-                                    </Link>
-                                </>
-                            ) : (
-                                <>
-                                    Success rate per{" "}
-                                    {harnessShortLabel(harness)} run across the
-                                    last {window} · {overview.runs.length} run
-                                    {overview.runs.length === 1 ? "" : "s"}
-                                </>
-                            )}
-                        </p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <HarnessSelector
-                            current={harness}
-                            harnesses={harnesses}
-                        />
-                        <WindowSelector current={window} />
-                    </div>
+                <div>
+                    <h2 className="text-sm font-semibold text-gray-900">
+                        Daily Success Rate (%)
+                    </h2>
+                    <p className="text-xs text-gray-500">
+                        {activeTag || q ? (
+                            <>
+                                Scoped to{" "}
+                                {activeTag && (
+                                    <>
+                                        tag{" "}
+                                        <span className="font-mono text-gray-700">
+                                            {activeTag}
+                                        </span>
+                                    </>
+                                )}
+                                {activeTag && q && " and "}
+                                {q && (
+                                    <>
+                                        search{" "}
+                                        <span className="font-mono text-gray-700">
+                                            {q}
+                                        </span>
+                                    </>
+                                )}{" "}
+                                over the last {WINDOW} ·{" "}
+                                {overview.runs.length} run
+                                {overview.runs.length === 1 ? "" : "s"}
+                                {" · "}
+                                <Link
+                                    href={buildHref({ h: hParam })}
+                                    scroll={false}
+                                    className="text-studio-blue hover:underline"
+                                >
+                                    clear
+                                </Link>
+                            </>
+                        ) : (
+                            <>
+                                Success rate per{" "}
+                                {harness
+                                    ? `${harnessShortLabel(harness)} run`
+                                    : "run, one line per harness,"}{" "}
+                                across the last {WINDOW} ·{" "}
+                                {overview.runs.length} run
+                                {overview.runs.length === 1 ? "" : "s"}
+                            </>
+                        )}
+                    </p>
                 </div>
                 <DailySuccessChart
                     data={overview.runs}
+                    harnesses={overview.harnesses}
                     windowStart={overview.windowStart}
                     windowEnd={overview.windowEnd}
                 />
@@ -263,11 +289,13 @@ export default async function Page({
                     <p className="text-xs text-gray-500">
                         % of budgeted tasks that stayed within 1.5× their
                         expected turns (a budgeted task that failed counts as
-                        over budget)
+                        over budget) · runs with no budgeted task are omitted
+                        rather than plotted at 0
                         {activeTag || q ? " · scoped to the active filter" : ""}
                     </p>
                     <TurnBudgetChart
                         data={overview.runs}
+                        harnesses={overview.harnesses}
                         windowStart={overview.windowStart}
                         windowEnd={overview.windowEnd}
                     />
@@ -280,7 +308,6 @@ export default async function Page({
                             taskTags={taskTags}
                             reviewTags={reviewTags}
                             activeTag={activeTag}
-                            window={window}
                             q={q}
                             harness={harness}
                             limit={24}
@@ -305,9 +332,7 @@ export default async function Page({
                         Runs
                     </h2>
                     <span className="text-xs text-gray-500 tabular-nums">
-                        {isFiltered
-                            ? `${shownCount} of ${matchedCount} matching · ${totalInWindow} in ${window}`
-                            : `${shownCount} of ${totalInWindow} in ${window}`}
+                        {tableCountLabel}
                     </span>
                     {isFiltered && (
                         <Link
@@ -330,21 +355,11 @@ export default async function Page({
                                 scroll={false}
                                 className="text-studio-blue hover:underline"
                             >
-                                Show{" "}
-                                {Math.min(
-                                    DEFAULT_LIMIT,
-                                    tableTotalLabel - shownCount,
-                                )}{" "}
-                                more
+                                Show {nextPageSize} more
                             </Link>
-                            <span className="text-gray-300">·</span>
-                            <Link
-                                href={showAllHref}
-                                scroll={false}
-                                className="text-studio-blue hover:underline"
-                            >
-                                Show all ({tableTotalLabel})
-                            </Link>
+                            <span className="text-gray-400 tabular-nums">
+                                {tableCountLabel}
+                            </span>
                         </div>
                     ) : undefined
                 }
@@ -383,7 +398,11 @@ export default async function Page({
                                     key={r.id}
                                     className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
                                 >
-                                    <td className="py-3 px-4">
+                                    {/* nowrap: the table already scrolls inside
+                                        its own container, so a narrow screen
+                                        should scroll it rather than break the
+                                        timestamp across three lines. */}
+                                    <td className="py-3 px-4 whitespace-nowrap">
                                         <Link
                                             href={`/runs/${r.id}`}
                                             className="font-mono text-xs text-gray-900 hover:text-studio-blue font-semibold tabular-nums"
@@ -400,10 +419,7 @@ export default async function Page({
                                     )}
                                     <td className="py-3 px-4 tabular-nums">
                                         <span
-                                            className={`font-medium ${passClass(
-                                                pct,
-                                                total > 0,
-                                            )}`}
+                                            className={`font-medium ${passClass(pct)}`}
                                         >
                                             {pct != null
                                                 ? `${pct.toFixed(0)}%`
@@ -463,13 +479,16 @@ export default async function Page({
                                 <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-gray-100 bg-gray-50 text-xs">
                                     {adhocExpandable && (
                                         <Link
-                                            href={adhocShowAllHref}
+                                            href={adhocShowMoreHref}
                                             scroll={false}
                                             className="text-studio-blue hover:underline"
                                         >
-                                            Show all ({adhoc.total})
+                                            Show {adhocNextPageSize} more
                                         </Link>
                                     )}
+                                    <span className="text-gray-400 tabular-nums">
+                                        {adhoc.rows.length} of {adhoc.total}
+                                    </span>
                                     {adhocExpanded && (
                                         <Link
                                             href={adhocShowLessHref}
@@ -543,10 +562,7 @@ export default async function Page({
                                             </td>
                                             <td className="py-3 px-4 tabular-nums">
                                                 <span
-                                                    className={`font-medium ${passClass(
-                                                        pct,
-                                                        total > 0,
-                                                    )}`}
+                                                    className={`font-medium ${passClass(pct)}`}
                                                 >
                                                     {pct != null
                                                         ? `${pct.toFixed(0)}%`

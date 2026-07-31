@@ -1,4 +1,5 @@
-import { fmtDuration, fmtUsd, passClass } from "@/lib/format";
+import { fmtDuration, fmtUsd } from "@/lib/format";
+import { passClass } from "@/lib/pass-rate";
 import type { RunListingTotals } from "@/lib/overview";
 import type { Window } from "@/lib/reviews-types";
 
@@ -33,10 +34,14 @@ function Tile({
 }
 
 // Front-page window rollup: total spend + shape of the runs in scope. Every
-// tile is summed over the same set — `runCount` is the matched-run count
-// (`matchedCount`), which is exactly what `totals` folds in, so the Runs tile
-// can never disagree with the Cost/Tasks/Pass/Compute tiles. The totals are
-// scoped to matching tasks whenever a filter is active.
+// tile is summed over the same set — `runCount` and `totals` both come out of
+// getOverview's single pass, so the Runs tile can never disagree with the
+// Cost/Tasks/Pass/Compute tiles or with the charts. The totals are scoped to
+// matching tasks whenever a filter is active.
+//
+// This describes the window the charts plot, NOT however far the run table below
+// is paged out (the table reads back past this window), so every sub-label names
+// the window even when scoped — otherwise a narrowed view reads as all-time.
 export function WindowSummary({
     totals,
     window,
@@ -52,7 +57,9 @@ export function WindowSummary({
         totals.tasksRun > 0
             ? (totals.tasksSucceeded / totals.tasksRun) * 100
             : null;
-    const scope = isFiltered ? "matching runs" : `runs · last ${window}`;
+    const scope = isFiltered
+        ? `matching · last ${window}`
+        : `runs · last ${window}`;
 
     return (
         <section className="border border-gray-200 rounded-lg bg-white">
@@ -64,7 +71,7 @@ export function WindowSummary({
                         totals.costPartial
                             ? "some runs missing cost"
                             : isFiltered
-                              ? "matching tasks"
+                              ? `matching tasks · ${window}`
                               : `across ${window}`
                     }
                 />
@@ -81,7 +88,7 @@ export function WindowSummary({
                 <Tile
                     label="Pass rate"
                     value={pct != null ? `${pct.toFixed(0)}%` : "—"}
-                    valueClass={passClass(pct, totals.tasksRun > 0)}
+                    valueClass={passClass(pct)}
                 />
                 <Tile
                     label="Compute time"

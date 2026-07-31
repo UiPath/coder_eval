@@ -13,6 +13,7 @@ import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
 import { RefreshButton } from "./refresh-button";
 import { RunView } from "./run-view";
+import { RunIdentity } from "./run-identity";
 import { VersionList } from "@/app/_components/version-list";
 import { isInternal } from "@/lib/edition";
 
@@ -102,6 +103,13 @@ export default async function RunPage({
                         {meta.description}
                     </p>
                 )}
+                {/* Harness + model, so the page says what produced these
+                    numbers without a trip back to the runs table. */}
+                <RunIdentity
+                    harness={summary.harness}
+                    model={summary.model}
+                    modelCount={summary.modelCount}
+                />
                 {/* Component SHAs (cli / agent / sdk / drawer …) point at
                     internal tooling; internal-only. See lib/edition.ts. */}
                 {isInternal && (

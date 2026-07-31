@@ -1,7 +1,5 @@
 import Link from "next/link";
 import type { TagCount } from "@/lib/overview";
-import { DEFAULT_HARNESS } from "@/lib/harness";
-import type { Window } from "@/lib/reviews-types";
 
 type Variant = "neutral" | "rose" | "indigo";
 
@@ -34,18 +32,17 @@ const STYLES: Record<
 function hrefForTag(
     basePath: string,
     tag: string | null,
-    window: Window | null,
     q: string | null,
     harness: string | null,
 ): string {
     const params = new URLSearchParams();
-    if (window) params.set("window", window);
     if (tag) params.set("tag", tag);
     if (q) params.set("q", q);
-    // Preserve the active harness scope across tag clicks (omit the default to
-    // keep URLs clean). Without this, filtering by a tag would silently reset a
-    // codex/antigravity view back to claude-code.
-    if (harness && harness !== DEFAULT_HARNESS) params.set("h", harness);
+    // Preserve the active harness scope across tag clicks. null is the
+    // all-harness default and is expressed as the param's absence, so there is
+    // nothing to carry. Without this, filtering by a tag would silently widen a
+    // codex/antigravity view back out to every harness.
+    if (harness) params.set("h", harness);
     const qs = params.toString();
     return qs ? `${basePath}?${qs}` : basePath;
 }
@@ -56,7 +53,6 @@ function TagChip({
     variant,
     active,
     basePath,
-    window,
     q,
     harness,
 }: {
@@ -65,14 +61,13 @@ function TagChip({
     variant: Variant;
     active: boolean;
     basePath: string;
-    window: Window | null;
     q: string | null;
     harness: string | null;
 }) {
     const s = STYLES[variant];
     return (
         <Link
-            href={hrefForTag(basePath, active ? null : tag, window, q, harness)}
+            href={hrefForTag(basePath, active ? null : tag, q, harness)}
             scroll={false}
             className={`inline-flex items-center gap-1 text-[11px] leading-none px-2 py-1 rounded border transition-colors ${active ? s.chipActive : s.chip}`}
         >
@@ -117,7 +112,6 @@ export function MergedTagRail({
     reviewTags,
     activeTag,
     basePath = "/",
-    window = null,
     q = null,
     harness = null,
     limit = 24,
@@ -129,8 +123,6 @@ export function MergedTagRail({
     // Path the chip links point at — "/" for the overview, "/trends" for the
     // trends page. Query string is preserved.
     basePath?: string;
-    // Null on pages that don't expose a window selector (e.g. /trends).
-    window?: Window | null;
     q?: string | null;
     // Active harness scope to preserve in chip links (null = not harness-scoped).
     harness?: string | null;
@@ -155,7 +147,6 @@ export function MergedTagRail({
                     variant="indigo"
                     active={tc.tag === activeTag}
                     basePath={basePath}
-                    window={window}
                     q={q}
                     harness={harness}
                 />
@@ -168,7 +159,6 @@ export function MergedTagRail({
                     variant="rose"
                     active={tc.tag === activeTag}
                     basePath={basePath}
-                    window={window}
                     q={q}
                     harness={harness}
                 />
@@ -181,7 +171,6 @@ export function MergedTagRail({
                     variant="neutral"
                     active={tc.tag === activeTag}
                     basePath={basePath}
-                    window={window}
                     q={q}
                     harness={harness}
                 />
