@@ -8,6 +8,8 @@
 // (e.g. StatusPill) also handles flow execution statuses like "Completed"
 // and "Faulted" and uses its own logic.
 
+import type { TaskResultSummary } from "./runs";
+
 export type StatusCategory = "passed" | "failed" | "error" | "unknown";
 
 export function statusCategory(status: string | null): StatusCategory {
@@ -23,18 +25,113 @@ export function isPassStatus(status: string | null): boolean {
     return statusCategory(status) === "passed";
 }
 
-// Roll per-replicate rows up per task: taskId -> number of replicates that
-// passed. Repeated runs share a taskId, so this is the one place the "any
+// Separator used to join a task id and its variant into one map key. A control
+// character (unit separator) that can never appear in a task id or variant id,
+// so the two segments can never collide.
+const KEY_SEP = "\u001f";
+
+// Grouping key for the "one row per task" collapse. A task's repeated runs
+// (replicates) share it, so they fold together; but in a multi-model (A/B) run
+// several variants ALSO share a taskId — they must stay DISTINCT rows, one per
+// model — so the variant is part of the key. Single-config runs carry variant
+// "default" (or null on legacy rows), so the key is effectively the taskId and
+// behavior is unchanged.
+export function taskGroupKey(t: {
+    taskId: string;
+    variant?: string | null;
+}): string {
+    return `${t.taskId}${KEY_SEP}${t.variant ?? "default"}`;
+}
+
+// Roll per-replicate rows up per (task, variant): key -> number of replicates
+// that passed. Repeated runs share a key, so this is the one place the "any
 // replicate passed" aggregation lives — consumed by the run-page pass-rate
-// tile AND the grid badge / collapse so they can never disagree.
+// tile AND the grid badge / collapse so they can never disagree. Keyed by
+// taskGroupKey so a multi-model run counts each model's attempt separately.
 export function perTaskPassCounts<
-    T extends { taskId: string; status: string | null },
+    T extends { taskId: string; status: string | null; variant?: string | null },
 >(rows: readonly T[]): Map<string, number> {
     const m = new Map<string, number>();
     for (const r of rows) {
-        m.set(r.taskId, (m.get(r.taskId) ?? 0) + (isPassStatus(r.status) ? 1 : 0));
+        const k = taskGroupKey(r);
+        m.set(k, (m.get(k) ?? 0) + (isPassStatus(r.status) ? 1 : 0));
     }
     return m;
+}
+
+// Mean of the non-null values, or null when every value is null (so the cell
+// renders "—" instead of a misleading 0). The averaging primitive behind the
+// replicate collapse below.
+function meanOrNull(values: readonly (number | null)[]): number | null {
+    let sum = 0;
+    let n = 0;
+    for (const v of values) {
+        if (v != null) {
+            sum += v;
+            n += 1;
+        }
+    }
+    return n ? sum / n : null;
+}
+
+// Collapse per-replicate rows to one row per (task, variant) for the run grid.
+// Repeated runs of a task share a taskId, so they fold together; a multi-model
+// run keeps one row PER MODEL (the variant is part of the group key), so each
+// model's metrics stay separate instead of being averaged across models. Each
+// collapsed row's:
+//   - categorical fields (status, replicateIndex/detail link, tags, skill,
+//     model, variant, expected_turns, mature flag) come from a REPRESENTATIVE
+//     replicate — a passing one when any passed, else the lowest-index one — so
+//     the status pill and the "open detail" link both describe one real run; and
+//   - quantitative columns (score, duration, cost, turns via actualCommands,
+//     tokens) are the MEAN across ALL replicates, so the grid reflects the whole
+//     repeat set rather than just the representative run. (Previously every
+//     column was the representative's own value, so e.g. cost showed a single
+//     run's price instead of the average over the repeats.)
+// First-seen group order is preserved. With repeats disabled (one replicate per
+// task/variant) each mean is that single value, so the output is byte-identical.
+export function collapseReplicates(
+    rows: readonly TaskResultSummary[],
+): TaskResultSummary[] {
+    const groups = new Map<string, TaskResultSummary[]>();
+    for (const t of rows) {
+        const key = taskGroupKey(t);
+        const g = groups.get(key);
+        if (g) g.push(t);
+        else groups.set(key, [t]);
+    }
+    const out: TaskResultSummary[] = [];
+    for (const group of groups.values()) {
+        // Representative for the categorical fields: a passing replicate wins
+        // over a non-passing one; ties break to the lowest replicateIndex.
+        let rep = group[0];
+        for (const t of group) {
+            const repPass = isPassStatus(rep.status);
+            const tPass = isPassStatus(t.status);
+            if (repPass !== tPass) {
+                if (tPass) rep = t;
+            } else if ((t.replicateIndex ?? 0) < (rep.replicateIndex ?? 0)) {
+                rep = t;
+            }
+        }
+        out.push({
+            ...rep,
+            weightedScore: meanOrNull(group.map((t) => t.weightedScore)),
+            durationSeconds: meanOrNull(group.map((t) => t.durationSeconds)),
+            totalCostUsd: meanOrNull(group.map((t) => t.totalCostUsd)),
+            // Turns render from displayedTurns(actualCommands, hasFinalReply);
+            // averaging the command count carries the average into that column.
+            actualCommands: meanOrNull(group.map((t) => t.actualCommands)),
+            totalTurns: meanOrNull(group.map((t) => t.totalTurns)),
+            inputTokens: meanOrNull(group.map((t) => t.inputTokens)),
+            outputTokens: meanOrNull(group.map((t) => t.outputTokens)),
+            cacheCreationTokens: meanOrNull(
+                group.map((t) => t.cacheCreationTokens),
+            ),
+            cacheReadTokens: meanOrNull(group.map((t) => t.cacheReadTokens)),
+        });
+    }
+    return out;
 }
 
 // Default table sort: failures and errors first, unknowns next, passes last.

@@ -6,20 +6,24 @@ import { createZip, type ZipEntry } from "@/lib/zip";
 export const dynamic = "force-dynamic";
 
 // Bundle a task folder, or a whole run, into a zip download.
-//   ?run=<id>&task=<id>  → just that task's folder (default/<taskId>/)
-//   ?run=<id>            → the entire run folder (run.json + every task dir)
+//   ?run=<id>&task=<id>[&v=<variant>]  → just that task's folder
+//                                        (<variant>/<taskId>/, variant default "default")
+//   ?run=<id>                          → the entire run folder (run.json + every task dir)
 // minus the usual scaffolding noise. In blob mode the collect* helpers fetch
 // the needed blobs first, so this mirrors what the page would load.
 export async function GET(req: Request) {
     const url = new URL(req.url);
     const runId = url.searchParams.get("run");
     const taskId = url.searchParams.get("task");
+    // Which A/B variant's copy of the task to zip. Absent → "default" (the
+    // single-config subdir), so single-model download links are unchanged.
+    const variant = url.searchParams.get("v") ?? undefined;
     if (!runId) {
         return new NextResponse("missing run", { status: 400 });
     }
 
     const files = taskId
-        ? await collectTaskFiles(runId, taskId)
+        ? await collectTaskFiles(runId, taskId, variant)
         : await collectRunFiles(runId);
     if (!files) {
         return new NextResponse("not found", { status: 404 });

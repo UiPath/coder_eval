@@ -14,7 +14,12 @@ import {
     MaturePill,
     StatusPill,
 } from "@/lib/pills";
-import { isPassStatus, perTaskPassCounts, statusSortRank } from "@/lib/status";
+import {
+    collapseReplicates,
+    perTaskPassCounts,
+    statusSortRank,
+    taskGroupKey,
+} from "@/lib/status";
 import {
     displayedTurns,
     fmtTurnsCount,
@@ -32,6 +37,7 @@ import {
 
 type SortKey =
     | "task"
+    | "model"
     | "status"
     | "score"
     | "duration"
@@ -209,10 +215,14 @@ function TaskIdCell({
     // For a collapsed replicate row, link to the SAME replicate the row's
     // status/score/cost describe (the representative), not implicitly to
     // replicate 0 — so clicking a green "Passed" row lands on the passing run.
-    const href =
-        replicateCount > 1
-            ? `/runs/${runId}/${t.taskId}?r=${t.replicateIndex ?? 0}`
-            : `/runs/${runId}/${t.taskId}`;
+    // In a multi-model run several variants share the taskId, so carry the
+    // variant (?v=) too — otherwise every model's row would open the first
+    // variant's detail. "default" is the implicit fallback, so it's omitted.
+    const params = new URLSearchParams();
+    if (replicateCount > 1) params.set("r", String(t.replicateIndex ?? 0));
+    if (t.variant && t.variant !== "default") params.set("v", t.variant);
+    const qs = params.toString();
+    const href = `/runs/${runId}/${t.taskId}${qs ? `?${qs}` : ""}`;
     return (
         <Link href={href} className={className}>
             {humanizeTaskId(t.taskId)}
@@ -264,6 +274,7 @@ function tokenCell(
 
 const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     task: "asc",
+    model: "asc",
     status: "asc",
     score: "desc",
     duration: "desc",
@@ -283,6 +294,8 @@ function compare(
     switch (key) {
         case "task":
             return a.taskId.localeCompare(b.taskId);
+        case "model":
+            return (a.model ?? "").localeCompare(b.model ?? "");
         case "status":
             return statusSortRank(a.status) - statusSortRank(b.status);
         case "score":
@@ -329,6 +342,7 @@ const COLUMNS: Array<{
     align?: "right";
 }> = [
     { key: "task", header: "Task" },
+    { key: "model", header: "Model" },
     { key: "status", header: "Status" },
     { key: "score", header: "Score", align: "right" },
     { key: "duration", header: "Duration", align: "right" },
@@ -489,12 +503,15 @@ export function TaskGrid({
         };
     }, [openHelp]);
 
-    // How many rows share each taskId — i.e. the replicate count for that task.
-    // Drives whether a row shows its replicate badge + ?r link (only when >1, so
-    // single-run tasks aren't cluttered with a "#0").
+    // How many rows share each (task, variant) — i.e. the replicate count for
+    // that task under one model. Drives whether a row shows its replicate badge
+    // + ?r link (only when >1, so single-run tasks aren't cluttered with a "#0").
+    // Keyed by taskGroupKey so a multi-model run counts each model's replicates
+    // separately rather than lumping all variants' rows together.
     const replicateCounts = useMemo(() => {
         const m = new Map<string, number>();
-        for (const t of tasks) m.set(t.taskId, (m.get(t.taskId) ?? 0) + 1);
+        for (const t of tasks)
+            m.set(taskGroupKey(t), (m.get(taskGroupKey(t)) ?? 0) + 1);
         return m;
     }, [tasks]);
 
@@ -506,30 +523,20 @@ export function TaskGrid({
 
     // Collapse replicates to one row per task: repeated runs share a taskId, so
     // the grid shows a single entry with a k/N ✓ badge; the per-run detail is
-    // selectable on the task page. The representative is chosen so its status,
-    // score, cost, duration AND detail link all describe the SAME run: prefer a
-    // passing replicate when any passed (else the lowest-index one), breaking
-    // ties by lowest replicateIndex for stability. Pick BEFORE sorting so a
-    // metric-sorted view still shows one row per task.
-    const collapsed = useMemo(() => {
-        const byTask = new Map<string, TaskResultSummary>();
-        for (const t of tasks) {
-            const cur = byTask.get(t.taskId);
-            if (!cur) {
-                byTask.set(t.taskId, t);
-                continue;
-            }
-            const curPass = isPassStatus(cur.status);
-            const tPass = isPassStatus(t.status);
-            if (curPass !== tPass) {
-                // A passing replicate always wins over a non-passing one.
-                if (tPass) byTask.set(t.taskId, t);
-            } else if ((t.replicateIndex ?? 0) < (cur.replicateIndex ?? 0)) {
-                byTask.set(t.taskId, t);
-            }
-        }
-        return [...byTask.values()];
-    }, [tasks]);
+    // selectable on the task page. The status pill and detail link come from a
+    // representative replicate (a passing one when any passed, else the
+    // lowest-index one), while the quantitative columns (score, duration, cost,
+    // turns, tokens) are averaged across all repeats — see collapseReplicates.
+    // Collapse BEFORE sorting so a metric-sorted view still shows one row per task.
+    const collapsed = useMemo(() => collapseReplicates(tasks), [tasks]);
+
+    // Show the Model column only for multi-model (A/B) runs — a single-config
+    // run has one model across every row, so the column would be pure noise.
+    // The per-task detail page always names the model regardless (see page.tsx).
+    const showModel = useMemo(
+        () => new Set(collapsed.map((t) => t.model).filter(Boolean)).size > 1,
+        [collapsed],
+    );
 
     const sorted = useMemo(() => {
         const arr = [...collapsed];
@@ -559,7 +566,9 @@ export function TaskGrid({
     };
 
     const visibleColumns = COLUMNS.filter(
-        (c) => showTokens || !TOKEN_KEYS.has(c.key),
+        (c) =>
+            (showTokens || !TOKEN_KEYS.has(c.key)) &&
+            (showModel || c.key !== "model"),
     );
 
     return (
@@ -692,7 +701,7 @@ export function TaskGrid({
                         );
                         return (
                         <tr
-                            key={`${t.taskId}#${t.replicateIndex ?? 0}`}
+                            key={`${taskGroupKey(t)}#${t.replicateIndex ?? 0}`}
                             className="group border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
                         >
                             <td className="py-3 px-4 text-gray-700 sticky left-0 z-10 bg-white group-hover:bg-gray-50">
@@ -703,10 +712,14 @@ export function TaskGrid({
                                         className="text-gray-900 hover:text-studio-blue font-semibold"
                                         matureSourceRuns={matureSourceRuns}
                                         replicateCount={
-                                            replicateCounts.get(t.taskId) ?? 1
+                                            replicateCounts.get(
+                                                taskGroupKey(t),
+                                            ) ?? 1
                                         }
                                         replicatePassCount={
-                                            replicatePassCounts.get(t.taskId) ?? 0
+                                            replicatePassCounts.get(
+                                                taskGroupKey(t),
+                                            ) ?? 0
                                         }
                                     />
                                     <TaskTagChips
@@ -719,6 +732,14 @@ export function TaskGrid({
                                     />
                                 </div>
                             </td>
+                            {showModel && (
+                                <td
+                                    className="py-3 px-4 text-gray-700 font-mono text-xs max-w-[16rem] truncate"
+                                    title={t.model ?? undefined}
+                                >
+                                    {t.model ?? "—"}
+                                </td>
+                            )}
                             <td className="py-3 px-4">
                                 {t.matureSkipped ? (
                                     <MaturePill />
@@ -833,7 +854,7 @@ export function TaskGrid({
                     );
                     return (
                         <div
-                            key={`${t.taskId}#${t.replicateIndex ?? 0}`}
+                            key={`${taskGroupKey(t)}#${t.replicateIndex ?? 0}`}
                             className="rounded-lg border border-gray-200 bg-white p-3 space-y-2"
                         >
                             <div className="flex items-start justify-between gap-2">
@@ -843,11 +864,13 @@ export function TaskGrid({
                                     className="min-w-0 break-words font-semibold text-gray-900 hover:text-studio-blue"
                                     matureSourceRuns={matureSourceRuns}
                                     replicateCount={
-                                        replicateCounts.get(t.taskId) ?? 1
+                                        replicateCounts.get(taskGroupKey(t)) ?? 1
                                     }
-                                        replicatePassCount={
-                                            replicatePassCounts.get(t.taskId) ?? 0
-                                        }
+                                    replicatePassCount={
+                                        replicatePassCounts.get(
+                                            taskGroupKey(t),
+                                        ) ?? 0
+                                    }
                                 />
                                 <span className="shrink-0">
                                     {t.matureSkipped ? (
@@ -857,6 +880,14 @@ export function TaskGrid({
                                     )}
                                 </span>
                             </div>
+                            {showModel && t.model && (
+                                <div
+                                    className="font-mono text-[11px] text-gray-500 truncate"
+                                    title={t.model}
+                                >
+                                    {t.model}
+                                </div>
+                            )}
                             <TaskTagChips
                                 t={t}
                                 review={review}

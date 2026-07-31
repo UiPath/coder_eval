@@ -97,6 +97,13 @@ export interface TaskResultSummary {
     // Model the task ran on (run.json `model_used`). Used to price token
     // buckets as USD for the Tokens↔USD column toggle. Null on legacy runs.
     model: string | null;
+    // Experiment variant this row belongs to (run.json `variant_id`, e.g.
+    // "default" for a single-config run, or a model name like "kimi-k3" in an
+    // A/B run). Variant rows share a taskId but live in distinct on-disk subdirs
+    // (<variant>/<task>/<NN>/), so this is what tells sibling models apart in the
+    // grid and selects the right content dir on the detail page. Null on legacy
+    // runs that predate the field — treated as "default" when building paths.
+    variant: string | null;
     tags: string[];
     // Derived primary group. See deriveSkill below for the resolution chain
     // (new runs use task_path; older runs fall back to a tag heuristic).
@@ -362,6 +369,11 @@ interface RawTaskResult {
     // Model the task ran on (e.g. "claude-sonnet-4-6"). Used to price token
     // buckets as USD. Absent on legacy runs.
     model_used?: string | null;
+    // Experiment variant that produced this row. In an A/B (multi-model) run
+    // each variant contributes a row sharing the task_id but differing here and
+    // in model_used, and its artifacts live under <variant_id>/<task>/<NN>/.
+    // Absent → single-config run whose content dir is the literal "default".
+    variant_id?: string | null;
     // Per-task agent config; `type` is the harness (coder-eval AgentKind, e.g.
     // "claude-code" | "codex" | "antigravity"). Used to derive the run's harness
     // when the run-level RunConfig stamp is absent (direct coder-eval / legacy runs).
@@ -615,13 +627,31 @@ function isActivationTaskId(taskId: string): boolean {
     return taskId.startsWith("skill-activation/");
 }
 
+// The on-disk subdir a single-config run writes its tasks under. Multi-model
+// (A/B) runs replace this with the variant id (e.g. "kimi-k3"); the fallback
+// keeps legacy / single-config runs — whose rows carry no variant — resolving.
+const DEFAULT_VARIANT = "default";
+
+// Sanitize a variant into a safe single path segment. A variant id is reflected
+// into a filesystem path and a blob prefix, so anything that isn't a plain id
+// (null on legacy rows, or a would-be traversal) collapses to "default".
+function variantSegment(variant: string | null | undefined): string {
+    return variant && isValidId(variant) ? variant : DEFAULT_VARIANT;
+}
+
 // Filesystem base for a task's content (before the optional `00` replicate dir):
-// activation cases under <id>/activation/default/<taskId>, skills tasks under
-// <id>/default/<taskId>.
-function taskContentBase(runId: string, taskId: string): string {
+// activation cases under <id>/activation/<variant>/<taskId>, skills tasks under
+// <id>/<variant>/<taskId>. `variant` defaults to "default" — the subdir a
+// single-config run uses and the safe fallback for legacy rows.
+function taskContentBase(
+    runId: string,
+    taskId: string,
+    variant: string | null = DEFAULT_VARIANT,
+): string {
+    const v = variantSegment(variant);
     return isActivationTaskId(taskId)
-        ? path.join(RUNS_DIR, runId, "activation", "default", taskId)
-        : path.join(RUNS_DIR, runId, "default", taskId);
+        ? path.join(RUNS_DIR, runId, "activation", v, taskId)
+        : path.join(RUNS_DIR, runId, v, taskId);
 }
 
 // Resolve the skill (primary grouping axis) for a task. Two-stage fallback:
@@ -667,6 +697,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         cacheCreationTokens: t.cache_creation_input_tokens ?? null,
         cacheReadTokens: t.cache_read_input_tokens ?? null,
         model: t.model_used ?? null,
+        variant: t.variant_id ?? null,
         tags,
         skill: deriveSkill(t.task_path, tags),
         matureSkipped: t.mature_skipped ?? false,
@@ -1852,12 +1883,18 @@ async function resolveTaskContentDir(
 export async function readTaskReplicates(
     runId: string,
     taskId: string,
+    variant: string | null = DEFAULT_VARIANT,
 ): Promise<number[]> {
+    const v = variantSegment(variant);
     const data = isActivationTaskId(taskId)
         ? await readActivationRunJson(runId)
         : await readRunJson(runId);
+    // Scope to the selected variant so the run selector on a multi-model task
+    // lists only THIS model's replicates, not every variant's.
     const indices = (data?.task_results ?? [])
-        .filter((t) => t.task_id === taskId)
+        .filter(
+            (t) => t.task_id === taskId && variantSegment(t.variant_id) === v,
+        )
         .map((t) => t.replicate_index ?? 0);
     return [...new Set(indices)].sort((a, b) => a - b);
 }
@@ -1866,8 +1903,10 @@ export async function readTaskDetail(
     runId: string,
     taskId: string,
     replicate = 0,
+    variant: string | null = DEFAULT_VARIANT,
 ): Promise<TaskDetail | null> {
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
+    const v = variantSegment(variant);
+    await ensureTaskDir(runId, taskId, RUNS_DIR, v);
 
     // Activation cases live in the nested activation sub-run; skills tasks in the
     // top-level run. Read the row from whichever run.json owns this task so the
@@ -1875,11 +1914,16 @@ export async function readTaskDetail(
     const data = isActivationTaskId(taskId)
         ? await readActivationRunJson(runId)
         : await readRunJson(runId);
-    // Repeated runs share a task_id, so match on (task_id, replicate_index).
-    // Legacy rows carry no replicate_index (null) → treated as replicate 0, so
-    // an old single-result run still resolves at replicate 0.
+    // Repeated runs share a task_id, so match on (task_id, replicate_index). In
+    // a multi-model run several variants ALSO share the task_id at replicate 0,
+    // so filter on the variant too (rows carrying a variant_id) — otherwise
+    // every model would resolve to the first variant's row. Legacy rows carry
+    // neither field (null variant / null replicate_index) → treated as
+    // ("default", 0), so an old single-result run still resolves.
     const matches = (data?.task_results ?? []).filter(
-        (t) => t.task_id === taskId,
+        (t) =>
+            t.task_id === taskId &&
+            variantSegment(t.variant_id) === v,
     );
     const rawTask =
         matches.find((t) => (t.replicate_index ?? 0) === replicate) ??
@@ -1887,7 +1931,7 @@ export async function readTaskDetail(
     if (!rawTask) return null;
     const row = toTaskRow(rawTask);
 
-    const taskDir = taskContentBase(runId, taskId);
+    const taskDir = taskContentBase(runId, taskId, v);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const task = await readJson<{
         final_status?: string;
@@ -2122,10 +2166,12 @@ export async function readLogTail(
     runId: string,
     taskId: string,
     replicate = 0,
+    variant: string | null = DEFAULT_VARIANT,
     maxBytes = 200_000,
 ): Promise<string> {
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = taskContentBase(runId, taskId);
+    const v = variantSegment(variant);
+    await ensureTaskDir(runId, taskId, RUNS_DIR, v);
+    const taskDir = taskContentBase(runId, taskId, v);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "task.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
@@ -2147,10 +2193,12 @@ export async function readConversationLog(
     runId: string,
     taskId: string,
     replicate = 0,
+    variant: string | null = DEFAULT_VARIANT,
     maxBytes = 200_000,
 ): Promise<string> {
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = taskContentBase(runId, taskId);
+    const v = variantSegment(variant);
+    await ensureTaskDir(runId, taskId, RUNS_DIR, v);
+    const taskDir = taskContentBase(runId, taskId, v);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "conversation.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
@@ -2198,10 +2246,12 @@ export function parseConversation(raw: string): ConversationTurn[] {
 export async function collectTaskFiles(
     runId: string,
     taskId: string,
+    variant: string | null = DEFAULT_VARIANT,
 ): Promise<{ relPath: string; abs: string }[] | null> {
     if (!isValidId(runId) || !isValidTaskId(taskId)) return null;
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = taskContentBase(runId, taskId);
+    const v = variantSegment(variant);
+    await ensureTaskDir(runId, taskId, RUNS_DIR, v);
+    const taskDir = taskContentBase(runId, taskId, v);
     const refs = await walkArtifacts(taskDir);
     if (refs.length === 0) return null;
     return refs.map((r) => ({ relPath: r.relPath, abs: path.join(taskDir, r.relPath) }));
@@ -2227,13 +2277,21 @@ export async function resolveSafePath(
     relPath: string,
 ): Promise<string | null> {
     if (!isValidId(runId)) return null;
-    // Artifact URLs embed the task subdir in relPath
-    // (`default/<task-id>/artifacts/...`) — extract it so the narrow fetch
-    // hits the right blobs without pulling the whole run.
+    // Artifact URLs embed the task subdir in relPath as
+    // `<variant>/<task-id>/artifacts/...` — the variant is "default" for a
+    // single-config run and a model name (e.g. "kimi-k3") in an A/B run.
+    // Extract both so the narrow fetch hits the right blobs without pulling the
+    // whole run. This is only a prefetch optimization; the realpath containment
+    // check below is the actual security boundary, so an input that isn't that
+    // clean two-segment task shape (run-level files, the nested activation
+    // layout, OR any traversal like "../..") just falls back to the run summary
+    // and lets the containment check reject it — we must never hand a "."/".."
+    // segment to ensureTaskDir, which throws on it (isValidId admits dots).
     const parts = relPath.split("/");
-    if (parts[0] === "default" && parts[1]) {
-        if (!isValidId(parts[1])) return null;
-        await ensureTaskDir(runId, parts[1], RUNS_DIR);
+    const safeSeg = (s: string | undefined): s is string =>
+        !!s && isValidId(s) && s !== "." && s !== "..";
+    if (parts[0] !== "activation" && safeSeg(parts[0]) && safeSeg(parts[1])) {
+        await ensureTaskDir(runId, parts[1], RUNS_DIR, parts[0]);
     } else {
         await ensureRunSummary(runId, RUNS_DIR);
     }

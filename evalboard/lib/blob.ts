@@ -270,11 +270,16 @@ export async function ensureTaskDir(
     runId: string,
     taskId: string,
     destRoot: string,
+    // Experiment variant subdir. "default" for single-config runs; a model name
+    // (e.g. "kimi-k3") in A/B runs. Validated as a path segment so it can't
+    // escape the run prefix.
+    variant = "default",
 ): Promise<void> {
     assertValidId(runId, "runId");
     assertValidTaskId(taskId, "taskId");
+    assertValidId(variant, "variant");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`task:${runId}/${taskId}`, async () => {
+    return dedupe(`task:${runId}/${variant}/${taskId}`, async () => {
         // Activation cases live in the nested sub-run (<runId>/activation/...),
         // so their row + per-case dir come from there; skills tasks from the
         // top-level run. Fetch the matching run.json for the row lookup.
@@ -284,13 +289,13 @@ export async function ensureTaskDir(
         const c = await getContainer();
         const ops: Promise<void>[] = [];
         // `listBlobsFlat` recurses, so both the flat legacy layout
-        // (`default/<task>/task.json`) and the nested replicate layout
-        // (`default/<task>/00/task.json`) download unchanged — the prefix
+        // (`<variant>/<task>/task.json`) and the nested replicate layout
+        // (`<variant>/<task>/00/task.json`) download unchanged — the prefix
         // scope is the task subtree either way. `resolveTaskContentDir` in
         // runs.ts then picks the right shape at render time.
         const prefix = activation
-            ? `${runId}/activation/default/${taskId}/`
-            : `${runId}/default/${taskId}/`;
+            ? `${runId}/activation/${variant}/${taskId}/`
+            : `${runId}/${variant}/${taskId}/`;
         for await (const blob of c.listBlobsFlat({ prefix })) {
             // Agent sandboxes that run Python leave a `.venv/` tree (hundreds
             // of files, tens of MB) under the task dir. No UI page reads it,
