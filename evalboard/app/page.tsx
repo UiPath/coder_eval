@@ -205,18 +205,11 @@ export default async function Page({
                     </p>
                 </div>
                 {isInternal && (
-                    <div className="flex min-w-0 max-w-full flex-col items-start gap-1 sm:items-end">
-                        <HarnessSelector
-                            current={harness}
-                            harnesses={harnesses}
-                            includeAll
-                        />
-                        <p className="text-[11px] text-gray-500">
-                            {harness
-                                ? `Everything below is scoped to ${harnessShortLabel(harness)}`
-                                : "Scopes every tile, chart, and row below"}
-                        </p>
-                    </div>
+                    <HarnessSelector
+                        current={harness}
+                        harnesses={harnesses}
+                        includeAll
+                    />
                 )}
             </div>
 

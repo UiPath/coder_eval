@@ -56,11 +56,11 @@ export function parseHarnessScope(
     return /^[\w.-]{1,64}$/.test(trimmed) ? trimmed : null;
 }
 
-// Series color per harness, for the multi-harness overview charts, the scope
-// selector's dots, and the legends. Each is the vendor's own mark, so a line,
-// the segment that filters to it, and the logo beside them all read as the same
-// harness. Color is bound to the HARNESS, not to its position in the series
-// list — a filter that drops one harness must not repaint the others.
+// Series color per harness, for the multi-harness overview charts and their
+// legends. Each is the vendor's own mark, so a line and the logo beside it in
+// the legend read as the same harness. Color is bound to the HARNESS, not to
+// its position in the series list — a filter that drops one harness must not
+// repaint the others.
 //
 // Validated as a categorical set against a white chart surface over ALL pairs,
 // not just adjacent ones: worst normal-vision ΔE 22.8, worst CVD ΔE 16.6
@@ -70,8 +70,8 @@ export function parseHarnessScope(
 //   - codex is OpenAI's near-black, which fails the lightness-band and
 //     chroma-floor checks the way every gray does. It stays: it has the highest
 //     contrast of the four, and no surface identifies it by color alone (chart
-//     legend, tooltip, and selector all pair the color with the vendor logo and
-//     the harness name).
+//     legend and tooltip both pair the color with the vendor logo and the
+//     harness name).
 //   - delegate-sdk is NOT UiPath orange (#FA4616), even though that is the
 //     brand color. Against Anthropic's coral it scores ΔE 9.5 normal-vision /
 //     5.1 deutan — below the hard floor, i.e. two lines a full-color reader

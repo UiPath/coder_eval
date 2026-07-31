@@ -1,7 +1,6 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { harnessColor } from "@/lib/harness";
 import { HarnessBadge, harnessShortLabel } from "./harness-badge";
 
 // Segmented control for a page's harness scope. Sets `?h=<harness>` while
@@ -64,19 +63,6 @@ export function HarnessSelector({
     const label = (text: string) => (
         <span className="hidden sm:inline">{text}</span>
     );
-    // The segment's line color on the overview charts. Same swatch as the chart
-    // legend, so the control reads as the thing that picks those lines rather
-    // than as an unrelated filter. The white ring only shows on the selected
-    // segment, where the swatch sits on the blue fill.
-    const dot = (h: string, active: boolean) => (
-        <span
-            aria-hidden
-            className={`inline-block h-2 w-2 shrink-0 rounded-full ${
-                active ? "ring-1 ring-white/80" : ""
-            }`}
-            style={{ backgroundColor: harnessColor(h) }}
-        />
-    );
     return (
         <div className="flex max-w-full overflow-x-auto rounded-md border border-gray-200 text-sm">
             {includeAll && (
@@ -105,7 +91,6 @@ export function HarnessSelector({
                             !includeAll && i === 0 ? "rounded-l-md" : ""
                         } ${i === opts.length - 1 ? "rounded-r-md" : ""}`}
                     >
-                        {dot(h, active)}
                         <HarnessBadge harness={h} />
                         {label(name)}
                     </button>

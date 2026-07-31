@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { KNOWN_HARNESSES, harnessColor } from "@/lib/harness";
+import { KNOWN_HARNESSES } from "@/lib/harness";
 import { harnessShortLabel } from "../harness-badge";
 
 // The selector reads router/params hooks; stub them so it renders in jsdom
@@ -14,35 +14,7 @@ vi.mock("next/navigation", () => ({
 
 const { HarnessSelector } = await import("../harness-selector");
 
-// Recharts colors a line by harness; the selector segment that picks that line
-// must carry the same swatch, or the page-level control and the chart below it
-// read as two unrelated color schemes.
-function swatchColors(container: HTMLElement): string[] {
-    return [...container.querySelectorAll<HTMLElement>("span[style]")].map(
-        (el) => el.style.backgroundColor,
-    );
-}
-
-// jsdom normalizes an inline hex to rgb(); compare in that space.
-function rgb(hex: string): string {
-    const n = parseInt(hex.slice(1), 16);
-    return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
-}
-
 describe("HarnessSelector", () => {
-    test("each segment wears its harness's chart-series color", () => {
-        const { container } = render(
-            <HarnessSelector
-                current={null}
-                harnesses={[...KNOWN_HARNESSES]}
-                includeAll
-            />,
-        );
-        expect(swatchColors(container)).toEqual(
-            KNOWN_HARNESSES.map((h) => rgb(harnessColor(h))),
-        );
-    });
-
     test("the all-harness segment is present and selected by default", () => {
         render(
             <HarnessSelector
