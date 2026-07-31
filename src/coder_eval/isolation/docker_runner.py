@@ -1111,8 +1111,9 @@ class DockerRunner:
         # would silently default to DIRECT — downgrading the judge (and agent) route.
         merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
         for env_var in merged_allowlist:
-            # LITELLM_BASE_URL is forwarded below with a value rewrite, not name-only.
-            if env_var == "LITELLM_BASE_URL":
+            # LITELLM_BASE_URL / LITELLM_COST_LOG are forwarded below with a value
+            # rewrite (host alias / absolute mount path), not name-only.
+            if env_var in ("LITELLM_BASE_URL", "LITELLM_COST_LOG"):
                 continue
             if env_var in os.environ:
                 argv += ["--env", env_var]
@@ -1131,6 +1132,19 @@ class DockerRunner:
                 argv += ["--env", f"LITELLM_BASE_URL={rewritten}", "--add-host", f"{_DOCKER_HOST_ALIAS}:host-gateway"]
             else:
                 argv += ["--env", "LITELLM_BASE_URL"]
+
+        # LITELLM_COST_LOG is the proxy's per-call cost log, written on the HOST by
+        # the proxy; the in-container Orchestrator's actual-cost join READS it. So
+        # bind-mount its directory at the SAME host path (read-only — the container
+        # only reads; the host proxy is the sole writer) and forward the resolved
+        # ABSOLUTE path so it points at the mount regardless of a relative/env value.
+        # Skipped when the dir is absent → the join no-ops and the run keeps static
+        # pricing, exactly as a local run does when the log is missing.
+        litellm_cost_log = os.environ.get("LITELLM_COST_LOG")
+        if litellm_cost_log and "LITELLM_COST_LOG" in merged_allowlist and cfg.network != "none":
+            abs_log = Path(litellm_cost_log).expanduser().resolve()
+            if abs_log.parent.is_dir():
+                argv += ["-v", f"{abs_log.parent}:{abs_log.parent}:ro", "--env", f"LITELLM_COST_LOG={abs_log}"]
 
         # Signal to in-container agents that the harness already provides OS-level
         # isolation. The Codex agent reads this to fall back to its full-access

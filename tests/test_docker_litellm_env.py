@@ -87,6 +87,31 @@ class TestLitellmEnvForwarding:
         assert "LITELLM_MODEL" in argv
         assert "sk-master" not in " ".join(argv)
 
+    def test_cost_log_dir_bind_mounted_and_abs_path_forwarded(self, monkeypatch, tmp_path):
+        # The proxy writes the per-call cost log on the HOST; the in-container join
+        # reads it, so its dir is bind-mounted (ro) at the same host path and the
+        # ABSOLUTE path is forwarded so it resolves to the mount inside the container.
+        monkeypatch.setenv("API_BACKEND", "litellm")
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:4000")
+        log_dir = tmp_path / "costs"
+        log_dir.mkdir()
+        cost_log = log_dir / "litellm-costs.jsonl"
+        monkeypatch.setenv("LITELLM_COST_LOG", str(cost_log))
+        argv = self._build(self._make_runner())
+
+        assert f"{log_dir.resolve()}:{log_dir.resolve()}:ro" in argv  # dir mounted read-only, same path
+        assert f"LITELLM_COST_LOG={cost_log.resolve()}" in argv  # absolute path → resolves to the mount
+        assert "LITELLM_COST_LOG" not in argv  # not also forwarded name-only (could carry a relative value)
+
+    def test_cost_log_skipped_when_dir_absent(self, monkeypatch, tmp_path):
+        # No log dir on the host → no mount, no forward: the in-container join no-ops
+        # and the run keeps static pricing (graceful, same as a local missing log).
+        monkeypatch.setenv("API_BACKEND", "litellm")
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:4000")
+        monkeypatch.setenv("LITELLM_COST_LOG", str(tmp_path / "nope" / "litellm-costs.jsonl"))
+        argv = self._build(self._make_runner())
+        assert not any(a.startswith("LITELLM_COST_LOG") for a in argv)
+
     def test_non_loopback_url_forwarded_name_only(self, monkeypatch):
         monkeypatch.setenv("API_BACKEND", "litellm")
         monkeypatch.setenv("LITELLM_BASE_URL", "http://litellm.internal:4000")
