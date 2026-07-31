@@ -40,41 +40,66 @@ model_list:
   # OpenRouter models — cost-optimization path. Not on Bedrock; OpenRouter is
   # OpenAI-format, so LiteLLM does the Anthropic<->OpenAI translation.
   #
-  # provider routing (extra_body.provider): OpenRouter is a multi-provider router,
-  # and its per-request routing is nondeterministic — a request can land on a
-  # provider far pricier than the model page's headline rate (observed: DeepSeek
-  # V4 Pro routed to Novita at ~$1.47/M input vs the $0.435/M headline, 3.4x).
-  # `sort: price` pins the cheapest upstream and `allow_fallbacks: false` forbids
-  # silently upgrading to a pricier one, so the billed rate is deterministic and
-  # matches the pricing.py table (and is the cost floor we benchmark for).
+  # provider routing (extra_body.provider): OpenRouter is a multi-provider router.
+  # `provider.only` restricts each model to a HARD allowlist of providers we've
+  # observed to be reliable, `sort: price` tries them cheapest-first, and
+  # `allow_fallbacks: true` lets routing fall over to the NEXT provider in that set
+  # when the cheapest is saturated — so a contended provider no longer 429s with
+  # nowhere to go (the original single-pin failure). Fallback is bounded to the
+  # vetted `only` set, and cost_logger.py records each call's real usage.cost, so a
+  # fallover to another listed provider is still billed correctly. Cost is exact
+  # regardless of which listed provider serves the call.
+  #
+  # extra_body.usage.include (set on every model below): ask OpenRouter to return
+  # the ACTUAL per-call usage.cost + cache tokens for the provider it routed to. The
+  # Anthropic response the SDK receives has no slot for these, so cost_logger.py (the
+  # callback in litellm_settings) reads them proxy-side and writes one JSONL record
+  # per call for the harness to join back by the x-ce-* correlation headers.
   - model_name: moonshotai/kimi-k3
     litellm_params:
       model: openrouter/moonshotai/kimi-k3
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
+        # usage.include + provider pin — see the OpenRouter note above.
+        usage:
+          include: true
         provider:
           sort: price
-          allow_fallbacks: false
+          allow_fallbacks: true
+          only: ["baseten", "together", "fireworks"]
   - model_name: z-ai/glm-5.2
     litellm_params:
       model: openrouter/z-ai/glm-5.2
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
+        # usage.include + provider pin — see the OpenRouter note above.
+        usage:
+          include: true
         provider:
           sort: price
-          allow_fallbacks: false
+          allow_fallbacks: true
+          only: ["novita", "streamlake", "gmicloud", "alibaba"]
   - model_name: deepseek/deepseek-v4-pro
     litellm_params:
       model: openrouter/deepseek/deepseek-v4-pro
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
+        # usage.include + provider pin — see the OpenRouter note above.
+        usage:
+          include: true
         provider:
           sort: price
-          allow_fallbacks: false
+          allow_fallbacks: true
+          only: ["streamlake", "gmicloud", "novita", "alibaba"]
 
 litellm_settings:
   # Silently drop provider-unsupported OpenAI/Anthropic params rather than 400.
   drop_params: true
+  # Per-call ACTUAL-cost + cache capture for the open-weight backend. Appends one
+  # JSONL record per call to $LITELLM_COST_LOG (set in start-litellm.sh). Reads
+  # OpenRouter's real usage.cost, NOT LiteLLM's response_cost (0.0 for models it
+  # doesn't price). See cost_logger.py for the full rationale.
+  callbacks: cost_logger.proxy_handler_instance
 
 general_settings:
   # Read the virtual key from the environment — never hardcode a secret here.

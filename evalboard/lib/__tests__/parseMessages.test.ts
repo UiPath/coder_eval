@@ -770,19 +770,17 @@ describe("parseMessages — reconciliation entry", () => {
         expect(recon.toolUses).toEqual([]);
     });
 
-    test("prices the reconciliation row from the turn model so the Cost column sums to the turn total", () => {
-        // Mirrors the OpenRouter/LiteLLM sparse-stream case that motivated this:
-        // the per-message stream carries only output, and the bulk of the input +
-        // cache-read tokens land in the single reconciliation row. Before the fix
-        // that row read "—" for cost, so the Cost column summed to far less than
-        // the real total.
+    test("prices the reconciliation row from the turn model (Bedrock open-weight: static rates are authoritative)", () => {
+        // Bedrock open-weight runs on fixed Bedrock rates (like Claude) with no
+        // OpenRouter actual-cost capture, so static pricing IS correct here and the
+        // reconciliation row must carry it (else the Cost column under-sums).
         const turns: TurnEntry[] = [
             {
-                model_used: "deepseek/deepseek-v4-pro",
+                model_used: "zai.glm-5",
                 messages: [
                     {
                         role: "assistant",
-                        model: "deepseek/deepseek-v4-pro",
+                        model: "zai.glm-5",
                         started_at: "2026-01-01T00:00:00.000Z",
                         completed_at: "2026-01-01T00:00:01.000Z",
                         generation_duration_ms: 1000,
@@ -804,13 +802,45 @@ describe("parseMessages — reconciliation entry", () => {
         ];
         const events = parseMessages(turns);
         const [asst, recon] = events;
-        // deepseek-v4-pro: in 0.435 / out 0.87 / cacheRead 0.003625 per MTok.
-        // reconciliation = 100000*0.435 + 300000*0.003625 = 44587.5 tok-$ / 1e6.
-        expect(recon.model).toBe("deepseek/deepseek-v4-pro");
-        expect(recon.costUsd).toBeCloseTo(0.0445875, 9);
-        // The whole point: assistant + reconciliation sum to the turn total
-        // (1000*0.87/1e6 + 0.0445875), instead of the reconciliation row reading "—".
-        expect((asst.costUsd ?? 0) + (recon.costUsd ?? 0)).toBeCloseTo(0.0454575, 9);
+        // zai.glm-5: in 1.2 / out 3.84 / cacheRead 0 per MTok.
+        // reconciliation = 100000*1.2 + 300000*0 = 120000 tok-$ / 1e6 = 0.12.
+        expect(recon.model).toBe("zai.glm-5");
+        expect(recon.costUsd).toBeCloseTo(0.12, 9);
+        expect((asst.costUsd ?? 0) + (recon.costUsd ?? 0)).toBeCloseTo(0.12384, 9);
+    });
+
+    test("does NOT statically price OpenRouter models (their cost is the captured actual)", () => {
+        // OpenRouter routes per-request, so a static headline rate is wrong; the
+        // evalboard deliberately leaves these unpriced (→ "—") and shows the real
+        // per-call cost in the per-call table (ProviderCallTableSection) instead.
+        const turns: TurnEntry[] = [
+            {
+                model_used: "deepseek/deepseek-v4-pro",
+                messages: [
+                    {
+                        role: "assistant",
+                        model: "deepseek/deepseek-v4-pro",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                        input_tokens: 0,
+                        output_tokens: 1000,
+                        cache_read_tokens: 0,
+                    },
+                    {
+                        role: "reconciliation",
+                        input_tokens: 100000,
+                        output_tokens: 0,
+                        cache_read_tokens: 300000,
+                        note: "billed but not streamed",
+                    },
+                ],
+            },
+        ];
+        const [asst, recon] = parseMessages(turns);
+        expect(asst.costUsd).toBeNull(); // no static price for OpenRouter
+        expect(recon.costUsd).toBeNull();
     });
 
     test("reconciliation cost stays null when the turn model is absent (legacy runs)", () => {

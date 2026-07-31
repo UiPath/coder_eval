@@ -656,6 +656,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
 
+    # This agent's __init__ accepts cost_log_tags and stamps them into
+    # ANTHROPIC_CUSTOM_HEADERS for the proxy-side actual-cost join (LiteLLM backend).
+    supports_cost_log_tags: ClassVar[bool] = True
+
     def __init__(
         self,
         config: ClaudeCodeAgentConfig,
@@ -663,6 +667,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         *,
         instance_name: str = "coder",
         extra_mcp_servers: dict[str, Any] | None = None,
+        cost_log_tags: dict[str, str] | None = None,
     ):
         """Initialize the Claude Code agent.
 
@@ -680,10 +685,21 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 ``_FRAMEWORK_OWNED_SDK_FIELDS`` and explicitly denied via
                 ``sdk_options`` for security. The judge criterion is the only
                 caller today.
+            cost_log_tags: LiteLLM-only correlation headers (``x-ce-run-id`` /
+                ``x-ce-task-id`` / ``x-ce-attempt``, with ``x-ce-iteration`` appended
+                per turn) stamped into ``ANTHROPIC_CUSTOM_HEADERS`` so a proxy-side
+                cost callback can attribute each call's real cost back to this run.
+                None on Direct/Bedrock.
         """
         self.config = config
         self.route = route or DirectRoute()
         self._extra_mcp_servers = extra_mcp_servers or {}
+        # Correlation headers stamped on every SDK->proxy request (LiteLLM route
+        # only), so a proxy-side cost-logging callback can join each call's real
+        # usage.cost + cache buckets back to this run/task. None => no header
+        # (Direct/Bedrock, or when the orchestrator supplies none). This turn's
+        # iteration is appended per-communicate() in _build_claude_query.
+        self._cost_log_tags = cost_log_tags
         self.client: ClaudeSDKClient | None = None
         self.working_directory: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
@@ -729,6 +745,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         route: ApiRoute,
         path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        cost_log_tags: dict[str, str] | None = None,
     ) -> tuple[dict[str, str], str | None]:
         """Build SDK environment variables and resolve effective model for the given route.
 
@@ -741,6 +758,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             plugin_tools_dir: Fallback canonical ``node_modules/@uipath`` to export as
                 ``PLUGIN_TOOLS_DIR`` when the process environment doesn't already
                 provide one. An external ``PLUGIN_TOOLS_DIR`` always wins.
+            cost_log_tags: LiteLLM-only correlation headers stamped (newline-separated
+                ``Name: Value``) into ``ANTHROPIC_CUSTOM_HEADERS``. Values must be
+                single-line ASCII (validated here) — the header block is CR/LF-delimited.
 
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
@@ -809,6 +829,23 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     env["ANTHROPIC_MODEL"] = cr.model
                 if cr.small_model:
                     env["ANTHROPIC_SMALL_FAST_MODEL"] = cr.small_model
+                if cost_log_tags:
+                    # Stamp every SDK->proxy request with correlation headers so a
+                    # LiteLLM logging callback can attribute each call's real
+                    # usage.cost + cache buckets back to this run/task/turn. Claude
+                    # Code forwards ANTHROPIC_CUSTOM_HEADERS (newline-separated
+                    # `Name: Value`) verbatim, incl. to a non-anthropic base URL.
+                    #
+                    # Sanitize at the seam: x-ce-task-id carries the author-defined
+                    # task_id/variant_id, so a value with a CR/LF would inject extra
+                    # headers into every SDK->proxy request (forged cost attribution,
+                    # or an auth/routing header override). Non-ASCII also breaks the
+                    # latin-1 header encoding. Reject both loudly rather than emit them.
+                    for name, value in cost_log_tags.items():
+                        joined = f"{name}{value}"
+                        if "\r" in joined or "\n" in joined or not joined.isascii():
+                            raise ValueError(f"cost_log_tags {name!r} must be single-line ASCII (got {value!r})")
+                    env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{k}: {v}" for k, v in cost_log_tags.items())
                 return {**base_env, **env}, cr.model
 
         raise AssertionError(f"Unhandled route type: {type(route).__name__}")
@@ -1117,10 +1154,17 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         # Build env overrides and resolve model for the configured API route.
         # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
+        # Per-turn cost-correlation headers (LiteLLM route only): the run/task tag
+        # from the orchestrator plus this turn's iteration, so the proxy-side cost
+        # log can be joined back to the exact turn.
+        cost_log_tags: dict[str, str] | None = None
+        if self._cost_log_tags is not None:
+            cost_log_tags = {**self._cost_log_tags, "x-ce-iteration": str(self._iteration)}
         env, route_model = self._build_sdk_env(
             self.route,
             path_prepend=self._env_path_prepend,
             plugin_tools_dir=self._plugin_tools_dir,
+            cost_log_tags=cost_log_tags,
         )
         effective_model = self._resolve_effective_model(self.config.model, env, route_model)
 

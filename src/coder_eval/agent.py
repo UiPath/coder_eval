@@ -79,6 +79,13 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     # between messages override it to True.
     supports_cooperative_stop: ClassVar[bool] = False
 
+    # Capability flag: whether this agent's constructor accepts the ``cost_log_tags``
+    # kwarg (proxy-side actual-cost correlation headers for the LiteLLM backend).
+    # Default False — the agent-agnostic ``create_agent`` factory must only forward
+    # ``cost_log_tags`` to agents that set this True, else a route-driven kwarg would
+    # crash every agent (NoOp/Codex/Antigravity/plugins) whose ``__init__`` lacks it.
+    supports_cost_log_tags: ClassVar[bool] = False
+
     def _begin_turn(self) -> None:
         """Mark the start of a ``communicate()`` turn: reset the pending slot and
         bump the iteration counter so a mid-turn failure can be rolled back.

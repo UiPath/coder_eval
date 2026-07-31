@@ -295,6 +295,62 @@ class TestBuildSdkEnvCustom:
         env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1"))
         assert env["ANTHROPIC_API_KEY"] == ""
 
+    def test_cost_log_tags_become_custom_headers(self):
+        """cost_log_tags → ANTHROPIC_CUSTOM_HEADERS as newline-separated
+        `Name: Value` pairs (the format Claude Code forwards verbatim), so the
+        proxy-side cost log can join each call back to the run/task/turn."""
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek/deepseek-v4-pro")
+        tags = {"x-ce-run-id": "abc123", "x-ce-task-id": "calc/v1", "x-ce-iteration": "2"}
+        env, _ = ClaudeCodeAgent._build_sdk_env(route, cost_log_tags=tags)
+        assert env["ANTHROPIC_CUSTOM_HEADERS"] == "x-ce-run-id: abc123\nx-ce-task-id: calc/v1\nx-ce-iteration: 2"
+
+    def test_no_cost_log_tags_omits_custom_headers(self):
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        env, _ = ClaudeCodeAgent._build_sdk_env(route)
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env
+        env2, _ = ClaudeCodeAgent._build_sdk_env(route, cost_log_tags={})
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env2  # empty dict is a no-op
+
+    def test_cost_log_tags_ignored_on_non_litellm_routes(self):
+        """The tag is a LiteLLM-only concern; Bedrock/Direct must not emit it."""
+        tags = {"x-ce-run-id": "abc123"}
+        bedrock = BedrockRoute(bearer_token="t", region="eu-north-1", model="x")
+        env_b, _ = ClaudeCodeAgent._build_sdk_env(bedrock, cost_log_tags=tags)
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env_b
+        env_d, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), cost_log_tags=tags)
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env_d
+
+    def test_cost_log_tags_gated_on_agent_capability_not_route(self):
+        """Regression: cost_log_tags is a Claude-only constructor kwarg, but the
+        route that triggers it (LiteLLM) is agent-independent. The agent-agnostic
+        create_agent factory must forward it ONLY to agents that declare
+        supports_cost_log_tags — otherwise a none/codex/antigravity task crashes
+        with TypeError under API_BACKEND=litellm."""
+        from coder_eval.agents import AgentRegistry, create_agent
+        from coder_eval.models import NoneAgentConfig
+        from coder_eval.plugins import ensure_plugins_loaded
+
+        ensure_plugins_loaded()
+        # Capability contract the orchestrator gate reads.
+        assert AgentRegistry.get(AgentKind.CLAUDE_CODE).agent_class.supports_cost_log_tags is True
+        assert AgentRegistry.get(AgentKind.NONE).agent_class.supports_cost_log_tags is False
+
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek/deepseek-v4-pro")
+        # A none-agent constructs fine on a LiteLLM route (the gate omits the kwarg)...
+        assert create_agent(AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route) is not None
+        # ...and it WOULD crash if the kwarg were forwarded — exactly what the gate prevents.
+        with pytest.raises(TypeError):
+            create_agent(
+                AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route, cost_log_tags={"x-ce-run-id": "r"}
+            )
+
+    def test_cost_log_tags_reject_header_injection(self):
+        # A task_id/variant_id carrying a CR/LF would inject extra headers into every
+        # SDK->proxy request; the seam must reject it (single-line ASCII only).
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        with pytest.raises(ValueError, match="single-line ASCII"):
+            ClaudeCodeAgent._build_sdk_env(route, cost_log_tags={"x-ce-task-id": "ok\nAuthorization: Bearer forged"})
+
 
 class TestResolveEffectiveModelCustom:
     """_resolve_effective_model() on the LiteLLM route — no prefixing."""

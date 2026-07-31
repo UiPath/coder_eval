@@ -9,6 +9,7 @@ import type {
     MessageEvent,
     MessageToolUse,
     SubAgentTotals,
+    TaskDetail,
     TokenTotals,
     ToolCall,
 } from "@/lib/runs";
@@ -529,6 +530,129 @@ export function MessageTimelineSection({
                 </ol>
                 </div>
             </TableScroll>
+        </section>
+    );
+}
+
+// Short-form a call id for the table (full ids are long provider hashes). Keeps
+// the head/tail so a row is still identifiable at a glance. "—" when absent.
+function shortCallId(id: string | null): string {
+    if (!id) return "—";
+    return id.length > 14 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
+}
+
+function fmtCallTok(n: number | null): string {
+    return n != null ? fmtCompact(n) : "—";
+}
+
+// Per-call actual cost + cache table, sourced from each turn's
+// provider_call_costs audit rows (LiteLLM/open-weight backend). One sub-table
+// per turn with calls, plus a per-turn total. Renders nothing on Claude/Bedrock
+// runs (empty providerCalls).
+export function ProviderCallTableSection({
+    providerCalls,
+}: {
+    providerCalls: TaskDetail["providerCalls"];
+}) {
+    if (providerCalls.length === 0) return null;
+    const totalCalls = providerCalls.reduce((s, t) => s + t.calls.length, 0);
+    return (
+        <section className="space-y-2">
+            <h2 className="text-sm font-semibold text-gray-900">
+                Provider calls ({totalCalls})
+            </h2>
+            <p className="text-[10px] text-gray-500">
+                Actual per-call cost + cache captured from the provider (LiteLLM
+                backend). The turn total is the real bill.
+            </p>
+            {providerCalls.map(({ iteration, calls }) => {
+                const turnTotal = calls.reduce(
+                    (s, c) => s + (c.costUsd ?? 0),
+                    0,
+                );
+                return (
+                    <details
+                        key={iteration}
+                        className="group rounded border border-gray-200"
+                    >
+                        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 [&::-webkit-details-marker]:hidden">
+                            <span>
+                                Turn {iteration + 1} · {calls.length} call
+                                {calls.length === 1 ? "" : "s"}
+                            </span>
+                            <span className="tabular-nums text-gray-900">
+                                {fmtUsd(turnTotal)}
+                            </span>
+                        </summary>
+                        <TableScroll>
+                            <table className="w-full text-sm">
+                                <thead>
+                                    <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
+                                        <th className="py-2 px-3 font-medium">
+                                            Call
+                                        </th>
+                                        <th className="py-2 px-3 font-medium text-right">
+                                            Input
+                                        </th>
+                                        <th className="py-2 px-3 font-medium text-right">
+                                            Cache read
+                                        </th>
+                                        <th className="py-2 px-3 font-medium text-right">
+                                            Cache write
+                                        </th>
+                                        <th className="py-2 px-3 font-medium text-right">
+                                            Output
+                                        </th>
+                                        <th className="py-2 px-3 font-medium text-right">
+                                            Cost ($)
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {calls.map((c, i) => (
+                                        <tr
+                                            key={c.callId ?? i}
+                                            className="border-b border-gray-100 last:border-b-0"
+                                        >
+                                            <td className="py-2 px-3 font-mono text-xs text-gray-900">
+                                                {shortCallId(c.callId)}
+                                            </td>
+                                            <td className="py-2 px-3 text-right tabular-nums text-gray-700">
+                                                {fmtCallTok(c.inputTokens)}
+                                            </td>
+                                            <td className="py-2 px-3 text-right tabular-nums text-amber-700">
+                                                {fmtCallTok(c.cacheReadTokens)}
+                                            </td>
+                                            <td className="py-2 px-3 text-right tabular-nums text-amber-700">
+                                                {fmtCallTok(c.cacheWriteTokens)}
+                                            </td>
+                                            <td className="py-2 px-3 text-right tabular-nums text-gray-700">
+                                                {fmtCallTok(c.outputTokens)}
+                                            </td>
+                                            <td className="py-2 px-3 text-right tabular-nums text-gray-900">
+                                                {c.costUsd != null
+                                                    ? fmtUsd(c.costUsd)
+                                                    : "—"}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    <tr className="border-t border-gray-200 bg-gray-50 font-medium">
+                                        <td
+                                            className="py-2 px-3 text-xs text-gray-600"
+                                            colSpan={5}
+                                        >
+                                            Turn total
+                                        </td>
+                                        <td className="py-2 px-3 text-right tabular-nums text-gray-900">
+                                            {fmtUsd(turnTotal)}
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </TableScroll>
+                    </details>
+                );
+            })}
         </section>
     );
 }

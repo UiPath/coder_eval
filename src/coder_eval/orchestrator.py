@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from .errors import (
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
+from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
     ROUTE_NAMES,
     AgentKind,
@@ -344,6 +346,12 @@ class Orchestrator:
         """
         self.task = task
         self.run_dir = run_dir
+        # Per-attempt nonce for the LiteLLM cost-log join. The proxy log is
+        # append-only and the run_id is a deterministic hash of run_dir, so a
+        # re-run into the same --run-dir would otherwise re-match (and double-count)
+        # a prior attempt's rows. A fresh nonce per Orchestrator (one per process
+        # invocation) scopes the join to THIS attempt's records.
+        self._cost_attempt_nonce = uuid.uuid4().hex
         self.preservation_mode = preservation_mode
         self.workspace_dir = workspace_dir
         self.task_file = task_file
@@ -700,6 +708,11 @@ class Orchestrator:
         if not self.result.model_used and self.task.agent is not None and self.task.agent.model:
             self.result.model_used = self.task.agent.model
 
+        # Open-weight (LiteLLM) backend: replace per-turn cost with the ACTUAL
+        # per-call OpenRouter cost captured proxy-side. Runs BEFORE aggregation so
+        # the run total re-derives from the corrected per-turn costs.
+        self._join_litellm_actual_cost()
+
         # Aggregate token usage
         self._aggregate_token_usage()
 
@@ -891,6 +904,50 @@ class Orchestrator:
                 self.task.task_id,
             )
             self._expected_turns_warning_emitted = True
+
+    @property
+    def _cost_correlation_run_id(self) -> str:
+        """The LiteLLM cost-log correlation run id — a stable hash of the run dir.
+
+        Single accessor used by BOTH the stamp site (``_create_agent``, into
+        ``x-ce-run-id``) and the join site (``_join_litellm_actual_cost``); keeping
+        the derivation in one place means the two can't drift and silently revert
+        every turn to static pricing.
+        """
+        return hash_identifier(self.run_dir.as_posix())
+
+    def _join_litellm_actual_cost(self) -> None:
+        """Override per-turn cost with the proxy-captured ACTUAL per-call OpenRouter
+        cost (and attach the per-call cache breakdown) for the open-weight backend.
+
+        No-op unless the agent ran on a ``LiteLLMRoute`` AND ``LITELLM_COST_LOG`` is
+        configured. Never fatal: a failure, or an empty/mismatched log, leaves each
+        turn's static rate-card estimate in place (the whole-turn fallback).
+        """
+        if not (isinstance(self.route, LiteLLMRoute) and settings.litellm_cost_log and self.result is not None):
+            return
+        try:
+            applied = apply_actual_cost(
+                self.result,
+                run_id=self._cost_correlation_run_id,
+                task_id=self._log_task_id,
+                attempt=self._cost_attempt_nonce,
+                records=load_cost_records(settings.litellm_cost_log),
+            )
+            if applied:
+                logger.info("LiteLLM actual-cost join: real per-call cost applied to %d turn(s)", applied)
+            else:
+                # Tags were stamped but nothing matched (file absent, proxy never
+                # wrote, wrong path, or a run/task/attempt mismatch). The run stays
+                # on the static rate card — warn so it isn't mistaken for the real bill.
+                logger.warning(
+                    "LiteLLM actual-cost join found no matching records in %s (run=%s task=%s); cost stays static",
+                    settings.litellm_cost_log,
+                    self._cost_correlation_run_id,
+                    self._log_task_id,
+                )
+        except Exception:
+            logger.warning("LiteLLM actual-cost join failed; keeping static pricing", exc_info=True)
 
     def _aggregate_token_usage(self) -> None:
         """Aggregate token usage from turns, storing on self.result.
@@ -1206,7 +1263,7 @@ class Orchestrator:
             ValueError: If agent type is not supported
             TypeError: If config doesn't match agent's expected type
         """
-        from coder_eval.agents import create_agent
+        from coder_eval.agents import AgentRegistry, create_agent
         from coder_eval.plugins import ensure_plugins_loaded
 
         # Safety net for the production agent-construction path: create_agent no
@@ -1215,7 +1272,30 @@ class Orchestrator:
         ensure_plugins_loaded()
         assert self.task.agent is not None
         assert self.task.agent.type is not None
-        return create_agent(self.task.agent.type, self.task.agent, route=self.route)
+        # LiteLLM (open-weight) route only: give the agent correlation headers so a
+        # proxy-side cost-logging callback can attribute each call's real cost +
+        # cache buckets back to this task-run. x-ce-run-id is a stable per-task-run
+        # key (the join, in _finalize_result, recomputes it identically); x-ce-task-id
+        # is the human-readable canonical id.
+        #
+        # Gate on AGENT CAPABILITY, not the route: the route is settings-derived and
+        # independent of agent type, but only agents whose __init__ accepts the kwarg
+        # (supports_cost_log_tags) may receive it — otherwise the agent-agnostic
+        # factory would forward it into NoOp/Codex/Antigravity/plugin constructors
+        # that don't declare it and crash with TypeError under API_BACKEND=litellm.
+        kwargs: dict[str, Any] = {}
+        registration = AgentRegistry.get(self.task.agent.type)
+        if (
+            isinstance(self.route, LiteLLMRoute)
+            and registration is not None
+            and registration.agent_class.supports_cost_log_tags
+        ):
+            kwargs["cost_log_tags"] = {
+                "x-ce-run-id": self._cost_correlation_run_id,
+                "x-ce-task-id": self._log_task_id,
+                "x-ce-attempt": self._cost_attempt_nonce,
+            }
+        return create_agent(self.task.agent.type, self.task.agent, route=self.route, **kwargs)
 
     async def _communicate_with_retry(
         self,

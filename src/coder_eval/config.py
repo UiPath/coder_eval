@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     litellm_auth_token: str | None = None
     litellm_model: str | None = None
     litellm_small_model: str | None = None
+    # Path to the per-call cost/cache JSONL the LiteLLM proxy's cost_logger writes
+    # (LITELLM_COST_LOG). Must point at the SAME file the proxy uses (see
+    # litellm/start-litellm.sh). When set and the file exists, the harness joins each
+    # call's ACTUAL OpenRouter cost + cache onto the turn (litellm_cost.apply_actual_cost),
+    # overriding the static rate-card estimate; unset/missing => static pricing (fallback).
+    litellm_cost_log: str | None = None
 
     # Codex settings (CodexAgent). CODEX_MODEL is the fallback model/deployment
     # used when a task doesn't pin agent.model; CODEX_BASE_URL routes to a custom
