@@ -571,10 +571,19 @@ export function ProviderCallTableSection({
                     0,
                 );
                 return (
-                    <div key={iteration} className="space-y-1">
-                        <div className="text-xs text-gray-500">
-                            Turn {iteration + 1}
-                        </div>
+                    <details
+                        key={iteration}
+                        className="group rounded border border-gray-200"
+                    >
+                        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 [&::-webkit-details-marker]:hidden">
+                            <span>
+                                Turn {iteration + 1} · {calls.length} call
+                                {calls.length === 1 ? "" : "s"}
+                            </span>
+                            <span className="tabular-nums text-gray-900">
+                                {fmtUsd(turnTotal)}
+                            </span>
+                        </summary>
                         <TableScroll>
                             <table className="w-full text-sm">
                                 <thead>
@@ -647,7 +656,7 @@ export function ProviderCallTableSection({
                                 </tbody>
                             </table>
                         </TableScroll>
-                    </div>
+                    </details>
                 );
             })}
         </section>
