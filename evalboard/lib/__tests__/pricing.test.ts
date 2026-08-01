@@ -36,7 +36,11 @@ describe("resolvePricing", () => {
     });
 
     test("knows the current default opus id", () => {
-        expect(resolvePricing("claude-opus-4-8")?.outputPerMTok).toBe(75);
+        // Rate-agnostic on purpose: pricing-parity.test.ts already proves every
+        // rate equals pricing.py, so pinning a number here would break the suite
+        // on a legitimate vendor repricing. What matters at this seam is that the
+        // current default Opus id resolves at all.
+        expect(resolvePricing("claude-opus-4-8")).not.toBeNull();
     });
 
     test("strips LiteLLM/Bedrock routing + region prefixes (recorded model_used is qualified)", () => {

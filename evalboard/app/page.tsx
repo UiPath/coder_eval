@@ -6,7 +6,7 @@ import {
     listRecentHarnesses,
     type TagCount,
 } from "@/lib/overview";
-import { parseHarnessScope } from "@/lib/harness";
+import { orderHarnesses, parseHarnessScope } from "@/lib/harness";
 import { fmtDuration, fmtRunTime, fmtTimestamp } from "@/lib/format";
 import { passClass } from "@/lib/pass-rate";
 import { type Window } from "@/lib/reviews-types";
@@ -128,7 +128,7 @@ export default async function Page({
     const [overview, listing, adhoc, harnesses] = await Promise.all([
         getOverview(WINDOW, activeTag, q, harness),
         getRunListing(activeTag, q, limit, harness),
-        getAdhocRunListing(adhocLimit),
+        getAdhocRunListing(adhocLimit, harness),
         listRecentHarnesses(),
     ]);
 
@@ -193,7 +193,10 @@ export default async function Page({
                 together. Buried in the chart card it read as a chart control
                 while the numbers above it silently covered every harness. Same
                 position as the selector on Path to GA, trends, and the
-                watchlist. Internal-only, like the analytics block below. */}
+                watchlist. Shown in every edition, like the analytics block it
+                scopes — the charts below name a harness per line, so gating the
+                only control that isolates one would leave an OSS instance able
+                to see a harness but not select it. */}
             <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="space-y-1">
                     <h1 className="text-xl font-semibold text-gray-900">
@@ -204,13 +207,23 @@ export default async function Page({
                         and logs.
                     </p>
                 </div>
-                {isInternal && (
-                    <HarnessSelector
-                        current={harness}
-                        harnesses={harnesses}
-                        includeAll
-                    />
-                )}
+                <HarnessSelector
+                    current={harness}
+                    // Union the recent-runs discovery list with every harness in
+                    // this window. They cover different slices —
+                    // listRecentHarnesses scans a fixed count of recent runs,
+                    // windowHarnesses is windowed — so a harness that ran once
+                    // three weeks ago gets a chip in the 30d view despite being
+                    // absent from the discovery list, instead of being drawn on
+                    // the chart with no way to isolate it. windowHarnesses is
+                    // captured before the harness filter, so this set does not
+                    // shift when a chip is selected.
+                    harnesses={orderHarnesses([
+                        ...harnesses,
+                        ...overview.windowHarnesses,
+                    ])}
+                    includeAll
+                />
             </div>
 
             <WindowSummary
@@ -221,10 +234,15 @@ export default async function Page({
             />
 
             {/* The analytics block — daily success / turn-budget charts and the
-                colored skill/review/tag rail — is an internal-only surface (see
-                lib/edition.ts). The public OSS edition drops it so the front
-                page is just the run list. */}
-            {isInternal && (
+                colored skill/review/tag rail — renders in EVERY edition. It used
+                to sit behind isInternal, a gate that dated to the initial public
+                release rather than to anything in the block: nothing here is
+                UiPath-specific, it just charts whatever runs the instance is
+                pointed at, so an OSS clone charts its own results and a
+                default-configured instance no longer shows a bare run list.
+                The Harness column in the run table below stays gated separately,
+                so on an OSS instance the chart legend can name a harness that the
+                table does not have a column for. */}
             <section className="border border-gray-200 rounded-lg bg-white p-4 space-y-4">
                 <div>
                     <h2 className="text-sm font-semibold text-gray-900">
@@ -324,7 +342,6 @@ export default async function Page({
                         )}
                 </div>
             </section>
-            )}
 
             <div className="flex items-baseline justify-between gap-3 pt-1">
                 <div className="flex items-baseline gap-3 flex-wrap">

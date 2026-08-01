@@ -9,7 +9,7 @@ import {
     type PerRun,
     type RunListingRow,
 } from "../overview";
-import { normalizeHarness } from "../harness";
+import { normalizeHarness, orderHarnesses } from "../harness";
 import type { RunOverviewTask } from "../runs";
 
 function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
@@ -638,5 +638,89 @@ describe("projectRunRow", () => {
             );
             expect(scoped?.tasks).toHaveLength(2);
         });
+    });
+});
+
+// The switcher's chip set must be STABLE under selection. getOverview feeds it
+// `windowHarnesses`, not `harnesses`: the latter is derived from the FILTERED
+// points, so with `?h=codex` active it collapses to ["codex"] and every other
+// chip would vanish the moment one was selected — stranding the user on a scope
+// they cannot leave without hand-editing the URL. These pin the distinction.
+describe("harnesses vs windowHarnesses", () => {
+    function run(harness: string | null, id = "2026-07-30_00-00-00"): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                harness,
+                tasks: [task({ status: "SUCCESS" })],
+                totalCostUsd: null,
+                taskDurationSeconds: null,
+                componentShas: [],
+            } as unknown as NonNullable<PerRun["overview"]>,
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+        };
+    }
+
+    // The derivation getOverview applies for windowHarnesses: every non-adhoc
+    // run in the window with a readable overview, BEFORE the harness filter.
+    function windowHarnessesOf(runs: PerRun[]): string[] {
+        return orderHarnesses(
+            runs
+                .filter((r) => !r.adhoc && r.overview)
+                .map((r) => normalizeHarness(r.overview!.harness)),
+        );
+    }
+
+    const window = [
+        run("claude-code", "2026-07-28_00-00-00"),
+        run("codex", "2026-07-29_00-00-00"),
+        run("delegate-sdk", "2026-07-30_00-00-00"),
+    ];
+
+    test("windowHarnesses lists every harness in the window", () => {
+        expect(windowHarnessesOf(window)).toEqual([
+            "claude-code",
+            "codex",
+            "delegate-sdk",
+        ]);
+    });
+
+    test("it is IDENTICAL whichever harness is selected — the anti-shift rule", () => {
+        // Contrast the two derivations over the SAME scoped input. The
+        // post-filter one collapses to the selected harness and deletes the
+        // other chips; the pre-filter one is invariant. Comparing the pre-filter
+        // result to itself would be vacuous, so apply the real harness filter
+        // and show only one of the two survives it.
+        const unscoped = windowHarnessesOf(window);
+        expect(unscoped).toHaveLength(3);
+
+        for (const scope of ["claude-code", "codex", "delegate-sdk"]) {
+            const afterHarnessFilter = window.filter(
+                (r) => normalizeHarness(r.overview!.harness) === scope,
+            );
+
+            // What the chips must NOT be built from — collapses to one.
+            expect(windowHarnessesOf(afterHarnessFilter)).toEqual([scope]);
+
+            // What they ARE built from: computed before that filter, so the full
+            // set survives and every chip stays clickable.
+            expect(
+                windowHarnessesOf(window),
+                `chip set shifted when scoped to ${scope}`,
+            ).toEqual(unscoped);
+        }
+    });
+
+    test("a legacy unstamped run folds into claude-code, not a phantom chip", () => {
+        expect(windowHarnessesOf([run(null)])).toEqual(["claude-code"]);
+    });
+
+    test("ad-hoc runs contribute no chip", () => {
+        const adhoc = { ...run("delegate-sdk"), adhoc: true };
+        expect(windowHarnessesOf([run("codex"), adhoc])).toEqual(["codex"]);
     });
 });

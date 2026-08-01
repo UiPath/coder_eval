@@ -84,10 +84,19 @@ export interface TagCount {
 
 export interface OverviewData {
     runs: RunPoint[]; // one point per run, no daily aggregation
-    // The harnesses actually present in `runs`, in stable display order. Drives
-    // the chart's series list and legend, so a harness with no runs in the
-    // window contributes no empty line.
+    // The harnesses actually PLOTTED — present in `runs`, in stable display
+    // order. Drives the chart's series list and legend, so a harness with no
+    // runs in the window contributes no empty line. Derived from the windowed,
+    // FILTERED points, so it always equals the number of lines drawn.
     harnesses: string[];
+    // Every harness present in the window, captured BEFORE the harness filter
+    // and ignoring tag/q. Feeds the switcher, which must offer a stable set:
+    // `harnesses` above collapses to just the active one when `?h=` is set, so
+    // using it for the chips would delete every other chip the moment one was
+    // selected. Also covers the harness that IS charted but is too old to appear
+    // in listRecentHarnesses()' fixed-count discovery scan — that one would
+    // otherwise get a line with no chip to select it.
+    windowHarnesses: string[];
     windowStart: number; // ms — chart x-domain start
     windowEnd: number; // ms — chart x-domain end
     // The summary tiles' rollup, folded over the same runs `runs` plots so the
@@ -558,11 +567,20 @@ export async function getOverview(
     // Ad-hoc runs never feed the daily chart or the tag rails — they're not
     // pipeline cadence. (Non-date-named ones are already pruned upstream by
     // listRunIdsInWindow; this also drops date-named runs flagged adhoc.)
-    const perRun = (await loadWindowData(window)).filter(
+    const windowRuns = (await loadWindowData(window)).filter((r) => !r.adhoc);
+    // Captured BEFORE the harness filter, and deliberately ignoring tag/q: this
+    // is what the switcher offers, so it must not depend on what is currently
+    // selected. Deriving it after the filter would collapse it to the active
+    // harness and make every other chip vanish on selection — stranding the user
+    // on a scope they cannot leave without editing the URL.
+    const windowHarnesses = orderHarnesses(
+        windowRuns
+            .filter((r) => r.overview)
+            .map((r) => normalizeHarness(r.overview!.harness)),
+    );
+    const perRun = windowRuns.filter(
         (r) =>
-            !r.adhoc &&
-            (harness == null ||
-                normalizeHarness(r.overview?.harness) === harness),
+            harness == null || normalizeHarness(r.overview?.harness) === harness,
     );
     const needle = q?.trim().toLowerCase() || null;
 
@@ -610,6 +628,7 @@ export async function getOverview(
     return {
         runs: runPoints,
         harnesses: orderHarnesses(seenHarnesses),
+        windowHarnesses,
         windowStart,
         windowEnd,
         totals: summarizeListing(rows),
@@ -903,8 +922,21 @@ export function buildAdhocRows(
 // not the id, so we can't window by id and still show the most recent): the
 // ad-hoc set is small by construction (manual uploads only) and per-run reads
 // are memoized for 5 min, so a warm front page pays no extra IO.
-export async function getAdhocRunListing(limit: number | null): Promise<AdhocListing> {
+export async function getAdhocRunListing(
+    limit: number | null,
+    // Scoped by the same `?h=` as the rest of the page: an ad-hoc run carries a
+    // harness stamp like any other, and this section has no Harness column, so
+    // leaving it unfiltered would show codex uploads under a Claude Code scope
+    // with nothing on screen to explain why.
+    harness: string | null = null,
+): Promise<AdhocListing> {
     const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) == null);
     const perRun = await mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
-    return buildAdhocRows(perRun, limit);
+    const scoped =
+        harness == null
+            ? perRun
+            : perRun.filter(
+                  (r) => normalizeHarness(r.overview?.harness) === harness,
+              );
+    return buildAdhocRows(scoped, limit);
 }

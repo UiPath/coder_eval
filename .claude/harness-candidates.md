@@ -107,3 +107,60 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
+
+## From 2026-07-30 evalboard pricing SSOT + multi-harness charts
+
+- [ ] **CI never runs the `evalboard/` test suite — the highest-value gap here.**
+  `grep -rn evalboard .github/workflows/ .pre-commit-config.yaml Makefile` yields
+  exactly one hit: a comment in `pr-checks.yml` saying `evalboard/pnpm-lock.yaml`
+  is *out of scope*. `pnpm verify` (`tsc --noEmit && vitest run && next build`)
+  exists in `evalboard/package.json` but nothing invokes it. Consequence: the
+  pricing drift guard that the whole generated-SSOT design rests on is never
+  executed. A Python dev edits a rate in `src/coder_eval/pricing.py`, never opens
+  `evalboard/`, and the PR goes green while every rendered USD figure keeps the
+  stale rate — precisely how the 7 wrong rates (Opus 4.6/4.7/4.8 at 3× actual)
+  accumulated in the first place. Flagged independently by two reviewers.
+  *Not done here because adding a required check to `pr-checks.yml` is a repo-wide
+  CI-policy change affecting every contributor's PR, outside a plan scoped to
+  `evalboard/`.* Ready to apply: a job mirroring the existing `setup-node` steps
+  (`pnpm install --frozen-lockfile` + `pnpm verify` with `working-directory:
+  evalboard`), ideally non-blocking first. Alternatively a Python-side CExxx rule
+  asserting `lib/pricing.generated.ts` is current, which would put the guard on
+  the side that actually edits rates.
+- [ ] **One shared normalizer fixture for `normalizeModel` (TS) and
+  `_normalize_model` (Python).** Both strip the same routing/region/vendor
+  prefixes, but TS additionally strips a trailing `-YYYYMMDD` and Python does not
+  — so `claude-opus-4-6-20250514` prices in the evalboard and is unpriced in the
+  backend, and the frontend estimate can disagree with the backend's
+  authoritative Cost for dated ids. Neither side's tests can see the other, and
+  the generated table does not close this: generation shares the rate *values*,
+  not the *lookup* logic. Needs a decision on which behaviour is the reference
+  before a fixture can be written. Note also that plugin rates registered via
+  `register_pricing` (e.g. `coder_eval_uipath`) can never reach the generated
+  table at all, since the generator parses `pricing.py`'s literal table only.
+- [ ] **No test can see `app/page.tsx`'s self-link scope threading.** `hParam`,
+  `base` and `buildHref` are module-private inside an async server component and
+  there is no test for that file. A future self-link spelled `buildHref({ tag })`
+  silently resets the user's harness scope with the whole suite green — now that
+  `?h=` scopes the charts, the tiles, the run table *and* the ad-hoc section,
+  dropping it is a bigger jump than it was when it only re-scoped the chart.
+  Guarding it means extracting `buildHref` + a `selfLinkBase` helper into a
+  testable module.
+- [ ] **"Any chart with ≥2 series must have a hover-attribution test."** Nothing
+  in the suite mounted a chart tooltip before the multi-harness work, which is
+  how two real misattribution bugs survived a spec review: recharts silently
+  ignores `shared={false}` on `LineChart`, and with the default
+  `allowDuplicatedCategory` each `<Line>` indexes its own points with an index
+  into the concatenation of all series. `app/_overview/__tests__/harness-legend.test.tsx`
+  now covers the two overview charts (hovered-x attribution, real zeros, unknown
+  series keys), but that is one test file by convention, not a rule — nothing
+  enforces it for the next multi-series chart someone adds.
+- [ ] **Nothing checks that the frontend rate table's deliberate omissions stay
+  deliberate.** `EXCLUDED_MODELS` in `evalboard/scripts/gen-pricing.mjs` withholds
+  the OpenRouter open-weight ids because they are routed per-request and shown at
+  captured actual cost, so a static headline rate would be confidently wrong.
+  That set is guarded in both directions today (a stale entry throws; a
+  reintroduced static rate fails `pricing-parity.test.ts`), but only *within*
+  `evalboard/`. The Python side has no matching notion — `pricing.py` prices them
+  for the `max_usd` fallback with nothing recording that the board must not — so
+  the rationale lives in a JS comment a Python-side reprice will never surface.
