@@ -409,6 +409,171 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
 
 
+class FlagMatch(BaseModel):
+    """Predicate for ONE flag value within :class:`CliCalledCriterion`.
+
+    Exactly one predicate field may be set. In YAML a bare scalar is accepted as
+    shorthand for ``equals`` (``model: gemini_2_5_pro`` == ``model: {equals:
+    gemini_2_5_pro}``), which keeps the common case unnested.
+
+    ``absent: true`` asserts the flag was NOT passed — distinct from "passed with
+    a different value", and the reason this is a predicate rather than a bare
+    ``dict[str, str]`` on the criterion.
+
+    The one-predicate rule means a conjunction on a single flag ("contains BOTH
+    A and B") is not expressible here. Either declare two ``cli_called`` criteria
+    over the same log, or use one ``matches_regex`` that spans both — the latter
+    is what a heredoc-built JSON payload usually wants, together with
+    ``flags: 16`` (``re.DOTALL``) so ``.`` crosses the payload's newlines.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    equals: str | None = Field(default=None, description="Flag value must equal this string exactly")
+    contains: str | None = Field(default=None, description="Flag value must contain this substring")
+    matches_regex: str | None = Field(
+        default=None,
+        description="Flag value must match this regex. Scoped to ONE value, unlike a whole-line pattern",
+    )
+    any_of: list[str] | None = Field(default=None, description="Flag value must equal one of these strings")
+    absent: bool = Field(default=False, description="Flag must NOT be present in the invocation")
+    flags: int = Field(
+        default=0,
+        description=(
+            "Regex flags for matches_regex (e.g. re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16), "
+            "mirroring FileMatchesRegexCriterion.flags. DOTALL is the usual need: a flag value built "
+            "from a heredoc spans lines, and without it `.` stops at the first newline"
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_scalar_shorthand(cls, value: Any) -> Any:
+        """Accept ``model: gemini_2_5_pro`` as ``model: {equals: ...}``."""
+        if isinstance(value, str):
+            return {"equals": value}
+        return value
+
+    @model_validator(mode="after")
+    def _exactly_one_predicate(self) -> FlagMatch:
+        set_predicates = [
+            name for name in ("equals", "contains", "matches_regex", "any_of") if getattr(self, name) is not None
+        ]
+        if self.absent:
+            set_predicates.append("absent")
+        if len(set_predicates) != 1:
+            msg = (
+                "FlagMatch requires exactly one of equals / contains / matches_regex / any_of / absent, "
+                f"got {sorted(set_predicates) or 'none'}"
+            )
+            raise ValueError(msg)
+        # `flags` only reaches re.compile via matches_regex; setting it beside any
+        # other predicate is a silent no-op, so reject it rather than mislead.
+        if self.flags and self.matches_regex is None:
+            msg = f"FlagMatch.flags applies only to matches_regex, but the predicate is {set_predicates[0]!r}"
+            raise ValueError(msg)
+        return self
+
+
+class CliCalledCriterion(BaseSuccessCriterion):
+    """Check whether a CLI invocation matching a structured pattern was recorded.
+
+    Reads a **structured invocation log** the sandbox produced: JSON Lines, one
+    object per invocation, each with at minimum an ``argv`` list. A test harness
+    that shadows a CLI with a recording mock writes this log; this criterion
+    matches against it field-by-field instead of regexing a flattened command
+    string.
+
+    Record schema (extra keys ignored)::
+
+        {"argv": ["ixp", "projects", "get", "proj-1", "--output", "json"],
+         "tool": "uip", "exit": 1, "ts": 1785416844.987}
+
+    Only ``argv`` is required. ``tool`` enables one log to serve several shadowed
+    executables; ``exit`` and ``ts`` are recorded for reporting, not matched.
+
+    Why not ``file_matches_regex`` over a flattened log line: a flat line cannot
+    express "verb X was called AND flag Y had value Z" without stacked
+    lookaheads, cannot tell a quoted argument containing spaces from two
+    arguments, and cannot stop a match from running across shell operators.
+
+    Pure data model - checking logic in CliCalledChecker._check_impl()
+
+    Example YAML (positive — flag value must match)::
+
+        success_criteria:
+          - type: "cli_called"
+            description: "Switched the project to the capable model"
+            log: "mocks/calls.jsonl"
+            verb: "ixp projects configure-model"
+            positional: ["my_invoices-f1afa9ef-ixp"]
+            flags:
+              model: "gemini_2_5_pro"
+            min_count: 1
+
+    Example YAML (negative — must NOT have been called; ``max_count: 0``)::
+
+        success_criteria:
+          - type: "cli_called"
+            description: "Did not use --corrections to flip a boolean field"
+            log: "mocks/calls.jsonl"
+            verb: "ixp labellings confirm"
+            flags:
+              corrections: {contains: "f-100"}
+            max_count: 0
+    """
+
+    type: Literal["cli_called"] = "cli_called"
+    log: str = Field(description="Path to the JSON Lines invocation log, relative to the sandbox working directory")
+    verb: str | None = Field(
+        default=None,
+        description=(
+            "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the "
+            "invocation's non-flag arguments (e.g. 'ixp projects configure-model'). "
+            "Order matters, so 'labellings confirm' never matches 'labellings unconfirm'"
+        ),
+    )
+    tool: str | None = Field(
+        default=None,
+        description="Match only records whose 'tool' equals this (e.g. 'uip'). None matches any tool",
+    )
+    positional: list[str] | None = Field(
+        default=None,
+        description="Non-flag arguments that must follow the verb, in order",
+    )
+    flags: dict[str, FlagMatch] | None = Field(
+        default=None,
+        description=(
+            "Flag name (without leading dashes) to predicate. A bare scalar means 'equals'. "
+            "Flags not listed here are ignored, so an extra --output json never breaks a match"
+        ),
+    )
+    min_count: int = Field(default=1, ge=0, description="Minimum number of matching invocations")
+    max_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="Maximum number of matching invocations. None means no upper bound; 0 forbids the call",
+    )
+    ignore_flags: list[str] = Field(
+        default_factory=lambda: ["output"],
+        description=(
+            "Flag names dropped from an invocation before matching, because they never change WHICH "
+            "resource it addresses. Defaults to ['output'] so grading never depends on --output json, "
+            "which is outcome-invisible. Pass [] to disable"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> CliCalledCriterion:
+        if self.max_count is not None and self.max_count < self.min_count:
+            msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
+            raise ValueError(msg)
+        if self.verb is None and not self.positional and not self.flags and self.tool is None:
+            msg = "cli_called requires at least one of verb / positional / flags / tool to match on"
+            raise ValueError(msg)
+        return self
+
+
 class RegexPattern(BaseModel):
     """A single regex pattern check within FileCheckCriterion."""
 
@@ -1161,6 +1326,7 @@ SuccessCriterion = Annotated[
     | JsonCheckCriterion
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
+    | CliCalledCriterion
     | CommandsEfficiencyCriterion
     | UiPathEvalCriterion
     | ClassificationMatchCriterion

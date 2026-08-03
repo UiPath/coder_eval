@@ -37,6 +37,7 @@ MINIMAL_PAYLOADS: dict[str, dict] = {
     "json_check": {"description": "d", "path": "f.json"},
     "reference_comparison": {"description": "d", "agent_file": "f.py"},
     "command_executed": {"description": "d"},
+    "cli_called": {"description": "d", "log": "calls.jsonl", "verb": "ixp projects get"},
     "commands_efficiency": {"description": "d", "expected_commands": 3},
     "uipath_eval": {"description": "d", "agent_name": "a", "eval_set": "e", "thresholds": {"accuracy": 0.8}},
     "classification_match": {

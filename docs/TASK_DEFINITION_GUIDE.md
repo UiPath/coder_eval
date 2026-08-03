@@ -28,6 +28,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
   - [file_matches_regex](#file_matches_regex)
   - [reference_comparison](#reference_comparison)
   - [command_executed](#command_executed)
+  - [cli_called](#cli_called)
   - [uipath_eval](#uipath_eval)
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
@@ -620,7 +621,7 @@ All criteria share these fields:
 | `stop_early` | `null` | **Only on live-observable criteria** (`skill_triggered`, `command_executed`). Presence arms the criterion for early stop (no run-level switch needed): an effective fail may end the run (weighted ceiling rule, recall deferral). Keys: `on_pass: stop\|continue` (default `continue`), `decide_within: N` (timeout → effective fail, reported as `decision_budget_exceeded`). Inert triggers by design on instances that can't decide their polarity (dataset fan-out support). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
-- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `classification_match`, `skill_triggered`
+- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `cli_called`, `classification_match`, `skill_triggered`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
 - **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`
 
@@ -841,6 +842,63 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 ```
 
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
+
+### `cli_called`
+
+Checks whether a CLI invocation matching a **structured** pattern was recorded, by reading a JSON Lines invocation log the sandbox produced. **Binary scoring.**
+
+Use this instead of `command_executed` or `file_matches_regex` when a test shadows a CLI with a recording mock and needs to assert on *what was actually executed*, field by field.
+
+```yaml
+- type: "cli_called"
+  description: "Switched the project to the capable model"
+  log: "mocks/calls.jsonl"            # Path to the JSON Lines invocation log (required)
+  verb: "ixp projects configure-model" # Ordered prefix of the non-flag arguments
+  positional: ["my_invoices-ixp"]      # Non-flag arguments following the verb, in order
+  flags:
+    model: "gemini_2_5_pro"            # Bare scalar == {equals: ...}
+  tool: "uip"                          # Optional: match only records with this tool
+  min_count: 1                         # Minimum matching invocations (default: 1)
+  max_count: null                      # Maximum; null = unbounded, 0 = forbidden
+  ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
+```
+
+**Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
+
+```json
+{"ts": 1785416844.987, "tool": "uip", "argv": ["ixp", "projects", "get", "proj-1"], "exit": 1}
+```
+
+**Flag predicates.** Each entry under `flags:` takes **exactly one** of:
+
+| Predicate | Matches when the flag value… |
+|-----------|------------------------------|
+| `equals` | equals the string exactly (the bare-scalar shorthand) |
+| `contains` | contains the substring |
+| `matches_regex` | matches the regex — scoped to one value, not the whole line |
+| `any_of` | equals one of the listed strings |
+| `absent: true` | the flag was **not** passed at all |
+
+`matches_regex` also accepts `flags:` (the `re` module's integers, e.g. `2` = `IGNORECASE`, `8` = `MULTILINE`, `16` = `DOTALL`), mirroring [`file_matches_regex`](#file_matches_regex). Setting `flags` next to any other predicate is rejected rather than silently ignored.
+
+Flags the criterion does not mention are ignored, so an extra `--output json` never breaks a match. Repeated flags (`--fields a --fields b`) are satisfied by any one value.
+
+**One predicate per flag** — so a conjunction on a single flag ("contains *both* A and B") is not expressible directly. Two ways to write it:
+
+```yaml
+# 1. One matches_regex spanning both. DOTALL (16) is usually needed: a payload
+#    built with a heredoc contains newlines, and without it `.` stops at the first.
+flags:
+  updates:
+    matches_regex: '"name": "Invoice Number".*Do NOT use the Purchase Order'
+    flags: 16
+
+# 2. Or two criteria over the same log, which scores and reports each part separately.
+```
+
+**Negative guards.** Set `min_count: 0` and `max_count: 0` to assert a call did **not** happen. A missing log file *fails* rather than counting as zero matches — otherwise a mock writing to the wrong path would make every negative guard pass vacuously.
+
+**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`.
 
 ### `commands_efficiency`
 
