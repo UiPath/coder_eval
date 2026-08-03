@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RunLimits(BaseModel):
@@ -92,12 +94,63 @@ class RunLimits(BaseModel):
         description=(
             "Opt-in master switch for early-stop-on-criterion. When True, the run ends early "
             "once the armed criteria (those with stop_when set, incl. per-instance 'auto') "
-            "are decided mid-run: pass-stop when every pass-armed criterion live-passes, "
-            "fail-stop on the first fail-armed live-fail (deferred while any pass-armed "
-            "criterion is undecided, so a misfire never truncates the recall signal) - so a "
-            "raised max_turns is not wasted once the measured signal has happened. Default "
-            "False keeps behavior identical. Requires a Claude single-shot task with at least "
-            "one observable armed criterion; every unsupported combination is rejected at "
-            "resolution time."
+            "are decided mid-run: pass-stop when the armed subset's weighted score is "
+            "GUARANTEED to reach stop_early_gate_threshold regardless of any criterion still "
+            "undecided, fail-stop when it is GUARANTEED it never can (deferred while any "
+            "pass-armed criterion is undecided, so a misfire never truncates the recall "
+            "signal) - so a raised max_turns is not wasted once the outcome is locked in. "
+            "Default False keeps behavior identical. Requires a Claude single-shot task with "
+            "at least one observable armed criterion; every unsupported combination is "
+            "rejected at resolution time."
         ),
     )
+    stop_early_gate_threshold: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum weighted score (Σ weight_i·score_i / Σ weight_i, over the ARMED subset "
+            "only) required for an early-stopped run to gate as a pass. Also the bound "
+            "early-stop's trigger checks against: a fail-stop fires once no combination of "
+            "still-undecided armed criteria could raise the weighted score to this "
+            "threshold; a pass-stop fires once it is already guaranteed to meet it regardless "
+            "of what's still undecided. Default 1.0 reproduces the pre-weighting behavior "
+            "exactly (every armed criterion's live-observable score is binary 0/1, so a "
+            "weighted score of 1.0 requires every armed criterion to have actually passed) - "
+            "lowering it lets a low-weight armed criterion's failure be absorbed without "
+            "truncating the run, at the cost of the gate/trigger becoming a genuine weighted "
+            "average rather than a strict AND."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_stop_early_gate_threshold(self) -> Self:
+        """Reject a dead or degenerate ``stop_early_gate_threshold``.
+
+        Two hard errors, matching the "never a silent no-op" posture the rest
+        of early-stop resolution already holds itself to:
+
+        - Non-default with ``stop_early: False``: the field is read only
+          inside the orchestrator's ``early_stop is not None`` branch, so it
+          has zero effect while ``stop_early`` is off — a silent no-op rather
+          than the "unsupported combination is a hard error" contract.
+        - ``<= 0.0`` with ``stop_early: True``: a threshold of exactly 0
+          trivially satisfies both the pass-stop floor check and the final
+          weighted gate regardless of whether any armed criterion has
+          actually decided — a task author could neutralize the entire
+          armed pass/fail gate with one YAML line (coder-eval is used as a
+          CI gate). Kept as a validator rather than a stricter field bound
+          because the floor depends on ``stop_early``.
+        """
+        if not self.stop_early and self.stop_early_gate_threshold != 1.0:
+            raise ValueError(
+                "run_limits.stop_early_gate_threshold is set but run_limits.stop_early is "
+                + "False; the threshold has no effect unless stop_early is also True."
+            )
+        if self.stop_early and self.stop_early_gate_threshold <= 0.0:
+            raise ValueError(
+                "run_limits.stop_early_gate_threshold must be > 0.0 when stop_early is True "
+                + "(a threshold of 0 trivially passes the armed gate regardless of whether any "
+                + "armed criterion actually decided)."
+            )
+        return self

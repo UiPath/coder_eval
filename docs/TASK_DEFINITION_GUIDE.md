@@ -260,6 +260,7 @@ run_limits:
 | `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | `false` | — | Opt-in master switch for early-stop-on-criterion. See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` | Minimum weighted score over the armed subset required to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
 a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
@@ -390,6 +391,56 @@ Semantics:
   authoritative precision/recall belongs on the `stop_early: false` run.
 - **Fail-safe.** A live-verdict bug **fails open** to a full run (logged loudly) —
   it can never silently disable a criterion or cause a false early stop.
+- **Weighting.** `run_limits.stop_early_gate_threshold` (default `1.0`) is the
+  minimum weighted score (`Σ weight·score / Σ weight`, over the armed subset)
+  required to gate as a pass — both for the post-hoc verdict and for the live
+  stop rule itself. A fail-stop fires once the armed subset's **ceiling** (best
+  case: every still-undecided or already-passed criterion ends up scoring 1.0,
+  every live-failed one scores 0) can no longer reach the threshold — the gate
+  is mathematically guaranteed to fail regardless of how the trajectory
+  continues. A pass-stop fires once the pass-armed subset's **floor** (worst
+  case: every still-undecided one scores 0) already meets it. At the default
+  `1.0` both bounds collapse to the pre-weighting rules above exactly (any
+  single armed criterion's live-fail already drops the ceiling below 1.0, and
+  the floor only reaches 1.0 once every pass-armed criterion has actually
+  passed) — lowering it lets a low-weight armed criterion's failure be absorbed
+  without truncating the run, at the cost of the gate becoming a genuine
+  weighted average rather than a strict AND. **This weighting applies only
+  when the watcher itself fires the stop.** If a `stop_early: true` task
+  instead completes naturally (the agent finishes, or `max_turns` is hit,
+  before the bound ever trips), the run falls back to the ordinary full-run
+  gate (`all_criteria_passed`) — a strict `all(score >= pass_threshold)` over
+  every gating criterion, where `weight` magnitude plays no role beyond the
+  `weight: 0` informational exemption. Whether a low-weight criterion's
+  failure gets forgiven can therefore depend on whether the watcher actually
+  fired, not solely on the configured threshold — write `max_steps_to_decide`
+  or a tight `max_turns` if you need the weighted gate to be the one that
+  always applies.
+- **Decision-step budget.** `max_steps_to_decide` (per armed criterion, only
+  on `skill_triggered` / `command_executed`, requires `stop_when`) caps how
+  many tool-call steps that criterion may spend still **undecided** before the
+  run gives up on it:
+
+  ```yaml
+  success_criteria:
+    - type: skill_triggered
+      description: "date-teller must activate within 5 steps"
+      skill_name: date-teller
+      expected_skill: date-teller
+      stop_when: pass
+      max_steps_to_decide: 5
+  ```
+
+  Once the cap is exceeded (checked AFTER the normal fail-/pass-stop checks
+  each round, so a criterion that decides on that very step is never
+  penalized), the watcher fires `reason: decision_budget_exceeded` and the run
+  is forced to `FinalStatus.FAILURE` outright — bypassing
+  `stop_early_gate_threshold`'s weighted gate entirely, since a criterion that
+  never reached a verdict has nothing meaningful to weigh against the others.
+  `None` (default) = no cap; the run relies solely on `run_limits.max_turns`.
+  The step count is **cumulative across every retry attempt** of the turn —
+  including an attempt that crashed or timed out before this criterion's own
+  investigation even began — so size the budget with that headroom in mind.
 
 Observability (every early-stopped run is flagged everywhere so analysis never
 compares a truncated run against a full one):
@@ -535,6 +586,7 @@ All criteria share these fields:
 | `weight` | 1.0 | Relative importance for weighted score. `0` = **informational**: excluded from both the score and the pass/fail gate |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
 | `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`/`auto`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). `auto` arms whichever polarity this instance can decide (for dataset-fanned criteria whose positive/distractor role flips per row). See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `max_steps_to_decide` | `null` | **Only on live-observable criteria** (`skill_triggered`, `command_executed`) — requires `stop_when` to be set. Caps the tool-call steps this armed criterion may spend still undecided before the run gives up and force-fails. See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `classification_match`, `skill_triggered`

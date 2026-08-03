@@ -417,11 +417,17 @@ class EarlyStopReason(StrEnum):
     ``EvaluationResult`` carries it and ``models/`` is a leaf package that
     cannot import from ``simulation``. ``DialogStopReason`` is a stylistic
     reference only. Early-stop is orthogonal telemetry, NOT a ``FinalStatus`` —
-    the terminal-status set stays closed.
+    the terminal-status set stays closed — with ONE deliberate exception:
+    ``DECISION_BUDGET_EXCEEDED`` forces ``FinalStatus.FAILURE`` directly at the
+    orchestrator finalize step (``orchestrator.py``), bypassing
+    ``armed_criteria_passed``'s weighted gate entirely — the criterion whose
+    budget expired never reached a verdict at all, so there is nothing
+    meaningful to weigh it against.
     """
 
     CRITERION_PASSED = "criterion_passed"
     CRITERION_FAILED = "criterion_failed"
+    DECISION_BUDGET_EXCEEDED = "decision_budget_exceeded"
 
 
 class EarlyStopInfo(BaseModel):
@@ -434,7 +440,10 @@ class EarlyStopInfo(BaseModel):
     the round-trip is safe.
     """
 
-    reason: EarlyStopReason = Field(description="Why the run stopped: armed criteria passed, or definitively failed.")
+    reason: EarlyStopReason = Field(
+        description="Why the run stopped: armed criteria passed, definitively failed, or an armed "
+        + "criterion's decision-step budget (max_steps_to_decide) expired unresolved."
+    )
     deciding_criterion_type: str = Field(
         description="Type of the criterion whose live verdict fired the stop (the failing one on "
         + "fail-stop; the last-to-pass on pass-stop)."
@@ -462,6 +471,12 @@ class EarlyStopInfo(BaseModel):
         default=None,
         description="max_turns - sdk_turn_index (an upper bound on turns avoided, not a measured "
         + "saving); None when max_turns is unset.",
+    )
+    gate_threshold: float = Field(
+        default=1.0,
+        description="run_limits.stop_early_gate_threshold in effect for this stop — captured so a "
+        + "persisted task.json is self-describing (e.g. comparing early-stopped runs across an "
+        + "experiment sweep that varies the threshold) without needing the resolved task config.",
     )
 
 
@@ -654,8 +669,8 @@ class EvaluationResult(BaseModel):
             if c.is_gating
         )
 
-    def armed_criteria_passed(self, criteria: list[SuccessCriterion]) -> bool:
-        """True iff every ARMED criterion (``stop_when`` set) meets its pass_threshold.
+    def armed_criteria_passed(self, criteria: list[SuccessCriterion], gate_threshold: float = 1.0) -> bool:
+        """True iff the ARMED subset's weighted score meets ``gate_threshold``.
 
         The early-stop gate: on an early-stopped run only the armed subset gates
         ``final_status`` (non-armed criteria are advisory — recorded but never
@@ -667,6 +682,13 @@ class EvaluationResult(BaseModel):
         is a defensive guard against misuse. No ``is_gating`` filter is needed
         here: ``BaseSuccessCriterion`` rejects ``weight: 0`` together with
         ``stop_when``, so every armed criterion is gating by construction.
+
+        ``gate_threshold`` defaults to 1.0, which reproduces the pre-weighting
+        ``all(r.score >= c.pass_threshold)`` behavior exactly for the only
+        live-observable criteria (binary 0/1 scores) — a weighted average of 1.0
+        requires every armed criterion to have scored a full 1.0. Callers pass
+        ``run_limits.stop_early_gate_threshold`` to opt into a genuine weighted
+        average below 1.0.
         """
         if len(self.success_criteria_results) != len(criteria):
             raise ValueError(
@@ -681,7 +703,19 @@ class EvaluationResult(BaseModel):
                 f"armed_criteria_passed called with no armed criteria for task {self.task_id}; "
                 + "the early-stop gate is only valid when at least one criterion sets stop_when."
             )
-        return all(r.score >= c.pass_threshold for r, c in armed)
+        total_weight = sum(c.weight for _, c in armed)
+        if total_weight <= 0.0:
+            # Unreachable today (weight=0 + stop_when is rejected at the model
+            # layer, so every armed criterion carries weight > 0) — but a
+            # defensive guard on a pass/fail gate must fail CLOSED, not open,
+            # against a future criterion subclass that bypasses that
+            # validator. Mirrors EarlyStopWatcher._ceiling's lack of an
+            # equivalent guard: that one would raise ZeroDivisionError instead
+            # (fails by crashing, not by silently passing) rather than diverge
+            # toward a false pass.
+            return False
+        weighted_score = sum(r.score * c.weight for r, c in armed) / total_weight
+        return weighted_score >= gate_threshold
 
 
 class CriterionStats(BaseModel):

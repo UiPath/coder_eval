@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 from coder_eval.criteria._classification_aggregate import overlay_classification_metrics
 from coder_eval.criteria.base import BaseCriterion, LiveVerdict, register_criterion
@@ -114,8 +114,9 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
     # criterion live-passes when its expected skill is engaged, a
     # distractor/negative one live-fails when its (wrong) skill is engaged — but
     # any single INSTANCE decides only one of the two; see
-    # ``live_decidable_polarities``.
-    live_stop_polarities: ClassVar[frozenset[str]] = frozenset({"pass", "fail"})
+    # ``SkillTriggeredCriterion.live_decidable_polarities`` (models/criteria.py).
+    # "Is this criterion type live-observable" is now the model's
+    # ``LiveSuccessCriterion`` subclassing, not a checker-side ClassVar.
 
     def _check_impl(
         self,
@@ -179,36 +180,14 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
         frozen trajectory by construction — whether or not the run stopped early.
         A positive criterion can therefore only ever live-``pass`` and a
         distractor/negative one only ever live-``fail``; their *absence* is never
-        decidable mid-run (see ``live_decidable_polarities``). This is the change
-        from first-engagement: a wrong skill engaged first no longer live-fails a
-        positive row — the run keeps going so the expected skill can still load.
+        decidable mid-run (see ``SkillTriggeredCriterion.live_decidable_polarities``
+        in models/criteria.py). This is the change from first-engagement: a wrong
+        skill engaged first no longer live-fails a positive row — the run keeps
+        going so the expected skill can still load.
         """
         if criterion.skill_name not in _all_engaged_skill_names(turn_records):
             return "undecided"
         return "pass" if criterion.expected_skill == criterion.skill_name else "fail"
-
-    @classmethod
-    def live_decidable_polarities(cls, criterion: SkillTriggeredCriterion) -> frozenset[str]:
-        """Per-instance narrowing under the any-engagement latch.
-
-        Unlike the type-level capability (``live_stop_polarities`` = both), a
-        single instance decides exactly one polarity:
-
-        - a **positive** criterion (``skill_name == expected_skill``) can only
-          live-``pass`` (the expected skill engaging is a decidable hit; its
-          absence is not knowable mid-run);
-        - a **distractor/negative** criterion (``skill_name != expected_skill``,
-          including the ``expected_skill == ""`` negatives) can only
-          live-``fail`` (a wrong skill engaging is a decidable miss; its absence
-          is not).
-
-        ``validate_early_stop`` gates the requested ``stop_when`` on this set, so
-        arming a positive with ``fail`` / a distractor with ``pass`` — or either
-        with ``decided`` (which needs both) — is rejected at resolution rather
-        than silently degrading to a full run.
-        """
-        expected_yes = criterion.expected_skill == criterion.skill_name
-        return frozenset({"pass"}) if expected_yes else frozenset({"fail"})
 
     def aggregate(
         self,

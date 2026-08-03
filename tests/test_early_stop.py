@@ -1,7 +1,7 @@
 """Tests for early-stop-on-criterion (phases 1-3).
 
 Phase 1 (config + contract): the two new opt-in config fields, the
-``live_verdict`` / ``live_stop_polarities`` observability contract on the two
+``live_verdict`` / ``LiveSuccessCriterion`` observability contract on the two
 observable criteria, and ``validate_early_stop``'s guardrails on both the
 ``plan`` and ``run`` surfaces.
 
@@ -40,7 +40,6 @@ from coder_eval.agents.codex_agent import CodexAgent, _CodexTurnState
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.cli.plan_command import plan_command
 from coder_eval.criteria import CriterionRegistry, init_criteria
-from coder_eval.criteria.base import BaseCriterion
 from coder_eval.criteria.command_executed import CommandExecutedChecker
 from coder_eval.criteria.skill_triggered import SkillTriggeredChecker, _engaged_skill_names
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
@@ -57,6 +56,7 @@ from coder_eval.models import (
     ExperimentVariant,
     FileExistsCriterion,
     FinalStatus,
+    LiveSuccessCriterion,
     RunLimits,
     RunSummary,
     SandboxConfig,
@@ -152,18 +152,35 @@ def dummy_no_stop_kind() -> Iterator[str]:
         AgentRegistry._registry.pop(kind, None)
 
 
-def _skill_crit(skill_name: str, expected_skill: str, *, stop_when: str | None = None) -> SkillTriggeredCriterion:
+def _skill_crit(
+    skill_name: str,
+    expected_skill: str,
+    *,
+    stop_when: str | None = None,
+    weight: float = 1.0,
+    max_steps_to_decide: int | None = None,
+    pass_threshold: float = 0.9,
+) -> SkillTriggeredCriterion:
     return SkillTriggeredCriterion(
         type="skill_triggered",
         description=f"{skill_name} activation",
         skill_name=skill_name,
         expected_skill=expected_skill,
         stop_when=stop_when,  # type: ignore[arg-type]
+        weight=weight,
+        max_steps_to_decide=max_steps_to_decide,
+        pass_threshold=pass_threshold,
     )
 
 
 def _cmd_crit(
-    *, min_count: int = 1, max_count: int | None = None, pattern: str | None = "curl", stop_when: str | None = None
+    *,
+    min_count: int = 1,
+    max_count: int | None = None,
+    pattern: str | None = "curl",
+    stop_when: str | None = None,
+    weight: float = 1.0,
+    max_steps_to_decide: int | None = None,
 ) -> CommandExecutedCriterion:
     return CommandExecutedCriterion(
         type="command_executed",
@@ -173,6 +190,8 @@ def _cmd_crit(
         min_count=min_count,
         max_count=max_count,
         stop_when=stop_when,  # type: ignore[arg-type]
+        weight=weight,
+        max_steps_to_decide=max_steps_to_decide,
     )
 
 
@@ -262,6 +281,30 @@ class TestConfigSurface:
     def test_stop_early_settable(self) -> None:
         assert RunLimits(stop_early=True).stop_early is True
 
+    def test_gate_threshold_out_of_bounds_rejected(self) -> None:
+        with pytest.raises(ValueError, match="less than or equal to 1"):
+            RunLimits(stop_early=True, stop_early_gate_threshold=1.5)
+        with pytest.raises(ValueError, match="greater than or equal to 0"):
+            RunLimits(stop_early=True, stop_early_gate_threshold=-0.1)
+
+    def test_gate_threshold_nondefault_without_stop_early_rejected(self) -> None:
+        # A non-default threshold is a silent no-op unless stop_early is also
+        # True (the orchestrator only reads it inside the early_stop-fired
+        # branch) — reject it as a dead-config hard error, not a silent no-op.
+        with pytest.raises(ValueError, match="stop_early is False"):
+            RunLimits(stop_early=False, stop_early_gate_threshold=0.7)
+
+    def test_gate_threshold_zero_with_stop_early_rejected(self) -> None:
+        # A threshold of exactly 0 trivially satisfies the pass-stop floor and
+        # the final weighted gate regardless of whether anything decided —
+        # neutralizing the armed pass/fail gate outright.
+        with pytest.raises(ValueError, match=r"must be > 0\.0"):
+            RunLimits(stop_early=True, stop_early_gate_threshold=0.0)
+
+    def test_gate_threshold_default_is_valid_either_way(self) -> None:
+        assert RunLimits(stop_early=False).stop_early_gate_threshold == 1.0
+        assert RunLimits(stop_early=True).stop_early_gate_threshold == 1.0
+
     def test_stop_when_defaults_none(self) -> None:
         assert _skill_crit("s", "s").stop_when is None
 
@@ -280,6 +323,22 @@ class TestConfigSurface:
         restored = SkillTriggeredCriterion.model_validate_json(crit.model_dump_json())
         assert restored.stop_when == "auto"
         assert "stop_when" in restored.model_fields_set
+
+    def test_max_steps_to_decide_defaults_none(self) -> None:
+        assert _skill_crit("s", "s", stop_when="pass").max_steps_to_decide is None
+
+    def test_max_steps_to_decide_requires_stop_when(self) -> None:
+        with pytest.raises(ValueError, match="max_steps_to_decide requires stop_when"):
+            _skill_crit("s", "s", max_steps_to_decide=5)
+
+    def test_max_steps_to_decide_allowed_with_stop_when(self) -> None:
+        crit = _skill_crit("s", "s", stop_when="pass", max_steps_to_decide=5)
+        assert crit.max_steps_to_decide == 5
+
+    def test_max_steps_to_decide_requires_stop_when_command_executed(self) -> None:
+        # The other LiveSuccessCriterion subclass — same validator, same error.
+        with pytest.raises(ValueError, match="max_steps_to_decide requires stop_when"):
+            _cmd_crit(max_steps_to_decide=5)
 
 
 # --------------------------------------------------------------------------- #
@@ -360,18 +419,14 @@ class TestSkillTriggeredLiveVerdict:
         rec = [_turn(_cmd("Skill", {"skill": "wrong"}), _cmd("Skill", {"skill": "date-teller"}))]
         assert self.checker.live_verdict(crit, rec) == "pass"
 
-    def test_polarities_declared(self) -> None:
-        assert SkillTriggeredChecker.live_stop_polarities == frozenset({"pass", "fail"})
+    def test_is_live_success_criterion(self) -> None:
+        assert isinstance(_skill_crit("date-teller", "date-teller"), LiveSuccessCriterion)
 
     def test_decidable_narrows_per_instance(self) -> None:
         # A positive instance decides only pass; a distractor/negative only fail.
-        assert SkillTriggeredChecker.live_decidable_polarities(_skill_crit("date-teller", "date-teller")) == frozenset(
-            {"pass"}
-        )
-        assert SkillTriggeredChecker.live_decidable_polarities(
-            _skill_crit("weather-teller", "date-teller")
-        ) == frozenset({"fail"})
-        assert SkillTriggeredChecker.live_decidable_polarities(_skill_crit("date-teller", "")) == frozenset({"fail"})
+        assert _skill_crit("date-teller", "date-teller").live_decidable_polarities() == frozenset({"pass"})
+        assert _skill_crit("weather-teller", "date-teller").live_decidable_polarities() == frozenset({"fail"})
+        assert _skill_crit("date-teller", "").live_decidable_polarities() == frozenset({"fail"})
 
 
 # --------------------------------------------------------------------------- #
@@ -430,31 +485,31 @@ class TestCommandExecutedLiveVerdict:
         result = self.checker.check(crit, sandbox=None, turn_records=rec)  # type: ignore[arg-type]
         assert result.score == 1.0
 
-    def test_polarities_declared(self) -> None:
-        assert CommandExecutedChecker.live_stop_polarities == frozenset({"pass", "fail"})
+    def test_is_live_success_criterion(self) -> None:
+        assert isinstance(_cmd_crit(min_count=1), LiveSuccessCriterion)
 
     def test_decidable_pass_only_when_no_upper_bound(self) -> None:
         crit = _cmd_crit(min_count=1, max_count=None)
-        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset({"pass"})
+        assert crit.live_decidable_polarities() == frozenset({"pass"})
 
     def test_decidable_fail_only_when_upper_bound_set(self) -> None:
         crit = _cmd_crit(min_count=1, max_count=3)
-        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset({"fail"})
+        assert crit.live_decidable_polarities() == frozenset({"fail"})
 
     def test_decidable_fail_for_must_not_run(self) -> None:
         crit = _cmd_crit(min_count=0, max_count=0)
-        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset({"fail"})
+        assert crit.live_decidable_polarities() == frozenset({"fail"})
 
     def test_decidable_empty_for_zero_min_no_max(self) -> None:
         # min_count=0 + no upper bound: neither pass nor fail can ever fire.
         crit = _cmd_crit(min_count=0, max_count=None)
-        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset()
+        assert crit.live_decidable_polarities() == frozenset()
 
-    def test_decidable_is_subset_of_class_polarities(self) -> None:
-        # The instance set can never exceed the class capability.
+    def test_decidable_is_subset_of_type_universe(self) -> None:
+        # The instance set can never exceed {"pass", "fail"} — the type's universe.
         for min_c, max_c in [(1, None), (1, 3), (0, 0), (0, None)]:
             crit = _cmd_crit(min_count=min_c, max_count=max_c)
-            assert CommandExecutedChecker.live_decidable_polarities(crit) <= CommandExecutedChecker.live_stop_polarities
+            assert crit.live_decidable_polarities() <= frozenset({"pass", "fail"})
 
 
 # --------------------------------------------------------------------------- #
@@ -463,29 +518,24 @@ class TestCommandExecutedLiveVerdict:
 
 
 class TestBaseLiveVerdictDefault:
-    def test_base_polarities_empty(self) -> None:
-        assert BaseCriterion.live_stop_polarities == frozenset()
+    def test_unobservable_criterion_is_not_a_live_success_criterion(self) -> None:
+        # file_exists is not observable mid-run: its model is plain
+        # BaseSuccessCriterion, not LiveSuccessCriterion — no
+        # live_decidable_polarities method to call at all.
+        crit = FileExistsCriterion(type="file_exists", path="x.txt", description="x")
+        assert not isinstance(crit, LiveSuccessCriterion)
 
     def test_unobservable_checker_is_undecided(self) -> None:
         init_criteria(validate=False)
         checker = CriterionRegistry.get_checker("file_exists")()
-        assert checker.live_stop_polarities == frozenset()
         crit = FileExistsCriterion(type="file_exists", path="x.txt", description="x")
         assert checker.live_verdict(crit, [_turn()]) == "undecided"
 
-    def test_base_decidable_defaults_to_class_polarities(self) -> None:
-        # The base hook returns the ClassVar verbatim for a criterion that does
-        # NOT override it: file_exists (unobservable) reports its empty capability.
-        init_criteria(validate=False)
-        checker_cls = type(CriterionRegistry.get_checker("file_exists")())
-        crit = FileExistsCriterion(type="file_exists", path="x.txt", description="x")
-        assert checker_cls.live_decidable_polarities(crit) == checker_cls.live_stop_polarities == frozenset()
-
-    def test_skill_triggered_decidable_is_subset_of_class_polarities(self) -> None:
-        # skill_triggered DOES narrow per-instance; each instance set stays a
-        # subset of the class capability.
+    def test_skill_triggered_decidable_is_subset_of_type_universe(self) -> None:
+        # skill_triggered narrows per-instance; each instance set stays a
+        # subset of the type's universe ({"pass", "fail"}).
         for crit in (_skill_crit("s", "s"), _skill_crit("s", "other"), _skill_crit("s", "")):
-            assert SkillTriggeredChecker.live_decidable_polarities(crit) <= SkillTriggeredChecker.live_stop_polarities
+            assert crit.live_decidable_polarities() <= frozenset({"pass", "fail"})
 
 
 # --------------------------------------------------------------------------- #
@@ -598,7 +648,7 @@ class TestValidateEarlyStop:
     def test_guardrail4_unsupported_polarity_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Force command_executed to be pass-only, then arm it with stop_when="fail".
         init_criteria(validate=False)
-        monkeypatch.setattr(CommandExecutedChecker, "live_stop_polarities", frozenset({"pass"}))
+        monkeypatch.setattr(CommandExecutedCriterion, "live_decidable_polarities", lambda self: frozenset({"pass"}))
         task = _task(criteria=[_cmd_crit(stop_when="fail")], stop_early=True)
         with pytest.raises(EarlyStopConfigError, match="polarity"):
             validate_early_stop(task)
@@ -898,6 +948,30 @@ async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink
     return agent, sink, raised
 
 
+class TestNewFixtureTasksResolve:
+    """Cheap resolution-only coverage for the 3 checked-in early-stop example
+    task YAMLs — no live agent involved. These are deliberately NOT tagged
+    smoke-pass/smoke-fail (their pass/fail outcome depends on non-deterministic
+    agent behavior), so this is their only pre-merge signal that a malformed
+    weight/stop_when/max_steps_to_decide combo would otherwise slip through.
+    """
+
+    @pytest.mark.parametrize(
+        "task_file",
+        [
+            Path("tasks/early_stop_weighted_low_weight_absorbed.yaml"),
+            Path("tasks/early_stop_weighted_high_weight_kills_run.yaml"),
+            Path("tasks/early_stop_decision_budget_exceeded.yaml"),
+        ],
+    )
+    def test_fixture_resolves_without_error(self, task_file: Path, tmp_path: Path) -> None:
+        resolved, skipped = _resolve_surface(task_file, tmp_path)
+        assert not skipped
+        assert len(resolved) == 1
+        limits = resolved[0].task.run_limits
+        assert limits is not None and limits.stop_early is True
+
+
 class TestCooperativeStopSeam:
     def test_stopped_early_member_on_both_enums(self) -> None:
         assert AgentEndStatus.STOPPED_EARLY.value == "stopped_early"
@@ -1013,16 +1087,86 @@ class TestEarlyStopModels:
         with pytest.raises(ValueError, match="no armed criteria"):
             result.armed_criteria_passed(criteria)
 
+    def test_armed_criteria_passed_default_threshold_still_requires_all(self) -> None:
+        # gate_threshold=1.0 (the default) must reproduce the old all()-must-pass
+        # rule exactly: one armed criterion at 0.0 fails the gate regardless of
+        # the other armed criterion's weight.
+        criteria = [
+            _skill_crit("date-teller", "date-teller", stop_when="pass", weight=0.8),
+            _skill_crit("weather-teller", "date-teller", stop_when="fail", weight=0.2),
+        ]
+        low_weight_fails = _result(
+            criteria_results=[_crit_result("skill_triggered", 1.0), _crit_result("skill_triggered", 0.0)]
+        )
+        assert low_weight_fails.armed_criteria_passed(criteria) is False
+        high_weight_fails = _result(
+            criteria_results=[_crit_result("skill_triggered", 0.0), _crit_result("skill_triggered", 1.0)]
+        )
+        assert high_weight_fails.armed_criteria_passed(criteria) is False
+        all_pass = _result(
+            criteria_results=[_crit_result("skill_triggered", 1.0), _crit_result("skill_triggered", 1.0)]
+        )
+        assert all_pass.armed_criteria_passed(criteria) is True
+
+    def test_armed_criteria_passed_low_weight_failure_absorbed_below_threshold(self) -> None:
+        # The user's worked example: weights 0.8/0.2, gate_threshold 0.7. The
+        # LOW-weight criterion failing (weighted score 0.8) still clears 0.7;
+        # the HIGH-weight one failing (weighted score 0.2) does not.
+        criteria = [
+            _skill_crit("date-teller", "date-teller", stop_when="pass", weight=0.8),
+            _skill_crit("weather-teller", "date-teller", stop_when="fail", weight=0.2),
+        ]
+        low_weight_fails = _result(
+            criteria_results=[_crit_result("skill_triggered", 1.0), _crit_result("skill_triggered", 0.0)]
+        )
+        assert low_weight_fails.armed_criteria_passed(criteria, gate_threshold=0.7) is True
+        high_weight_fails = _result(
+            criteria_results=[_crit_result("skill_triggered", 0.0), _crit_result("skill_triggered", 1.0)]
+        )
+        assert high_weight_fails.armed_criteria_passed(criteria, gate_threshold=0.7) is False
+
+    def test_armed_criteria_passed_ignores_pass_threshold(self) -> None:
+        # armed_criteria_passed no longer consults each criterion's own
+        # pass_threshold at all — only the weighted average vs gate_threshold.
+        # A score that would FAIL this criterion's own pass_threshold (0.99)
+        # still passes the armed gate once gate_threshold is lowered to match
+        # it — proving pass_threshold plays no role in the weighted-average
+        # math. Currently safe only because the two live-observable criteria
+        # always score binary 0.0/1.0 in practice (0.5 here is a synthetic
+        # score to exercise the boundary); pin this with a regression test so
+        # a future fractional LiveSuccessCriterion can't silently reintroduce
+        # wrong gating.
+        criteria = [_skill_crit("date-teller", "date-teller", stop_when="pass", pass_threshold=0.99)]
+        result = _result(criteria_results=[_crit_result("skill_triggered", 0.5)])
+        assert result.armed_criteria_passed(criteria, gate_threshold=0.5) is True
+
+    def test_armed_criteria_passed_weighted_gate_with_command_executed(self) -> None:
+        # The other LiveSuccessCriterion subclass exercised through the same
+        # weighted gate — command_executed, not just skill_triggered.
+        criteria = [
+            _cmd_crit(min_count=1, max_count=None, stop_when="pass", weight=0.8),
+            _cmd_crit(min_count=0, max_count=0, stop_when="fail", weight=0.2),
+        ]
+        low_weight_fails = _result(
+            criteria_results=[_crit_result("command_executed", 1.0), _crit_result("command_executed", 0.0)]
+        )
+        assert low_weight_fails.armed_criteria_passed(criteria, gate_threshold=0.7) is True
+        high_weight_fails = _result(
+            criteria_results=[_crit_result("command_executed", 0.0), _crit_result("command_executed", 1.0)]
+        )
+        assert high_weight_fails.armed_criteria_passed(criteria, gate_threshold=0.7) is False
+
 
 # --------------------------------------------------------------------------- #
 # Phase 3: EarlyStopWatcher
 # --------------------------------------------------------------------------- #
 
 
-def _watcher(criteria: list[Any], *, max_turns: int | None = 20) -> EarlyStopWatcher:
+def _watcher(criteria: list[Any], *, max_turns: int | None = 20, gate_threshold: float = 1.0) -> EarlyStopWatcher:
     task = _task(criteria=criteria, stop_early=True)
     assert task.run_limits is not None
     task.run_limits.max_turns = max_turns
+    task.run_limits.stop_early_gate_threshold = gate_threshold
     return EarlyStopWatcher.for_task(task)
 
 
@@ -1217,6 +1361,155 @@ class TestEarlyStopWatcher:
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_ceiling_bound_defers_fail_stop_below_default_gate_threshold(self) -> None:
+        # The user's worked example on the trigger side: weights 0.8/0.2,
+        # gate_threshold 0.7. The LOW-weight (0.2) criterion misfiring leaves a
+        # ceiling of 0.8 (>= 0.7) — the gate could still pass if the high-weight
+        # positive comes through, so the run must NOT stop yet.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="auto", weight=0.8),
+                _skill_crit("weather-teller", "date-teller", stop_when="auto", weight=0.2),
+            ],
+            gate_threshold=0.7,
+        )
+        _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_ceiling_bound_fires_fail_stop_when_high_weight_criterion_fails(self) -> None:
+        # Mirror case: the HIGH-weight (0.8) positive misfiring as a distractor
+        # leaves a ceiling of 0.2 (< 0.7) — the gate can never reach 0.7 no
+        # matter what the low-weight criterion does, so the fail-stop must fire
+        # even though it's the "small" criterion still undecided.
+        watcher = _watcher(
+            [
+                _skill_crit("weather-teller", "date-teller", stop_when="auto", weight=0.8),
+                _skill_crit("news-teller", "date-teller", stop_when="auto", weight=0.2),
+            ],
+            gate_threshold=0.7,
+        )
+        _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_default_gate_threshold_fires_fail_stop_on_any_weight(self) -> None:
+        # At the default gate_threshold=1.0, even the low-weight criterion's
+        # failure alone must still fire — byte-for-byte the pre-weighting rule.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="auto", weight=0.8),
+                _skill_crit("weather-teller", "date-teller", stop_when="auto", weight=0.2),
+            ]
+        )
+        _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.should_stop() is False  # deferred: positive still undecided
+        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="d"))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_floor_bound_pass_stops_before_low_weight_distractor_decides(self) -> None:
+        # Floor generalization on the pass side: a high-weight (0.9) positive
+        # pass-armed criterion passing is enough to pass-stop on its own —
+        # there is no OTHER pass-armed criterion whose weight it needs to share
+        # the floor with (fail-armed distractors are excluded from the
+        # pass-armed floor by design either way).
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="pass", weight=0.9),
+            ],
+            gate_threshold=0.7,
+        )
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_floor_bound_pass_stop_requires_full_pass_armed_subset_below_default(self) -> None:
+        # Below the default threshold, a partially-decided pass-armed subset
+        # (one of two passed) must NOT pass-stop yet if the still-undecided
+        # one's weight share would drop the floor below the threshold.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="pass", weight=0.5),
+                _skill_crit("weather-teller", "weather-teller", stop_when="pass", weight=0.5),
+            ],
+            gate_threshold=0.7,
+        )
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_decision_budget_exceeded_when_still_undecided(self) -> None:
+        # An armed criterion capped at max_steps_to_decide=1 that is still
+        # "undecided" after its first tool call forces a budget-exceeded stop.
+        # Full-field EarlyStopInfo parity, matching every other stop-reason test.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass", max_steps_to_decide=1)])
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert watcher.info.deciding_criterion_type == "skill_triggered"
+        assert watcher.info.deciding_criterion_description == "date-teller activation"
+        assert watcher.info.sdk_turn_index == 1
+        assert watcher.info.tool_call_index == 1
+
+    def test_decision_budget_exceeded_names_the_right_criterion_among_several(self) -> None:
+        # Multiple armed criteria with different budgets: only the SECOND
+        # one's budget has expired (cap=1, undecided after 1 call); the first
+        # has a longer budget (cap=5) and is also still undecided. The
+        # deciding criterion reported must be the one whose budget actually
+        # tripped, not just the first armed criterion in list order.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="pass", max_steps_to_decide=5),
+                _skill_crit("weather-teller", "weather-teller", stop_when="pass", max_steps_to_decide=1),
+            ]
+        )
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+
+    def test_decision_budget_exceeded_with_command_executed(self) -> None:
+        # The other LiveSuccessCriterion subclass: a command_executed pass-armed
+        # criterion (min_count=1, no upper bound) capped at max_steps_to_decide=1
+        # that never sees a matching command force-fails identically.
+        watcher = _watcher([_cmd_crit(min_count=1, max_count=None, stop_when="pass", max_steps_to_decide=1)])
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert watcher.info.deciding_criterion_type == "command_executed"
+
+    def test_decision_budget_not_exceeded_below_cap(self) -> None:
+        # Same cap, but only reached on the FIRST tool call (index 1) — a cap of
+        # 2 must not fire yet.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass", max_steps_to_decide=2)])
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_real_decision_within_budget_wins_over_budget_check(self) -> None:
+        # The criterion decides (pass-stops) on the SAME tool call that would
+        # otherwise have tripped its budget — the real decision takes priority.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass", max_steps_to_decide=1)])
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_decision_budget_ignored_when_unset(self) -> None:
+        # No max_steps_to_decide -> no budget check, run continues indefinitely
+        # (up to run_limits.max_turns) while undecided.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
 
     def test_records_turn_and_tool_index(self) -> None:
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
@@ -1525,6 +1818,48 @@ class TestOrchestratorEarlyStopWiring:
         assert result.early_stop is not None
         assert result.all_criteria_passed(self._criteria()) is False  # full gate would fail
         assert result.armed_criteria_passed(self._criteria()) is True  # armed gate passes
+
+    async def test_decision_budget_exceeded_forces_failure_bypassing_gate(self, tmp_path) -> None:
+        # A criterion capped at max_steps_to_decide=1 that never engages its
+        # skill forces a hard fail — even though BOTH mocked criterion scores
+        # are 1.0 (the weighted gate, if consulted, would pass).
+        criteria = [
+            _skill_crit(self._SKILL, self._SKILL, stop_when="pass", max_steps_to_decide=1),
+            FileExistsCriterion(path="artifact.txt", description="artifact must exist"),
+        ]
+        task = _task(criteria=criteria, stop_early=True)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(parents=True)
+        orch = Orchestrator(task=task, run_dir=run_dir, variant_id="default")
+        orch.result = EvaluationResult(
+            task_id=task.task_id,
+            task_description=task.description,
+            variant_id="default",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status=FinalStatus.FAILURE,
+            iteration_count=0,
+            environment_info={},
+        )
+        sandbox = MagicMock()
+        sandbox.sandbox_dir = tmp_path / "sandbox"
+        sandbox.sandbox_dir.mkdir()
+        orch.sandbox = sandbox
+        checker = MagicMock()
+        checker.check_all_async = AsyncMock(return_value=[_crit_result(c.type, 1.0) for c in criteria])
+        orch.success_checker = checker
+        orch._early_stop_watcher = EarlyStopWatcher.for_task(task)
+        turn = TurnRecord(iteration=1, user_input="p", agent_output="done")
+        events = [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))]
+        agent = _ScriptedAgent(events, turn)
+        orch.agent = agent  # type: ignore[assignment]
+
+        with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+            success = await orch._evaluation_loop()
+
+        assert orch.result.early_stop is not None
+        assert orch.result.early_stop.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert success is False
 
     async def test_completed_naturally_uses_full_gate(self, tmp_path) -> None:
         # Armed, but the skill is never engaged -> watcher never fires -> full gate,
