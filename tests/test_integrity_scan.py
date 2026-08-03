@@ -1,0 +1,399 @@
+"""Tests for coder_eval.integrity: graded-material derivation and the read scan.
+
+The bulk of the integrity work is classification, so most of this is table-driven
+over shell strings. The cases that matter most are the NEGATIVE ones: a scan that
+flags a directory listing is worse than no scan, because it voids honest rows and
+gets switched off.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from coder_eval.integrity import (
+    GradedMaterialSpec,
+    _bash_read,
+    _task_dir_operands,
+    derive_graded_material,
+    evaluate_integrity,
+    scan_commands,
+)
+from coder_eval.models import (
+    CommandTelemetry,
+    IntegrityFindingKind,
+    IntegrityMode,
+    IntegrityVerdict,
+    TaskDefinition,
+    TurnRecord,
+)
+from coder_eval.models.container_paths import CONTAINER_INPUT_DIR
+
+
+SPEC = GradedMaterialSpec(
+    paths=frozenset({"/repo/tasks/leaky/task.yaml", "/repo/tasks/leaky/solution.py", "$TASK_DIR/check_output.py"}),
+    directories=frozenset({"/repo/tasks/leaky/_reference", CONTAINER_INPUT_DIR}),
+    basename_globs=("RESOLUTION.md", "check_*.py", "*.expected", "task.yaml", "context.json"),
+)
+
+
+def _cmd(tool_name: str, parameters: dict, tool_id: str = "t0") -> CommandTelemetry:
+    return CommandTelemetry(
+        tool_name=tool_name, tool_id=tool_id, timestamp=datetime.now(), parameters=parameters, result_status="success"
+    )
+
+
+def _bash(command: str) -> CommandTelemetry:
+    return _cmd("Bash", {"command": command})
+
+
+def _turn(commands: list[CommandTelemetry], *, iteration: int = 1, unrecovered: int = 0) -> TurnRecord:
+    return TurnRecord(
+        iteration=iteration,
+        user_input="p",
+        agent_output="a",
+        commands=commands,
+        unrecovered_subagent_threads=unrecovered,
+    )
+
+
+# --------------------------------------------------------------------------
+# Shell segment classification
+# --------------------------------------------------------------------------
+
+READS = [
+    pytest.param("cat RESOLUTION.md", id="cat"),
+    pytest.param("head -50 RESOLUTION.md", id="head"),
+    pytest.param("tail -n 5 /repo/tasks/leaky/solution.py", id="tail-absolute-path"),
+    pytest.param("sed -n '1,20p' RESOLUTION.md", id="sed"),
+    pytest.param("awk '{print}' check_output.py", id="awk-glob"),
+    pytest.param("python3 $TASK_DIR/check_output.py", id="python-runs-the-grader"),
+    pytest.param("python -c \"print(open('RESOLUTION.md').read())\"", id="python-inline"),
+    pytest.param("node -e \"require('fs').readFileSync('RESOLUTION.md')\"", id="node-inline"),
+    pytest.param("base64 -d RESOLUTION.md", id="base64"),
+    pytest.param("xxd RESOLUTION.md | head", id="xxd-piped"),
+    pytest.param("jq . /work/input/context.json", id="jq-container-input"),
+    pytest.param("diff mine.py /repo/tasks/leaky/solution.py", id="diff-against-reference"),
+    pytest.param("cp /repo/tasks/leaky/solution.py ./mine.py", id="cp-the-reference"),
+    pytest.param("grep -n 'root cause' RESOLUTION.md", id="grep-content"),
+    pytest.param("rg 'fixed version' RESOLUTION.md", id="rg-content"),
+    pytest.param("while read l; do echo $l; done < RESOLUTION.md", id="input-redirect"),
+    pytest.param("find . -name '*.md' -exec cat RESOLUTION.md {} \\;", id="find-exec-cat"),
+    pytest.param("ls -1 | xargs cat RESOLUTION.md", id="xargs-cat"),
+    pytest.param("sudo cat RESOLUTION.md", id="sudo-wrapper"),
+    pytest.param("FOO=1 cat RESOLUTION.md", id="env-assignment-prefix"),
+    pytest.param("ls -la && cat RESOLUTION.md", id="second-segment-reads"),
+    pytest.param("cat /repo/tasks/leaky/_reference/answer.py", id="reference-directory"),
+    pytest.param("strange-tool RESOLUTION.md", id="unknown-utility-conservative"),
+]
+
+NOT_READS = [
+    pytest.param("ls -la", id="plain-listing"),
+    pytest.param("ls -la /repo/tasks/leaky", id="listing-the-task-dir"),
+    pytest.param("find . -name RESOLUTION.md", id="find-by-name"),
+    pytest.param("find /repo -name 'check_*.py' -print", id="find-glob-print"),
+    pytest.param("test -f RESOLUTION.md", id="existence-test"),
+    pytest.param("stat RESOLUTION.md", id="stat-metadata"),
+    pytest.param("wc -l RESOLUTION.md", id="wc-line-count"),
+    pytest.param("basename /repo/tasks/leaky/task.yaml", id="basename"),
+    pytest.param("dirname /repo/tasks/leaky/task.yaml", id="dirname"),
+    pytest.param("echo RESOLUTION.md", id="echo-the-name"),
+    pytest.param("grep -l 'cause' RESOLUTION.md", id="grep-files-only"),
+    pytest.param("grep -rl 'cause' /repo --include=RESOLUTION.md", id="grep-bundled-files-only"),
+    pytest.param("grep -c 'cause' RESOLUTION.md", id="grep-count"),
+    pytest.param("rg --files /repo | grep -l RESOLUTION.md", id="rg-files"),
+    pytest.param("rg --files-with-matches cause RESOLUTION.md", id="rg-files-with-matches"),
+    pytest.param("cat my_own_notes.md", id="reads-something-else"),
+    pytest.param("python3 build.py", id="runs-own-script"),
+    pytest.param("mkdir -p output && ls", id="unrelated-work"),
+    pytest.param("du -sh /repo/tasks/leaky", id="disk-usage"),
+]
+
+
+@pytest.mark.parametrize("command", READS)
+def test_shell_reads_are_flagged(command: str):
+    is_read, matched = _bash_read(command, SPEC)
+    assert is_read is True, f"expected a read: {command!r}"
+    assert matched is not None
+
+
+@pytest.mark.parametrize("command", NOT_READS)
+def test_shell_non_reads_are_not_flagged(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is False, f"expected NOT a read: {command!r}"
+
+
+def test_windows_separators_still_match():
+    """A task file recorded with backslashes must match a forward-slash command."""
+    spec = GradedMaterialSpec(paths=frozenset({r"C:\repo\tasks\leaky\task.yaml"}))
+    is_read, matched = _bash_read("cat C:/repo/tasks/leaky/task.yaml", spec)
+    assert is_read is True
+    assert matched == r"C:\repo\tasks\leaky\task.yaml"
+
+
+def test_glob_wildcard_does_not_cross_a_path_separator():
+    """`check_*.py` must not match `check_dir/unrelated.py`."""
+    spec = GradedMaterialSpec(basename_globs=("check_*.py",))
+    assert _bash_read("cat check_dir/unrelated.py", spec) == (False, None)
+    assert _bash_read("cat check_dir/check_it.py", spec)[0] is True
+
+
+def test_unbalanced_quotes_do_not_skip_the_command():
+    """A command shlex cannot parse still ran, so it must still be classified."""
+    is_read, _ = _bash_read("cat 'RESOLUTION.md", SPEC)
+    assert is_read is True
+
+
+# --------------------------------------------------------------------------
+# The regression guard for the truncation trap
+# --------------------------------------------------------------------------
+
+
+def test_match_past_2000_chars_is_still_found():
+    """The scan must NOT reuse CommandExecutedChecker's 2000-char ReDoS clip.
+
+    That checker truncates command text at 2000 characters, which is exactly
+    where a long `cat` hides: pad the command past the limit and the match is
+    invisible to anything that reuses it. This scan reads
+    CommandTelemetry.parameters directly and never truncates the haystack.
+    """
+    from coder_eval.criteria.command_executed import _MAX_PATTERN_SEARCH_LEN
+
+    padding = "# " + ("x" * (_MAX_PATTERN_SEARCH_LEN + 500))
+    command = f"echo start\n{padding}\ncat RESOLUTION.md"
+    assert len(command) > _MAX_PATTERN_SEARCH_LEN
+
+    info = scan_commands([_turn([_bash(command)])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+    assert len(info.findings) == 1
+
+
+# --------------------------------------------------------------------------
+# Structured (non-Bash) tools
+# --------------------------------------------------------------------------
+
+
+def test_read_tool_on_graded_material_is_tainted():
+    info = scan_commands([_turn([_cmd("Read", {"file_path": "/repo/tasks/leaky/RESOLUTION.md"})])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+    assert info.findings[0].tool_name == "Read"
+    assert info.findings[0].kind is IntegrityFindingKind.GRADED_READ
+
+
+def test_glob_listing_graded_material_is_clean():
+    info = scan_commands([_turn([_cmd("Glob", {"pattern": "**/RESOLUTION.md"})])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+    assert info.findings == []
+
+
+def test_grep_files_mode_is_clean_but_content_mode_is_tainted():
+    listing = scan_commands([_turn([_cmd("Grep", {"pattern": "cause", "path": "RESOLUTION.md"})])], SPEC)
+    assert listing.verdict is IntegrityVerdict.CLEAN
+
+    content = scan_commands(
+        [_turn([_cmd("Grep", {"pattern": "cause", "path": "RESOLUTION.md", "output_mode": "content"})])], SPEC
+    )
+    assert content.verdict is IntegrityVerdict.TAINTED
+
+
+def test_grep_with_context_flag_is_tainted():
+    info = scan_commands([_turn([_cmd("Grep", {"pattern": "cause", "path": "RESOLUTION.md", "-C": 3})])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+def test_unknown_tool_touching_graded_material_is_inconclusive_not_tainted():
+    """We do not guess at an unrecognised tool's semantics in either direction."""
+    info = scan_commands([_turn([_cmd("mcp__some__fetch", {"target": "RESOLUTION.md"})])], SPEC)
+    assert info.verdict is IntegrityVerdict.INCONCLUSIVE
+    assert info.findings == []
+    assert any("read semantics are unknown" in n for n in info.notes)
+
+
+def test_unknown_tool_not_touching_graded_material_is_clean():
+    info = scan_commands([_turn([_cmd("mcp__some__fetch", {"target": "notes.md"})])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+# --------------------------------------------------------------------------
+# Blind spots
+# --------------------------------------------------------------------------
+
+
+def test_clean_scan_is_clean():
+    info = scan_commands([_turn([_bash("ls -la"), _bash("python3 build.py")])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+    assert info.commands_scanned == 2
+    assert info.commands_without_parameters == 0
+
+
+def test_no_commands_is_clean():
+    info = scan_commands([_turn([])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+    assert info.commands_scanned == 0
+
+
+def test_mostly_parameterless_commands_force_inconclusive():
+    """Codex returns {} for tool kinds it does not model; a scan that saw almost
+    nothing must not report CLEAN."""
+    commands = [_cmd("Unknown", {}, tool_id=f"t{i}") for i in range(4)] + [_bash("ls")]
+    info = scan_commands([_turn(commands)], SPEC)
+    assert info.verdict is IntegrityVerdict.INCONCLUSIVE
+    assert info.commands_without_parameters == 4
+    assert any("no scannable parameters" in n for n in info.notes)
+
+
+def test_a_few_parameterless_commands_stay_clean():
+    commands = [_bash("ls") for _ in range(20)] + [_cmd("Unknown", {}, tool_id="tX")]
+    info = scan_commands([_turn(commands)], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+def test_unrecovered_subagents_force_inconclusive():
+    info = scan_commands([_turn([_bash("ls")], unrecovered=1)], SPEC)
+    assert info.verdict is IntegrityVerdict.INCONCLUSIVE
+    assert info.subagent_recovery_incomplete is True
+
+
+def test_a_hit_beats_every_blind_spot():
+    """Going blind cannot un-see a read that WAS observed."""
+    commands = [_cmd("Unknown", {}, tool_id=f"t{i}") for i in range(9)] + [_bash("cat RESOLUTION.md")]
+    info = scan_commands([_turn(commands, unrecovered=3)], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+def test_findings_carry_locating_coordinates():
+    turn = _turn([_bash("ls"), _bash("cat RESOLUTION.md")], iteration=2)
+    info = scan_commands([turn], SPEC)
+    finding = info.findings[0]
+    assert finding.iteration == 2
+    assert finding.command_index == 1
+    assert finding.evidence is not None
+    assert "RESOLUTION.md" in finding.evidence
+
+
+# --------------------------------------------------------------------------
+# Graded-material derivation
+# --------------------------------------------------------------------------
+
+
+def _task(**kwargs) -> TaskDefinition:
+    base = {
+        "task_id": "t",
+        "description": "d",
+        "initial_prompt": "p",
+        "success_criteria": [{"type": "file_exists", "description": "x", "path": "out.txt"}],
+    }
+    base.update(kwargs)
+    return TaskDefinition(**base)
+
+
+def test_derivation_includes_the_task_file_and_reference():
+    task = _task(reference={"file": "solution.py"})
+    spec = derive_graded_material(task, Path("/repo/tasks/leaky/task.yaml"))
+    assert str(Path("/repo/tasks/leaky/task.yaml")) in spec.paths
+    assert str(Path("/repo/tasks/leaky/solution.py")) in spec.paths
+
+
+def test_derivation_includes_the_reference_directory():
+    task = _task(reference={"directory": "_reference"})
+    spec = derive_graded_material(task, Path("/repo/tasks/leaky/task.yaml"))
+    assert str(Path("/repo/tasks/leaky/_reference")) in spec.directories
+
+
+def test_derivation_always_includes_the_container_input_mount():
+    spec = derive_graded_material(_task(), None)
+    assert CONTAINER_INPUT_DIR in spec.directories
+
+
+def test_derivation_without_a_task_file_keeps_the_globs():
+    """A caller that never tracked the YAML still gets location-independent cover."""
+    spec = derive_graded_material(_task(), None)
+    assert not any("task.yaml" in p for p in spec.paths)
+    assert "RESOLUTION.md" in spec.basename_globs
+
+
+def test_derivation_harvests_task_dir_operands_from_criteria():
+    task = _task(
+        success_criteria=[
+            {
+                "type": "run_command",
+                "description": "grade",
+                "command": "python3 $TASK_DIR/check_answer.py",
+            }
+        ]
+    )
+    spec = derive_graded_material(task, None)
+    assert "$TASK_DIR/check_answer.py" in spec.paths
+    assert "/work/task_dir/check_answer.py" in spec.paths
+
+
+def test_derivation_harvests_task_dir_operands_from_hooks():
+    task = _task(post_run=[{"command": "cp ${TASK_DIR}/expected.json ."}])
+    spec = derive_graded_material(task, None)
+    assert "$TASK_DIR/expected.json" in spec.paths
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("python3 $TASK_DIR/check_x.py", {"$TASK_DIR/check_x.py", "/work/task_dir/check_x.py"}),
+        ("python3 ${TASK_DIR}/check_x.py", {"$TASK_DIR/check_x.py", "/work/task_dir/check_x.py"}),
+        ('cat "$TASK_DIR/a.txt" && ls', {"$TASK_DIR/a.txt", "/work/task_dir/a.txt"}),
+        ("echo $TASK_DIR", set()),
+        ("no variable here", set()),
+    ],
+)
+def test_task_dir_operand_extraction(command: str, expected: set[str]):
+    assert _task_dir_operands(command) == expected
+
+
+# --------------------------------------------------------------------------
+# evaluate_integrity: mode handling and failure containment
+# --------------------------------------------------------------------------
+
+
+def test_mode_off_skips_the_scan():
+    info = evaluate_integrity(_task(), None, [_turn([_bash("cat RESOLUTION.md")])], mode=IntegrityMode.OFF)
+    assert info.verdict is IntegrityVerdict.SKIPPED
+    assert info.mode is IntegrityMode.OFF
+    assert info.findings == []
+
+
+@pytest.mark.parametrize("mode", [IntegrityMode.DETECT, IntegrityMode.VOID])
+def test_detect_and_void_both_scan_and_stamp_the_mode(mode: IntegrityMode):
+    info = evaluate_integrity(_task(), None, [_turn([_bash("cat RESOLUTION.md")])], mode=mode)
+    assert info.verdict is IntegrityVerdict.TAINTED
+    assert info.mode is mode
+    # The gate, not the scan, decides whether to void.
+    assert info.voided is False
+
+
+def test_a_scan_failure_is_inconclusive_not_a_crash():
+    """An integrity bug must not take down a row that otherwise ran fine."""
+
+    class _Exploding(list):
+        def __iter__(self):
+            raise RuntimeError("boom")
+
+    info = evaluate_integrity(_task(), None, _Exploding(), mode=IntegrityMode.VOID)
+    assert info.verdict is IntegrityVerdict.INCONCLUSIVE
+    assert any("boom" in n for n in info.notes)
+
+
+def test_empty_spec_skips_rather_than_reporting_clean():
+    """With nothing to match against, CLEAN would be an unearned reassurance."""
+    from coder_eval import integrity
+
+    spec = GradedMaterialSpec()
+    assert spec.is_empty() is True
+
+    original = integrity.derive_graded_material
+    try:
+        integrity.derive_graded_material = lambda _task, _file: GradedMaterialSpec()
+        info = evaluate_integrity(_task(), None, [_turn([_bash("ls")])], mode=IntegrityMode.DETECT)
+    finally:
+        integrity.derive_graded_material = original
+
+    assert info.verdict is IntegrityVerdict.SKIPPED
