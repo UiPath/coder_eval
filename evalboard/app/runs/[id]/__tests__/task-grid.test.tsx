@@ -449,7 +449,7 @@ describe("TaskGrid — multi-model (A/B) runs", () => {
         expect(hrefs).toEqual(["/runs/r1/t?v=glm-5-2", "/runs/r1/t?v=kimi-k3"]);
     });
 
-    test("hides the Model column for a single-model run", () => {
+    test("hides the arm column for a single-arm run", () => {
         render(
             <TaskGrid
                 runId="r1"
@@ -463,5 +463,40 @@ describe("TaskGrid — multi-model (A/B) runs", () => {
         expect(
             within(table).queryByRole("columnheader", { name: /Model/i }),
         ).toBeNull();
+        expect(
+            within(table).queryByRole("columnheader", { name: /Variant/i }),
+        ).toBeNull();
+    });
+
+    test("same-model A/B: shows a Variant column labeling each arm", () => {
+        // Skill on/off (or terse/detailed): same model, different variant. Rows
+        // split on variant, so they must be distinguishable — gating on distinct
+        // MODEL would render two identical unlabeled rows (the reported gap).
+        render(
+            <TaskGrid
+                runId="r1"
+                tasks={[
+                    row("t", 3, 5, { variant: "bare", model: "claude-sonnet-4-6" }),
+                    row("t", 3, 5, {
+                        variant: "with-skill",
+                        model: "claude-sonnet-4-6",
+                    }),
+                ]}
+            />,
+        );
+        const table = screen.getByRole("table");
+        // Header reads "Variant" (models don't differ), not "Model".
+        expect(
+            within(table).getByRole("columnheader", { name: /Variant/i }),
+        ).toBeInTheDocument();
+        // Both arms are labeled and distinct.
+        expect(within(table).getByText("bare")).toBeInTheDocument();
+        expect(within(table).getByText("with-skill")).toBeInTheDocument();
+        // Each arm links to its own ?v=.
+        const hrefs = within(table)
+            .getAllByRole("link", { name: /^t/i })
+            .map((l) => l.getAttribute("href"))
+            .sort();
+        expect(hrefs).toEqual(["/runs/r1/t?v=bare", "/runs/r1/t?v=with-skill"]);
     });
 });

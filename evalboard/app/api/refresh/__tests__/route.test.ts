@@ -87,9 +87,10 @@ describe("POST /api/refresh", () => {
         });
 
         test('traversal id ".." -> 400, cache root untouched', async () => {
-            // ".." passes isValidId (dots are word-ish) but clearRunCacheDir's
-            // strict-child check rejects it, so the route returns 400 and the
-            // cache root is never the rm target.
+            // isValidId now rejects "." / ".." outright, so clearRunCacheDir
+            // returns false and the route 400s — and even if that guard were
+            // loosened, its strict-child check still refuses to rm the cache
+            // root. Belt and suspenders; the cache root is never the rm target.
             const marker = path.join(cache, "keep.txt");
             await fs.writeFile(marker, "x");
 

@@ -90,18 +90,60 @@ describe("readTaskDetail — variant selects the model's own row + content", () 
         expect(glm?.status).toBe("FAILURE");
     });
 
-    test("a run with no 'default' variant returns null when ?v is omitted", async () => {
-        // Mirrors the live behavior: the grid only ever links multi-model rows
-        // with ?v=, and there is no default/ subdir to fall back to.
+    test("a bare URL (no ?v) resolves the run's actual arm instead of 404ing", async () => {
+        // The 404-regression fix: with no ?v and no "default" arm, readTaskDetail
+        // resolves to the run's first arm (kimi-k3 here) and renders it, rather
+        // than matching the literal "default" (zero rows → notFound). This is what
+        // keeps pre-existing ?v-less deep links / bookmarks working.
         const { readTaskDetail } = await loadRuns();
-        expect(await readTaskDetail(RUN, TASK, 0)).toBeNull();
+        const task = await readTaskDetail(RUN, TASK, 0);
+        expect(task).not.toBeNull();
+        expect(task?.variant).toBe("kimi-k3");
     });
 
-    test("an unsafe variant is sanitized to 'default' (no path escape)", async () => {
+    test("an unsafe explicit variant is sanitized to 'default' (no path escape)", async () => {
         const { readTaskDetail } = await loadRuns();
-        // "../glm-5-2" is not a valid id → falls back to "default", which has
-        // no row here → null. It must NOT traverse into the glm-5-2 subtree.
+        // "../glm-5-2" is not a valid id → sanitized to "default", which has no
+        // row here → null. It must NOT traverse into the glm-5-2 subtree.
         expect(await readTaskDetail(RUN, TASK, 0, "../glm-5-2")).toBeNull();
+        // A bare ".." is now rejected by isValidId too (was the traversal hole).
+        expect(await readTaskDetail(RUN, TASK, 0, "..")).toBeNull();
+    });
+});
+
+describe("legacy / single-config layout (no variant_id, <run>/default/)", () => {
+    const LRUN = "2026-02-02_00-00-00";
+    const LTASK = "legacy-task";
+
+    async function loadLegacy() {
+        // A run whose rows omit variant_id entirely, content under default/ —
+        // the pre-variant on-disk shape the compat claim depends on.
+        await write(
+            `${LRUN}/run.json`,
+            JSON.stringify({
+                run_id: "x",
+                task_results: [
+                    { task_id: LTASK, replicate_index: 0, status: "SUCCESS" },
+                ],
+            }),
+        );
+        await write(`${LRUN}/default/${LTASK}/00/task.json`, "{}");
+        await write(`${LRUN}/default/${LTASK}/00/task.log`, "legacy log");
+        return loadRuns();
+    }
+
+    test("readTaskDetail with no ?v resolves the default/ row + content", async () => {
+        const { readTaskDetail } = await loadLegacy();
+        const task = await readTaskDetail(LRUN, LTASK, 0);
+        expect(task).not.toBeNull();
+        expect(task?.variant).toBeNull(); // legacy row carries no variant_id
+        expect(task?.status).toBe("SUCCESS");
+    });
+
+    test("readTaskReplicates / readLogTail resolve the default/ subdir", async () => {
+        const { readTaskReplicates, readLogTail } = await loadLegacy();
+        expect(await readTaskReplicates(LRUN, LTASK)).toEqual([0]);
+        expect(await readLogTail(LRUN, LTASK, 0)).toBe("legacy log");
     });
 });
 
@@ -144,8 +186,34 @@ describe("resolveSafePath — variant-prefixed artifact URLs", () => {
         expect(abs).toContain(path.join(RUN, "glm-5-2", TASK));
     });
 
-    test("still rejects traversal outside the run dir", async () => {
+    test("rejects traversal outside the run dir (relative + absolute)", async () => {
         const { resolveSafePath } = await loadRuns();
         expect(await resolveSafePath(RUN, "../../etc/passwd")).toBeNull();
+        expect(await resolveSafePath(RUN, "/etc/passwd")).toBeNull();
+        // dot-only variant segment: isValidId now rejects "..", so the prefetch
+        // falls through and the containment check nulls it.
+        expect(await resolveSafePath(RUN, `../${TASK}/00/task.json`)).toBeNull();
+    });
+});
+
+describe("dot-segment traversal is closed at the id guard", () => {
+    test("collectTaskFiles rejects a '..' runId / variant (no exfil via download)", async () => {
+        // Before the fix, isValidId admitted ".." so collectTaskFiles("..", …, "..")
+        // enumerated a sibling dir. Now every dot segment is rejected.
+        const { collectTaskFiles } = await loadRuns();
+        // runId ".." → rejected outright.
+        expect(await collectTaskFiles("..", "secret", "..")).toBeNull();
+        // variant ".." → sanitized to "default" (a nonexistent subtree here), so
+        // it resolves to nothing rather than escaping into "../<task>".
+        expect(await collectTaskFiles(RUN, TASK, "..")).toBeNull();
+    });
+
+    test("isValidId rejects '.' and '..' but accepts real ids", async () => {
+        const { isValidId } = await import("../blob");
+        expect(isValidId("..")).toBe(false);
+        expect(isValidId(".")).toBe(false);
+        expect(isValidId("kimi-k3")).toBe(true);
+        expect(isValidId("default")).toBe(true);
+        expect(isValidId("gpt-5.6")).toBe(true); // dots inside a real id are fine
     });
 });

@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { ContainerClient } from "@azure/storage-blob";
+import { DEFAULT_VARIANT } from "./variant";
 
 const ACCOUNT = "coderevaltests";
 const CONTAINER = "runs";
@@ -13,19 +14,30 @@ const CONTAINER = "runs";
 export const LOCAL_RUNS_DIR = process.env.EVALBOARD_LOCAL_RUNS_DIR || null;
 
 // Run / task IDs get reflected into filesystem paths and blob prefixes, so
-// reject anything outside a narrow whitelist before any side effect.
+// reject anything outside a narrow whitelist before any side effect. `.` and
+// `..` match ID_RE (dots are word-ish) but are traversal segments, so they are
+// rejected explicitly — a single guard that protects every id reflected into a
+// path (run id, variant segment, task-id segment, blob prefix). Historically
+// only isValidTaskId excluded them; isValidId did not, which let a variant of
+// ".." escape the run dir via taskContentBase / collectTaskFiles.
 const ID_RE = /^[\w.-]+$/;
 // Task IDs from dataset-expanded tasks look like "sentiment-classification/r3"
 // (suite/row). Each segment must still pass the narrow ID_RE — only the slash
 // separator between segments is additionally allowed.
 const TASK_ID_RE = /^[\w.-]+(\/[\w.-]+)*$/;
 
+// A path segment that is only dots ("." / "..") is a traversal, never a real id.
+function isDotSegment(s: string): boolean {
+    return s === "." || s === "..";
+}
+
 export function isValidId(id: unknown): id is string {
     return (
         typeof id === "string" &&
         id.length > 0 &&
         id.length < 128 &&
-        ID_RE.test(id)
+        ID_RE.test(id) &&
+        !isDotSegment(id)
     );
 }
 
@@ -35,7 +47,7 @@ export function isValidTaskId(id: unknown): id is string {
         id.length > 0 &&
         id.length < 256 &&
         TASK_ID_RE.test(id) &&
-        !id.split("/").some((s) => s === "." || s === "..")
+        !id.split("/").some(isDotSegment)
     );
 }
 
@@ -271,9 +283,9 @@ export async function ensureTaskDir(
     taskId: string,
     destRoot: string,
     // Experiment variant subdir. "default" for single-config runs; a model name
-    // (e.g. "kimi-k3") in A/B runs. Validated as a path segment so it can't
-    // escape the run prefix.
-    variant = "default",
+    // (e.g. "kimi-k3") in A/B runs. Validated as a path segment (assertValidId
+    // rejects "."/".." now) so it can't escape the run prefix.
+    variant: string = DEFAULT_VARIANT,
 ): Promise<void> {
     assertValidId(runId, "runId");
     assertValidTaskId(taskId, "taskId");

@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { ensureRunReviewIndex } from "./blob";
-import { RUNS_DIR, listRunIds } from "./runs";
+import { RUNS_DIR, listRunIds, variantSegment } from "./runs";
+import { taskGroupKey } from "./status";
 import type {
     Review,
     ReviewIndex,
@@ -46,10 +47,14 @@ export async function readTaskReview(
     taskId: string,
     replicate: string,
 ): Promise<Review | null> {
+    // Sanitize the variant here too — this is a path-consuming reader like the
+    // others, so it must not trust its caller (page.tsx forwards the run's arm,
+    // but a raw ?v= must never reach path.join). variantSegment collapses "."/
+    // ".." / any non-id to "default".
     const p = path.join(
         RUNS_DIR,
         runId,
-        variantId,
+        variantSegment(variantId),
         taskId,
         replicate,
         "review.json",
@@ -79,14 +84,23 @@ export function tagCountsForRun(
         .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
 }
 
-// Per-task review entries indexed by task_id (collapsed across variant/replicate
-// for the run grid — first occurrence wins for stable rendering).
+// Per-arm review entries keyed by (task_id, variant) via taskGroupKey — the SAME
+// key the grid rows collapse on — so in an A/B run each arm shows its OWN review
+// instead of both arms inheriting the first arm's summary/tags. Collapsed across
+// replicate only (first occurrence per arm wins for stable rendering). Look rows
+// up with taskGroupKey(row), not row.taskId.
 export type EntriesByTask = Map<string, ReviewIndexEntry>;
 
 export function indexByTask(index: ReviewIndex): EntriesByTask {
     const out: EntriesByTask = new Map();
     for (const e of index.reviews) {
-        if (!out.has(e.task_id)) out.set(e.task_id, e);
+        // Empty variant_id (legacy indexes) → null so it collapses to "default",
+        // matching a row whose variant is null/"default".
+        const key = taskGroupKey({
+            taskId: e.task_id,
+            variant: e.variant_id || null,
+        });
+        if (!out.has(key)) out.set(key, e);
     }
     return out;
 }

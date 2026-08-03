@@ -31,17 +31,39 @@ function row(
 }
 
 describe("collapseReplicates", () => {
-    test("averages the numeric columns across a task's replicates", () => {
+    test("averages ALL resource columns across a task's replicates", () => {
+        // Distinct values per replicate so a mean is distinguishable from the
+        // representative's value on every averaged column (guards the whole set,
+        // per the review's mutation-survival finding). All SUCCESS → the
+        // representative is replicateIndex 0.
         const [collapsed] = collapseReplicates([
-            row("t", { replicateIndex: 0, totalCostUsd: 0.1, durationSeconds: 10, weightedScore: 0.9, actualCommands: 4 }),
-            row("t", { replicateIndex: 1, totalCostUsd: 0.2, durationSeconds: 20, weightedScore: 0.6, actualCommands: 8 }),
-            row("t", { replicateIndex: 2, totalCostUsd: 0.3, durationSeconds: 30, weightedScore: 0.3, actualCommands: 6 }),
+            row("t", { replicateIndex: 0, totalCostUsd: 0.1, durationSeconds: 10, actualCommands: 4, totalTurns: 2, inputTokens: 100, outputTokens: 10, cacheCreationTokens: 1000, cacheReadTokens: 5000 }),
+            row("t", { replicateIndex: 1, totalCostUsd: 0.2, durationSeconds: 20, actualCommands: 8, totalTurns: 4, inputTokens: 200, outputTokens: 20, cacheCreationTokens: 2000, cacheReadTokens: 7000 }),
+            row("t", { replicateIndex: 2, totalCostUsd: 0.3, durationSeconds: 30, actualCommands: 6, totalTurns: 6, inputTokens: 300, outputTokens: 30, cacheCreationTokens: 3000, cacheReadTokens: 9000 }),
         ]);
-        // Cost is the MEAN of the three repeats — not the first run's 0.1.
+        // Every resource column is the MEAN of the three repeats — not the first
+        // run's value.
         expect(collapsed.totalCostUsd).toBeCloseTo(0.2, 10);
         expect(collapsed.durationSeconds).toBeCloseTo(20, 10);
-        expect(collapsed.weightedScore).toBeCloseTo(0.6, 10);
         expect(collapsed.actualCommands).toBeCloseTo(6, 10);
+        expect(collapsed.totalTurns).toBeCloseTo(4, 10);
+        expect(collapsed.inputTokens).toBeCloseTo(200, 10);
+        expect(collapsed.outputTokens).toBeCloseTo(20, 10);
+        expect(collapsed.cacheCreationTokens).toBeCloseTo(2000, 10);
+        expect(collapsed.cacheReadTokens).toBeCloseTo(7000, 10);
+    });
+
+    test("weightedScore stays on the representative, NOT averaged (score/status coherence)", () => {
+        // SUCCESS(1.0) + FAILURE(0.2): the representative is the passing row, so
+        // the row's Score must be that run's 1.0 — never the 0.6 mean, which would
+        // read "Passed · 0.60" and then show 1.00 on click-through.
+        const [collapsed] = collapseReplicates([
+            row("t", { replicateIndex: 0, status: "FAILURE", weightedScore: 0.2 }),
+            row("t", { replicateIndex: 1, status: "SUCCESS", weightedScore: 1.0 }),
+        ]);
+        expect(collapsed.status).toBe("SUCCESS");
+        expect(collapsed.replicateIndex).toBe(1);
+        expect(collapsed.weightedScore).toBe(1.0);
     });
 
     test("keeps categorical fields from the representative (passing replicate wins, then lowest index)", () => {

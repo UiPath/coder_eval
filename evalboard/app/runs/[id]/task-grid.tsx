@@ -27,6 +27,7 @@ import {
     turnRatio,
     turnsCellClasses,
 } from "@/lib/turns";
+import { DEFAULT_VARIANT } from "@/lib/variant";
 import { ChipButton } from "./chips";
 import { TableScroll } from "@/app/_components/scroll-table";
 import {
@@ -220,7 +221,7 @@ function TaskIdCell({
     // variant's detail. "default" is the implicit fallback, so it's omitted.
     const params = new URLSearchParams();
     if (replicateCount > 1) params.set("r", String(t.replicateIndex ?? 0));
-    if (t.variant && t.variant !== "default") params.set("v", t.variant);
+    if (t.variant && t.variant !== DEFAULT_VARIANT) params.set("v", t.variant);
     const qs = params.toString();
     const href = `/runs/${runId}/${t.taskId}${qs ? `?${qs}` : ""}`;
     return (
@@ -295,7 +296,11 @@ function compare(
         case "task":
             return a.taskId.localeCompare(b.taskId);
         case "model":
-            return (a.model ?? "").localeCompare(b.model ?? "");
+            // The arm column sorts by whichever label it shows (model when
+            // models differ, else the variant/arm id).
+            return (a.model ?? a.variant ?? "").localeCompare(
+                b.model ?? b.variant ?? "",
+            );
         case "status":
             return statusSortRank(a.status) - statusSortRank(b.status);
         case "score":
@@ -510,8 +515,10 @@ export function TaskGrid({
     // separately rather than lumping all variants' rows together.
     const replicateCounts = useMemo(() => {
         const m = new Map<string, number>();
-        for (const t of tasks)
-            m.set(taskGroupKey(t), (m.get(taskGroupKey(t)) ?? 0) + 1);
+        for (const t of tasks) {
+            const k = taskGroupKey(t);
+            m.set(k, (m.get(k) ?? 0) + 1);
+        }
         return m;
     }, [tasks]);
 
@@ -530,13 +537,27 @@ export function TaskGrid({
     // Collapse BEFORE sorting so a metric-sorted view still shows one row per task.
     const collapsed = useMemo(() => collapseReplicates(tasks), [tasks]);
 
-    // Show the Model column only for multi-model (A/B) runs — a single-config
-    // run has one model across every row, so the column would be pure noise.
-    // The per-task detail page always names the model regardless (see page.tsx).
-    const showModel = useMemo(
-        () => new Set(collapsed.map((t) => t.model).filter(Boolean)).size > 1,
-        [collapsed],
-    );
+    // Show the arm column only when a run actually has multiple ARMS — rows split
+    // on (taskId, variant), so gate on distinct VARIANT, not distinct model: a
+    // same-model A/B (skill on/off, terse/detailed) varies only the variant, and
+    // gating on model would render N identical unlabeled rows per task. Also show
+    // it if models differ (a genuine multi-model run). A single-config run has
+    // one arm across every row, so the column stays hidden (pure noise). When
+    // shown, prefer the model label if models differ (the informative axis), else
+    // the variant id (the arm name). The detail page always names the model too.
+    const { showArm, armByModel } = useMemo(() => {
+        const models = new Set(collapsed.map((t) => t.model).filter(Boolean));
+        const variants = new Set(
+            collapsed.map((t) => t.variant ?? DEFAULT_VARIANT),
+        );
+        return {
+            showArm: models.size > 1 || variants.size > 1,
+            armByModel: models.size > 1,
+        };
+    }, [collapsed]);
+    // The label shown in the arm column / mobile card for one row.
+    const armLabel = (t: TaskResultSummary): string =>
+        (armByModel ? t.model ?? t.variant : t.variant) ?? DEFAULT_VARIANT;
 
     const sorted = useMemo(() => {
         const arr = [...collapsed];
@@ -568,8 +589,12 @@ export function TaskGrid({
     const visibleColumns = COLUMNS.filter(
         (c) =>
             (showTokens || !TOKEN_KEYS.has(c.key)) &&
-            (showModel || c.key !== "model"),
+            (showArm || c.key !== "model"),
     );
+    // The arm column's header reads "Model" when models distinguish the arms,
+    // else "Variant" (same-model A/B). The SortKey stays "model".
+    const columnHeader = (col: (typeof COLUMNS)[number]): string =>
+        col.key === "model" ? (armByModel ? "Model" : "Variant") : col.header;
 
     return (
         <div className="space-y-2">
@@ -636,7 +661,7 @@ export function TaskGrid({
                                             onClick={() => onSort(col.key)}
                                             className="inline-flex items-center gap-1 hover:text-gray-900"
                                         >
-                                            {col.header}
+                                            {columnHeader(col)}
                                             <span className="text-xs text-gray-400 w-3">
                                                 {arrow}
                                             </span>
@@ -648,7 +673,7 @@ export function TaskGrid({
                                             >
                                                 <button
                                                     type="button"
-                                                    aria-label={`What is ${col.header}?`}
+                                                    aria-label={`What is ${columnHeader(col)}?`}
                                                     aria-expanded={
                                                         openHelp === col.key
                                                     }
@@ -688,7 +713,7 @@ export function TaskGrid({
                 </thead>
                 <tbody>
                     {sorted.map((t) => {
-                        const review = reviewsByTask?.get(t.taskId);
+                        const review = reviewsByTask?.get(taskGroupKey(t));
                         // Color off the same visible-events count the cell
                         // displays — not SDK num_turns (totalTurns), which the
                         // visible-turns refactor dropped from the display and
@@ -732,12 +757,16 @@ export function TaskGrid({
                                     />
                                 </div>
                             </td>
-                            {showModel && (
+                            {showArm && (
                                 <td
                                     className="py-3 px-4 text-gray-700 font-mono text-xs max-w-[16rem] truncate"
-                                    title={t.model ?? undefined}
+                                    title={
+                                        t.model
+                                            ? `model ${t.model} · variant ${t.variant ?? DEFAULT_VARIANT}`
+                                            : `variant ${t.variant ?? DEFAULT_VARIANT}`
+                                    }
                                 >
-                                    {t.model ?? "—"}
+                                    {armLabel(t)}
                                 </td>
                             )}
                             <td className="py-3 px-4">
@@ -845,7 +874,7 @@ export function TaskGrid({
                 table's columns do. */}
             <div className="md:hidden space-y-2">
                 {sorted.map((t) => {
-                    const review = reviewsByTask?.get(t.taskId);
+                    const review = reviewsByTask?.get(taskGroupKey(t));
                     const turnsTint = tintForRatio(
                         turnRatio(
                             displayedTurns(t.actualCommands, t.hasFinalReply),
@@ -880,12 +909,16 @@ export function TaskGrid({
                                     )}
                                 </span>
                             </div>
-                            {showModel && t.model && (
+                            {showArm && (
                                 <div
                                     className="font-mono text-[11px] text-gray-500 truncate"
-                                    title={t.model}
+                                    title={
+                                        t.model
+                                            ? `model ${t.model} · variant ${t.variant ?? DEFAULT_VARIANT}`
+                                            : `variant ${t.variant ?? DEFAULT_VARIANT}`
+                                    }
                                 >
-                                    {t.model}
+                                    {armLabel(t)}
                                 </div>
                             )}
                             <TaskTagChips

@@ -9,6 +9,7 @@
 // and "Faulted" and uses its own logic.
 
 import type { TaskResultSummary } from "./runs";
+import { DEFAULT_VARIANT } from "./variant";
 
 export type StatusCategory = "passed" | "failed" | "error" | "unknown";
 
@@ -36,11 +37,16 @@ const KEY_SEP = "\u001f";
 // model — so the variant is part of the key. Single-config runs carry variant
 // "default" (or null on legacy rows), so the key is effectively the taskId and
 // behavior is unchanged.
+// `variant` is REQUIRED (matching TaskResultSummary.variant, a required
+// `string | null`) — declaring it optional would let a row-shaped object that
+// forgot the field type-check and silently fold every arm of an A/B run back
+// into one "default" group, which is exactly the bug this key prevents. The
+// `?? DEFAULT_VARIANT` still covers the legacy-null case.
 export function taskGroupKey(t: {
     taskId: string;
-    variant?: string | null;
+    variant: string | null;
 }): string {
-    return `${t.taskId}${KEY_SEP}${t.variant ?? "default"}`;
+    return `${t.taskId}${KEY_SEP}${t.variant ?? DEFAULT_VARIANT}`;
 }
 
 // Roll per-replicate rows up per (task, variant): key -> number of replicates
@@ -49,7 +55,7 @@ export function taskGroupKey(t: {
 // tile AND the grid badge / collapse so they can never disagree. Keyed by
 // taskGroupKey so a multi-model run counts each model's attempt separately.
 export function perTaskPassCounts<
-    T extends { taskId: string; status: string | null; variant?: string | null },
+    T extends { taskId: string; status: string | null; variant: string | null },
 >(rows: readonly T[]): Map<string, number> {
     const m = new Map<string, number>();
     for (const r of rows) {
@@ -79,15 +85,21 @@ function meanOrNull(values: readonly (number | null)[]): number | null {
 // run keeps one row PER MODEL (the variant is part of the group key), so each
 // model's metrics stay separate instead of being averaged across models. Each
 // collapsed row's:
-//   - categorical fields (status, replicateIndex/detail link, tags, skill,
-//     model, variant, expected_turns, mature flag) come from a REPRESENTATIVE
-//     replicate — a passing one when any passed, else the lowest-index one — so
-//     the status pill and the "open detail" link both describe one real run; and
-//   - quantitative columns (score, duration, cost, turns via actualCommands,
-//     tokens) are the MEAN across ALL replicates, so the grid reflects the whole
-//     repeat set rather than just the representative run. (Previously every
-//     column was the representative's own value, so e.g. cost showed a single
-//     run's price instead of the average over the repeats.)
+//   - categorical + verdict fields (status, weightedScore, replicateIndex/detail
+//     link, tags, skill, model, variant, expected_turns, mature flag) come from
+//     a REPRESENTATIVE replicate — a passing one when any passed, else the
+//     lowest-index one — so the Status pill, the Score, and the "open detail"
+//     link ALL describe the SAME run (clicking a "Passed" row lands on a page
+//     showing that same score); and
+//   - resource columns (duration, cost, turns via actualCommands, tokens) are
+//     the MEAN across ALL replicates, so the grid reflects the whole repeat set
+//     rather than just the representative run. (Previously cost/tokens/etc.
+//     showed a single run's value instead of the average over the repeats.)
+// weightedScore is DELIBERATELY kept on the representative, not averaged: the row
+// shows one pass/fail verdict, so its score must be that run's score — an
+// averaged score beside a representative Status pill reads "Passed · 0.60" for a
+// SUCCESS/FAILURE pair and then shows 1.00 on click-through. Score aggregation,
+// if wanted, belongs in a separately labeled column.
 // First-seen group order is preserved. With repeats disabled (one replicate per
 // task/variant) each mean is that single value, so the output is byte-identical.
 export function collapseReplicates(
@@ -116,7 +128,8 @@ export function collapseReplicates(
         }
         out.push({
             ...rep,
-            weightedScore: meanOrNull(group.map((t) => t.weightedScore)),
+            // weightedScore intentionally NOT averaged — see the note above; it
+            // stays the representative's so Status/Score/detail-link agree.
             durationSeconds: meanOrNull(group.map((t) => t.durationSeconds)),
             totalCostUsd: meanOrNull(group.map((t) => t.totalCostUsd)),
             // Turns render from displayedTurns(actualCommands, hasFinalReply);

@@ -9,6 +9,7 @@ import {
     replicateDirName,
 } from "@/lib/runs";
 import { readTaskReview } from "@/lib/reviews";
+import { DEFAULT_VARIANT, firstParam, variantLinkParam } from "@/lib/variant";
 import { fmtCompact, fmtRunTime, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { ChipButton } from "../chips";
@@ -33,7 +34,10 @@ export default async function TaskPage({
     searchParams,
 }: {
     params: Promise<{ id: string; task: string[] }>;
-    searchParams: Promise<{ r?: string; v?: string }>;
+    // Next yields `string | string[]` for a repeated query key; declare it
+    // honestly and normalize with firstParam so `?v=a&v=b` can't reach a reader
+    // as an array (which would throw a 500 at path.join).
+    searchParams: Promise<{ r?: string | string[]; v?: string | string[] }>;
 }) {
     const { id, task: taskSegments } = await params;
     const { r, v } = await searchParams;
@@ -42,16 +46,17 @@ export default async function TaskPage({
     // path, so the query param is what selects which replicate's <NN>/ dir to
     // open. Absent / non-numeric / negative → replicate 0 (the single result a
     // non-repeated or legacy run has).
-    const parsedR = Number(r);
+    const parsedR = Number(firstParam(r));
     const replicate =
-        r != null && Number.isInteger(parsedR) && parsedR >= 0 ? parsedR : 0;
-    // Variant (model) from ?v=NAME — in a multi-model (A/B) run several variants
-    // share this task path, so ?v selects which model's <variant>/ subdir to
-    // open. Absent → "default" (the single-config subdir); the readers sanitize
-    // and fall back to "default" for anything unsafe or unknown.
-    const variant = v ?? "default";
-    const task = await readTaskDetail(id, taskId, replicate, variant);
+        Number.isInteger(parsedR) && parsedR >= 0 ? parsedR : 0;
+    // Variant (arm) from ?v=NAME — in an A/B run several variants share this task
+    // path, so ?v selects which arm's <variant>/ subdir to open. When ABSENT,
+    // readTaskDetail resolves the run's actual arm (single-arm tasks just work;
+    // this is what keeps pre-existing ?v-less deep links from 404-ing). The
+    // resolved arm comes back on task.variant and drives every other reader.
+    const task = await readTaskDetail(id, taskId, replicate, firstParam(v));
     if (!task) notFound();
+    const variant = task.variant ?? DEFAULT_VARIANT;
 
     // Replicate indices available for this task/variant — drives the run
     // selector below. [0] (or fewer) for a non-repeated task, so it self-hides.
@@ -73,12 +78,9 @@ export default async function TaskPage({
     const { flowDebug } = task;
 
     // Preserve ?v= on in-page links (replicate selector, download) so switching
-    // replicates or downloading stays on the SAME model. "default" is the
-    // implicit fallback, so it's omitted to keep single-config URLs clean.
-    const variantParam =
-        variant && variant !== "default"
-            ? `&v=${encodeURIComponent(variant)}`
-            : "";
+    // replicates or downloading stays on the SAME arm. "default" is the implicit
+    // fallback, so it's omitted to keep single-config URLs clean.
+    const variantParam = variantLinkParam(variant);
 
     return (
         <div className="space-y-6">

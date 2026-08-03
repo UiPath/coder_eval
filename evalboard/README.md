@@ -36,14 +36,18 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
 
 `<task-id>` is the same string the eval framework writes to
 `task_results[].task_id` (e.g., `skill-flow-calculator`) and equals the
-subdir name under `<run-id>/default/`.
+subdir name under `<run-id>/<variant-id>/`, where `<variant-id>` is the
+experiment arm — `default` for a single-config run, or the arm name (e.g.
+`opus`, `with-skill`) in an A/B run. The task page selects the arm via `?v=`
+(mirroring `?r=` for replicates); a bare URL resolves the run's actual arm.
 
 ## Conventions
 
 - `/api/file?run=<id>&path=<relpath>` serves `.flow`, `.uipx`, etc. with
   path-traversal guard (`resolveSafePath`).
-- `/api/download?run=<id>[&task=<id>]` streams a zip of a task folder (with
-  `task`) or the whole run (without). Files are gathered by `collectTaskFiles`
+- `/api/download?run=<id>[&task=<id>][&v=<variant>]` streams a zip of a task
+  folder (with `task`; `v` selects the arm, default `default`) or the whole run
+  (without `task`). Files are gathered by `collectTaskFiles`
   / `collectRunFiles`, which reuse the `walkArtifacts` noise filter, and zipped
   by `lib/zip.ts` (a dependency-free DEFLATE writer).
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red

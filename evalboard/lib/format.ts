@@ -37,7 +37,10 @@ export function fmtCompact(n: number | null | undefined): string {
     const abs = Math.abs(n);
     if (abs >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
     if (abs >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
-    return String(n);
+    // Cap sub-1k values at 2 decimals (dropping trailing zeros) — averaged
+    // token/command means across replicates are fractional (e.g. 500.666…), and
+    // the ≥1k branches already round via toFixed(1). Integers render unchanged.
+    return String(Number(n.toFixed(2)));
 }
 
 // USD with enough precision to read sub-cent differences as the thinking

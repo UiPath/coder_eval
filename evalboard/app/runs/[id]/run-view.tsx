@@ -5,7 +5,7 @@ import { useCallback, useMemo, useState } from "react";
 import type { ActivationScore, TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
-import { perTaskPassCounts, statusCategory } from "@/lib/status";
+import { perTaskPassCounts, statusCategory, taskGroupKey } from "@/lib/status";
 import { ChipLegend } from "@/app/_overview/tag-rail";
 import { CollapsibleRail } from "@/app/_components/collapsible-rail";
 import { ActivationCard } from "./activation-card";
@@ -285,7 +285,7 @@ export function RunView({
         }
         if (selectedReviewTags.length > 0) {
             arr = arr.filter((t) => {
-                const rtags = reviewsByTask?.get(t.taskId)?.tags ?? [];
+                const rtags = reviewsByTask?.get(taskGroupKey(t))?.tags ?? [];
                 return selectedReviewTags.every((tag) => rtags.includes(tag));
             });
         }
@@ -300,7 +300,7 @@ export function RunView({
                     return true;
                 if (t.tags.some((tag) => tag.toLowerCase().includes(qLower)))
                     return true;
-                const rtags = reviewsByTask?.get(t.taskId)?.tags ?? [];
+                const rtags = reviewsByTask?.get(taskGroupKey(t))?.tags ?? [];
                 if (rtags.some((tag) => tag.toLowerCase().includes(qLower)))
                     return true;
                 return false;
