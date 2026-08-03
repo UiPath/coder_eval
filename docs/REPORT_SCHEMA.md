@@ -79,10 +79,43 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `expected_commands`,
 `actual_commands`, `commands_efficiency`, `agent_config`, `sdk_options`,
 `installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_turns`,
-`max_turns_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
-`early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
-turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
-crashed, crash_reason}`) — the full transcript is in `task.json`.
+`max_turns_exhausted`, `has_final_reply`), early-stop fields (`stopped_early`,
+`early_stop_reason`, `turns_remaining_at_stop`), and run-integrity fields
+(`integrity_verdict`, `integrity_voided`, `integrity_findings`). `iterations` here is
+a **reduced** turn digest (`{iteration, duration_seconds, command_count,
+assistant_turn_count, crashed, crash_reason}`) — the full transcript is in `task.json`.
+
+The row key set is pinned by `tests/test_reports_experiment.py::TestRowKeySet`.
+`eval_result_to_task_dict` is a hand-maintained dict literal, so a new
+`EvaluationResult` field reaches `task.json` for free but **not** `run.json` unless it
+is added there too.
+
+### Run integrity
+
+Every row carries an integrity verdict: was the score a measurement of the agent, or an
+artifact of the agent reaching graded material — a reference solution, a checker script,
+its own task definition?
+
+| `integrity_verdict` | Meaning |
+| --- | --- |
+| `clean` | The scan saw the whole transcript and found nothing. |
+| `tainted` | A command read graded material. |
+| `inconclusive` | The scan could not see the whole transcript — unrecovered sub-agent tool calls, too many commands with no parameters, or an unrecognised tool touching graded material. Never voids. |
+| `skipped` | The pass did not run (`INTEGRITY_MODE=off`, or no graded material was derivable for the task). |
+
+`INTEGRITY_MODE` decides what a `tainted` verdict does: `detect` (the default) records
+the verdict and findings and changes no outcome; `void` additionally downgrades a
+tainted `SUCCESS` to `FAILURE` and sets `integrity_voided`; `off` skips the pass. Roll
+out with `detect` and read a real run's findings before switching to `void`.
+
+`weighted_score` is left as computed on a voided row: the high score IS the finding (the
+row passed *because* it cheated), so erasing it would destroy the evidence. Taint is
+never a `FinalStatus` member — the terminal-status set is closed, and integrity rides
+alongside the status as orthogonal telemetry, the way early-stop does.
+
+`task.json` carries the full `integrity` object: every finding with its coordinates
+(iteration, command index, tool, evidence excerpt) plus the blind-spot counters
+(`commands_scanned`, `commands_without_parameters`, `subagent_recovery_incomplete`).
 
 ### Missing cost is never fatal
 

@@ -28,6 +28,7 @@ from .errors import (
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
+from .integrity import evaluate_integrity
 from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
@@ -40,6 +41,8 @@ from .models import (
     DirectRoute,
     EvaluationResult,
     FinalStatus,
+    IntegrityMode,
+    IntegrityVerdict,
     JudgeCriterionResult,
     LiteLLMRoute,
     PostRunCommand,
@@ -662,6 +665,71 @@ class Orchestrator:
         except Exception:
             logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
 
+    def _apply_integrity_gate(self) -> None:
+        """Record the integrity verdict and, under ``void``, downgrade a tainted pass.
+
+        Runs as a pass over the finished result rather than as a criterion type:
+        criteria are opt-in per task YAML across a hundred-plus files, and the
+        author whose fixtures leak is exactly the author who will not add one.
+
+        What the gate does and does not do:
+
+        * ``SUCCESS`` + ``TAINTED`` + ``mode=void`` -> ``FAILURE``, ``voided=True``.
+          Every other combination leaves the status alone. ``INCONCLUSIVE`` never
+          voids -- "the scan could not see everything" is not evidence of a leak.
+        * ``weighted_score`` is left exactly as computed. On a tainted row the
+          high score IS the finding (it passed *because* it cheated), so erasing
+          it would destroy the evidence the row exists to carry.
+        * No new ``FinalStatus`` member. The terminal-status set is closed (two
+          exhaustive maps whose module-level asserts break import, plus every
+          consumer that switches on it); taint rides alongside the status as
+          orthogonal telemetry, the way early-stop does.
+
+        Never raises: this runs inside ``run()``'s ``finally``, so an integrity
+        bug must not cost the row its ``task.json``.
+        """
+        if self.result is None:
+            return
+
+        try:
+            info = evaluate_integrity(
+                self.task,
+                self.task_file,
+                self.result.iterations,
+                mode=settings.integrity_mode,
+            )
+        except Exception:
+            logger.warning("[%s] Integrity pass failed; leaving the row ungated", self.task.task_id, exc_info=True)
+            return
+
+        self.result.integrity = info
+
+        if info.verdict is not IntegrityVerdict.TAINTED:
+            if info.notes:
+                logger.debug("[%s] Integrity %s: %s", self.task.task_id, info.verdict.value, "; ".join(info.notes))
+            return
+
+        summary = "; ".join(f.detail for f in info.findings[:3])
+        if info.mode is IntegrityMode.VOID and self.result.final_status is FinalStatus.SUCCESS:
+            info.voided = True
+            self.result.final_status = FinalStatus.FAILURE
+            if not self.result.error_message:
+                self.result.error_message = f"Score voided: agent read graded material. {summary}"
+            logger.error(
+                "[%s] VOIDED a passing row: the agent read graded material (%d finding(s)). %s",
+                self.task.task_id,
+                len(info.findings),
+                summary,
+            )
+        else:
+            logger.warning(
+                "[%s] Integrity TAINTED (mode=%s, status=%s; not voided): %s",
+                self.task.task_id,
+                info.mode.value,
+                self.result.final_status.value,
+                summary,
+            )
+
     def _finalize_result(self, start_time: float) -> None:
         """Finalize the evaluation result: scores, telemetry, and persistence."""
         if not self.result:
@@ -700,6 +768,11 @@ class Orchestrator:
         # Command statistics
         if self.result.iterations:
             self.result.command_stats = calculate_command_statistics(self.result.iterations)
+
+        # Run integrity: did this row measure the agent, or a leak? Placed here --
+        # after criteria have produced a status and a score, before persistence --
+        # so the gate can act on the verdict and task.json records it either way.
+        self._apply_integrity_gate()
 
         # Resolve model_used (last turn with model wins, then agent config)
         if self.result.iterations:
