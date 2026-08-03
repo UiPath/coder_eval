@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Self
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RunLimits(BaseModel):
@@ -123,34 +121,19 @@ class RunLimits(BaseModel):
         ),
     )
 
-    @model_validator(mode="after")
-    def _check_stop_early_gate_threshold(self) -> Self:
-        """Reject a dead or degenerate ``stop_early_gate_threshold``.
-
-        Two hard errors, matching the "never a silent no-op" posture the rest
-        of early-stop resolution already holds itself to:
-
-        - Non-default with ``stop_early: False``: the field is read only
-          inside the orchestrator's ``early_stop is not None`` branch, so it
-          has zero effect while ``stop_early`` is off — a silent no-op rather
-          than the "unsupported combination is a hard error" contract.
-        - ``<= 0.0`` with ``stop_early: True``: a threshold of exactly 0
-          trivially satisfies both the pass-stop floor check and the final
-          weighted gate regardless of whether any armed criterion has
-          actually decided — a task author could neutralize the entire
-          armed pass/fail gate with one YAML line (coder-eval is used as a
-          CI gate). Kept as a validator rather than a stricter field bound
-          because the floor depends on ``stop_early``.
-        """
-        if not self.stop_early and self.stop_early_gate_threshold != 1.0:
-            raise ValueError(
-                "run_limits.stop_early_gate_threshold is set but run_limits.stop_early is "
-                + "False; the threshold has no effect unless stop_early is also True."
-            )
-        if self.stop_early and self.stop_early_gate_threshold <= 0.0:
-            raise ValueError(
-                "run_limits.stop_early_gate_threshold must be > 0.0 when stop_early is True "
-                + "(a threshold of 0 trivially passes the armed gate regardless of whether any "
-                + "armed criterion actually decided)."
-            )
-        return self
+    # NOTE: stop_early_gate_threshold <= 0.0 together with stop_early: True is
+    # a degenerate, gate-neutralizing config (a threshold of 0 trivially
+    # passes the armed gate regardless of whether anything decided) and is
+    # rejected — but NOT here. RunLimits is field-merged across 5 layers, so a
+    # model-level validator has no visibility into which layer produced the
+    # merged value and cannot distinguish a real mistake from a value merged
+    # forward from a sibling layer (e.g. a task-level threshold inherited by a
+    # variant that only flips stop_early). That distinction requires seeing
+    # the whole resolved task, so the check lives in
+    # orchestration/early_stop.py::validate_early_stop instead, where it
+    # raises EarlyStopConfigError and gets the same hard-stop CLI treatment
+    # (flips the plan exit code, aborts run) as every other early-stop
+    # guardrail — a plain pydantic ValueError here would instead land in
+    # plan_command's generic per-variant "resolution failed" branch, which
+    # prints red text but does NOT flip the exit code by design (unlike
+    # EarlyStopConfigError), so a model-level raise would silently pass CI.

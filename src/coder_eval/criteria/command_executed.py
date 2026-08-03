@@ -30,14 +30,6 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
 
     criterion_type = "command_executed"
 
-    # Observable mid-run: command matches accumulate monotonically in the live
-    # stream, so a min_count pass (no upper bound) and a max_count exceedance
-    # (incl. the must-NOT-run 0/0 form) are both decidable before end-of-run.
-    # Per-instance decidability narrowing now lives on the model
-    # (``CommandExecutedCriterion.live_decidable_polarities`` in
-    # models/criteria.py) — "is this criterion type live-observable" is its
-    # ``LiveSuccessCriterion`` subclassing, not a checker-side ClassVar.
-
     @staticmethod
     def _matching_commands(
         criterion: CommandExecutedCriterion,

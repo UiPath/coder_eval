@@ -260,7 +260,7 @@ run_limits:
 | `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | `false` | — | Opt-in master switch for early-stop-on-criterion. See [`stop_early`](#stop_early-opt-in-early-stop). |
-| `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` | Minimum weighted score over the armed subset required to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution when `stop_early: true`) | Minimum weighted score over the armed subset required to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
 a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
@@ -377,11 +377,14 @@ Semantics:
   (e.g. `stop_when: pass` alongside a `max_count`, or `auto` on an instance that
   can decide neither) is likewise a hard error at resolution, not a silent full
   run.
-- **Verdict.** An early-stopped run is gated on the **armed subset only**; the
-  non-armed criteria become **advisory** and are clearly marked (report badge +
-  per-criterion note + `stopped_early` row). A run that completes naturally is
-  gated on the **full** set, as always. This is what lets one file serve both a
-  `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`) —
+- **Verdict.** Any task armed for early-stop (`stop_early: true`) is gated on
+  the **armed subset only** — the non-armed criteria become **advisory** and
+  are clearly marked (report badge + per-criterion note + `stopped_early`
+  row when the watcher actually fired) — whether or not the watcher actually
+  cut the run short; one task config maps to one gate semantic. Only a task
+  that never armed `stop_early` at all is gated on the **full** set, as
+  always. This is what lets one file serve both a `smoke` flavor
+  (`stop_early: true`) and an `e2e` flavor (`stop_early: false`) —
   see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md). Verdict parity between the flavors
   is one-sided: a **fail-stop** is verdict-preserving (the deferral above
   guarantees every pass-armed signal was allowed to resolve first), but a
@@ -405,17 +408,18 @@ Semantics:
   the floor only reaches 1.0 once every pass-armed criterion has actually
   passed) — lowering it lets a low-weight armed criterion's failure be absorbed
   without truncating the run, at the cost of the gate becoming a genuine
-  weighted average rather than a strict AND. **This weighting applies only
-  when the watcher itself fires the stop.** If a `stop_early: true` task
-  instead completes naturally (the agent finishes, or `max_turns` is hit,
-  before the bound ever trips), the run falls back to the ordinary full-run
-  gate (`all_criteria_passed`) — a strict `all(score >= pass_threshold)` over
-  every gating criterion, where `weight` magnitude plays no role beyond the
-  `weight: 0` informational exemption. Whether a low-weight criterion's
-  failure gets forgiven can therefore depend on whether the watcher actually
-  fired, not solely on the configured threshold — write `max_steps_to_decide`
-  or a tight `max_turns` if you need the weighted gate to be the one that
-  always applies.
+  weighted average rather than a strict AND. **The armed weighted gate applies
+  whenever `stop_early: true` is set — one task config, one gate semantic —
+  regardless of whether the watcher actually fired a stop.** A task armed for
+  early-stop that instead completes naturally (the agent finishes, or
+  `max_turns` is hit, before the bound ever trips) is gated on the *same*
+  weighted armed-subset formula as an actual early stop, not the full-run
+  `all_criteria_passed`; only a task that never armed `stop_early` at all uses
+  the strict full-set gate. Each armed criterion's own `pass_threshold` still
+  decides whether it individually passed (converted to a binary 1.0/0.0
+  before weighting) — only the combination rule (weighted average vs strict
+  AND) changes, which is what makes the `gate_threshold=1.0` default an exact
+  equivalence with the pre-weighting `all(...)` rule.
 - **Decision-step budget.** `max_steps_to_decide` (per armed criterion, only
   on `skill_triggered` / `command_executed`, requires `stop_when`) caps how
   many tool-call steps that criterion may spend still **undecided** before the

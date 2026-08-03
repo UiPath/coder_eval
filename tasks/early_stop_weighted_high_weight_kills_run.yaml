@@ -7,8 +7,12 @@ description: >
   misfires, the ceiling (best case: the low-weight positive still passes) is
   only 0.2, which can never reach the 0.7 gate threshold — the run is
   mathematically guaranteed to fail the armed gate no matter what happens
-  next, so the watcher must fail-stop immediately instead of burning the rest
-  of run_limits.max_turns on a doomed run. This is a NON-CI example task
+  next. The fail-stop is DEFERRED, though, while the low-weight positive is
+  still undecided (a distractor misfire must not truncate recall) — with the
+  prompt ordering curl before python app.py, the fail-stop actually fires as
+  soon as the positive resolves (not "immediately" on the curl misfire
+  itself), rather than burning the rest of run_limits.max_turns on a doomed
+  run. This is a NON-CI example task
   (deliberately untagged for smoke-pass/smoke-fail): whether the agent
   actually calls curl as instructed is not deterministic enough for a
   live-agent CI assertion — run it manually with `coder-eval run` to observe

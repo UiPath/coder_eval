@@ -438,10 +438,14 @@ class ReportGenerator:
                 reason = t.get("early_stop_reason") or "unknown"
                 turns_remaining = t.get("turns_remaining_at_stop")
                 avoided = f" <= {turns_remaining} turn(s) avoided —" if isinstance(turns_remaining, int) else ""
-                notes.append(
-                    f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided}"
-                    + " gated on armed criteria only; other criteria are advisory"
-                )
+                if reason == "decision_budget_exceeded":
+                    # No criterion gated here at all — an armed criterion's
+                    # decision-step budget expired unresolved, forcing FAILURE
+                    # outright, bypassing the weighted gate entirely.
+                    gate_note = " forced to FAILURE (decision-step budget exceeded, bypassing the gate)"
+                else:
+                    gate_note = " gated on armed criteria only; other criteria are advisory"
+                notes.append(f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided}" + gate_note)
         if not notes:
             return []
         return ["## Run-time Notes", "", *notes]

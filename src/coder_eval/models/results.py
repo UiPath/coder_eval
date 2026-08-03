@@ -474,9 +474,13 @@ class EarlyStopInfo(BaseModel):
     )
     gate_threshold: float = Field(
         default=1.0,
+        ge=0.0,
+        le=1.0,
         description="run_limits.stop_early_gate_threshold in effect for this stop — captured so a "
         + "persisted task.json is self-describing (e.g. comparing early-stopped runs across an "
-        + "experiment sweep that varies the threshold) without needing the resolved task config.",
+        + "experiment sweep that varies the threshold) without needing the resolved task config. "
+        + "Bounded to mirror the source field so a hand-edited or externally produced record "
+        + "cannot represent a value the authoritative field would reject.",
     )
 
 
@@ -683,12 +687,21 @@ class EvaluationResult(BaseModel):
         here: ``BaseSuccessCriterion`` rejects ``weight: 0`` together with
         ``stop_when``, so every armed criterion is gating by construction.
 
-        ``gate_threshold`` defaults to 1.0, which reproduces the pre-weighting
-        ``all(r.score >= c.pass_threshold)`` behavior exactly for the only
-        live-observable criteria (binary 0/1 scores) — a weighted average of 1.0
-        requires every armed criterion to have scored a full 1.0. Callers pass
-        ``run_limits.stop_early_gate_threshold`` to opt into a genuine weighted
-        average below 1.0.
+        Each armed criterion's OWN ``pass_threshold`` still decides whether it
+        individually passed — ``r.score`` is converted to a binary 1.0/0.0 via
+        ``r.score >= c.pass_threshold`` before weighting, exactly mirroring
+        ``all_criteria_passed``'s per-criterion comparison. Only the
+        combination rule changes: ``all_criteria_passed`` ANDs those binary
+        outcomes, this weights and averages them against ``gate_threshold``.
+        This is what makes the ``gate_threshold=1.0`` default an EXACT
+        equivalence with the pre-weighting ``all(...)`` rule, not merely an
+        approximation that happens to hold for binary-scoring criteria: a
+        weighted average of 1.0 requires every armed criterion's binary
+        outcome to be 1.0, i.e. every one to have individually passed its own
+        ``pass_threshold`` — identical to ``all(...)`` regardless of what
+        ``r.score`` itself was. Callers pass
+        ``run_limits.stop_early_gate_threshold`` to opt into a genuine
+        weighted average below 1.0.
         """
         if len(self.success_criteria_results) != len(criteria):
             raise ValueError(
@@ -714,7 +727,7 @@ class EvaluationResult(BaseModel):
             # (fails by crashing, not by silently passing) rather than diverge
             # toward a false pass.
             return False
-        weighted_score = sum(r.score * c.weight for r, c in armed) / total_weight
+        weighted_score = sum((1.0 if r.score >= c.pass_threshold else 0.0) * c.weight for r, c in armed) / total_weight
         return weighted_score >= gate_threshold
 
 

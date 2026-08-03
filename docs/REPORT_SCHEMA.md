@@ -188,10 +188,13 @@ backend), `num_turns`, `max_turns_exhausted`,
 ### EarlyStopInfo
 
 Present (non-`null`) iff the run stopped early — there is no separate boolean.
-Fields: `reason` (`criterion_passed` / `criterion_failed`),
+Fields: `reason` (`criterion_passed` / `criterion_failed` /
+`decision_budget_exceeded` — the last forces `FinalStatus.FAILURE` outright,
+bypassing the weighted gate),
 `deciding_criterion_type`, `deciding_criterion_description`, `armed_criteria`,
 `sdk_turn_index`, `tool_call_index` (1-based, includes the in-flight call),
-`elapsed_seconds`, `turns_remaining_at_stop`.
+`elapsed_seconds`, `turns_remaining_at_stop`, `gate_threshold` (the
+`run_limits.stop_early_gate_threshold` in effect for this stop; default `1.0`).
 
 ---
 

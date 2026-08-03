@@ -109,15 +109,6 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
 
     criterion_type = "skill_triggered"
 
-    # Observable mid-run: a Skill tool call (or a skill file read) is a positive
-    # event in the live stream. The TYPE can decide either polarity — a positive
-    # criterion live-passes when its expected skill is engaged, a
-    # distractor/negative one live-fails when its (wrong) skill is engaged — but
-    # any single INSTANCE decides only one of the two; see
-    # ``SkillTriggeredCriterion.live_decidable_polarities`` (models/criteria.py).
-    # "Is this criterion type live-observable" is now the model's
-    # ``LiveSuccessCriterion`` subclassing, not a checker-side ClassVar.
-
     def _check_impl(
         self,
         criterion: SkillTriggeredCriterion,

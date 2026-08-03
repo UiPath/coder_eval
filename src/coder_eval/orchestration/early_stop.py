@@ -185,6 +185,22 @@ def validate_early_stop(task: TaskDefinition) -> None:
             + "arming requires at least one stop criterion (e.g. stop_when: auto)."
         )
 
+    # (0) A threshold of exactly 0 trivially satisfies both the pass-stop
+    # floor check and the final weighted gate regardless of whether any armed
+    # criterion has actually decided — neutralizing the armed pass/fail gate
+    # with one YAML line (coder-eval is used as a CI gate). Checked here
+    # (not on RunLimits itself) because this is the whole-task, hard-stop
+    # surface: an EarlyStopConfigError here flips the plan exit code and
+    # aborts run, whereas a plain ValueError on the merged RunLimits model
+    # would land in the CLI's generic "resolution failed" branch, which
+    # prints red text but does not flip the exit code.
+    if limits.stop_early_gate_threshold <= 0.0:
+        raise EarlyStopConfigError(
+            f"run_limits.stop_early_gate_threshold ({limits.stop_early_gate_threshold}) must be "
+            + "> 0.0 when stop_early is True (a threshold of 0 trivially passes the armed gate "
+            + "regardless of whether any armed criterion actually decided)."
+        )
+
     # (3)+(4) Per armed criterion: observable, then the requested polarity is
     # decidable.
     for c in armed:
@@ -229,6 +245,24 @@ def validate_early_stop(task: TaskDefinition) -> None:
                 + "can live-pass only with max_count unset + min_count>0, and live-fail only "
                 + "with max_count set)."
             )
+        # (6) A decision-step budget is meaningless for a fail-only-decidable
+        # instance (a pure distractor/guard, e.g. a "must-NOT-run" command or a
+        # negative-row skill_triggered): its "undecided" IS the success
+        # state — the forbidden event simply hasn't happened yet, and staying
+        # undecided forever is correct, not a stall. The budget only makes
+        # sense for an instance that can decide "pass": something it is
+        # actively waiting to observe. Rejecting this at resolution (rather
+        # than letting EarlyStopWatcher force-fail a clean run) matters most
+        # for a dataset-fanned `auto` criterion, where the same YAML line
+        # would force-fail every negative row.
+        if c.max_steps_to_decide is not None and "pass" not in polarities:
+            raise EarlyStopConfigError(
+                f"criterion {c.type!r} ({c.description!r}) sets max_steps_to_decide but this "
+                + f"instance can only ever live-decide {sorted(polarities) or 'no polarities'} — "
+                + "a fail-only-decidable instance's 'undecided' is its success state (the "
+                + "forbidden event hasn't happened), so a decision-step budget would force-fail "
+                + "a clean run. max_steps_to_decide requires an instance that can live-pass."
+            )
 
 
 class EarlyStopWatcher:
@@ -269,7 +303,7 @@ class EarlyStopWatcher:
         # stop_when -> polarity mapping). The stop rule consults this, not the raw
         # ``stop_when`` string, so a distractor armed ``auto`` (fail only) is not
         # required to live-pass for a pass-stop.
-        self._armed_polarities: list[frozenset[str]] = [
+        self._armed_polarities: list[frozenset[LivePolarity]] = [
             self._resolve_armed_polarities(criterion) for criterion, _checker in armed
         ]
         self._max_turns = max_turns
@@ -379,7 +413,7 @@ class EarlyStopWatcher:
     # --- Stop rule -------------------------------------------------- #
 
     @staticmethod
-    def _resolve_armed_polarities(criterion: LiveSuccessCriterion) -> frozenset[str]:
+    def _resolve_armed_polarities(criterion: LiveSuccessCriterion) -> frozenset[LivePolarity]:
         """The polarities this armed instance may fire, via ``_requested_polarities``.
 
         Validation has already guaranteed the resolved set is non-empty and
@@ -424,6 +458,27 @@ class EarlyStopWatcher:
         return sum(self._armed[i][0].weight for i in indices if verdicts[i] == "pass") / weight
 
     def _evaluate(self, in_flight: CommandTelemetry | None = None) -> None:
+        """Fail-open wrapper: any unexpected exception anywhere in the round
+        disarms the watcher and degrades to a full run, exactly like a raising
+        ``live_verdict`` — not just the verdict-collection loop. The
+        ceiling/floor arithmetic below is currently guarded (an empty armed
+        set is unreachable, and every candidate short-circuits before
+        dividing), but a future change to that arithmetic — or to
+        ``_fire`` — must not be able to leave the watcher stuck re-raising on
+        every subsequent event with ``_disarmed`` still False (which is what a
+        narrower try/except would risk).
+        """
+        try:
+            self._evaluate_impl(in_flight)
+        except Exception:
+            self._disarmed = True
+            logger.error(
+                "[%s] early-stop round raised unexpectedly; disarming watcher, run degrades to a full run",
+                self._task_id,
+                exc_info=True,
+            )
+
+    def _evaluate_impl(self, in_flight: CommandTelemetry | None = None) -> None:
         record = self._collector.build_turn_record()
         if in_flight is not None:
             # The in-flight call has no ToolEnd yet, so the collector (which
@@ -440,16 +495,17 @@ class EarlyStopWatcher:
             try:
                 verdicts.append(checker.live_verdict(criterion, records))
             except Exception:
-                # Fail-open: a raising verdict disarms; the run degrades to full.
-                self._disarmed = True
+                # Re-raise to the wrapping try/except in _evaluate, which sets
+                # _disarmed — but log the specific criterion here first, since
+                # that context (which criterion's live_verdict raised) would
+                # otherwise be lost once the exception is caught generically.
                 logger.error(
-                    "[%s] early-stop live_verdict raised for criterion %r; disarming watcher, "
-                    + "run degrades to a full run",
+                    "[%s] early-stop live_verdict raised for criterion %r",
                     self._task_id,
                     criterion.type,
                     exc_info=True,
                 )
-                return
+                raise
 
         pass_armed = [i for i, pol in enumerate(self._armed_polarities) if "pass" in pol]
 
