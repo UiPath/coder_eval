@@ -104,3 +104,92 @@ class TestCodexTurnState:
         # A tool_use block was recorded into the open buffer (cut at the next
         # tokenUsage flush, not here), joinable to the command by tool_id.
         assert any(b.block_type == "tool_use" and b.tool_use_id == "c1" for b in state.open_blocks)
+
+
+class TestSubagentRecoveryCounter:
+    """The recovery gap must be counted, not just swallowed.
+
+    A sub-agent whose rollout is missing or whose recovery raises contributes no
+    tool calls to the transcript. Left silent, a scan over that transcript reports
+    "nothing suspicious" for commands it never saw.
+    """
+
+    @staticmethod
+    def _agent():
+        from coder_eval.agents.codex_agent import CodexAgent
+        from coder_eval.models import parse_agent_config
+
+        return CodexAgent(parse_agent_config(type="codex"))
+
+    @staticmethod
+    def _noop_emit():
+        class _Emit:
+            def on_event(self, event) -> None:
+                pass
+
+        return _Emit()
+
+    async def test_missing_rollout_counts_as_unrecovered(self, monkeypatch):
+        agent = self._agent()
+
+        async def _no_rollout(_home, _thread_id):
+            return None
+
+        monkeypatch.setattr(agent, "_await_rollout_file", _no_rollout)
+        messages: list = []
+        commands: list = []
+        count = await agent._recover_subagent_tool_calls(
+            [("thread-a", "tool-1", "gpt"), ("thread-b", "tool-2", "gpt")],
+            {},
+            messages,
+            commands,
+            self._noop_emit(),
+            "task",
+            "turn",
+        )
+        assert count == 2
+        assert commands == []
+
+    async def test_recovery_exception_counts_as_unrecovered(self, monkeypatch):
+        agent = self._agent()
+
+        async def _boom(_home, _thread_id):
+            raise OSError("rollout unreadable")
+
+        monkeypatch.setattr(agent, "_await_rollout_file", _boom)
+        count = await agent._recover_subagent_tool_calls(
+            [("thread-a", "tool-1", None)],
+            {},
+            [],
+            [],
+            self._noop_emit(),
+            "task",
+            "turn",
+        )
+        assert count == 1
+
+    async def test_full_recovery_counts_zero(self, monkeypatch):
+        agent = self._agent()
+
+        async def _rollout(_home, _thread_id):
+            return "rollout.jsonl"
+
+        monkeypatch.setattr(agent, "_await_rollout_file", _rollout)
+        monkeypatch.setattr(agent, "_parse_rollout_generations", lambda _p: [])
+        count = await agent._recover_subagent_tool_calls(
+            [("thread-a", "tool-1", None)],
+            {},
+            [],
+            [],
+            self._noop_emit(),
+            "task",
+            "turn",
+        )
+        assert count == 0
+
+
+def test_turn_record_defaults_unrecovered_subagent_threads_to_zero():
+    """Claude bubbles its sub-agent calls natively, so the default must be 0."""
+    from coder_eval.models import TurnRecord
+
+    assert TurnRecord(iteration=1, user_input="p", agent_output="a").unrecovered_subagent_threads == 0

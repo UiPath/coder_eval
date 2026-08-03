@@ -372,6 +372,17 @@ class TurnRecord(BaseModel):
         default=None,
         description="Short human-readable cause when crashed=True; None otherwise.",
     )
+    unrecovered_subagent_threads: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Sub-agents whose INNER tool calls could not be reconstructed, so their commands are "
+            "absent from `commands` and `messages` entirely. Non-zero means this turn's transcript "
+            "is incomplete: any analysis over it (integrity scanning, command statistics) saw less "
+            "than the agent actually did. Only Codex can be non-zero today — Claude bubbles its "
+            "sub-agent calls into the parent stream natively."
+        ),
+    )
 
 
 class PostRunResult(BaseModel):

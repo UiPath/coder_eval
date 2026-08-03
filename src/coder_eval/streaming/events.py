@@ -174,6 +174,11 @@ class AgentEndEvent(StreamEvent):
     crashed: bool = False
     crash_reason: str | None = None
     duration_seconds: float = 0.0
+    # Sub-agents whose inner tool calls never reached this turn's transcript. Rides
+    # the finalization payload because the agent is the only party that knows a
+    # recovery attempt failed -- there is no granular event for a stream that never
+    # existed, so the collector has nothing to reduce.
+    unrecovered_subagent_threads: int = 0
 
 
 # --- Post-evaluation events (orchestrator-owned, not part of the agent lifecycle) ---

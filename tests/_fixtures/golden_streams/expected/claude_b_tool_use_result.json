@@ -75,5 +75,6 @@
     "total_cost_usd": "<scrubbed>",
     "uncached_input_tokens": 80
   },
+  "unrecovered_subagent_threads": 0,
   "user_input": "do the thing"
 }

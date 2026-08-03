@@ -297,6 +297,10 @@ class _CodexTurnState:
         self.spawned_children: list[tuple[str, str, str | None]] = []
         # child thread id -> returned message (fallback when the rollout is absent).
         self.collab_results: dict[str, str] = {}
+        # Sub-agents whose inner tool calls never made it into the transcript
+        # (rollout missing, or recovery raised). Surfaced on the TurnRecord so
+        # consumers know the transcript is incomplete rather than empty.
+        self.unrecovered_subagent_threads = 0
 
         # Assistant-transcript reconstruction buffers (one AssistantMessage per gen).
         self.open_blocks: list[ContentBlock] = []
@@ -624,6 +628,7 @@ class _CodexTurnState:
                 crashed=crashed,
                 crash_reason=crash_reason,
                 duration_seconds=time.monotonic() - self.turn_start_time,
+                unrecovered_subagent_threads=self.unrecovered_subagent_threads,
             )
         )
 
@@ -1462,7 +1467,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # Skipped on a cooperative stop: children may have no rollout yet and the
         # run is already decided — recovery adds nothing the armed gate uses.
         if state.spawned_children and not state.stopped_early_hit:
-            await self._recover_subagent_tool_calls(
+            state.unrecovered_subagent_threads = await self._recover_subagent_tool_calls(
                 state.spawned_children,
                 state.collab_results,
                 state.messages,
@@ -1700,7 +1705,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         emit: StreamCallback,
         task_id: str,
         turn_id: str,
-    ) -> None:
+    ) -> int:
         """Recover each spawned sub-agent's INNER tool calls AND token usage.
 
         Codex runs every sub-agent on its own child thread whose events never
@@ -1726,14 +1731,23 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         Best-effort: any failure (missing file, parse error) is swallowed so a
         recovery hiccup never fails the turn.
+
+        Returns:
+            Number of sub-agents whose inner tool calls could NOT be recovered.
+            Those calls are absent from ``commands`` and ``messages`` altogether,
+            so a caller analysing the transcript is looking at less than the agent
+            actually did. Swallowing the failure keeps the turn alive; returning
+            the count keeps it from being mistaken for "the sub-agent ran nothing".
         """
         home = self._codex_home()
+        unrecovered = 0
         for thread_id, parent_tool_id, model in spawned_children:
             try:
                 path = await self._await_rollout_file(home, thread_id)
                 if path is None:
                     # No rollout to mine: nest just the returned message (if any) so
                     # the sub-agent's answer still shows, tokenless.
+                    unrecovered += 1
                     self._log.debug("CodexAgent: no rollout found for sub-agent thread %s", thread_id)
                     result = collab_results.get(thread_id)
                     if result:
@@ -1763,8 +1777,19 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         )
                     messages.append(self._subagent_generation_message(blocks, gen, parent_tool_id, model, turn_id, gi))
             except Exception as exc:
-                # Best-effort: a recovery hiccup must never fail the turn.
+                # Best-effort: a recovery hiccup must never fail the turn -- but it
+                # leaves this child's commands out of the transcript, so count it.
+                unrecovered += 1
                 self._log.debug("CodexAgent: sub-agent recovery failed for %s: %s", thread_id, exc)
+
+        if unrecovered:
+            self._log.warning(
+                "CodexAgent: %d of %d sub-agent(s) contributed no recovered tool calls; "
+                + "this turn's transcript is incomplete",
+                unrecovered,
+                len(spawned_children),
+            )
+        return unrecovered
 
     @staticmethod
     def _codex_home() -> Path:

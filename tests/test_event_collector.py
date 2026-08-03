@@ -227,6 +227,7 @@ class TestFullFieldParity:
             result_summary=ResultSummary(is_error=False, subtype="success", result="all done"),
             crashed=True,
             crash_reason="boom",
+            unrecovered_subagent_threads=2,
         )
 
     def test_no_turn_record_field_is_unaccounted_for(self):

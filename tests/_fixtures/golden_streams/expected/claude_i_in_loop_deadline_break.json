@@ -41,5 +41,6 @@
   "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": null,
+  "unrecovered_subagent_threads": 0,
   "user_input": "do the thing"
 }

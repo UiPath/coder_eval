@@ -190,4 +190,5 @@ class EventCollector:
             result_summary=end.result_summary,
             crashed=end.crashed,
             crash_reason=end.crash_reason,
+            unrecovered_subagent_threads=end.unrecovered_subagent_threads,
         )
