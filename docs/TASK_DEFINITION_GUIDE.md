@@ -17,6 +17,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Agent Configuration](#agent-configuration)
 - [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
+  - [Recording CLI Invocations](#recording-cli-invocations)
 - [Template Sources](#template-sources)
 - [Success Criteria](#success-criteria)
   - [Continuous Scoring](#continuous-scoring)
@@ -513,6 +514,31 @@ Under `driver: tempdir` only `timeout` is enforced — the agent can consume
 arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
 container limits above to actually bind.
 
+### Recording CLI Invocations
+
+`record_cli` shadows executables with generated recording shims, so a task can assert on **what the agent actually ran** without hand-writing a mock:
+
+```yaml
+sandbox:
+  record_cli:
+    - tool: uip
+      exit_code: 1
+      stderr: "uip: not connected to a tenant in this sandbox.\n"
+    - tool: curl                   # so a disobedient agent cannot reach the network
+```
+
+Each shim records the invocation, writes the configured `stdout`/`stderr`, and exits with `exit_code`. **Nothing is executed** — no network, no auth, no side effects.
+
+The sandbox writes the shims into `cli_mocks/` and PATH-prepends that directory, then appends one JSON record per invocation to `cli_mocks/calls.jsonl` — the log [`cli_called`](#cli_called) reads by default. Nothing else to wire: no `mock_path_dirs`, no `template_sources`, no `log:` on the criterion.
+
+Notes:
+
+- **A `.cmd` twin** is generated beside each shim so a bare `uip` also resolves through Windows PATHEXT lookup.
+- **The log is seeded empty**, so a correct run that legitimately calls nothing still satisfies a `max_count: 0` guard — while a *missing* log (mock never ran, or wrote elsewhere) still fails.
+- **stdin is never read** by the shim: reading it would block whenever the sandbox leaves stdin attached to an open pipe, hanging the task.
+- **Collisions are rejected.** If a `mock_path_dirs` entry already provides an executable of the same name, setup raises rather than letting directory order decide which one runs.
+- **It stubs a tool; it does not proxy one, and it does not serve per-invocation responses.** Recording a *real* executable on the way through, or returning different output per invocation, stays a hand-written mock under `mock_path_dirs` — both depend on state the harness cannot guarantee (the tool being installed, PATH order, live credentials, a fixture set).
+
 ## Template Sources
 
 Tasks can start with preset files instead of an empty sandbox. Multiple sources are applied sequentially (last wins for conflicts).
@@ -862,6 +888,8 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
   max_count: null                      # Maximum; null = unbounded, 0 = forbidden
   ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
 ```
+
+`log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
 
 **Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
 

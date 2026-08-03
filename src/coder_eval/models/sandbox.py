@@ -307,6 +307,65 @@ class DockerDriverConfig(BaseModel):
         return v
 
 
+# Sandbox-relative location of the generated CLI recorders and their shared log.
+# Not dot-prefixed on purpose: CI artifact upload (actions/upload-artifact) skips
+# hidden files, and the log is primary evidence for every `cli_called` criterion,
+# so it must survive into the run artifact.
+RECORD_CLI_DIR = "cli_mocks"
+RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/calls.jsonl"
+
+
+class RecordedCli(BaseModel):
+    """One executable to shadow with a generated recording shim.
+
+    The shim records the invocation, writes the configured output, and exits —
+    nothing is executed, so there is no network, no auth, and no side effect. Each
+    invocation becomes a JSON Lines record in :data:`RECORD_CLI_LOG`, the log the
+    ``cli_called`` criterion reads by default, so a task asserts on what actually
+    ran without hand-rolling a mock and without the record shape being a contract
+    between two repositories.
+
+    It stubs a tool; it does not proxy one. A test that needs a REAL executable's
+    behavior recorded on the way through still supplies its own wrapper under
+    ``mock_path_dirs`` — that depends on the tool being installed, on PATH order,
+    and usually on live credentials, which is a different problem with different
+    failure modes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str = Field(description="Executable name to shadow on PATH (e.g. 'uip', 'curl', 'git')")
+    exit_code: int = Field(
+        default=1,
+        description=(
+            "Exit status the shim returns. Defaults to 1 so an unconfigured tool looks like a failing "
+            "one rather than silently succeeding"
+        ),
+    )
+    stdout: str = Field(default="", description="Text the shim writes to stdout")
+    stderr: str = Field(
+        default="",
+        description=(
+            "Text the shim writes to stderr. Use it to explain the failure the way the real tool "
+            "would, so an agent reads a plausible error rather than silence"
+        ),
+    )
+
+    @field_validator("tool")
+    @classmethod
+    def validate_tool_name(cls, v: str) -> str:
+        """Reject names that are not a bare filename.
+
+        The shim is written as ``<RECORD_CLI_DIR>/<tool>``; a separator or a
+        traversal segment would place it outside the managed directory.
+        """
+        if not v or v != v.strip():
+            raise ValueError("record_cli tool must be a non-empty name without surrounding whitespace")
+        if "/" in v or "\\" in v or v in {".", ".."}:
+            raise ValueError(f"record_cli tool {v!r} must be a bare executable name, not a path")
+        return v
+
+
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment.
 
@@ -357,6 +416,20 @@ class SandboxConfig(BaseModel):
             "returns absolute paths to the orchestrator, which forwards them to the "
             "agent. Missing entries are skipped silently. Example: "
             '["mocks"] with a `mocks/uip` script placed via `template_sources`.'
+        ),
+    )
+
+    record_cli: list[RecordedCli] | None = MergeField(
+        strategy="replace",
+        default=None,
+        description=(
+            "Executables to shadow with a generated recording shim. The sandbox writes each shim "
+            f"into '{RECORD_CLI_DIR}/' and PATH-prepends that directory, so the agent's calls are "
+            f"recorded as JSON Lines in '{RECORD_CLI_LOG}' — the log a 'cli_called' criterion reads "
+            "by default. Use instead of hand-writing a mock under mock_path_dirs when all the test "
+            "needs is a faithful record of what ran plus a canned exit status and message. It does "
+            "NOT serve per-invocation responses and does NOT proxy the real executable; supply your "
+            "own mock for either. Replaced (not merged) across config layers, like mock_path_dirs."
         ),
     )
 
