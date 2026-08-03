@@ -27,15 +27,6 @@ export function firstParam(
     return first != null && first.length > 0 ? first : undefined;
 }
 
-// Normalize a raw ?v= query value into the variant to read. Absent / empty →
-// "default". Also collapses a repeated param to its first value. The path
-// readers additionally run variantSegment() to reject unsafe values.
-export function variantFromParam(
-    v: string | string[] | null | undefined,
-): string {
-    return firstParam(v) ?? DEFAULT_VARIANT;
-}
-
 // The query-string fragment that preserves the current variant on in-page links
 // (the replicate selector, the download link, cross-page task links). Empty for
 // the default variant so single-config URLs stay clean and unchanged. Returns a

@@ -558,6 +558,13 @@ export function TaskGrid({
     // The label shown in the arm column / mobile card for one row.
     const armLabel = (t: TaskResultSummary): string =>
         (armByModel ? t.model ?? t.variant : t.variant) ?? DEFAULT_VARIANT;
+    // The hover title — names both the model and the variant so whichever the
+    // column shows, the other is one hover away. Shared by the desktop cell and
+    // the mobile card so the two can't drift.
+    const armTitle = (t: TaskResultSummary): string =>
+        t.model
+            ? `model ${t.model} · variant ${t.variant ?? DEFAULT_VARIANT}`
+            : `variant ${t.variant ?? DEFAULT_VARIANT}`;
 
     const sorted = useMemo(() => {
         const arr = [...collapsed];
@@ -760,11 +767,7 @@ export function TaskGrid({
                             {showArm && (
                                 <td
                                     className="py-3 px-4 text-gray-700 font-mono text-xs max-w-[16rem] truncate"
-                                    title={
-                                        t.model
-                                            ? `model ${t.model} · variant ${t.variant ?? DEFAULT_VARIANT}`
-                                            : `variant ${t.variant ?? DEFAULT_VARIANT}`
-                                    }
+                                    title={armTitle(t)}
                                 >
                                     {armLabel(t)}
                                 </td>
@@ -912,11 +915,7 @@ export function TaskGrid({
                             {showArm && (
                                 <div
                                     className="font-mono text-[11px] text-gray-500 truncate"
-                                    title={
-                                        t.model
-                                            ? `model ${t.model} · variant ${t.variant ?? DEFAULT_VARIANT}`
-                                            : `variant ${t.variant ?? DEFAULT_VARIANT}`
-                                    }
+                                    title={armTitle(t)}
                                 >
                                     {armLabel(t)}
                                 </div>
