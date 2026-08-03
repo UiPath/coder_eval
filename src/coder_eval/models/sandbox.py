@@ -256,6 +256,10 @@ class DockerDriverConfig(BaseModel):
             # selects the Gemini model when agent.model is unset.
             "GEMINI_API_KEY",
             "ANTIGRAVITY_MODEL",
+            # Run-integrity gate mode. Without it the in-container Settings falls
+            # back to its own default, so the gate would differ between the
+            # tempdir and docker drivers on the same run.
+            "INTEGRITY_MODE",
             # User HOME used to keep ~/.claude resolution symmetric with the host.
             # See docs/DOCKER_ISOLATION.md "HOME is forwarded by default" for the
             # contract. tl;dr: Path.home() inside the container returns the

@@ -13,7 +13,7 @@ from dotenv import dotenv_values, load_dotenv
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from coder_eval.models import AgentKind, ApiBackend
+from coder_eval.models import AgentKind, ApiBackend, IntegrityMode
 
 
 # Application Insights connection string baked into the application so a fresh
@@ -136,6 +136,17 @@ class Settings(BaseSettings):
     # task doesn't pin agent.model.
     gemini_api_key: str | None = None
     antigravity_model: str | None = None
+
+    # Run-integrity gate (see models.enums.IntegrityMode). Kill switch for the
+    # graded-material read pass in coder_eval.integrity. DETECT
+    # (default) records a verdict + findings on every row and changes no score;
+    # VOID additionally downgrades a tainted SUCCESS to FAILURE; OFF skips the
+    # pass. Flip to VOID once a nightly's DETECT findings have been reviewed.
+    # INTEGRITY_MODE is also in the docker env allowlist (models/sandbox.py) —
+    # without that the in-container Settings silently defaults and the gate
+    # differs between the tempdir and docker drivers (same bug class as the
+    # API_BACKEND note in isolation/docker_runner.py).
+    integrity_mode: IntegrityMode = IntegrityMode.DETECT
 
     # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)

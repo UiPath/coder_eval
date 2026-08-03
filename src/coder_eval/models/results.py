@@ -20,7 +20,7 @@ from pydantic import (
 
 from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
-from coder_eval.models.enums import FinalStatus
+from coder_eval.models.enums import FinalStatus, IntegrityMode
 from coder_eval.models.limits import DEFAULT_STOP_EARLY_GATE_THRESHOLD
 from coder_eval.models.telemetry import (
     CommandStatistics,
@@ -487,6 +487,110 @@ class EarlyStopInfo(BaseModel):
     )
 
 
+class IntegrityVerdict(StrEnum):
+    """Whether a run's score can be trusted as a measurement of the agent.
+
+    Deliberately NOT a ``FinalStatus`` member: the terminal-status set is closed
+    (two exhaustive maps in ``models/enums.py`` plus every consumer that
+    switches on it), and a tainted run already has a perfectly good terminal
+    status. Integrity is orthogonal telemetry, like ``EarlyStopReason``.
+
+    ``INCONCLUSIVE`` is why ``IntegrityInfo`` is always populated rather than
+    ``None``-when-clean: "the scan could not see the whole transcript" is a
+    distinct, reportable state from "the scan saw everything and found nothing",
+    and only the second one licenses trusting the score.
+    """
+
+    CLEAN = "clean"
+    TAINTED = "tainted"
+    INCONCLUSIVE = "inconclusive"
+    SKIPPED = "skipped"
+
+
+class IntegrityFindingKind(StrEnum):
+    """The class of integrity problem a finding records.
+
+    One member today: every finding is a read of graded material. The kind is
+    carried on the finding anyway so a second check can be added without
+    reshaping the row key ``integrity_findings`` already ships.
+    """
+
+    GRADED_READ = "graded_read"
+
+
+class IntegrityFinding(BaseModel):
+    """One concrete integrity problem, with enough context to adjudicate it.
+
+    Carries the locating coordinates (iteration / command index / tool) so a
+    reviewer can go straight to the command in ``task.json`` rather than
+    re-deriving it, and a truncated ``evidence`` excerpt so an obvious false
+    positive is visible without opening the artifact at all.
+    """
+
+    kind: IntegrityFindingKind = Field(description="Which integrity check produced this finding.")
+    detail: str = Field(description="Human-readable statement of what was found.")
+    iteration: int | None = Field(
+        default=None, description="Orchestrator iteration the offending command belongs to (1-indexed)."
+    )
+    command_index: int | None = Field(
+        default=None, description="0-based index of the command within that iteration's command list."
+    )
+    tool_name: str | None = Field(default=None, description="Tool that issued the offending command.")
+    evidence: str | None = Field(
+        default=None,
+        description="Truncated excerpt of the matched command text (or an empty-signal note), for triage.",
+    )
+
+
+class IntegrityInfo(BaseModel):
+    """Run-integrity verdict: is this row a measurement, or an artifact of a leak?
+
+    ALWAYS populated on ``EvaluationResult`` (unlike ``EarlyStopInfo``, whose
+    ``is not None`` doubles as its flag) because ``SKIPPED`` and ``INCONCLUSIVE``
+    must be expressible and distinguishable from ``CLEAN``. Defaults describe a
+    run on which the pass never executed, so a legacy ``task.json`` with no
+    ``integrity`` key round-trips to exactly that.
+
+    ``voided`` records that the gate downgraded the row. ``weighted_score`` is
+    deliberately left as computed: on a tainted row the high score IS the
+    diagnostic (it passed *because* it cheated), so erasing it would destroy the
+    evidence.
+    """
+
+    verdict: IntegrityVerdict = Field(
+        default=IntegrityVerdict.SKIPPED, description="Whether the row's score is trustworthy."
+    )
+    mode: IntegrityMode = Field(
+        default=IntegrityMode.OFF, description="The INTEGRITY_MODE the pass ran under (off / detect / void)."
+    )
+    voided: bool = Field(
+        default=False,
+        description="True when the gate downgraded a passing row because of a TAINTED verdict. "
+        + "Only ever set under mode=void; INCONCLUSIVE never voids.",
+    )
+    findings: list[IntegrityFinding] = Field(
+        default_factory=list, description="Every problem the pass found, in discovery order."
+    )
+    commands_scanned: int = Field(
+        default=0, ge=0, description="Agent commands the scan examined across all iterations."
+    )
+    commands_without_parameters: int = Field(
+        default=0,
+        ge=0,
+        description="Commands whose parameters were empty, so their content could not be scanned. "
+        + "A high ratio means the scan was partially blind and forces INCONCLUSIVE.",
+    )
+    subagent_recovery_incomplete: bool = Field(
+        default=False,
+        description="True when the agent reported that it failed to recover a sub-agent's inner tool "
+        + "calls, so those commands are absent from the transcript entirely. Forces INCONCLUSIVE.",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Why the verdict is INCONCLUSIVE or SKIPPED, or which veto suppressed a finding.",
+    )
+
+
 class EvaluationResult(BaseModel):
     """Complete result of a task evaluation."""
 
@@ -619,6 +723,16 @@ class EvaluationResult(BaseModel):
         description=(
             "Why/when the run stopped early (reason, deciding criterion, SDK turn/tool index, elapsed). "
             "None on a full run — 'early_stop is not None' is itself the stopped-early flag."
+        ),
+    )
+
+    # Run-integrity telemetry. Always present (never None) so SKIPPED and
+    # INCONCLUSIVE are expressible; see IntegrityInfo.
+    integrity: IntegrityInfo = Field(
+        default_factory=IntegrityInfo,
+        description=(
+            "Whether this row is a measurement of the agent or an artifact of a leak: verdict, the "
+            "mode the pass ran under, whether the score was voided, and the findings behind it."
         ),
     )
 

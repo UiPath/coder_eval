@@ -62,6 +62,21 @@ _STATUS_ICONS: dict[FinalStatus, str] = {
 assert set(_STATUS_ICONS) == set(FinalStatus), "Missing icon for FinalStatus member"
 
 
+class IntegrityMode(StrEnum):
+    """How the run-integrity pass acts on what it finds (``INTEGRITY_MODE``).
+
+    The kill switch for the integrity gate. ``DETECT`` is the default so a
+    rollout can read real findings from ``run.json`` before any score is voided;
+    ``VOID`` additionally flips a tainted ``SUCCESS`` to ``FAILURE``. ``OFF``
+    skips the pass entirely (verdict ``SKIPPED``), for bisecting a suspected
+    false positive without redeploying.
+    """
+
+    OFF = "off"
+    DETECT = "detect"
+    VOID = "void"
+
+
 class ApiBackend(StrEnum):
     """API backend for LLM calls."""
 

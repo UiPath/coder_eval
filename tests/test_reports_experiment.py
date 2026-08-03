@@ -7,11 +7,16 @@ from coder_eval.models import (
     CommandTelemetry,
     EvaluationResult,
     FinalStatus,
+    IntegrityFinding,
+    IntegrityFindingKind,
+    IntegrityInfo,
+    IntegrityMode,
+    IntegrityVerdict,
     ResultSummary,
     TaskConfigRecord,
     TurnRecord,
 )
-from coder_eval.reports_experiment import eval_result_to_task_dict
+from coder_eval.reports_experiment import _ROW_INTEGRITY_FINDINGS_MAX, eval_result_to_task_dict
 
 
 def _make_result(
@@ -145,3 +150,106 @@ class TestExpectedTurnsKey:
         )
         d = eval_result_to_task_dict(result)
         assert d["expected_turns"] is None
+
+
+class TestRowKeySet:
+    """Pins the run.json row key set.
+
+    ``eval_result_to_task_dict`` is a hand-maintained dict literal: a new field on
+    ``EvaluationResult`` reaches ``task.json`` for free but is silently ABSENT
+    from ``run.json``, which is what the evalboard and triage read. Nothing
+    pinned this key set before (not even ``stopped_early``), so the omission was
+    invisible. Adding a row key here is intentional; removing or renaming one is
+    a breaking change for downstream consumers.
+    """
+
+    EXPECTED_KEYS = frozenset(
+        {
+            "task_id",
+            "replicate_index",
+            "status",
+            "weighted_score",
+            "duration",
+            "iteration_count",
+            "tags",
+            "task_path",
+            "iterations",
+            "model_used",
+            "reference_similarity",
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "total_tokens",
+            "total_cost_usd",
+            "agent_cost_usd",
+            "cost_complete",
+            "judge_cost_usd",
+            "simulator_cost_usd",
+            "error_message",
+            "error_category",
+            "expected_commands",
+            "actual_commands",
+            "commands_efficiency",
+            "agent_config",
+            "sdk_options",
+            "installed_tools",
+            "max_turns_exhausted",
+            "expected_turns_overage",
+            "total_turns",
+            "visible_turns",
+            "expected_turns",
+            "has_final_reply",
+            "stopped_early",
+            "early_stop_reason",
+            "turns_remaining_at_stop",
+            "gate_threshold",
+            "integrity_verdict",
+            "integrity_voided",
+            "integrity_findings",
+            "variant_id",
+        }
+    )
+
+    def test_key_set_is_exactly_as_pinned(self):
+        d = eval_result_to_task_dict(_make_result(turns=[_turn(5)]))
+        assert set(d) == self.EXPECTED_KEYS
+
+
+class TestIntegrityKeys:
+    def test_defaults_report_a_skipped_untainted_row(self):
+        d = eval_result_to_task_dict(_make_result(turns=[_turn(5)]))
+        assert d["integrity_verdict"] == "skipped"
+        assert d["integrity_voided"] is False
+        assert d["integrity_findings"] == []
+
+    def test_verdict_and_findings_reach_the_row(self):
+        result = _make_result(turns=[_turn(5)])
+        result.integrity = IntegrityInfo(
+            verdict=IntegrityVerdict.TAINTED,
+            mode=IntegrityMode.VOID,
+            voided=True,
+            findings=[
+                IntegrityFinding(
+                    kind=IntegrityFindingKind.GRADED_READ,
+                    detail="read RESOLUTION.md",
+                    iteration=1,
+                    command_index=3,
+                    tool_name="Bash",
+                    evidence="cat RESOLUTION.md",
+                )
+            ],
+        )
+        d = eval_result_to_task_dict(result)
+        assert d["integrity_verdict"] == "tainted"
+        assert d["integrity_voided"] is True
+        assert d["integrity_findings"] == ["graded_read: read RESOLUTION.md"]
+
+    def test_findings_are_capped(self):
+        result = _make_result(turns=[_turn(5)])
+        result.integrity = IntegrityInfo(
+            verdict=IntegrityVerdict.TAINTED,
+            findings=[IntegrityFinding(kind=IntegrityFindingKind.GRADED_READ, detail=f"hit {i}") for i in range(20)],
+        )
+        d = eval_result_to_task_dict(result)
+        assert len(d["integrity_findings"]) == _ROW_INTEGRITY_FINDINGS_MAX

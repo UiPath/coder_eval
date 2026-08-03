@@ -510,3 +510,129 @@ class TestDockerWorkingDir:
 
         with pytest.raises(ValidationError, match="must be an absolute path"):
             DockerDriverConfig(working_dir="root")
+
+
+class TestIntegrityInfoModel:
+    """IntegrityInfo shape, defaults, round-trip, and legacy-file tolerance."""
+
+    def test_defaults_describe_a_pass_that_never_ran(self):
+        from coder_eval.models import IntegrityInfo, IntegrityMode, IntegrityVerdict
+
+        info = IntegrityInfo()
+        assert info.verdict is IntegrityVerdict.SKIPPED
+        assert info.mode is IntegrityMode.OFF
+        assert info.voided is False
+        assert info.findings == []
+        assert info.notes == []
+        assert info.commands_scanned == 0
+        assert info.commands_without_parameters == 0
+        assert info.subagent_recovery_incomplete is False
+
+    def test_always_present_on_evaluation_result(self):
+        """Unlike EarlyStopInfo, integrity is never None — SKIPPED/INCONCLUSIVE must be expressible."""
+        from datetime import datetime
+
+        from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, IntegrityVerdict
+
+        result = EvaluationResult(
+            task_id="t",
+            task_description="d",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status=FinalStatus.SUCCESS,
+            iteration_count=1,
+        )
+        assert result.integrity is not None
+        assert result.integrity.verdict is IntegrityVerdict.SKIPPED
+
+    def test_round_trips_through_json(self):
+        from datetime import datetime
+
+        from coder_eval.models import (
+            AgentKind,
+            EvaluationResult,
+            FinalStatus,
+            IntegrityFinding,
+            IntegrityFindingKind,
+            IntegrityInfo,
+            IntegrityMode,
+            IntegrityVerdict,
+        )
+
+        result = EvaluationResult(
+            task_id="t",
+            task_description="d",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status=FinalStatus.FAILURE,
+            iteration_count=1,
+            integrity=IntegrityInfo(
+                verdict=IntegrityVerdict.TAINTED,
+                mode=IntegrityMode.VOID,
+                voided=True,
+                findings=[
+                    IntegrityFinding(
+                        kind=IntegrityFindingKind.GRADED_READ,
+                        detail="read the reference solution",
+                        iteration=1,
+                        command_index=7,
+                        tool_name="Bash",
+                        evidence="cat /work/task_dir/RESOLUTION.md",
+                    )
+                ],
+                commands_scanned=42,
+                commands_without_parameters=1,
+                notes=["one command had empty parameters"],
+            ),
+        )
+
+        reloaded = EvaluationResult.model_validate_json(result.model_dump_json())
+        assert reloaded.integrity.verdict is IntegrityVerdict.TAINTED
+        assert reloaded.integrity.mode is IntegrityMode.VOID
+        assert reloaded.integrity.voided is True
+        assert reloaded.integrity.findings[0].kind is IntegrityFindingKind.GRADED_READ
+        assert reloaded.integrity.findings[0].command_index == 7
+        assert reloaded.integrity.commands_scanned == 42
+        assert reloaded.integrity.notes == ["one command had empty parameters"]
+
+    def test_legacy_task_json_without_integrity_loads(self):
+        """A task.json written before this field must still parse, as SKIPPED."""
+        import json
+
+        from coder_eval.models import EvaluationResult, IntegrityVerdict
+
+        legacy = {
+            "task_id": "t",
+            "task_description": "d",
+            "agent_type": "claude-code",
+            "started_at": "2026-01-01T00:00:00",
+            "final_status": "SUCCESS",
+            "iteration_count": 1,
+        }
+        result = EvaluationResult.model_validate_json(json.dumps(legacy))
+        assert result.integrity.verdict is IntegrityVerdict.SKIPPED
+        assert result.integrity.voided is False
+
+
+def test_final_status_member_set_is_closed():
+    """Integrity taint must NOT add a FinalStatus member.
+
+    A new member costs both exhaustive maps in models/enums.py (module-level
+    asserts, so a miss breaks import), the orchestrator/batch status branches,
+    the telemetry Category dimension, and the evalboard's status layer. A
+    tainted run already has a terminal status; taint rides alongside it as
+    orthogonal telemetry (see IntegrityVerdict). This pin makes an attempt to
+    add TAINTED/VOIDED as a status fail here, where the decision is documented.
+    """
+    from coder_eval.models import FinalStatus
+
+    assert {s.value for s in FinalStatus} == {
+        "SUCCESS",
+        "FAILURE",
+        "ERROR",
+        "BUILD_FAILED",
+        "TIMEOUT",
+        "MAX_TURNS_EXHAUSTED",
+        "TOKEN_BUDGET_EXCEEDED",
+        "COST_BUDGET_EXCEEDED",
+    }

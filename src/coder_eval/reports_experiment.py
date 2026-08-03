@@ -44,6 +44,11 @@ _REPLICATE_PASS_THRESHOLD = 0.9
 # run doesn't bloat run.json. The untruncated message stays on task.json.
 _ROW_ERROR_MESSAGE_MAX_CHARS = 400
 
+# Cap on integrity findings carried into a run.json row. One finding is enough to
+# adjudicate a row; the full list stays on task.json. Keeps a pathological run
+# (an agent that greps the answer key fifty times) from bloating run.json.
+_ROW_INTEGRITY_FINDINGS_MAX = 5
+
 
 def _cost_complete(result: EvaluationResult) -> bool:
     """Whether this row's recorded agent spend accounts for everything it spent.
@@ -214,6 +219,14 @@ def eval_result_to_task_dict(
         # comparing early-stopped runs across an experiment sweep that varies
         # it can tell which weighted-gate value produced a given verdict.
         "gate_threshold": (result.early_stop.gate_threshold if result.early_stop is not None else None),
+        # Run-integrity surfaces. A tainted row's score is a measurement of the
+        # leak, not of the agent, so triage has to be able to see that from
+        # run.json alone — task.json is one fetch per row.
+        "integrity_verdict": result.integrity.verdict.value,
+        "integrity_voided": result.integrity.voided,
+        "integrity_findings": [
+            f"{f.kind.value}: {f.detail}" for f in result.integrity.findings[:_ROW_INTEGRITY_FINDINGS_MAX]
+        ],
     }
     d["variant_id"] = variant_id
     return d
