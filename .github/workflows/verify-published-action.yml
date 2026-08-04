@@ -1,0 +1,305 @@
+name: Verify Published Action
+
+# Verifies the PUBLISHED composite of (moving major tag + action.yml pin + PyPI
+# wheel + Marketplace listing) actually resolves and runs.
+#
+# WHY THIS EXISTS SEPARATELY FROM pr-checks.yml. The `action-dogfood` job there
+# runs `uses: ./` with `version: local`, which proves the action's code in a PR
+# works. It never touches `v0` or PyPI, so it says nothing about the published
+# artifact. This workflow is the other half.
+#
+# WHY THIS IS NOT A PR GATE. The published artifact does not change when someone
+# opens a PR, so a PR-time job pulling `@v0` would re-test the PREVIOUS release on
+# every PR -- paying agent tokens each time and going red for reasons the PR author
+# cannot fix. That is how required checks get ignored. PR-time coverage stays as-is.
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    # Deliberately NOT filtered on `conclusion == 'success'`. The failure this
+    # workflow exists to catch -- publish-pypi failing after the release job pushed
+    # tags -- makes the Release run's conclusion `failure`. Gating on success would
+    # skip the check precisely when it matters most.
+    types: [completed]
+  # Catches drift a release cannot: a PyPI yank, the pinned setup-uv SHA, runner
+  # image changes, the @anthropic-ai/claude-code npm package, model deprecation, or
+  # the Marketplace listing being renamed/delisted.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize rather than cancel: a release-triggered run must not be killed by an
+  # overlapping nightly.
+  group: verify-published-action
+  cancel-in-progress: false
+
+jobs:
+  # TIER 1 -- free. No API spend, fully deterministic. This tier alone catches the
+  # tag/pin/PyPI desync, so it gates the paid tier below.
+  preflight:
+    name: Preflight (tag/pin/PyPI/Marketplace parity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history for tags)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      # Resolve the published triple from git alone: newest release tag, the moving
+      # major tag, and the `version:` pin baked into action.yml AT THAT TAG (not the
+      # working tree -- the tree is whatever main happens to be, which is not what
+      # consumers resolve).
+      - name: Check tag / pin parity
+        id: parity
+        run: |
+          set -euo pipefail
+
+          # Release tags are strictly vX.Y.Z; prereleases are never tagged.
+          NEWEST=$(git tag -l 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$NEWEST" ]; then echo "::error::no vX.Y.Z release tag found"; exit 1; fi
+          VERSION="${NEWEST#v}"
+          MAJOR="v${VERSION%%.*}"
+          echo "newest release tag: $NEWEST"
+          echo "moving major tag:   $MAJOR"
+
+          if ! git rev-parse -q --verify "refs/tags/$MAJOR" >/dev/null; then
+            echo "::error::moving major tag $MAJOR does not exist"; exit 1
+          fi
+
+          # The e2e job below hardcodes `uses: UiPath/coder_eval@v0` -- GitHub Actions
+          # forbids expressions in `uses:`, so it cannot be derived. Assert the major
+          # here so a 1.0.0 release fails loudly instead of silently leaving the paid
+          # tier testing a stale major forever.
+          if [ "$MAJOR" != "v0" ]; then
+            echo "::error::major tag is now $MAJOR, but the e2e job below pins @v0. Bump the \`uses:\` in this workflow."
+            exit 1
+          fi
+
+          # 1. The major tag must point at the newest release.
+          MAJOR_SHA=$(git rev-parse "refs/tags/$MAJOR^{commit}")
+          NEWEST_SHA=$(git rev-parse "refs/tags/$NEWEST^{commit}")
+          if [ "$MAJOR_SHA" != "$NEWEST_SHA" ]; then
+            echo "::error::$MAJOR points at $MAJOR_SHA but $NEWEST is $NEWEST_SHA -- consumers on @$MAJOR are not getting the newest release"
+            exit 1
+          fi
+
+          # 2. action.yml AT the major tag must pin the newest released version.
+          #    Anchor mirrors release.yml's sed and tests/test_action_version_pin.py.
+          PIN=$(git show "$MAJOR:action.yml" \
+            | sed -nE 's/^[[:space:]]*default: "([0-9]+\.[0-9]+\.[0-9]+)"[[:space:]]+# <-- kept in sync.*/\1/p')
+          if [ -z "$PIN" ]; then
+            echo "::error::could not read the version pin from action.yml at $MAJOR (the '# <-- kept in sync' anchor may have been detached)"
+            exit 1
+          fi
+          echo "action.yml pin at $MAJOR: $PIN"
+          if [ "$PIN" != "$VERSION" ]; then
+            echo "::error::action.yml at $MAJOR pins coder-eval==$PIN but the newest release is $VERSION -- @$MAJOR consumers install the wrong version"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "parity OK: @$MAJOR -> $NEWEST -> coder-eval==$VERSION"
+
+      # The stranded-pin check: does the version @v0 promises actually exist on PyPI?
+      # Retried because a release-triggered run can land seconds after the upload,
+      # before the index/CDN has propagated -- without the wait this would flake red
+      # on every release, which is how a check earns being ignored.
+      - name: Verify version exists on PyPI
+        env:
+          VERSION: ${{ steps.parity.outputs.version }}
+        run: |
+          set -euo pipefail
+          URL="https://pypi.org/pypi/coder-eval/${VERSION}/json"
+          for attempt in 1 2 3 4 5 6; do
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+            if [ "$CODE" = "200" ]; then
+              echo "coder-eval==${VERSION} is on PyPI"
+              exit 0
+            fi
+            echo "attempt $attempt: PyPI returned $CODE for ${VERSION}; waiting for propagation..."
+            sleep 20
+          done
+          echo "::error title=Stranded action.yml pin::coder-eval==${VERSION} is NOT on PyPI, but the moving major tag points at an action.yml that installs it. Every 'uses: UiPath/coder_eval@v0' consumer fails at install. Re-run the Release workflow's publish-pypi job."
+          exit 1
+
+      # Catches the listing being renamed or delisted. The slug is derived from
+      # action.yml's `name:` rather than hardcoded -- and note GitHub does NOT
+      # convert underscores to hyphens: `coder_eval` is the live slug (verified;
+      # `coder-eval` 404s). tests/lint/action_docs.py (CE026) keeps the docs links
+      # consistent with the same `name:`.
+      - name: Verify Marketplace listing resolves
+        env:
+          # The version tag, which the parity step above proved is the same commit
+          # the major tag points at.
+          TAG_REF: v${{ steps.parity.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME=$(git show "${TAG_REF}:action.yml" \
+            | sed -nE 's/^name:[[:space:]]*(.+)$/\1/p' | head -1 \
+            | sed -E 's/^["'"'"']//; s/["'"'"']$//')
+          if [ -z "$NAME" ]; then echo "::error::could not read \`name:\` from action.yml"; exit 1; fi
+          SLUG=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+          URL="https://github.com/marketplace/actions/${SLUG}"
+          echo "listing name: $NAME -> $URL"
+
+          CODE=000
+          for attempt in 1 2 3; do
+            CODE=$(curl -sSL -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+            [ "$CODE" = "200" ] && break
+            echo "attempt $attempt: $CODE"
+            sleep 10
+          done
+
+          if [ "$CODE" = "200" ]; then
+            echo "Marketplace listing resolves."
+          elif [ "$CODE" = "429" ] || [ "$CODE" -ge 500 ] 2>/dev/null; then
+            # Transient / bot-throttled: warn, do not fail. Distinguishing this from a
+            # 404 is what keeps the check from crying wolf.
+            echo "::warning title=Marketplace check inconclusive::GitHub returned $CODE for $URL (rate-limited or transient), not treating as delisted."
+          else
+            echo "::error title=Marketplace listing missing::$URL returned $CODE. The listing may have been renamed or delisted, or action.yml's \`name:\` changed without the listing following."
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
+
+      # Proves the wheel is installable and the console script works -- the exact two
+      # things the composite action does before it runs anything.
+      - name: Install from PyPI and smoke the CLI
+        env:
+          VERSION: ${{ steps.parity.outputs.version }}
+        run: |
+          set -euo pipefail
+          uv tool install "coder-eval==${VERSION}"
+          coder-eval --help > /dev/null
+          echo "coder-eval==${VERSION} installs and runs."
+
+  # TIER 2 -- costs cents. Consumes the action exactly as a stranger would:
+  # `uses: UiPath/coder_eval@v0` with the default `version:` (never `local`), no repo
+  # checkout, and a task YAML written inline rather than one from this repo. That
+  # makes it a real consumer simulation instead of a self-referential run, and it
+  # doubles as a live proof that the documented agent-runtime prerequisite steps
+  # still work.
+  e2e:
+    name: End-to-end (published action, real API)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # No actions/checkout on purpose: a consumer's workspace does not contain this
+      # repo. Everything the run needs is written below or installed by the action.
+      # (The default experiment resolves from packaged resources, not the repo.)
+
+      # The prerequisite steps the README/docs tell consumers to add. The action is
+      # agent-agnostic and installs no agent runtime.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Write a consumer task YAML
+        run: |
+          set -euo pipefail
+          mkdir -p tasks
+          cat > tasks/published_smoke.yaml <<'YAML'
+          task_id: "published_action_smoke"
+          description: "Minimal task proving the published action installs and drives an agent."
+          initial_prompt: "Create a file named hello.txt in the current working directory containing exactly the single line: hello from the published action"
+          tags: [smoke]
+
+          agent:
+            type: "claude-code"
+            permission_mode: "acceptEdits"
+            allowed_tools: ["Read", "Write", "Bash"]
+            # No host CLAUDE.md/settings to inherit here, but pinned explicitly so the
+            # run is isolated and cheap regardless of the runner's state.
+            setting_sources: []
+
+          success_criteria:
+            - type: "file_exists"
+              path: "hello.txt"
+              description: "The agent must create hello.txt."
+          YAML
+          echo "--- task YAML:"; cat tasks/published_smoke.yaml
+
+      # continue-on-error, because this step's exit code is NOT the gate. The action
+      # exits with coder-eval's own code (action.yml combines them), and coder-eval
+      # exits 1 on any failed task -- so a model flake failing `file_exists` would
+      # redden this workflow even with minimum-task-score at 0.0, which does not
+      # neutralize that path. This check must answer "does the published action still
+      # work", not "is the model still good": the verification step below gates on
+      # ARTIFACTS instead. A genuine model/credential outage still surfaces there, via
+      # the zero-token assertion.
+      - name: Run the published action
+        id: run
+        continue-on-error: true
+        uses: UiPath/coder_eval@v0   # major asserted by the preflight job above
+        with:
+          # `version:` intentionally omitted -- the whole point is to exercise the
+          # default pin baked into action.yml at the v0 tag.
+          tasks: tasks/published_smoke.yaml
+          model: claude-haiku-4-5-20251001
+          run-dir: runs/verify-published
+          junit-path: runs/verify-published/junit.xml
+          minimum-task-score: "0.0"
+          env: |
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+
+      # THE ACTUAL GATE: the action's mechanics, not the model's answer.
+      - name: Verify action mechanics
+        env:
+          JUNIT: ${{ steps.run.outputs.junit-path }}
+          RUNDIR: ${{ steps.run.outputs.run-dir }}
+          STEP_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -euo pipefail
+          echo "action step outcome: $STEP_OUTCOME (informational -- artifacts are the gate)"
+
+          # 1. Outputs are wired.
+          [ -n "$JUNIT" ]  || { echo "::error::action did not set the junit-path output"; exit 1; }
+          [ -n "$RUNDIR" ] || { echo "::error::action did not set the run-dir output"; exit 1; }
+
+          # 2. The JUnit report exists and is well-formed (trusted, self-generated
+          #    input; our writer emits no DTDs/entities, so stdlib ET is fine).
+          [ -f "$JUNIT" ] || { echo "::error::JUnit report missing at $JUNIT"; exit 1; }
+          python3 -c "import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])" "$JUNIT"
+
+          # 3. run.json -- the consumer contract -- exists and describes a real run
+          #    that reached the model. Non-zero tokens prove the credential passthrough
+          #    and the agent runtime actually worked, WITHOUT asserting output quality.
+          [ -f "$RUNDIR/run.json" ] || { echo "::error::run.json missing in $RUNDIR"; exit 1; }
+          RUN_JSON="$RUNDIR/run.json" python3 <<'PY'
+          import json, os, sys
+
+          data = json.load(open(os.environ["RUN_JSON"], encoding="utf-8"))
+          rows = data.get("task_results") or []
+          if not rows:
+              print("::error::run.json contains no task_results -- the action produced no run")
+              sys.exit(1)
+          tokens = sum(r.get("total_tokens") or 0 for r in rows)
+          for r in rows:
+              print(f"  {r.get('task_id')}: status={r.get('final_status')} "
+                    f"score={r.get('weighted_score')} tokens={r.get('total_tokens')}")
+          if tokens <= 0:
+              print("::error::no tokens consumed across any task -- the agent never reached the model "
+                    "(credential passthrough, agent runtime, or backend wiring is broken)")
+              sys.exit(1)
+          print(f"published action mechanics OK: {len(rows)} task row(s), {tokens} tokens consumed")
+          PY
+
+      - name: Upload run on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: verify-published-runs
+          path: runs/verify-published/
+          retention-days: 7
