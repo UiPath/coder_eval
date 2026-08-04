@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -279,6 +280,23 @@ def _sanitize_container_name_component(s: str) -> str:
 # Same reserved set the workspace-dir validator uses (single source of truth in
 # models.container_paths). Extra-mount destinations and WORKDIR both reject these.
 _RESERVED_MOUNT_DESTS = RESERVED_CONTAINER_DIRS
+
+
+def _warn_if_sensitive_mount(target: Path, sensitive_sources: Collection[Path]) -> None:
+    """Warn when an auto-mounted host path looks like a credential/secret location.
+
+    Warning, not a hard failure: legitimate uses exist (a task that really does
+    want to read ``~/.aws/config``). The point is to surface the surprise, since
+    ``plugin.path`` / ``reference.directory`` / ``template_sources`` are
+    user-controlled strings where a typo silently exposes the host.
+    """
+    for sensitive in sensitive_sources:
+        if target == sensitive or sensitive in target.parents:
+            logger.warning(
+                "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
+                target,
+            )
+            return
 
 
 def _validate_extra_mount(spec: str) -> str:
@@ -620,16 +638,21 @@ class DockerRunner:
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
         # Lineage + variant metadata so the in-container Orchestrator
         # reconstructs the same context (variant_id is load-bearing for
-        # report grouping). source_yaml carries the *raw* on-disk text
-        # so the in-container Orchestrator records the same audit trail
-        # as the in-process driver (task.json.task_config.source_yaml).
+        # report grouping).
+        #
+        # `source_yaml` (the raw on-disk task text) is deliberately NOT staged. It
+        # is a pure audit field -- nothing in the container reads it, it only ends
+        # up in task.json.task_config.source_yaml -- and staging it put a second
+        # verbatim copy of the task's success_criteria inside the sandbox for no
+        # functional gain. The host owns that text already and stitches it back
+        # into the returned result (`_restore_source_yaml`), so the audit trail is
+        # unchanged.
         context_payload = json.dumps(
             {
                 "variant_id": self.rt.variant_id,
                 "replicate_index": self.rt.replicate_index,
                 "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
                 "preservation_mode": self.preservation_mode.value,
-                "source_yaml": self.rt.source_yaml,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
@@ -771,7 +794,33 @@ class DockerRunner:
             # rather than crashing with an uncaught ValidationError/JSONDecodeError.
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
         self._warn_on_version_mismatch(result)
+        await self._restore_source_yaml(result, task_json)
         return result
+
+    async def _restore_source_yaml(self, result: EvaluationResult, task_json: Path) -> None:
+        """Put the host's raw task YAML back on the returned record's audit field.
+
+        ``source_yaml`` is not staged into the container (see ``_stage_inputs``), so
+        the in-container Orchestrator records the post-override dump it was handed
+        instead of the raw on-disk text. The host has that text, so it restores it
+        here -- keeping ``task.json.task_config.source_yaml`` identical to what the
+        in-process driver writes.
+
+        Rewrites ``task.json`` as well as the in-memory record, because the file is
+        the artifact downstream consumers read. Best-effort: a failed rewrite is
+        logged and leaves the in-memory record corrected, never failing the task
+        over an audit field.
+        """
+        if result.task_config is None or not self.rt.source_yaml:
+            return
+        if result.task_config.source_yaml == self.rt.source_yaml:
+            return
+
+        result.task_config.source_yaml = self.rt.source_yaml
+        try:
+            await asyncio.to_thread(task_json.write_text, result.model_dump_json(indent=2), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Could not rewrite %s with the host source_yaml: %s", task_json, exc)
 
     async def _handle_malformed_task_json(self, task_json: Path, log_path: Path, exc: ValueError) -> DockerRunError:
         """Degrade a present-but-malformed task.json; return the DockerRunError to raise.
@@ -1195,7 +1244,9 @@ class DockerRunner:
         #     resolve_template_paths runs on the host).
         # Reference files (`task.reference.file`) and `run_command`
         # criteria that use `$TASK_DIR/...` are covered by the symmetric
-        # task_dir mount above. ``mounted`` dedupes overlapping entries.
+        # task_dir mount above. ``mounted`` dedupes overlapping entries; it holds
+        # both directory and single-file targets, since a file is now mounted as
+        # a file rather than widened to its parent directory.
         mounted: set[Path] = set()
         # Auto-mount sources that look like credential / secret dirs get a
         # loud warning. Task YAMLs typically come from in-house suite authors,
@@ -1209,19 +1260,16 @@ class DockerRunner:
         def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
             if not raw_path:
                 return
-            resolved = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
-            # File paths get mounted as the parent dir so a single -v covers
-            # the file; container-side reads still resolve at the same path.
-            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
-            if target in mounted or not target.is_dir():
+            target = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
+            # A file is mounted AS a file. Widening it to its parent directory (the
+            # old behavior) exposed every sibling to satisfy a request for one file
+            # -- for a reference solution that is the whole scenario folder,
+            # RESOLUTION.md and checker scripts included. Docker creates the
+            # container-side path for a file bind mount, so nothing else is needed.
+            # `dir_only` therefore only decides what kind of target is acceptable.
+            if target in mounted or not (target.is_dir() or (not dir_only and target.is_file())):
                 return
-            for sensitive in sensitive_sources:
-                if target == sensitive or sensitive in target.parents:
-                    logger.warning(
-                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
-                        target,
-                    )
-                    break
+            _warn_if_sensitive_mount(target, sensitive_sources)
             mounted.add(target)
             argv.extend(["-v", f"{target}:{target}:ro"])
 

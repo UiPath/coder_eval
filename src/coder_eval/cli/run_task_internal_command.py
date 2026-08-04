@@ -159,9 +159,11 @@ def run_task_internal_command(
     workspace_dir_raw = context.get("workspace_dir")
     workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
     config_lineage = {k: ConfigLineageEntry.model_validate(v) for k, v in (context.get("config_lineage") or {}).items()}
-    # Prefer the host's raw source_yaml so task.json's audit trail matches
-    # the in-process driver. Fall back to the staged (post-override) YAML
-    # for older host versions that didn't forward it.
+    # The host no longer stages its raw `source_yaml` (a second verbatim copy of the
+    # task's success_criteria inside the sandbox, read by nothing here). Record the
+    # staged post-override YAML instead; the host restores its own raw text onto
+    # task.json.task_config.source_yaml when it parses the result back, so the audit
+    # trail is unchanged. An older host that still sends the key is honored.
     host_source_yaml: str | None = context.get("source_yaml")
 
     # Load the post-override spec from the staged YAML. We then point
