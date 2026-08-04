@@ -320,15 +320,31 @@ def _normalize(text: str) -> str:
 def _glob_to_regex(glob: str) -> re.Pattern[str]:
     """Compile a basename glob into a pattern that matches it inside a command.
 
-    ``fnmatch.translate`` alone anchors the whole string; the wildcard is also
-    narrowed so it cannot cross a path separator (``check_*.py`` must not match
-    ``check_dir/other.py``).
+    Three adjustments to ``fnmatch.translate``, which anchors the whole string:
+
+    * The trailing ``\\Z`` anchor is dropped so the pattern can be SEARCHED for
+      inside command text rather than matched against a bare filename.
+    * The wildcard is narrowed so it cannot cross a path separator
+      (``check_*.py`` must not match ``check_dir/other.py``).
+    * Dropping the anchor also drops the filename's right-hand boundary, and
+      ``translate`` never had a left-hand one, so both are restored as a
+      lookbehind/lookahead pair. Without them ``RESOLUTION.md`` matches inside
+      ``RESOLUTION.md.draft`` and ``task.yaml`` inside ``my-task.yaml.bak``, and
+      an agent gets voided for reading its own scratch file.
+
+    The boundary class is ``[\\w.-]`` on both sides -- exactly the characters a
+    filename can continue through -- which is also what :func:`_segment_to_regex`
+    uses. Everything a real reference is delimited BY is therefore still a match:
+    string start/end, whitespace, ``/`` (so ``./RESOLUTION.md`` and
+    ``../scen/RESOLUTION.md`` hit, and Windows backslashes too, since
+    :func:`_normalize` has already turned them into ``/``), quotes, and shell
+    metacharacters (``;``, ``|``, ``&``, ``)``, ``=``).
     """
     body = fnmatch.translate(_normalize(glob))
     # translate() emits `(?s:...)\Z`; strip the anchor and re-scope the wildcard.
     body = body.removesuffix(r"\Z")
     body = body.replace(".*", "[^/]*")
-    return re.compile(body)
+    return re.compile(r"(?<![\w.\-])" + body + r"(?![\w.\-])")
 
 
 def _segment_to_regex(segment: str) -> re.Pattern[str]:

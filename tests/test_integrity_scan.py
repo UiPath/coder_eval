@@ -233,6 +233,48 @@ def test_glob_wildcard_does_not_cross_a_path_separator():
     assert _bash_read("cat check_dir/check_it.py", spec)[0] is True
 
 
+# --------------------------------------------------------------------------
+# A basename glob matches a WHOLE filename, not a substring of one
+# --------------------------------------------------------------------------
+
+GLOB_BOUNDARY_READS = [
+    pytest.param("cat RESOLUTION.md", id="bare"),
+    pytest.param("sed -n '1,20p' ../scen/RESOLUTION.md", id="relative-parent-path"),
+    pytest.param("cat ./RESOLUTION.md", id="dot-slash"),
+    pytest.param("cat 'RESOLUTION.md'", id="single-quoted"),
+    pytest.param('cat "RESOLUTION.md"', id="double-quoted"),
+    pytest.param("head RESOLUTION.md;echo done", id="trailing-semicolon"),
+    pytest.param("head RESOLUTION.md|head -3", id="trailing-pipe"),
+    pytest.param("cat /repo/tasks/leaky/check_env.py", id="grader-under-the-task-dir"),
+    pytest.param("python3 $TASK_DIR/check.py", id="grader-under-the-task-dir-variable"),
+    pytest.param("cat out.expected", id="suffix-glob"),
+    pytest.param(r"cat C:\repo\tasks\leaky\RESOLUTION.md", id="windows-separators"),
+]
+
+GLOB_BOUNDARY_CLEAN = [
+    pytest.param("cat RESOLUTION.md.draft", id="own-draft-of-the-deliverable"),
+    pytest.param("cat notes/RESOLUTION.md-backup.txt", id="own-backup-name"),
+    pytest.param("python tests/tasks/suite/scen/check_env.pyc", id="compiled-bytecode-sibling"),
+    pytest.param("cat my-task.yaml.bak", id="longer-name-ending-in-the-glob"),
+    pytest.param("cat my_task.yaml", id="longer-name-prefixed-with-a-word-char"),
+    pytest.param("cat out.expected.tmp", id="suffix-glob-with-a-longer-name"),
+]
+
+
+@pytest.mark.parametrize("command", GLOB_BOUNDARY_READS)
+def test_a_whole_filename_match_is_still_a_read(command: str):
+    is_read, matched = _bash_read(command, SPEC)
+    assert is_read is True, f"expected a read: {command!r}"
+    assert matched is not None
+
+
+@pytest.mark.parametrize("command", GLOB_BOUNDARY_CLEAN)
+def test_a_glob_inside_a_longer_filename_is_not_a_match(command: str):
+    """`RESOLUTION.md` inside `RESOLUTION.md.draft` is the agent's own scratch file;
+    under `void` flagging it destroys an honest row."""
+    assert _bash_read(command, SPEC) == (False, None)
+
+
 def test_unbalanced_quotes_do_not_skip_the_command():
     """A command shlex cannot parse still ran, so it must still be classified."""
     is_read, _ = _bash_read("cat 'RESOLUTION.md", SPEC)
