@@ -48,6 +48,15 @@ export AWS_REGION="${AWS_REGION:-$(read_env AWS_REGION)}"
 export AWS_REGION="${AWS_REGION:-eu-north-1}"
 # OpenRouter key for the openrouter/* models in the config (cost-optimization path).
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(read_env OPENROUTER_API_KEY)}"
+# OpenAI / Azure-OpenAI key + base URL for the gpt-* models in the config — the
+# Claude-SDK-through-LiteLLM skill-activation path. CODEX_BASE_URL is an
+# OpenAI-compatible endpoint (e.g. Azure's /openai/v1), reused verbatim so the
+# proxy reaches the model the same way the Codex agent does.
+export CODEX_API_KEY="${CODEX_API_KEY:-$(read_env CODEX_API_KEY)}"
+export CODEX_BASE_URL="${CODEX_BASE_URL:-$(read_env CODEX_BASE_URL)}"
+# Gemini key for the gemini/* model in the config — the Gemini-via-Claude-SDK
+# skill-activation A/B against the native Antigravity harness.
+export GEMINI_API_KEY="${GEMINI_API_KEY:-$(read_env GEMINI_API_KEY)}"
 # Master key = the key clients present. Default to .env's LITELLM_AUTH_TOKEN so the
 # client and proxy match; fall back to the local dev key.
 export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-$(read_env LITELLM_AUTH_TOKEN)}"
@@ -92,8 +101,17 @@ Set these in coder_eval's .env (or shell) to use it:
   LITELLM_BASE_URL=http://localhost:$PORT
   LITELLM_AUTH_TOKEN=$LITELLM_MASTER_KEY
   LITELLM_COST_LOG=$LITELLM_COST_LOG   # SAME path as above, so the run joins ACTUAL per-call cost (else static pricing)
-  # then run:  coder-eval run <task> --model zai.glm-5   (or deepseek.v3.2 / moonshotai.kimi-k2.5)
+  # then run:  coder-eval run <task> --model zai.glm-5   (or deepseek.v3.2 / moonshotai.kimi-k2.5 / gpt-5.6-terra)
 
 EOF
 
-exec uvx --from 'litellm[proxy]' litellm --config "$CONFIG" --host 127.0.0.1 --port "$PORT"
+# Pin the proxy deps. `uvx --from 'litellm[proxy]'` unpinned drifts: litellm 1.95.0
+# declares `fastapi>=0.136.3,<1.0`, so uvx grabs the newest fastapi — but fastapi
+# dropped `get_flat_dependant` (which litellm's proxy still imports) in a 0.140.x
+# PATCH (0.140.0 has it, 0.140.13 doesn't), so a range cap isn't enough and startup
+# dies with a (masked) `ModuleNotFoundError: proxy_server`. Pin fastapi to an exact
+# verified-good version and pin litellm so the sidecar can't silently re-break.
+# Override for an upgrade: LITELLM_SPEC='litellm[proxy]==<ver>' LITELLM_FASTAPI='fastapi==<ver>'.
+LITELLM_SPEC="${LITELLM_SPEC:-litellm[proxy]==1.95.0}"
+LITELLM_FASTAPI="${LITELLM_FASTAPI:-fastapi==0.140.0}"
+exec uvx --from "$LITELLM_SPEC" --with "$LITELLM_FASTAPI" litellm --config "$CONFIG" --host 127.0.0.1 --port "$PORT"

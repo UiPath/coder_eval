@@ -18,8 +18,10 @@
 #   AWS_REGION=eu-north-1      — EU residency (Stockholm).
 #   LITELLM_MASTER_KEY         — the virtual key clients present as LITELLM_AUTH_TOKEN.
 #
-# Run manually:
-#   uvx --from 'litellm[proxy]' litellm --config litellm/litellm-config.yaml --port 4000
+# Run manually (pin fastapi==0.140.0 — a later 0.140.x patch removed a symbol
+# litellm's proxy imports; start-litellm.sh does this for you):
+#   uvx --from 'litellm[proxy]==1.95.0' --with 'fastapi==0.140.0' \
+#     litellm --config litellm/litellm-config.yaml --port 4000
 
 model_list:
   # DeepSeek V3.2 — cost lead ($0.74 / $2.22 per Mtok).
@@ -91,6 +93,37 @@ model_list:
           sort: price
           allow_fallbacks: true
           only: ["streamlake", "gmicloud", "novita", "alibaba"]
+
+  # OpenAI / Azure-OpenAI direct — drive a GPT/Codex-family model through the SAME
+  # Claude Code SDK harness (LiteLLM translates Anthropic Messages <-> OpenAI Chat
+  # Completions) so the native `Skill` tool + progressive disclosure fire and we can
+  # measure skill-activation reliability on a non-Claude model — the thing the Codex
+  # SDK path cannot test (it does not run Claude-Code skills).
+  #
+  # The endpoint is OpenAI-compatible: Azure's `/openai/v1` surface accepts a Bearer
+  # key and OpenAI-format requests, so the generic `openai/` provider + a custom
+  # `api_base` mirrors exactly how the Codex agent already reaches it (bearer auth,
+  # no api-version). `model:` after the `openai/` prefix is the Azure DEPLOYMENT name.
+  # No usage.include/provider block — those are OpenRouter-only; OpenAI/Azure returns
+  # no usage.cost, so cost falls back to the static pricing table (gpt-5.6-terra is
+  # registered), which is exact for a flat per-token rate.
+  - model_name: gpt-5.6-terra
+    litellm_params:
+      model: openai/gpt-5.6-terra
+      api_base: os.environ/CODEX_BASE_URL
+      api_key: os.environ/CODEX_API_KEY
+
+  # Gemini (Google) direct — drive a Gemini model through the SAME Claude Code SDK
+  # harness so the native `Skill` tool fires, to A/B skill activation against Gemini's
+  # own Antigravity SDK. LiteLLM's `gemini/` provider calls the Gemini Developer API
+  # with GEMINI_API_KEY and does the Anthropic<->Gemini translation (incl. tool_use
+  # <-> function-calling, which is what the Skill tool rides). No usage.include block —
+  # that's OpenRouter-only; Gemini returns no usage.cost, so cost falls back to the
+  # static pricing table (gemini-3.1-pro-preview is registered).
+  - model_name: gemini-3.1-pro-preview
+    litellm_params:
+      model: gemini/gemini-3.1-pro-preview
+      api_key: os.environ/GEMINI_API_KEY
 
 litellm_settings:
   # Silently drop provider-unsupported OpenAI/Anthropic params rather than 400.

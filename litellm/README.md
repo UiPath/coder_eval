@@ -9,6 +9,11 @@ Messages** format (`POST /v1/messages`), but the target models don't:
 |---|---|---|
 | Bedrock open-weight (GLM, DeepSeek, Kimi) | Converse | yes |
 | OpenRouter (any model) | OpenAI Chat Completions | yes |
+| OpenAI / Azure-OpenAI direct (GPT / Codex) | OpenAI Chat Completions | yes |
+
+The last row is how we test **skill-activation reliability on a GPT/Codex model**:
+route it through this same Claude Code SDK harness instead of the Codex SDK (which
+does not run Claude-Code skills), so the native `Skill` tool fires and can be graded.
 
 **LiteLLM is the translation shim.** The SDK is pointed at LiteLLM via
 `ANTHROPIC_BASE_URL`; LiteLLM translates Anthropic ↔ Converse / OpenAI per model
@@ -46,6 +51,7 @@ environment before launching:
 | `AWS_BEARER_TOKEN_BEDROCK` | Bedrock models | required if you use any `bedrock/*` model |
 | `AWS_REGION` | Bedrock models | defaults to `eu-north-1` |
 | `OPENROUTER_API_KEY` | OpenRouter models | required if you use any `openrouter/*` model |
+| `CODEX_API_KEY` / `CODEX_BASE_URL` | OpenAI / Azure-OpenAI (GPT / Codex) models | required if you use the `gpt-*` OpenAI-compatible model; base URL is reused verbatim (e.g. Azure's `/openai/v1`) |
 | `LITELLM_AUTH_TOKEN` | the virtual key clients present | becomes the proxy's `LITELLM_MASTER_KEY`; falls back to `sk-spike-local`. It can be customly designed.|
 
 ### Start it
