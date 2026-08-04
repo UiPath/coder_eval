@@ -175,15 +175,34 @@ _LISTING_TOOLS = frozenset({"Glob", "LS", "ListDir", "list_dir", "Ls", "glob", "
 # work would produce.
 _GRADED_BASENAME_GLOBS = ("RESOLUTION.md", "check_*.py", "*.expected", "task.yaml", "context.json")
 
+# Path SEGMENTS that hold answer keys wherever they appear. Segments rather than
+# resolved prefixes because this is how an agent types them -- `cat
+# _fixtures/expected/foo.json`, `../_fixtures/solution/main.py` -- so an absolute
+# prefix derived on the host matches neither spelling.
+_GRADED_PATH_SEGMENTS = ("_fixtures",)
+
+# Path segments holding the scenario's mock/fixture DATA: the recorded responses a
+# mock shim replays and the shim itself. Reported as MOCK_DATA_READ rather than
+# GRADED_READ -- reading the fixture store is a different act from reading the
+# reference answer, and the first rollout runs record-only, so the two have to be
+# triageable apart.
+_MOCK_PATH_SEGMENTS = ("mocks", "mock_src")
+
 
 @dataclass(frozen=True)
 class GradedMaterialSpec:
     """What counts as graded material for one task.
 
     Derived from what the harness already knows -- the task file, its declared
-    reference, the ``$TASK_DIR`` operands its own criteria use, and the
-    framework's container mounts -- rather than from hardcoded suite paths, so it
-    stays correct as suites are added and renamed.
+    reference, the mock/fixture directories it declares, the ``$TASK_DIR``
+    operands its own criteria use, and the framework's container mounts -- rather
+    than from hardcoded suite paths, so it stays correct as suites are added and
+    renamed.
+
+    Two match shapes, because agents type two shapes: ``paths`` / ``directories``
+    are resolved and substring-matched, while ``path_segments`` /
+    ``mock_segments`` are path COMPONENTS matched wherever they occur, so a
+    relative ``../mocks/responses/manifest.json`` is caught as well.
     """
 
     paths: frozenset[str] = field(default_factory=frozenset)
@@ -195,9 +214,16 @@ class GradedMaterialSpec:
     basename_globs: tuple[str, ...] = ()
     """Filename patterns that are graded material regardless of location."""
 
+    path_segments: frozenset[str] = field(default_factory=frozenset)
+    """Answer-key path components (``_fixtures``), matched anywhere in a path."""
+
+    mock_segments: frozenset[str] = field(default_factory=frozenset)
+    """Mock/fixture-store path components (declared mock dirs, staged fixture
+    mount points), matched anywhere in a path and reported as MOCK_DATA_READ."""
+
     def is_empty(self) -> bool:
         """Whether the spec would match nothing at all."""
-        return not (self.paths or self.directories or self.basename_globs)
+        return not (self.paths or self.directories or self.basename_globs or self.path_segments or self.mock_segments)
 
 
 def _normalize(text: str) -> str:
@@ -221,6 +247,52 @@ def _glob_to_regex(glob: str) -> re.Pattern[str]:
     body = body.removesuffix(r"\Z")
     body = body.replace(".*", "[^/]*")
     return re.compile(body)
+
+
+def _segment_to_regex(segment: str) -> re.Pattern[str]:
+    """Compile a path segment into a pattern that matches it as a path COMPONENT.
+
+    ``m`` must match ``m/.store`` and ``<artifacts>/m/.store`` but not
+    ``stream/x``, so the component is anchored on its trailing separator plus a
+    leading boundary that rejects any character a path component could continue
+    from. A leading separator is NOT required: agents open these paths relatively
+    and quoted (``open('m/.store')``).
+    """
+    return re.compile(r"(?<![\w.\-])" + re.escape(_normalize(segment).strip("/")) + "/")
+
+
+def _path_segments(raw: str) -> set[str]:
+    """Normalize a declared sandbox-relative directory into matchable segments.
+
+    Returns the declared path itself plus its root component: a task that declares
+    ``mocks/bin`` as its shim directory still keeps the recorded responses it
+    replays under ``mocks/``. ``.`` (the sandbox root) yields nothing -- every
+    read would match it.
+    """
+    parts = [p for p in _normalize(raw).split("/") if p not in ("", ".")]
+    if not parts:
+        return set()
+    return {"/".join(parts), parts[0]}
+
+
+def _declared_mock_segments(task: TaskDefinition) -> set[str]:
+    """Mock/fixture directories this task DECLARES, as path segments.
+
+    Two declarations locate a scenario's fixture store: ``sandbox.mock_path_dirs``
+    (the directories whose contents the harness makes executable and prepends to
+    the agent's PATH -- the shims) and ``template_sources[*].mount_point`` (where a
+    staged tree lands). A mount point is only as precise as the task made it: one
+    that points at the agent's own working tree widens the spec to that tree, which
+    is why these are reported as MOCK_DATA_READ and not folded into GRADED_READ.
+    """
+    segments: set[str] = set()
+    for raw in task.sandbox.mock_path_dirs or []:
+        segments.update(_path_segments(raw))
+    for source in task.sandbox.template_sources or []:
+        mount_point = getattr(source, "mount_point", None)
+        if mount_point:
+            segments.update(_path_segments(mount_point))
+    return segments
 
 
 def derive_graded_material(task: TaskDefinition, task_file: Path | None) -> GradedMaterialSpec:
@@ -256,10 +328,18 @@ def derive_graded_material(task: TaskDefinition, task_file: Path | None) -> Grad
     for command in (*criterion_commands, *hook_commands):
         paths.update(_task_dir_operands(command or ""))
 
+    # Mock/fixture stores. Declared per task (mock dirs, staged mount points) plus
+    # the two conventions no task spells out: `_fixtures/` holds golden solutions
+    # and `mock_src/` the fixture sources.
+    mock_segments = _declared_mock_segments(task) | set(_MOCK_PATH_SEGMENTS)
+    path_segments = set(_GRADED_PATH_SEGMENTS)
+
     return GradedMaterialSpec(
         paths=frozenset(paths),
         directories=frozenset(directories),
         basename_globs=_GRADED_BASENAME_GLOBS,
+        path_segments=frozenset(path_segments),
+        mock_segments=frozenset(mock_segments - path_segments),
     )
 
 
@@ -283,7 +363,9 @@ def _find_match(text: str, spec: GradedMaterialSpec) -> str | None:
     """Return the graded-material reference found in ``text``, or None.
 
     Literal paths and directory prefixes are substring-matched on the normalized
-    form; basename globs are regex-matched so ``check_*.py`` catches any grader.
+    form; basename globs are regex-matched so ``check_*.py`` catches any grader;
+    path segments are matched as a path component so a relatively-typed
+    ``../mocks/responses/manifest.json`` is caught too.
     """
     haystack = _normalize(text)
 
@@ -298,7 +380,22 @@ def _find_match(text: str, spec: GradedMaterialSpec) -> str | None:
     for glob in spec.basename_globs:
         if _glob_to_regex(glob).search(haystack):
             return glob
+    for segment in (*spec.path_segments, *spec.mock_segments):
+        if _segment_to_regex(segment).search(haystack):
+            return segment
     return None
+
+
+def _finding_kind(matched: str, spec: GradedMaterialSpec) -> IntegrityFindingKind:
+    """Which class of finding a matched reference produces.
+
+    Only the mock/fixture-store segments are MOCK_DATA_READ; everything else --
+    the reference solution, the task YAML, the grader, a golden solution under
+    ``_fixtures/`` -- is a read of the answer key itself.
+    """
+    if matched in spec.mock_segments:
+        return IntegrityFindingKind.MOCK_DATA_READ
+    return IntegrityFindingKind.GRADED_READ
 
 
 def _segment_utility(segment: str) -> tuple[str, list[str]]:
@@ -454,10 +551,12 @@ def scan_commands(turns: list[TurnRecord], spec: GradedMaterialSpec) -> Integrit
                     )
 
             if is_read and matched is not None:
+                kind = _finding_kind(matched, spec)
+                subject = "mock fixture data" if kind is IntegrityFindingKind.MOCK_DATA_READ else "graded material"
                 findings.append(
                     IntegrityFinding(
-                        kind=IntegrityFindingKind.GRADED_READ,
-                        detail=f"{cmd.tool_name} read graded material ({matched})",
+                        kind=kind,
+                        detail=f"{cmd.tool_name} read {subject} ({matched})",
                         iteration=turn.iteration,
                         command_index=index,
                         tool_name=cmd.tool_name,

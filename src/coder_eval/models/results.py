@@ -521,12 +521,17 @@ class IntegrityVerdict(StrEnum):
 class IntegrityFindingKind(StrEnum):
     """The class of integrity problem a finding records.
 
-    One member today: every finding is a read of graded material. The kind is
-    carried on the finding anyway so a second check can be added without
-    reshaping the row key ``integrity_findings`` already ships.
+    Both members are reads; they differ in WHAT was read, and that difference is
+    load-bearing. ``GRADED_READ`` is the answer key -- the reference solution, the
+    task YAML, the grader script, a golden solution. ``MOCK_DATA_READ`` is the
+    scenario's fixture store: the recorded responses a mock shim replays, and the
+    shim itself. The first rollout of the integrity pass is record-only, and "the
+    agent read the fixture store" is a different conversation from "the agent read
+    the answer", so triage has to be able to separate them from the row alone.
     """
 
     GRADED_READ = "graded_read"
+    MOCK_DATA_READ = "mock_data_read"
 
 
 class IntegrityFinding(BaseModel):
