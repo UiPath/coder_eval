@@ -459,6 +459,41 @@ class TestRegressionsFromReview:
         )
         assert SuccessChecker(sandbox).check(criterion).score == 0.0
 
+    def test_asserting_a_switch_does_not_swallow_the_next_positional(self, sandbox_with_log):
+        """Adding a switch predicate must not weaken the guard it is added to.
+
+        A presence predicate needs no value, so it must not make the flag
+        value-bearing — otherwise `flags: {yes: {present: true}}` on a guard over
+        `delete --yes proj-1` would rebind `yes=proj-1`, empty the positionals,
+        and hand the guard a false PASS: the exact defect declared value-binding
+        exists to prevent, reintroduced by trying to assert more.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "--yes", "proj-1"])])
+        guard = CliCalledCriterion(
+            description="did NOT delete proj-1 with --yes",
+            log=LOG,
+            verb="ixp fields delete",
+            positional=["proj-1"],
+            flags={"yes": {"present": True}},
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(sandbox).check(guard).score == 0.0
+        positive = guard.model_copy(update={"min_count": 1, "max_count": None})
+        assert SuccessChecker(sandbox).check(positive).score == 1.0
+
+    def test_present_requires_the_flag(self, sandbox_with_log):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="passed --yes",
+            log=LOG,
+            verb="ixp fields delete",
+            flags={"yes": {"present": True}},
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
     def test_bad_regex_flags_value_names_the_flag(self, sandbox_with_log):
         """re.error is not a ValueError, so the pre-flight guard missed this."""
         sandbox, sandbox_dir = sandbox_with_log

@@ -445,6 +445,15 @@ class FlagMatch(BaseModel):
         ),
     )
     absent: bool = Field(default=False, description="Flag must NOT be present in the invocation")
+    present: bool = Field(
+        default=False,
+        description=(
+            "Flag must be present, whatever its value. The right predicate for a boolean switch: "
+            '`equals: ""` also works when the switch records an empty value, but breaks if the CLI '
+            "spells it `--force true`. Presence predicates never make a flag value-bearing, so "
+            "asserting a switch cannot swallow the positional after it"
+        ),
+    )
     flags: int = Field(
         default=0,
         description=(
@@ -453,6 +462,20 @@ class FlagMatch(BaseModel):
             "from a heredoc spans lines, and without it `.` stops at the first newline"
         ),
     )
+
+    @property
+    def needs_value(self) -> bool:
+        """Whether evaluating this predicate requires the flag's VALUE.
+
+        Presence predicates (``present`` / ``absent``) do not, so they must not
+        make a flag value-bearing. Otherwise asserting a boolean switch would
+        make it consume the following token: adding ``flags: {yes: {present:
+        true}}`` to a guard on ``delete --yes proj-1`` would bind
+        ``yes=proj-1``, drop ``proj-1`` from the positionals, and hand the guard
+        a false PASS -- reintroducing the very defect declared value-binding
+        exists to prevent.
+        """
+        return not (self.present or self.absent)
 
     @model_validator(mode="before")
     @classmethod
@@ -469,9 +492,11 @@ class FlagMatch(BaseModel):
         ]
         if self.absent:
             set_predicates.append("absent")
+        if self.present:
+            set_predicates.append("present")
         if len(set_predicates) != 1:
             msg = (
-                "FlagMatch requires exactly one of equals / contains / matches_regex / any_of / absent, "
+                "FlagMatch requires exactly one of equals / contains / matches_regex / any_of / absent / present, "
                 f"got {sorted(set_predicates) or 'none'}"
             )
             raise ValueError(msg)

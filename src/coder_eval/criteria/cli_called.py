@@ -97,6 +97,8 @@ def _flag_matches(predicate: FlagMatch, values: list[str] | None) -> bool:
     """
     if predicate.absent:
         return values is None
+    if predicate.present:
+        return values is not None
     if values is None:
         return False
     if predicate.equals is not None:
@@ -141,7 +143,9 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
         ignore,
         # Ignored flags are value-bearing too: dropping `--output` while leaving
         # `json` in the positionals would defeat the point of ignoring it.
-        frozenset(criterion.flags or {}) | frozenset(criterion.value_flags) | ignore,
+        frozenset(name for name, p in (criterion.flags or {}).items() if p.needs_value)
+        | frozenset(criterion.value_flags)
+        | ignore,
     )
 
     offset = 0

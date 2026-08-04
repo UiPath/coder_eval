@@ -877,6 +877,7 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
 | `contains` | contains the substring |
 | `matches_regex` | matches the regex — scoped to one value, not the whole line |
 | `any_of` | equals one of the listed strings |
+| `present: true` | the flag was passed, whatever its value — the right predicate for a boolean switch |
 | `absent: true` | the flag was **not** passed at all |
 
 `matches_regex` also accepts `flags:` (the `re` module's integers, e.g. `2` = `IGNORECASE`, `8` = `MULTILINE`, `16` = `DOTALL`), mirroring [`file_matches_regex`](#file_matches_regex). Setting `flags` next to any other predicate is rejected rather than silently ignored.
@@ -903,6 +904,17 @@ Flags the criterion does not mention are ignored, so an extra `--output json` ne
 ```
 
 Defaulting to "switch" is deliberate: `--yes` / `--force` / `-y` before the target is how destructive CLIs are invoked, so guessing that the flag swallows its neighbour is precisely how a `max_count: 0` guard ends up passing on the call it exists to forbid. The equals form (`--offset=-1`) is unambiguous and always binds directly, and a declared value flag binds even a dash-leading value (`--limit -1`).
+
+**Negative guards want the FEWEST facets that capture the forbidden act.** This is the opposite of a positive assertion, and it is easy to get backwards. `max_count: 0` passes when *nothing matches*, so every facet you add is another way for the real invocation to slip past the pattern and report a false PASS.
+
+In the delete example above, it is tempting to also assert `--yes`. Don't:
+
+- `--yes` is not the forbidden thing — the deletion is. The CLI *requires* a confirmation flag, so asserting it adds no discriminating power.
+- It adds escape routes: `-y` instead of `--yes` (a different flag name) no longer matches, and the guard passes on a delete that did happen.
+
+Use `present: true` — not `equals: ""` — when you do need to assert a switch. `present` needs no value, so it never makes the flag value-bearing; `equals: ""` depends on how the mock happens to record a switch and breaks if the CLI spells it `--force true`.
+
+The mirror rule for positive assertions: add every facet that distinguishes the right call from a near-miss, because there a missing facet makes the assertion *too easy* to satisfy.
 
 **Unusable records fail the criterion.** A line that is not JSON, not an object, or whose `argv` is not a list of strings scores 0.0 with an error, on the same footing as a missing log — a record that cannot be read might *be* the invocation a negative guard forbids.
 
