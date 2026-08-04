@@ -353,6 +353,13 @@ jobs:
           # Trusted Publisher is configured on pypi.org for this repo +
           # workflow (release.yml) + environment (pypi); no password needed.
           packages-dir: dist/
+          # Required for the `promote` job's recovery story to actually work. Without
+          # it, a step that fails AFTER a successful upload (lost response, job
+          # timeout) can never be re-run: PyPI answers 400 "File already exists", this
+          # job stays permanently red, so `promote` can never run and the major tag is
+          # never moved for a version that IS published -- the stranded state from the
+          # other direction. Trusted-Publishing scoping is unaffected.
+          skip-existing: true
 
   # Everything CONSUMER-VISIBLE happens here, and only after the wheel is actually
   # on PyPI: the moving major tag (`v0`, what every consumer pins) and the GitHub
@@ -387,11 +394,15 @@ jobs:
   promote:
     name: Promote major tag and cut GitHub Release
     needs: [release, publish-pypi]
-    # Real releases only. `released_version` is empty on a prerelease dispatch, which
-    # must never move the major tag or cut a Release. (A prerelease also skips
-    # publish-pypi's sibling path in spirit -- but note a *skipped* `needs` job blocks
-    # this one anyway, so this guard is belt-and-suspenders.)
-    if: needs.release.outputs.released_version != ''
+    # Real releases only, discriminated on the DISPATCHED REF rather than on a `needs`
+    # output. Prerelease mode is defined by the ref (see "Determine release mode"), so
+    # this is the same signal, and it cannot silently evaporate: were this gated on
+    # `needs.release.outputs.released_version != ''` and that output failed to carry
+    # over into a partial "Re-run failed jobs" attempt, the job would resolve to
+    # SKIPPED-GREEN -- the operator sees a green re-run while the major tag never moves
+    # and no Release is cut. Emptiness is enforced inside the job instead, by
+    # "Validate version shape", so a lost output is a RED job, not a silent no-op.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -405,15 +416,22 @@ jobs:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-      # The version is interpolated into `ref:` below, so pin its shape first. It
-      # comes from `semantic-release version --print` (internal, not user input), so
-      # this is defence-in-depth against a malformed value producing a surprising ref
-      # rather than a mitigation for untrusted input.
+      # Two jobs in one: (1) the version is interpolated into `ref:` below, so pin its
+      # shape first -- defence-in-depth against a malformed value producing a surprising
+      # ref (the value is `semantic-release version --print` output, first-party, not
+      # untrusted input); (2) this is the ENFORCEMENT POINT for a missing version, which
+      # the job's `if:` deliberately no longer gates on. An empty string fails the regex,
+      # so a `needs` output lost across a partial re-run surfaces as a red job with a
+      # clear message instead of a silently skipped promotion.
       - name: Validate version shape
         env:
           VERSION: ${{ needs.release.outputs.released_version }}
         run: |
           set -euo pipefail
+          if [ -z "$VERSION" ]; then
+            echo "::error title=Release version unavailable::needs.release.outputs.released_version is empty. On a real release it is always set, so this most likely means the output did not carry over into a partial re-run -- re-run the whole Release workflow's remaining jobs, or promote by hand."
+            exit 1
+          fi
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "::error::refusing to promote a malformed version: '$VERSION'"; exit 1; }
           echo "promoting v$VERSION"
@@ -428,16 +446,32 @@ jobs:
           fetch-depth: 0  # need tag objects to re-point the major tag
           token: ${{ steps.app-token.outputs.token }}
 
-      # The `v0` promotion itself. Force-move is idempotent, so re-running this job
-      # is always safe; force on a missing tag creates it (first release of a major).
+      # The `v0` promotion itself. Force-move makes re-running THIS run's job safe, but
+      # force-push is only self-idempotent -- it says nothing about ORDERING. GitHub
+      # keeps "Re-run failed jobs" available for 30 days, so replaying an OLD release's
+      # promote (e.g. 0.9.5 failed at publish-pypi, the operator moved on and shipped
+      # 0.9.6, then later cleaned up the red 0.9.5 run) would walk `v0` BACKWARDS and
+      # silently downgrade every consumer. The monotonicity guard below is what makes
+      # "re-running is safe" actually true. No `-a`/`-m`, so this is a lightweight tag:
+      # a plain ref write needing no committer identity.
       - name: Move major action tag (vN -> this release)
         env:
           VERSION: ${{ needs.release.outputs.released_version }}
         run: |
           set -euo pipefail
           MAJOR="v${VERSION%%.*}"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
+
+          # Refuse to promote anything but the newest release tag.
+          NEWEST=$(git tag -l 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -z "$NEWEST" ]; then
+            echo "::error::no vX.Y.Z release tag found; refusing to move $MAJOR"; exit 1
+          fi
+          if [ "$NEWEST" != "v${VERSION}" ]; then
+            echo "::error title=Refusing to move $MAJOR backwards::this run promotes v${VERSION}, but ${NEWEST} is the newest release tag. Moving $MAJOR would downgrade every 'uses: UiPath/coder_eval@$MAJOR' consumer. If you are recovering an old release, promote ${NEWEST} instead."
+            exit 1
+          fi
+
           git tag -f "$MAJOR" "v${VERSION}"
           git push -f origin "$MAJOR"
           echo "Moved $MAJOR -> v${VERSION} (coder-eval==${VERSION} is on PyPI)"

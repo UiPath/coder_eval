@@ -86,16 +86,9 @@ jobs:
             exit 1
           fi
 
-          # 1. The major tag must point at the newest release.
-          MAJOR_SHA=$(git rev-parse "refs/tags/$MAJOR^{commit}")
-          NEWEST_SHA=$(git rev-parse "refs/tags/$NEWEST^{commit}")
-          if [ "$MAJOR_SHA" != "$NEWEST_SHA" ]; then
-            echo "::error::$MAJOR points at $MAJOR_SHA but $NEWEST is $NEWEST_SHA -- consumers on @$MAJOR are not getting the newest release"
-            exit 1
-          fi
-
-          # 2. action.yml AT the major tag must pin the newest released version.
-          #    Anchor mirrors release.yml's sed and tests/test_action_version_pin.py.
+          # The pin baked into action.yml AT the major tag -- what @v0 consumers
+          # actually install. Anchor mirrors release.yml's sed and
+          # tests/test_action_version_pin.py.
           PIN=$(git show "$MAJOR:action.yml" \
             | sed -nE 's/^[[:space:]]*default: "([0-9]+\.[0-9]+\.[0-9]+)"[[:space:]]+# <-- kept in sync.*/\1/p')
           if [ -z "$PIN" ]; then
@@ -103,35 +96,99 @@ jobs:
             exit 1
           fi
           echo "action.yml pin at $MAJOR: $PIN"
-          if [ "$PIN" != "$VERSION" ]; then
-            echo "::error::action.yml at $MAJOR pins coder-eval==$PIN but the newest release is $VERSION -- @$MAJOR consumers install the wrong version"
-            exit 1
+
+          # Does the major tag lag the newest release tag? Since release.yml's
+          # `promote` job moves $MAJOR only AFTER publish-pypi succeeds, lag is a
+          # LEGITIMATE transient state (publish-pypi still awaiting the `pypi`
+          # environment approval, or having failed) -- NOT automatically a defect, and
+          # in the failed case @v0 consumers are perfectly healthy on the previous
+          # release. So this only classifies; the "Classify major-tag lag" step below
+          # decides, once it knows whether the newest version reached PyPI. Failing
+          # here would redden a healthy published artifact and pre-empt the accurate
+          # diagnostic, which is how a check earns being ignored.
+          MAJOR_SHA=$(git rev-parse "refs/tags/$MAJOR^{commit}")
+          NEWEST_SHA=$(git rev-parse "refs/tags/$NEWEST^{commit}")
+          if [ "$MAJOR_SHA" = "$NEWEST_SHA" ]; then
+            LAGGING=false
+            # Same commit, so the pin there MUST be the newest version. A mismatch means
+            # the release's action.yml sed/amend silently didn't take -- always a bug.
+            if [ "$PIN" != "$VERSION" ]; then
+              echo "::error::action.yml at $MAJOR pins coder-eval==$PIN but that same commit is release $VERSION -- release.yml's pin bump did not take, so @$MAJOR consumers install the wrong version"
+              exit 1
+            fi
+          else
+            LAGGING=true
+            echo "note: $MAJOR ($MAJOR_SHA) lags newest release $NEWEST ($NEWEST_SHA) -- classifying below"
           fi
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "parity OK: @$MAJOR -> $NEWEST -> coder-eval==$VERSION"
+          {
+            echo "pin=$PIN"
+            echo "newest=$VERSION"
+            echo "lagging=$LAGGING"
+          } >> "$GITHUB_OUTPUT"
+          echo "parity OK: @$MAJOR promises coder-eval==$PIN (newest release $VERSION, lagging=$LAGGING)"
 
-      # The stranded-pin check: does the version @v0 promises actually exist on PyPI?
-      # Retried because a release-triggered run can land seconds after the upload,
-      # before the index/CDN has propagated -- without the wait this would flake red
-      # on every release, which is how a check earns being ignored.
-      - name: Verify version exists on PyPI
+      # THE CONSUMER CONTRACT, and the hard gate of this tier: whatever version @v0's
+      # action.yml promises must be installable. This is what breaks a stranger's
+      # pipeline when it is false, so it is checked against the PIN rather than the
+      # newest tag. Retried because a release-triggered run can land seconds after the
+      # upload, before the index/CDN has propagated -- without the wait this would
+      # flake red on every release, which is how a check earns being ignored.
+      - name: Verify @v0's pinned version is installable from PyPI
         env:
-          VERSION: ${{ steps.parity.outputs.version }}
+          PIN: ${{ steps.parity.outputs.pin }}
         run: |
           set -euo pipefail
-          URL="https://pypi.org/pypi/coder-eval/${VERSION}/json"
+          URL="https://pypi.org/pypi/coder-eval/${PIN}/json"
+          CODE=000
           for attempt in 1 2 3 4 5 6; do
-            CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+            # No `|| echo 000`: curl's own `-w '%{http_code}'` already prints 000 on a
+            # transport failure, so appending another would yield the literal "000000"
+            # and defeat every comparison below. `|| true` only absorbs curl's non-zero
+            # exit under `set -e`.
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL" || true)
             if [ "$CODE" = "200" ]; then
-              echo "coder-eval==${VERSION} is on PyPI"
+              echo "coder-eval==${PIN} is on PyPI -- @v0 consumers can install."
               exit 0
             fi
-            echo "attempt $attempt: PyPI returned $CODE for ${VERSION}; waiting for propagation..."
+            echo "attempt $attempt: PyPI returned $CODE for ${PIN}; waiting for propagation..."
             sleep 20
           done
-          echo "::error title=Stranded action.yml pin::coder-eval==${VERSION} is NOT on PyPI, but the moving major tag points at an action.yml that installs it. Every 'uses: UiPath/coder_eval@v0' consumer fails at install. Re-run the Release workflow's publish-pypi job."
+
+          # 000 means we never reached PyPI at all -- that is our problem, not a
+          # stranded pin, and must not be reported as one.
+          if [ "$CODE" = "000" ]; then
+            echo "::error title=PyPI unreachable::could not reach $URL after 6 attempts (curl transport failure). This check is inconclusive -- it does NOT mean coder-eval==${PIN} is missing."
+            exit 1
+          fi
+          echo "::error title=Stranded action.yml pin::coder-eval==${PIN} is NOT on PyPI (HTTP $CODE), but @v0 points at an action.yml that installs it. Every 'uses: UiPath/coder_eval@v0' consumer fails at install. Re-run the Release workflow's publish-pypi job, then its promote job."
           exit 1
+
+      # Only runs when the major tag lags. Distinguishes the two causes, which need
+      # opposite verdicts -- the whole reason the parity step above does not fail on lag.
+      - name: Classify major-tag lag
+        if: steps.parity.outputs.lagging == 'true'
+        env:
+          PIN: ${{ steps.parity.outputs.pin }}
+          NEWEST: ${{ steps.parity.outputs.newest }}
+        run: |
+          set -euo pipefail
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/coder-eval/${NEWEST}/json" || true)
+          if [ "$CODE" = "200" ]; then
+            # The newest version IS published, so `promote` should have moved the tag
+            # and did not. Consumers are stuck an entire release behind: actionable.
+            echo "::error title=promote did not run::coder-eval==${NEWEST} is on PyPI but @v0 still promises ${PIN}. The Release workflow's promote job was skipped or failed -- re-run it to move the major tag."
+            exit 1
+          fi
+          if [ "$CODE" = "000" ]; then
+            echo "::warning title=Lag classification inconclusive::could not reach PyPI to check whether ${NEWEST} was published; @v0 still promises ${PIN}, which the previous step verified is installable."
+            exit 0
+          fi
+          # Newest is tagged but unpublished => publish-pypi never completed (failed, or
+          # still awaiting the `pypi` environment approval). @v0 consumers are HEALTHY on
+          # ${PIN}; the release is merely incomplete. The Release run is red for this
+          # already, so warn rather than duplicating a red on a working artifact.
+          echo "::warning title=Release incomplete::${NEWEST} is tagged but not on PyPI (HTTP $CODE), so @v0 correctly still promises ${PIN}. Consumers are unaffected. Finish the release by re-running publish-pypi (and promote), or this lag will persist."
 
       # Catches the listing being renamed or delisted. The slug is derived from
       # action.yml's `name:` rather than hardcoded -- and note GitHub does NOT
@@ -155,7 +212,10 @@ jobs:
 
           CODE=000
           for attempt in 1 2 3; do
-            CODE=$(curl -sSL -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+            # See the PyPI step: curl already prints 000 on transport failure, so
+            # `|| echo 000` would produce the literal "000000" and make the transient
+            # branch below unreachable for the commonest transient of all.
+            CODE=$(curl -sSL -o /dev/null -w '%{http_code}' "$URL" || true)
             [ "$CODE" = "200" ] && break
             echo "attempt $attempt: $CODE"
             sleep 10
@@ -200,6 +260,12 @@ jobs:
   e2e:
     name: End-to-end (published action, real API)
     needs: preflight
+    # Skip the paid tier for a Release run that cannot have changed the published
+    # artifact: a PRERELEASE dispatch comes from a non-default branch and by design
+    # never tags, never moves the major tag, and never cuts a Release. The free tier
+    # still runs. Schedule/dispatch events have no workflow_run context, so the first
+    # clause lets them through.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == github.event.repository.default_branch
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -267,21 +333,43 @@ jobs:
       # THE ACTUAL GATE: the action's mechanics, not the model's answer.
       - name: Verify action mechanics
         env:
-          JUNIT: ${{ steps.run.outputs.junit-path }}
-          RUNDIR: ${{ steps.run.outputs.run-dir }}
+          # Asserted against the LITERAL paths passed in the `with:` block above, not
+          # against steps.run.outputs.*. The action step is continue-on-error, and
+          # whether a composite action's `outputs:` mapping still propagates when an
+          # embedded step exits non-zero is not a documented guarantee -- if it does
+          # not, keying the file checks off the outputs would turn every model flake
+          # into "action did not set the junit-path output" and defeat the whole
+          # artifact-gate design. Output wiring is still checked below, but separately
+          # and only where it is meaningful.
+          RUNDIR: runs/verify-published
+          JUNIT: runs/verify-published/junit.xml
+          OUT_JUNIT: ${{ steps.run.outputs.junit-path }}
+          OUT_RUNDIR: ${{ steps.run.outputs.run-dir }}
           STEP_OUTCOME: ${{ steps.run.outcome }}
         run: |
           set -euo pipefail
-          echo "action step outcome: $STEP_OUTCOME (informational -- artifacts are the gate)"
+          echo "action step outcome: $STEP_OUTCOME (not the gate by itself -- see below)"
 
-          # 1. Outputs are wired.
-          [ -n "$JUNIT" ]  || { echo "::error::action did not set the junit-path output"; exit 1; }
-          [ -n "$RUNDIR" ] || { echo "::error::action did not set the run-dir output"; exit 1; }
-
-          # 2. The JUnit report exists and is well-formed (trusted, self-generated
-          #    input; our writer emits no DTDs/entities, so stdlib ET is fine).
-          [ -f "$JUNIT" ] || { echo "::error::JUnit report missing at $JUNIT"; exit 1; }
+          # 1. The JUnit report exists at the requested path and is well-formed
+          #    (trusted, self-generated input; our writer emits no DTDs/entities, so
+          #    stdlib ET is fine).
+          if [ ! -f "$JUNIT" ]; then
+            echo "::error::no JUnit report at $JUNIT. If the action failed during install, the pinned version is probably not installable -- check the preflight job's PyPI result."
+            exit 1
+          fi
           python3 -c "import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])" "$JUNIT"
+
+          # 1b. Output wiring, as its own assertion with its own message. Only hard-fail
+          #     when the step went green, where propagation is guaranteed; otherwise the
+          #     emptiness is ambiguous (broken action vs. runner not mapping outputs of
+          #     a failed composite) and must not be reported as a broken contract.
+          if [ "$STEP_OUTCOME" = "success" ]; then
+            [ "$OUT_JUNIT" = "$JUNIT" ] || { echo "::error::action's junit-path output is '$OUT_JUNIT', expected '$JUNIT'"; exit 1; }
+            [ "$OUT_RUNDIR" = "$RUNDIR" ] || { echo "::error::action's run-dir output is '$OUT_RUNDIR', expected '$RUNDIR'"; exit 1; }
+            echo "outputs wired correctly."
+          elif [ -z "$OUT_JUNIT" ] || [ -z "$OUT_RUNDIR" ]; then
+            echo "::warning::action step was red and its outputs are empty; cannot tell whether the action failed to set them or the runner does not map outputs of a failed composite. Artifact checks below are authoritative."
+          fi
 
           # 3. run.json -- the consumer contract -- exists and describes a real run
           #    that reached the model. Non-zero tokens prove the credential passthrough
