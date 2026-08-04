@@ -97,9 +97,11 @@ the full setup.
 
 ## Use as a GitHub Action
 
-A composite action at the repo root runs `coder-eval` as a CI gate — it installs
-the pinned CLI, runs your tasks, writes a JUnit XML report, appends `run.md` to
-the job summary, and fails the step on any task/gate failure:
+A composite action — on the Marketplace as
+[**coder_eval**](https://github.com/marketplace/actions/coder_eval) — runs
+`coder-eval` as a CI gate. It installs the pinned CLI, runs your tasks, writes a
+JUnit XML report, appends `run.md` to the job summary, and fails the step on any
+task/gate failure:
 
 ```yaml
 - uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly

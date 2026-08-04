@@ -161,8 +161,10 @@ jobs:
 ## Shortcut: the packaged action
 
 The five steps above spell out the mechanics, but Coder Eval also ships a
-composite action at the repo root that bundles install + run + JUnit report +
-job-summary + fail-on-failure into one step:
+composite action — on the Marketplace as
+[**coder_eval**](https://github.com/marketplace/actions/coder_eval) — that
+bundles install + run + JUnit report + job-summary + fail-on-failure into one
+step:
 
 ```yaml
       - uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…

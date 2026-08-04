@@ -15,8 +15,10 @@ reference for the Action and the JUnit output. For a step-by-step walkthrough
 
 ## The GitHub Action
 
-A composite action lives at the repo root (`action.yml`), so you can reference it
-directly:
+The action is published on the GitHub Actions Marketplace as
+[**coder_eval**](https://github.com/marketplace/actions/coder_eval). It is a
+composite action living at the repo root (`action.yml`), so you reference it by
+repo path — there is nothing to install:
 
 ```yaml
 - uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly
