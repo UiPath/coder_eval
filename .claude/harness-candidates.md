@@ -391,3 +391,27 @@ with the two `action.yml` items above — one considered change to the action's 
   violations on `main` before this bug, one on this PR). Worth a real look next time
   `agents/` is touched, since a second agent adding its own disconnected sleep-loop
   constant would reintroduce the exact same shape.
+
+## From 2026-08-04 published-action verification review
+
+- [ ] **CE034 — `VAR=$(… | grep …)` under `set -e` followed by an emptiness check
+  is a dead diagnostic.** With `set -euo pipefail`, a pipeline whose `grep` matches
+  nothing exits 1, so the assignment aborts the step *before* the
+  `if [ -z "$VAR" ]; then echo "::error::…"` branch that was written to report it —
+  the operator gets a bare exit 1 with no message. Also applies to `head -1`
+  closing the pipe early (SIGPIPE 141). Fix is `|| true` on the substitution,
+  letting the emptiness check own every failure mode. Detectable by matching
+  `\w+=\$\(.*\|\s*(grep|head)\b` inside a `run:` body whose script sets `-e`, then
+  requiring `|| true`/`|| :` on the same logical line. Caught by a reviewer in
+  `verify-published-action.yml`; **`actionlint` + shellcheck do NOT flag it**
+  (verified against the exact snippet), so the actionlint candidate above does not
+  subsume this one.
+- [ ] **Runtime-key parity for `run.json` consumers outside `src/`.** The e2e gate in
+  `verify-published-action.yml` reads `task_results[*].status` / `weighted_score` /
+  `total_tokens`, and `action.yml`'s score gate reads `weighted_score` / `task_id`.
+  These are string keys in shell/YAML that no test or type-checker binds to
+  `eval_result_to_task_dict` (`reports_experiment.py`), so renaming a key there
+  silently turns an external gate into a no-op — a reviewer here proposed
+  `final_status`, which does not exist in `run.json` and would have made a new
+  assertion dead on arrival. Guard: assert the key set that non-Python consumers
+  depend on, mirroring how CE030 pins doc/schema parity.

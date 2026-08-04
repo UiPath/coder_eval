@@ -473,9 +473,13 @@ jobs:
         run: |
           set -euo pipefail
           # Existence-guarded so re-running this job after a partial failure is a
-          # no-op rather than a "release already exists" error.
+          # no-op rather than a "release already exists" error. `gh release view`
+          # also matches a DRAFT or prerelease, which would announce nothing to the
+          # Marketplace -- so normalize rather than trusting mere existence, keeping
+          # this job idempotent in fact and not just in the happy case.
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "GitHub Release v${VERSION} already exists — nothing to do."
+            gh release edit "v${VERSION}" --draft=false --prerelease=false --latest
+            echo "GitHub Release v${VERSION} already existed — normalized to published/latest."
             exit 0
           fi
           # Written under RUNNER_TEMP, never the repo root: hatchling's default sdist

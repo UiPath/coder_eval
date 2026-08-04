@@ -60,8 +60,13 @@ jobs:
           set -euo pipefail
 
           # Release tags are strictly vX.Y.Z; prereleases are never tagged.
+          # `|| true` is required, not defensive noise: under `pipefail` this pipeline
+          # exits non-zero when grep matches nothing (and, in theory, 141 if `head`
+          # closes the pipe early), so `set -e` would kill the step BEFORE the
+          # empty-check below — making its error message dead code. Any failure mode
+          # lands as an empty $NEWEST, which the check reports properly.
           NEWEST=$(git tag -l 'v*' --sort=-v:refname \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
           if [ -z "$NEWEST" ]; then echo "::error::no vX.Y.Z release tag found"; exit 1; fi
           VERSION="${NEWEST#v}"
           MAJOR="v${VERSION%%.*}"
@@ -158,10 +163,15 @@ jobs:
 
           if [ "$CODE" = "200" ]; then
             echo "Marketplace listing resolves."
-          elif [ "$CODE" = "429" ] || [ "$CODE" -ge 500 ] 2>/dev/null; then
-            # Transient / bot-throttled: warn, do not fail. Distinguishing this from a
-            # 404 is what keeps the check from crying wolf.
-            echo "::warning title=Marketplace check inconclusive::GitHub returned $CODE for $URL (rate-limited or transient), not treating as delisted."
+          # Inconclusive, NOT proof of delisting — warn and move on. Only 404 (and
+          # other 4xx) is treated as a real signal. This split is what keeps the
+          # check from crying wolf:
+          #   000 -> curl itself failed (DNS/network/TLS); we learned nothing.
+          #   403 -> GitHub commonly serves this to unauthenticated/bot page fetches
+          #          from CI runners; it means "not shown to you", not "not there".
+          #   429/5xx -> rate-limited or GitHub-side transient.
+          elif [ "$CODE" = "000" ] || [ "$CODE" = "403" ] || [ "$CODE" = "429" ] || [ "$CODE" -ge 500 ] 2>/dev/null; then
+            echo "::warning title=Marketplace check inconclusive::GitHub returned $CODE for $URL (network failure, throttling, or transient), not treating as delisted."
           else
             echo "::error title=Marketplace listing missing::$URL returned $CODE. The listing may have been renamed or delisted, or action.yml's \`name:\` changed without the listing following."
             exit 1
@@ -285,15 +295,35 @@ jobs:
           if not rows:
               print("::error::run.json contains no task_results -- the action produced no run")
               sys.exit(1)
+          # Key is "status" (eval_result_to_task_dict writes FinalStatus there); there is
+          # no "final_status" key in run.json rows, and reading one would silently
+          # evaluate to None and make the exit-contract assertion below dead code.
+          statuses = [r.get("status") for r in rows]
           tokens = sum(r.get("total_tokens") or 0 for r in rows)
           for r in rows:
-              print(f"  {r.get('task_id')}: status={r.get('final_status')} "
+              print(f"  {r.get('task_id')}: status={r.get('status')} "
                     f"score={r.get('weighted_score')} tokens={r.get('total_tokens')}")
+
           if tokens <= 0:
               print("::error::no tokens consumed across any task -- the agent never reached the model "
                     "(credential passthrough, agent runtime, or backend wiring is broken)")
               sys.exit(1)
-          print(f"published action mechanics OK: {len(rows)} task row(s), {tokens} tokens consumed")
+
+          # Exit-contract check, conditional on the model having actually performed.
+          # Ignoring the step's exit code entirely (see the continue-on-error rationale
+          # above) would also hide a REGRESSION in the action's own exit logic -- e.g. a
+          # broken score gate failing the step even though every task succeeded. That is
+          # precisely a "published action is broken" signal and must be caught. So:
+          # tolerate a red step when any task under-performed (model flake, not our bug),
+          # but require green when all of them succeeded.
+          if all(s == "SUCCESS" for s in statuses) and os.environ.get("STEP_OUTCOME") != "success":
+              print("::error::every task reported SUCCESS but the published action step exited "
+                    f"non-zero (outcome={os.environ.get('STEP_OUTCOME')!r}) -- the action's exit-code "
+                    "contract or its score gate is broken for consumers")
+              sys.exit(1)
+
+          print(f"published action mechanics OK: {len(rows)} task row(s), {tokens} tokens consumed, "
+                f"statuses={statuses}")
           PY
 
       - name: Upload run on failure
