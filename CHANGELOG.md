@@ -2,6 +2,36 @@
 
 <!-- version list -->
 
+## v0.9.4 (2026-08-04)
+
+### Bug Fixes
+
+- **litellm**: Pin litellm[proxy]==1.95.0 + fastapi==0.140.0 for proxy startup
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+- **litellm**: Pin proxy deps (litellm 1.95.0 + fastapi 0.140.0) to fix startup crash
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+### Chores
+
+- **action**: Rename Marketplace listing to coder_eval, add author
+  ([`a9c274d`](https://github.com/UiPath/coder_eval/commit/a9c274d918114df5229b20e9c65a4ce620b9f9ed))
+
+### Documentation
+
+- **litellm**: Surface the proxy dep-pin override vars in start script
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+### Refactoring
+
+- **litellm**: Address PR review — pin SSOT guard, rename, doc ripple
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+
 ## v0.9.3 (2026-08-04)
 
 ### Bug Fixes
