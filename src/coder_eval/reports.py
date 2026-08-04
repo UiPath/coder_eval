@@ -187,14 +187,15 @@ def early_stop_gate_note(reason: str) -> str:
         case EarlyStopReason.DECISION_BUDGET_EXCEEDED:
             # The deciding criterion timed out undecided (an effective fail); it
             # gates through the same weighted armed gate as a native live-fail.
-            return (
+            note = (
                 "decision-step budget exceeded (criterion timed out undecided, treated as a failed "
                 "armed criterion); gated on armed criteria only; other criteria are advisory"
             )
         case EarlyStopReason.CRITERION_PASSED | EarlyStopReason.CRITERION_FAILED:
-            return generic
+            note = generic
         case _:
             assert_never(member)
+    return note
 
 
 def _pass_rate_lines(summary: RunSummary) -> list[str]:
