@@ -143,7 +143,7 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
         ignore,
         # Ignored flags are value-bearing too: dropping `--output` while leaving
         # `json` in the positionals would defeat the point of ignoring it.
-        frozenset(name for name, p in (criterion.flags or {}).items() if p.needs_value)
+        frozenset(n for name, p in (criterion.flags or {}).items() if p.needs_value for n in (name, *p.aliases))
         | frozenset(criterion.value_flags)
         | ignore,
     )
@@ -165,7 +165,11 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
 
     if criterion.flags:
         for name, predicate in criterion.flags.items():
-            if not _flag_matches(predicate, flags.get(name)):
+            # One flag, several spellings: gather values across every name it owns.
+            # [] means the flag was absent under all of them, which _flag_matches
+            # distinguishes from "present with an empty value" (a switch, [""]).
+            collected = [v for n in (name, *predicate.aliases) for v in flags.get(n, [])]
+            if not _flag_matches(predicate, collected or None):
                 return False
 
     return True

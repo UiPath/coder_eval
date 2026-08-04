@@ -454,6 +454,18 @@ class FlagMatch(BaseModel):
             "asserting a switch cannot swallow the positional after it"
         ),
     )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Other names for the SAME flag (without leading dashes), e.g. aliases: [y] on a `yes` "
+            "predicate so `-y` and `--yes` are one flag. Values are gathered across every name: "
+            "`present` holds if ANY of them appeared, `absent` only if NONE did, and a value "
+            "predicate matches if any value under any name satisfies it. Without this, short/long "
+            "pairs need one criterion per spelling -- which works for a guard (both are forbidden) "
+            "but cannot express 'either spelling' positively, and makes `absent` flag every "
+            "invocation whatever it did"
+        ),
+    )
     flags: int = Field(
         default=0,
         description=(
@@ -635,12 +647,29 @@ class CliCalledCriterion(BaseSuccessCriterion):
         # A predicate on an ignored flag can never be evaluated: ignore_flags drops
         # the flag before any predicate runs, so `absent` would pass vacuously and
         # `equals` could never match.
-        shadowed = sorted(set(self.flags or {}) & set(self.ignore_flags))
+        # An alias that is also a key, or shared between two predicates, would make
+        # which predicate owns a recorded flag depend on dict order.
+        seen: dict[str, str] = {}
+        for key, predicate in (self.flags or {}).items():
+            for name in (key, *predicate.aliases):
+                if name in seen and seen[name] != key:
+                    msg = (
+                        f"cli_called flag name {name!r} is claimed by both {seen[name]!r} and {key!r} "
+                        "(via aliases); a flag can belong to only one predicate"
+                    )
+                    raise ValueError(msg)
+                seen[name] = key
+            if key in predicate.aliases:
+                msg = f"cli_called flag {key!r} lists itself in aliases"
+                raise ValueError(msg)
+
+        shadowed = sorted(set(seen) & set(self.ignore_flags))
         if shadowed:
             names = ", ".join(repr(n) for n in shadowed)
             msg = (
-                f"cli_called flag predicate(s) {names} are also listed in ignore_flags, which drops them "
-                "before matching. Remove them from ignore_flags, or drop the predicate."
+                f"cli_called flag predicate(s) {names} are also listed in ignore_flags (directly or as "
+                "an alias), which drops them before matching. Remove them from ignore_flags, or drop "
+                "the predicate."
             )
             raise ValueError(msg)
         return self

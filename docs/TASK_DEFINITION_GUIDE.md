@@ -914,6 +914,17 @@ In the delete example above, it is tempting to also assert `--yes`. Don't:
 
 Use `present: true` — not `equals: ""` — when you do need to assert a switch. `present` needs no value, so it never makes the flag value-bearing; `equals: ""` depends on how the mock happens to record a switch and breaks if the CLI spells it `--force true`.
 
+**Short and long spellings are one flag via `aliases`.** A predicate matches a flag *name*, so `--yes` and `-y` are otherwise unrelated flags:
+
+```yaml
+flags:
+  yes:
+    present: true
+    aliases: ["y"]        # values gathered across --yes AND -y
+```
+
+`present` holds if any listed name appeared, `absent` only if none did, and a value predicate matches if any value under any name satisfies it — so `-f f-002` binds like `--fields f-002`. Splitting the spellings into one criterion each works for a *guard* (both forbidden, and criteria are ANDed) but cannot express "either spelling" positively, and makes `absent` flag **every** invocation, because whichever spelling was not used is always absent. A flag may belong to only one predicate: an alias that is also another key, or that appears in `ignore_flags`, is rejected at load time.
+
 The mirror rule for positive assertions: add every facet that distinguishes the right call from a near-miss, because there a missing facet makes the assertion *too easy* to satisfy.
 
 **Unusable records fail the criterion.** A line that is not JSON, not an object, or whose `argv` is not a list of strings scores 0.0 with an error, on the same footing as a missing log — a record that cannot be read might *be* the invocation a negative guard forbids.

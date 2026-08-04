@@ -483,6 +483,52 @@ class TestRegressionsFromReview:
         positive = guard.model_copy(update={"min_count": 1, "max_count": None})
         assert SuccessChecker(sandbox).check(positive).score == 1.0
 
+    @pytest.mark.parametrize(
+        ("argv_tail", "expected"),
+        [(["--yes", "proj-1"], 1.0), (["-y", "proj-1"], 1.0), (["proj-1"], 0.0)],
+    )
+    def test_aliases_make_short_and_long_one_flag(self, sandbox_with_log, argv_tail, expected):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", *argv_tail])])
+        criterion = CliCalledCriterion(
+            description="confirmed, either spelling",
+            log=LOG,
+            verb="ixp fields delete",
+            flags={"yes": {"present": True, "aliases": ["y"]}},
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == expected
+
+    @pytest.mark.parametrize(
+        ("argv_tail", "expected"),
+        [(["--yes", "proj-1"], 1.0), (["-y", "proj-1"], 1.0), (["proj-1"], 0.0)],
+    )
+    def test_absent_across_aliases_needs_all_spellings_missing(self, sandbox_with_log, argv_tail, expected):
+        """Without aliases this was silently wrong: an ANDed pair of absent-guards
+        (one per spelling) flagged EVERY invocation, whatever it did, because the
+        spelling not used was always absent."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", *argv_tail])])
+        guard = CliCalledCriterion(
+            description="never deleted without confirming",
+            log=LOG,
+            verb="ixp fields delete",
+            flags={"yes": {"absent": True, "aliases": ["y"]}},
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(sandbox).check(guard).score == expected
+
+    def test_alias_of_a_value_flag_binds_its_value(self, sandbox_with_log):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "labellings", "confirm", "-f", "f-002"])])
+        criterion = CliCalledCriterion(
+            description="confirmed f-002 via the short flag",
+            log=LOG,
+            verb="ixp labellings confirm",
+            flags={"fields": {"equals": "f-002", "aliases": ["f"]}},
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
     def test_present_requires_the_flag(self, sandbox_with_log):
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "proj-1"])])
@@ -519,6 +565,29 @@ class TestModelValidation:
     def test_empty_any_of_rejected(self):
         with pytest.raises(ValidationError):
             CliCalledCriterion(description="d", log=LOG, verb="v", flags={"m": {"any_of": []}})
+
+    def test_alias_claimed_by_two_predicates_rejected(self):
+        """Ambiguous ownership would make the verdict depend on dict order."""
+        with pytest.raises(ValidationError, match="claimed by both"):
+            CliCalledCriterion(
+                description="d",
+                log=LOG,
+                verb="v",
+                flags={"yes": {"present": True, "aliases": ["y"]}, "y": {"present": True}},
+            )
+
+    def test_self_alias_rejected(self):
+        with pytest.raises(ValidationError, match="itself in aliases"):
+            CliCalledCriterion(description="d", log=LOG, verb="v", flags={"yes": {"present": True, "aliases": ["yes"]}})
+
+    def test_alias_in_ignore_flags_rejected(self):
+        with pytest.raises(ValidationError, match="ignore_flags"):
+            CliCalledCriterion(
+                description="d",
+                log=LOG,
+                verb="v",
+                flags={"out": {"present": True, "aliases": ["output"]}},
+            )
 
     def test_predicate_on_an_ignored_flag_rejected(self):
         """ignore_flags drops the flag before predicates run, so this can never work."""
