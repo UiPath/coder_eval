@@ -96,4 +96,13 @@ Set these in coder_eval's .env (or shell) to use it:
 
 EOF
 
-exec uvx --from 'litellm[proxy]' litellm --config "$CONFIG" --host 127.0.0.1 --port "$PORT"
+# Pin the proxy deps. `uvx --from 'litellm[proxy]'` unpinned drifts: litellm 1.95.0
+# declares `fastapi>=0.136.3,<1.0`, so uvx grabs the newest fastapi — but fastapi
+# dropped `get_flat_dependant` (which litellm's proxy still imports) in a 0.140.x
+# PATCH (0.140.0 has it, 0.140.13 doesn't), so a range cap isn't enough and startup
+# dies with a (masked) `ModuleNotFoundError: proxy_server`. Pin fastapi to an exact
+# verified-good version and pin litellm so the sidecar can't silently re-break.
+# Override for an upgrade: LITELLM_SPEC='litellm[proxy]==<ver>' LITELLM_FASTAPI='fastapi==<ver>'.
+LITELLM_SPEC="${LITELLM_SPEC:-litellm[proxy]==1.95.0}"
+LITELLM_FASTAPI="${LITELLM_FASTAPI:-fastapi==0.140.0}"
+exec uvx --from "$LITELLM_SPEC" --with "$LITELLM_FASTAPI" litellm --config "$CONFIG" --host 127.0.0.1 --port "$PORT"
