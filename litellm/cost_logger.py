@@ -26,7 +26,7 @@ Register in ``litellm-config.yaml``::
 
 This module is intentionally **self-contained** (no ``coder_eval`` import): the
 proxy may run in its own ephemeral environment
-(``uvx --from 'litellm[proxy]' litellm``).
+(``uvx --from 'litellm[proxy]==1.95.0' --with 'fastapi==0.140.0' litellm``).
 """
 
 from __future__ import annotations
