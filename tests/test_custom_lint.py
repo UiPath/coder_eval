@@ -1121,6 +1121,111 @@ class TestCE028DocIndexParity:
 
 
 @pytest.mark.lint
+class TestCE032PluginReferenceParity:
+    """CE032 — the plugin's bundled criteria reference is generated from the models.
+
+    An installed plugin is copied to ~/.claude/plugins/cache/ without its parent
+    directories, so its skills cannot read docs/TASK_DEFINITION_GUIDE.md at
+    runtime — the criterion vocabulary has to ship inside plugins/coder-eval/,
+    where a hand-maintained copy would drift on the next criterion change. The
+    SuccessCriterion union is the SSOT; `make plugin-reference` writes the copy
+    and this class diffs it. Reasons over Markdown + pydantic metadata, so it
+    lives here rather than in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_generated_reference_matches_disk(self):
+        from tests.lint.plugin_reference import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, (
+            "\nThe plugin's bundled criteria reference drifted from the criterion models — run "
+            "`make plugin-reference` to regenerate:\n\n"
+            + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
+        )
+
+    def test_every_criterion_type_appears_in_the_reference(self):
+        # Union-driven, so a 15th criterion must appear with zero edits to the generator.
+        from tests.lint.plugin_reference import _VARIANTS, _tag, render_criteria
+
+        rendered = render_criteria()
+        for cls in _VARIANTS:
+            assert f"### `{_tag(cls)}`" in rendered, f"{cls.__name__} is missing from the rendered reference"
+
+    def test_common_base_fields_are_not_repeated_per_criterion(self):
+        from tests.lint.plugin_reference import render_criteria
+
+        common_section, _, per_criterion = render_criteria().partition("## Criterion types")
+        for field in ("weight", "pass_threshold"):
+            assert f"`{field}`" in common_section, f"{field} must be documented once, in Common fields"
+            assert f"`{field}`" not in per_criterion, f"{field} is inherited and must not repeat per criterion"
+
+    def test_render_is_deterministic(self):
+        from tests.lint.plugin_reference import render_criteria
+
+        assert render_criteria() == render_criteria()
+
+    def test_docstringless_criterion_renders(self):
+        from typing import Literal
+
+        from coder_eval.models import BaseSuccessCriterion
+        from tests.lint.plugin_reference import render_criteria
+
+        class Undocumented(BaseSuccessCriterion):
+            type: Literal["undocumented"] = "undocumented"
+
+        Undocumented.__doc__ = None
+        rendered = render_criteria([Undocumented])
+        assert "### `undocumented`" in rendered
+        assert "No fields beyond the common ones." in rendered
+
+    def test_pipe_in_description_is_escaped(self):
+        from typing import Literal
+
+        from pydantic import Field
+
+        from coder_eval.models import BaseSuccessCriterion
+        from tests.lint.plugin_reference import render_criteria
+
+        class Piped(BaseSuccessCriterion):
+            """A criterion whose required field description contains a pipe."""
+
+            type: Literal["piped"] = "piped"
+            mode: str = Field(description="one of: a | b | c")
+
+        row = next(line for line in render_criteria([Piped]).splitlines() if line.startswith("| `mode`"))
+        # Escaped pipes keep the row at two columns: leading, separator, trailing.
+        assert row.count("|") - row.count(r"\|") == 3, row
+
+    def test_write_is_idempotent(self, tmp_path: Path):
+        from tests.lint.plugin_reference import check, write
+
+        write(tmp_path)
+        first = (tmp_path / "plugins/coder-eval/reference/criteria.md").read_text(encoding="utf-8")
+        write(tmp_path)
+        assert (tmp_path / "plugins/coder-eval/reference/criteria.md").read_text(encoding="utf-8") == first
+        assert check(tmp_path) == {}
+
+    def test_render_carries_no_types_or_defaults(self):
+        # The render deliberately emits neither field types nor defaults (see the
+        # module docstring); these tokens are what a reintroduced column would leak.
+        from tests.lint.plugin_reference import render_criteria
+
+        rendered = render_criteria()
+        assert "PydanticUndefined" not in rendered
+        assert "typing.Optional" not in rendered
+
+    def test_drift_is_detected(self, tmp_path: Path):
+        from tests.lint.plugin_reference import check, write
+
+        write(tmp_path)
+        target = tmp_path / "plugins/coder-eval/reference/criteria.md"
+        target.write_text(target.read_text(encoding="utf-8").replace("### `file_exists`", "### `tampered`"))
+        assert str(target) in check(tmp_path)
+
+
+@pytest.mark.lint
 class TestCE031DeadConfigFields:
     """CE031 — a behavior-driving config field must be read somewhere in src/.
 
