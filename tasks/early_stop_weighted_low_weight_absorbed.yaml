@@ -3,19 +3,20 @@ description: >
   Weighted early-stop (GitHub issue #61, item 1): a LOW-weight armed criterion
   misfiring must not unilaterally truncate the run once run_limits.
   stop_early_gate_threshold is below 1.0. Two armed criteria: a HIGH-weight
-  (0.8) positive ("ran python app.py") and a LOW-weight (0.2) distractor
-  ("never called curl"). If the distractor misfires alone, the ceiling
-  (best case: the positive still passes) is 0.8, which still clears the 0.7
-  gate threshold — so the watcher must keep running instead of fail-stopping,
-  and the low-weight failure must not sink the final armed_criteria_passed
-  gate either (weighted score 0.8 >= 0.7). Note: the weighted forgiveness
-  applies only when the watcher itself fires the stop (pass-stops here once
-  the positive resolves, regardless of the distractor) — a stop_early: true
-  run that instead completes naturally still gates on the full strict-AND
-  set, unaffected by weight. This is a NON-CI example task (deliberately
-  untagged for smoke-pass/smoke-fail): agent behavior around curl is not
-  deterministic enough for a live-agent CI assertion — run it manually with
-  `coder-eval run` to observe the mechanism.
+  (0.8) positive ("ran python app.py", stop_early.on_pass: stop) and a LOW-weight (0.2)
+  distractor ("never called curl", an empty stop_early block). If the distractor misfires
+  alone, the ceiling (best case: the positive still passes) is 0.8, which
+  still clears the 0.7 gate threshold — so the watcher must keep running
+  instead of fail-stopping, and the low-weight failure must not sink the
+  final armed_criteria_passed gate either (weighted score 0.8 >= 0.7). Once
+  the positive resolves, its on_pass=stop floor (0.8/0.8 = 1.0 over the
+  on_pass=stop subset) meets the threshold and the run pass-stops. Gating is
+  FIRED-ONLY: the weighted armed gate applies only when the watcher actually
+  cuts the run; a run that completes naturally gates strict-AND over the full
+  criteria set (armed or not). This is a NON-CI example task
+  (deliberately untagged for smoke-pass/smoke-fail): agent behavior around
+  curl is not deterministic enough for a live-agent CI assertion — run it
+  manually with `coder-eval run` to observe the mechanism.
 tags: [early-stop, weighted-early-stop]
 
 initial_prompt: >
@@ -30,7 +31,6 @@ agent:
 
 run_limits:
   max_turns: 20
-  stop_early: true
   stop_early_gate_threshold: 0.7
 
 success_criteria:
@@ -40,7 +40,8 @@ success_criteria:
     command_pattern: "python app\\.py"
     min_count: 1
     weight: 0.8
-    stop_when: "auto"
+    stop_early:
+      on_pass: stop
   - type: "command_executed"
     description: "Agent did NOT call curl (the LOW-weight distractor)"
     tool_name: "Bash"
@@ -48,7 +49,7 @@ success_criteria:
     min_count: 0
     max_count: 0
     weight: 0.2
-    stop_when: "auto"
+    stop_early: {}
   - type: "file_exists"
     path: "app.py"
     description: "app.py must exist (advisory — not armed, only gates a full run)"

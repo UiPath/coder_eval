@@ -69,9 +69,10 @@ calls the agent's `communicate()`, so Codex and plugin agents work. The *simulat
 always a Claude Code agent. A dialog run therefore needs the `claude` CLI on `PATH` and working
 Anthropic or Bedrock credentials **even when the agent under test is not Claude**.
 
-**Early stop is not available here.** [`run_limits.stop_early`](TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop)
-is single-shot-only; arming it alongside `simulation.enabled` is a hard error at resolution time, not
-a silent no-op. Use `stop_on_criteria_pass` (below) for the dialog equivalent.
+**Early stop is not available here.** [Criterion-level `stop_early:` arming](TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop)
+is single-shot-only; an armed criterion alongside `simulation.enabled` is a hard error at resolution
+time, not a silent no-op (disarm with the `run_limits.stop_early: false` kill switch to run anyway).
+Use `stop_on_criteria_pass` (below) for the dialog equivalent.
 
 Every field's default and constraint lives in one place — the
 [Task Definition Guide's simulation section](TASK_DEFINITION_GUIDE.md#simulation-multi-turn-user-dialog).

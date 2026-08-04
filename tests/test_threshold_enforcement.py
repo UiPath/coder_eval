@@ -17,6 +17,7 @@ from coder_eval.models import (
     EvaluationResult,
     FileExistsCriterion,
     FinalStatus,
+    StopEarlyPolicy,
 )
 
 
@@ -134,12 +135,12 @@ class TestThresholdEnforcement:
         assert _make_result([0.0, 0.0]).all_criteria_passed(criteria)
 
     def test_zero_weight_cannot_be_armed_for_early_stop(self):
-        """weight=0 + stop_when is incoherent: it would leave the early-stop gate empty."""
+        """weight=0 + a stop_early block is incoherent: it would leave the early-stop gate empty."""
         with pytest.raises(ValidationError, match="weight=0"):
             CommandExecutedCriterion(
                 description="informational + armed",
                 weight=0.0,
-                stop_when="pass",
+                stop_early=StopEarlyPolicy(on_pass="stop"),
                 tool_name="Bash",
                 command_pattern="pytest",
             )

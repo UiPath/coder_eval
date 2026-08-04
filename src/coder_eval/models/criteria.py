@@ -99,13 +99,15 @@ class BaseSuccessCriterion(BaseModel, ABC):
     weight: float = Field(
         default=1.0,
         ge=0.0,
+        allow_inf_nan=False,
         description=(
             "Relative importance of this criterion in the weighted score (default: 1.0). Set to 0 to "
             "make the criterion purely INFORMATIONAL -- useful for side-effect checks (e.g. a setup "
             "command): it is excluded from the weighted score AND from the pass/fail gate, so scoring "
             "below its pass_threshold no longer flips the task to FAILURE. The result is still "
-            "computed, stored, and rendered in reports. A weight=0 criterion may not set stop_when "
-            "or suite_thresholds (arming a non-gating criterion for a pass/fail gate is incoherent)."
+            "computed, stored, and rendered in reports. A weight=0 criterion may not set a stop_early "
+            "block or suite_thresholds (arming a non-gating criterion for a pass/fail gate is "
+            "incoherent)."
         ),
     )
 
@@ -123,25 +125,21 @@ class BaseSuccessCriterion(BaseModel, ABC):
         ),
     )
 
-    stop_when: Literal["pass", "fail", "decided", "auto"] | None = Field(
-        default=None,
-        description=(
-            "Opt-in early-stop polarity for this criterion (membership in the run's 'armed set'). "
-            "None (default) = not a stop criterion. 'pass' = a live PASS may contribute to a stop; "
-            "'fail' = a live definitive FAIL may trigger a stop; 'decided' = either (the instance "
-            "must be able to decide BOTH polarities). 'auto' = arm whichever polarities THIS instance "
-            "can actually decide (its live_decidable_polarities) - use it when the decidable polarity "
-            "is instance-dependent, e.g. skill_triggered under any-engagement, where a positive row "
-            "(skill_name == expected_skill) can only live-pass and a distractor can only live-fail, "
-            "so no single static polarity fits every fanned-out row. Inert unless "
-            "run_limits.stop_early is True. Only valid on criteria observable mid-run (e.g. "
-            "skill_triggered, command_executed); an unobservable armed criterion is rejected at "
-            "resolution time."
-        ),
-    )
-
     requires_agent: ClassVar[bool] = False
     """True if this criterion requires agent turn records to evaluate correctly."""
+
+    @property
+    def is_stop_armed(self) -> bool:
+        """True when this criterion participates in the run's early-stop armed set.
+
+        Always ``False`` on the base: only live-observable criteria
+        (``LiveSuccessCriterion`` subclasses) carry stop triggers, so arming an
+        unobservable criterion is unrepresentable rather than a validation
+        error. The armed set drives both the runtime watcher
+        (``EarlyStopWatcher``) and the weighted armed gate
+        (``EvaluationResult.armed_criteria_passed``).
+        """
+        return False
 
     def model_post_init(self, context: Any, /) -> None:
         # Pin the discriminator tag into model_fields_set so it survives
@@ -156,21 +154,27 @@ class BaseSuccessCriterion(BaseModel, ABC):
         """Reject ``weight: 0`` combined with any gate-arming field.
 
         ``weight: 0`` makes a criterion informational — excluded from the score
-        and from the pass/fail gate (see ``is_gating``). Both ``stop_when`` (arms
-        the per-row early-stop gate) and ``suite_thresholds`` (arms the
-        across-row suite gate, which drives the run's exit code) would let an
-        "informational" criterion flip a run to failure — directly contradicting
-        the field's contract. So both combinations are authoring errors, caught
-        at load time rather than surfacing as a confusing exit code later.
+        and from the pass/fail gate (see ``is_gating``). Both the early-stop
+        triggers (``is_stop_armed``: arms the per-row early-stop gate) and
+        ``suite_thresholds`` (arms the across-row suite gate, which drives the
+        run's exit code) would let an "informational" criterion flip a run to
+        failure — directly contradicting the field's contract. So both
+        combinations are authoring errors, caught at load time rather than
+        surfacing as a confusing exit code later.
         """
         if self.weight == 0.0:
-            for field, name in (("stop_when", "stop_when"), ("suite_thresholds", "suite_thresholds")):
-                if getattr(self, field) is not None:
-                    raise ValueError(
-                        f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
-                        + f"so it cannot also set {name} (which arms it for a pass/fail gate). "
-                        + f"Give it a non-zero weight, or drop {name}."
-                    )
+            if self.is_stop_armed:
+                raise ValueError(
+                    f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
+                    + "so it cannot also set a stop_early block, which arms it for a pass/fail gate. "
+                    + "Give it a non-zero weight, or drop the block."
+                )
+            if self.suite_thresholds is not None:
+                raise ValueError(
+                    f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
+                    + "so it cannot also set suite_thresholds (which arms it for a pass/fail gate). "
+                    + "Give it a non-zero weight, or drop suite_thresholds."
+                )
         return self
 
     @property
@@ -196,6 +200,52 @@ class BaseSuccessCriterion(BaseModel, ABC):
 LivePolarity = Literal["pass", "fail"]
 
 
+class StopEarlyPolicy(BaseModel):
+    """Per-criterion early-stop policy — presence of the block IS the arming.
+
+    Attaching ``stop_early:`` to a live-observable criterion arms it for the
+    run's early-stop watcher — there is no run-level master switch; the block
+    alone activates the watcher (``run_limits.stop_early: false`` is the
+    run-level veto). Arming carries ONE implicit trigger — a definitive *effective* fail
+    (a native live-fail, or the ``decide_within`` timeout expiring) may end the
+    run under the weighted ceiling rule — plus the two knobs below. A trigger
+    whose polarity the instance can never decide is inert by design, so one
+    dataset-fanned YAML line (same block on every row) serves both positive
+    rows (pass/timeout live) and distractor rows (fail live).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    on_pass: Literal["stop", "continue"] = Field(
+        default="continue",
+        description=(
+            "What a live PASS does. 'continue' (default): the verdict latches (the criterion is "
+            "not re-checked) and the run proceeds untouched — use with decide_within for a "
+            "fail-fast timeout that does not cut successful runs short. 'stop': end the run (a "
+            "pass-stop) the moment this criterion live-passes — subject to the weighted floor "
+            "rule: the stop fires only once the on_pass=stop subset's worst-case weighted score "
+            "already meets run_limits.stop_early_gate_threshold. Inert on an instance that can "
+            "never live-pass (e.g. a distractor row)."
+        ),
+    )
+
+    decide_within: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Timeout in tool-call steps: still 'undecided' after this many steps latches an "
+            "effective FAIL — fed through the same weighted ceiling fail-stop rule as a native "
+            "live-fail, reported as reason 'decision_budget_exceeded'. Inert on an instance "
+            "that can only ever live-fail (a distractor/guard, whose 'undecided' is its "
+            "success state). None (default) = no timeout. The step count is CUMULATIVE across "
+            "every retry attempt of the turn (the same EarlyStopWatcher instance, and its "
+            "counters, persist across retries) — including attempts that ultimately crashed or "
+            "timed out before this criterion's own investigation even began. Size it with that "
+            "headroom in mind."
+        ),
+    )
+
+
 class LiveSuccessCriterion(BaseSuccessCriterion):
     """Base for criteria observable from a PARTIAL, mid-run trajectory (early-stop).
 
@@ -205,8 +255,8 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
     set). That makes it genuinely computable on the data model rather than the
     checker, unlike the checker's ``live_verdict`` (``criteria/base.py``),
     which reads the actual trajectory and stays checker-side logic. Moving
-    decidability here also gives early-stop-only config (e.g.
-    ``max_steps_to_decide``) a home that doesn't pollute ``BaseSuccessCriterion``
+    decidability here also gives early-stop-only config (the
+    ``stop_early`` block) a home that doesn't pollute ``BaseSuccessCriterion``
     with a field meaningless for every non-observable criterion type.
 
     Only ``SkillTriggeredCriterion`` / ``CommandExecutedCriterion`` subclass
@@ -216,43 +266,35 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
     checker-side flag to keep in sync).
     """
 
-    max_steps_to_decide: int | None = Field(
+    stop_early: StopEarlyPolicy | None = Field(
         default=None,
-        ge=1,
         description=(
-            "Cap on tool-call steps this ARMED criterion (stop_when must be set) "
-            "may spend still 'undecided' before the run gives up on it. Once "
-            "exceeded, EarlyStopWatcher fires an early stop with reason "
-            "'decision_budget_exceeded' and the run is forced to FinalStatus."
-            "FAILURE outright — regardless of what any other armed criterion's "
-            "weighted score would otherwise gate to (this criterion never "
-            "reached a verdict at all, so there is nothing to weigh). None "
-            "(default) = no cap; the run relies solely on run_limits.max_turns. "
-            "Requires run_limits.stop_early and this criterion's own stop_when. "
-            "The step count is CUMULATIVE across every retry attempt of the "
-            "turn (the same EarlyStopWatcher instance, and its counters, "
-            "persist across retries) — including attempts that ultimately "
-            "crashed or timed out before this criterion's own investigation "
-            "even began. Size the budget with that headroom in mind."
+            "Opt-in early-stop policy block; its PRESENCE arms this criterion for the run's "
+            "early-stop watcher — the block alone activates the watcher, there is no run-level "
+            "master switch (run_limits.stop_early: false is the run-level veto). An armed "
+            "criterion's definitive effective FAIL — a native live-fail, or the decide_within "
+            "timeout expiring — may end the run under the weighted ceiling rule (deferred "
+            "while any pass-capable armed criterion is still undecided); set on_pass: stop to "
+            "also end the run on a live PASS. An empty block (stop_early: {}) is the idiomatic "
+            "distractor arming: fail-stop on misfire, nothing else. Triggers whose polarity "
+            "this instance cannot decide are inert by design (dataset fan-out support). "
+            "Unarmed criteria stay advisory on an early-stopped run. Only exists on "
+            "live-observable criteria, so arming anything else is a schema error."
         ),
     )
 
-    @model_validator(mode="after")
-    def _check_max_steps_requires_armed(self) -> Self:
-        """Reject a decision-step cap on a criterion that isn't armed for early-stop.
+    @property
+    def is_stop_armed(self) -> bool:
+        """True when the ``stop_early:`` block is present on this instance.
 
-        ``max_steps_to_decide`` only means anything relative to a criterion
-        that ``EarlyStopWatcher`` is actually tracking (``stop_when`` set);
-        setting it without ``stop_when`` is a dead field that silently does
-        nothing, so reject it at load time rather than let it rot unnoticed.
+        Presence of the block IS the arming — the implicit fail trigger comes
+        with it, ``on_pass`` / ``decide_within`` refine it. A trigger whose
+        polarity this instance can never decide is inert by design (see
+        ``StopEarlyPolicy``) — that is what lets one dataset-fanned YAML
+        line serve both positive and distractor rows without per-row
+        conditionals.
         """
-        if self.max_steps_to_decide is not None and self.stop_when is None:
-            raise ValueError(
-                f"criterion {self.type!r}: max_steps_to_decide requires stop_when to be set "
-                + "(the decision-step budget is meaningless for a criterion that isn't armed "
-                + "for early-stop)."
-            )
-        return self
+        return self.stop_early is not None
 
     @abstractmethod
     def live_decidable_polarities(self) -> frozenset[LivePolarity]:
@@ -260,10 +302,14 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
 
         Must return a subset of the polarities the corresponding checker's
         ``live_verdict`` can ever emit for this criterion type. Used by
-        ``validate_early_stop`` to reject arming a polarity this instance can
-        never reach, and by ``EarlyStopWatcher`` to resolve which polarities a
-        ``stop_when`` value actually arms for this instance (see
-        ``orchestration.early_stop._requested_polarities``).
+        ``EarlyStopWatcher`` to decide which triggers of an armed criterion's
+        ``stop_early`` block are live for this instance: ``on_pass: stop``
+        needs ``"pass"``, the implicit fail trigger needs ``"fail"``, and
+        ``decide_within`` needs ``"pass"`` (a fail-only instance's 'undecided'
+        is its success state, so the timeout is inert there). A trigger whose
+        polarity is missing from this set is inert by design, not an error —
+        that is what lets one dataset-fanned YAML line serve both positive and
+        distractor rows.
         """
 
 
@@ -641,9 +687,10 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
           the moment the count exceeds it (this includes the
           ``min_count: 0, max_count: 0`` "must-NOT-run" form).
 
-        So these instance shapes are dead arms the class-level check misses:
-        ``stop_when: pass`` with ``max_count`` set (pass can never fire);
-        ``stop_when: fail`` with ``max_count: None`` (fail can never fire);
+        So these instance shapes leave a trigger inert (by design, so a
+        dataset-fanned line works across row roles): ``on_pass: stop`` /
+        ``decide_within`` with ``max_count`` set (pass can never fire); the
+        implicit fail trigger with ``max_count: None`` (fail can never fire);
         ``min_count: 0, max_count: None`` (neither can ever fire).
         """
         decidable: set[LivePolarity] = set()
@@ -765,10 +812,12 @@ class SkillTriggeredCriterion(LiveSuccessCriterion):
           live-``fail`` (a wrong skill engaging is a decidable miss; its
           absence is not).
 
-        ``validate_early_stop`` gates the requested ``stop_when`` on this set,
-        so arming a positive with ``fail`` / a distractor with ``pass`` — or
-        either with ``decided`` (which needs both) — is rejected at resolution
-        rather than silently degrading to a full run.
+        ``EarlyStopWatcher`` consults this set to decide which triggers are
+        live per instance: on a positive row ``on_pass: stop`` and
+        ``decide_within`` are live while the implicit fail trigger is inert;
+        on a distractor row the reverse. That per-row adaptivity is what lets
+        one dataset-fanned YAML line (same block on every row) serve both
+        roles.
         """
         expected_yes = self.expected_skill == self.skill_name
         return frozenset({"pass"}) if expected_yes else frozenset({"fail"})

@@ -109,7 +109,7 @@ turn, and `ToolStart`/`ToolEnd` per tool call (close orphaned tools with
 returned `TurnRecord`, the single agent-agnostic capture path.
 
 Set `supports_cooperative_stop: ClassVar[bool] = True` only if your `communicate()`
-actually honors `should_stop` (needed for `run_limits.stop_early`). Leaving it
+actually honors `should_stop` (needed for criterion-level `stop_early:` arming). Leaving it
 `False` means early stop is rejected at resolution for your agent — which is correct
 if you can't stop cooperatively.
 
@@ -146,7 +146,7 @@ class MyCriterion(BaseSuccessCriterion):
 Union membership is required — a run validates that every union member's `type` has a
 registered checker, and rejects unknown `type` tags in YAML. `BaseSuccessCriterion`
 gives you `description`, `weight` (default 1.0; `0` = informational/non-gating),
-`pass_threshold` (default 0.9), `stop_when`, and `suite_thresholds` for free, with
+`pass_threshold` (default 0.9) and `suite_thresholds` for free, with
 `extra="forbid"` so YAML typos are caught.
 
 ### Step 2 — the checker

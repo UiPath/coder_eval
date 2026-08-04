@@ -21,6 +21,7 @@ from pydantic import (
 from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import FinalStatus
+from coder_eval.models.limits import DEFAULT_STOP_EARLY_GATE_THRESHOLD
 from coder_eval.models.telemetry import (
     CommandStatistics,
     CommandTelemetry,
@@ -417,12 +418,12 @@ class EarlyStopReason(StrEnum):
     ``EvaluationResult`` carries it and ``models/`` is a leaf package that
     cannot import from ``simulation``. ``DialogStopReason`` is a stylistic
     reference only. Early-stop is orthogonal telemetry, NOT a ``FinalStatus`` —
-    the terminal-status set stays closed — with ONE deliberate exception:
-    ``DECISION_BUDGET_EXCEEDED`` forces ``FinalStatus.FAILURE`` directly at the
-    orchestrator finalize step (``orchestrator.py``), bypassing
-    ``armed_criteria_passed``'s weighted gate entirely — the criterion whose
-    budget expired never reached a verdict at all, so there is nothing
-    meaningful to weigh it against.
+    the terminal-status set stays closed, and every reason gates identically
+    through ``armed_criteria_passed``'s weighted gate.
+    ``DECISION_BUDGET_EXCEEDED`` is a reporting label only: it marks a
+    fail-stop whose deciding criterion timed out undecided past its
+    ``stop_early.decide_within`` (an *effective* fail latched by the watcher)
+    rather than live-failing natively.
     """
 
     CRITERION_PASSED = "criterion_passed"
@@ -441,8 +442,10 @@ class EarlyStopInfo(BaseModel):
     """
 
     reason: EarlyStopReason = Field(
-        description="Why the run stopped: armed criteria passed, definitively failed, or an armed "
-        + "criterion's decision-step budget (max_steps_to_decide) expired unresolved."
+        description="Why the run stopped: the pass-stop floor locked in (criterion_passed), an armed "
+        + "criterion live-failed natively (criterion_failed), or an armed criterion's decision-step "
+        + "budget (stop_early.decide_within) expired while still undecided — an effective fail "
+        + "(decision_budget_exceeded). All reasons gate identically through the weighted armed gate."
     )
     deciding_criterion_type: str = Field(
         description="Type of the criterion whose live verdict fired the stop (the failing one on "
@@ -473,7 +476,7 @@ class EarlyStopInfo(BaseModel):
         + "saving); None when max_turns is unset.",
     )
     gate_threshold: float = Field(
-        default=1.0,
+        default=DEFAULT_STOP_EARLY_GATE_THRESHOLD,
         ge=0.0,
         le=1.0,
         description="run_limits.stop_early_gate_threshold in effect for this stop — captured so a "
@@ -673,7 +676,9 @@ class EvaluationResult(BaseModel):
             if c.is_gating
         )
 
-    def armed_criteria_passed(self, criteria: list[SuccessCriterion], gate_threshold: float = 1.0) -> bool:
+    def armed_criteria_passed(
+        self, criteria: list[SuccessCriterion], gate_threshold: float = DEFAULT_STOP_EARLY_GATE_THRESHOLD
+    ) -> bool:
         """True iff the ARMED subset's weighted score meets ``gate_threshold``.
 
         The early-stop gate: on an early-stopped run only the armed subset gates
@@ -684,8 +689,8 @@ class EvaluationResult(BaseModel):
         single-sourced. Raises ``ValueError`` on an empty armed set — unreachable
         when a stop actually fired (a stop requires an armed criterion), so this
         is a defensive guard against misuse. No ``is_gating`` filter is needed
-        here: ``BaseSuccessCriterion`` rejects ``weight: 0`` together with
-        ``stop_when``, so every armed criterion is gating by construction.
+        here: ``BaseSuccessCriterion`` rejects ``weight: 0`` together with any
+        early-stop trigger, so every armed criterion is gating by construction.
 
         Each armed criterion's OWN ``pass_threshold`` still decides whether it
         individually passed — ``r.score`` is converted to a binary 1.0/0.0 via
@@ -708,17 +713,15 @@ class EvaluationResult(BaseModel):
                 f"Results/criteria length mismatch for task {self.task_id}: "
                 + f"{len(self.success_criteria_results)} results vs {len(criteria)} criteria."
             )
-        armed = [
-            (r, c) for r, c in zip(self.success_criteria_results, criteria, strict=True) if c.stop_when is not None
-        ]
+        armed = [(r, c) for r, c in zip(self.success_criteria_results, criteria, strict=True) if c.is_stop_armed]
         if not armed:
             raise ValueError(
                 f"armed_criteria_passed called with no armed criteria for task {self.task_id}; "
-                + "the early-stop gate is only valid when at least one criterion sets stop_when."
+                + "the early-stop gate is only valid when at least one criterion sets a stop trigger."
             )
         total_weight = sum(c.weight for _, c in armed)
         if total_weight <= 0.0:
-            # Unreachable today (weight=0 + stop_when is rejected at the model
+            # Unreachable today (weight=0 + a stop trigger is rejected at the model
             # layer, so every armed criterion carries weight > 0) — but a
             # defensive guard on a pass/fail gate must fail CLOSED, not open,
             # against a future criterion subclass that bypasses that
