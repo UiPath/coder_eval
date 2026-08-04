@@ -1,8 +1,8 @@
 # Coder Eval — evaluate & benchmark AI coding agents and Claude Code skills
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
+[![GitHub Marketplace](https://img.shields.io/badge/marketplace-coder__eval-2ea44f.svg)](https://github.com/marketplace/actions/coder_eval)
 [![Website](https://img.shields.io/badge/website-coder--eval.com-1f6feb.svg)](https://coder-eval.com)
-[![Docs](https://img.shields.io/badge/docs-coder--eval.com%2Fdocs-1f6feb.svg)](https://coder-eval.com/docs)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
