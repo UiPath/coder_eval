@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.9.3 (2026-08-04)
+
+### Bug Fixes
+
+- **early-stop**: Address PR review — polarity-blind budget, pass_threshold displacement,
+  gate-semantic split ([#74](https://github.com/UiPath/coder_eval/pull/74),
+  [`800ac77`](https://github.com/UiPath/coder_eval/commit/800ac7730e53a0ce9e9128b42ea91f0030d01f89))
+
+### Chores
+
+- **deps**: Bump aiohttp 3.14.1→3.14.3, cryptography 49.0.0→50.0.0
+  ([#74](https://github.com/UiPath/coder_eval/pull/74),
+  [`800ac77`](https://github.com/UiPath/coder_eval/commit/800ac7730e53a0ce9e9128b42ea91f0030d01f89))
+
+### Features
+
+- **early-stop**: Weighted ceiling/floor bounds + decision-step budget
+  ([#74](https://github.com/UiPath/coder_eval/pull/74),
+  [`800ac77`](https://github.com/UiPath/coder_eval/commit/800ac7730e53a0ce9e9128b42ea91f0030d01f89))
+
+
 ## v0.9.2 (2026-07-31)
 
 ### Bug Fixes
