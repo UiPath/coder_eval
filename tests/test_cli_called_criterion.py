@@ -305,7 +305,10 @@ class TestLogHandling:
         assert result.score == 1.0
         assert result.error is None
 
-    def test_malformed_lines_are_skipped_and_reported(self, sandbox_with_log):
+    def test_malformed_line_now_fails_instead_of_being_skipped(self, sandbox_with_log):
+        """Superseded behaviour: an unparseable line used to be skipped with the
+        score untouched, which let a max_count: 0 guard pass on a truncated record
+        of the forbidden call. It is now a harness fault, like a missing log."""
         sandbox, sandbox_dir = sandbox_with_log
         log_path = sandbox_dir / LOG
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -315,14 +318,14 @@ class TestLogHandling:
         )
         criterion = CliCalledCriterion(description="got it", log=LOG, verb="ixp projects get")
         result = SuccessChecker(sandbox).check(criterion)
-        assert result.score == 1.0
-        assert "Skipped 1 unparseable" in result.details
+        assert result.score == 0.0
+        assert "1 unusable record" in (result.error or "")
 
 
 class TestArgvNormalization:
     def test_equals_form_and_space_form_are_equivalent(self):
-        space = _split_flags(["get", "--model", "pro"], frozenset())
-        equals = _split_flags(["get", "--model=pro"], frozenset())
+        space = _split_flags(["get", "--model", "pro"], frozenset(), frozenset({"model"}))
+        equals = _split_flags(["get", "--model=pro"], frozenset(), frozenset({"model"}))
         assert space == equals == (["get"], {"model": ["pro"]})
 
     def test_output_is_ignored_by_default(self, sandbox_with_log):
@@ -341,30 +344,163 @@ class TestArgvNormalization:
         assert SuccessChecker(sandbox).check(with_json).score == 1.0
 
     def test_boolean_switch_does_not_consume_the_next_flag(self):
-        positional, flags = _split_flags(["delete", "proj-1", "--yes", "--force"], frozenset())
+        positional, flags = _split_flags(["delete", "proj-1", "--yes", "--force"], frozenset(), frozenset())
         assert positional == ["delete", "proj-1"]
         assert flags == {"yes": [""], "force": [""]}
 
     def test_flag_like_value_stays_a_value(self):
         """A value that merely looks like a flag is still a value when quoted as one."""
-        positional, flags = _split_flags(["confirm", "--corrections", '[{"v":"--x"}]'], frozenset())
+        positional, flags = _split_flags(
+            ["confirm", "--corrections", '[{"v":"--x"}]'], frozenset(), frozenset({"corrections"})
+        )
         assert positional == ["confirm"]
         assert flags == {"corrections": ['[{"v":"--x"}]']}
 
     def test_double_dash_terminates_flag_parsing(self):
         """`--` is consumed as a separator; what follows is positional, not a flag."""
-        positional, flags = _split_flags(["run", "--", "--not-a-flag"], frozenset())
+        positional, flags = _split_flags(["run", "--", "--not-a-flag"], frozenset(), frozenset())
         assert positional == ["run", "--not-a-flag"]
         assert flags == {}
 
     def test_lone_dash_is_positional(self):
         """A bare `-` is the stdin convention, not a flag."""
-        positional, flags = _split_flags(["import", "-"], frozenset())
+        positional, flags = _split_flags(["import", "-"], frozenset(), frozenset())
         assert positional == ["import", "-"]
         assert flags == {}
 
 
+class TestRegressionsFromReview:
+    """One test per defect found reviewing PR #72, each written in the failing
+    direction — the guard that reported a PASS while the log proved otherwise."""
+
+    def test_boolean_switch_before_a_positional_does_not_swallow_it(self, sandbox_with_log):
+        """`delete --yes proj-1`: the guard must CATCH the delete, not pass.
+
+        The old heuristic bound `yes=proj-1`, emptied the positionals, and scored
+        a `max_count: 0` guard 1.0 on the very invocation it forbids.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "--yes", "proj-1"])])
+        forbidden = CliCalledCriterion(
+            description="did NOT delete proj-1",
+            log=LOG,
+            verb="ixp fields delete",
+            positional=["proj-1"],
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(sandbox).check(forbidden).score == 0.0
+        # ...and the positive form of the same assertion must hold.
+        positive = forbidden.model_copy(update={"min_count": 1, "max_count": None})
+        assert SuccessChecker(sandbox).check(positive).score == 1.0
+
+    def test_declared_value_flag_consumes_a_dash_leading_value(self):
+        """`--limit -1 proj-1`: declared value flags bind even a dash-leading value."""
+        positional, flags = _split_flags(
+            ["ixp", "proj", "get", "--limit", "-1", "proj-1"], frozenset(), frozenset({"limit"})
+        )
+        assert positional == ["ixp", "proj", "get", "proj-1"]
+        assert flags == {"limit": ["-1"]}
+
+    def test_undeclared_flag_leaves_its_neighbour_positional(self):
+        positional, flags = _split_flags(["ixp", "fields", "delete", "--yes", "proj-1"], frozenset(), frozenset())
+        assert positional == ["ixp", "fields", "delete", "proj-1"]
+        assert flags == {"yes": [""]}
+
+    def test_equals_form_keeps_a_dash_leading_value_and_invents_no_flag(self):
+        """`--offset=-1` used to drop the value AND invent a flag named `1`."""
+        positional, flags = _split_flags(["get", "--offset=-1"], frozenset(), frozenset())
+        assert positional == ["get"]
+        assert flags == {"offset": ["-1"]}
+
+    def test_unparseable_line_fails_a_negative_guard(self, sandbox_with_log):
+        """An unreadable record might BE the forbidden call, so the guard must fail."""
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            json.dumps(_call(["ixp", "projects", "get", "p1"]))
+            + '\n{"tool": "uip", "argv": ["ixp", "fields", "delete"\n',
+            encoding="utf-8",
+        )
+        forbidden = CliCalledCriterion(
+            description="did NOT delete",
+            log=LOG,
+            verb="ixp fields delete",
+            min_count=0,
+            max_count=0,
+        )
+        result = SuccessChecker(sandbox).check(forbidden)
+        assert result.score == 0.0
+        assert "unusable record" in (result.error or "")
+
+    def test_argv_not_a_list_of_strings_fails_loudly(self, sandbox_with_log):
+        """A mock recording argv as a string is a harness fault, not a non-match."""
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps({"tool": "uip", "argv": "ixp fields delete proj-1"}) + "\n", encoding="utf-8")
+        forbidden = CliCalledCriterion(
+            description="did NOT delete", log=LOG, verb="ixp fields delete", min_count=0, max_count=0
+        )
+        result = SuccessChecker(sandbox).check(forbidden)
+        assert result.score == 0.0
+        assert "unusable record" in (result.error or "")
+
+    def test_required_flag_missing_entirely_scores_zero(self, sandbox_with_log):
+        """The branch separating `equals` from `absent`, previously uncovered."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "configure-model", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="passed --model at all",
+            log=LOG,
+            verb="ixp projects configure-model",
+            flags={"model": "gemini_2_5_pro"},
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    def test_bad_regex_flags_value_names_the_flag(self, sandbox_with_log):
+        """re.error is not a ValueError, so the pre-flight guard missed this."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "--val", "x"])])
+        criterion = CliCalledCriterion(
+            description="bad flags int",
+            log=LOG,
+            verb="ixp projects get",
+            flags={"val": {"matches_regex": "a", "flags": 99999999}},
+        )
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "flag 'val'" in (result.error or "")
+
+
 class TestModelValidation:
+    @pytest.mark.parametrize("verb", ["", "   ", "\t"])
+    def test_blank_verb_rejected(self, verb):
+        """A blank verb is an empty prefix: it matched every record and scored 1.0."""
+        with pytest.raises(ValidationError):
+            CliCalledCriterion(description="d", log=LOG, verb=verb)
+
+    def test_empty_any_of_rejected(self):
+        with pytest.raises(ValidationError):
+            CliCalledCriterion(description="d", log=LOG, verb="v", flags={"m": {"any_of": []}})
+
+    def test_predicate_on_an_ignored_flag_rejected(self):
+        """ignore_flags drops the flag before predicates run, so this can never work."""
+        with pytest.raises(ValidationError, match="ignore_flags"):
+            CliCalledCriterion(description="d", log=LOG, verb="v", flags={"output": "json"})
+
+    def test_docstring_negative_example_is_constructible(self):
+        """The model docstring's negative example must actually validate."""
+        CliCalledCriterion(
+            description="Did not use --corrections to flip a boolean field",
+            log="mocks/calls.jsonl",
+            verb="ixp labellings confirm",
+            flags={"corrections": {"contains": "f-100"}},
+            min_count=0,
+            max_count=0,
+        )
+
     def test_scalar_shorthand_equals_predicate(self):
         shorthand = CliCalledCriterion(description="d", log=LOG, verb="ixp projects get", flags={"model": "pro"})
         explicit = CliCalledCriterion(

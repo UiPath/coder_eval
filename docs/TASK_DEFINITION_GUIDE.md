@@ -881,7 +881,30 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
 
 `matches_regex` also accepts `flags:` (the `re` module's integers, e.g. `2` = `IGNORECASE`, `8` = `MULTILINE`, `16` = `DOTALL`), mirroring [`file_matches_regex`](#file_matches_regex). Setting `flags` next to any other predicate is rejected rather than silently ignored.
 
-Flags the criterion does not mention are ignored, so an extra `--output json` never breaks a match. Repeated flags (`--fields a --fields b`) are satisfied by any one value.
+Flags the criterion does not mention are ignored, so an extra `--output json` never breaks a match. Repeated flags (`--fields a --fields b`) are satisfied by any one value. A predicate on a flag also listed in `ignore_flags` is rejected at load time — the flag is dropped before predicates run, so it could never be evaluated.
+
+**Which flags carry a value is declared, not guessed.** A flag consumes the following token only if it appears in `flags:`, in `value_flags:`, or in `ignore_flags:`. Everything else is a switch, and the token after it stays positional:
+
+```yaml
+# `uip ixp fields delete --yes proj-1`
+- type: "cli_called"
+  description: "Did not delete proj-1"
+  verb: "ixp fields delete"
+  positional: ["proj-1"]        # --yes is a switch, so proj-1 stays positional
+  min_count: 0
+  max_count: 0                  # correctly FAILS -- the log proves the delete happened
+
+# `uip ixp projects list --folder Finance proj-1`
+- type: "cli_called"
+  description: "Listed proj-1"
+  verb: "ixp projects list"
+  positional: ["proj-1"]
+  value_flags: ["folder"]       # without this, "Finance" would count as a positional
+```
+
+Defaulting to "switch" is deliberate: `--yes` / `--force` / `-y` before the target is how destructive CLIs are invoked, so guessing that the flag swallows its neighbour is precisely how a `max_count: 0` guard ends up passing on the call it exists to forbid. The equals form (`--offset=-1`) is unambiguous and always binds directly, and a declared value flag binds even a dash-leading value (`--limit -1`).
+
+**Unusable records fail the criterion.** A line that is not JSON, not an object, or whose `argv` is not a list of strings scores 0.0 with an error, on the same footing as a missing log — a record that cannot be read might *be* the invocation a negative guard forbids.
 
 **One predicate per flag** — so a conjunction on a single flag ("contains *both* A and B") is not expressible directly. Two ways to write it:
 

@@ -3,7 +3,6 @@
 import json
 import logging
 import re
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
@@ -17,19 +16,36 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _split_flags(argv: list[str], ignore: frozenset[str]) -> tuple[list[str], dict[str, list[str]]]:
+def _split_flags(
+    argv: list[str],
+    ignore: frozenset[str],
+    value_flags: frozenset[str],
+) -> tuple[list[str], dict[str, list[str]]]:
     """Split ``argv`` into non-flag arguments and a flag map.
 
-    Normalizations, each one a case that a flat-string regex gets wrong:
+    Value binding is DECLARED, not guessed. ``value_flags`` names the flags that
+    consume a following token; every other flag is a switch whose following token
+    stays positional. The criterion supplies its own ``flags:`` keys plus
+    ``value_flags:`` as that set, so the author's assertion doubles as the grammar.
 
-    - ``--flag=value`` is split into ``--flag value``, so the equals-form and the
-      space-form compare equal.
-    - A flag's value is the following token unless that token itself starts with
-      ``-``, in which case the flag is treated as a boolean switch. Without a CLI
-      grammar this is the only available heuristic; the ambiguity is confined to
-      here rather than duplicated into every task's pattern.
+    This replaced a heuristic ("the next token is the value unless it starts with
+    ``-``") that silently swallowed a positional after a boolean switch. For
+    ``uip fields delete --yes proj-1`` it bound ``yes=proj-1`` and dropped
+    ``proj-1`` from the positionals, so a ``max_count: 0`` guard on
+    ``positional: [proj-1]`` reported a PASS while the log proved the delete had
+    happened. ``--yes``/``--force``/``-y`` before the target is how destructive
+    CLIs are invoked, which is exactly the shape a negative guard exists to catch,
+    so the default resolves ambiguity toward keeping the token positional.
+
+    Other normalizations, each a case a flat-string regex gets wrong:
+
+    - ``--flag=value`` binds directly. The equals form is unambiguous, so it is
+      never re-run through any value/switch decision: ``--offset=-1`` keeps ``-1``
+      instead of dropping it and inventing a flag named ``1``.
+    - A declared value flag consumes its next token even when that token starts
+      with ``-``, so ``--limit -1`` binds ``-1``.
     - Repeated flags accumulate, so ``--field a --field b`` keeps both values.
-    - Names in ``ignore`` are dropped with their values.
+    - Names in ``ignore`` are dropped along with their values.
 
     A bare ``--`` terminates flag parsing (POSIX convention): everything after it
     is positional, and the separator itself is dropped so it never has to be
@@ -39,58 +55,38 @@ def _split_flags(argv: list[str], ignore: frozenset[str]) -> tuple[list[str], di
     positional: list[str] = []
     flags: dict[str, list[str]] = {}
 
-    tokens: list[str] = []
-    end_of_flags = False
-    for raw in argv:
-        if end_of_flags:
-            tokens.append(raw)
-            continue
-        if raw == "--":
-            end_of_flags = True
-            tokens.append(raw)
-            continue
-        if raw.startswith("-") and "=" in raw:
-            name, _, value = raw.partition("=")
-            tokens.append(name)
-            tokens.append(value)
-        else:
-            tokens.append(raw)
+    def record(name: str, value: str) -> None:
+        if name not in ignore:
+            flags.setdefault(name, []).append(value)
 
     index = 0
     end_of_flags = False
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--" and not end_of_flags:
-            end_of_flags = True
-            index += 1
-            continue
-        if not end_of_flags and token.startswith("-") and token != "-":
-            name = token.lstrip("-")
-            flag_value: str | None = None
-            if index + 1 < len(tokens):
-                candidate = tokens[index + 1]
-                if not candidate.startswith("-") or candidate == "-":
-                    flag_value = candidate
-                    index += 1
-            if name not in ignore:
-                flags.setdefault(name, []).append(flag_value if flag_value is not None else "")
-            index += 1
-            continue
-        positional.append(token)
+    while index < len(argv):
+        token = argv[index]
         index += 1
 
+        if end_of_flags or not token.startswith("-") or token == "-":
+            positional.append(token)
+            continue
+        if token == "--":
+            end_of_flags = True
+            continue
+
+        # Equals form: unambiguous, bind it and move on.
+        if "=" in token:
+            name, _, value = token.partition("=")
+            record(name.lstrip("-"), value)
+            continue
+
+        name = token.lstrip("-")
+        if name in value_flags and index < len(argv):
+            record(name, argv[index])
+            index += 1
+        else:
+            # Switch: empty value, and the next token is left for the positionals.
+            record(name, "")
+
     return positional, flags
-
-
-@lru_cache(maxsize=256)
-def _compiled(pattern: str, flags: int) -> re.Pattern[str]:
-    """Compile once per (pattern, flags) rather than once per record per flag.
-
-    A log can hold hundreds of invocations; recompiling the same pattern for each
-    is pure waste. Cached at module scope because patterns come from task YAML and
-    are few and long-lived.
-    """
-    return re.compile(pattern, flags)
 
 
 def _flag_matches(predicate: FlagMatch, values: list[str] | None) -> bool:
@@ -111,21 +107,42 @@ def _flag_matches(predicate: FlagMatch, values: list[str] | None) -> bool:
         allowed = set(predicate.any_of)
         return any(value in allowed for value in values)
     if predicate.matches_regex is not None:
-        regex = _compiled(predicate.matches_regex, predicate.flags)
+        regex = re.compile(predicate.matches_regex, predicate.flags)
         return any(regex.search(value) is not None for value in values)
-    return False
+    # Unreachable: FlagMatch guarantees exactly one predicate. Raise rather than
+    # return False so a predicate added without a matcher arm here fails loudly.
+    raise AssertionError(f"FlagMatch has no matcher arm: {predicate!r}")
 
 
-def _record_matches(criterion: CliCalledCriterion, record: dict[str, Any]) -> bool:
+def _usable_argv(record: dict[str, Any]) -> list[str] | None:
+    """The record's ``argv`` when it is a list of strings, else None.
+
+    None means the record cannot be evaluated at all — a different thing from
+    "evaluated and did not match", which is why the caller reports it rather than
+    quietly treating it as a non-match.
+    """
+    argv = record.get("argv")
+    if isinstance(argv, list) and all(isinstance(item, str) for item in argv):
+        return argv
+    return None
+
+
+def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict[str, Any]) -> bool:
     """Whether one log record satisfies every configured facet of the criterion."""
     if criterion.tool is not None and record.get("tool") != criterion.tool:
         return False
 
-    argv = record.get("argv")
-    if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
-        return False
-
-    positional, flags = _split_flags(argv, frozenset(criterion.ignore_flags))
+    # The criterion's own flag predicates declare which flags carry a value;
+    # `value_flags` covers the rest (a flag whose value must not be mistaken for a
+    # positional even though nothing asserts on it).
+    ignore = frozenset(criterion.ignore_flags)
+    positional, flags = _split_flags(
+        argv,
+        ignore,
+        # Ignored flags are value-bearing too: dropping `--output` while leaving
+        # `json` in the positionals would defeat the point of ignoring it.
+        frozenset(criterion.flags or {}) | frozenset(criterion.value_flags) | ignore,
+    )
 
     offset = 0
     if criterion.verb is not None:
@@ -183,8 +200,8 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             if predicate.matches_regex is None:
                 continue
             try:
-                _compiled(predicate.matches_regex, predicate.flags)
-            except re.error as exc:
+                re.compile(predicate.matches_regex, predicate.flags)
+            except (re.error, ValueError) as exc:
                 return CriterionResult(
                     criterion_type=criterion.type,
                     description=criterion.description,
@@ -206,8 +223,8 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
 
         content = sandbox.get_file_content(criterion.log)
 
-        records: list[dict[str, Any]] = []
-        malformed = 0
+        usable: list[tuple[list[str], dict[str, Any]]] = []
+        unusable = 0
         for line in content.splitlines():
             stripped = line.strip()
             if not stripped:
@@ -215,15 +232,42 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             try:
                 parsed = json.loads(stripped)
             except ValueError:
-                malformed += 1
+                unusable += 1
                 continue
-            if isinstance(parsed, dict):
-                records.append(parsed)
-            else:
-                malformed += 1
+            if not isinstance(parsed, dict):
+                unusable += 1
+                continue
+            argv = _usable_argv(parsed)
+            if argv is None:
+                unusable += 1
+                continue
+            usable.append((argv, parsed))
 
-        matches = [record for record in records if _record_matches(criterion, record)]
+        if unusable:
+            # Same footing as a missing log, and for the same reason: a record we
+            # cannot read might BE the invocation a max_count: 0 guard forbids, so
+            # scoring it as "did not match" would let the guard pass on the very
+            # call it exists to catch. Skipping these silently (the previous
+            # behaviour) contradicted the fail-loud missing-log path above and the
+            # sibling precedent in json_check.
+            logger.warning(
+                f"cli_called: {unusable} unusable record(s) in '{criterion.log}'"
+                + " (unparseable line, non-object line, or argv that is not a list of strings)"
+            )
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                error=(
+                    f"Invocation log '{criterion.log}' has {unusable} unusable record(s): a line that is "
+                    "not JSON, not an object, or whose 'argv' is not a list of strings. The verdict "
+                    "cannot be trusted, so the criterion fails rather than scoring an incomplete log."
+                ),
+            )
+
+        matches = [record for argv, record in usable if _record_matches(criterion, argv, record)]
         count = len(matches)
+        records = usable
 
         within_lower = count >= criterion.min_count
         within_upper = criterion.max_count is None or count <= criterion.max_count
@@ -253,9 +297,6 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             )
         else:
             details = f"{count} invocation(s) matched ({wanted}) but {bound} forbids it"
-
-        if malformed:
-            details += f". Skipped {malformed} unparseable log line(s)"
 
         return CriterionResult(
             criterion_type=criterion.type,

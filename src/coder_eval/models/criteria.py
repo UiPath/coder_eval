@@ -435,7 +435,15 @@ class FlagMatch(BaseModel):
         default=None,
         description="Flag value must match this regex. Scoped to ONE value, unlike a whole-line pattern",
     )
-    any_of: list[str] | None = Field(default=None, description="Flag value must equal one of these strings")
+    any_of: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Flag value must equal one of these strings. min_length=1: an empty list would satisfy "
+            "the exactly-one-predicate rule and then match nothing, so a max_count: 0 guard built on "
+            "it would pass vacuously"
+        ),
+    )
     absent: bool = Field(default=False, description="Flag must NOT be present in the invocation")
     flags: int = Field(
         default=0,
@@ -511,7 +519,7 @@ class CliCalledCriterion(BaseSuccessCriterion):
               model: "gemini_2_5_pro"
             min_count: 1
 
-    Example YAML (negative — must NOT have been called; ``max_count: 0``)::
+    Example YAML (negative — must NOT have been called; ``min_count: 0`` + ``max_count: 0``)::
 
         success_criteria:
           - type: "cli_called"
@@ -520,6 +528,7 @@ class CliCalledCriterion(BaseSuccessCriterion):
             verb: "ixp labellings confirm"
             flags:
               corrections: {contains: "f-100"}
+            min_count: 0
             max_count: 0
     """
 
@@ -527,6 +536,7 @@ class CliCalledCriterion(BaseSuccessCriterion):
     log: str = Field(description="Path to the JSON Lines invocation log, relative to the sandbox working directory")
     verb: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the "
             "invocation's non-flag arguments (e.g. 'ixp projects configure-model'). "
@@ -548,7 +558,26 @@ class CliCalledCriterion(BaseSuccessCriterion):
             "Flags not listed here are ignored, so an extra --output json never breaks a match"
         ),
     )
-    min_count: int = Field(default=1, ge=0, description="Minimum number of matching invocations")
+    value_flags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Flag names (without leading dashes) that consume a following token as their value, for "
+            "flags this criterion does NOT assert on. Keys of `flags` are value-bearing automatically. "
+            "Everything else is treated as a boolean switch whose following token stays positional -- "
+            "so `delete --yes proj-1` keeps `proj-1` positional instead of binding it to `--yes`. "
+            "Declare a flag here when its value would otherwise be mistaken for a positional "
+            "(e.g. value_flags: [folder] for `--folder F proj-1`)"
+        ),
+    )
+    min_count: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Minimum number of matching invocations. Combine min_count: 0 with max_count: 0 to "
+            "express must NOT match. Scoring is BINARY here (in vs out of bounds), unlike "
+            "command_executed, whose identically-named field scores fractionally"
+        ),
+    )
     max_count: int | None = Field(
         default=None,
         ge=0,
@@ -568,8 +597,26 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if self.max_count is not None and self.max_count < self.min_count:
             msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
             raise ValueError(msg)
-        if self.verb is None and not self.positional and not self.flags and self.tool is None:
+        # min_length=1 counts characters, so "   " passes it — and `"   ".split()`
+        # is `[]`, an empty prefix that matches every record.
+        if self.verb is not None and not self.verb.strip():
+            msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
+            raise ValueError(msg)
+        # Falsiness-symmetric on purpose: `verb: ""` used to slip past an `is None`
+        # check here and then match EVERY record (empty prefix), silently scoring 1.0.
+        if not self.verb and not self.positional and not self.flags and not self.tool:
             msg = "cli_called requires at least one of verb / positional / flags / tool to match on"
+            raise ValueError(msg)
+        # A predicate on an ignored flag can never be evaluated: ignore_flags drops
+        # the flag before any predicate runs, so `absent` would pass vacuously and
+        # `equals` could never match.
+        shadowed = sorted(set(self.flags or {}) & set(self.ignore_flags))
+        if shadowed:
+            names = ", ".join(repr(n) for n in shadowed)
+            msg = (
+                f"cli_called flag predicate(s) {names} are also listed in ignore_flags, which drops them "
+                "before matching. Remove them from ignore_flags, or drop the predicate."
+            )
             raise ValueError(msg)
         return self
 
