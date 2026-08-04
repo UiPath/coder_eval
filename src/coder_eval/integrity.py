@@ -173,7 +173,19 @@ _LISTING_TOOLS = frozenset({"Glob", "LS", "ListDir", "list_dir", "Ls", "glob", "
 # this particular task declares. Deliberately short: each entry is a name the
 # framework or the task-authoring convention owns, never a name an agent's own
 # work would produce.
-_GRADED_BASENAME_GLOBS = ("RESOLUTION.md", "check_*.py", "*.expected", "task.yaml", "context.json")
+_GRADED_BASENAME_GLOBS = ("RESOLUTION.md", "*.expected", "task.yaml", "context.json")
+
+# Grader-script names. `check.py` (no underscore) grades live tasks too, so the
+# underscore cannot be required -- but neither name is the task's alone: `check.py`
+# is also perfectly ordinary application code. These are therefore matched only
+# when the path locates them in the task's own directory (:func:`_grader_match`),
+# unlike the basename globs above.
+_GRADER_SCRIPT_GLOBS = ("check_*.py", "check.py")
+
+# Directory markers that put a grader script in the task's own directory: the
+# suite layout every task YAML lives under, and both spellings of the framework's
+# task-dir variable. The resolved task directory is added per task.
+_GRADER_DIR_MARKERS = ("tests/tasks/", "$task_dir/", f"{CONTAINER_TASK_DIR}/")
 
 # Path SEGMENTS that hold answer keys wherever they appear. Segments rather than
 # resolved prefixes because this is how an agent types them -- `cat
@@ -221,9 +233,23 @@ class GradedMaterialSpec:
     """Mock/fixture-store path components (declared mock dirs, staged fixture
     mount points), matched anywhere in a path and reported as MOCK_DATA_READ."""
 
+    grader_globs: tuple[str, ...] = ()
+    """Grader-script patterns, matched only under the task directory."""
+
+    task_dir: str | None = None
+    """The task's own directory, when known -- the location a grader-script match
+    must carry to count."""
+
     def is_empty(self) -> bool:
         """Whether the spec would match nothing at all."""
-        return not (self.paths or self.directories or self.basename_globs or self.path_segments or self.mock_segments)
+        return not (
+            self.paths
+            or self.directories
+            or self.basename_globs
+            or self.path_segments
+            or self.mock_segments
+            or self.grader_globs
+        )
 
 
 def _normalize(text: str) -> str:
@@ -310,6 +336,7 @@ def derive_graded_material(task: TaskDefinition, task_file: Path | None) -> Grad
     """
     paths: set[str] = set()
     directories: set[str] = {CONTAINER_INPUT_DIR}
+    task_dir = task_file.parent if task_file is not None else None
 
     if task_file is not None:
         paths.add(str(task_file))
@@ -326,7 +353,7 @@ def derive_graded_material(task: TaskDefinition, task_file: Path | None) -> Grad
     criterion_commands = [getattr(c, "command", "") for c in task.success_criteria]
     hook_commands = [c.command for c in (*task.pre_run, *task.post_run)]
     for command in (*criterion_commands, *hook_commands):
-        paths.update(_task_dir_operands(command or ""))
+        paths.update(_task_dir_operands(command or "", task_dir))
 
     # Mock/fixture stores. Declared per task (mock dirs, staged mount points) plus
     # the two conventions no task spells out: `_fixtures/` holds golden solutions
@@ -340,22 +367,28 @@ def derive_graded_material(task: TaskDefinition, task_file: Path | None) -> Grad
         basename_globs=_GRADED_BASENAME_GLOBS,
         path_segments=frozenset(path_segments),
         mock_segments=frozenset(mock_segments - path_segments),
+        grader_globs=_GRADER_SCRIPT_GLOBS,
+        task_dir=str(task_dir) if task_dir is not None else None,
     )
 
 
-def _task_dir_operands(command: str) -> set[str]:
+def _task_dir_operands(command: str, task_dir: Path | None = None) -> set[str]:
     """Extract ``$TASK_DIR``-rooted operands from a framework-run command.
 
-    Both the raw form (``$TASK_DIR/check_x.py``, which is what an agent that
-    discovered the variable would type) and the container-resolved form
-    (``/work/task_dir/check_x.py``) are returned, since either spelling is the
-    same read.
+    Three spellings of the same read, because which one the agent types depends on
+    the driver: the raw form (``$TASK_DIR/check_x.py``, what an agent that
+    discovered the variable would use), the container-resolved form
+    (``/work/task_dir/check_x.py``), and -- when the task directory is known -- the
+    real on-disk path. Under ``driver: tempdir`` the task lives in the host
+    checkout and the agent reads THAT path, which neither symbolic form matches.
     """
     operands: set[str] = set()
     for match in re.finditer(r"\$\{?TASK_DIR\}?(/[^\s'\";|&)]+)", command):
         suffix = match.group(1)
         operands.add(f"$TASK_DIR{suffix}")
         operands.add(f"{CONTAINER_TASK_DIR}{suffix}")
+        if task_dir is not None:
+            operands.add(str((task_dir / suffix.lstrip("/")).resolve()))
     return operands
 
 
@@ -363,9 +396,10 @@ def _find_match(text: str, spec: GradedMaterialSpec) -> str | None:
     """Return the graded-material reference found in ``text``, or None.
 
     Literal paths and directory prefixes are substring-matched on the normalized
-    form; basename globs are regex-matched so ``check_*.py`` catches any grader;
-    path segments are matched as a path component so a relatively-typed
-    ``../mocks/responses/manifest.json`` is caught too.
+    form; basename globs are regex-matched wherever they appear; path segments are
+    matched as a path component so a relatively-typed
+    ``../mocks/responses/manifest.json`` is caught too; grader scripts are matched
+    last and only under the task directory (:func:`_grader_match`).
     """
     haystack = _normalize(text)
 
@@ -383,6 +417,39 @@ def _find_match(text: str, spec: GradedMaterialSpec) -> str | None:
     for segment in (*spec.path_segments, *spec.mock_segments):
         if _segment_to_regex(segment).search(haystack):
             return segment
+    return _grader_match(haystack, spec)
+
+
+def _grader_match(haystack: str, spec: GradedMaterialSpec) -> str | None:
+    """Find a grader-script reference that is rooted in the task's OWN directory.
+
+    ``check_env.py`` in the agent's working directory is the agent's own helper and
+    ``check.py`` is ordinary application code, so a bare basename proves nothing: a
+    grader-glob match only counts when the path it sits in names the task directory
+    (its resolved path, either ``$TASK_DIR`` spelling, or the ``tests/tasks/``
+    segment the suite layout puts on every task path).
+
+    Args:
+        haystack: Already-normalized command text.
+        spec: The task's graded material.
+
+    Returns:
+        The matched glob, or None.
+    """
+    if not spec.grader_globs:
+        return None
+
+    markers = list(_GRADER_DIR_MARKERS)
+    if spec.task_dir:
+        markers.append(_normalize(spec.task_dir).rstrip("/") + "/")
+
+    for glob in spec.grader_globs:
+        # The directory component is bounded by the token: it cannot run over
+        # whitespace or a quote into a neighbouring argument.
+        pattern = re.compile(r"(?P<dir>[^\s'\"|;&()]*/)" + _glob_to_regex(glob).pattern)
+        for match in pattern.finditer(haystack):
+            if any(marker in match.group("dir") for marker in markers):
+                return glob
     return None
 
 

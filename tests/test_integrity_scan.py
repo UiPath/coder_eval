@@ -35,7 +35,9 @@ from coder_eval.models.container_paths import CONTAINER_INPUT_DIR
 SPEC = GradedMaterialSpec(
     paths=frozenset({"/repo/tasks/leaky/task.yaml", "/repo/tasks/leaky/solution.py", "$TASK_DIR/check_output.py"}),
     directories=frozenset({"/repo/tasks/leaky/_reference", CONTAINER_INPUT_DIR}),
-    basename_globs=("RESOLUTION.md", "check_*.py", "*.expected", "task.yaml", "context.json"),
+    basename_globs=("RESOLUTION.md", "*.expected", "task.yaml", "context.json"),
+    grader_globs=("check_*.py", "check.py"),
+    task_dir="/repo/tasks/leaky",
 )
 
 
@@ -68,7 +70,9 @@ READS = [
     pytest.param("head -50 RESOLUTION.md", id="head"),
     pytest.param("tail -n 5 /repo/tasks/leaky/solution.py", id="tail-absolute-path"),
     pytest.param("sed -n '1,20p' RESOLUTION.md", id="sed"),
-    pytest.param("awk '{print}' check_output.py", id="awk-glob"),
+    pytest.param("awk '{print}' /repo/tasks/leaky/check_output.py", id="awk-grader-under-the-task-dir"),
+    pytest.param("cat /repo/tests/tasks/other/check.py", id="grader-without-an-underscore"),
+    pytest.param("cat $TASK_DIR/check.py", id="grader-under-the-task-dir-variable"),
     pytest.param("python3 $TASK_DIR/check_output.py", id="python-runs-the-grader"),
     pytest.param("python -c \"print(open('RESOLUTION.md').read())\"", id="python-inline"),
     pytest.param("node -e \"require('fs').readFileSync('RESOLUTION.md')\"", id="node-inline"),
@@ -333,6 +337,44 @@ def test_derivation_harvests_task_dir_operands_from_hooks():
     task = _task(post_run=[{"command": "cp ${TASK_DIR}/expected.json ."}])
     spec = derive_graded_material(task, None)
     assert "$TASK_DIR/expected.json" in spec.paths
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("cat check.py", id="bare-check-py"),
+        pytest.param("cat check_env.py", id="bare-check-glob"),
+        pytest.param("python3 ./check.py", id="own-working-directory"),
+        pytest.param("cat src/check.py", id="ordinary-application-code"),
+    ],
+)
+def test_a_grader_glob_needs_a_task_directory_component(command: str):
+    """`check.py` is ordinary application code; only its LOCATION makes it a grader."""
+    assert _bash_read(command, SPEC) == (False, None)
+
+
+def test_task_dir_operands_add_the_resolved_spelling():
+    task_dir = Path("/repo/tasks/leaky")
+    operands = _task_dir_operands("python3 $TASK_DIR/check_x.py", task_dir)
+    assert operands == {
+        "$TASK_DIR/check_x.py",
+        "/work/task_dir/check_x.py",
+        str((task_dir / "check_x.py").resolve()),
+    }
+
+
+def test_a_tempdir_run_matches_the_resolved_task_dir_path(tmp_path):
+    """Under `driver: tempdir` the agent reads the real checkout path, which
+    neither `$TASK_DIR/...` nor `/work/task_dir/...` matches."""
+    task_file = tmp_path / "scenario" / "task.yaml"
+    task = _task(
+        success_criteria=[{"type": "run_command", "description": "grade", "command": "python3 $TASK_DIR/grade_it.py"}]
+    )
+    spec = derive_graded_material(task, task_file)
+    resolved = (task_file.parent / "grade_it.py").resolve()
+
+    info = scan_commands([_turn([_bash(f"cat {resolved.as_posix()}")])], spec)
+    assert info.verdict is IntegrityVerdict.TAINTED
 
 
 def test_derivation_picks_up_declared_mock_dirs():
