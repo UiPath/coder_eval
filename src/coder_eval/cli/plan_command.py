@@ -134,7 +134,7 @@ def plan_command(
             for variant in exp_def.variants:
                 try:
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
-                    # Early-stop guardrails (no-op unless run_limits.stop_early is armed).
+                    # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
                     validate_early_stop(resolved)
                     agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None

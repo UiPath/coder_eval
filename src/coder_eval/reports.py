@@ -166,6 +166,24 @@ def _fmt_rate(rate: float | None) -> str:
     return f"{rate * 100:.1f}%" if rate is not None else "n/a"
 
 
+def early_stop_gate_note(reason: str) -> str:
+    """The gate-explaining sentence for an early-stopped run, shared verbatim by
+    every report surface (markdown run-time note, HTML badge tooltip) so the
+    prose can never drift between renderers.
+
+    ``reason`` is the ``EarlyStopReason`` string value (e.g. ``run.json``'s
+    ``early_stop_reason``).
+    """
+    if reason == "decision_budget_exceeded":
+        # The deciding criterion timed out undecided (an effective fail); it
+        # gates through the same weighted armed gate as a native live-fail.
+        return (
+            "decision-step budget exceeded (criterion timed out undecided, treated as a failed "
+            "armed criterion); gated on armed criteria only; other criteria are advisory"
+        )
+    return "gated on armed criteria only; other criteria are advisory"
+
+
 def _pass_rate_lines(summary: RunSummary) -> list[str]:
     """The pass rate over every dispatched task, plus the error share when non-zero."""
     lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_run})"]
@@ -438,14 +456,9 @@ class ReportGenerator:
                 reason = t.get("early_stop_reason") or "unknown"
                 turns_remaining = t.get("turns_remaining_at_stop")
                 avoided = f" <= {turns_remaining} turn(s) avoided —" if isinstance(turns_remaining, int) else ""
-                if reason == "decision_budget_exceeded":
-                    # No criterion gated here at all — an armed criterion's
-                    # decision-step budget expired unresolved, forcing FAILURE
-                    # outright, bypassing the weighted gate entirely.
-                    gate_note = " forced to FAILURE (decision-step budget exceeded, bypassing the gate)"
-                else:
-                    gate_note = " gated on armed criteria only; other criteria are advisory"
-                notes.append(f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided}" + gate_note)
+                notes.append(
+                    f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided} {early_stop_gate_note(reason)}"
+                )
         if not notes:
             return []
         return ["## Run-time Notes", "", *notes]

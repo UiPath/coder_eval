@@ -668,7 +668,7 @@ def resolve_all_tasks(
                     _apply_cli_overrides(resolved_task, config, lineage)
 
                     # Early-stop guardrails: run once the task is fully resolved (all 5
-                    # layers merged, incl. -D run_limits.stop_early). No-op unless armed;
+                    # layers merged, incl. the -D run_limits.stop_early kill switch). No-op unless armed;
                     # a bad arming raises EarlyStopConfigError (a ValueError).
                     validate_early_stop(resolved_task)
 

@@ -243,8 +243,8 @@ run_limits:
   max_total_tokens: 200000            # cumulative input + output
   max_usd: 2.50                       # cumulative cost
 
-  # Early stop
-  stop_early: true                    # end once the armed criteria are decided
+  # Early stop (kill switch only — arming lives on the criteria)
+  stop_early: false                   # force-disarm every criterion's stop_early: block
 ```
 
 | Field | Default | Constraint | Description |
@@ -259,8 +259,8 @@ run_limits:
 | `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. Requires per-turn SDK cost reporting. |
 | `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
-| `stop_early` | `false` | — | Opt-in master switch for early-stop-on-criterion. See [`stop_early`](#stop_early-opt-in-early-stop). |
-| `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution when `stop_early: true`) | Minimum weighted score over the armed subset required to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution on an armed task) | Minimum weighted score over the armed subset required for an **early-stopped** run to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
 a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
@@ -326,125 +326,148 @@ default) to exclude a task from the metric entirely.
 
 ### `stop_early` (opt-in early stop)
 
-`run_limits.stop_early` (default `false`) ends a single-shot run **early** once
-the run's **armed** criteria are decided — so you can raise `max_turns` for the
-full-run flavor without paying for turns the smoke flavor doesn't need. A
-criterion is *armed* by giving it a `stop_when` (see the criterion-fields table);
-`stop_early` is the master switch that turns arming on for the run.
+Early stop ends a single-shot run **early** once the run's **armed** criteria
+decide the outcome — so you can raise `max_turns` for the full-run flavor
+without paying for turns the smoke flavor doesn't need. A criterion is *armed*
+by attaching a **`stop_early:` block** to it — the block's presence IS the
+arming, and it alone activates the run's watcher; there is **no run-level
+master switch**. (Live-observable criteria only: the block field exists only on
+`skill_triggered` / `command_executed`, so arming anything else is a schema
+error, not a runtime surprise.) `run_limits.stop_early: false` is the run-level
+**kill switch** that force-disarms every block — the one-line experiment/CLI
+override that turns a smoke flavor back into an authoritative full run;
+`run_limits.stop_early: true` (the removed master arm) is rejected at
+resolution.
+
+Arming carries one **implicit** trigger — a definitive *effective* fail (a
+native live-fail, or the `decide_within` timeout expiring) may end the run
+under the weighted ceiling rule — plus two knobs inside the block:
+
+| Block | Meaning |
+|-------|---------|
+| `stop_early: {}` | armed: fail-stop on a native live-fail (the idiomatic distractor arming) |
+| `stop_early: {on_pass: stop}` | …plus pass-stop the moment the criterion live-passes |
+| `stop_early: {decide_within: N}` | …plus an *effective* fail if still **undecided** after N tool-call steps (reported as `decision_budget_exceeded`) |
 
 ```yaml
 run_limits:
   max_turns: 30
-  stop_early: true            # opt in; default false leaves behavior unchanged
 success_criteria:
   - type: skill_triggered
     skill_name: date-teller
     expected_skill: date-teller
-    stop_when: auto           # arm whichever polarity this instance can decide
-  - type: file_exists         # not armed → advisory on an early-stopped run
+    stop_early:
+      decide_within: 5        # not loaded within 5 steps → effective fail → stop
+  - type: file_exists         # no block → unarmed (advisory on an early-stopped run)
     path: report.md
 ```
 
+The two intents compose cleanly: `decide_within` with the default
+`on_pass: continue` means *"fail fast if the signal doesn't arrive in time,
+but if it does arrive, keep running"* (a live PASS never stops the run — it
+only **latches**, so the criterion is not re-checked). Set `on_pass: stop`
+when the signal arriving makes the rest of the run redundant and you want to
+bank the saved turns.
+
 Semantics:
 
-- **Opt-in, per run.** With `stop_early: false` (the default) the run behaves
-  exactly as before — `stop_when` is inert and every criterion gates normally.
-- **Polarity.** `stop_when: pass` stops the moment all **pass-armed** criteria are
-  decided in the pass direction; `stop_when: fail` stops on a definitive
-  wrong-signal fail; `stop_when: decided` stops on either (the criterion instance
-  must be able to decide **both**). `stop_when: auto` arms whichever polarities
-  **this instance** can decide — use it when the decidable polarity is
-  instance-dependent, e.g. a `skill_triggered` activation suite where a positive
-  row (`skill_name == expected_skill`) can only live-pass and a distractor can only
-  live-fail, so one static value on a dataset-fanned criterion (whose
-  positive/distractor role flips per row) cannot fit every row. A **pass-stop**
-  needs every pass-armed criterion to pass — fail-armed distractors are not
-  required to, and a row with **zero** pass-armed criteria (e.g. a negative row)
-  never pass-stops; a **fail-stop** fires on the first fail-armed criterion that
-  live-fails, but is **deferred while any pass-armed criterion is still
-  undecided** — a distractor misfire on an early tool call must not cut a
-  positive row before its expected signal can appear (that would freeze a
-  would-be true positive as a false negative and deflate suite recall). The
-  misfire is latched, so the deferred fail-stop fires the moment every
-  pass-armed criterion decides; if none ever decides, the run simply continues
-  to the cap. Only criteria that can decide from a partial trajectory (currently
-  `skill_triggered`, `command_executed`) may be armed — arming any other criterion
-  is a hard error at resolution (plan *and* run), never a silent no-op.
-  Decidability can also depend on a criterion's own fields: `command_executed` can
-  live-**pass** only with `max_count` unset and `min_count > 0`, and live-**fail**
-  only with `max_count` set (which includes the `min_count: 0, max_count: 0`
-  "must-NOT-run" form). Arming a polarity the configured criterion can never reach
-  (e.g. `stop_when: pass` alongside a `max_count`, or `auto` on an instance that
-  can decide neither) is likewise a hard error at resolution, not a silent full
-  run.
-- **Verdict.** Any task armed for early-stop (`stop_early: true`) is gated on
-  the **armed subset only** — the non-armed criteria become **advisory** and
-  are clearly marked (report badge + per-criterion note + `stopped_early`
-  row when the watcher actually fired) — whether or not the watcher actually
-  cut the run short; one task config maps to one gate semantic. Only a task
-  that never armed `stop_early` at all is gated on the **full** set, as
-  always. This is what lets one file serve both a `smoke` flavor
-  (`stop_early: true`) and an `e2e` flavor (`stop_early: false`) —
+- **Opt-in, per criterion.** With no `stop_early:` block anywhere the run
+  behaves exactly as before — there is no watcher at all. The
+  `run_limits.stop_early: false` kill switch force-disarms an armed task for
+  one run (e.g. an experiment's `e2e` variant, or
+  `-D run_limits.stop_early=false` from the CLI) without touching the
+  criteria.
+- **Inert-by-design triggers (dataset fan-out).** A trigger whose polarity this
+  *instance* can never decide is silently inert, not an error: a positive
+  `skill_triggered` row (`skill_name == expected_skill`) can only live-pass, so
+  the implicit fail trigger does nothing on it; a distractor row can only
+  live-fail, so `on_pass: stop` and `decide_within` do nothing on it. That is
+  what lets **one** dataset-fanned YAML line — same block on every row — serve
+  both positive rows (pass/timeout live) and distractor rows (fail live)
+  without per-row conditionals. Decidability can also depend on a criterion's own
+  fields: `command_executed` can live-**pass** only with `max_count` unset and
+  `min_count > 0`, and live-**fail** only with `max_count` set (which includes
+  the `min_count: 0, max_count: 0` "must-NOT-run" form).
+- **Verdict latching.** Once an armed criterion decides (pass or fail), its
+  live verdict is latched and never re-computed — the observable criteria are
+  monotonic (an engaged skill stays engaged), so re-polling is pure waste.
+- **Fail-stop rule (weighted ceiling).** A fail-stop candidate is any armed
+  criterion whose *effective* verdict is fail — a native live-fail (the
+  implicit trigger every armed criterion carries), or an expired
+  `decide_within` timeout. The stop fires
+  only once the armed set's **ceiling** (best case: every still-undecided or
+  already-passed criterion ends up scoring 1.0, every failed one scores 0) can
+  no longer reach `stop_early_gate_threshold` — the gate is mathematically
+  guaranteed to fail regardless of how the trajectory continues. It is also
+  **deferred while any pass-capable armed criterion is still undecided** — a
+  distractor misfire on an early tool call must not cut a positive row before
+  its expected signal can appear (that would freeze a would-be true positive as
+  a false negative and deflate suite recall). The misfire is latched, so the
+  deferred fail-stop fires the moment every pass-capable criterion decides; if
+  none ever decides, the run simply continues to the cap.
+- **Pass-stop rule (weighted floor).** A pass-stop fires once the
+  `on_pass: stop` subset's **floor** (worst case: every still-undecided member
+  scores 0) already meets the threshold. Distractors are excluded from this
+  bound (they can never live-pass); a task with **zero** `on_pass: stop`
+  criteria never pass-stops. Like the fail-stop, it is **deferred while any
+  pass-capable armed criterion outside the `on_pass: stop` subset is still
+  undecided** (subset members are already priced into the floor) — otherwise
+  an early pass would truncate a sibling `on_pass: continue` criterion's
+  expected signal out of the trajectory and freeze it as an unearned fail on
+  the armed gate. This deferral is what lets `on_pass: stop` and a sibling's
+  `decide_within` compose safely on the same task.
+- **Verdict (fired-only gating).** A run the watcher actually **cut short** is
+  gated on the **armed subset only** — on a truncated trajectory the unarmed
+  criteria never had the chance to be satisfied, so they become **advisory**
+  and are clearly marked (report badge + per-criterion note + `stopped_early`
+  row). A run that **completes naturally** — armed or not — has a full
+  trajectory and gates strict-AND over the **full** set, as always: adding a
+  block (e.g. a `decide_within` fail-fast timeout) never changes the verdict
+  of a run it didn't cut. Precisely: the gate keys on the watcher having
+  **fired** (`result.early_stop is not None`), not on confirmed truncation —
+  an agent that ignores `should_stop`, or a stop that fires on the run's
+  final message, still gates armed-only. This is what lets one file serve both a `smoke`
+  flavor (blocks armed) and an `e2e` flavor (`stop_early: false` kill switch) —
   see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md). Verdict parity between the flavors
   is one-sided: a **fail-stop** is verdict-preserving (the deferral above
-  guarantees every pass-armed signal was allowed to resolve first), but a
+  guarantees every pass-capable signal was allowed to resolve first), but a
   **pass-stop** cuts the run once the positives are decided, so a distractor that
   would misfire on a *later* tool call is not observed (the frozen row scores as a
   clean pass) — the smoke flavor trades some precision completeness for budget, so
-  authoritative precision/recall belongs on the `stop_early: false` run.
+  authoritative precision/recall belongs on the kill-switched
+  (`run_limits.stop_early: false`) run.
 - **Fail-safe.** A live-verdict bug **fails open** to a full run (logged loudly) —
   it can never silently disable a criterion or cause a false early stop.
 - **Weighting.** `run_limits.stop_early_gate_threshold` (default `1.0`) is the
   minimum weighted score (`Σ weight·score / Σ weight`, over the armed subset)
   required to gate as a pass — both for the post-hoc verdict and for the live
-  stop rule itself. A fail-stop fires once the armed subset's **ceiling** (best
-  case: every still-undecided or already-passed criterion ends up scoring 1.0,
-  every live-failed one scores 0) can no longer reach the threshold — the gate
-  is mathematically guaranteed to fail regardless of how the trajectory
-  continues. A pass-stop fires once the pass-armed subset's **floor** (worst
-  case: every still-undecided one scores 0) already meets it. At the default
-  `1.0` both bounds collapse to the pre-weighting rules above exactly (any
-  single armed criterion's live-fail already drops the ceiling below 1.0, and
-  the floor only reaches 1.0 once every pass-armed criterion has actually
-  passed) — lowering it lets a low-weight armed criterion's failure be absorbed
-  without truncating the run, at the cost of the gate becoming a genuine
-  weighted average rather than a strict AND. **The armed weighted gate applies
-  whenever `stop_early: true` is set — one task config, one gate semantic —
-  regardless of whether the watcher actually fired a stop.** A task armed for
-  early-stop that instead completes naturally (the agent finishes, or
-  `max_turns` is hit, before the bound ever trips) is gated on the *same*
-  weighted armed-subset formula as an actual early stop, not the full-run
-  `all_criteria_passed`; only a task that never armed `stop_early` at all uses
-  the strict full-set gate. Each armed criterion's own `pass_threshold` still
-  decides whether it individually passed (converted to a binary 1.0/0.0
+  stop rules above. At the default `1.0` the bounds collapse to strict rules
+  exactly (any single armed criterion's effective fail already drops the
+  ceiling below 1.0, and the floor only reaches 1.0 once every `on_pass: stop`
+  criterion has actually passed) — lowering it lets a low-weight armed
+  criterion's failure **or timeout** be absorbed without truncating the run,
+  at the cost of the gate becoming a genuine weighted average rather than a
+  strict AND. **The armed weighted gate applies only to a run the watcher
+  actually cut** (fired-only gating, see *Verdict* above); a run that
+  completes naturally gates on the full-set `all_criteria_passed` regardless
+  of arming. Each armed criterion's own `pass_threshold`
+  still decides whether it individually passed (converted to a binary 1.0/0.0
   before weighting) — only the combination rule (weighted average vs strict
   AND) changes, which is what makes the `gate_threshold=1.0` default an exact
-  equivalence with the pre-weighting `all(...)` rule.
-- **Decision-step budget.** `max_steps_to_decide` (per armed criterion, only
-  on `skill_triggered` / `command_executed`, requires `stop_when`) caps how
-  many tool-call steps that criterion may spend still **undecided** before the
-  run gives up on it:
-
-  ```yaml
-  success_criteria:
-    - type: skill_triggered
-      description: "date-teller must activate within 5 steps"
-      skill_name: date-teller
-      expected_skill: date-teller
-      stop_when: pass
-      max_steps_to_decide: 5
-  ```
-
-  Once the cap is exceeded (checked AFTER the normal fail-/pass-stop checks
-  each round, so a criterion that decides on that very step is never
-  penalized), the watcher fires `reason: decision_budget_exceeded` and the run
-  is forced to `FinalStatus.FAILURE` outright — bypassing
-  `stop_early_gate_threshold`'s weighted gate entirely, since a criterion that
-  never reached a verdict has nothing meaningful to weigh against the others.
-  `None` (default) = no cap; the run relies solely on `run_limits.max_turns`.
-  The step count is **cumulative across every retry attempt** of the turn —
-  including an attempt that crashed or timed out before this criterion's own
-  investigation even began — so size the budget with that headroom in mind.
+  equivalence with the strict `all(...)` rule.
+- **Decision-step timeout.** `stop_early: {decide_within: N}`. If the
+  criterion is still **undecided**
+  after N tool-call steps, the watcher latches an **effective fail** for it and
+  the normal fail-stop ceiling rule applies — reported as
+  `reason: decision_budget_exceeded` so an analysis can tell a timeout from a
+  native misfire, but gated identically (a low-weight criterion's timeout that
+  cannot doom the gate is absorbed, and the run continues). The timeout is
+  checked after the criterion's own verdict each round, so one that decides on
+  that very step is never penalized. `None` (default) = no timeout; the run
+  relies solely on `run_limits.max_turns`. The step count is **cumulative
+  across every retry attempt** of the turn — including an attempt that crashed
+  or timed out before this criterion's own investigation even began — so size
+  the budget with that headroom in mind.
 
 Observability (every early-stopped run is flagged everywhere so analysis never
 compares a truncated run against a full one):
@@ -589,8 +612,7 @@ All criteria share these fields:
 | `description` | — | Human-readable description (required) |
 | `weight` | 1.0 | Relative importance for weighted score. `0` = **informational**: excluded from both the score and the pass/fail gate |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
-| `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`/`auto`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). `auto` arms whichever polarity this instance can decide (for dataset-fanned criteria whose positive/distractor role flips per row). See [`stop_early`](#stop_early-opt-in-early-stop). |
-| `max_steps_to_decide` | `null` | **Only on live-observable criteria** (`skill_triggered`, `command_executed`) — requires `stop_when` to be set. Caps the tool-call steps this armed criterion may spend still undecided before the run gives up and force-fails. See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early` | `null` | **Only on live-observable criteria** (`skill_triggered`, `command_executed`). Presence arms the criterion for early stop (no run-level switch needed): an effective fail may end the run (weighted ceiling rule, recall deferral). Keys: `on_pass: stop\|continue` (default `continue`), `decide_within: N` (timeout → effective fail, reported as `decision_budget_exceeded`). Inert triggers by design on instances that can't decide their polarity (dataset fan-out support). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `classification_match`, `skill_triggered`
@@ -600,7 +622,7 @@ All criteria share these fields:
 **Task success:** all *gating* criteria must score >= their `pass_threshold`. A
 criterion with `weight: 0` is informational — it is still checked, stored, and
 rendered in reports, but it neither contributes to the score nor fails the task.
-(A `weight: 0` criterion may not set `stop_when` or `suite_thresholds`: arming a
+(A `weight: 0` criterion may not set a `stop_early` block or `suite_thresholds`: arming a
 non-gating criterion for the early-stop or suite gate would let an
 "informational" check flip a run to failure.)
 
