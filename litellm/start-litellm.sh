@@ -13,7 +13,8 @@
 #   litellm/start-litellm.sh                 # foreground; Ctrl-C to stop
 # Overridable via env:
 #   LITELLM_PORT (default 4000), LITELLM_CONFIG, ENV_FILE, LITELLM_MASTER_KEY,
-#   LITELLM_SPEC / LITELLM_FASTAPI (proxy dep pins — see the launch comment below)
+#   LITELLM_SPEC / LITELLM_FASTAPI_SPEC (proxy dep pins — FULL pip specifiers,
+#   e.g. 'litellm[proxy]==1.95.0' / 'fastapi==0.140.0'; see the pin comment below)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -70,11 +71,31 @@ if [ -z "$AWS_BEARER_TOKEN_BEDROCK" ]; then
   echo "       Set it in .env or 'export AWS_BEARER_TOKEN_BEDROCK=...' before running." >&2
   exit 1
 fi
+# Pin the proxy deps. `uvx --from 'litellm[proxy]'` unpinned drifts: litellm 1.95.0
+# declares `fastapi>=0.136.3,<1.0`, so uvx grabs the newest fastapi — but fastapi
+# dropped `get_flat_dependant` (which litellm's proxy still imports) in a 0.140.x
+# PATCH (0.140.0 has it, 0.140.13 doesn't), so a range cap isn't enough and startup
+# dies with a (masked) `ModuleNotFoundError: proxy_server`. Pin fastapi to an exact
+# verified-good version and pin litellm so the sidecar can't silently re-break.
+# Both are FULL pip specifiers; override for an upgrade (set BOTH together):
+#   LITELLM_SPEC='litellm[proxy]==<ver>' LITELLM_FASTAPI_SPEC='fastapi==<ver>'.
+LITELLM_SPEC="${LITELLM_SPEC:-litellm[proxy]==1.95.0}"
+LITELLM_FASTAPI_SPEC="${LITELLM_FASTAPI_SPEC:-fastapi==0.140.0}"
+# Fail loud on a bare version (e.g. '0.140.0'): `uvx --with 0.140.0` would die with
+# an opaque 'package not found' instead of a pin error.
+for _spec in "$LITELLM_SPEC" "$LITELLM_FASTAPI_SPEC"; do
+  case "$_spec" in
+    *[=\<\>~]*) ;;
+    *) echo "ERROR: '$_spec' is not a pip specifier (expected e.g. fastapi==0.140.0)." >&2; exit 1 ;;
+  esac
+done
+
 echo "config     : $CONFIG"
 echo "region     : $AWS_REGION"
 echo "bedrock tok: set (${#AWS_BEARER_TOKEN_BEDROCK} chars)"
 echo "master key : $LITELLM_MASTER_KEY"
 echo "cost log   : $LITELLM_COST_LOG"
+echo "proxy deps : $LITELLM_SPEC + $LITELLM_FASTAPI_SPEC"
 
 # --- stop any stale proxy on the port (the classic 'creds-less running proxy') ---
 existing=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
@@ -97,14 +118,5 @@ Set these in coder_eval's .env (or shell) to use it:
 
 EOF
 
-# Pin the proxy deps. `uvx --from 'litellm[proxy]'` unpinned drifts: litellm 1.95.0
-# declares `fastapi>=0.136.3,<1.0`, so uvx grabs the newest fastapi — but fastapi
-# dropped `get_flat_dependant` (which litellm's proxy still imports) in a 0.140.x
-# PATCH (0.140.0 has it, 0.140.13 doesn't), so a range cap isn't enough and startup
-# dies with a (masked) `ModuleNotFoundError: proxy_server`. Pin fastapi to an exact
-# verified-good version and pin litellm so the sidecar can't silently re-break.
-# Override for an upgrade: LITELLM_SPEC='litellm[proxy]==<ver>' LITELLM_FASTAPI='fastapi==<ver>'.
-LITELLM_SPEC="${LITELLM_SPEC:-litellm[proxy]==1.95.0}"
-LITELLM_FASTAPI="${LITELLM_FASTAPI:-fastapi==0.140.0}"
-echo "proxy deps : $LITELLM_SPEC + $LITELLM_FASTAPI"
-exec uvx --from "$LITELLM_SPEC" --with "$LITELLM_FASTAPI" litellm --config "$CONFIG" --host 127.0.0.1 --port "$PORT"
+# Launch with the pinned deps resolved above (rationale in the pin comment).
+exec uvx --from "$LITELLM_SPEC" --with "$LITELLM_FASTAPI_SPEC" litellm --config "$CONFIG" --host 127.0.0.1 --port "$PORT"
