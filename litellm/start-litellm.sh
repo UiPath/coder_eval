@@ -12,7 +12,8 @@
 # Usage:
 #   litellm/start-litellm.sh                 # foreground; Ctrl-C to stop
 # Overridable via env:
-#   LITELLM_PORT (default 4000), LITELLM_CONFIG, ENV_FILE, LITELLM_MASTER_KEY
+#   LITELLM_PORT (default 4000), LITELLM_CONFIG, ENV_FILE, LITELLM_MASTER_KEY,
+#   LITELLM_SPEC / LITELLM_FASTAPI (proxy dep pins — see the launch comment below)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -105,4 +106,5 @@ EOF
 # Override for an upgrade: LITELLM_SPEC='litellm[proxy]==<ver>' LITELLM_FASTAPI='fastapi==<ver>'.
 LITELLM_SPEC="${LITELLM_SPEC:-litellm[proxy]==1.95.0}"
 LITELLM_FASTAPI="${LITELLM_FASTAPI:-fastapi==0.140.0}"
+echo "proxy deps : $LITELLM_SPEC + $LITELLM_FASTAPI"
 exec uvx --from "$LITELLM_SPEC" --with "$LITELLM_FASTAPI" litellm --config "$CONFIG" --host 127.0.0.1 --port "$PORT"
