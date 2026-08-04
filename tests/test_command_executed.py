@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from coder_eval.criteria.command_executed import _normalize_shell
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CommandExecutedCriterion
 from coder_eval.models.results import TurnRecord
@@ -750,3 +751,143 @@ class TestCommandExecutedCriterion:
                 min_count=5,
                 max_count=2,
             )
+
+
+class TestNormalizeShell:
+    """Unit tests for the shell-normalization helper."""
+
+    def test_unwraps_bash_lc_and_resolves_single_quotes(self):
+        raw = (
+            '/bin/bash -lc "uip is resources run list uipath-salesforce-slack '
+            "'curated_channels?types=public_channel,private_channel' --output json\""
+        )
+        assert _normalize_shell(raw) == (
+            "uip is resources run list uipath-salesforce-slack "
+            "curated_channels?types=public_channel,private_channel --output json"
+        )
+
+    def test_unwraps_escaped_double_quotes(self):
+        raw = '/bin/bash -lc "uip is resources run list \\"slack\\" \\"curated_channels\\""'
+        assert _normalize_shell(raw) == "uip is resources run list slack curated_channels"
+
+    def test_bare_command_is_just_requoted(self):
+        assert _normalize_shell("uip is resources run list slack 'curated_channels'") == (
+            "uip is resources run list slack curated_channels"
+        )
+
+    def test_shell_operators_survive_as_tokens(self):
+        raw = "uip maestro flow validate X.flow --output json && uip maestro flow format X.flow"
+        assert _normalize_shell(raw) == raw  # already unquoted; operators kept verbatim
+
+    def test_unbalanced_quotes_return_none(self):
+        assert _normalize_shell("echo 'unterminated") is None
+
+
+class TestShellQuotingNormalization:
+    """Patterns match regardless of how the agent quoted the command.
+
+    Regression for ``skill-flow-paginated-reference-lookup``: the agent
+    paginated ``uip is resources run list <slack> 'curated_channels?...'``
+    correctly (a sibling ``nextPage=`` criterion matched the same calls), but the
+    gating pagination criterion's pattern allowed only a bare or ``\\"``-escaped
+    token — the agent single-quoted the resource arg — so it scored 0.0 (false
+    negative). Normalizing the command before matching fixes the whole class
+    without touching any task YAML.
+    """
+
+    # The exact recorded shape: `bash -lc "..."` wrapper, resource arg in SINGLE
+    # quotes. Second call adds a nextPage token (still single-quoted).
+    _PAGE1 = (
+        '/bin/bash -lc "uip is resources run list uipath-salesforce-slack '
+        "'curated_channels?types=public_channel,private_channel' --connection-id abc --output json\""
+    )
+    _PAGE2 = (
+        '/bin/bash -lc "uip is resources run list uipath-salesforce-slack '
+        "'curated_channels?types=public_channel,private_channel' "
+        "--query 'nextPage=eyJwYWdlIjoyfQ' --output json\""
+    )
+    # The ORIGINAL, unchanged pattern from the task YAML: allows an optional
+    # backslash + optional DOUBLE quote, but no single quote.
+    _YAML_PATTERN = r'uip\s+is\s+resources\s+run\s+list\s+\\?"?uipath-salesforce-slack\\?"?\s+\\?"?curated_channels'
+
+    def test_single_quoted_calls_now_counted_with_original_pattern(self):
+        """The unchanged YAML pattern now counts both single-quoted calls."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": self._PAGE1}, tool_id="t1"),
+                    _make_command(tool_name="Bash", parameters={"command": self._PAGE2}, tool_id="t2"),
+                ]
+            )
+        ]
+        criterion = CommandExecutedCriterion(
+            description="paginated curated_channels list ran >1x",
+            tool_name="Bash",
+            command_pattern=self._YAML_PATTERN,
+            min_count=2,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+        assert "2/2" in result.details
+
+    def test_escaped_double_quote_form_still_matches(self):
+        """Backward compat: the escaping style the pattern anticipated still hits."""
+        sandbox = MockSandbox()
+        raw = (
+            '/bin/bash -lc "uip is resources run list \\"uipath-salesforce-slack\\" '
+            '\\"curated_channels?types=x\\" --output json"'
+        )
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": raw})])]
+        criterion = CommandExecutedCriterion(
+            description="curated_channels list ran",
+            tool_name="Bash",
+            command_pattern=self._YAML_PATTERN,
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_shell_operator_pattern_still_matches(self):
+        """`&&`/`|` patterns keep working — operators survive normalization."""
+        sandbox = MockSandbox()
+        cmd = "/bin/bash -lc 'uip maestro flow validate X.flow --output json && uip maestro flow format X.flow'"
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="validate then format",
+            tool_name="Bash",
+            command_pattern=r"uip\s+maestro\s+flow\s+validate.*&&.*uip\s+maestro\s+flow\s+format",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_unbalanced_quotes_fall_back_to_raw_without_crashing(self):
+        """A command shlex can't parse still matches against its raw text."""
+        sandbox = MockSandbox()
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": "echo 'unterminated"})])]
+        criterion = CommandExecutedCriterion(
+            description="echo ran",
+            tool_name="Bash",
+            command_pattern=r"echo\s+",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_negative_assertion_not_dodged_by_quoting(self):
+        """A quote-obfuscated retired call is still caught by a max_count=0 gate."""
+        sandbox = MockSandbox()
+        # `'uip' or users list` doesn't match `uip\s+or` on the raw text (a quote
+        # sits right after uip), but the normalized form `uip or users list` does.
+        obfuscated = "/bin/bash -lc \"'uip' or users list\""
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": obfuscated})])]
+        criterion = CommandExecutedCriterion(
+            description="must NOT use retired `uip or users list`",
+            tool_name="Bash",
+            command_pattern=r"uip\s+or\s+users\s+list",
+            min_count=0,
+            max_count=0,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 0.0

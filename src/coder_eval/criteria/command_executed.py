@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import shlex
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, LiveVerdict, register_criterion
@@ -18,6 +19,73 @@ logger = logging.getLogger(__name__)
 
 # Limit regex search input length to mitigate ReDoS on large command strings
 _MAX_PATTERN_SEARCH_LEN = 2000
+
+# Skip shell-normalization above this size — shlex is linear so this is only a
+# worst-case guard; real telemetry commands are far smaller.
+_MAX_NORMALIZE_LEN = 10 * _MAX_PATTERN_SEARCH_LEN
+
+# Shells whose `-c`/`-lc` payload is the real command we want to match against.
+_SHELL_WRAPPERS = {"bash", "sh"}
+_SHELL_CMD_FLAGS = {"-c", "-lc", "-lic"}
+
+
+def _normalize_shell(cmd_text: str) -> str | None:
+    """Quote-resolved, wrapper-stripped form of a shell command, or None.
+
+    ``command_pattern`` regexes are written against the *logical* command
+    (``uip is resources run list <key> <resource>``), but telemetry records the
+    raw ``bash -lc "..."`` wrapper — so whichever way the agent happened to quote
+    an argument (bare, ``"double"``, ``'single'``, ``\\"escaped\\"``) leaks into
+    the pattern. Authors then hand-model that escaping and get it subtly wrong
+    (e.g. allowing ``"`` but not ``'``), silently under-counting correct calls.
+
+    This unwraps a ``bash``/``sh -c`` wrapper and resolves shell quoting with
+    ``shlex`` so a pattern can match argv semantics regardless of quoting.
+    Shell operators (``&&``, ``|``, ``>``) survive as their own tokens, so
+    patterns that reference them keep working. Returns ``None`` when the text
+    can't be parsed (unbalanced quotes, heredocs); the caller keeps the raw
+    text as a haystack, so nothing that matched before can stop matching.
+    """
+    try:
+        tokens = shlex.split(cmd_text, posix=True)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    # Unwrap `bash -lc "<script>"` / `sh -c "<script>"`: the real command is the
+    # argument immediately after the -c/-lc flag.
+    if tokens[0].rsplit("/", 1)[-1] in _SHELL_WRAPPERS:
+        for i in range(1, len(tokens) - 1):
+            tok = tokens[i]
+            if tok in _SHELL_CMD_FLAGS:
+                try:
+                    inner = shlex.split(tokens[i + 1], posix=True)
+                except ValueError:
+                    return None
+                if inner:
+                    tokens = inner
+                break
+            if not tok.startswith("-"):
+                break  # first positional before any -c: not a command wrapper
+    return " ".join(tokens)
+
+
+def _match_haystacks(cmd: "CommandTelemetry", cmd_text: str) -> list[str]:
+    """Strings a pattern may match against for one command.
+
+    Always the raw ``cmd_text``; for Bash, additionally the quote-resolved
+    normalized form (see :func:`_normalize_shell`). Both are length-capped to
+    preserve the ReDoS bound. Matching is "either" — a pattern hits the command
+    if it matches ANY haystack — so normalization only ever repairs a missed
+    match, never removes one. Non-Bash tools serialize params to JSON, where
+    shell tokenization is meaningless, so they are never normalized.
+    """
+    haystacks = [cmd_text[:_MAX_PATTERN_SEARCH_LEN]]
+    if cmd.tool_name == "Bash" and 0 < len(cmd_text) <= _MAX_NORMALIZE_LEN:
+        normalized = _normalize_shell(cmd_text)
+        if normalized is not None and normalized != cmd_text:
+            haystacks.append(normalized[:_MAX_PATTERN_SEARCH_LEN])
+    return haystacks
 
 
 @register_criterion
@@ -60,16 +128,18 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             else:
                 cmd_text = json.dumps(cmd.parameters)
 
-            # Truncate to mitigate ReDoS on large command strings
-            if len(cmd_text) > _MAX_PATTERN_SEARCH_LEN:
-                cmd_text = cmd_text[:_MAX_PATTERN_SEARCH_LEN]
+            # Match the pattern against the raw command AND its quote-resolved
+            # form, so authors need not encode shell quoting/escaping (which they
+            # do inconsistently, silently under-counting correctly-quoted calls).
+            haystacks = _match_haystacks(cmd, cmd_text)
 
             # Filter by command pattern
-            if pattern is not None and not pattern.search(cmd_text):
+            if pattern is not None and not any(pattern.search(h) for h in haystacks):
                 continue
 
-            # Apply exclusion pattern (skip commands matching the exclusion)
-            if exclude_re is not None and exclude_re.search(cmd_text):
+            # Apply exclusion pattern (skip commands matching the exclusion).
+            # Same both-haystacks logic so exclusion can't be dodged by quoting.
+            if exclude_re is not None and any(exclude_re.search(h) for h in haystacks):
                 continue
 
             # Build a display label for the matched command
