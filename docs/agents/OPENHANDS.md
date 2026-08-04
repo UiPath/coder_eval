@@ -81,8 +81,10 @@ allowlist, so they are forwarded automatically under the Docker driver.
 
 ### Command line
 
+Run any task under OpenHands by overriding the agent type:
+
 ```bash
-coder-eval run tasks/agents/openhands_hello_world.yaml --type openhands
+coder-eval run tasks/hello_date.yaml --type openhands --model openrouter/z-ai/glm-5.2
 ```
 
 Or override the agent type for every task in an experiment:
@@ -169,6 +171,13 @@ every other agent.
    harnesses, use the proxy path.
 4. **No sandbox isolation of its own.** Tools run on the host; rely on the Docker
    driver for untrusted tasks (see above).
+5. **`max_turns` exhaustion is reported as a crash, not `max_turns_exhausted`.** When
+   the run hits `max_iteration_per_run` (coder_eval's `run_limits.max_turns`) without
+   the agent calling `finish`, the SDK ends in the same `ERROR` status it uses for a
+   genuine failure — only the log message differs — so this backend classifies it as a
+   crash (the orchestrator may then retry). Claude Code instead returns a clean turn
+   with `max_turns_exhausted=True`. Set a generous `max_turns` for OpenHands runs so
+   the cap is not hit on legitimate long trajectories.
 
 ## Benchmark validity (harness-neutral criteria)
 

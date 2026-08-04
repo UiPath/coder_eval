@@ -672,6 +672,24 @@ class TestCommunicateCrash:
         assert agent.pending_turn is not None
         assert agent.pending_turn.crashed is True
 
+    @pytest.mark.parametrize("status", ["STUCK", "WAITING_FOR_CONFIRMATION", "IDLE", "PAUSED"])
+    async def test_non_finished_terminal_status_crashes(self, monkeypatch, tmp_path, status):
+        """ALLOWLIST classification: any terminal status other than FINISHED (that we
+        did not ourselves cause via pause) is a crash — never a silent COMPLETED. This
+        includes STUCK, WAITING_FOR_CONFIRMATION, an unexpected IDLE, and a PAUSED we
+        did NOT trigger (no timeout / no should_stop)."""
+
+        def factory(**kw):
+            return _FakeConversation(events=[], status=status, **kw)
+
+        _install_fake_sdk(monkeypatch, factory)
+        agent = await _started_agent(tmp_path)
+
+        with pytest.raises(AgentCrashError):
+            await agent.communicate("do it")
+        assert agent.pending_turn is not None
+        assert agent.pending_turn.crashed is True
+
 
 class TestCommunicateTimeout:
     async def test_timeout_pauses_and_raises(self, monkeypatch, tmp_path):

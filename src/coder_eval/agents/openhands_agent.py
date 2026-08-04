@@ -97,14 +97,16 @@ _FILE_EDITOR_TOOL = "file_editor"
 # Conversation's ``max_iteration_per_run`` constructor kwarg (NOT a run() arg).
 _DEFAULT_MAX_ITERATIONS = 500
 
-# ConversationExecutionStatus NAMES we crash-classify on (FINISHED → clean;
-# PAUSED → our own timeout/early-stop pause, flagged separately on the turn state;
-# ERROR / STUCK → the run failed on its own → crash). Mirrored as plain strings so
-# this module needs no SDK import at module load (the SDK is an optional extra; only
-# start()/_run_conversation touch it). Named constants — not bare literals — so a
-# status comparison is not mistaken for a coder_eval FinalStatus denylist (CE018).
-_STATUS_ERROR = "ERROR"
-_STATUS_STUCK = "STUCK"
+# The ONE terminal ConversationExecutionStatus NAME that is a clean, agent-completed
+# turn (the agent called `finish`). Classification is an ALLOWLIST: a turn is clean iff
+# the status is FINISHED, or WE caused a PAUSED (timeout / cooperative stop). ANY other
+# value — ERROR, STUCK, WAITING_FOR_CONFIRMATION, an unexpected IDLE/RUNNING/DELETING,
+# a PAUSED we did not cause, or a future SDK status — is crash-classified, so a
+# non-terminal run can never silently score as COMPLETED. A plain string so this module
+# needs no SDK import at module load (the SDK is an optional extra; only
+# start()/_run_conversation touch it). A named constant — not a bare literal — so the
+# comparison is not mistaken for a coder_eval FinalStatus denylist (CE018).
+_STATUS_FINISHED = "FINISHED"
 
 
 @AgentRegistry.register(AgentKind.OPENHANDS, OpenHandsAgentConfig)
@@ -414,15 +416,23 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
         conversation.run()
         state.record_final_status(conversation)
         state.usage = self._token_usage_from_openhands(conversation)
-        # FINISHED → clean; PAUSED → our own pause (timeout / cooperative stop, already
-        # flagged on the state); ERROR / STUCK → the run failed on its own, so surface
-        # it as a crash (unless we already paused it ourselves).
-        if state.final_status in (_STATUS_ERROR, _STATUS_STUCK) and not (state.timeout_hit or state.stopped_early_hit):
-            raise RuntimeError(f"OpenHands run ended in status {state.final_status}")
-        # NOTE: teardown is deliberately NOT done here. close() is owned by the single
-        # main-thread `finally` in communicate() (_close_conversation), so it can never
-        # race a concurrent close from this worker thread (the drain in communicate()
-        # guarantees this worker has fully returned before that close runs).
+        # ALLOWLIST classification: a turn is clean iff the terminal status is FINISHED,
+        # or WE caused a PAUSED (timeout / cooperative stop). When we paused, the outer
+        # communicate() handlers own the outcome (timeout raise / clean STOPPED_EARLY),
+        # so we don't raise here. Otherwise ANY status other than FINISHED — ERROR,
+        # STUCK, WAITING_FOR_CONFIRMATION, or an unexpected IDLE/RUNNING/DELETING (or a
+        # future SDK status), including a PAUSED we did NOT cause — is a crash, so a
+        # non-terminal run can never silently score as COMPLETED (denylist → allowlist).
+        we_paused = state.timeout_hit or state.stopped_early_hit
+        if not we_paused and state.final_status != _STATUS_FINISHED:
+            raise RuntimeError(f"OpenHands run ended in status {state.final_status or '(unknown)'}")
+        # NOTE: teardown is deliberately NOT done here. close() is driven from the
+        # main-thread `finally` in communicate() (_close_conversation); the drain there
+        # guarantees this worker has fully returned before that close runs, so it never
+        # closes mid-run from this thread. The task-level watchdog may ALSO call close()
+        # via kill_sync() from its own OS thread — that's safe because _close_conversation
+        # is idempotent (null-and-suppress) with delete_on_close=False, so a concurrent
+        # close is at worst a redundant no-op, never data loss.
 
     def _token_usage_from_openhands(self, conversation: Any) -> TokenUsage | None:
         """Map OpenHands' accumulated ``Metrics`` onto coder_eval's ``TokenUsage``.
