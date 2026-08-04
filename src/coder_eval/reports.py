@@ -183,6 +183,7 @@ def early_stop_gate_note(reason: str) -> str:
         member = EarlyStopReason(reason)
     except ValueError:
         return generic
+    note = generic
     match member:
         case EarlyStopReason.DECISION_BUDGET_EXCEEDED:
             # The deciding criterion timed out undecided (an effective fail); it
@@ -192,7 +193,7 @@ def early_stop_gate_note(reason: str) -> str:
                 "armed criterion); gated on armed criteria only; other criteria are advisory"
             )
         case EarlyStopReason.CRITERION_PASSED | EarlyStopReason.CRITERION_FAILED:
-            note = generic
+            pass  # the generic note
         case _:
             assert_never(member)
     return note
