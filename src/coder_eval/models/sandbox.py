@@ -256,15 +256,13 @@ class DockerDriverConfig(BaseModel):
             # selects the Gemini model when agent.model is unset.
             "GEMINI_API_KEY",
             "ANTIGRAVITY_MODEL",
-            # OpenHands agent auth/routing — the OpenHands SDK's LiteLLM resolves the
-            # provider from the agent.model prefix and reads the matching key from the
-            # environment: openrouter/… → OPENROUTER_API_KEY, openai/… → OPENAI_API_KEY
-            # (ANTHROPIC_API_KEY / AWS_* are already forwarded above). OPENHANDS_BASE_URL
-            # is the optional LiteLLM-proxy endpoint override; without it, provider calls
-            # go direct. OPENHANDS_MODEL selects the model when agent.model is unset.
+            # OpenHands agent auth/routing (direct-provider only) — the OpenHands SDK's
+            # LiteLLM resolves the provider from the agent.model prefix and reads the
+            # matching key from the environment: openrouter/… → OPENROUTER_API_KEY,
+            # openai/… → OPENAI_API_KEY (ANTHROPIC_API_KEY / AWS_* are already forwarded
+            # above). OPENHANDS_MODEL selects the model when agent.model is unset.
             "OPENAI_API_KEY",
             "OPENROUTER_API_KEY",
-            "OPENHANDS_BASE_URL",
             "OPENHANDS_MODEL",
             # User HOME used to keep ~/.claude resolution symmetric with the host.
             # See docs/DOCKER_ISOLATION.md "HOME is forwarded by default" for the

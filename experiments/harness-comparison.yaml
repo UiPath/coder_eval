@@ -19,12 +19,6 @@
 # CONSTRUCTION) — EXCLUDE it / treat it as N/A for cross-harness scoring, or the
 # leaderboard measures "Claude-shapedness" rather than task quality. Auditing the
 # UiPath criteria for harness-neutrality is a separate prerequisite workstream.
-#
-# ── OpenRouter data-policy caveat (see docs/agents/OPENHANDS.md) ──────────────────
-# Some OpenRouter accounts 404 DIRECT calls under a data-policy guardrail. If so,
-# route the OpenHands OSS cells through the LiteLLM proxy: set
-# OPENHANDS_BASE_URL=<proxy> and use a `litellm_proxy/<alias>` model instead of the
-# `openrouter/…` id below (the `openhands-proxy` variant shows the shape).
 
 experiment_id: harness-comparison
 description: "Compare harnesses (claude-code / openhands) on the same tasks, incl. an isolate-the-model cell"
@@ -44,19 +38,11 @@ variants:
       model: claude-sonnet-4-6
 
   # OpenHands driving an OSS model directly via OpenRouter (priced: z-ai/glm-5.2).
-  # Requires OPENROUTER_API_KEY; leave OPENHANDS_BASE_URL unset for direct calls.
+  # Requires OPENROUTER_API_KEY.
   - variant_id: openhands-glm-direct
     agent:
       type: openhands
       model: openrouter/z-ai/glm-5.2
-
-  # Same OSS model via the LiteLLM proxy (governance / uniform actual-cost / the
-  # working path when the OpenRouter account blocks direct calls). Set
-  # OPENHANDS_BASE_URL=<your-litellm-proxy> and swap in your proxy's alias.
-  - variant_id: openhands-glm-proxy
-    agent:
-      type: openhands
-      model: litellm_proxy/z-ai/glm-5.2
 
   # --- Isolate-the-model cell (SAME model, different harness) ---------------------
   # Claude-Code-Sonnet vs OpenHands-Sonnet: the harness is the only variable, so this

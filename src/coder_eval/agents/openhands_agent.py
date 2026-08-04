@@ -2,13 +2,12 @@
 
 The backend drives the OpenHands ``Conversation`` (``openhands-sdk`` +
 ``openhands-tools``) against any model reachable through OpenHands' bundled
-LiteLLM. The provider is resolved from the ``agent.model`` prefix — LiteLLM reads
-the matching key from the environment (``anthropic/…`` → ``ANTHROPIC_API_KEY``,
-``openai/…`` → ``OPENAI_API_KEY``, ``openrouter/…`` → ``OPENROUTER_API_KEY``,
-``bedrock/…`` → ``AWS_*``, ``litellm_proxy/<alias>`` → ``OPENHANDS_BASE_URL``) with
-no per-provider branch in this module. This makes OpenHands the model-agnostic
-"universal harness" for isolate-the-model comparisons. ``OPENHANDS_BASE_URL`` is
-an OPTIONAL endpoint override, used only for the LiteLLM-proxy path.
+LiteLLM. The harness is **direct-provider only**: the provider is resolved from
+the ``agent.model`` prefix and LiteLLM reads the matching key from the environment
+(``anthropic/…`` → ``ANTHROPIC_API_KEY``, ``openai/…`` → ``OPENAI_API_KEY``,
+``openrouter/…`` → ``OPENROUTER_API_KEY``, ``bedrock/…`` → ``AWS_*``) with no
+per-provider branch and no endpoint override in this module. This makes OpenHands
+the model-agnostic "universal harness" for isolate-the-model comparisons.
 
 NO OpenHands-side sandbox: the SDK's ``LocalWorkspace`` runs tools (terminal /
 file_editor) directly on the host. coder_eval's own per-run sandbox — a docker
@@ -46,7 +45,6 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
@@ -97,6 +95,47 @@ _FILE_EDITOR_TOOL = "file_editor"
 # Conversation's ``max_iteration_per_run`` constructor kwarg (NOT a run() arg).
 _DEFAULT_MAX_ITERATIONS = 500
 
+# OpenRouter is a multi-provider router. On the DIRECT path (no LiteLLM proxy) we
+# carry the same provider-routing controls the proxy YAML sets, via LiteLLM's
+# request-body passthrough. Two things ride here for ``openrouter/*`` models:
+#   * ``usage.include: true`` — makes OpenRouter return the REAL routed-provider
+#     ``usage.cost`` (+ cache tokens) in the response body; LiteLLM stashes it where
+#     OpenHands' Telemetry reads it FIRST, so ``accumulated_cost`` becomes the actual
+#     bill instead of LiteLLM's near-zero OpenRouter estimate. Unconditional for the
+#     prefix — it is the whole reason direct-path cost is trustworthy.
+#   * ``provider`` — cheapest-first with bounded fallback so a saturated provider
+#     no longer 429s with nowhere to go; ``only`` pins a vetted, data-policy-compliant
+#     allowlist per model. The lists MIRROR ``litellm/litellm-config.yaml`` (the proxy
+#     path's SSOT for the same models); keep them in sync when either changes.
+# Keyed by the BARE OpenRouter slug (the model id with the ``openrouter/`` prefix
+# stripped). A model absent from the map still routes (unpinned ``sort``+fallback).
+_OPENROUTER_PROVIDER_ROUTING: dict[str, list[str]] = {
+    "moonshotai/kimi-k3": ["baseten", "together", "fireworks"],
+    "z-ai/glm-5.2": ["novita", "streamlake", "gmicloud", "alibaba"],
+    "deepseek/deepseek-v4-pro": ["streamlake", "gmicloud", "novita", "alibaba"],
+}
+
+
+def _openrouter_extra_body(model: str) -> dict[str, Any] | None:
+    """Build ``litellm_extra_body`` for a direct ``openrouter/*`` call, else None.
+
+    Returns None for non-OpenRouter prefixes (``anthropic/…``, ``openai/…``,
+    ``bedrock/…``, ``litellm_proxy/…``) — those providers do not accept OpenRouter's
+    ``provider``/``usage`` block. For ``openrouter/*`` it always sets ``usage.include``
+    (real-cost recovery) and a cheapest-first, fallback-enabled ``provider`` block,
+    adding an ``only`` allowlist when the slug is in ``_OPENROUTER_PROVIDER_ROUTING``.
+    """
+    prefix = "openrouter/"
+    if not model.startswith(prefix):
+        return None
+    slug = model[len(prefix) :]
+    provider: dict[str, Any] = {"sort": "price", "allow_fallbacks": True}
+    allowlist = _OPENROUTER_PROVIDER_ROUTING.get(slug)
+    if allowlist:
+        provider["only"] = list(allowlist)
+    return {"usage": {"include": True}, "provider": provider}
+
+
 # The ONE terminal ConversationExecutionStatus NAME that is a clean, agent-completed
 # turn (the agent called `finish`). Classification is an ALLOWLIST: a turn is clean iff
 # the status is FINISHED, or WE caused a PAUSED (timeout / cooperative stop). ANY other
@@ -117,36 +156,26 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
     # and calls ``pause()``, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
 
-    # ``LLM.extra_headers`` accepts per-request headers (verified against the installed SDK), so
-    # the LiteLLM-proxy path can forward the ``x-ce-*`` cost-correlation headers for
-    # the per-run actual-cost join. The direct-provider default carries no tags and
-    # uses OpenHands' native LiteLLM cost estimate.
-    supports_cost_log_tags: ClassVar[bool] = True
-
     def __init__(
         self,
         config: OpenHandsAgentConfig,
         route: ApiRoute | None = None,
         *,
         instance_name: str = "openhands",
-        cost_log_tags: dict[str, str] | None = None,
     ):
         """Initialize the OpenHands agent.
 
         Args:
             config: Agent configuration.
             route: API routing configuration (unused — OpenHands owns model-reaching
-                via the ``agent.model`` provider prefix + optional ``OPENHANDS_BASE_URL``;
-                kept for interface compatibility, mirroring Codex/Antigravity).
+                via the ``agent.model`` provider prefix; kept for interface
+                compatibility, mirroring Codex/Antigravity).
             instance_name: Short label used to prefix this instance's log records.
-            cost_log_tags: Optional ``x-ce-*`` cost-correlation headers forwarded to
-                the LiteLLM proxy for the per-run actual-cost join (proxy path only).
         """
         self.config = config
         self.route = route or DirectRoute()
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
-        self._cost_log_tags = dict(cost_log_tags or {})
         # Live handle to the in-flight Conversation, set at the top of communicate()
         # and cleared in its finally. The watchdog / kill paths pause + close it.
         self._active_conversation: Any = None
@@ -158,20 +187,25 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
         """Resolve the model: task/CLI ``agent.model`` wins, else OPENHANDS_MODEL.
 
         Carries the LiteLLM provider prefix intact (e.g. ``openrouter/z-ai/glm-5.2``,
-        ``anthropic/…``, ``litellm_proxy/<alias>``). May be None when nothing is
-        configured — surfaced as a clear error at communicate() rather than sending
-        model=None to the SDK.
+        ``anthropic/…``). May be None when nothing is configured — surfaced as a clear
+        error at communicate() rather than sending model=None to the SDK.
         """
         return self.config.model or settings.openhands_model
 
     @staticmethod
-    def _resolve_base_url() -> str | None:
-        """Optional LiteLLM-proxy endpoint override from OPENHANDS_BASE_URL, or None.
+    def _reject_proxy_model(model: str) -> None:
+        """Fail fast on a ``litellm_proxy/*`` model id (the proxy path was removed).
 
-        Left unset for direct provider calls (LiteLLM resolves the endpoint from the
-        model prefix); set only for the ``litellm_proxy/<alias>`` path.
+        OpenHands is direct-provider only; a ``litellm_proxy/<alias>`` id would reach
+        LiteLLM with no endpoint and fail obscurely deep in the SDK. Reject it up front
+        with an actionable message instead.
         """
-        return os.getenv("OPENHANDS_BASE_URL") or None
+        if model.startswith("litellm_proxy/"):
+            raise RuntimeError(
+                "The litellm_proxy/* model prefix is not supported by the OpenHands agent "
+                + "(the proxy path was removed). Use a direct provider prefix, e.g. "
+                + "'openrouter/z-ai/glm-5.2' or 'anthropic/claude-sonnet-4-6'."
+            )
 
     async def start(
         self,
@@ -221,6 +255,10 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
                 len(self.config.plugins),
             )
 
+        # Best-effort early feedback; communicate() re-checks authoritatively.
+        if model := self._effective_model():
+            self._reject_proxy_model(model)
+
         self._log.debug("OpenHands agent ready (model=%s)", self._effective_model())
 
     async def communicate(
@@ -260,6 +298,7 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
                 "No model configured for the OpenHands agent. "
                 + "Set agent.model (e.g. 'openrouter/z-ai/glm-5.2'), --model, or OPENHANDS_MODEL."
             )
+        self._reject_proxy_model(model)
 
         self._begin_turn()
         turn_start_time = time.monotonic()
@@ -391,13 +430,13 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
         """
         from openhands.sdk import LLM, Agent, Conversation, Tool
 
-        base_url = self._resolve_base_url()
-        # Forward cost-correlation headers ONLY on the proxy path (tags present).
-        extra_headers = dict(self._cost_log_tags) if self._cost_log_tags else None
+        # Direct openrouter/* calls carry usage.include (real-cost recovery) + provider
+        # routing via the request body; empty for every other prefix — {} is the SDK
+        # field's default. See _openrouter_extra_body.
+        litellm_extra_body = _openrouter_extra_body(model) or {}
         llm = LLM(
             model=model,
-            base_url=base_url,
-            extra_headers=extra_headers,
+            litellm_extra_body=litellm_extra_body,
             usage_id=state.turn_id,
         )
         sdk_agent = Agent(llm=llm, tools=[Tool(name=_TERMINAL_TOOL), Tool(name=_FILE_EDITOR_TOOL)])
@@ -442,8 +481,10 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
         is ``prompt_tokens - cache_read - cache_write`` (guarded with ``max(0, …)``).
         coder_eval's three input buckets are mutually exclusive and SUM to the full
         prompt; cost bills the uncached slice at the input rate. The turn cost is
-        OpenHands' native LiteLLM estimate (``accumulated_cost``); when the model is
-        unpriced in our rate card we still keep that estimate (never zero it).
+        OpenHands' ``accumulated_cost`` — the REAL routed-provider cost for
+        ``openrouter/*`` (recovered via ``usage.include``), else the native LiteLLM
+        estimate; when the model is unpriced in our rate card we still keep it
+        (never zero it).
         """
         try:
             metrics = conversation.conversation_stats.get_combined_metrics()
@@ -478,8 +519,9 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
             cache_creation_input_tokens=cache_write,
             cache_read_input_tokens=cache_read,
             # OpenHands' native LiteLLM cost estimate is authoritative for this
-            # backend (no proxy actual-cost join in v1). Keep it even when the model
-            # is unpriced in our rate card.
+            # backend (for openrouter/* it is the REAL routed-provider cost recovered
+            # via usage.include; see _openrouter_extra_body). Keep it even when the
+            # model is unpriced in our rate card.
             total_cost_usd=cost,
         )
 
@@ -543,17 +585,11 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
             conversation.close()
 
     def get_environment_info(self) -> dict[str, Any]:
-        """Record the resolved OpenHands routing so runs are auditable/comparable.
+        """Record the resolved OpenHands model so runs are auditable/comparable.
 
-        The model (with its provider prefix) is always recorded; the proxy host is
-        added only when ``OPENHANDS_BASE_URL`` is set (host only, not the full URL,
-        to avoid leaking any embedded credentials).
+        The model (with its provider prefix) is always recorded.
         """
-        info: dict[str, Any] = {"openhands_model": self._effective_model() or ""}
-        base_url = self._resolve_base_url()
-        if base_url:
-            info["openhands_base_url_host"] = urlparse(base_url).hostname or ""
-        return info
+        return {"openhands_model": self._effective_model() or ""}
 
 
 class _OpenHandsTurnState:
@@ -675,9 +711,17 @@ class _OpenHandsTurnState:
         self._blocks.append(ContentBlock(block_type="tool_use", sequence=0, tool_use_id=tool_call_id))
 
     def _on_observation(self, event: Any) -> None:
-        """Resolve the pending tool for a successful ObservationEvent."""
-        action_id = getattr(event, "action_id", None)
-        self._close_tool(action_id, errored=False, result=self._observation_text(event), error_message=None)
+        """Resolve the pending tool for a successful ObservationEvent.
+
+        Join on ``tool_call_id`` — NOT ``action_id``. On the OpenHands SDK an
+        ``ObservationEvent`` carries BOTH: ``action_id`` is the *EventID of the
+        originating ActionEvent*, while ``tool_call_id`` is the tool-call id the tool
+        was opened under (``_on_action`` keys ``_open_tools`` by that). Matching on
+        ``action_id`` never resolves the tool, so every tool would orphan as
+        ``result_status="unknown"``.
+        """
+        tool_call_id = getattr(event, "tool_call_id", None)
+        self._close_tool(tool_call_id, errored=False, result=self._observation_text(event), error_message=None)
 
     def _on_agent_error(self, event: Any) -> None:
         """A tool FAILURE arrives as a separate AgentErrorEvent — close it as ERROR."""

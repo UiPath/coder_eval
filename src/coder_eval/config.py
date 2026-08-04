@@ -141,8 +141,7 @@ class Settings(BaseSettings):
     # OPENHANDS_MODEL is the fallback model used when a task doesn't pin agent.model;
     # it carries the LiteLLM provider prefix (e.g. openrouter/z-ai/glm-5.2). The
     # provider key (ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / AWS_*)
-    # is resolved by LiteLLM from that prefix. OPENHANDS_BASE_URL (optional proxy
-    # override) is read directly via os.getenv in the agent, not mirrored here.
+    # is resolved by LiteLLM from that prefix (direct-provider only).
     openhands_model: str | None = None
 
     # Logging

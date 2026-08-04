@@ -123,3 +123,4 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
+- [ ] OpenHands `_OPENROUTER_PROVIDER_ROUTING` (openhands_agent.py) duplicates the `provider.only` lists in `litellm/litellm-config.yaml`, synced only by a comment — a whole-tree lint rule could diff the two, but requires a YAML-vs-Python parse (>30 min). — caught in final review of c/2026-08-04-openhands-drop-litellm-proxy-path.md

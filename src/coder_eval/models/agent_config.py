@@ -283,11 +283,10 @@ class OpenHandsAgentConfig(BaseAgentConfig):
 
     Runs via the ``openhands-sdk`` + ``openhands-tools`` packages, driving
     OSS/open-weight models (and any provider) through OpenHands' internal LiteLLM.
-    The provider is resolved from the ``model`` prefix (``anthropic/…`` →
-    ``ANTHROPIC_API_KEY``, ``openrouter/…`` → ``OPENROUTER_API_KEY``, etc.); an
-    optional ``OPENHANDS_BASE_URL`` overrides the endpoint for the LiteLLM-proxy
-    path. ``model`` defaults (when unset on the task / ``--model`` /
-    ``OPENHANDS_MODEL``) are resolved at the agent layer.
+    The harness is direct-provider only: the provider is resolved from the ``model``
+    prefix (``anthropic/…`` → ``ANTHROPIC_API_KEY``, ``openrouter/…`` →
+    ``OPENROUTER_API_KEY``, etc.). ``model`` defaults (when unset on the task /
+    ``--model`` / ``OPENHANDS_MODEL``) are resolved at the agent layer.
     """
 
     type: Literal[AgentKind.OPENHANDS]  # type: ignore[assignment]

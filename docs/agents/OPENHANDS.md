@@ -1,8 +1,8 @@
 ---
 description: >-
   Run the OpenHands Software Agent SDK as the agent under evaluation in Coder
-  Eval — installation, the model-prefix provider routing, the optional LiteLLM
-  proxy, and how its telemetry maps to sandboxed, weighted scoring.
+  Eval — installation, the model-prefix provider routing (direct-provider only),
+  and how its telemetry maps to sandboxed, weighted scoring.
 ---
 
 # Running OpenHands in Coder Eval
@@ -15,8 +15,9 @@ evaluation. Set `agent.type: openhands` in a task and the rest of the framework
 
 OpenHands is a **model-agnostic** harness: it drives any model reachable through
 its bundled LiteLLM, resolving the provider from the `agent.model` **prefix**
-(`anthropic/…`, `openai/…`, `openrouter/…`, `bedrock/…`, `litellm_proxy/…`) with
-no per-provider branch in Coder Eval. This makes it the "universal harness" for
+(`anthropic/…`, `openai/…`, `openrouter/…`, `bedrock/…`) with no per-provider
+branch in Coder Eval. It is **direct-provider only** — each provider is called
+natively, with no proxy sidecar. This makes it the "universal harness" for
 **isolate-the-model** comparisons — e.g. Claude-Code-on-Sonnet vs
 OpenHands-on-Sonnet, or Codex-on-GPT vs OpenHands-on-GPT — where the harness (not
 the model) is the variable. It is the recommended way to evaluate OSS/open-weight
@@ -53,29 +54,22 @@ reads the matching key from the environment automatically — there is **no sing
 | `openai/gpt-5.4`              | `OPENAI_API_KEY`       |
 | `openrouter/z-ai/glm-5.2`     | `OPENROUTER_API_KEY`   |
 | `bedrock/…`                   | `AWS_*`                |
-| `litellm_proxy/<alias>`       | `OPENHANDS_BASE_URL` (proxy) |
 
-Set the one that matches your grid in `.env` (or the environment). All of these,
-plus `OPENHANDS_BASE_URL` and `OPENHANDS_MODEL`, are on the container env-passthrough
-allowlist, so they are forwarded automatically under the Docker driver.
+Set the one that matches your grid in `.env` (or the environment). These, plus
+`OPENHANDS_MODEL`, are on the container env-passthrough allowlist, so they are
+forwarded automatically under the Docker driver.
 
-### Direct vs proxy — a per-experiment env choice, not a code branch
+### Cost — direct-provider only
 
-- **Direct (default).** Leave `OPENHANDS_BASE_URL` unset. Each provider is called
-  natively; cost is OpenHands' native LiteLLM **estimate**; no sidecar.
-- **Proxy (opt-in).** Set `OPENHANDS_BASE_URL` to a LiteLLM proxy and use a
-  `litellm_proxy/<alias>` model. Use this for a single egress point (governance /
-  EU-residency / allowlist / gateway caching), or for uniform actual-cost across
-  harnesses. Coder Eval's `x-ce-*` cost-correlation headers are forwarded to the
-  proxy on this path only (the direct path uses the native estimate).
+Each provider is called natively; there is no proxy sidecar. Cost is OpenHands'
+native LiteLLM estimate — except for `openrouter/*`, where the **real**
+routed-provider cost is recovered via `usage.include` in the request body (not the
+near-zero LiteLLM OpenRouter estimate).
 
 > **Operational caveat (OpenRouter data policy).** Some OpenRouter accounts enforce
-> a global data-policy/privacy guardrail that **404s _direct_ calls** ("No endpoints
+> a global data-policy/privacy guardrail that **404s direct calls** ("No endpoints
 > available matching your guardrail restrictions and data policy"). If you hit this,
-> either relax the account privacy policy at `openrouter.ai/settings/privacy`, or
-> route through the **LiteLLM proxy** (`OPENHANDS_BASE_URL` + a `litellm_proxy/…`
-> model), which is unaffected. The proxy path is the reliable default until the
-> account policy is relaxed.
+> relax the account privacy policy at `openrouter.ai/settings/privacy`.
 
 ## Usage
 
@@ -150,8 +144,9 @@ every other agent.
   fresh/uncached slice is `prompt_tokens − cache_read − cache_write`; `cache_write`
   maps to `cache_creation`, `cache_read` to `cache_read`, and `completion_tokens`
   (which already includes reasoning, billed as output by LiteLLM) to `output`. The
-  turn cost is OpenHands' native LiteLLM **estimate** (`accumulated_cost`), kept even
-  for a model our rate card can't price. OpenHands surfaces usage only as a post-run
+  turn cost is OpenHands' `accumulated_cost` — for `openrouter/*` this is the **real**
+  routed-provider cost (recovered via `usage.include`), otherwise the native LiteLLM
+  estimate — kept even for a model our rate card can't price. OpenHands surfaces usage only as a post-run
   aggregate (no per-generation token stream in events), so the whole turn total is
   booked as the `EventCollector`'s single reconciliation entry — the transcript token
   buckets still sum exactly to the turn total.
@@ -166,9 +161,9 @@ every other agent.
    enforced by Coder Eval's `ThreadedWatchdog`, which calls `conversation.pause()`.
    A cooperative pause may not stop a non-yielding native call promptly;
    `kill_sync()` best-effort `close()` is the backstop.
-3. **Native cost estimate.** The direct path records OpenHands' LiteLLM cost
-   *estimate*, not a proxy-measured actual cost. For uniform actual-cost across
-   harnesses, use the proxy path.
+3. **Cost fidelity varies by provider.** For `openrouter/*` the recorded cost is the
+   real routed-provider cost (recovered via `usage.include`); for every other provider
+   it is OpenHands' native LiteLLM *estimate*.
 4. **No sandbox isolation of its own.** Tools run on the host; rely on the Docker
    driver for untrusted tasks (see above).
 5. **`max_turns` exhaustion is reported as a crash, not `max_turns_exhausted`.** When
@@ -194,8 +189,8 @@ separate workstream.
 The `docker` driver works the same as for other agents (see
 [Docker Isolation](../DOCKER_ISOLATION.md)). Install the `[openhands]` extra into
 the image, and the provider keys (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
-`OPENROUTER_API_KEY`), `OPENHANDS_BASE_URL`, and `OPENHANDS_MODEL` are on the
-container env passthrough allowlist, so they are forwarded automatically.
+`OPENROUTER_API_KEY`) and `OPENHANDS_MODEL` are on the container env passthrough
+allowlist, so they are forwarded automatically.
 
 ## References
 

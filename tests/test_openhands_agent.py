@@ -126,11 +126,41 @@ class TestOpenHandsEnvPassthroughAllowlist:
         from coder_eval.models.sandbox import DockerDriverConfig
 
         allowlist = DockerDriverConfig().env_passthrough
-        for var in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENHANDS_BASE_URL", "OPENHANDS_MODEL"):
+        for var in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENHANDS_MODEL"):
             assert var in allowlist, f"{var} missing from default env_passthrough allowlist"
+        # The proxy endpoint override was removed — lock it out of the allowlist.
+        assert "OPENHANDS_BASE_URL" not in allowlist
 
 
 # --- Registry dispatch (SDK-free — registration is import-time, not start()) -
+
+
+class TestOpenRouterExtraBody:
+    """_openrouter_extra_body: usage.include (real-cost recovery) + provider routing
+    ride the request body for direct openrouter/* calls only."""
+
+    def test_pinned_slug_gets_usage_include_and_provider_only(self):
+        body = _openrouter_extra_body("openrouter/moonshotai/kimi-k3")
+        assert body is not None
+        assert body["usage"] == {"include": True}
+        assert body["provider"]["only"] == ["baseten", "together", "fireworks"]
+        assert body["provider"]["sort"] == "price"
+        assert body["provider"]["allow_fallbacks"] is True
+
+    def test_unpinned_openrouter_slug_still_gets_usage_and_fallback_no_only(self):
+        # A slug absent from the map must still recover real cost + get fallback,
+        # just without a provider allowlist (unpinned still routes — probe case B).
+        body = _openrouter_extra_body("openrouter/some/other-model")
+        assert body["usage"] == {"include": True}
+        assert body["provider"]["allow_fallbacks"] is True
+        assert "only" not in body["provider"]
+
+    def test_non_openrouter_prefixes_get_no_body(self):
+        # Other providers do not accept OpenRouter's provider/usage block.
+        assert _openrouter_extra_body("anthropic/claude-sonnet-4-6") is None
+        assert _openrouter_extra_body("openai/gpt-5") is None
+        assert _openrouter_extra_body("bedrock/converse/us.deepseek") is None
+        assert _openrouter_extra_body("litellm_proxy/moonshotai/kimi-k3") is None
 
 
 class TestOpenHandsRegistryDispatch:
@@ -159,27 +189,18 @@ class TestOpenHandsRegistryDispatch:
         from coder_eval.agents.openhands_agent import OpenHandsAgent
 
         assert OpenHandsAgent.supports_cooperative_stop is True
-        assert OpenHandsAgent.supports_cost_log_tags is True
+        # Direct-provider only: no proxy cost-correlation surface (inherits base False).
+        assert OpenHandsAgent.supports_cost_log_tags is False
 
 
 class TestOpenHandsEnvironmentInfo:
-    """get_environment_info records model always; proxy host only when set."""
+    """get_environment_info records the resolved model (direct-provider only)."""
 
-    def test_records_model_only_without_base_url(self, monkeypatch):
+    def test_records_model_only(self):
         from coder_eval.agents.openhands_agent import OpenHandsAgent
 
-        monkeypatch.delenv("OPENHANDS_BASE_URL", raising=False)
         agent = OpenHandsAgent(parse_agent_config(type=AgentKind.OPENHANDS, model="anthropic/claude-sonnet-4-6"))
         assert agent.get_environment_info() == {"openhands_model": "anthropic/claude-sonnet-4-6"}
-
-    def test_records_proxy_host_when_base_url_set(self, monkeypatch):
-        from coder_eval.agents.openhands_agent import OpenHandsAgent
-
-        monkeypatch.setenv("OPENHANDS_BASE_URL", "https://key@proxy.internal:4000/v1")
-        agent = OpenHandsAgent(parse_agent_config(type=AgentKind.OPENHANDS, model="litellm_proxy/glm"))
-        info = agent.get_environment_info()
-        assert info == {"openhands_model": "litellm_proxy/glm", "openhands_base_url_host": "proxy.internal"}
-        assert "key" not in str(info)  # embedded credential not leaked
 
 
 class TestOpenHandsEffectiveModel:
@@ -219,7 +240,11 @@ import time  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from coder_eval.agent import AgentState  # noqa: E402
-from coder_eval.agents.openhands_agent import OpenHandsAgent, _OpenHandsTurnState  # noqa: E402
+from coder_eval.agents.openhands_agent import (  # noqa: E402
+    OpenHandsAgent,
+    _OpenHandsTurnState,
+    _openrouter_extra_body,
+)
 from coder_eval.errors import AgentCrashError, TurnTimeoutError  # noqa: E402
 from coder_eval.models import TokenUsage  # noqa: E402
 from coder_eval.streaming.collector import EventCollector  # noqa: E402
@@ -299,7 +324,16 @@ class TestOpenHandsEventMapping:
             tool_call_id="t1",
             action=SimpleNamespace(model_dump=lambda mode="json": {"command": "echo hi"}),
         )
-        obs = _KindEvent("observation", action_id="t1", observation=SimpleNamespace(agent_observation="hi\n"))
+        # Real SDK semantics: ObservationEvent.tool_call_id is the join key; action_id
+        # is the ActionEvent's EVENT id (a DIFFERENT value). Set them differently so the
+        # mapping must join on tool_call_id — a regression to action_id would orphan the
+        # tool (result_status="unknown") and this assertion would fail.
+        obs = _KindEvent(
+            "observation",
+            tool_call_id="t1",
+            action_id="evt_action_1",
+            observation=SimpleNamespace(agent_observation="hi\n"),
+        )
 
         state.dispatch(msg)
         state.dispatch(action)
@@ -307,7 +341,7 @@ class TestOpenHandsEventMapping:
         state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
 
         record = collector.build_turn_record()
-        # Tool start->end pairing on tool_call_id==action_id.
+        # Tool start->end pairing joins on tool_call_id (NOT action_id).
         assert [c.tool_name for c in record.commands] == ["execute_bash"]
         assert record.commands[0].result_status == "success"
         assert record.commands[0].result_summary == "hi\n"
@@ -557,7 +591,7 @@ class TestCommunicateHappyPath:
                 tool_call_id="t1",
                 action=SimpleNamespace(model_dump=lambda mode="json": {"command": "echo hi"}),
             ),
-            _KindEvent("observation", action_id="t1", observation=SimpleNamespace(agent_observation="hi\n")),
+            _KindEvent("observation", tool_call_id="t1", observation=SimpleNamespace(agent_observation="hi\n")),
         ]
 
         def factory(**kw):
@@ -576,33 +610,12 @@ class TestCommunicateHappyPath:
 
 
 class TestEndpointConfigLever:
-    """The direct-vs-proxy switch is env-only: OPENHANDS_BASE_URL threads into
-    LLM(base_url=...) with NO code branch on backend; _effective_model carries the
-    agent.model provider prefix unchanged; delete_on_close=False + max_iteration_per_run
-    are wired on the Conversation."""
+    """Direct-provider only: LLM(...) is built with NO base_url / extra_headers args;
+    _effective_model carries the agent.model provider prefix unchanged;
+    delete_on_close=False + max_iteration_per_run are wired on the Conversation."""
 
-    async def test_base_url_set_builds_llm_with_base_url(self, monkeypatch, tmp_path):
+    async def test_llm_built_without_base_url_or_extra_headers(self, monkeypatch, tmp_path):
         monkeypatch.setattr(_OpenHandsTurnState, "_route", _kind_route)
-        monkeypatch.setenv("OPENHANDS_BASE_URL", "https://proxy.internal:4000/v1")
-        captured: dict = {}
-
-        def factory(**kw):
-            return _FakeConversation(events=[], status="FINISHED", **kw)
-
-        _install_fake_sdk(monkeypatch, factory, captured=captured)
-        agent = await _started_agent(tmp_path, model="litellm_proxy/z-ai/glm-5.2")
-        await agent.communicate("do it", max_turns=7)
-
-        assert captured["llm"]["base_url"] == "https://proxy.internal:4000/v1"
-        # Model prefix carried unchanged (no code branch on backend).
-        assert captured["llm"]["model"] == "litellm_proxy/z-ai/glm-5.2"
-        # Conversation config: delete_on_close=False + max_turns→max_iteration_per_run.
-        assert captured["conversation"]["delete_on_close"] is False
-        assert captured["conversation"]["max_iteration_per_run"] == 7
-
-    async def test_base_url_unset_builds_llm_with_none(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(_OpenHandsTurnState, "_route", _kind_route)
-        monkeypatch.delenv("OPENHANDS_BASE_URL", raising=False)
         captured: dict = {}
 
         def factory(**kw):
@@ -612,12 +625,15 @@ class TestEndpointConfigLever:
         agent = await _started_agent(tmp_path, model="openrouter/z-ai/glm-5.2")
         await agent.communicate("do it")
 
-        assert captured["llm"]["base_url"] is None
+        # The proxy-only args are gone entirely — not passed as None.
+        assert "base_url" not in captured["llm"]
+        assert "extra_headers" not in captured["llm"]
         assert captured["llm"]["model"] == "openrouter/z-ai/glm-5.2"
         # No max_turns → the default iteration cap.
         assert captured["conversation"]["max_iteration_per_run"] == 500
+        assert captured["conversation"]["delete_on_close"] is False
 
-    async def test_cost_log_tags_forwarded_only_when_present(self, monkeypatch, tmp_path):
+    async def test_litellm_extra_body_direct_openrouter_only(self, monkeypatch, tmp_path):
         monkeypatch.setattr(_OpenHandsTurnState, "_route", _kind_route)
         captured: dict = {}
 
@@ -625,20 +641,43 @@ class TestEndpointConfigLever:
             return _FakeConversation(events=[], status="FINISHED", **kw)
 
         _install_fake_sdk(monkeypatch, factory, captured=captured)
-        # Direct path: no tags → extra_headers None.
-        agent = OpenHandsAgent(parse_agent_config(type=AgentKind.OPENHANDS, model="openrouter/z-ai/glm-5.2"))
-        await agent.start(str(tmp_path))
+        # Direct openrouter/*: usage.include + provider routing reach LLM(...).
+        agent = await _started_agent(tmp_path, model="openrouter/moonshotai/kimi-k3")
         await agent.communicate("do it")
-        assert captured["llm"]["extra_headers"] is None
+        body = captured["llm"]["litellm_extra_body"]
+        assert body["usage"] == {"include": True}
+        assert body["provider"]["only"] == ["baseten", "together", "fireworks"]
 
-        # Proxy path: cost_log_tags → forwarded as extra_headers.
-        agent2 = OpenHandsAgent(
-            parse_agent_config(type=AgentKind.OPENHANDS, model="litellm_proxy/glm"),
-            cost_log_tags={"x-ce-run-id": "run-123"},
-        )
-        await agent2.start(str(tmp_path))
+        # Non-openrouter prefix: empty body ({} is the SDK default).
+        agent2 = await _started_agent(tmp_path, model="anthropic/claude-sonnet-4-6")
         await agent2.communicate("do it")
-        assert captured["llm"]["extra_headers"] == {"x-ce-run-id": "run-123"}
+        assert captured["llm"]["litellm_extra_body"] == {}
+
+
+class TestProxyModelRejected:
+    """A litellm_proxy/* model fails fast (the proxy path was removed)."""
+
+    async def test_litellm_proxy_model_rejected_at_communicate(self, monkeypatch, tmp_path):
+        captured: dict = {}
+
+        def factory(**kw):
+            return _FakeConversation(events=[], status="FINISHED", **kw)
+
+        _install_fake_sdk(monkeypatch, factory, captured=captured)
+        # start() would also reject, so bypass it and set the working dir directly to
+        # prove communicate() is the authoritative gate.
+        agent = OpenHandsAgent(parse_agent_config(type=AgentKind.OPENHANDS, model="litellm_proxy/glm"))
+        agent.working_directory = tmp_path
+
+        with pytest.raises(RuntimeError, match=r"(?i)proxy path was removed"):
+            await agent.communicate("do it")
+        # No SDK object was ever built (rejected before _run_conversation).
+        assert "llm" not in captured
+
+    async def test_litellm_proxy_model_rejected_at_start(self, monkeypatch, tmp_path):
+        agent = OpenHandsAgent(parse_agent_config(type=AgentKind.OPENHANDS, model="litellm_proxy/glm"))
+        with pytest.raises(RuntimeError, match=r"(?i)proxy path was removed"):
+            await agent.start(str(tmp_path))
 
 
 class TestCommunicateCrash:
@@ -802,7 +841,7 @@ class TestOffThreadEmission:
             tool_call_id="t1",
             action=SimpleNamespace(model_dump=lambda mode="json": {}),
         )
-        obs = _KindEvent("observation", action_id="t1", observation=SimpleNamespace(agent_observation="ok"))
+        obs = _KindEvent("observation", tool_call_id="t1", observation=SimpleNamespace(agent_observation="ok"))
 
         class _RecordingConversation(_FakeConversation):
             def run(self):
