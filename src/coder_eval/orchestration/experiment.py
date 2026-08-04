@@ -815,10 +815,14 @@ def aggregate_results(
     for tr in task_results:
         task_variant_reps.setdefault((tr.task_id, tr.variant_id), []).append(tr)
 
-    # Collect per-replicate scores keyed variant_id → task_id → [scores] for stats rendering.
+    # Collect per-replicate scores keyed variant_id → task_id → [scores] for stats
+    # rendering, plus the integrity gate's void flag per replicate: a voided row keeps
+    # its score, so a score-based rate has to be told which samples to drop.
     per_replicate_scores: dict[str, dict[str, list[float]]] = {}
+    per_replicate_voided: dict[str, dict[str, list[bool]]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
         per_replicate_scores.setdefault(variant_id, {})[task_id] = [r.result.weighted_score or 0.0 for r in reps]
+        per_replicate_voided.setdefault(variant_id, {})[task_id] = [r.result.integrity.voided for r in reps]
 
     task_variants: dict[str, list[VariantResult]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
@@ -905,4 +909,5 @@ def aggregate_results(
         variant_aggregates=variant_aggregates,
         total_duration_seconds=total_duration,
         per_replicate_scores=per_replicate_scores,
+        per_replicate_voided=per_replicate_voided,
     )

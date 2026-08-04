@@ -516,26 +516,44 @@ class ExperimentReportGenerator:
     @staticmethod
     def _replicate_stats_lines(result: ExperimentResult) -> list[str]:
         """The ``## Replicate Statistics`` block: per-variant bootstrap-CI / Wilson
-        pass-rate table. Returns ``[]`` when no variant ran more than one replicate."""
+        pass-rate table. Returns ``[]`` when no variant ran more than one replicate.
+
+        The pass rate counts SCORES, and the integrity gate deliberately leaves a
+        voided row's ``weighted_score`` as computed (the high score is the
+        diagnostic). So a voided replicate would otherwise be counted as a pass here
+        and a variant whose every row was voided would report 100% in the one table a
+        reviewer reads when comparing arms. Voided replicates are excluded from the
+        pass rate and reported in their own column instead.
+        """
         # ── Replicate Statistics (only when any variant ran >1 replicate) ──
         if not any(ts.replicate_count > 1 for ts in result.task_summaries):
             return []
         lines = ["", "## Replicate Statistics", ""]
 
         # Per-variant bootstrap CI + Wilson pass-rate table
-        lines.append("| Variant | Replicates/task | Mean score | 95% CI | Pass-rate (Wilson 95%) |")
-        lines.append("|---------|-----------------|------------|--------|------------------------|")
+        lines.append("| Variant | Replicates/task | Mean score | 95% CI | Pass-rate (Wilson 95%) | Voided |")
+        lines.append("|---------|-----------------|------------|--------|------------------------|--------|")
         for vid in result.variant_ids:
             per_rep = result.per_replicate_scores.get(vid, {})
+            voided_flags = result.per_replicate_voided.get(vid, {})
             all_scores: list[float] = [s for scores in per_rep.values() for s in scores]
-            passes = sum(1 for s in all_scores if s >= _REPLICATE_PASS_THRESHOLD)
+            scored: list[float] = []
+            voided = 0
+            for task_id, scores in per_rep.items():
+                flags = voided_flags.get(task_id, [])
+                for index, score in enumerate(scores):
+                    if index < len(flags) and flags[index]:
+                        voided += 1
+                    else:
+                        scored.append(score)
+            passes = sum(1 for s in scored if s >= _REPLICATE_PASS_THRESHOLD)
             m, lo, hi = bootstrap_mean_ci(all_scores)
-            wlo, whi = wilson_interval(passes, len(all_scores))
+            wlo, whi = wilson_interval(passes, len(scored))
             agg = result.variant_aggregates.get(vid)
             rep_count = agg.replicate_count if agg else 1
             lines.append(
                 f"| {vid} | {rep_count} | {m:.3f} | [{lo:.3f}, {hi:.3f}]"
-                + f" | {passes}/{len(all_scores)} [{wlo:.2f}, {whi:.2f}] |"
+                + f" | {passes}/{len(scored)} [{wlo:.2f}, {whi:.2f}] | {voided} |"
             )
 
         return lines

@@ -272,6 +272,16 @@ class ExperimentResult(BaseModel):  # noqa: CE009 -- persisted result model; rou
             "Empty dict only on deserialized results from before this field existed."
         ),
     )
+    per_replicate_voided: dict[str, dict[str, list[bool]]] = Field(
+        default_factory=dict,
+        description=(
+            "Whether the integrity gate voided each replicate, keyed variant_id → task_id → "
+            "[flags], positionally aligned with per_replicate_scores. A voided row keeps its "
+            "weighted_score on purpose, so the score alone cannot tell a pass from a voided "
+            "pass and any score-based rate needs this to exclude them. "
+            "Empty dict only on deserialized results from before this field existed."
+        ),
+    )
 
 
 class ResolvedTask(BaseModel):  # noqa: CE009 -- programmatic resolution model, not YAML input
