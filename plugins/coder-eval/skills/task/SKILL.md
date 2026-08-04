@@ -1,0 +1,132 @@
+---
+description: Turn a natural-language description into one or more coder-eval task YAML files — minimal prompts, weighted success criteria that check output content, validated with `coder-eval plan`. Use when the user wants to write, add, or generate an evaluation task.
+allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
+---
+
+# Author a coder-eval task
+
+You are writing coder-eval task YAML. The user's request is: `$ARGUMENTS`
+
+If `$ARGUMENTS` is empty, ask what the task should test. Do not invent a subject.
+
+Good tasks use simple prompts: state the goal and the expected output, then let the
+agent work out the approach. A single request can produce **several** task files —
+"create tasks for all the registry subcommands" means one task per subcommand.
+
+## Step 1 — Understand the request
+
+- **What is being tested** — which tool, SDK, CLI, skill, or capability?
+- **How many tasks** — one operation, or several?
+- **Difficulty** — smoke, basic, or intermediate?
+- **Dependencies** — network, packages, starter files, external services?
+
+State any assumptions you make rather than silently picking.
+
+## Step 2 — Look at what already exists
+
+Find the repository's task directory by globbing for `*.yaml` files containing a
+`task_id:` key (commonly `tasks/`). Read a couple of the existing tasks and follow
+their conventions: naming, tags, criteria style. If a task already covers this ground,
+say so and offer to modify it instead of adding a near-duplicate.
+
+## Step 3 — Design the task
+
+**Task ID** — lowercase kebab-case, unique, `<domain>-<action>` (e.g.
+`registry-list-processes`).
+
+**Initial prompt** — minimal. State the goal and the expected output; nothing else.
+
+- Good: "Use the `foo` CLI to list the available processes and save the result to
+  `processes.json`."
+- Bad: a step-by-step recipe with the exact flags, or a restatement of what the
+  criteria check.
+
+**Key rule: prompts instruct, criteria validate.** Never leak criteria detail into the
+prompt. If a criterion checks that the output contains a `count` field, the prompt must
+not mention `count` — otherwise you are testing transcription, not capability.
+
+**Success criteria** — pick by what actually needs verifying:
+
+| What to check | Criterion type |
+| --- | --- |
+| File exists, has content, matches a pattern | `file_check` (prefer over `file_exists` + `file_contains`) |
+| JSON structure or specific values | `json_check` (JSON Schema + JMESPath assertions) |
+| A script runs, tests pass, or a scorer emits a float | `run_command` |
+| Output resembles a reference solution | `reference_comparison` |
+| Subjective or open-ended quality | `llm_judge` |
+| A deep, tool-using verdict on the sandbox | `agent_judge` (expensive) |
+| The agent used a specific tool | `command_executed` |
+| Tool-call efficiency against a budget | `commands_efficiency` |
+| The agent engaged a target skill | `skill_triggered` (see `/coder-eval:skill-check`) |
+| A predicted label vs. ground truth | `classification_match` |
+
+Read `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md` for each type's exact fields — it is
+generated from coder-eval's own models, so it is the authoritative field list.
+
+Rules that matter:
+
+- **Every task needs at least one criterion that checks output *content***, not just
+  existence. A suite of `file_exists` checks passes when the agent writes an empty file.
+- Use `command_executed` sparingly — only when it genuinely matters *how* the result was
+  produced. Set `require_success: false` unless the command must have succeeded.
+- `weight` reflects importance: `0.5` nice-to-have, `1.0` standard, `1.5`–`2.0` critical.
+  `weight: 0` makes a criterion informational (reported, but excluded from the score and
+  the pass/fail gate).
+- The default `pass_threshold: 0.9` is right for most criteria; use `1.0` only for binary
+  checks.
+- Omit the `agent:` block unless the task needs non-default settings. Agent config is
+  resolved from the experiment layer, and hardcoding it in every task defeats
+  experiment-level control such as A/B model comparisons.
+
+**Tags** — keep them portable: a difficulty tag (`smoke`, `basic`, `intermediate`) plus
+whatever domain vocabulary the repository's existing tasks already use.
+
+## Step 4 — Write the file(s)
+
+One file per task, named after the task ID with underscores
+(`registry-list-processes` → `registry_list_processes.yaml`), in the repository's task
+directory.
+
+```yaml
+task_id: "<kebab-case-id>"
+description: "<one line: what this task tests>"
+initial_prompt: |
+  <the natural-language request>
+tags: [<difficulty>, <domain>]
+
+sandbox:
+  driver: "tempdir"
+  python: {}              # a venv with no extra packages; add env_packages if needed
+
+success_criteria:
+  - type: "<criterion_type>"
+    description: "<what this checks>"
+    # ... type-specific fields
+    weight: 1.0
+```
+
+Add `template_sources` if the task needs starter files (a codebase to modify, a fixture
+to read).
+
+## Step 5 — Validate
+
+For each file written, run `coder-eval plan <path>` and fix everything it reports. It
+validates through the real Pydantic models, so a mistyped field name or a missing
+required key surfaces here rather than halfway through a paid run.
+
+Then re-read your own work and check:
+
+- every criterion refers to a file or command the prompt actually leads the agent to
+  produce;
+- the prompt leaks no criteria detail;
+- at least one criterion inspects content.
+
+## Step 6 — Report
+
+Summarize what you wrote:
+
+| File | Task ID | Criteria | Tags |
+| --- | --- | --- | --- |
+
+Then list any assumptions you made, and the command to run it:
+`coder-eval run <path>` (real tokens, real cost).
