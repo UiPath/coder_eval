@@ -1,14 +1,22 @@
-"""``action.yml``'s ``version:`` default must equal ``pyproject.toml``'s version.
+"""The two derived version pins must equal ``pyproject.toml``'s version.
 
-The published composite action installs ``coder-eval==<that default>``, so a
-consumer pinning ``UiPath/coder_eval@vX.Y.Z`` (or the moving ``@v0``) must get
-X.Y.Z and not some other release. ``release.yml``'s "Regenerate uv.lock, bump
-action.yml pin, and amend release commit" step sed-bumps the default inside the
-release commit, which makes the invariant mechanically true *at rest* — every
-commit on main has the two in agreement.
+``pyproject.toml`` is the single version source; two files carry a *derived* pin
+of it, and one ``release.yml`` step bumps both inside the release commit:
+
+- ``action.yml``'s ``version:`` default — the published composite action installs
+  ``coder-eval==<that default>``, so a consumer pinning
+  ``UiPath/coder_eval@vX.Y.Z`` (or the moving ``@v0``) must get X.Y.Z and not
+  some other release.
+- ``plugins/coder-eval/.claude-plugin/plugin.json``'s ``version`` — the Claude
+  Code plugin manifest. ``claude plugin validate --strict`` rejects a manifest
+  with no version, and a pinned-but-stale one strands users on a cached copy
+  because Claude Code keys plugin updates off it.
+
+The release-time seds make both invariants mechanically true *at rest* — every
+commit on main has the pins in agreement with ``pyproject.toml``.
 
 Nothing asserted it, which is how ``action.yml`` shipped pinned to 0.8.6 while
-main was already 0.8.9: the sed lives on the release path only, so a hand-edit
+main was already 0.8.9: the seds live on the release path only, so a hand-edit
 (or a release whose amend step was skipped) drifts silently and ``@v0``
 consumers install a version other than the tag they pinned.
 
@@ -20,6 +28,7 @@ only after the tag exists).
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -27,6 +36,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACTION_YML = REPO_ROOT / "action.yml"
+PLUGIN_MANIFEST = REPO_ROOT / "plugins" / "coder-eval" / ".claude-plugin" / "plugin.json"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 # Mirrors the anchor release.yml's sed matches: indentation-tolerant, keyed on the
@@ -56,4 +66,14 @@ def test_action_version_pin_matches_pyproject_version():
         f"action.yml pins coder-eval=={pinned} but pyproject.toml is {expected}. "
         f"Consumers of UiPath/coder_eval@v{expected} would install {pinned}. "
         "Update the `default:` in action.yml (release.yml bumps it automatically on release)."
+    )
+
+
+def test_plugin_manifest_version_matches_pyproject_version():
+    pinned = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))["version"]
+    expected = _project_version()
+    assert pinned == expected, (
+        f"{PLUGIN_MANIFEST.name} declares version {pinned} but pyproject.toml is {expected}. "
+        "Claude Code keys plugin updates off this version, so a stale pin strands installed "
+        "users on a cached copy. Update it (release.yml bumps it automatically on release)."
     )
