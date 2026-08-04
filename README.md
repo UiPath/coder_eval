@@ -1,8 +1,8 @@
 # Coder Eval — evaluate & benchmark AI coding agents and Claude Code skills
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
+[![GitHub Marketplace](https://img.shields.io/badge/marketplace-coder__eval-2ea44f.svg)](https://github.com/marketplace/actions/coder_eval)
 [![Website](https://img.shields.io/badge/website-coder--eval.com-1f6feb.svg)](https://coder-eval.com)
-[![Docs](https://img.shields.io/badge/docs-coder--eval.com%2Fdocs-1f6feb.svg)](https://coder-eval.com/docs)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
@@ -97,12 +97,18 @@ the full setup.
 
 ## Use as a GitHub Action
 
-A composite action at the repo root runs `coder-eval` as a CI gate — it installs
-the pinned CLI, runs your tasks, writes a JUnit XML report, appends `run.md` to
-the job summary, and fails the step on any task/gate failure:
+A composite action — on the Marketplace as
+[**coder_eval**](https://github.com/marketplace/actions/coder_eval) — runs
+`coder-eval` as a CI gate. It installs the pinned CLI, runs your tasks, writes a
+JUnit XML report, appends `run.md` to the job summary, and fails the step on any
+task/gate failure:
 
 ```yaml
-- uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly
+- uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…
+  with: { node-version: '20' }
+- run: npm install -g @anthropic-ai/claude-code
+
+- uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
     tasks: tests/tasks/**/*.yaml
     model: claude-sonnet-5
@@ -154,9 +160,11 @@ code: the step fails if *either* coder-eval exits non-zero *or* any task's
 alone.
 
 > **Agent runtime is the caller's responsibility.** The action is agent-agnostic —
-> it installs `coder-eval` but no coding-agent runtime. Tasks using the default
-> `claude-code` agent need the `claude` CLI on `PATH` (`actions/setup-node` +
-> `npm install -g @anthropic-ai/claude-code`) in the job before the action runs.
+> it installs `coder-eval` but no coding-agent runtime, which is why the example
+> above starts with `actions/setup-node` +
+> `npm install -g @anthropic-ai/claude-code`: the default `claude-code` agent
+> needs the `claude` CLI on `PATH` before the action runs. Swap those steps for
+> your own agent's runtime as needed.
 
 > **Security.** Evaluated tasks execute agent-generated code. Do **not** run this
 > action under `pull_request_target` with secrets exposed to untrusted fork PRs —
@@ -188,7 +196,7 @@ alone.
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
-| [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
+| [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
 | [How It Compares](docs/comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |
