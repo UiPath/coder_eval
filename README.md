@@ -2,6 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![GitHub Marketplace](https://img.shields.io/badge/marketplace-coder__eval-2ea44f.svg)](https://github.com/marketplace/actions/coder_eval)
+[![Claude Code plugin](https://img.shields.io/badge/claude__code__plugin-coder--eval-d97757.svg)](docs/PLUGIN.md)
 [![Website](https://img.shields.io/badge/website-coder--eval.com-1f6feb.svg)](https://coder-eval.com)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
@@ -94,6 +95,22 @@ so a harness upgrade can't silently move your results. (The example `tasks/`
 live in this repo — clone it or point the CLI at your own task files.) See
 [Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md) for
 the full setup.
+
+## Use inside Claude Code
+
+This repo is also a **Claude Code plugin marketplace**, so the whole loop —
+scaffold a suite, author a task, check whether a skill triggers, read the
+results — runs inside the agent:
+
+```
+/plugin marketplace add UiPath/coder_eval
+/plugin install coder-eval@coder-eval
+```
+
+That adds five slash commands: `/coder-eval:init`, `/coder-eval:skill-check`,
+`/coder-eval:task`, `/coder-eval:analyze` and `/coder-eval:ci`. They drive the
+`coder-eval` CLI, so install it too (`uv tool install coder-eval`). See
+[Claude Code Plugin](docs/PLUGIN.md).
 
 ## Use as a GitHub Action
 
@@ -197,6 +214,7 @@ alone.
 | [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
 | [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor |
+| [Claude Code Plugin](docs/PLUGIN.md) | Install the Claude Code plugin — author, run, and analyze suites from inside the agent |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
 | [How It Compares](docs/comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |

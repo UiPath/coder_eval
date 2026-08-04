@@ -122,6 +122,8 @@ tasks/                             # Task definition YAML files
 tests/                             # Test suite
 docs/                              # Documentation
 templates/                         # Sandbox template directories
+.claude-plugin/marketplace.json    # Makes this repo a Claude Code plugin marketplace (`/plugin marketplace add UiPath/coder_eval`); lists the one plugin below.
+plugins/coder-eval/                # The published Claude Code plugin: `.claude-plugin/plugin.json` (its `version` is a derived pin of pyproject's, bumped by release.yml, guarded by tests/test_action_version_pin.py), `skills/<name>/SKILL.md` × 5 (init, skill-check, task, analyze, ci → `/coder-eval:<name>`), and `reference/` — everything a skill reads must live here, since an installed plugin is copied to ~/.claude/plugins/cache/ WITHOUT its parent dirs (address it via `${CLAUDE_PLUGIN_ROOT}`). `reference/criteria.md` is generated (`make plugin-reference`, CE032); `reference/run-layout.md` is a verbatim mirror of `.claude/shared/run-layout.md`. Distinct from `.claude/commands/`, which stays repo-local contributor tooling.
 action.yml                         # Published composite GitHub Action (coder-eval as a CI gate). release.yml maintains its `version:` default + the moving `v<major>` tag.
 ```
 
@@ -203,11 +205,15 @@ make verify      # All of the above + coverage check (CI equivalent)
 # The JS half (evalboard/). Separate because it needs a Node/pnpm toolchain,
 # but gated in CI by the `evalboard` job just like the Python side.
 make evalboard-verify   # tsc --noEmit + vitest + next build
+
+# Regenerate a generated surface (both are CE-guarded; never hand-edit the output)
+make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
+make plugin-reference  # the plugin's bundled criteria reference from the models (CE032)
 ```
 
 Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is a hand-copied mirror, and `evalboard/lib/__tests__/pricing-parity.test.ts` fails the build on drift in either direction.
 
-When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001+ pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested. (Doc-surface / whole-tree rules that reason over Markdown/YAML or the entire `src/` tree rather than one `.py` AST at a time — CE026–CE031 — are not `BaseRule`s in the runner; they are wired as dedicated `@pytest.mark.lint` test classes. CE031 guards against dead config: a behavior-driving field on `SimulationConfig`/`RunLimits`/`Dataset` that no code reads by name. CE026 keeps the GitHub Action's three onboarding surfaces honest: a page's *first* Action snippet must show the agent-runtime prerequisite steps (pinned to the `action-dogfood` job that proves them in CI), a zero-install absolute next to such a snippet must name the channel it means, and every `github.com/marketplace/actions/<slug>` link plus the shields badge label must match `action.yml`'s `name:`.)
+When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001+ pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested. (Doc-surface / whole-tree rules that reason over Markdown/YAML or the entire `src/` tree rather than one `.py` AST at a time — CE026–CE032 — are not `BaseRule`s in the runner; they are wired as dedicated `@pytest.mark.lint` test classes. CE032 keeps the plugin's bundled `reference/criteria.md` in parity with the `SuccessCriterion` union that generates it (`make plugin-reference` writes it; the rule re-renders and diffs — never hand-edit the file). CE031 guards against dead config: a behavior-driving field on `SimulationConfig`/`RunLimits`/`Dataset` that no code reads by name. CE026 keeps the GitHub Action's three onboarding surfaces honest: a page's *first* Action snippet must show the agent-runtime prerequisite steps (pinned to the `action-dogfood` job that proves them in CI), a zero-install absolute next to such a snippet must name the channel it means, and every `github.com/marketplace/actions/<slug>` link plus the shields badge label must match `action.yml`'s `name:`.)
 
 Adding a user-facing field to one of the models CE030 tracks (`TaskDefinition`, `RunLimits`, `Dataset`, `SimulationConfig` — see `tests/lint/doc_schema_parity.py`) means documenting it in its guide (mention the field name as inline code) or adding an `EXEMPT` entry with a reason it is not user-authored. `make lint` fails otherwise.
 

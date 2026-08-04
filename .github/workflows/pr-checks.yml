@@ -207,6 +207,67 @@ jobs:
         working-directory: evalboard
         run: pnpm verify
 
+  plugin-validate:
+    # Proves the Claude Code plugin marketplace is installable and that the suite
+    # `skill-check` scaffolds is real: the manifests pass strict validation, and the
+    # bundled activation template both schema-validates and expands to one task per
+    # dataset row. Needs no credentials — nothing here invokes a model.
+    name: Claude Code Plugin (manifests + offline scaffold)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # `claude plugin validate` ships in the Claude Code npm package.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate plugin manifest (strict)
+        run: claude plugin validate ./plugins/coder-eval --strict
+
+      - name: Validate marketplace manifest (strict)
+        run: claude plugin validate . --strict
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+
+      # Runs OUTSIDE the source tree, the way a user's copy of the template does:
+      # no experiments/, no tasks/, no coder_eval checkout on the path. `plan` is a
+      # schema check only (it exits 0 even when dataset.paths names a nonexistent
+      # file), so the row-count assert goes through expand_dataset — otherwise this
+      # step would pass even if activation-rows.jsonl were never copied.
+      # Reproduce locally with: SCRATCH=$(mktemp -d) VENV=$(mktemp -d)/venv
+      - name: Scaffold assert (no source tree)
+        run: |
+          set -euo pipefail
+          SCRATCH="$RUNNER_TEMP/scratch"
+          VENV="$RUNNER_TEMP/venv"
+          mkdir -p "$SCRATCH"
+          cp plugins/coder-eval/reference/templates/activation.yaml "$SCRATCH/"
+          cp plugins/coder-eval/reference/templates/activation-rows.jsonl "$SCRATCH/"
+          # A venv (not `uv tool install`) because the expansion assert needs
+          # `coder_eval` importable, not just the `coder-eval` CLI on PATH.
+          uv venv "$VENV"
+          VIRTUAL_ENV="$VENV" uv pip install .
+          cd "$SCRATCH"
+          "$VENV/bin/coder-eval" plan activation.yaml
+          "$VENV/bin/python" - <<'PY'
+          from pathlib import Path
+          from coder_eval.orchestration.task_loader import expand_dataset, load_task
+          task, _ = load_task(Path("activation.yaml"))
+          rows = expand_dataset(task, Path("."))
+          assert len(rows) == 6, f"expected 6 row-tasks, got {len(rows)}"
+          labels = {c.expected_skill for t in rows for c in t.success_criteria}
+          assert labels == {"my-skill", ""}, labels
+          print(f"ok: {len(rows)} row-tasks")
+          PY
+
   no-uipath-extra:
     # Proves that `pip install coder-eval` (without the optional `[uipath]`
     # extra) yields a working framework: imports succeed, the criterion

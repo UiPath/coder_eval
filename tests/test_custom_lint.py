@@ -1263,6 +1263,14 @@ class TestPluginArtifacts:
             f"{skill}: expected disable-model-invocation {expected}, got {meta.get('disable-model-invocation')!r}"
         )
 
+    def test_every_declared_skill_ships(self):
+        # The other side of SKILL_DISABLE_MODEL_INVOCATION: the per-skill tests are
+        # parametrized over what is on disk, so without this a deleted skill would
+        # pass everything silently.
+        on_disk = {p.parent.name for p in PLUGIN_SKILLS}
+        missing = sorted(set(SKILL_DISABLE_MODEL_INVOCATION) - on_disk)
+        assert not missing, f"declared skill(s) with no skills/<name>/SKILL.md on disk: {missing}"
+
     def test_bundled_run_layout_matches_the_shared_source(self):
         # The one hand-copied file in the plugin: reference/run-layout.md mirrors
         # .claude/shared/run-layout.md verbatim, minus the pointer comment the
@@ -1529,6 +1537,27 @@ class TestCE026ActionDocSurfaces:
         assert not findings, (
             f"\nMarketplace link/badge(s) inconsistent with action.yml `name: {listing}` — a rename "
             "404s every one of them:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_plugin_skills_are_covered_by_the_doc_scan(self):
+        # The `ci` skill emits an Action snippet users copy verbatim, so it must be
+        # held to the same prerequisite standard as the docs pages.
+        from tests.lint.action_docs import default_doc_paths
+
+        ci_skill = PLUGIN_ROOT / "skills" / "ci" / "SKILL.md"
+        scanned = {p.resolve() for p in default_doc_paths(self.REPO_ROOT)}
+        assert ci_skill.resolve() in scanned, (
+            f"{ci_skill} is outside default_doc_paths() — its Action snippet would go unchecked"
+        )
+
+    def test_ci_skill_snippet_shows_agent_runtime_prereqs(self):
+        from tests.lint.action_docs import find_missing_prereqs
+
+        findings = find_missing_prereqs([PLUGIN_ROOT / "skills" / "ci" / "SKILL.md"])
+        assert not findings, (
+            "\nThe ci skill emits a workflow without the agent-runtime prerequisite steps — a user "
+            "who copies it gets a run that dies on a missing `claude` binary:\n\n"
+            + "\n".join(f"  {f}" for f in findings)
         )
 
     def test_required_prereqs_match_the_dogfood_job(self):

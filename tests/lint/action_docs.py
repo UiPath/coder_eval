@@ -1,8 +1,9 @@
 """CE026 — the GitHub Action's onboarding surfaces must stay truthful and self-sufficient.
 
-Three doc surfaces introduce the same composite Action (``README.md``,
-``docs/CI_GATE.md``, ``docs/tutorials/02-ci-pipeline.md``) and each was hand-maintained,
-so they drifted. The motivating bug: ``docs/CI_GATE.md`` claimed "there is nothing to
+Several surfaces introduce the same composite Action — ``README.md``,
+``docs/CI_GATE.md``, ``docs/tutorials/02-ci-pipeline.md``, and now the Claude Code
+plugin's ``ci`` skill, whose emitted workflow users copy verbatim — and each was
+hand-maintained, so they drifted. The motivating bug: ``docs/CI_GATE.md`` claimed "there is nothing to
 install" and offered a copy-pasteable ``uses:`` step with no agent runtime — the action
 is agent-agnostic, so an integrator who copied it got a run that dies on a missing
 ``claude`` binary. The correcting paragraph was 11 lines away; the tutorial's snippet
@@ -81,9 +82,11 @@ class Finding:
 
 
 def default_doc_paths(repo_root: Path) -> list[Path]:
-    """Markdown surfaces that may introduce the Action: README plus every docs page."""
+    """Markdown surfaces that may introduce the Action: README, every docs page, and
+    every plugin markdown file (the `ci` skill emits an Action snippet users copy verbatim)."""
     paths = [repo_root / "README.md"]
     paths.extend(sorted(p for p in (repo_root / "docs").rglob("*.md") if p.is_file()))
+    paths.extend(sorted(p for p in (repo_root / "plugins").rglob("*.md") if p.is_file()))
     return [p for p in paths if p.is_file()]
 
 

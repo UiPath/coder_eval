@@ -88,6 +88,7 @@ extra:
     DIALOG_MODE.md: "Evaluate agents in multi-turn conversation via a simulated user"
     DOCKER_ISOLATION.md: "The container sandbox driver, with custom images"
     CI_GATE.md: "Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor"
+    PLUGIN.md: "Install the Claude Code plugin — author, run, and analyze suites from inside the agent"
     EXTENDING.md: "Author a custom agent, criterion, or model pricing via the plugin SPI"
     REPORT_SCHEMA.md: "Field-level reference for run.json / variant.json / task.json"
     comparison.md: "vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts"
@@ -115,6 +116,7 @@ nav:
       - Dialog Mode: DIALOG_MODE.md
       - Docker Isolation: DOCKER_ISOLATION.md
       - CI Gate & GitHub Action: CI_GATE.md
+      - Claude Code Plugin: PLUGIN.md
       - Extending Coder Eval: EXTENDING.md
       - Report Schema: REPORT_SCHEMA.md
   - How It Compares: comparison.md
