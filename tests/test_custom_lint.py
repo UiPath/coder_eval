@@ -1120,6 +1120,160 @@ class TestCE028DocIndexParity:
         assert str(readme) in findings
 
 
+# The Claude Code plugin's skills, resolved at collection time so every skill is
+# parametrized into the frontmatter / path-containment guards below automatically.
+PLUGIN_ROOT = Path(__file__).parent.parent / "plugins" / "coder-eval"
+PLUGIN_SKILLS = sorted(PLUGIN_ROOT.glob("skills/*/SKILL.md"))
+
+# Which skills are explicit-invocation only. Scaffolding a directory (`init`) or
+# writing a CI workflow (`ci`) is never something to do unprompted; the other three
+# are safe for the agent to reach for on its own.
+SKILL_DISABLE_MODEL_INVOCATION = {
+    "analyze": False,
+    "ci": True,
+    "init": True,
+    "skill-check": False,
+    "task": False,
+}
+
+# Tokens that name THIS repository's files. An installed plugin is copied to
+# ~/.claude/plugins/cache/ without its parent directories, so any of these in a
+# skill body is a path that does not exist at runtime. `tasks/` and
+# `.claude/skills/` are deliberately absent: those are user-workspace paths the
+# skills legitimately scan and scaffold.
+REPO_PATH_TOKENS = ("docs/", "src/", ".claude/shared/", ".claude/commands/", "uv run", "../")
+
+
+def _skill_frontmatter(path: Path) -> dict:
+    """Parse a SKILL.md's YAML frontmatter block."""
+    import yaml
+
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n"), f"{path} does not open with a YAML frontmatter fence"
+    end = text.index("\n---\n", 3)
+    return yaml.safe_load(text[4:end])
+
+
+@pytest.mark.lint
+class TestPluginArtifacts:
+    """The Claude Code plugin's shipped artifacts must be valid and self-contained.
+
+    `claude plugin validate --strict` (run by the plugin-validate CI job) checks
+    the manifests but NOT skill frontmatter — a SKILL.md carrying an unsupported
+    `name:` plus an invented key passes it with zero warnings. These tests are
+    what stand between a typo'd frontmatter key and a skill that silently never
+    triggers, and between a skill body and a repo path that does not exist once
+    the plugin is installed.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+    TEMPLATES = PLUGIN_ROOT / "reference" / "templates"
+
+    def test_activation_template_expands_to_one_task_per_row(self):
+        from coder_eval.orchestration.task_loader import expand_dataset, load_task
+
+        task, _source_yaml = load_task(self.TEMPLATES / "activation.yaml")
+        rows = expand_dataset(task, self.TEMPLATES)
+
+        assert len(rows) == 6, f"expected one task per dataset row, got {len(rows)}"
+        expected = sorted(c.expected_skill for row in rows for c in row.success_criteria)  # type: ignore[attr-defined]
+        assert expected == ["", "", "", "my-skill", "my-skill", "my-skill"]
+        for row in rows:
+            assert "${row." not in row.initial_prompt, f"unsubstituted row placeholder in {row.task_id}"
+
+    def test_activation_template_thresholds_use_real_metric_keys(self):
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+        from coder_eval.models import ClassificationCriterionResult, SkillTriggeredCriterion
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "activation.yaml")
+        criterion = task.success_criteria[0]
+        assert isinstance(criterion, SkillTriggeredCriterion)
+        assert criterion.suite_thresholds, "the template must gate the suite on classification metrics"
+
+        # Derive the available metric names by running the real aggregate, never
+        # from a hardcoded list (which would re-declare the metric vocabulary).
+        init_criteria(validate=False)
+        checker = CriterionRegistry.get_checker("skill_triggered")()
+        rows = [
+            ClassificationCriterionResult(
+                criterion_type="skill_triggered",
+                description="d",
+                score=1.0,
+                observed_label=label,
+                expected_label=label,
+            )
+            for label in ("yes", "no")
+        ]
+        aggregate = checker.aggregate(
+            SkillTriggeredCriterion(description="d", skill_name="my-skill", expected_skill="my-skill"),
+            rows,
+        )
+        assert aggregate is not None
+        for metric in criterion.suite_thresholds:
+            assert metric in aggregate.metrics, (
+                f"suite_thresholds names {metric!r}, which the skill_triggered aggregate does not "
+                f"emit (available: {sorted(aggregate.metrics)})"
+            )
+
+    def test_activation_rows_have_both_polarities(self):
+        import json
+
+        rows = [
+            json.loads(line)
+            for line in (self.TEMPLATES / "activation-rows.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        labels = {row["expected_skill"] for row in rows}
+        assert any(label for label in labels), "no positive rows — recall would be undefined"
+        assert "" in labels, "no distractor rows — precision is 1.0 by definition and meaningless"
+
+    @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
+    def test_skill_md_frontmatter_is_valid(self, skill: Path):
+        # `claude plugin validate --strict` does NOT check skill frontmatter, so this
+        # test is the only guard against a typo'd key silently disabling a skill.
+        supported = {"description", "disable-model-invocation", "allowed-tools"}
+        meta = _skill_frontmatter(skill)
+
+        unknown = set(meta) - supported
+        assert not unknown, (
+            f"{skill}: unsupported frontmatter key(s) {sorted(unknown)} (the plugin spec allows {sorted(supported)})"
+        )
+        assert isinstance(meta.get("description"), str) and meta["description"].strip(), (
+            f"{skill}: `description` must be a non-empty string — it is what the model matches on"
+        )
+        tools = meta.get("allowed-tools")
+        if tools is not None:
+            assert isinstance(tools, list), f"{skill}: `allowed-tools` must be a YAML array of bare tool names"
+            for tool in tools:
+                assert isinstance(tool, str) and "(" not in tool, (
+                    f"{skill}: `allowed-tools` entry {tool!r} uses the scoped form from .claude/commands; "
+                    "the plugin spec takes bare names like 'Bash'"
+                )
+
+    @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
+    def test_model_invocation_flags_match_the_design(self, skill: Path):
+        name = skill.parent.name
+        assert name in SKILL_DISABLE_MODEL_INVOCATION, (
+            f"{name} is a new skill — declare whether it is explicit-invocation only in SKILL_DISABLE_MODEL_INVOCATION"
+        )
+        meta = _skill_frontmatter(skill)
+        expected = SKILL_DISABLE_MODEL_INVOCATION[name]
+        assert meta.get("disable-model-invocation", False) is expected, (
+            f"{skill}: expected disable-model-invocation {expected}, got {meta.get('disable-model-invocation')!r}"
+        )
+
+    @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
+    def test_skills_reference_no_repo_paths(self, skill: Path):
+        text = skill.read_text(encoding="utf-8")
+        offenders = [token for token in REPO_PATH_TOKENS if token in text]
+        assert not offenders, (
+            f"{skill} names this repository's path(s) {offenders} — an installed plugin is copied "
+            "without its parent directories, so they do not exist at runtime. Bundle what the skill "
+            "needs under plugins/coder-eval/ and address it via ${CLAUDE_PLUGIN_ROOT}."
+        )
+
+
 @pytest.mark.lint
 class TestCE032PluginReferenceParity:
     """CE032 — the plugin's bundled criteria reference is generated from the models.

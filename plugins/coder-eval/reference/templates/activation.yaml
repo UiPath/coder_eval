@@ -1,0 +1,28 @@
+# Activation suite template. Replace every `my-skill` with the bare name of the
+# skill under test (the directory name of its SKILL.md — never a `plugin:skill`
+# form), and rewrite the rows in activation-rows.jsonl as real user requests.
+#
+# One row per prompt; each row is scored on whether the agent engaged the skill.
+# Positive rows set expected_skill to the skill's name, distractor rows set "".
+task_id: "my-skill-activation"
+description: "Does the agent engage `my-skill` when it should, and leave it alone when it shouldn't?"
+tags: [activation]
+
+dataset:
+  paths:
+    - "activation-rows.jsonl"
+
+initial_prompt: |
+  ${row.prompt}
+
+success_criteria:
+  - type: "skill_triggered"
+    description: "my-skill activation for row ${row.id}"
+    skill_name: "my-skill"
+    expected_skill: "${row.expected_skill}"
+    # Suite-level gate over all rows: recall = of the rows that should have
+    # engaged the skill, how many did; precision = of the rows where it engaged,
+    # how many should have. Raise these once you have a baseline.
+    suite_thresholds:
+      recall.yes: 0.7
+      precision.yes: 0.7
