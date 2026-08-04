@@ -143,6 +143,73 @@ action.yml                         # Published composite GitHub Action (coder-ev
 - **sandbox isolation**: Tasks that don't need MCP servers should set `setting_sources: []` in their `agent:` block to isolate the sandbox from the host project's CLAUDE.md and settings. Without this, the host project's CLAUDE.md (often 20 KB+) is injected into every API call, inflating cache-creation tokens and cost significantly.
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all *task-level* run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block. The one *per-criterion* cap, `stop_early.decide_within`, deliberately lives on `LiveSuccessCriterion` instead (see below) — the watcher must attribute a decision-step timeout to a specific criterion, which `RunLimits` (task-scoped, criterion-agnostic) cannot express.
 - **Early stop on criterion (opt-in, per-criterion arming)**: a `stop_early:` block (`StopEarlyPolicy`) on a criterion ends a single-shot run early once the run's **armed** criteria decide the outcome, so a raised `max_turns` isn't wasted on the smoke flavor. The block's PRESENCE is the arming and alone activates the watcher — there is **no run-level master switch**: `run_limits.stop_early: false` is the run-level KILL SWITCH that force-disarms every block (the one-line experiment-variant/`-D` override for an authoritative full run), and `run_limits.stop_early: true` (the removed master arm) is a hard `EarlyStopConfigError` at resolution. The block exists on `LiveSuccessCriterion` only (currently `skill_triggered`, `command_executed` — so arming an unobservable criterion is unrepresentable, a pydantic extra-forbid error). Arming carries one implicit trigger (a native live-fail may fail-stop the run); its keys refine it: `on_pass: stop` (pass-stop the moment the criterion live-passes; default `continue` just latches) and `decide_within: N` (still undecided after N tool-call steps latches an **effective fail**, fed through the same fail-stop rule, reported as `decision_budget_exceeded` — an ordinary weighted fail, NOT a gate-bypassing force-fail; cumulative across retry attempts of the same turn). A trigger whose polarity the instance can't decide (per the abstract, checker-independent `live_decidable_polarities()`, a pure function of the criterion's own fields, paired with the checker's `live_verdict` override by lint rule CE025, a registry-based whole-tree check) is **inert by design** — one dataset-fanned YAML line serves both positive rows (pass/timeout live) and distractor rows (fail live). Verdicts **latch**: once a criterion decides, its `live_verdict` is never polled again. Stop rule is weighted, not strict-boolean: `run_limits.stop_early_gate_threshold` (default `1.0`, reproducing strict-AND behavior exactly) is the minimum weighted score (`Σ weight·score / Σ weight` over the armed subset) required to pass; a fail-stop fires once the armed set's **ceiling** (best case for everything still undecided) can no longer reach the threshold — so a low-weight fail or timeout that can't doom the gate is absorbed and the run continues — and is **deferred while any pass-capable armed criterion is undecided** (a distractor misfire never truncates a positive row's recall signal); a pass-stop fires once the `on_pass: stop` subset's **floor** (worst case) already meets the threshold, and is symmetrically **deferred while any pass-capable armed criterion outside the `on_pass: stop` subset is undecided** (so an early pass never freezes a sibling `on_pass: continue` criterion's signal out of the trajectory). A fail-stop is therefore verdict-preserving; a pass-stop can miss a *later* distractor misfire, so authoritative P/R/F1 comes from a kill-switched (`stop_early: false`) run. Driven by `orchestration/early_stop.py::EarlyStopWatcher` (built when `early_stop_active(task)`: ≥1 armed criterion, kill switch not thrown) through the agent's cooperative `should_stop` seam (tool-call granularity, no SIGKILL); live verdicts only *trigger* the stop — the standard `check_all_async` on the frozen trajectory is authoritative. Gating is **FIRED-ONLY**: a run the watcher actually cut gates on the **armed subset** via the weighted `EvaluationResult.armed_criteria_passed`; a run that completes naturally — armed or not — gates strict-AND via `all_criteria_passed`, so adding a block never changes the verdict of a run it didn't cut. Note the gate keys on the watcher having FIRED (`result.early_stop is not None`), not on confirmed truncation — an agent that ignores `should_stop`, or a stop firing on the final message, still gates armed-only. Every resolution-time guardrail violation is a hard error at resolution (plan *and* run); the one load-time case — a `stop_early:` block on a non-live criterion — is a pydantic schema error at task load, which the run surface reports as a skipped task like any other malformed task. A runtime verdict bug **fails open** to a full run. Surfaces: `EarlyStopInfo` (incl. `gate_threshold` at stop time), report notes/badges, `stopped_early` run.json rows, `EarlyStopped`/`EarlyStopReason` telemetry dims. Worked rationale: docs/TASK_DEFINITION_GUIDE.md § `stop_early`. No blocks anywhere ⇒ behavior byte-for-byte unchanged.
+
+## Success Criteria (14 types)
+
+| Type | Scoring | Description |
+|------|---------|-------------|
+| `file_exists` | Binary | File must exist |
+| `file_contains` | Fractional | String presence/absence |
+| `file_check` | Fractional | Unified file existence + content + regex check |
+| `json_check` | Fractional | JSON validation + JSON Schema + JMESPath assertions |
+| `run_command` | Binary / Continuous | Command exit code + optional stdout matching or float scoring |
+| `file_matches_regex` | Binary | Regex match on file |
+| `reference_comparison` | Continuous | AST/token/complexity similarity |
+| `command_executed` | Fractional | Agent tool usage verification |
+| `commands_efficiency` | Continuous | Agent tool-call efficiency relative to expected budget |
+| `uipath_eval` | Fractional | UiPath agent evaluation results |
+| `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
+| `skill_triggered` | Binary | Did the agent engage the target skill? Agent-agnostic — Claude's `Skill` tool call, or (Codex) reading the skill's files off disk. Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
+| `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference; routes through the run's backend (Bedrock / Anthropic) |
+| `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. |
+
+All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9), plus (on live criteria only) a `stop_early:` block (`on_pass`, `decide_within`) that arms the criterion for early stop by its presence. On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
+
+## Evaluation Flow
+
+```
+CLI → ExperimentRunner (resolve task × variant) → run_batch → Orchestrator → Sandbox + Agent + SuccessChecker
+
+ExperimentRunner resolves configs via 5-layer merge:
+  1. experiments/default.yaml  (baseline defaults)
+  2. experiment defaults       (experiment-wide defaults)
+  3. tasks/<task>.yaml         (task-specific config, wins over defaults)
+  4. experiment variant        (variant-specific overrides)
+  5. CLI flags                 (always wins)
+
+Per-task (single iteration; simulation mode runs a multi-turn dialog):
+  1. Orchestrator._communicate_with_retry(prompt, iteration) → TurnRecord
+       (shared by single-shot + simulation paths; wraps
+        agent.communicate with execute_with_retry, per-attempt
+        turn_timeout, and on_attempt_error → preserves crashed=True
+        partial TurnRecords on AgentCrashError / TurnTimeoutError)
+  2. SuccessChecker.check_all_async() → List[CriterionResult]
+
+Cleanup: Stop agent, save EvaluationResult, generate reports
+```
+
+## Development Commands
+
+```bash
+# MANDATORY: Run after every implementation phase
+make format      # ruff format
+make check       # ruff check (lint)
+make typecheck   # pyright
+make test        # pytest
+make lint        # custom architectural lint rules (CE001+)
+make verify      # All of the above + coverage check (CI equivalent)
+```
+
+When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001+ pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested. (Doc-surface / whole-tree rules that reason over Markdown/YAML or the entire `src/` tree rather than one `.py` AST at a time — CE027–CE031 — are not `BaseRule`s in the runner; they are wired as dedicated `@pytest.mark.lint` test classes. CE031 guards against dead config: a behavior-driving field on `SimulationConfig`/`RunLimits`/`Dataset` that no code reads by name.)
+
+Adding a user-facing field to one of the models CE030 tracks (`TaskDefinition`, `RunLimits`, `Dataset`, `SimulationConfig` — see `tests/lint/doc_schema_parity.py`) means documenting it in its guide (mention the field name as inline code) or adding an `EXEMPT` entry with a reason it is not user-authored. `make lint` fails otherwise.
+
+**Docs index SSOT.** `nav:` plus `extra.docs_index` (blurbs) in `mkdocs.yml` are the single source of truth for the flat index surfaces — `README.md`'s Documentation table, `docs/index.md`'s "Where to go next" table, and the `## Docs` / `## Tutorials` sections of `docs/llms.txt`. Regenerate all three with `make docs-indexes`; **CE028** fails the build if any drifts, if a nav page lacks a blurb (or vice-versa), or if a `docs/*.md` page is missing from the nav. The website sidebar derives from the same `nav:`. When adding or renaming a docs page, edit `nav:` + `extra.docs_index` and run `make docs-indexes` — never hand-edit the generated tables (they sit between `<!-- docs-index:start -->` / `<!-- docs-index:end -->` markers).
+
+**Anchor slugger convention.** The docs are rendered by three sluggers (GitHub, Starlight/github-slugger on coder-eval.com, and python-markdown/mkdocs), which disagree on headings containing `&` or punctuation (`api-routing--benchmarking` vs `api-routing-benchmarking`). Prefer punctuation-free headings so all three agree; if a heading needs `&`, add a GitHub-form `<a id="…"></a>` shim above it and link that form. Verify a new intra-doc anchor link resolves in the built HTML (`mkdocs build`), not by eye.
+
+## Configuration
+
 - **ruff**: line-length=120, target py313, select E/F/I/N/W/UP/B/SIM/RUF
 - **pyright**: standard mode, includes `coder_eval/` only, excludes tests
 - **pytest**: asyncio_mode=auto, strict markers, coverage source=coder_eval

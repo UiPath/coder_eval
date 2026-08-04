@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
+from .reports import early_stop_gate_note
+
 
 if TYPE_CHECKING:
     from coder_eval.models import (
@@ -345,8 +347,6 @@ def _render_header(result: EvaluationResult) -> str:
         expected_turns_badge = f'<span class="badge warning">expected_turns exceeded ({actual}/{expected})</span>'
     early_stop_badge = ""
     if result.early_stop is not None:
-        from .reports import early_stop_gate_note
-
         title = early_stop_gate_note(result.early_stop.reason.value)
         early_stop_badge = (
             f'<span class="badge warning" title="{_esc(title)}">'

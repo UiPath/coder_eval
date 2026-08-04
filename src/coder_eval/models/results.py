@@ -476,7 +476,7 @@ class EarlyStopInfo(BaseModel):
         + "saving); None when max_turns is unset.",
     )
     gate_threshold: float = Field(
-        default=1.0,
+        default=DEFAULT_STOP_EARLY_GATE_THRESHOLD,
         ge=0.0,
         le=1.0,
         description="run_limits.stop_early_gate_threshold in effect for this stop — captured so a "

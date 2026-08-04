@@ -435,7 +435,12 @@ Semantics:
   would misfire on a *later* tool call is not observed (the frozen row scores as a
   clean pass) — the smoke flavor trades some precision completeness for budget, so
   authoritative precision/recall belongs on the kill-switched
-  (`run_limits.stop_early: false`) run.
+  (`run_limits.stop_early: false`) run. The same one-sidedness applies to an armed
+  criterion that is fail-only-decidable but still needs evidence to *pass* — e.g.
+  `command_executed` with `min_count: 1` **and** `max_count` set: the pass-stop
+  deferral holds only for pass-capable siblings, so an `on_pass: stop` sibling can
+  cut the run before the minimum count is reached and the armed gate scores that
+  criterion 0. Score such combinations authoritatively on the kill-switched run.
 - **Fail-safe.** A live-verdict bug **fails open** to a full run (logged loudly) —
   it can never silently disable a criterion or cause a false early stop.
 - **Weighting.** `run_limits.stop_early_gate_threshold` (default `1.0`) is the

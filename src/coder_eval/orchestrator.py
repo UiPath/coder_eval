@@ -1582,8 +1582,11 @@ class Orchestrator:
             # One gate for every early-stopped run, no per-reason branches: a
             # decision-budget stop is just a fail-stop whose deciding criterion
             # timed out (the watcher only fires once the weighted ceiling
-            # proves the armed gate cannot pass), and the frozen-trajectory
-            # scores agree by construction — so the weighted armed gate is
+            # proves the armed gate cannot pass). The ceiling is an upper bound
+            # on the authoritative armed score only because the watcher reduces
+            # the SAME trajectory the checker scores — it records UNRESOLVED
+            # tool ends exactly like the agent's EventCollector does (see
+            # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
             # correct whether the watcher fired on a pass, a fail, or a timeout.
             gate_threshold = (
                 self.task.run_limits.stop_early_gate_threshold
@@ -1600,7 +1603,10 @@ class Orchestrator:
             )
         else:
             if self._early_stop_watcher is not None:
-                logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
+                if self._early_stop_watcher.disarmed:
+                    logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
+                else:
+                    logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
             all_passed = self.result.all_criteria_passed(self.task.success_criteria)
 
         # Reuse the model method for weighted score (single source of truth)

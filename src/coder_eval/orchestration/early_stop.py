@@ -224,7 +224,15 @@ def validate_early_stop(task: TaskDefinition) -> None:
 
     ensure_plugins_loaded()
     agent_type = str(task.agent.type) if task.agent is not None and task.agent.type is not None else None
-    registration = AgentRegistry.get(agent_type) if agent_type is not None else None
+    if agent_type is None:
+        # Distinct from an unregistered type: there is no agent block at all,
+        # so pointing at plugin loading would send the user the wrong way.
+        raise EarlyStopConfigError(
+            "criterion-level stop_early arming requires an agent block with a registered type; "
+            + "this task resolves without one. "
+            + "Disarm with run_limits.stop_early: false to bypass this check."
+        )
+    registration = AgentRegistry.get(agent_type)
     if registration is None:
         # Not the same failure as an agent that opted out of cooperative stop:
         # an unregistered type usually means a plugin is not installed/loaded.
@@ -233,10 +241,15 @@ def validate_early_stop(task: TaskDefinition) -> None:
             + "not registered (is the providing plugin installed and loaded?). "
             + "Disarm with run_limits.stop_early: false to bypass this check."
         )
-    if not bool(getattr(registration.agent_class, "supports_cooperative_stop", False)):
+    if not registration.agent_class.supports_cooperative_stop:
+        supporting = ", ".join(
+            kind
+            for kind in AgentRegistry.list_kinds()
+            if (reg := AgentRegistry.get(kind)) is not None and reg.agent_class.supports_cooperative_stop
+        )
         raise EarlyStopConfigError(
             "criterion-level stop_early arming requires an agent that supports cooperative stopping "
-            + f"(claude-code, codex, antigravity); agent type {agent_type!r} does not. "
+            + f"({supporting}); agent type {agent_type!r} does not. "
             + "Disarm with run_limits.stop_early: false to run this agent anyway."
         )
 
@@ -320,9 +333,10 @@ class EarlyStopWatcher:
         ]
         if not any(self._pass_trigger) and not any(self._fail_trigger) and all(b is None for b in self._budget):
             # Legal (a fanned row whose armed lines are all inert for this row's
-            # role) but worth a breadcrumb: this row can never stop early and
-            # will simply run to the cap, gating on the armed subset.
-            logger.debug("[%s] all armed stop triggers are inert for this row; run cannot stop early", task_id)
+            # role) but user-visible: on a non-fanned task this is dead config —
+            # the row can never stop early and will simply run to the cap,
+            # gating on the armed subset if the watcher somehow fires.
+            logger.warning("[%s] all armed stop triggers are inert for this row; run cannot stop early", task_id)
         self._max_turns = max_turns
         self._collector = EventCollector()
         self._sdk_turn_index = 0
@@ -413,15 +427,21 @@ class EarlyStopWatcher:
         already latched the stop. ``tool_call_index`` is incremented on the
         resolved ``ToolEndEvent`` so it stays a count of completed tool calls.
 
-        UNRESOLVED tool ends are ignored entirely (not counted or evaluated).
+        UNRESOLVED tool ends are RECORDED but never counted or evaluated on.
         ``_ClaudeTurnState.finalize`` force-closes orphaned tools as UNRESOLVED
         *after* the message loop has ended and the terminal status is already
         chosen (COMPLETED / TIMEOUT / crash) — those are not live tool activity
         and must not trip the stop rule, or a run that ran to completion (or timed
         out / crashed) without a real, in-loop decision would latch a false early
-        stop. A legitimate stop always fires on the in-loop call, so dropping
-        unresolved ends can never suppress a real stop; it also keeps a crashed
-        attempt's orphan tools out of the retry-persistent partial trajectory.
+        stop. A legitimate stop always fires on the in-loop call, so skipping the
+        evaluation can never suppress a real stop. They DO land in the collector:
+        the agent's own ``EventCollector`` records force-closed commands into the
+        ``TurnRecord`` that ``check_all_async`` later scores (including a crashed
+        attempt's drained partial turn), so the watcher must reduce the same
+        trajectory — otherwise its verdicts (and the fail-stop's ceiling bound)
+        would be computed over a strictly smaller command set than the
+        authoritative check, and a ``decide_within`` timeout could latch an
+        effective fail on a criterion the frozen trajectory scores as a pass.
         """
         if isinstance(event, AgentStartEvent):
             if self._started_monotonic is None:
@@ -435,6 +455,10 @@ class EarlyStopWatcher:
             return
         elif isinstance(event, ToolEndEvent):
             if event.status == ToolEndStatus.UNRESOLVED:
+                # Trajectory parity with the agent's collector (see docstring):
+                # record, but don't count a round or evaluate — a force-closed
+                # orphan is not live tool activity and must not fire a stop.
+                self._collector.on_event(event)
                 return
             self._tool_call_index += 1
             self._collector.on_event(event)
@@ -597,20 +621,22 @@ class EarlyStopWatcher:
         # failure (or timeout) may not be enough to doom the gate, so the run
         # keeps going: the failure is absorbed.
         if not pass_capable_undecided:
-            candidate_index = next(
-                (
-                    i
-                    for i, v in enumerate(verdicts)
-                    if v == "fail" and (self._fail_trigger[i] or self._budget_drove(i, verdicts, tool_call_index))
-                ),
-                None,
-            )
+            # Deterministic precedence: a native live-fail candidate always wins
+            # over a budget-driven one, so the persisted/telemetry reason cannot
+            # flip between CRITERION_FAILED and DECISION_BUDGET_EXCEEDED on a
+            # mere reorder of ``success_criteria`` when both resolve on the same
+            # round. Within each class, first criteria-order match wins.
+            native_fails = [
+                i
+                for i, v in enumerate(verdicts)
+                if v == "fail" and self._fail_trigger[i] and not self._budget_drove(i, verdicts, tool_call_index)
+            ]
+            budget_fails = [
+                i for i, v in enumerate(verdicts) if v == "fail" and self._budget_drove(i, verdicts, tool_call_index)
+            ]
+            candidate_index = native_fails[0] if native_fails else (budget_fails[0] if budget_fails else None)
             if candidate_index is not None and self._ceiling(verdicts) < self._gate_threshold:
-                reason = (
-                    EarlyStopReason.DECISION_BUDGET_EXCEEDED
-                    if self._budget_drove(candidate_index, verdicts, tool_call_index)
-                    else EarlyStopReason.CRITERION_FAILED
-                )
+                reason = EarlyStopReason.CRITERION_FAILED if native_fails else EarlyStopReason.DECISION_BUDGET_EXCEEDED
                 self._fire(reason, self._armed[candidate_index][0], tool_call_index=tool_call_index)
                 return
 

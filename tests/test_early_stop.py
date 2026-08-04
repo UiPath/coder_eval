@@ -795,6 +795,25 @@ class TestValidateEarlyStop:
         with pytest.raises(EarlyStopConfigError, match="cooperative stopping"):
             validate_early_stop(task)
 
+    def test_guardrail3_agentless_task_rejected(self) -> None:
+        # An armed task with no agent block at all: the diagnosis must point at
+        # the missing agent block, not at plugin loading.
+        task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)]).model_copy(update={"agent": None})
+        with pytest.raises(EarlyStopConfigError, match="agent block"):
+            validate_early_stop(task)
+
+    def test_guardrail3_unregistered_agent_type_rejected(self) -> None:
+        # An armed task whose agent type vanished from the registry (plugin not
+        # installed/loaded) must fail with the plugin-pointing diagnosis.
+        kind = "vanishing-agent"
+        AgentRegistry.register(kind, _DummyNoStopConfig)(_DummyNoStopAgent)
+        try:
+            task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=kind)
+        finally:
+            AgentRegistry._registry.pop(kind, None)
+        with pytest.raises(EarlyStopConfigError, match="not registered"):
+            validate_early_stop(task)
+
     def test_guardrail1_armed_codex_accepts(self) -> None:
         task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=AgentKind.CODEX)
         validate_early_stop(task)  # no raise
@@ -812,15 +831,17 @@ class TestValidateEarlyStop:
         assert early_stop_active(task) is False
 
     def test_guardrail3_unobservable_criterion_unrepresentable(self) -> None:
-        # The trigger fields exist only on LiveSuccessCriterion, so an armed
+        # The stop_early block exists only on LiveSuccessCriterion, so an armed
         # unobservable criterion cannot even be constructed (extra='forbid') —
-        # the old runtime "observable" guard is now a schema property.
-        with pytest.raises(ValueError):
+        # the old runtime "observable" guard is now a schema property. Match on
+        # the field name so the rejection is provably about stop_early, not
+        # some other typo'd kwarg.
+        with pytest.raises(ValueError, match="stop_early"):
             FileExistsCriterion(
                 type="file_exists",
                 path="x.txt",
                 description="x",
-                stop_on_pass=True,  # type: ignore[call-arg]
+                stop_early=StopEarlyPolicy(),  # type: ignore[call-arg]
             )
 
     def test_raise_order_simulation_before_agent(self, dummy_no_stop_kind: str) -> None:
@@ -2046,8 +2067,8 @@ class TestEarlyStopWatcher:
         assert watcher._tool_call_index == 0  # the unresolved end is not even counted
 
     def test_resolved_after_unresolved_still_decides(self) -> None:
-        # An UNRESOLVED end is dropped, but a later RESOLVED engagement still fires
-        # the stop (dropping orphans never suppresses a real, observed stop).
+        # An UNRESOLVED end never evaluates, but a later RESOLVED engagement still
+        # fires the stop (skipping orphan rounds never suppresses a real stop).
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
         assert watcher.info is None
@@ -2055,6 +2076,76 @@ class TestEarlyStopWatcher:
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_unresolved_end_recorded_for_trajectory_parity(self) -> None:
+        # TRAJECTORY PARITY: the agent's EventCollector records force-closed
+        # (UNRESOLVED) commands into the TurnRecord that check_all_async later
+        # scores — e.g. a crashed attempt's drained partial turn. The watcher
+        # must reduce the SAME trajectory: the orphan is recorded (visible to
+        # the next evaluation round), just never counted or evaluated on.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        assert watcher._tool_call_index == 0  # no round counted
+        assert watcher.info is None  # no stop fired on the orphan itself
+        record = watcher._collector.build_turn_record()
+        assert any(c.tool_name == "Skill" for c in record.commands)  # ...but it IS in the trajectory
+        # The next real round evaluates over the parity trajectory: an unrelated
+        # Bash call decides the criterion pass from the recorded orphan.
+        _feed(watcher, [_tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_budget_timeout_not_latched_when_orphan_already_decided(self) -> None:
+        # The verdict-preserving half of trajectory parity: a decide_within
+        # timeout must never latch an effective fail on a criterion the frozen
+        # trajectory scores as a pass. The deciding engagement arrived as a
+        # force-closed orphan (recorded, not evaluated); the budget expiring on
+        # the next round must see it as a live-pass, not fabricate a fail.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", max_steps_to_decide=1)])
+        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        # Round 1 (tool_call_index == 1 >= decide_within): without parity this
+        # would latch a synthetic fail and fire DECISION_BUDGET_EXCEEDED.
+        _feed(watcher, [_tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_pass_stop_cuts_undecided_fail_only_sibling_documented_gap(self) -> None:
+        # KNOWN one-sided trade, pinned so a future deferral redesign flips it
+        # consciously: the pass-stop deferral holds only for PASS-CAPABLE
+        # siblings. An armed fail-only-decidable criterion that still needs
+        # evidence (command_executed with min_count>=1 AND max_count set —
+        # polarities == {"fail"} but the frozen score needs the command run)
+        # is NOT deferred on, so an on_pass=stop sibling can cut before its
+        # minimum count is reached and the armed gate scores it 0. Documented
+        # in TASK_DEFINITION_GUIDE.md § stop_early: authoritative scoring for
+        # such combinations belongs on the kill-switched run.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_on_pass=True),
+                _cmd_crit(min_count=1, max_count=3, stop_on_fail=True),
+            ]
+        )
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_fail_stop_reason_precedence_is_criteria_order_invariant(self) -> None:
+        # A native live-fail (distractor misfire) and a decide_within timeout
+        # resolving on the SAME round must report the same persisted/telemetry
+        # reason in either YAML order: the native fail always wins.
+        def build(order: str) -> EarlyStopWatcher:
+            distractor = _skill_crit("weather-teller", "date-teller", stop_on_fail=True)
+            timed = _skill_crit("date-teller", "date-teller", max_steps_to_decide=1)
+            criteria = [distractor, timed] if order == "distractor-first" else [timed, distractor]
+            return _watcher(criteria)
+
+        for order in ("distractor-first", "timed-first"):
+            watcher = build(order)
+            # One resolved misfire round: the distractor natively fails AND the
+            # timed criterion's budget (1) expires on the same tool call.
+            _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_skill_cmd("weather-teller", tool_id="w1"))])
+            assert watcher.info is not None, order
+            assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED, order
 
     def test_decision_latched_after_fire(self) -> None:
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
@@ -2392,6 +2483,28 @@ class TestOrchestratorEarlyStopWiring:
         assert result.early_stop.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
         assert success is False
 
+    async def test_decision_budget_exceeded_advisory_demotion(self, tmp_path) -> None:
+        # The advisory-demotion consequence of fired-only gating, pinned where
+        # the two gates DISAGREE: the timed-out armed criterion scores 1.0 on
+        # the frozen trajectory while the unarmed advisory criterion scores
+        # 0.0. The armed gate passes (SUCCESS) even though the full strict-AND
+        # gate would fail — the advisory criterion never had the chance to be
+        # satisfied on a truncated trajectory, so it must not gate.
+        criteria = [
+            _skill_crit(self._SKILL, self._SKILL, stop_on_pass=True, max_steps_to_decide=1),
+            FileExistsCriterion(path="artifact.txt", description="artifact must exist"),
+        ]
+        result, _agent, success = await _run_wiring(
+            criteria=criteria,
+            events=[_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))],
+            scores=[1.0, 0.0],
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is not None
+        assert result.early_stop.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert result.all_criteria_passed(criteria) is False  # full gate would fail
+        assert success is True  # armed gate decides: advisory 0.0 is demoted
+
     async def test_completed_naturally_weighted_armed_gate_does_not_run(self, tmp_path) -> None:
         # FIRED-ONLY gating, diverging in the other direction from the sibling
         # test below: two ARMED criteria (0.8 passing / 0.2 failing) under a
@@ -2648,8 +2761,17 @@ class TestEarlyStopReportSurfaces:
     def test_html_header_shows_early_stop_badge(self) -> None:
         html = _render_header(_stopped_result())
         assert "stopped early (criterion_passed)" in html
+        assert "gated on armed criteria only" in html  # shared gate note as the tooltip
         # No badge on a normal run.
         assert "stopped early" not in _render_header(_result())
+
+    def test_html_badge_tooltip_for_decision_budget_exceeded(self) -> None:
+        # The decision-budget flavor of the shared gate note reaches the HTML
+        # tooltip too — and survives _esc (the prose has no markup, so escaping
+        # must be a no-op on it).
+        html = _render_header(_stopped_result(reason=EarlyStopReason.DECISION_BUDGET_EXCEEDED))
+        assert "stopped early (decision_budget_exceeded)" in html
+        assert "decision-step budget exceeded" in html
 
     def test_html_criteria_marks_only_advisory_rows(self) -> None:
         # Armed skill_triggered (matches _info.armed_criteria) + advisory file_exists.

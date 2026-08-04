@@ -6,11 +6,12 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from .models import (
     CriterionAggregate,
     CriterionStats,
+    EarlyStopReason,
     FailedRowSummary,
     SuiteRollup,
     TaskResult,
@@ -172,16 +173,28 @@ def early_stop_gate_note(reason: str) -> str:
     prose can never drift between renderers.
 
     ``reason`` is the ``EarlyStopReason`` string value (e.g. ``run.json``'s
-    ``early_stop_reason``).
+    ``early_stop_reason``); an unrecognized value (a legacy or hand-edited
+    record, or run.json's literal ``"unknown"``) gets the generic note. The
+    ``match`` is exhaustiveness-checked so a new ``EarlyStopReason`` member
+    cannot silently fall through to the wrong prose.
     """
-    if reason == "decision_budget_exceeded":
-        # The deciding criterion timed out undecided (an effective fail); it
-        # gates through the same weighted armed gate as a native live-fail.
-        return (
-            "decision-step budget exceeded (criterion timed out undecided, treated as a failed "
-            "armed criterion); gated on armed criteria only; other criteria are advisory"
-        )
-    return "gated on armed criteria only; other criteria are advisory"
+    generic = "gated on armed criteria only; other criteria are advisory"
+    try:
+        member = EarlyStopReason(reason)
+    except ValueError:
+        return generic
+    match member:
+        case EarlyStopReason.DECISION_BUDGET_EXCEEDED:
+            # The deciding criterion timed out undecided (an effective fail); it
+            # gates through the same weighted armed gate as a native live-fail.
+            return (
+                "decision-step budget exceeded (criterion timed out undecided, treated as a failed "
+                "armed criterion); gated on armed criteria only; other criteria are advisory"
+            )
+        case EarlyStopReason.CRITERION_PASSED | EarlyStopReason.CRITERION_FAILED:
+            return generic
+        case _:
+            assert_never(member)
 
 
 def _pass_rate_lines(summary: RunSummary) -> list[str]:
