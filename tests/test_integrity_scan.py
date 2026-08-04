@@ -246,6 +246,35 @@ def test_grep_with_context_flag_is_tainted():
     assert info.verdict is IntegrityVerdict.TAINTED
 
 
+@pytest.mark.parametrize("tool_name", ["Edit", "MultiEdit", "NotebookEdit"])
+def test_editing_graded_material_is_a_read(tool_name: str):
+    """An edit needs the current content to locate what it replaces."""
+    info = scan_commands(
+        [
+            _turn(
+                [_cmd(tool_name, {"file_path": "/repo/tasks/leaky/solution.py", "old_string": "a", "new_string": "b"})]
+            )
+        ],
+        SPEC,
+    )
+    assert info.verdict is IntegrityVerdict.TAINTED
+    assert info.findings[0].tool_name == tool_name
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "parameters"),
+    [
+        pytest.param("Write", {"file_path": "RESOLUTION.md", "content": "my diagnosis"}, id="write-the-deliverable"),
+        pytest.param("WebFetch", {"url": "https://docs.example.com/RESOLUTION.md"}, id="webfetch"),
+    ],
+)
+def test_producing_content_is_not_a_read(tool_name: str, parameters: dict):
+    """These name what the agent is CREATING; nothing local is opened."""
+    info = scan_commands([_turn([_cmd(tool_name, parameters)])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+    assert info.findings == []
+
+
 def test_unknown_tool_touching_graded_material_is_inconclusive_not_tainted():
     """We do not guess at an unrecognised tool's semantics in either direction."""
     info = scan_commands([_turn([_cmd("mcp__some__fetch", {"target": "RESOLUTION.md"})])], SPEC)

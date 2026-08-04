@@ -177,6 +177,16 @@ _READ_TOOLS = frozenset({"Read", "NotebookRead", "ReadFile", "read_file", "view"
 # Structured tools that only enumerate paths.
 _LISTING_TOOLS = frozenset({"Glob", "LS", "ListDir", "list_dir", "Ls", "glob", "TodoWrite", "Task", "Skill"})
 
+# Structured tools that edit a file in place. Editing is a read: the tool requires
+# the current content to locate what it replaces, and the agent had to have seen
+# that content to write the edit.
+_EDIT_TOOLS = frozenset({"Edit", "MultiEdit", "NotebookEdit"})
+
+# Structured tools that produce content rather than consume it. `Write` names the
+# file it creates -- including the deliverable a task asks for, whose name may BE
+# graded material -- and `WebFetch` names a URL, not a local path.
+_NEUTRAL_TOOLS = frozenset({"Write", "WebFetch"})
+
 # Basename patterns that are graded material in every suite, independent of what
 # this particular task declares. Deliberately short: each entry is a name the
 # framework or the task-authoring convention owns, never a name an agent's own
@@ -701,9 +711,9 @@ def _structured_read(cmd: CommandTelemetry, text: str, spec: GradedMaterialSpec)
     if matched is None:
         return False, None, True
 
-    if cmd.tool_name in _READ_TOOLS:
+    if cmd.tool_name in _READ_TOOLS or cmd.tool_name in _EDIT_TOOLS:
         return True, matched, True
-    if cmd.tool_name in _LISTING_TOOLS:
+    if cmd.tool_name in _LISTING_TOOLS or cmd.tool_name in _NEUTRAL_TOOLS:
         return False, matched, True
     if cmd.tool_name == "Grep":
         # Claude's Grep returns matching LINES only in content mode; the default
