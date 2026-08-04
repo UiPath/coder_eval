@@ -104,7 +104,11 @@ JUnit XML report, appends `run.md` to the job summary, and fails the step on any
 task/gate failure:
 
 ```yaml
-- uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly
+- uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…
+  with: { node-version: '20' }
+- run: npm install -g @anthropic-ai/claude-code
+
+- uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
     tasks: tests/tasks/**/*.yaml
     model: claude-sonnet-5
@@ -156,9 +160,11 @@ code: the step fails if *either* coder-eval exits non-zero *or* any task's
 alone.
 
 > **Agent runtime is the caller's responsibility.** The action is agent-agnostic —
-> it installs `coder-eval` but no coding-agent runtime. Tasks using the default
-> `claude-code` agent need the `claude` CLI on `PATH` (`actions/setup-node` +
-> `npm install -g @anthropic-ai/claude-code`) in the job before the action runs.
+> it installs `coder-eval` but no coding-agent runtime, which is why the example
+> above starts with `actions/setup-node` +
+> `npm install -g @anthropic-ai/claude-code`: the default `claude-code` agent
+> needs the `claude` CLI on `PATH` before the action runs. Swap those steps for
+> your own agent's runtime as needed.
 
 > **Security.** Evaluated tasks execute agent-generated code. Do **not** run this
 > action under `pull_request_target` with secrets exposed to untrusted fork PRs —
@@ -190,7 +196,7 @@ alone.
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
-| [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
+| [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
 | [How It Compares](docs/comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |

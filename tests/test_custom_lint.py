@@ -1208,3 +1208,166 @@ class TestCE031DeadConfigFields:
         consumed = consumed_attr_names(self.SRC)
         for name in ("n_trials", "max_usd", "stratify_field"):
             assert name in consumed, f"expected {name!r} to be read as an attribute in src/"
+
+
+@pytest.mark.lint
+class TestCE026ActionDocSurfaces:
+    """CE026 — the Action's onboarding surfaces must be truthful and self-sufficient.
+
+    The motivating bug: docs/CI_GATE.md said "there is nothing to install" above a
+    copy-pasteable `uses:` step with no agent runtime, while the correcting
+    prerequisite note sat 11 lines below and the tutorial's sibling snippet *did*
+    show the steps. An integrator who copied it got a run that dies on a missing
+    `claude` binary. Reasons over Markdown + YAML, so it lives here rather than in
+    the AST-only runner (precedent: CE027-CE031).
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+    ACTION_YML = REPO_ROOT / "action.yml"
+    PR_CHECKS = REPO_ROOT / ".github" / "workflows" / "pr-checks.yml"
+
+    def test_primary_action_snippets_show_agent_runtime_prereqs(self):
+        from tests.lint.action_docs import default_doc_paths, find_missing_prereqs
+
+        findings = find_missing_prereqs(default_doc_paths(self.REPO_ROOT))
+        assert not findings, (
+            "\nAction quickstart snippet(s) that a reader can copy but that omit the agent-runtime "
+            "prerequisite steps:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_no_unqualified_zero_install_claims_near_action_snippets(self):
+        from tests.lint.action_docs import default_doc_paths, find_unscoped_absolute_claims
+
+        findings = find_unscoped_absolute_claims(default_doc_paths(self.REPO_ROOT))
+        assert not findings, (
+            "\nUnqualified zero-install absolute(s) beside an Action snippet — scope the claim to the "
+            "channel it is about:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_marketplace_links_match_the_action_listing_name(self):
+        from tests.lint.action_docs import action_listing_name, default_doc_paths, find_slug_mismatches
+
+        listing = action_listing_name(self.ACTION_YML)
+        findings = find_slug_mismatches(default_doc_paths(self.REPO_ROOT), listing)
+        assert not findings, (
+            f"\nMarketplace link/badge(s) inconsistent with action.yml `name: {listing}` — a rename "
+            "404s every one of them:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_required_prereqs_match_the_dogfood_job(self):
+        # The constant is pinned to the executable reference: the dogfood job proves
+        # in CI that these steps are what a fresh runner needs before `uses: ./`.
+        from tests.lint.action_docs import DOGFOOD_JOB, REQUIRED_PREREQ_TOKENS, dogfood_prereq_tokens
+
+        tokens = dogfood_prereq_tokens(self.PR_CHECKS)
+        for required in REQUIRED_PREREQ_TOKENS:
+            assert any(required in token for token in tokens), (
+                f"{required!r} is documented as a prerequisite but the {DOGFOOD_JOB} job no longer "
+                f"runs it before `uses: ./` (job steps: {sorted(tokens)}). Update "
+                "REQUIRED_PREREQ_TOKENS and the doc snippets together."
+            )
+
+    def test_catches_a_snippet_missing_prereqs(self, tmp_path: Path):
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "# Gate\n\n```yaml\n- uses: UiPath/coder_eval@v0\n  with:\n    tasks: t.yaml\n```\n",
+            encoding="utf-8",
+        )
+        findings = find_missing_prereqs([page])
+        assert len(findings) == 1
+        assert "actions/setup-node" in findings[0].message
+
+    def test_only_the_first_action_block_is_checked(self, tmp_path: Path):
+        # Later single-input illustrations must stay quiet, or the rule becomes a nuisance.
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "```yaml\n"
+            "- uses: actions/setup-node@v4\n"
+            "- run: npm install -g @anthropic-ai/claude-code\n"
+            "- uses: UiPath/coder_eval@v0\n"
+            "```\n\n"
+            "Score floor:\n\n"
+            '```yaml\n- uses: UiPath/coder_eval@v0\n  with:\n    minimum-task-score: "0.8"\n```\n',
+            encoding="utf-8",
+        )
+        assert find_missing_prereqs([page]) == []
+
+    def test_prereq_skip_marker_opts_out(self, tmp_path: Path):
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "<!-- lint-skip: action-prereq: illustrative fragment -->\n```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        assert find_missing_prereqs([page]) == []
+
+    def test_page_without_the_action_is_ignored(self, tmp_path: Path):
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text("```yaml\n- uses: actions/checkout@v6\n```\n", encoding="utf-8")
+        assert find_missing_prereqs([page]) == []
+
+    def test_catches_the_nothing_to_install_regression(self, tmp_path: Path):
+        # The exact sentence this rule exists for.
+        from tests.lint.action_docs import find_unscoped_absolute_claims
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "you reference it by repo path — there is nothing to install:\n\n"
+            "```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        findings = find_unscoped_absolute_claims([page])
+        assert len(findings) == 1
+        assert "nothing to install" in findings[0].message
+
+    def test_scoped_claim_is_allowed(self, tmp_path: Path):
+        from tests.lint.action_docs import find_unscoped_absolute_claims
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "you reference it by repo path — there is no Marketplace install step:\n\n"
+            "```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        assert find_unscoped_absolute_claims([page]) == []
+
+    def test_claim_far_from_a_snippet_is_ignored(self, tmp_path: Path):
+        from tests.lint.action_docs import find_unscoped_absolute_claims
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "there is nothing to install\n" + "\n" * 40 + "```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        assert find_unscoped_absolute_claims([page]) == []
+
+    def test_catches_a_renamed_listing(self, tmp_path: Path):
+        from tests.lint.action_docs import find_slug_mismatches
+
+        page = tmp_path / "page.md"
+        page.write_text("[coder_eval](https://github.com/marketplace/actions/coder_eval)\n", encoding="utf-8")
+        assert find_slug_mismatches([page], "coder_eval") == []
+        assert len(find_slug_mismatches([page], "coder eval x")) == 1
+
+    def test_shields_label_must_decode_to_the_listing_name(self, tmp_path: Path):
+        from tests.lint.action_docs import decode_shields_label, find_slug_mismatches
+
+        # A single `_` renders as a space, which is why the badge needs the doubled form.
+        assert decode_shields_label("coder__eval") == "coder_eval"
+        assert decode_shields_label("coder_eval") == "coder eval"
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "[![m](https://img.shields.io/badge/marketplace-coder_eval-2ea44f.svg)](https://x)\n",
+            encoding="utf-8",
+        )
+        findings = find_slug_mismatches([page], "coder_eval")
+        assert len(findings) == 1
+        assert "displays as 'coder eval'" in findings[0].message
