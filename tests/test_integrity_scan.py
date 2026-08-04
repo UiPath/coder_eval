@@ -129,6 +129,45 @@ def test_shell_non_reads_are_not_flagged(command: str):
     assert is_read is False, f"expected NOT a read: {command!r}"
 
 
+# --------------------------------------------------------------------------
+# False positives: an honest command that only LOOKS like a leak
+# --------------------------------------------------------------------------
+
+FALSE_POSITIVES = [
+    pytest.param("cat > check_env.py", id="writing-your-own-helper"),
+    pytest.param("cat >> /repo/tasks/leaky/check_env.py", id="appending-to-a-task-dir-path"),
+    pytest.param("cat > RESOLUTION.md", id="writing-the-deliverable"),
+    pytest.param("rm -f check_env.py", id="removing-your-own-helper"),
+    pytest.param("rm -f /repo/tasks/leaky/check_env.py", id="removing-a-task-dir-path"),
+    pytest.param("mv check_temp.py somewhere/", id="moving-your-own-helper"),
+    pytest.param("mv /repo/tasks/leaky/check_temp.py somewhere/", id="moving-a-task-dir-path"),
+    pytest.param("chmod +x /repo/tasks/leaky/check_env.py", id="chmod"),
+    pytest.param("for f in check_*.py; do echo $f; done", id="globbing-your-own-helpers"),
+    pytest.param(
+        "uip solution resources get my-asset --decode --output json",
+        id="legitimate-decode-flag",
+    ),
+]
+
+
+@pytest.mark.parametrize("command", FALSE_POSITIVES)
+def test_honest_commands_are_not_reads(command: str):
+    """Under `void` these would each destroy a row that measured the agent fairly."""
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is False, f"false positive: {command!r}"
+
+
+def test_a_read_before_an_output_redirect_still_counts():
+    """The write rule must not become an escape hatch: `cat KEY > mine` is a read."""
+    is_read, _ = _bash_read("cat RESOLUTION.md > my_notes.md", SPEC)
+    assert is_read is True
+
+
+def test_stderr_redirection_does_not_hide_a_read():
+    is_read, _ = _bash_read("cat RESOLUTION.md 2>&1", SPEC)
+    assert is_read is True
+
+
 def test_windows_separators_still_match():
     """A task file recorded with backslashes must match a forward-slash command."""
     spec = GradedMaterialSpec(paths=frozenset({r"C:\repo\tasks\leaky\task.yaml"}))
