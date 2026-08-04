@@ -1,25 +1,34 @@
 ---
 description: >-
-  Run Coder Eval as a CI gate — the packaged composite GitHub Action, JUnit XML
-  output for test-report ingestion, and an optional per-task score floor.
+  Run Coder Eval as a CI gate — the coder_eval GitHub Action from the Actions
+  Marketplace, JUnit XML output for test-report ingestion, and an optional
+  per-task score floor.
 ---
 
 # CI Gate: GitHub Action & JUnit reports
 
-Coder Eval ships a **packaged CI gate**: a composite GitHub Action that installs
-the CLI, runs your tasks, emits a JUnit XML report, appends the run summary to the
-job summary, and fails the build on any task/gate failure. This page is the
-reference for the Action and the JUnit output. For a step-by-step walkthrough
+Coder Eval ships a **packaged CI gate**: a composite GitHub Action — on the
+Actions Marketplace as
+[**coder_eval**](https://github.com/marketplace/actions/coder_eval) — that
+installs the CLI, runs your tasks, emits a JUnit XML report, appends the run
+summary to the job summary, and fails the build on any task/gate failure. This
+page is the reference for the Action and the JUnit output. For a walkthrough
 (including a hand-rolled workflow), see
 [Tutorial 02 — Running Coder Eval in CI](tutorials/02-ci-pipeline.md).
 
 ## The GitHub Action
 
-A composite action lives at the repo root (`action.yml`), so you can reference it
-directly:
+The action is published on the GitHub Actions Marketplace as
+[**coder_eval**](https://github.com/marketplace/actions/coder_eval). It is a
+composite action living at the repo root (`action.yml`), so you reference it by
+repo path — there is no Marketplace install step:
 
 ```yaml
-- uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly
+- uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…
+  with: { node-version: '20' }
+- run: npm install -g @anthropic-ai/claude-code
+
+- uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
     tasks: tests/tasks/**/*.yaml
     model: claude-sonnet-5
@@ -27,10 +36,11 @@ directly:
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-The action is **agent-agnostic** — it installs `coder-eval` but *not* any
-coding-agent runtime. Tasks using the default `claude-code` agent need the
-`claude` CLI on `PATH` (Node + `@anthropic-ai/claude-code`), provided by your job
-*before* this step runs.
+The first two steps are there because the action is **agent-agnostic** — it
+installs `coder-eval` but *not* any coding-agent runtime. Tasks using the default
+`claude-code` agent need the `claude` CLI on `PATH` (Node +
+`@anthropic-ai/claude-code`), provided by your job *before* the action runs; swap
+those steps for your own agent's runtime as needed.
 
 ### Inputs
 
