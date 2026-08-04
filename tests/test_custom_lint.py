@@ -1263,6 +1263,24 @@ class TestPluginArtifacts:
             f"{skill}: expected disable-model-invocation {expected}, got {meta.get('disable-model-invocation')!r}"
         )
 
+    def test_bundled_run_layout_matches_the_shared_source(self):
+        # The one hand-copied file in the plugin: reference/run-layout.md mirrors
+        # .claude/shared/run-layout.md verbatim, minus the pointer comment the
+        # original carries on its first line. Generating one hand-written file
+        # from another would add machinery without adding a source of truth, so
+        # this byte-equality assert is the sensor instead.
+        shared = self.REPO_ROOT / ".claude" / "shared" / "run-layout.md"
+        bundled = PLUGIN_ROOT / "reference" / "run-layout.md"
+        pointer, _, body = shared.read_text(encoding="utf-8").partition("\n")
+        assert "plugins/coder-eval/reference/run-layout.md" in pointer, (
+            f"{shared} must open with the pointer comment naming its mirror, so an editor of one "
+            "file learns about the other"
+        )
+        assert body == bundled.read_text(encoding="utf-8"), (
+            f"{bundled} drifted from {shared} — they are a verbatim mirror; copy the shared file "
+            "over the bundled one (keeping the pointer comment only in the shared original)"
+        )
+
     @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
     def test_skills_reference_no_repo_paths(self, skill: Path):
         text = skill.read_text(encoding="utf-8")
