@@ -27,9 +27,24 @@ loop before the result message is ever pulled.
 Live verdicts only *trigger* the stop; the authoritative scores always come
 from the standard ``check_all_async`` on the frozen trajectory after the cut.
 
-Precision trade-off: a pass-stop cuts the run the instant every *pass-armed*
-criterion is decided, so a *fail-armed* criterion (e.g. a distractor) that would
-only misfire on a LATER tool call is never observed — the frozen trajectory then
+Weighting: both the stop rule and the post-hoc gate
+(``EvaluationResult.armed_criteria_passed``) consult ``run_limits.
+stop_early_gate_threshold`` (default ``1.0``) rather than treating every armed
+criterion's pass/fail as equally decisive. A fail-stop fires once the armed
+subset's CEILING (best case: every still-``undecided``/``pass`` criterion
+scores 1.0, every live-``fail``ed one scores 0) can no longer reach the
+threshold — i.e. the gate is mathematically guaranteed to fail regardless of
+how the trajectory continues. A pass-stop fires once the pass-armed subset's
+FLOOR (worst case: every still-undecided one scores 0) already meets it. At the
+default threshold of 1.0 both bounds collapse exactly to "any single armed
+criterion's live-fail stops the run" / "every pass-armed criterion has
+live-passed" — byte-for-byte the pre-weighting behavior, since the only
+live-observable criteria score binary 0/1. Lowering the threshold lets a
+low-weight armed criterion's failure be absorbed without truncating the run.
+
+Precision trade-off: a pass-stop cuts the run the instant the pass-armed floor
+locks in, so a *fail-armed* criterion (e.g. a distractor) that would only
+misfire on a LATER tool call is never observed — the frozen trajectory then
 scores that row as a clean pass. This is an intentional precision-for-budget
 trade of the opt-in "smoke" flavor; the authoritative
 precision/recall must come from a non-early-stop (``stop_early: false``) run.
@@ -52,7 +67,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
-from coder_eval.models import EarlyStopInfo, EarlyStopReason
+from coder_eval.models import EarlyStopInfo, EarlyStopReason, LivePolarity, LiveSuccessCriterion
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentStartEvent,
@@ -66,21 +81,21 @@ from coder_eval.streaming.events import (
 
 if TYPE_CHECKING:
     from coder_eval.criteria.base import BaseCriterion, LiveVerdict
-    from coder_eval.models import BaseSuccessCriterion, CommandTelemetry, TaskDefinition
+    from coder_eval.models import CommandTelemetry, TaskDefinition
 
     # Armed pair the watcher holds: (criterion model, its checker). Lives in the
     # TYPE_CHECKING block (only annotations reference it, and those are lazy under
     # `from __future__ import annotations`), so the names are real references
     # rather than quoted strings static analyzers cannot resolve.
-    _ArmedPair = tuple[BaseSuccessCriterion, BaseCriterion[Any]]
+    _ArmedPair = tuple[LiveSuccessCriterion, BaseCriterion[Any]]
 
 
 logger = logging.getLogger(__name__)
 
 
 def _requested_polarities(
-    stop_when: Literal["pass", "fail", "decided", "auto"], decidable: frozenset[str]
-) -> frozenset[str]:
+    stop_when: Literal["pass", "fail", "decided", "auto"], decidable: frozenset[LivePolarity]
+) -> frozenset[LivePolarity]:
     """The polarities a ``stop_when`` value requests to arm, given what the instance can decide.
 
     The single source of truth for the ``stop_when`` -> polarity mapping — both
@@ -170,20 +185,33 @@ def validate_early_stop(task: TaskDefinition) -> None:
             + "arming requires at least one stop criterion (e.g. stop_when: auto)."
         )
 
-    # (3)+(4) Per armed criterion: observable, then the requested polarity is
-    # decidable. The criteria registry is not initialized at resolution time.
-    from coder_eval.criteria import CriterionRegistry, init_criteria
+    # (0) A threshold of exactly 0 trivially satisfies both the pass-stop
+    # floor check and the final weighted gate regardless of whether any armed
+    # criterion has actually decided — neutralizing the armed pass/fail gate
+    # with one YAML line (coder-eval is used as a CI gate). Checked here
+    # (not on RunLimits itself) because this is the whole-task, hard-stop
+    # surface: an EarlyStopConfigError here flips the plan exit code and
+    # aborts run, whereas a plain ValueError on the merged RunLimits model
+    # would land in the CLI's generic "resolution failed" branch, which
+    # prints red text but does not flip the exit code.
+    if limits.stop_early_gate_threshold <= 0.0:
+        raise EarlyStopConfigError(
+            f"run_limits.stop_early_gate_threshold ({limits.stop_early_gate_threshold}) must be "
+            + "> 0.0 when stop_early is True (a threshold of 0 trivially passes the armed gate "
+            + "regardless of whether any armed criterion actually decided)."
+        )
 
-    init_criteria(validate=False)
+    # (3)+(4) Per armed criterion: observable, then the requested polarity is
+    # decidable.
     for c in armed:
         # `armed` filtered on `stop_when is not None`; re-bind + assert so pyright
         # narrows the Literal away from None for the set arithmetic below.
         polarity = c.stop_when
         assert polarity is not None
-        checker_cls = CriterionRegistry.get_checker(c.type)
-        # (3) Class-level observability: an empty ``live_stop_polarities`` means
-        # the criterion TYPE can never decide mid-run, regardless of config.
-        if not checker_cls.live_stop_polarities:
+        # (3) Type-level observability: a criterion type is live-observable iff
+        # its model is a ``LiveSuccessCriterion`` subclass (models/criteria.py)
+        # — the single source of truth, replacing a separate checker-side flag.
+        if not isinstance(c, LiveSuccessCriterion):
             raise EarlyStopConfigError(
                 f"criterion type {c.type!r} is armed (stop_when={polarity!r}) but is not "
                 + "observable mid-run; early-stop supports only live-observable criteria "
@@ -194,7 +222,7 @@ def validate_early_stop(task: TaskDefinition) -> None:
         # instance's config, so gate on the per-instance set — otherwise a dead
         # arm (a polarity this instance can never fire) would silently degrade to
         # a full run instead of erroring here.
-        polarities = checker_cls.live_decidable_polarities(c)
+        polarities = c.live_decidable_polarities()
         requested = _requested_polarities(polarity, polarities)
         # Dead arm: only `auto` can request the empty set (it requests exactly
         # the instance's decidable polarities) — an instance that can decide
@@ -216,6 +244,24 @@ def validate_early_stop(task: TaskDefinition) -> None:
                 + "Decidability can depend on the criterion's fields (e.g. command_executed "
                 + "can live-pass only with max_count unset + min_count>0, and live-fail only "
                 + "with max_count set)."
+            )
+        # (6) A decision-step budget is meaningless for a fail-only-decidable
+        # instance (a pure distractor/guard, e.g. a "must-NOT-run" command or a
+        # negative-row skill_triggered): its "undecided" IS the success
+        # state — the forbidden event simply hasn't happened yet, and staying
+        # undecided forever is correct, not a stall. The budget only makes
+        # sense for an instance that can decide "pass": something it is
+        # actively waiting to observe. Rejecting this at resolution (rather
+        # than letting EarlyStopWatcher force-fail a clean run) matters most
+        # for a dataset-fanned `auto` criterion, where the same YAML line
+        # would force-fail every negative row.
+        if c.max_steps_to_decide is not None and "pass" not in polarities:
+            raise EarlyStopConfigError(
+                f"criterion {c.type!r} ({c.description!r}) sets max_steps_to_decide but this "
+                + f"instance can only ever live-decide {sorted(polarities) or 'no polarities'} — "
+                + "a fail-only-decidable instance's 'undecided' is its success state (the "
+                + "forbidden event hasn't happened), so a decision-step budget would force-fail "
+                + "a clean run. max_steps_to_decide requires an instance that can live-pass."
             )
 
 
@@ -246,16 +292,19 @@ class EarlyStopWatcher:
         armed: list[_ArmedPair],
         *,
         max_turns: int | None,
+        gate_threshold: float = 1.0,
     ) -> None:
         self._task_id = task_id
         self._armed = armed
+        self._gate_threshold = gate_threshold
+        self._armed_weight = sum(c.weight for c, _ in armed)
         # Per-instance resolved arming polarities, aligned with ``_armed``. Static
         # for the run, resolved through ``_requested_polarities`` (the single
         # stop_when -> polarity mapping). The stop rule consults this, not the raw
         # ``stop_when`` string, so a distractor armed ``auto`` (fail only) is not
         # required to live-pass for a pass-stop.
-        self._armed_polarities: list[frozenset[str]] = [
-            self._resolve_armed_polarities(criterion, checker) for criterion, checker in armed
+        self._armed_polarities: list[frozenset[LivePolarity]] = [
+            self._resolve_armed_polarities(criterion) for criterion, _checker in armed
         ]
         self._max_turns = max_turns
         self._collector = EventCollector()
@@ -280,11 +329,18 @@ class EarlyStopWatcher:
         from coder_eval.criteria import CriterionRegistry, init_criteria
 
         init_criteria(validate=False)
+        # The `isinstance` check is defense-in-depth, not load-bearing: every
+        # call site (`run`, `plan`) runs `validate_early_stop` first, which
+        # already hard-rejects an armed non-observable criterion at resolution
+        # time. Narrows `c` to `LiveSuccessCriterion` for pyright either way.
         armed: list[_ArmedPair] = [
-            (c, CriterionRegistry.get_checker(c.type)()) for c in task.success_criteria if c.stop_when is not None
+            (c, CriterionRegistry.get_checker(c.type)())
+            for c in task.success_criteria
+            if c.stop_when is not None and isinstance(c, LiveSuccessCriterion)
         ]
         max_turns = task.run_limits.max_turns if task.run_limits is not None else None
-        return cls(task.task_id, armed, max_turns=max_turns)
+        gate_threshold = task.run_limits.stop_early_gate_threshold if task.run_limits is not None else 1.0
+        return cls(task.task_id, armed, max_turns=max_turns, gate_threshold=gate_threshold)
 
     # --- StreamCallback -------------------------------------------------- #
 
@@ -357,7 +413,7 @@ class EarlyStopWatcher:
     # --- Stop rule -------------------------------------------------- #
 
     @staticmethod
-    def _resolve_armed_polarities(criterion: BaseSuccessCriterion, checker: BaseCriterion[Any]) -> frozenset[str]:
+    def _resolve_armed_polarities(criterion: LiveSuccessCriterion) -> frozenset[LivePolarity]:
         """The polarities this armed instance may fire, via ``_requested_polarities``.
 
         Validation has already guaranteed the resolved set is non-empty and
@@ -368,9 +424,61 @@ class EarlyStopWatcher:
         sw = criterion.stop_when
         if sw is None:
             return frozenset()
-        return _requested_polarities(sw, checker.live_decidable_polarities(criterion))
+        return _requested_polarities(sw, criterion.live_decidable_polarities())
+
+    def _ceiling(self, verdicts: list[LiveVerdict]) -> float:
+        """Best-case weighted score over the WHOLE armed set, given current verdicts.
+
+        Every already-live-failed criterion is pinned at 0 (a monotonic
+        ``live_verdict`` guarantees it stays failed); every ``pass`` or still
+        ``undecided`` criterion is credited its full weight (the optimistic
+        assumption that it could still end up scoring 1.0). This is the same
+        weighting ``EvaluationResult.armed_criteria_passed`` uses for the real,
+        final gate, so ``ceiling < gate_threshold`` means the gate is
+        mathematically guaranteed to fail no matter how the trajectory continues.
+        """
+        return sum(c.weight for (c, _checker), v in zip(self._armed, verdicts, strict=True) if v != "fail") / (
+            self._armed_weight
+        )
+
+    def _floor(self, verdicts: list[LiveVerdict], indices: list[int]) -> float | None:
+        """Worst-case weighted score over the given armed-index subset, given current verdicts.
+
+        Mirrors ``_ceiling`` for the opposite direction: every still-undecided
+        (or already-``fail``) criterion in ``indices`` is credited nothing (the
+        pessimistic assumption that it could still end up scoring 0); only an
+        already-``pass`` criterion contributes its weight. Returns ``None``
+        when the subset's total weight is 0 (the vacuous case — nothing to
+        bound), so callers don't have to special-case an empty numerator over
+        an empty denominator.
+        """
+        weight = sum(self._armed[i][0].weight for i in indices)
+        if weight <= 0.0:
+            return None
+        return sum(self._armed[i][0].weight for i in indices if verdicts[i] == "pass") / weight
 
     def _evaluate(self, in_flight: CommandTelemetry | None = None) -> None:
+        """Fail-open wrapper: any unexpected exception anywhere in the round
+        disarms the watcher and degrades to a full run, exactly like a raising
+        ``live_verdict`` — not just the verdict-collection loop. The
+        ceiling/floor arithmetic below is currently guarded (an empty armed
+        set is unreachable, and every candidate short-circuits before
+        dividing), but a future change to that arithmetic — or to
+        ``_fire`` — must not be able to leave the watcher stuck re-raising on
+        every subsequent event with ``_disarmed`` still False (which is what a
+        narrower try/except would risk).
+        """
+        try:
+            self._evaluate_impl(in_flight)
+        except Exception:
+            self._disarmed = True
+            logger.error(
+                "[%s] early-stop round raised unexpectedly; disarming watcher, run degrades to a full run",
+                self._task_id,
+                exc_info=True,
+            )
+
+    def _evaluate_impl(self, in_flight: CommandTelemetry | None = None) -> None:
         record = self._collector.build_turn_record()
         if in_flight is not None:
             # The in-flight call has no ToolEnd yet, so the collector (which
@@ -387,43 +495,71 @@ class EarlyStopWatcher:
             try:
                 verdicts.append(checker.live_verdict(criterion, records))
             except Exception:
-                # Fail-open: a raising verdict disarms; the run degrades to full.
-                self._disarmed = True
+                # Re-raise to the wrapping try/except in _evaluate, which sets
+                # _disarmed — but log the specific criterion here first, since
+                # that context (which criterion's live_verdict raised) would
+                # otherwise be lost once the exception is caught generically.
                 logger.error(
-                    "[%s] early-stop live_verdict raised for criterion %r; disarming watcher, "
-                    + "run degrades to a full run",
+                    "[%s] early-stop live_verdict raised for criterion %r",
                     self._task_id,
                     criterion.type,
                     exc_info=True,
                 )
-                return
+                raise
 
         pass_armed = [i for i, pol in enumerate(self._armed_polarities) if "pass" in pol]
 
-        # Fail-stop: first armed criterion (criteria order) that live-fails AND
-        # whose resolved arming permits fail decides the run — but DEFERRED while
-        # any pass-armed criterion is still undecided. Cutting a positive row on a
-        # distractor misfire before its expected signal could appear would freeze a
-        # would-be TP as an FN (truncating the suite's recall); the misfire is
-        # latched by the criterion's own monotone semantics, so the deferred fail
-        # still fires the moment every pass-armed criterion decides, and a row with
-        # zero pass-armed criteria (a negative row) defers nothing.
+        # Fail-stop: at least one armed criterion (criteria order) that live-fails
+        # AND whose resolved arming permits fail is a CANDIDATE — but the stop only
+        # actually fires once the ceiling bound (best case: every still-undecided
+        # or already-passed armed criterion ends up scoring 1.0, every live-failed
+        # one scores 0) can no longer reach ``gate_threshold``, i.e. the armed gate
+        # (``EvaluationResult.armed_criteria_passed``) is GUARANTEED to fail no
+        # matter what happens on the rest of the trajectory. At the default
+        # ``gate_threshold=1.0`` this is equivalent to firing on the first
+        # candidate (any armed criterion's weight is > 0 by construction, so a
+        # single fail already drops the ceiling below 1.0) — below 1.0 a
+        # low-weight candidate's failure may not be enough to doom the gate, so the
+        # run keeps going. This is DEFERRED while any pass-armed criterion is still
+        # undecided. Cutting a positive row on a distractor misfire before its
+        # expected signal could appear would freeze a would-be TP as an FN
+        # (truncating the suite's recall); the misfire is latched by the
+        # criterion's own monotone semantics, so the deferred fail still fires the
+        # moment every pass-armed criterion decides, and a row with zero
+        # pass-armed criteria (a negative row) defers nothing.
         if not any(verdicts[i] == "undecided" for i in pass_armed):
-            for (criterion, _checker), verdict, armed_pol in zip(
-                self._armed, verdicts, self._armed_polarities, strict=True
-            ):
-                if verdict == "fail" and "fail" in armed_pol:
-                    self._fire(EarlyStopReason.CRITERION_FAILED, criterion, tool_call_index=tool_call_index)
-                    return
+            candidate = next(
+                (
+                    criterion
+                    for (criterion, _checker), verdict, armed_pol in zip(
+                        self._armed, verdicts, self._armed_polarities, strict=True
+                    )
+                    if verdict == "fail" and "fail" in armed_pol
+                ),
+                None,
+            )
+            if candidate is not None and self._ceiling(verdicts) < self._gate_threshold:
+                self._fire(EarlyStopReason.CRITERION_FAILED, candidate, tool_call_index=tool_call_index)
+                return
 
-        # Pass-stop: every PASS-ARMED criterion live-passes. Fail-armed criteria
-        # (e.g. distractors armed ``auto`` -> fail only) are NOT required to pass —
-        # they can never live-pass and only guard the fail side above, so requiring
-        # them would veto every pass-stop (the mixed-arming bug). Guard the vacuous
-        # case: with zero pass-armed criteria (a negative row whose criteria are all
-        # distractors) there is nothing to pass-stop on, so the run must continue to
-        # the cap rather than firing on turn 0 with an empty ``all()``.
-        if pass_armed and all(verdicts[i] == "pass" for i in pass_armed):
+        # Pass-stop: the PASS-ARMED subset's own floor bound (worst case: every
+        # still-undecided pass-armed criterion ends up scoring 0, weighted against
+        # only the pass-armed subset's total weight) already meets
+        # ``gate_threshold`` — guaranteed regardless of what the rest of that
+        # subset still decides. Fail-armed criteria (e.g. distractors armed
+        # ``auto`` -> fail only) are excluded from both the numerator and the
+        # denominator: they can never live-pass and only guard the fail side
+        # above, so folding them in would veto every pass-stop (the mixed-arming
+        # bug) and penalize this bound for a criterion it was never scoped to
+        # cover. At the default ``gate_threshold=1.0`` this requires every
+        # pass-armed criterion to actually be "pass" (any non-pass drops the floor
+        # below 1.0) — identical to the pre-weighting ``all(...)`` rule. Guard the
+        # vacuous case: with zero pass-armed criteria (a negative row whose
+        # criteria are all distractors) there is nothing to pass-stop on, so the
+        # run must continue to the cap rather than firing on turn 0 with an empty
+        # numerator/denominator.
+        floor = self._floor(verdicts, pass_armed)
+        if floor is not None and floor >= self._gate_threshold:
             # Deciding criterion = the last pass-armed (criteria order) whose verdict
             # flipped vs the previous round; fall back to the last pass-armed.
             deciding = self._armed[pass_armed[-1]][0]
@@ -433,10 +569,25 @@ class EarlyStopWatcher:
             self._fire(EarlyStopReason.CRITERION_PASSED, deciding, tool_call_index=tool_call_index)
             return
 
+        # Decision-step budget: an armed criterion with max_steps_to_decide set
+        # that is STILL "undecided" once that many tool-call steps have elapsed
+        # forces a hard fail — checked last, after the real fail-/pass-stop
+        # checks above, so a criterion that decides on this very round (however
+        # late) is never punished for a budget it technically exceeded. It never
+        # reached a verdict at all, so there is nothing meaningful to weigh it
+        # against — this is why DECISION_BUDGET_EXCEEDED bypasses the weighted
+        # gate entirely at the orchestrator finalize step rather than folding
+        # into the ceiling/floor bounds above.
+        for (criterion, _checker), verdict in zip(self._armed, verdicts, strict=True):
+            budget = criterion.max_steps_to_decide
+            if budget is not None and verdict == "undecided" and tool_call_index >= budget:
+                self._fire(EarlyStopReason.DECISION_BUDGET_EXCEEDED, criterion, tool_call_index=tool_call_index)
+                return
+
         # No stop this round — record the verdicts so the next round can detect flips.
         self._prev_verdicts = verdicts
 
-    def _fire(self, reason: EarlyStopReason, criterion: BaseSuccessCriterion, *, tool_call_index: int) -> None:
+    def _fire(self, reason: EarlyStopReason, criterion: LiveSuccessCriterion, *, tool_call_index: int) -> None:
         elapsed = 0.0
         if self._started_monotonic is not None:
             elapsed = max(time.monotonic() - self._started_monotonic, 0.0)
@@ -450,6 +601,7 @@ class EarlyStopWatcher:
             tool_call_index=tool_call_index,
             elapsed_seconds=elapsed,
             turns_remaining_at_stop=turns_remaining,
+            gate_threshold=self._gate_threshold,
         )
         logger.info(
             "[%s] early-stop fired: reason=%s deciding=%s sdk_turn=%d tool_call=%d elapsed=%.2fs",

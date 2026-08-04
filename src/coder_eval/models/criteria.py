@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -185,6 +185,86 @@ class BaseSuccessCriterion(BaseModel, ABC):
         return self.weight > 0.0
 
     # Business logic (check operations) moved to SuccessChecker in evaluator.py
+
+
+# The two polarities a live-observable criterion can decide mid-run — distinct
+# from the 3-value LiveVerdict ("pass"/"fail"/"undecided") the checker's
+# live_verdict returns: this is the narrower CAPABILITY type, "undecided" is
+# never a valid decidable polarity. Typed here (not a bare frozenset[str]) so
+# a live_decidable_polarities override returning a stray/typo'd string, or
+# "undecided" itself, is a pyright error rather than a runtime-only lint gap.
+LivePolarity = Literal["pass", "fail"]
+
+
+class LiveSuccessCriterion(BaseSuccessCriterion):
+    """Base for criteria observable from a PARTIAL, mid-run trajectory (early-stop).
+
+    ``live_decidable_polarities`` is a pure function of THIS instance's own
+    fields — no ``turn_records``, no sandbox, no checker instance needed (e.g.
+    ``command_executed`` can decide this purely from whether ``max_count`` is
+    set). That makes it genuinely computable on the data model rather than the
+    checker, unlike the checker's ``live_verdict`` (``criteria/base.py``),
+    which reads the actual trajectory and stays checker-side logic. Moving
+    decidability here also gives early-stop-only config (e.g.
+    ``max_steps_to_decide``) a home that doesn't pollute ``BaseSuccessCriterion``
+    with a field meaningless for every non-observable criterion type.
+
+    Only ``SkillTriggeredCriterion`` / ``CommandExecutedCriterion`` subclass
+    this today; a criterion type is "live-observable" iff it is a
+    ``LiveSuccessCriterion`` subclass — the single source of truth
+    ``validate_early_stop`` / ``EarlyStopWatcher`` consult (no separate
+    checker-side flag to keep in sync).
+    """
+
+    max_steps_to_decide: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Cap on tool-call steps this ARMED criterion (stop_when must be set) "
+            "may spend still 'undecided' before the run gives up on it. Once "
+            "exceeded, EarlyStopWatcher fires an early stop with reason "
+            "'decision_budget_exceeded' and the run is forced to FinalStatus."
+            "FAILURE outright — regardless of what any other armed criterion's "
+            "weighted score would otherwise gate to (this criterion never "
+            "reached a verdict at all, so there is nothing to weigh). None "
+            "(default) = no cap; the run relies solely on run_limits.max_turns. "
+            "Requires run_limits.stop_early and this criterion's own stop_when. "
+            "The step count is CUMULATIVE across every retry attempt of the "
+            "turn (the same EarlyStopWatcher instance, and its counters, "
+            "persist across retries) — including attempts that ultimately "
+            "crashed or timed out before this criterion's own investigation "
+            "even began. Size the budget with that headroom in mind."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_max_steps_requires_armed(self) -> Self:
+        """Reject a decision-step cap on a criterion that isn't armed for early-stop.
+
+        ``max_steps_to_decide`` only means anything relative to a criterion
+        that ``EarlyStopWatcher`` is actually tracking (``stop_when`` set);
+        setting it without ``stop_when`` is a dead field that silently does
+        nothing, so reject it at load time rather than let it rot unnoticed.
+        """
+        if self.max_steps_to_decide is not None and self.stop_when is None:
+            raise ValueError(
+                f"criterion {self.type!r}: max_steps_to_decide requires stop_when to be set "
+                + "(the decision-step budget is meaningless for a criterion that isn't armed "
+                + "for early-stop)."
+            )
+        return self
+
+    @abstractmethod
+    def live_decidable_polarities(self) -> frozenset[LivePolarity]:
+        """Which polarities THIS instance can decide mid-run, from its own fields alone.
+
+        Must return a subset of the polarities the corresponding checker's
+        ``live_verdict`` can ever emit for this criterion type. Used by
+        ``validate_early_stop`` to reject arming a polarity this instance can
+        never reach, and by ``EarlyStopWatcher`` to resolve which polarities a
+        ``stop_when`` value actually arms for this instance (see
+        ``orchestration.early_stop._requested_polarities``).
+        """
 
 
 class FileExistsCriterion(BaseSuccessCriterion):
@@ -472,7 +552,7 @@ class CommandsEfficiencyCriterion(BaseSuccessCriterion):
     expected_commands: int = Field(ge=1, description="Expected number of tool commands to complete the task")
 
 
-class CommandExecutedCriterion(BaseSuccessCriterion):
+class CommandExecutedCriterion(LiveSuccessCriterion):
     """Check whether the agent executed specific commands/tools.
 
     Inspects CommandTelemetry records from TurnRecord.commands to verify
@@ -548,6 +628,32 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
             raise ValueError(f"max_count ({self.max_count}) must be >= min_count ({self.min_count})")
         return self
 
+    def live_decidable_polarities(self) -> frozenset[LivePolarity]:
+        """Narrow to what THIS instance can decide mid-run.
+
+        The checker's ``live_verdict`` (``criteria/command_executed.py``) can
+        only:
+
+        - ``pass`` when there is no upper bound and a positive floor
+          (``max_count is None and min_count > 0``) — with an upper bound a
+          pass is not final until end-of-run, so it never fires live; and
+        - ``fail`` when there IS an upper bound (``max_count is not None``),
+          the moment the count exceeds it (this includes the
+          ``min_count: 0, max_count: 0`` "must-NOT-run" form).
+
+        So these instance shapes are dead arms the class-level check misses:
+        ``stop_when: pass`` with ``max_count`` set (pass can never fire);
+        ``stop_when: fail`` with ``max_count: None`` (fail can never fire);
+        ``min_count: 0, max_count: None`` (neither can ever fire).
+        """
+        decidable: set[LivePolarity] = set()
+        if self.max_count is None:
+            if self.min_count > 0:
+                decidable.add("pass")
+        else:
+            decidable.add("fail")
+        return frozenset(decidable)
+
 
 class UiPathEvalCriterion(BaseSuccessCriterion):
     """Check evaluation results against UiPath agent performance.
@@ -608,7 +714,7 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
     )
 
 
-class SkillTriggeredCriterion(BaseSuccessCriterion):
+class SkillTriggeredCriterion(LiveSuccessCriterion):
     """Binary classifier: did the agent engage the target skill during the run?
 
     Agent-agnostic. Observed label is ``"yes"`` when ``turn_records`` show the
@@ -643,6 +749,29 @@ class SkillTriggeredCriterion(BaseSuccessCriterion):
     skill_name: str = Field(
         description="Only count Skill invocations whose 'skill' parameter matches this name.",
     )
+
+    def live_decidable_polarities(self) -> frozenset[LivePolarity]:
+        """Per-instance narrowing under the checker's any-engagement latch.
+
+        The checker's ``live_verdict`` (``criteria/skill_triggered.py``) can
+        decide either polarity at the TYPE level, but a single INSTANCE only
+        ever resolves one of them:
+
+        - a **positive** criterion (``skill_name == expected_skill``) can only
+          live-``pass`` (the expected skill engaging is a decidable hit; its
+          absence is not knowable mid-run);
+        - a **distractor/negative** criterion (``skill_name != expected_skill``,
+          including the ``expected_skill == ""`` negatives) can only
+          live-``fail`` (a wrong skill engaging is a decidable miss; its
+          absence is not).
+
+        ``validate_early_stop`` gates the requested ``stop_when`` on this set,
+        so arming a positive with ``fail`` / a distractor with ``pass`` — or
+        either with ``decided`` (which needs both) — is rejected at resolution
+        rather than silently degrading to a full run.
+        """
+        expected_yes = self.expected_skill == self.skill_name
+        return frozenset({"pass"}) if expected_yes else frozenset({"fail"})
 
 
 class LLMJudgeCriterion(BaseSuccessCriterion):

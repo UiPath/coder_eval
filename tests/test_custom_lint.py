@@ -532,67 +532,110 @@ class TestCE024DiscriminatedUnions:
 
 @pytest.mark.lint
 class TestCE025LiveVerdictConsistency:
-    """CE025 flags criteria whose `live_stop_polarities` and `live_verdict` disagree."""
+    """CE025: a criterion type's ``LiveSuccessCriterion`` subclassing (models/criteria.py)
+    and its checker's ``live_verdict`` override (criteria/) must agree.
 
-    _POLARITIES_NONEMPTY = '    live_stop_polarities: ClassVar[frozenset[str]] = frozenset({"pass", "fail"})\n'
-    _POLARITIES_EMPTY = "    live_stop_polarities: ClassVar[frozenset[str]] = frozenset()\n"
-    _POLARITIES_PLAIN = '    live_stop_polarities = frozenset({"pass"})\n'
-    _POLARITIES_NONLITERAL = "    live_stop_polarities: ClassVar[frozenset[str]] = frozenset(_SOME_SET)\n"
-    _LIVE_VERDICT = '    def live_verdict(self, criterion, turn_records):\n        return "undecided"\n'
+    Whole-tree / registry-based (like CE027-31), not a per-file AST rule: the
+    invariant spans two separate class hierarchies (the criterion model in
+    ``models/criteria.py`` and its checker in ``criteria/``) linked only via the
+    shared ``type`` discriminator string through ``CriterionRegistry``, so it
+    cannot be checked by looking at one file's AST in isolation.
+
+    A criterion model that is a ``LiveSuccessCriterion`` subclass without a
+    ``live_verdict`` override on its checker arms a criterion whose base
+    ``live_verdict`` always returns ``"undecided"`` (a silent dead arm); a
+    checker overriding ``live_verdict`` whose criterion model is NOT a
+    ``LiveSuccessCriterion`` writes decision logic the arming path
+    (``validate_early_stop`` gates on ``isinstance(c, LiveSuccessCriterion)``)
+    can never reach.
+    """
 
     @staticmethod
-    def _cls(*members: str) -> str:
-        body = "".join(members) if members else "    pass\n"
-        return "from typing import ClassVar\nclass FakeChecker:\n" + body
+    def _type_to_model() -> dict[str, type]:
+        from typing import Annotated, get_args, get_origin
+
+        from coder_eval.models import SuccessCriterion
+
+        assert get_origin(SuccessCriterion) is Annotated
+        inner, *_ = get_args(SuccessCriterion)
+        return {model.model_fields["type"].default: model for model in get_args(inner)}
 
     @staticmethod
-    def _run(src: str, *, path: str = "src/coder_eval/criteria/fake_checker.py"):
-        import ast
+    def _find_violations(pairs: dict[str, tuple[type, type]]) -> list[str]:
+        """Shared checker-vs-model pairing logic, driven by an explicit
+        ``{criterion_type: (checker_cls, model_cls)}`` mapping so both the real
+        registry and synthetic fixtures can exercise it identically."""
+        from coder_eval.criteria.base import BaseCriterion
+        from coder_eval.models import LiveSuccessCriterion
 
-        from tests.lint.rules.ce025_live_verdict_consistency import LiveVerdictConsistency
+        violations = []
+        for criterion_type, (checker_cls, model) in pairs.items():
+            overrides_live_verdict = checker_cls.live_verdict is not BaseCriterion.live_verdict
+            is_live_model = issubclass(model, LiveSuccessCriterion)
+            if is_live_model and not overrides_live_verdict:
+                violations.append(
+                    f"{model.__name__} ({criterion_type!r}) is a LiveSuccessCriterion but its checker "
+                    f"{checker_cls.__name__} does not override live_verdict — a dead arm."
+                )
+            elif overrides_live_verdict and not is_live_model:
+                violations.append(
+                    f"{checker_cls.__name__} ({criterion_type!r}) overrides live_verdict but its criterion "
+                    f"model {model.__name__} is not a LiveSuccessCriterion — unreachable decision logic."
+                )
+        return violations
 
-        return LiveVerdictConsistency(path).check(ast.parse(src))
+    def test_real_criteria_tree_is_clean(self) -> None:
+        from coder_eval.criteria import CriterionRegistry, init_criteria
 
-    def test_flags_polarities_without_live_verdict(self):
-        assert self._run(self._cls(self._POLARITIES_NONEMPTY))
+        init_criteria(validate=False)
+        pairs = {
+            criterion_type: (CriterionRegistry.get_checker(criterion_type), model)
+            for criterion_type, model in self._type_to_model().items()
+        }
+        assert not self._find_violations(pairs)
 
-    def test_flags_live_verdict_without_polarities(self):
-        assert self._run(self._cls(self._LIVE_VERDICT))
+    def test_detects_live_model_with_no_live_verdict_override(self) -> None:
+        # A LiveSuccessCriterion subclass whose checker does NOT override
+        # live_verdict — the dead-arm branch.
+        from coder_eval.criteria.base import BaseCriterion
+        from coder_eval.models import LiveSuccessCriterion
 
-    def test_flags_live_verdict_with_empty_polarities(self):
-        assert self._run(self._cls(self._POLARITIES_EMPTY, self._LIVE_VERDICT))
+        class _FakeLiveModel(LiveSuccessCriterion):
+            def live_decidable_polarities(self):
+                return frozenset({"pass"})
 
-    def test_allows_polarities_with_live_verdict(self):
-        assert not self._run(self._cls(self._POLARITIES_NONEMPTY, self._LIVE_VERDICT))
+        class _FakeCheckerNoOverride(BaseCriterion):
+            criterion_type = "fake_live_no_override"
 
-    def test_allows_neither_declared(self):
-        # A plain checker (e.g. file_exists) that arms nothing declares neither member.
-        assert not self._run(self._cls("    path: str\n"))
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                raise NotImplementedError
 
-    def test_allows_empty_polarities_without_live_verdict(self):
-        assert not self._run(self._cls(self._POLARITIES_EMPTY))
+        violations = self._find_violations({"fake_live_no_override": (_FakeCheckerNoOverride, _FakeLiveModel)})
+        assert violations
+        assert "dead arm" in violations[0]
 
-    def test_detects_plain_assign_polarities(self):
-        # Non-empty `live_stop_polarities` via a plain (non-annotated) assignment still arms.
-        assert self._run(self._cls(self._POLARITIES_PLAIN))
+    def test_detects_live_verdict_override_on_non_live_model(self) -> None:
+        # A checker overriding live_verdict whose criterion model is a plain
+        # BaseSuccessCriterion, not LiveSuccessCriterion — the unreachable
+        # decision-logic branch.
+        from coder_eval.criteria.base import BaseCriterion, LiveVerdict
+        from coder_eval.models import BaseSuccessCriterion
 
-    def test_non_literal_arg_treated_nonempty(self):
-        # A computed frozenset() argument is conservatively non-empty → live_verdict required.
-        assert self._run(self._cls(self._POLARITIES_NONLITERAL))
-        assert not self._run(self._cls(self._POLARITIES_NONLITERAL, self._LIVE_VERDICT))
+        class _FakeNonLiveModel(BaseSuccessCriterion):
+            type: str = "fake_non_live_override"
 
-    def test_scope_exemptions(self):
-        # base.py legitimately pairs the empty default with the default live_verdict; and
-        # files outside criteria/ are out of scope entirely.
-        offending = self._cls(self._LIVE_VERDICT)
-        assert not self._run(offending, path="src/coder_eval/criteria/base.py")
-        assert not self._run(offending, path="src/coder_eval/orchestration/x.py")
+        class _FakeCheckerOverrides(BaseCriterion):
+            criterion_type = "fake_non_live_override"
 
-    def test_real_criteria_tree_is_clean(self):
-        from tests.lint.rules.ce025_live_verdict_consistency import LiveVerdictConsistency
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                raise NotImplementedError
 
-        criteria_dir = SRC / "coder_eval" / "criteria"
-        assert not check_paths([criteria_dir], rules=[LiveVerdictConsistency])
+            def live_verdict(self, criterion, turn_records) -> LiveVerdict:
+                return "undecided"
+
+        violations = self._find_violations({"fake_non_live_override": (_FakeCheckerOverrides, _FakeNonLiveModel)})
+        assert violations
+        assert "unreachable" in violations[0]
 
 
 @pytest.mark.lint

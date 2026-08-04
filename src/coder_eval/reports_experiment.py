@@ -210,6 +210,10 @@ def eval_result_to_task_dict(
         "turns_remaining_at_stop": (
             result.early_stop.turns_remaining_at_stop if result.early_stop is not None else None
         ),
+        # The threshold in effect for this stop, so a downstream consumer
+        # comparing early-stopped runs across an experiment sweep that varies
+        # it can tell which weighted-gate value produced a given verdict.
+        "gate_threshold": (result.early_stop.gate_threshold if result.early_stop is not None else None),
     }
     d["variant_id"] = variant_id
     return d

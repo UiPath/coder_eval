@@ -40,6 +40,8 @@ from coder_eval.models.criteria import (
     FileMatchesRegexCriterion,
     JMESPathAssertion,
     JsonCheckCriterion,
+    LivePolarity,
+    LiveSuccessCriterion,
     LLMJudgeCriterion,
     ReferenceComparisonCriterion,
     RegexPattern,
@@ -232,6 +234,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "LLMJudgeCriterion",
     "AgentJudgeCriterion",
     "SkillTriggeredCriterion",
+    "LiveSuccessCriterion",
+    "LivePolarity",
     "SuccessCriterion",
     # Routing
     "ROUTE_NAMES",

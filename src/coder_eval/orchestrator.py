@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any
+from typing import Any, assert_never
 from urllib.parse import urlparse
 
 from .agent import Agent
@@ -37,6 +37,7 @@ from .models import (
     ConfigLineageEntry,
     CriterionResult,
     DirectRoute,
+    EarlyStopReason,
     EvaluationResult,
     FinalStatus,
     JudgeCriterionResult,
@@ -1567,17 +1568,59 @@ class Orchestrator:
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
-        if self.result.early_stop is not None:
-            # Early-stopped run: only the armed subset gates final_status; the rest
-            # are advisory (recorded, never decisive) so a smoke flavor is not
-            # dragged to FAILURE by criteria whose work it deliberately skipped.
-            all_passed = self.result.armed_criteria_passed(self.task.success_criteria)
-            armed_count = sum(1 for c in self.task.success_criteria if c.stop_when is not None)
-            logger.info(
-                "Early-stopped run: gating on %d armed criteria (%d advisory, not gated).",
-                armed_count,
-                total_count - armed_count,
-            )
+        # The armed weighted gate governs any task armed for early-stop
+        # (run_limits.stop_early: true), whether or not the watcher actually
+        # fired — one task config maps to one gate semantic. Without this, a
+        # run that happened to finish before the bound ever tripped would
+        # silently fall back to the strict full-set gate, re-failing on a
+        # low-weight criterion the weighted gate was configured to forgive,
+        # for a reason (incidental control flow) unrelated to configured
+        # intent. Only a task NOT armed for early-stop uses the full,
+        # strict-AND gate over every gating criterion.
+        if self.task.run_limits is not None and self.task.run_limits.stop_early:
+            if self.result.early_stop is not None:
+                reason = self.result.early_stop.reason
+                # Exhaustive on EarlyStopReason: adding a 4th member without a
+                # branch here is a type error (assert_never), not a silent
+                # fall-through into the weighted-gate branch below.
+                if reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED:
+                    # Hard fail, bypassing the weighted gate entirely: the deciding
+                    # criterion never reached a verdict within its max_steps_to_decide
+                    # budget, so there is nothing meaningful to weigh it against.
+                    all_passed = False
+                    logger.info(
+                        "Early-stopped run: decision-step budget exceeded for %r, forcing FAILURE.",
+                        self.result.early_stop.deciding_criterion_description,
+                    )
+                elif reason == EarlyStopReason.CRITERION_PASSED or reason == EarlyStopReason.CRITERION_FAILED:
+                    all_passed = self.result.armed_criteria_passed(
+                        self.task.success_criteria, self.task.run_limits.stop_early_gate_threshold
+                    )
+                    armed_count = sum(1 for c in self.task.success_criteria if c.stop_when is not None)
+                    logger.info(
+                        "Early-stopped run: gating on %d armed criteria (%d advisory, not gated).",
+                        armed_count,
+                        total_count - armed_count,
+                    )
+                else:
+                    assert_never(reason)
+            else:
+                # Armed for early-stop but the watcher never fired (the agent
+                # finished, or max_turns was hit, before the bound tripped):
+                # only the armed subset gates final_status; the rest are
+                # advisory (recorded, never decisive) — same gate as an
+                # actual early stop, so a smoke flavor is not dragged to
+                # FAILURE by criteria whose work it deliberately skipped.
+                all_passed = self.result.armed_criteria_passed(
+                    self.task.success_criteria, self.task.run_limits.stop_early_gate_threshold
+                )
+                armed_count = sum(1 for c in self.task.success_criteria if c.stop_when is not None)
+                logger.info(
+                    "stop_early armed but never fired (run completed naturally): gating on "
+                    + "%d armed criteria (%d advisory, not gated).",
+                    armed_count,
+                    total_count - armed_count,
+                )
         else:
             all_passed = self.result.all_criteria_passed(self.task.success_criteria)
 
