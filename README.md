@@ -184,6 +184,7 @@ alone.
 | [Claude Code](docs/agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
 | [Codex](docs/agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
+| [OpenHands](docs/agents/OPENHANDS.md) | Running the OpenHands Software Agent SDK agent |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
