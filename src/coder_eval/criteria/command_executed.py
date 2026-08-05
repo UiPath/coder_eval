@@ -24,9 +24,30 @@ _MAX_PATTERN_SEARCH_LEN = 2000
 # worst-case guard; real telemetry commands are far smaller.
 _MAX_NORMALIZE_LEN = 10 * _MAX_PATTERN_SEARCH_LEN
 
-# Shells whose `-c`/`-lc` payload is the real command we want to match against.
-_SHELL_WRAPPERS = {"bash", "sh"}
-_SHELL_CMD_FLAGS = {"-c", "-lc", "-lic"}
+
+def _is_shell_program(arg0: str) -> bool:
+    """True if argv[0]'s basename looks like a POSIX shell.
+
+    A predicate rather than an enumerated allowlist: the set of shells is open
+    (``bash``/``sh`` on Linux, ``zsh`` on macOS — Codex shells through the host's
+    login shell, see codex_agent.py — plus ``dash``/``ksh``/…), and every common
+    shell basename ends in ``sh``. Matching is additive (the raw text stays a
+    haystack), so favouring recall over a hand-maintained list is safe.
+    """
+    return arg0.rsplit("/", 1)[-1].endswith("sh")
+
+
+def _is_command_flag(tok: str) -> bool:
+    """True for a short-option cluster carrying a ``-c`` command string.
+
+    Covers ``-c``, ``-lc``, ``-ic``, ``-lic`` (login/interactive + command) in
+    any order — a single ``-``-prefixed token whose option letters are all
+    alphabetic and include ``c``. ``--long`` options and ``-o=val`` forms are
+    rejected, so this is the first flag that actually introduces the command
+    string. The combined and split (``bash -l -c``) forms both work: a non-``c``
+    short flag like ``-l`` simply isn't the command flag and the scan continues.
+    """
+    return len(tok) >= 2 and tok[0] == "-" and tok[1] != "-" and tok[1:].isalpha() and "c" in tok[1:]
 
 
 def _normalize_shell(cmd_text: str) -> str | None:
@@ -54,10 +75,10 @@ def _normalize_shell(cmd_text: str) -> str | None:
         return None
     # Unwrap `bash -lc "<script>"` / `sh -c "<script>"`: the real command is
     # everything after the -c/-lc flag.
-    if tokens[0].rsplit("/", 1)[-1] in _SHELL_WRAPPERS:
+    if _is_shell_program(tokens[0]):
         for i in range(1, len(tokens) - 1):
             tok = tokens[i]
-            if tok in _SHELL_CMD_FLAGS:
+            if _is_command_flag(tok):
                 rest = tokens[i + 1 :]
                 if len(rest) == 1:
                     # Quoted whole-script form (`bash -lc "uip ... 'arg' ..."`):

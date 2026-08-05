@@ -839,6 +839,41 @@ class TestNormalizeShell:
     def test_argv_joined_short_command(self):
         assert _normalize_shell("bash -c echo hi there") == "echo hi there"
 
+    def test_every_wrapper_form_is_unwrapped(self):
+        """One case per shell/flag shape the agents emit — the allowlist can't rot.
+
+        The predicate replaced an enumerated allowlist that omitted ``zsh``
+        (Codex's shell on macOS, codex_agent.py) and ``-ic`` while listing the
+        exotic ``-lic``; on those hosts the normalization silently reverted to
+        the pre-fix false-negative behaviour. Each entry must strip the wrapper.
+        """
+        cases = {
+            # zsh — Codex's default login shell on macOS
+            '/bin/zsh -lc "uip is resources run list slack curated_channels"': (
+                "uip is resources run list slack curated_channels"
+            ),
+            'zsh -lc "echo hi"': "echo hi",
+            'sh -c "echo hi"': "echo hi",
+            'dash -c "echo hi"': "echo hi",
+            'ksh -c "echo hi"': "echo hi",
+            'bash -ic "echo hi"': "echo hi",  # interactive + command
+            '/usr/bin/bash -lic "echo hi"': "echo hi",  # login + interactive + command
+            "bash -l -c 'echo hi'": "echo hi",  # split login/command flags
+        }
+        for raw, expected in cases.items():
+            assert _normalize_shell(raw) == expected, raw
+
+    def test_non_shell_arg0_is_not_unwrapped(self):
+        """A non-shell program (basename not ending in ``sh``) is only re-quoted.
+
+        ``git -c <config>`` is the motivating case: ``-c`` is a real git flag, but
+        because ``git`` is not a shell the payload must NOT be unwrapped.
+        """
+        assert _normalize_shell("git -c user.name=x status") == "git -c user.name=x status"
+        assert _normalize_shell("uip is resources run list slack 'curated_channels'") == (
+            "uip is resources run list slack curated_channels"
+        )
+
 
 class TestShellQuotingNormalization:
     """Patterns match regardless of how the agent quoted the command.
