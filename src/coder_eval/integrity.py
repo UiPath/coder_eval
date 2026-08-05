@@ -835,11 +835,14 @@ def _classify_segment(
     4. ``git`` -> decided by its subcommand (:func:`_git_is_read`): ``git show`` /
        ``cat-file`` / ``diff`` / ``blame`` / ``grep`` / ``log -p`` print content,
        ``git add`` / ``status`` / ``checkout`` do not.
-    5. Any content-emitting utility appearing as a token -> a read. Checked
+    5. A leading search utility -> decided by its own flags: restricted to file
+       names or counts is not a read, otherwise it is. Decided BEFORE the token
+       sweep below, because a search utility's operands are patterns and paths,
+       never nested executables -- ``grep -l cat KEY`` searches FOR "cat", it
+       does not run it.
+    6. Any content-emitting utility appearing as a token -> a read. Checked
        across all tokens, not just the leading one, so ``find … -exec cat {}``
        and ``xargs cat`` do not slip past on their wrapper's name.
-    6. A search utility restricted to file names or counts -> not a read;
-       otherwise a read.
     7. A listing/metadata utility, or a utility that moves, removes or otherwise
        manipulates a file without emitting it -> not a read.
     8. Anything else -> a read. Conservative on purpose: an unrecognised utility
@@ -868,11 +871,11 @@ def _classify_segment(
     if utility == "git":
         return _git_is_read(tokens), matched
 
-    if any(name in _READ_UTILITIES for name in normalized_tokens):
-        return True, matched
-
     if utility in _SEARCH_UTILITIES:
         return not _search_is_files_only(tokens), matched
+
+    if any(name in _READ_UTILITIES for name in normalized_tokens):
+        return True, matched
 
     if utility in _LISTING_UTILITIES or utility in _NEUTRAL_UTILITIES:
         return False, matched
