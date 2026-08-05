@@ -244,8 +244,11 @@ _SCHEMA_KNOWN_TOOLS = _READ_TOOLS | _EDIT_TOOLS | _LISTING_TOOLS | _NEUTRAL_TOOL
 
 # Basename patterns that are graded material in every suite, independent of what
 # this particular task declares. Deliberately short: each entry is a name the
-# framework or the task-authoring convention owns, never a name an agent's own
-# work would produce.
+# framework or the task-authoring convention owns. One of them (`RESOLUTION.md`)
+# is ALSO the required deliverable of the troubleshoot suite -- the agent is
+# supposed to write and re-read its own copy -- so basename-glob matches are
+# excused when the matched path is one the agent itself created earlier in the
+# transcript (:func:`_is_agent_created`); a golden elsewhere still matches.
 _GRADED_BASENAME_GLOBS = ("RESOLUTION.md", "*.expected", "task.yaml", "context.json")
 
 # Grader-script names. `check.py` (no underscore) grades live tasks too, so the
@@ -497,12 +500,60 @@ def _task_dir_operands(command: str, task_dir: Path | None = None) -> set[str]:
     return operands
 
 
-def _find_match(text: str, spec: GradedMaterialSpec) -> str | None:
+# Characters that end a path token inside an already-normalized command string.
+_TOKEN_DELIMITERS = " \t'\";|&<>()="
+
+
+def _created_path(raw: str) -> str:
+    """Normalize a path the agent created, for :func:`_is_agent_created` lookups."""
+    path = _normalize(raw)
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _is_agent_created(haystack: str, start: int, end: int, created: frozenset[str] | set[str]) -> bool:
+    """Whether the filename matched at ``[start, end)`` sits in a path the agent
+    itself created earlier in this transcript.
+
+    The basename globs are location-independent, and one of them names the
+    troubleshoot suite's required DELIVERABLE: every honest agent writes
+    ``RESOLUTION.md`` and -- because the harness enforces Read-before-Edit --
+    reads it back. Those reads are the agent's own work, not a leak, so a glob
+    match is excused when its whole path token is one the agent created.
+
+    The comparison is one-directional on purpose: a RELATIVE read may resolve
+    into a created path as its component-suffix (``cat RESOLUTION.md`` after
+    ``Write /workspace/RESOLUTION.md``), but an ABSOLUTE read is never excused
+    by a relative creation and a longer relative read never by a shorter one --
+    otherwise writing your own ``RESOLUTION.md`` once would license reading
+    every golden of the same name.
+    """
+    if not created:
+        return False
+    left = start
+    while left > 0 and haystack[left - 1] not in _TOKEN_DELIMITERS:
+        left -= 1
+    right = end
+    while right < len(haystack) and haystack[right] not in _TOKEN_DELIMITERS:
+        right += 1
+    token = haystack[left:right]
+    while token.startswith("./"):
+        token = token[2:]
+    if token in created:
+        return True
+    is_relative = not token.startswith("/") and re.match(r"[a-z]:/", token) is None
+    return is_relative and any(c.endswith("/" + token) for c in created)
+
+
+def _find_match(text: str, spec: GradedMaterialSpec, created: frozenset[str] | set[str] = frozenset()) -> str | None:
     """Return the graded-material reference found in ``text``, or None.
 
     Literal paths and directory prefixes are matched as whole paths on the
     normalized form (:func:`_literal_to_regex`); basename globs are regex-matched
-    wherever they appear; path segments are matched as a path component so a
+    wherever they appear, EXCEPT on a path the agent itself created earlier
+    (``created``, see :func:`_is_agent_created`) -- its own deliverable is not an
+    answer key; path segments are matched as a path component so a
     relatively-typed ``../mocks/responses/manifest.json`` is caught too; grader
     scripts are matched last and only under the task directory
     (:func:`_grader_match`).
@@ -518,8 +569,9 @@ def _find_match(text: str, spec: GradedMaterialSpec) -> str | None:
         if needle and _literal_to_regex(needle, directory=True).search(haystack):
             return candidate
     for glob in spec.basename_globs:
-        if _glob_to_regex(glob).search(haystack):
-            return glob
+        for match in _glob_to_regex(glob).finditer(haystack):
+            if not _is_agent_created(haystack, match.start(), match.end(), created):
+                return glob
     for segment in (*spec.path_segments, *spec.mock_segments):
         if _segment_to_regex(segment).search(haystack):
             return segment
@@ -638,8 +690,8 @@ def _git_is_read(tokens: list[str]) -> bool:
     return subcommand not in _GIT_NEUTRAL_SUBCOMMANDS
 
 
-def _strip_redirects(segment: str) -> tuple[str, list[str]]:
-    """Remove real output redirects from a segment; collect input-redirect targets.
+def _strip_redirects(segment: str) -> tuple[str, list[str], list[str]]:
+    """Remove real output redirects from a segment; collect the redirect targets.
 
     The old ``partition(">")`` treated ANY ``>`` as an output redirect -- one
     inside an awk program (``awk '$1 > 0' KEY``), a sed pattern, or a plain
@@ -648,16 +700,20 @@ def _strip_redirects(segment: str) -> tuple[str, list[str]]:
     A real redirect is an UNQUOTED operator and consumes exactly one word; every
     other operand is still passed to the utility.
 
-    Returns ``(stripped, input_targets)``: the segment with each output-redirect
-    operator (``>``, ``>>``, ``>&``, ``&>``, fd-prefixed forms) and the single
-    word it consumes removed, plus the target words of plain ``<`` input
-    redirects (which the SHELL reads, whatever the utility is). Heredoc
-    operators (``<<``), here-strings (``<<<``) and process substitution
-    (``<(…)``) are left in place: their text is data or an executing command,
-    and either way it must stay visible to the caller's matching.
+    Returns ``(stripped, input_targets, created_targets)``: the segment with
+    each output-redirect operator (``>``, ``>>``, ``>&``, ``&>``, fd-prefixed
+    forms) and the single word it consumes removed; the target words of plain
+    ``<`` input redirects (which the SHELL reads, whatever the utility is); and
+    the targets of TRUNCATING output redirects (``>`` / ``&>``, not ``>>`` --
+    an append leaves the original content readable, a truncation replaces it),
+    which mark files the agent itself created. Heredoc operators (``<<``),
+    here-strings (``<<<``) and process substitution (``<(…)``) are left in
+    place: their text is data or an executing command, and either way it must
+    stay visible to the caller's matching.
     """
     out: list[str] = []
     input_targets: list[str] = []
+    created_targets: list[str] = []
     in_single = in_double = False
     i = 0
     n = len(segment)
@@ -715,11 +771,15 @@ def _strip_redirects(segment: str) -> tuple[str, list[str]]:
             continue
         if c == ">" or segment[i : i + 2] == "&>":
             j = i + 1 if c == ">" else i + 2
-            if j < n and segment[j] == ">":
+            appending = j < n and segment[j] == ">"
+            if appending:
                 j += 1
-            if j < n and segment[j] == "&":  # fd duplication: >&2, 2>&1
+            duplicating = j < n and segment[j] == "&"  # fd duplication: >&2, 2>&1
+            if duplicating:
                 j += 1
-            _, j = _consume_word(j)
+            word, j = _consume_word(j)
+            if word and not appending and not duplicating:
+                created_targets.append(word)
             out.append(" ")
             i = j
             continue
@@ -733,7 +793,7 @@ def _strip_redirects(segment: str) -> tuple[str, list[str]]:
         out.append(c)
         i += 1
 
-    return "".join(out), input_targets
+    return "".join(out), input_targets, created_targets
 
 
 def _search_is_files_only(tokens: list[str]) -> bool:
@@ -751,7 +811,9 @@ def _search_is_files_only(tokens: list[str]) -> bool:
     return False
 
 
-def _classify_segment(segment: str, spec: GradedMaterialSpec) -> tuple[bool, str | None]:
+def _classify_segment(
+    segment: str, spec: GradedMaterialSpec, created: frozenset[str] | set[str] = frozenset()
+) -> tuple[bool, str | None]:
     """Decide whether one shell segment READ graded material.
 
     Returns ``(is_read, matched_reference)``. ``matched_reference`` is set
@@ -760,7 +822,9 @@ def _classify_segment(segment: str, spec: GradedMaterialSpec) -> tuple[bool, str
 
     Rules, in order:
 
-    1. No graded-material reference anywhere in the segment -> not a read.
+    1. No graded-material reference anywhere in the segment -> not a read. A
+       basename-glob reference on a path the agent itself created earlier
+       (``created``) does not count: that is its own deliverable, not a golden.
     2. A reference consumed by an input redirect (``< file``) -> a read, whatever
        the utility is; the shell does the reading.
     3. An output redirect (``>`` / ``>>`` / ``>&`` / ``&>``) consumes exactly one
@@ -783,18 +847,18 @@ def _classify_segment(segment: str, spec: GradedMaterialSpec) -> tuple[bool, str
        false positive is visible in the finding's evidence while a false negative
        is invisible.
     """
-    matched = _find_match(segment, spec)
+    matched = _find_match(segment, spec, created)
     if matched is None:
         return False, None
 
     utility, tokens = _segment_utility(segment)
     normalized_tokens = [Path(t.replace("\\", "/")).name.casefold().removesuffix(".exe") for t in tokens]
 
-    stripped, input_targets = _strip_redirects(segment)
-    if any(_find_match(target, spec) is not None for target in input_targets):
+    stripped, input_targets, _ = _strip_redirects(segment)
+    if any(_find_match(target, spec, created) is not None for target in input_targets):
         return True, matched
 
-    if _find_match(stripped, spec) is None:
+    if _find_match(stripped, spec, created) is None:
         # Every reference sits in an output-redirect target: a write, not a read.
         return False, matched
 
@@ -859,6 +923,10 @@ def scan_commands(turns: list[TurnRecord], spec: GradedMaterialSpec) -> Integrit
     scanned = 0
     blind = 0
     unclassified_hits = 0
+    # Paths the agent itself created, in transcript order: the required
+    # deliverable shares a basename glob with the graded goldens, and only
+    # provenance tells the agent's own copy apart (see _is_agent_created).
+    created: set[str] = set()
 
     for turn in turns:
         for index, cmd in enumerate(turn.commands):
@@ -873,14 +941,16 @@ def scan_commands(turns: list[TurnRecord], spec: GradedMaterialSpec) -> Integrit
                 continue
 
             if cmd.tool_name == "Bash":
-                is_read, matched = _bash_read(text, spec)
+                is_read, matched = _bash_read(text, spec, created)
             else:
-                is_read, matched, understood = _structured_read(cmd, text, spec)
+                is_read, matched, understood = _structured_read(cmd, text, spec, created)
                 if matched is not None and not understood:
                     unclassified_hits += 1
                     notes.append(
                         f"{cmd.tool_name} referenced {matched} but its read semantics are unknown; not counted"
                     )
+                if cmd.tool_name == "Write" and isinstance(cmd.parameters.get("file_path"), str):
+                    created.add(_created_path(cmd.parameters["file_path"]))
 
             if is_read and matched is not None:
                 kind = _finding_kind(matched, spec)
@@ -1056,19 +1126,34 @@ def _split_segments(command: str) -> list[str]:
     return segments
 
 
-def _bash_read(command: str, spec: GradedMaterialSpec) -> tuple[bool, str | None]:
-    """Classify a shell command by splitting it into segments and judging each."""
+def _bash_read(command: str, spec: GradedMaterialSpec, created: set[str] | None = None) -> tuple[bool, str | None]:
+    """Classify a shell command by splitting it into segments and judging each.
+
+    ``created`` is the transcript-ordered set of paths the agent has written so
+    far; each segment's truncating redirect targets are added AFTER the segment
+    is classified, so ``cat > RESOLUTION.md && cat RESOLUTION.md`` excuses the
+    re-read while ``sed … golden > RESOLUTION.md`` still counts the read that
+    produced the file.
+    """
+    created = set() if created is None else created
     mentioned: str | None = None
     for segment in _split_segments(command):
-        is_read, matched = _classify_segment(segment, spec)
+        is_read, matched = _classify_segment(segment, spec, created)
         if matched is not None:
             mentioned = matched
         if is_read:
             return True, matched
+        _, _, made = _strip_redirects(segment)
+        created.update(_created_path(target) for target in made)
     return False, mentioned
 
 
-def _structured_read(cmd: CommandTelemetry, text: str, spec: GradedMaterialSpec) -> tuple[bool, str | None, bool]:
+def _structured_read(
+    cmd: CommandTelemetry,
+    text: str,
+    spec: GradedMaterialSpec,
+    created: frozenset[str] | set[str] = frozenset(),
+) -> tuple[bool, str | None, bool]:
     """Classify a non-Bash tool call.
 
     Returns ``(is_read, matched, semantics_understood)``. Unlike a shell string, a
@@ -1085,7 +1170,7 @@ def _structured_read(cmd: CommandTelemetry, text: str, spec: GradedMaterialSpec)
         haystack = " ".join(str(cmd.parameters[key]) for key in _PATH_PARAMETER_KEYS if cmd.parameters.get(key))
     else:
         haystack = text
-    matched = _find_match(haystack, spec)
+    matched = _find_match(haystack, spec, created)
     if matched is None:
         return False, None, True
 

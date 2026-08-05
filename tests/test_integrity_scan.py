@@ -385,6 +385,78 @@ def test_inert_text_handling_does_not_hide_a_real_read(command: str):
 
 
 # --------------------------------------------------------------------------
+# The agent's own deliverable: created-in-transcript paths are not answer keys
+# --------------------------------------------------------------------------
+
+
+def test_the_write_read_edit_deliverable_flow_is_clean():
+    """The flagship troubleshoot flow: the agent writes RESOLUTION.md, and the
+    harness's Read-before-Edit rule forces it to read its own copy back. Flagging
+    that floods detect-mode triage and blocks void mode outright."""
+    commands = [
+        _cmd("Write", {"file_path": "/workspace/RESOLUTION.md", "content": "my diagnosis"}, tool_id="t1"),
+        _cmd("Read", {"file_path": "/workspace/RESOLUTION.md"}, tool_id="t2"),
+        _cmd("Edit", {"file_path": "/workspace/RESOLUTION.md", "old_string": "my", "new_string": "the"}, tool_id="t3"),
+    ]
+    info = scan_commands([_turn(commands)], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+    assert info.findings == []
+
+
+def test_a_shell_created_deliverable_can_be_re_read():
+    info = scan_commands([_turn([_bash("echo 'diagnosis' > RESOLUTION.md"), _bash("cat RESOLUTION.md")])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+def test_creation_and_re_read_in_one_command_is_clean():
+    info = scan_commands([_turn([_bash("cat > RESOLUTION.md && cat RESOLUTION.md")])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+def test_a_relative_re_read_of_an_absolutely_created_deliverable_is_clean():
+    commands = [
+        _cmd("Write", {"file_path": "/workspace/RESOLUTION.md", "content": "d"}, tool_id="t1"),
+        _bash("cat RESOLUTION.md"),
+    ]
+    info = scan_commands([_turn(commands)], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+def test_creating_your_own_copy_does_not_license_reading_a_golden():
+    """Provenance is per-path: the agent's RESOLUTION.md excuses nothing at any
+    OTHER location, or writing your own copy once would unlock every golden."""
+    info = scan_commands(
+        [_turn([_bash("echo 'diagnosis' > RESOLUTION.md"), _bash("cat ../scenario/RESOLUTION.md")])], SPEC
+    )
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+def test_a_relative_creation_never_excuses_an_absolute_read():
+    info = scan_commands(
+        [_turn([_bash("echo 'diagnosis' > RESOLUTION.md"), _bash("cat /repo/tests/tasks/scen/RESOLUTION.md")])], SPEC
+    )
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+def test_an_append_is_not_a_creation():
+    """`>>` leaves the original content readable, so it proves nothing about
+    who wrote the file."""
+    info = scan_commands([_turn([_bash("echo 'note' >> RESOLUTION.md"), _bash("cat RESOLUTION.md")])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+def test_the_read_that_produces_the_deliverable_still_counts():
+    """Deriving RESOLUTION.md FROM a golden is the leak itself."""
+    info = scan_commands([_turn([_bash("sed 's/x/y/' ../scen/RESOLUTION.md > RESOLUTION.md")])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+def test_a_read_before_any_creation_is_still_a_leak():
+    info = scan_commands([_turn([_bash("cat RESOLUTION.md"), _bash("echo 'd' > RESOLUTION.md")])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+# --------------------------------------------------------------------------
 # The regression guard for the truncation trap
 # --------------------------------------------------------------------------
 
