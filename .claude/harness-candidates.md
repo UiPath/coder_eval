@@ -107,3 +107,23 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
+
+## From PR #77 (command-executed shell-normalize) — CE030-to-criteria deferred
+
+- [ ] **Extend CE030 doc/schema-parity to the `SuccessCriterion` union** so a new
+  criterion (or field) can't ship undocumented. Attempted in PR #77 and reverted:
+  CI installs `--extra uipath`, and in that environment `coder_eval.models.criteria`
+  gains a `CliCalledCriterion` (fields `log`/`positional`) that is NOT present in a
+  plain checkout (it did not reproduce on macOS, whose lockfile resolution omits the
+  contributing linux-only component). It defeated every discriminator tried — union
+  membership, a `__module__` string filter (it is spoofed to `coder_eval.models.criteria`),
+  a genuine-module-attribute scan (it is `setattr` onto the module), and even an AST
+  parse of the `SuccessCriterion` union literal in `criteria.py` source (CI's imported
+  criteria module resolves to a file whose union literal already contains it). No
+  runtime OR source signal available in the lint could separate the injected criterion
+  from an in-tree one. Revisit only with a way to identify the in-tree criterion set that
+  is provably immune to the uipath integration — e.g. a hardcoded name allowlist of the
+  in-tree criteria (losing auto-coverage of new ones), or first understanding exactly how
+  that environment injects the criterion. Until then CE030 stays scoped to the four
+  top-level models; the `command_pattern`/`exclude_pattern` contract this PR changed is
+  documented in the Field descriptions and TASK_DEFINITION_GUIDE regardless.

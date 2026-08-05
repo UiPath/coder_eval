@@ -910,56 +910,6 @@ class TestCE030DocSchemaParity:
             + "\n".join(f"  {model}: {', '.join(fields)}" for model, fields in sorted(findings.items()))
         )
 
-    def test_criterion_models_match_the_source_union_literal(self):
-        # The enumerated criteria are exactly the class names in the source
-        # ``SuccessCriterion`` union literal, resolved to real module attributes.
-        from coder_eval.models import criteria as crit
-        from tests.lint.doc_schema_parity import _criterion_models, _union_literal_criterion_names
-
-        names = _union_literal_criterion_names()
-        assert names, "expected the source union literal to name criteria"
-        models = _criterion_models()
-        assert [m.__name__ for m in models] == names
-        assert all(getattr(crit, m.__name__, None) is m for m in models)
-
-    def test_plugin_injected_criterion_is_excluded(self, monkeypatch):
-        """A criterion a plugin injects at load time is NOT held to this repo's
-        doc obligation — even when it is a real module attribute, spoofs
-        ``__module__`` to look in-tree, AND is spliced into the runtime union.
-
-        Regression: the ``uipath`` SDK's ``coder_eval.plugins`` hook adds a
-        ``CliCalledCriterion`` (fields ``log``/``positional``) in CI, integrated
-        so thoroughly that neither a ``__module__`` filter nor a module-attribute
-        scan excluded it. The parity list is read from the SOURCE union literal,
-        which a plugin cannot edit, so runtime injection has no effect. This
-        reproduces the full shape and pins that.
-        """
-        from typing import Annotated, Literal
-
-        from pydantic import Field, create_model
-
-        from coder_eval.models import criteria as crit
-        from tests.lint.doc_schema_parity import _criterion_models
-
-        injected = create_model(
-            "CliCalledCriterionStub",
-            __base__=crit.BaseSuccessCriterion,
-            __module__=crit.__name__,  # spoof: looks in-tree
-            type=(Literal["_cli_called_stub"], "_cli_called_stub"),
-            undocumented_plugin_field=(str, ""),
-        )
-        # Integrate it exactly as CI's plugin does: real module attribute + union splice.
-        monkeypatch.setattr(crit, "CliCalledCriterionStub", injected, raising=False)
-        monkeypatch.setattr(
-            crit,
-            "SuccessCriterion",
-            Annotated[crit.FileExistsCriterion | injected, Field(discriminator="type")],
-        )
-
-        names = [m.__name__ for m in _criterion_models()]
-        assert "FileExistsCriterion" in names  # named in the source union literal
-        assert "CliCalledCriterionStub" not in names  # injected at runtime, not in source
-
     def test_exempt_fields_carry_a_reason(self):
         from tests.lint.doc_schema_parity import EXEMPT
 

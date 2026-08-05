@@ -12,16 +12,10 @@ Design choices, each load-bearing:
 * **Allowlist, not denylist.** A new field on a registered model that is neither
   documented nor exempted *fails* — which is the point. Adding a user-facing field
   now forces a doc update or a reasoned exemption in the same change.
-* **Registry + the criterion union, no recursion.** The four top-level models are
-  registered explicitly; the members of the ``SuccessCriterion`` discriminated
-  union are enumerated programmatically (a task author writes them directly, the
-  guide already claims to be their reference, and the set is closed/enumerable).
-  In neither case do we recurse into *nested* models (``AgentConfig``,
-  ``SandboxConfig``, the criteria's own sub-models, …) — that would silently
-  expand the commitment to dozens of models nobody signed up for. Enumerating the
-  union (not recursing) is what makes "the next criterion-semantics change cannot
-  ship undocumented" mechanical: a new criterion, or a new field on one, fails
-  until it is documented or exempted.
+* **Explicit registry, no recursion.** Only the four registered models are
+  checked; nested models (``AgentConfig``, ``SandboxConfig``, criteria, …) are NOT
+  walked. Walking them would silently expand the documentation commitment to
+  dozens of models nobody signed up for.
 * **Inline-code match, deliberately simple.** A field counts as documented when
   its bare name appears wrapped in Markdown inline-code backticks anywhere in the
   doc. This is a floor, not a proof — a field name that appears in an unrelated
@@ -37,62 +31,21 @@ over Markdown and is wired as ``tests/test_custom_lint.py::TestCE030DocSchemaPar
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from coder_eval.models import Dataset, RunLimits, SimulationConfig, TaskDefinition
-from coder_eval.models import criteria as _criteria_module
-
-
-_GUIDE = "docs/TASK_DEFINITION_GUIDE.md"
-
-
-def _union_literal_criterion_names() -> list[str]:
-    """Class names in the ``SuccessCriterion = Annotated[A | B | ...]`` literal.
-
-    Read STATICALLY from ``criteria.py`` source, not from the runtime union
-    object. That is the whole point: a plugin's ``coder_eval.plugins`` hook can
-    inject its OWN criterion into the runtime union (and even into the module
-    namespace) at load time — the ``uipath`` SDK adds a ``CliCalledCriterion`` —
-    and such a criterion is documented in its plugin's own repo, not this guide.
-    A plugin cannot edit this repo's source, so the source literal is the
-    authoritative, contamination-proof list of the criteria THIS repo ships.
-    """
-    tree = ast.parse(Path(_criteria_module.__file__).read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "SuccessCriterion" for t in node.targets
-        ):
-            # value is ``Annotated[<Name | Name | ...>, Field(...)]``; every
-            # criterion class name ends in "Criterion" (Annotated/Field/discriminator
-            # string do not), so this selects exactly the union members.
-            return [n.id for n in ast.walk(node.value) if isinstance(n, ast.Name) and n.id.endswith("Criterion")]
-    raise AssertionError("SuccessCriterion union assignment not found in criteria.py")
-
-
-def _criterion_models() -> list[type[BaseModel]]:
-    """The in-tree ``SuccessCriterion`` member models, resolved from the source union.
-
-    Names come from the source literal (see :func:`_union_literal_criterion_names`),
-    then each is resolved to its class via ``getattr`` on the criteria module. New
-    in-tree criteria are covered automatically (they're added to the union literal);
-    plugin-injected criteria are never named in the source, so they are excluded
-    even though they exist as runtime attributes.
-    """
-    return [getattr(_criteria_module, name) for name in _union_literal_criterion_names()]
 
 
 # Models the project commits to documenting, paired with the doc page that owns
-# their field reference. The four top-level models are explicit; the criterion
-# union members are enumerated so a new criterion (or field) can't ship undocumented.
+# their field reference. Keep this list SHORT and explicit — every entry is a
+# standing documentation obligation.
 DOCUMENTED_MODELS: list[tuple[type[BaseModel], str]] = [
-    (TaskDefinition, _GUIDE),
-    (RunLimits, _GUIDE),
-    (Dataset, _GUIDE),
-    (SimulationConfig, _GUIDE),
-    *[(m, _GUIDE) for m in _criterion_models()],
+    (TaskDefinition, "docs/TASK_DEFINITION_GUIDE.md"),
+    (RunLimits, "docs/TASK_DEFINITION_GUIDE.md"),
+    (Dataset, "docs/TASK_DEFINITION_GUIDE.md"),
+    (SimulationConfig, "docs/TASK_DEFINITION_GUIDE.md"),
 ]
 
 # Fields deliberately absent from the user docs, with the reason each is not
