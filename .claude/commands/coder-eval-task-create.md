@@ -68,10 +68,13 @@ adversarial checklist ("could this pass for the wrong reason?", fixture lifecycl
 match). It is the single declaration for all three consumers: this command and the
 plugin's `task` and `lint-tasks` skills.
 
-**Criteria design rules:**
-- Every task needs at least one criterion that validates the **output content**, not just existence
+The rubric owns the *correctness* checks — that something validates output content, that
+`require_success: true` is set whenever a command's success is what you are grading, that a
+criterion cannot pass for the wrong reason. Do not restate them here; apply them from there.
+
+**Criteria design rules** (conventions the rubric does not cover):
 - Use `run_command` with `expected_stdout` + `stdout_match: regex` to validate script output
-- Use `command_executed` sparingly — only when verifying the agent used a specific tool matters. Set `require_success: true` whenever the command's success is what you are grading; the permissive default (`false`) credits a crashed invocation, and belongs only on a probe whose failure is an acceptable outcome.
+- Use `command_executed` sparingly — only when verifying the agent used a specific tool matters
 - Use `file_check` instead of separate `file_exists` + `file_contains` when checking the same file
 - Set `weight` to reflect importance: 0.5 for nice-to-have, 1.0 for standard, 1.5-2.0 for critical
 - Default `pass_threshold: 0.9` is fine for most criteria. Use `1.0` only for binary checks.

@@ -61,9 +61,12 @@ Write one task derived from what step 2 found:
 
 Prompts instruct, criteria validate. Do not restate in the prompt what the criteria
 check — a prompt that says "make sure the file contains X" tests reading
-comprehension, not capability. Watch for the quiet version too: a criterion matching a
-literal the prompt already dictates (prompt says "use `pypdf`", criterion greps for
-`pypdf`) is a criterion that cannot fail. For criterion types and their fields, read
+comprehension, not capability.
+
+Before writing the criteria, read `${CLAUDE_PLUGIN_ROOT}/reference/task-rubric.md`. It is
+the shared checklist for whether a task can pass for the wrong reason, and the one task you
+scaffold here is the example every later task in this repository gets modelled on — so it
+is worth getting right rather than fixing later. For criterion types and their fields, read
 `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md`.
 
 Use `/coder-eval:task` if the user wants more tasks after this one; it is the same

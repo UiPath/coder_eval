@@ -1135,7 +1135,7 @@ PLUGIN_TEXT_FILES = sorted(
 
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
 # dead weight; a reader that stops reading it has silently forked the rubric.
-RUBRIC_READERS = {"task", "lint-tasks"}
+RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
 # Which skills are explicit-invocation only. Scaffolding a directory (`init`) or
 # writing a CI workflow (`ci`) is never something to do unprompted; the rest are
@@ -2018,3 +2018,127 @@ class TestCE032CriteriaPathSeam:
             "target = sandbox.sandbox_dir / path",
             "/repo/src/coder_eval/orchestrator.py",
         )
+
+
+@pytest.mark.lint
+class TestCE034ArmedPositiveRequiresSuccess:
+    """CE034 — an armed, live-passable `command_executed` must require success.
+
+    `require_success` defaults to False, so a criterion counts an invocation that
+    CRASHED. On an unarmed criterion that is merely generous. On an armed one it
+    corrupts the run's verdict, because three behaviours compose:
+
+    1. `live_verdict` and `_check_impl` share `_matching_commands`, so a failed
+       invocation live-PASSES a positive criterion (`min_count > 0`, no
+       `max_count`) the moment it is observed;
+    2. `stop_early.on_pass: stop` ends the run on that pass — and
+       `decide_within` latches it, so the timeout never fires either;
+    3. gating is FIRED-ONLY: a run the watcher cut gates on the ARMED SUBSET
+       (`armed_criteria_passed`), so unarmed criteria are never consulted.
+
+    Net effect on `tasks/early_stop_weighted_low_weight_absorbed.yaml` before this
+    rule existed: an agent that ran `python app.py` BEFORE creating app.py scored a
+    weighted 1.0 over the armed subset and reported SUCCESS — with no app.py and a
+    crashed script — because the unarmed `file_exists` was bypassed. Found by
+    running the plugin's own `lint-tasks` skill against this repository's tasks.
+
+    Only *pass-capable* instances are constrained, read off the model's own
+    `live_decidable_polarities()` rather than re-deriving the shape here. A
+    negative assertion (`min_count: 0, max_count: 0`, i.e. "must NOT call curl")
+    is fail-only and must NOT set `require_success`: a curl that failed is still a
+    curl that was called, and requiring success there would blind the criterion to
+    exactly the calls it exists to forbid.
+    """
+
+    ROOT = Path(__file__).parent.parent
+
+    @staticmethod
+    def _offenders(task) -> list[str]:
+        """Armed, pass-capable command_executed criteria that don't require success."""
+        from coder_eval.models import CommandExecutedCriterion
+
+        return [
+            c.description
+            for c in task.success_criteria
+            if isinstance(c, CommandExecutedCriterion)
+            and c.stop_early is not None
+            and "pass" in c.live_decidable_polarities()
+            and not c.require_success
+        ]
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_tasks_arm_only_success_requiring_positives(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        offenders = self._offenders(task)
+        assert not offenders, (
+            f"{path}: armed criteria {offenders} can live-PASS on an invocation that FAILED "
+            "(require_success defaults to False). Under FIRED-ONLY armed gating that reports "
+            "SUCCESS while bypassing every unarmed criterion. Set `require_success: true`."
+        )
+
+    def test_detects_an_armed_positive_without_require_success(self):
+        from coder_eval.models import TaskDefinition
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            success_criteria=[
+                {
+                    "type": "command_executed",
+                    "description": "ran the script",
+                    "command_pattern": "python app\\.py",
+                    "min_count": 1,
+                    "stop_early": {"on_pass": "stop"},
+                }
+            ],
+        )
+        assert self._offenders(task) == ["ran the script"]
+
+    def test_fail_only_negative_is_not_constrained(self):
+        # The distractor shape: fail-only, so it can never live-PASS on a crashed
+        # command, and requiring success would hide the forbidden calls it hunts.
+        from coder_eval.models import TaskDefinition
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            success_criteria=[
+                {
+                    "type": "command_executed",
+                    "description": "never called curl",
+                    "command_pattern": "curl",
+                    "min_count": 0,
+                    "max_count": 0,
+                    "stop_early": {},
+                }
+            ],
+        )
+        assert self._offenders(task) == []
+
+    def test_unarmed_positive_is_not_constrained(self):
+        # No stop_early block => not armed => a generous default cannot truncate a
+        # run or bypass a gate, so this rule deliberately says nothing about it.
+        from coder_eval.models import TaskDefinition
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            success_criteria=[
+                {
+                    "type": "command_executed",
+                    "description": "ran the script",
+                    "command_pattern": "python app\\.py",
+                    "min_count": 1,
+                }
+            ],
+        )
+        assert self._offenders(task) == []
