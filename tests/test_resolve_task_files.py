@@ -3,9 +3,14 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from coder_eval.models import (
+    AGENT_GID,
+    AGENT_HIDDEN_TASK_FIELDS,
+    AGENT_UID,
+    AGENT_USERNAME,
     AgentConfig,
     AgentKind,
     SandboxConfig,
@@ -13,8 +18,11 @@ from coder_eval.models import (
     TemplateDirSource,
     parse_agent_config,
 )
+from coder_eval.models.tasks import _AGENT_HIDDEN_FIELD_EMPTIES
 from coder_eval.orchestration.experiment import resolve_task_files
 from coder_eval.orchestration.task_loader import (
+    load_task,
+    parse_task_dict,
     resolve_agent_system_prompt,
     resolve_initial_prompt_file,
 )
@@ -302,3 +310,118 @@ class TestResolveTaskFiles:
         resolve_task_files(task, task_file)
 
         assert task.agent is None
+
+
+class TestAgentSafeDump:
+    """TaskDefinition.agent_safe_dump strips grading material for the docker barrier."""
+
+    def test_strips_hidden_fields_leaves_rest_identical(self):
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="go",
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[
+                {"type": "file_contains", "path": "f.py", "includes": ["SECRET-ANSWER"], "description": "d"}
+            ],
+            reference={"code": "print('ref')"},
+        )
+        full = task.model_dump(mode="json")
+        safe = task.agent_safe_dump()
+
+        assert safe["success_criteria"] == []
+        assert safe["reference"] is None
+        # Every other key is byte-identical to the full dump.
+        for key in full:
+            if key in ("success_criteria", "reference"):
+                continue
+            assert safe[key] == full[key], key
+        assert set(safe) == set(full)
+
+    def test_idempotent_on_reference_none_task(self):
+        # reference already None; a single criterion (min the validator allows).
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="go",
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[{"type": "file_exists", "path": "f.py", "description": "d"}],
+        )
+        safe = task.agent_safe_dump()
+        assert safe["success_criteria"] == []
+        assert safe["reference"] is None
+        # Applying agent_safe_dump semantics again over the same object is stable.
+        assert task.agent_safe_dump() == safe
+
+    def test_merged_back_projection_reparses(self, tmp_path):
+        """The docker entrypoint strips the agent-readable task.yaml, then merges the
+        full criteria back from the root-only channel before parsing. Assert that
+        merge-back dict re-parses via parse_task_dict — the required-field edge case.
+
+        (The bare stripped projection with success_criteria == [] deliberately does
+        NOT re-parse: TaskDefinition requires >= 1 criterion. Production never parses
+        the empty projection standalone.)
+        """
+        criteria = [{"type": "file_exists", "path": "f.py", "description": "d"}]
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="go",
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=criteria,
+            reference={"code": "print('ref')"},
+        )
+        stripped = task.agent_safe_dump()
+        assert stripped["success_criteria"] == []
+        # Merge the full criteria + reference back (what the root entrypoint does).
+        merged = {**stripped, "success_criteria": criteria, "reference": {"code": "print('ref')"}}
+        reparsed = parse_task_dict(merged, tmp_path)
+        assert isinstance(reparsed, TaskDefinition)
+        assert len(reparsed.success_criteria) == 1
+        assert reparsed.reference is not None
+
+    def test_hidden_fields_ssot_derivation(self):
+        assert frozenset(_AGENT_HIDDEN_FIELD_EMPTIES) == AGENT_HIDDEN_TASK_FIELDS
+
+    def test_agent_uid_constants_importable(self):
+        assert (AGENT_UID, AGENT_GID, AGENT_USERNAME) == (2000, 2000, "agent")
+
+
+class TestParseTaskDict:
+    """parse_task_dict runs the same construction + four resolve_* steps as load_task."""
+
+    def test_matches_load_task(self, tmp_path):
+        # A task exercising system_prompt_file + a relative template_sources dir so
+        # the resolve_* steps have real work to do.
+        (tmp_path / "templates").mkdir()
+        (tmp_path / "sysprompt.md").write_text("Be terse.\n", encoding="utf-8")
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text(
+            "task_id: t\n"
+            "description: d\n"
+            "initial_prompt: go\n"
+            "agent:\n"
+            "  type: claude-code\n"
+            "  system_prompt_file: sysprompt.md\n"
+            "sandbox:\n"
+            "  driver: tempdir\n"
+            "  template_sources:\n"
+            "    - type: template_dir\n"
+            "      path: templates\n"
+            "success_criteria:\n"
+            "  - type: file_exists\n"
+            "    path: f.py\n"
+            "    description: d\n",
+            encoding="utf-8",
+        )
+        from_load, _ = load_task(task_file)
+        raw = yaml.safe_load(task_file.read_text(encoding="utf-8"))
+        from_parse = parse_task_dict(raw, task_file.parent)
+
+        # Both resolved system_prompt inline (proves resolve_system_prompt_files ran)
+        assert from_parse.agent.system_prompt == "Be terse."
+        assert from_parse.agent.system_prompt_file is None
+        # Both resolved the template path to absolute (proves resolve_template_paths ran)
+        expected_template = str((tmp_path / "templates").resolve())
+        assert from_parse.sandbox.template_sources[0].path == expected_template
+        assert from_load.model_dump(mode="json") == from_parse.model_dump(mode="json")

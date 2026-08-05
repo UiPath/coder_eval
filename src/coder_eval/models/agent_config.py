@@ -104,6 +104,11 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "skills",
         "add_dirs",
         "setting_sources",  # framework-controlled to prevent hook injection
+        # OS uid drop — framework-managed by the docker user/permission isolation
+        # barrier (set from agent_run_uid, not YAML). Letting it through sdk_options
+        # would both bypass the barrier's gating and collide with the explicit
+        # `user=` the agent sets in the ClaudeAgentOptions(...) block.
+        "user",
         # telemetry: required by ClaudeCodeAgent to recover per-emission
         # output_tokens via message_delta stream events (works around
         # anthropics/claude-code#22686 where the assistant event's
@@ -175,6 +180,26 @@ class BaseAgentConfig(BaseModel):
             "prefixed with '!' remove a default (gitignore-style negation)."
         ),
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
+    )
+
+    # Runtime-resolved (NOT task-authored): the unprivileged uid the docker
+    # in-container entrypoint drops this agent's CLI subprocess to, under the
+    # user/permission isolation barrier. Set by run_task_internal_command from the
+    # container context.json; None everywhere else (no drop). Each agent reads it
+    # and wires its own spawn seam (claude user=, codex launch_args_override,
+    # antigravity PATH-shadow). Not a YAML field — carried via context.json, not the
+    # 5-layer merge — so it needs no MergeField and no doc-parity entry. Authored
+    # values are rejected at task-load (parse_task_dict) and CLI-override
+    # (apply_overrides) time, since the contract is framework-set only.
+    agent_run_uid: int | None = Field(
+        default=None,
+        exclude=True,  # runtime-only: set by direct write in the container; must NOT persist
+        # into task.json/EvaluationResult, else the host read-back (model_validate) carries it
+        # back through parse_agent_config and trips the framework-set-only authoring guard.
+        description=(
+            "Runtime-resolved unprivileged uid to run the agent's CLI subprocess as "
+            "(docker user/permission isolation barrier). Framework-set, not task-authored."
+        ),
     )
 
     @field_validator("ignore_patterns")
@@ -338,6 +363,21 @@ def parse_agent_config(**kwargs: Any) -> BaseAgentConfig:
     """
     from coder_eval.agents.registry import AgentRegistry
     from coder_eval.plugins import ensure_plugins_loaded
+
+    # agent_run_uid is framework-set ONLY (the docker isolation barrier assigns it
+    # by direct attribute write on the already-constructed config). Reject any
+    # non-None value arriving through CONSTRUCTION — this is the single choke point
+    # every authoring path funnels through: YAML (TaskDefinition -> ResolvedAgentConfig
+    # BeforeValidator -> here) AND the experiment variant / experiment-defaults merge
+    # (resolve_root("agent") -> here). The framework's own direct attribute write
+    # (task.agent.agent_run_uid = AGENT_UID) does NOT pass through this factory, so it
+    # stays open. None (the model_dump round-trip default of an un-dropped config, e.g.
+    # the container's staged task.yaml re-parse) is allowed.
+    if kwargs.get("agent_run_uid") is not None:
+        raise ValueError(
+            "agent.agent_run_uid is framework-set only (docker isolation barrier); "
+            + "it cannot be supplied from a task definition, experiment variant, or override"
+        )
 
     agent_type = kwargs.get("type")
 

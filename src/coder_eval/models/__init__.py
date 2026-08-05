@@ -19,8 +19,14 @@ from coder_eval.models.agent_config import (
 
 # Container paths (leaf constants; re-exported so consumers obey CE001)
 from coder_eval.models.container_paths import (
+    AGENT_GID,
+    AGENT_HOME,
+    AGENT_UID,
+    AGENT_USERNAME,
+    CONTAINER_DROP_SHIM,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_SKILL_DOCS_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
@@ -105,6 +111,11 @@ from coder_eval.models.mutations import (
     PromptTemplate,
     apply_prompt_mutations,
 )
+from coder_eval.models.plugin_projection import (
+    PLUGIN_AGENT_ALLOWED_SUBDIRS,
+    plugin_path,
+    project_plugin_for_agent,
+)
 
 # Results
 from coder_eval.models.results import (
@@ -166,6 +177,7 @@ from coder_eval.models.sandbox import (
 
 # Tasks
 from coder_eval.models.tasks import (
+    AGENT_HIDDEN_TASK_FIELDS,
     DEFAULT_SIMULATION_STOP_TOKEN,
     CriteriaCheckTiming,
     Dataset,
@@ -262,11 +274,20 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TemplateSource",
     # Sandbox
     "DockerBuildConfig",
+    "AGENT_GID",
+    "AGENT_HOME",
+    "AGENT_UID",
+    "AGENT_USERNAME",
+    "CONTAINER_DROP_SHIM",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
+    "CONTAINER_SKILL_DOCS_DIR",
     "CONTAINER_TASK_DIR",
     "CONTAINER_WORK_DIR",
+    "PLUGIN_AGENT_ALLOWED_SUBDIRS",
     "RESERVED_CONTAINER_DIRS",
+    "plugin_path",
+    "project_plugin_for_agent",
     "DockerDriverConfig",
     "NodeEnvConfig",
     "PythonEnvConfig",
@@ -335,6 +356,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "merge_strategy_of",
     # Tasks
     "TaskDefinition",
+    "AGENT_HIDDEN_TASK_FIELDS",
     "DEFAULT_SIMULATION_STOP_TOKEN",
     "CriteriaCheckTiming",
     "Dataset",

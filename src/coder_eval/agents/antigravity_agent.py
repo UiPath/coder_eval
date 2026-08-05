@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import shlex
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack
@@ -40,6 +41,7 @@ from coder_eval.errors import (
     truncate_crash_message,
 )
 from coder_eval.models import (
+    CONTAINER_DROP_SHIM,
     AgentKind,
     AntigravityAgentConfig,
     ApiRoute,
@@ -215,6 +217,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         # Absolute dirs to prepend to PATH so sandbox mock CLIs shadow real ones
         # for the harness's run_command tool — applied at spawn (see start()).
         self._env_path_prepend: list[str] = []
+        # Temp dir holding the localharness drop-privilege wrapper (docker
+        # isolation barrier). Removed in _teardown. None when no drop is requested.
+        self._drop_shim_dir: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -222,6 +227,33 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     def _effective_model(self) -> str:
         """Resolve the model: task ``agent.model`` > ``ANTIGRAVITY_MODEL`` > default."""
         return self.config.model or settings.antigravity_model or _DEFAULT_MODEL
+
+    def _stage_localharness_drop_shim(self) -> Path | None:
+        """Stage a `localharness` wrapper that execs the real localharness through
+        the drop-privilege shim, and return the dir holding it (for PATH-prepend).
+
+        The wrapper must exec the REAL localharness by ABSOLUTE path (captured now,
+        before the PATH prepend) so it never recurses into itself. Returns None if
+        the real localharness can't be resolved (leaves the spawn undropped rather
+        than breaking it — the entrypoint's fail-loud root check is the hard gate).
+        """
+        import shutil
+        import stat
+        import tempfile
+
+        real = shutil.which("localharness")
+        if real is None:
+            self._log.warning("localharness not found on PATH; cannot stage drop-privilege wrapper")
+            return None
+        shim_dir = Path(tempfile.mkdtemp(prefix="antigravity-drop-"))
+        wrapper = shim_dir / "localharness"
+        wrapper.write_text(
+            f'#!/usr/bin/env bash\nexec {CONTAINER_DROP_SHIM} {shlex.quote(real)} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        self._drop_shim_dir = shim_dir
+        return shim_dir
 
     def _resolve_skills_paths(self, plugin_tools_dir: str | None) -> list[str]:
         """Resolve skill search-path roots for the harness's native ``skills_paths``.
@@ -316,6 +348,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
+        # Docker user/permission isolation barrier: when the entrypoint resolved an
+        # agent_run_uid, shadow `localharness` on PATH with a wrapper that execs the
+        # REAL localharness through the drop-privilege shim, so the SDK's own
+        # Popen("localharness") resolves the wrapper first and runs as the agent uid.
+        # Reuses the existing _harness_spawn_guard PATH-prepend (no SDK change).
+        if self.config.agent_run_uid is not None:
+            shim_dir = self._stage_localharness_drop_shim()
+            if shim_dir is not None:
+                self._env_path_prepend = [str(shim_dir), *self._env_path_prepend]
         self._state = AgentState.WORKING
 
         try:
@@ -389,22 +430,42 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         never affects the live harness. The lock is taken even when no prepend dirs
         were configured: a no-prepend spawn must still wait out any in-flight mutated-
         PATH window, or its harness would inherit another task's mock dirs.
+
+        Under the docker isolation barrier (``agent_run_uid`` set) the localharness is
+        dropped to the agent uid via the setpriv shim, which does NOT set HOME — so the
+        dropped harness would inherit root's HOME (0700 ``/root``) and EACCES on any
+        ``$HOME`` write. HOME is relocated to the agent-owned ``AGENT_HOME`` across the
+        same guarded window (same env-inheritance mechanism as the PATH prepend), then
+        restored in ``finally``.
         """
+        from coder_eval.models import AGENT_HOME
+
         async with _harness_spawn_lock():
-            if not self._env_path_prepend:
+            drop_home = self.config.agent_run_uid is not None
+            if not self._env_path_prepend and not drop_home:
                 yield
                 return
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
-            original = os.environ.get(path_key)
-            os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original or ""])
-            self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
+            original_path = os.environ.get(path_key)
+            original_home = os.environ.get("HOME")
+            if self._env_path_prepend:
+                os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original_path or ""])
+                self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
+            if drop_home:
+                os.environ["HOME"] = AGENT_HOME
+                self._log.debug("HOME relocated to %s for dropped harness spawn", AGENT_HOME)
             try:
                 yield
             finally:
-                if original is None:
+                if original_path is None:
                     os.environ.pop(path_key, None)
                 else:
-                    os.environ[path_key] = original
+                    os.environ[path_key] = original_path
+                if drop_home:
+                    if original_home is None:
+                        os.environ.pop("HOME", None)
+                    else:
+                        os.environ["HOME"] = original_home
 
     async def communicate(
         self,
@@ -579,6 +640,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         if stack is not None:
             with contextlib.suppress(Exception):
                 await stack.aclose()
+        # Remove the drop-privilege wrapper dir (docker isolation barrier), if any.
+        shim_dir = self._drop_shim_dir
+        self._drop_shim_dir = None
+        if shim_dir is not None:
+            import shutil
+
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(shutil.rmtree, shim_dir, ignore_errors=True)
 
 
 class _AntigravityTurnState:

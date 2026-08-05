@@ -182,6 +182,7 @@ external = [
     "CE012",
     "CE013",
     "CE018",
+    "CE033",
 ]  # custom architectural lint rules (tests/lint/)
 
 [tool.ruff.lint.pylint]
@@ -291,6 +292,10 @@ addopts = [
     "-ra",              # Show summary of all test outcomes
     "--showlocals",     # Show local variables in tracebacks
     "--color=yes",      # Force colored output
+    # Root-in-container docker-isolation tests never pass on a non-root host;
+    # they run via `make test-docker-isolation` (pytest -m docker_root inside
+    # the built image). Exclude them from the default host suite.
+    "-m", "not docker_root",
 ]
 
 # Asyncio configuration
@@ -307,6 +312,7 @@ markers = [
     "live: marks tests that hit real external services (Anthropic API, AWS Bedrock, etc.)",
     "lint: marks tests that enforce custom architectural lint rules",
     "divergence: pins a layer-4-vs-layer-5 merge divergence (or crash) that the declarative-merge refactor intentionally flips; see tests/test_merge_characterization.py",
+    "docker_root: marks tests that require root inside the built agent image (run via `make test-docker-isolation`, auto-excluded from host `make test`)",
 ]
 
 # Test discovery patterns

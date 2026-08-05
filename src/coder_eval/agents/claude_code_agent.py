@@ -38,6 +38,8 @@ from coder_eval.errors import (
 )
 from coder_eval.formatting import format_messages, format_payload
 from coder_eval.models import (
+    AGENT_HOME,
+    AGENT_USERNAME,
     AgentKind,
     ApiRoute,
     BedrockRoute,
@@ -740,6 +742,39 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         self._state = AgentState.WORKING
         # Note: Client is created per-communication to avoid transport issues
 
+    def _relocate_home_for_drop(self, env: dict[str, str]) -> None:
+        """Point the dropped CLI's ``HOME`` at an agent-owned dir and stage ``~/.claude``.
+
+        Under the docker user/permission isolation barrier (``agent_run_uid`` set) the
+        SDK spawns the CLI via ``Popen(user="agent")``, which drops the uid but leaves
+        HOME resolving to root's home (0700 ``/root`` when HOME isn't forwarded, or
+        ``working_dir: auto`` -> ``/root``). The dropped CLI then EACCESes on
+        ``~/.claude``. Set ``HOME`` to the baked agent-owned ``AGENT_HOME`` (0755, owned
+        by the agent uid) and stage a copy of the current ``~/.claude`` under it, chowned
+        to the agent uid so the CLI can read+write its own state. No-op off the barrier
+        (HOME untouched, host/tempdir behaviour unchanged).
+        """
+        if self.config.agent_run_uid is None:
+            return
+        import shutil
+
+        from coder_eval.isolation import container_perms
+
+        agent_home = Path(AGENT_HOME)
+        env["HOME"] = str(agent_home)
+        # Relocate ~/.claude (OAuth/session state) under the agent HOME. The host
+        # forwards its lean copy at $ORIG_HOME/.claude; move it beside the new HOME so
+        # the dropped CLI, resolving ~ to AGENT_HOME, finds it.
+        src_claude = Path.home() / ".claude"
+        dst_claude = agent_home / ".claude"
+        with suppress(OSError):
+            agent_home.mkdir(parents=True, exist_ok=True)
+            if src_claude.exists() and src_claude.resolve() != dst_claude.resolve() and not dst_claude.exists():
+                shutil.copytree(src_claude, dst_claude, symlinks=True, dirs_exist_ok=True)
+        # Grant the whole agent HOME (incl. the staged ~/.claude) to the agent uid so
+        # the dropped CLI can read+write it. No-op off Linux/root.
+        container_perms.grant_agent_ownership([agent_home])
+
     @staticmethod
     def _build_sdk_env(
         route: ApiRoute,
@@ -1166,6 +1201,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             plugin_tools_dir=self._plugin_tools_dir,
             cost_log_tags=cost_log_tags,
         )
+        # Docker user/permission isolation barrier: Popen(user="agent") drops the uid
+        # but NOT HOME, so the dropped CLI would resolve HOME to root's 0700 dir
+        # (/root when HOME isn't forwarded, or working_dir:auto->/root) and EACCES on
+        # ~/.claude. Point HOME at the agent-owned baked dir and stage its ~/.claude.
+        self._relocate_home_for_drop(env)
         effective_model = self._resolve_effective_model(self.config.model, env, route_model)
 
         disallowed_tools = list(self.config.disallowed_tools or [])
@@ -1199,6 +1239,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             if isinstance(self.config.claude_settings, dict)
             else self.config.claude_settings,
             mcp_servers=self._extra_mcp_servers,
+            # Docker user/permission isolation barrier: when the entrypoint has
+            # resolved an agent_run_uid, run the CLI subprocess as the unprivileged
+            # `agent` user (SDK forwards user= to subprocess.Popen(user=), a POSIX
+            # setuid drop). None off-docker leaves the CLI running as the container
+            # process owner (root), unchanged.
+            user=(AGENT_USERNAME if self.config.agent_run_uid is not None else None),
             **self.config.sdk_options,
         )
 

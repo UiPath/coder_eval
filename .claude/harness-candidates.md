@@ -107,3 +107,4 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
+- [ ] CE033 form (c): a raw `.model_dump(` feeding the AGENT-READABLE `task.yaml` write in docker_runner must route through `agent_safe_dump` instead — no lint check today because distinguishing the stripped `task.yaml` write from the legitimate root-only `task_full.json` `model_dump` in the same function needs data-flow analysis, not a single-node AST match. Codebase currently compliant (task.yaml uses agent_safe_dump). — caught in docker-isolation-user-separation Phase 5.

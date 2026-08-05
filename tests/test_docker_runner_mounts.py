@@ -32,7 +32,7 @@ from coder_eval.isolation.docker_runner import (
     _sanitize_container_name_component,
     _validate_extra_mount,
 )
-from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
+from coder_eval.models import AGENT_HOME, FileExistsCriterion, SandboxConfig, TaskDefinition
 
 
 # DockerRunner targets Linux containers from POSIX hosts. On Windows the test
@@ -628,11 +628,14 @@ class TestWorkspaceDir:
 
     @pytest.mark.parametrize("workdir_out", ["", "/"])
     def test_resolve_auto_empty_or_root_falls_back(self, monkeypatch, workdir_out):
+        # Fallback is the agent-owned AGENT_HOME (not /root): the agent CLI is dropped
+        # to the agent uid under the isolation barrier, and a /root (0700) workspace
+        # would EACCES every write.
         monkeypatch.setattr(
             "coder_eval.isolation.docker_runner.subprocess.run",
             lambda *a, **k: MagicMock(stdout=workdir_out + "\n"),
         )
-        assert _resolve_workspace_dir("auto", "img") == "/root"
+        assert _resolve_workspace_dir("auto", "img") == AGENT_HOME
 
     def test_resolve_auto_inspect_failure_falls_back(self, monkeypatch):
         import subprocess
@@ -641,7 +644,7 @@ class TestWorkspaceDir:
             raise subprocess.CalledProcessError(1, "docker")
 
         monkeypatch.setattr("coder_eval.isolation.docker_runner.subprocess.run", boom)
-        assert _resolve_workspace_dir("auto", "img") == "/root"
+        assert _resolve_workspace_dir("auto", "img") == AGENT_HOME
 
     def _argv(self, runner) -> list[str]:
         with tempfile.TemporaryDirectory() as tmpdir:

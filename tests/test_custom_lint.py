@@ -531,6 +531,78 @@ class TestCE024DiscriminatedUnions:
 
 
 @pytest.mark.lint
+class TestCE033HarnessPathsLocked:
+    """CE033 flags isolation-barrier bypasses in the two scoped docker files."""
+
+    _SCOPED = "src/coder_eval/isolation/docker_runner.py"
+    _UNSCOPED = "src/coder_eval/sandbox.py"
+
+    @staticmethod
+    def _run(src: str, *, path: str):
+        import ast
+
+        from tests.lint.rules.ce033_harness_paths_locked import HarnessPathsLocked
+
+        return HarnessPathsLocked(path).check(ast.parse(src))
+
+    def test_flags_bare_os_chown(self):
+        assert self._run("import os\nos.chown('/work/input', 0, 0)\n", path=self._SCOPED)
+
+    def test_flags_bare_os_chmod(self):
+        assert self._run("import os\nos.chmod('/work/input', 0o700)\n", path=self._SCOPED)
+
+    def test_flags_bare_shutil_chown(self):
+        assert self._run("import shutil\nshutil.chown('/work/input', 'root')\n", path=self._SCOPED)
+
+    def test_flags_bare_os_lchown_fchown(self):
+        assert self._run("import os\nos.lchown('/work/input', 0, 0)\n", path=self._SCOPED)
+        assert self._run("import os\nos.fchown(fd, 0, 0)\n", path=self._SCOPED)
+
+    def test_flags_path_method_chmod_chown(self):
+        # (a') the idiomatic pathlib bypass: Path(x).chmod / p.chown / p.lchown.
+        assert self._run("from pathlib import Path\nPath('/work/input').chmod(0o700)\n", path=self._SCOPED)
+        assert self._run("p.chown(0, 0)\n", path=self._SCOPED)
+        assert self._run("p.lchown(0, 0)\n", path=self._SCOPED)
+
+    def test_flags_user_argv_flag(self):
+        assert self._run('argv = []\nargv += ["--user", "2000"]\n', path=self._SCOPED)
+
+    def test_allows_container_perms_calls(self):
+        src = (
+            "from coder_eval.isolation import container_perms\n"
+            "container_perms.lock_harness_root_0700([p])\n"
+            "container_perms.grant_agent_ownership([q])\n"
+        )
+        assert not self._run(src, path=self._SCOPED)
+
+    def test_allows_agent_safe_dump(self):
+        assert not self._run("y = task.agent_safe_dump()\n", path=self._SCOPED)
+
+    def test_flags_raw_task_model_dump(self):
+        # (c) a raw task.model_dump() into the agent-readable task.yaml.
+        assert self._run("y = task.model_dump(mode='json')\n", path=self._SCOPED)
+
+    def test_flags_nested_task_model_dump(self):
+        # (c) attribute-chain receiver (self.rt.task.model_dump) is also flagged.
+        assert self._run("y = self.rt.task.model_dump()\n", path=self._SCOPED)
+
+    def test_allows_model_dump_on_non_task_receiver(self):
+        # (c) only task-receiver model_dump is flagged; lineage/result dumps are fine.
+        assert not self._run("y = v.model_dump(mode='json')\n", path=self._SCOPED)
+        assert not self._run("y = result.model_dump_json(indent=2)\n", path=self._SCOPED)
+
+    def test_allows_task_model_dump_json(self):
+        # model_dump_json (attr != "model_dump") is not the task.yaml-strip surface.
+        assert not self._run("y = task.model_dump_json()\n", path=self._SCOPED)
+
+    def test_ignores_files_outside_scope(self):
+        # sandbox.py legitimately uses os.chmod in _grant_read_traverse.
+        assert not self._run("import os\nos.chmod('/x', 0o700)\n", path=self._UNSCOPED)
+        # (c) is also scoped to the two docker files only.
+        assert not self._run("y = task.model_dump()\n", path=self._UNSCOPED)
+
+
+@pytest.mark.lint
 class TestCE025LiveVerdictConsistency:
     """CE025: a criterion type's ``LiveSuccessCriterion`` subclassing (models/criteria.py)
     and its checker's ``live_verdict`` override (criteria/) must agree.

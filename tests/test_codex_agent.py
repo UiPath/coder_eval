@@ -163,6 +163,30 @@ class TestCodexEnvironmentConfiguration:
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         assert agent._build_codex_env() is None
 
+    def test_build_codex_env_materializes_codex_home_under_drop_without_mocks(self, monkeypatch, tmp_path):
+        """Regression: under the docker uid-drop, CODEX_HOME must be materialized even
+        with NO mock PATH dirs (so ``_login_shell_home`` is None). The setup used to be
+        nested inside the login-shell block and was skipped for mock-free tasks, so the
+        dropped codex process EACCES'd initializing sqlite state under the root-owned
+        ~/.codex."""
+        monkeypatch.setenv("CODEX_API_KEY", "k")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "ch"))
+        config = parse_agent_config(type=AgentKind.CODEX)
+        config.agent_run_uid = 2000
+        agent = CodexAgent(config)
+        assert agent._login_shell_home is None  # no mocks -> login-shell home not set up
+        env = agent._build_codex_env()
+        assert env is not None
+        assert env.get("CODEX_HOME") == str(tmp_path / "ch")
+        assert (tmp_path / "ch").is_dir()  # created so the dropped uid can write it
+
+    def test_build_codex_env_no_codex_home_without_drop_or_mocks(self, monkeypatch):
+        """Off the drop and without mocks, CODEX_HOME stays unset (codex default)."""
+        monkeypatch.setenv("CODEX_API_KEY", "k")
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        env = agent._build_codex_env()
+        assert env is not None and "CODEX_HOME" not in env
+
     def test_build_codex_env_prepends_path_when_env_path_prepend_set(self, monkeypatch):
         """env_path_prepend dirs land at the FRONT of PATH, in order, parent appended.
 

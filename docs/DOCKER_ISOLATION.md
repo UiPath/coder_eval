@@ -307,3 +307,134 @@ The host's `DockerRunner` (`coder_eval/isolation/docker_runner.py`) renders the 
 Inside the container, the entrypoint invokes `coder-eval _run-task-internal` (hidden subcommand), which loads the staged YAML + context, runs the standard in-process Orchestrator (driver auto-coerced back to `tempdir`), and writes `task.json` to the output mount. Host reads it and feeds the existing aggregation pipeline.
 
 A `result_kind` discriminator on `CriterionResult` ensures `ClassificationCriterionResult` subclasses survive the JSON round-trip — without it, host-side aggregation would silently lose `observed_label`/`expected_label`.
+
+## Grading-material isolation (user/permission barrier)
+
+Under `driver: docker`, a scavenging agent can otherwise read its own grading
+rubric off the mounted inputs (`/work/input/task.yaml`, the skills-repo `tests/`
+tree, `check_*.py` graders, `RESOLUTION.md`). Coder Eval closes this with a
+**Unix DAC permission barrier**: all grading material is root-owned mode-0700 and
+the agent-under-test's CLI subprocess runs as a **dedicated unprivileged uid**
+(`agent`, uid/gid 2000, baked into the image). Grading (`SuccessChecker`,
+`run_command`, judges) stays in the container's **root** process, which ignores
+DAC and reads the locked material via `$TASK_DIR`/`$SKILLS_REPO_PATH`.
+
+### What the agent uid can and cannot read
+
+| Path | Owner/mode | Agent uid |
+|---|---|---|
+| `/work/input` (`task.yaml`, `task_full.json`, `context.json`) | root 0700 | **EACCES** |
+| skills-repo / plugin mount (`tests/`, `check_*.py`, `reference_agents/`, `RESOLUTION.md`) | root 0700 | **EACCES** |
+| per-task-dir mount | root 0700 | **EACCES** |
+| reference-solution mount (absolute/escaping `reference.file`/`reference.directory`) | root 0700 | **EACCES** |
+| `/proc/1/environ` (root PID1) | kernel-restricted | **EACCES** |
+| `/work/skills` (world-readable skill-DOCS copy: docs/commands/skills only) | agent | readable |
+| `/work/output/artifacts/<task>` (its workspace) | agent | read/write |
+
+**`/work/output` is NOT locked during the turn.** It is a bind mount *shared with
+the host*, which writes the liveness heartbeat there as a non-root uid; a
+root-0700 lock would make the heartbeat unwritable and self-reap the container. So
+`/work/output` is world-traversable and the agent's own `artifacts/<task>`
+subdir is agent-owned. The real mitigation for the grading artifact is temporal,
+not permission-based: **`task.json` is written only AFTER the agent turn ends** (it
+is not a live read surface during the turn), and its `source_yaml` is **nulled** in
+the agent-visible context (the raw YAML rides on the root-only `task_full.json`
+instead). A root-0700 file *placed* under `/work/output` IS EACCES to the agent
+(the lock mechanism works there) — `/work/output` is simply not blanket-locked.
+
+The `/work/input`, per-task-dir, and skills-repo/plugin mounts are bind-mounted
+**read-write** (not `:ro`) precisely so the in-container root entrypoint's
+root-0700 `chmod`/`chown` lock applies: an `os.chmod` on a `:ro` bind mount fails
+with `EROFS` and would silently leave the material agent-readable. The lock denies
+the dropped agent uid; the agent still cannot write (0700-root), and grading runs
+as root.
+
+The agent-readable `task.yaml` is additionally **criteria-stripped**
+(`TaskDefinition.agent_safe_dump()` — defence in depth); the full criteria travel
+in a root-only `task_full.json` sibling the entrypoint merges back before grading.
+`agent_safe_dump` strips **only** `success_criteria` and `reference` — every other
+field (`initial_prompt`, `system_prompt`, pre/post commands, `metadata`) survives
+into the agent-readable `task.yaml`, so grading material must never be authored
+into those fields. The skill-DOCS copy carries only the plugin-discovery subtrees
+(`PLUGIN_AGENT_ALLOWED_SUBDIRS`), never grader/reference/fixture trees. The RAW
+skills-repo/plugin mount (which does carry the grader trees) is locked separately:
+the host rewrites the staged task's plugin paths to `/work/skills`, so it forwards
+the ORIGINAL host mount paths via `context.json` (`plugin_host_paths`) and the
+entrypoint locks those real in-container mount paths root-0700. The reference
+solution is handled the same way: `agent_safe_dump` strips the `reference` field
+from `task.yaml`, but an absolute (or `..`-escaping) `reference.file`/`reference.directory`
+is still bind-mounted for the in-container grader — so the host forwards its resolved
+mount targets via `context.json` (`reference_host_paths`) and the entrypoint locks
+those root-0700 too (mounted rw, like the plugin mounts, so the `chmod` isn't `EROFS`'d).
+
+### Per-harness drop seam (agent-agnostic)
+
+Every built-in harness spawns a controllable CLI-binary subprocess, so the drop
+is at that spawn seam — no orchestrator fork, no two-container split:
+
+- **claude-code** — `ClaudeAgentOptions.user = "agent"` (SDK forwards to
+  `subprocess.Popen(user=)`, a POSIX setuid).
+- **codex** — `CodexConfig.launch_args_override` routes the bundled codex binary
+  through the drop shim (`coder_eval_drop_privilege.sh` → `setpriv --reuid=agent`).
+- **antigravity** — the existing PATH-shadow (`_harness_spawn_guard`) injects a
+  `localharness` wrapper that execs the real binary through the same shim.
+
+If the drop is requested but the container is not root, the entrypoint **fails
+loud** — it never silently runs the agent as the container owner.
+
+### Scope, portability, and the Docker-Desktop caveat
+
+- **Docker + Linux only.** Unix uid/permissions exist only inside the Linux
+  container. The **Windows nightly slice runs `--driver tempdir`** (agent on host,
+  no container, no uid boundary): it is immune (criteria live in memory, never
+  written to an agent-readable file) but is **not covered by this barrier** — a
+  separate host-side isolation follow-up tracks it.
+- **Docker-Desktop bind-mount uid remap.** On macOS/Windows Docker Desktop, a
+  bind-mount's owner can be remapped, which can defeat an in-container `chown` on
+  a *bind-mounted* path. The barrier applies `chmod 0700` (owner root), which
+  denies the agent uid regardless of any remap; a materialized grader root can
+  live in the container rootfs (not a mount) where its `chown root:root` is always
+  authoritative. **The Linux CI/nightly host (native overlayfs, real root) is the
+  authoritative environment**; do not rely on the barrier on Docker-Desktop dev
+  machines.
+
+### Surface #6 — baked image content (authoring invariant)
+
+The barrier locks *runtime-mounted* material, but image **content** is not a
+permission surface. **Authoring invariant: mocks and tooling baked into the image
+must not encode task-specific expected values.** `tests/test_docker_image_no_answer_leak.py`
+is the deterministic sensor — it scans the Dockerfile + its `COPY` sources for
+answer sentinels and for `check_*.py` / `RESOLUTION.md` / `tests/tasks` grader
+material, and fails the build if any are baked.
+
+### Live check + nightly re-audit
+
+- **Live check.** Run `tasks/.../template_aware_create_adversarial.yaml` (the
+  "read /work" adversary) under a real `--driver docker` run and confirm the
+  agent's `found_criteria.txt` contains no grading material.
+- **Acceptance proof (CI).** `make test-docker-isolation` runs the six-surface
+  EACCES-as-agent-uid suite **as root inside the built image** (the `docker-isolation`
+  CI job); it is the authoritative check that the barrier holds.
+- **Per-harness uid probe (manual/nightly).** For each harness, run a minimal task
+  whose prompt writes `id -u` to a workspace file and confirm it equals `2000`
+  (== the baked agent uid) — the objective proof the agent-agnostic drop takes
+  effect. (Not wired as a live CI test to avoid model spend; the deterministic
+  EACCES proof + the per-harness wiring unit tests establish the mechanism.)
+- **Nightly re-audit.** Re-run the trajectory scan that produced the original leak
+  audit (reads of `check_*.py` / task-YAML / `RESOLUTION.md` / `$SKILLS_REPO_PATH/tests`
+  / `/work/input`) and confirm a per-run leak rate of 0. The reusable
+  `scan_for_leak_techniques` detector is the CI-cheap proxy.
+
+### Rollout notes
+
+- **Aggregate pass rates shift down ~2.4% (honest correction).** Before the
+  barrier, ~2.4% of nightly replicates passed by reading the suite (claude-code
+  highest, ~5–6%). Those tasks must now succeed on merit, so pass rates drop by
+  roughly that margin. **Annotate the first post-fix nightly** in the evalboard
+  ("leak-barrier landed") so the step-down is not read as a regression.
+- **Re-run contaminated carried passes.** The maturity feature carries forward
+  passes; any task that previously passed via a leak has a contaminated carried
+  pass. Invalidate + re-run the carried passes for every task the audit flagged
+  as `answer`/`oracle`/`recon`.
+- **~0 wall-clock cost.** The drop is a chmod/chown + a setuid at spawn inside the
+  single existing container — no extra container, no second pass.

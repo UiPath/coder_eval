@@ -26,6 +26,7 @@ from coder_eval.errors import (
     truncate_crash_message,
 )
 from coder_eval.models import (
+    CONTAINER_DROP_SHIM,
     AgentKind,
     ApiRoute,
     AssistantMessage,
@@ -689,6 +690,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
         self._setup_login_shell_home()
+        # Docker isolation barrier: the login-shell HOME / CODEX_HOME are created by
+        # this root process via mkdtemp (mode 0700), but the app-server runs as the
+        # dropped agent uid and must read/write them. Chown them to the agent uid so
+        # the drop doesn't EACCES on its own profile / codex state.
+        if self.config.agent_run_uid is not None and self._login_shell_home is not None:
+            from coder_eval.isolation import container_perms
+
+            container_perms.grant_agent_ownership([self._login_shell_home])
         self._state = AgentState.WORKING
 
         try:
@@ -696,7 +705,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
             # Build CodexConfig with environment variables for custom API configuration
             env_override = self._build_codex_env()
-            config = CodexConfig(env=env_override) if env_override else None
+            launch_args_override = self._drop_privilege_launch_args()
+            if env_override is not None or launch_args_override is not None:
+                config = CodexConfig(env=env_override, launch_args_override=launch_args_override)
+            else:
+                config = None
 
             # Initialize the Codex client (context manager compatible). Close any
             # prior client first: start() is driven through execute_with_retry, so
@@ -1077,6 +1090,30 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         return self.config.model or settings.codex_model
 
+    def _drop_privilege_launch_args(self) -> tuple[str, ...] | None:
+        """Full argv routing the Codex app-server through the drop-privilege shim.
+
+        Under the docker user/permission isolation barrier (``agent_run_uid`` set),
+        return ``(CONTAINER_DROP_SHIM, <bundled_codex>, "app-server", "--listen",
+        "stdio://")``. The Codex SDK's ``launch_args_override`` REPLACES the whole
+        argv, so the SDK runs ``Popen([shim, bundled_codex, app-server, ...])`` and
+        the shim setuids to the agent uid before exec'ing the real codex. ``None``
+        off-docker leaves the SDK's default argv (unchanged).
+
+        The bundled codex path comes from ``codex_cli_bin.bundled_codex_path`` (the
+        same source the SDK's own ``_installed_codex_path`` uses); the import is
+        guarded so this stays importable where the codex extra is absent.
+
+        NOTE: this hard-codes the SDK's ``app-server --listen stdio://`` launch args.
+        If a future SDK changes them, this override must track them — the per-harness
+        ``id -u`` probe test is the objective check that the drop still takes effect.
+        """
+        if self.config.agent_run_uid is None:
+            return None
+        from codex_cli_bin import bundled_codex_path
+
+        return (CONTAINER_DROP_SHIM, str(bundled_codex_path()), "app-server", "--listen", "stdio://")
+
     def _build_codex_env(self) -> dict[str, str] | None:
         """Build the environment passed to the Codex app-server.
 
@@ -1102,19 +1139,59 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.debug(f"PATH prepend: {os.pathsep.join(self._env_path_prepend)}")
         if self._login_shell_home is not None:
             # Point login shells at the generated profile dir (see
-            # _setup_login_shell_home) while pinning codex state (auth, rollout
-            # sessions) to its real location — _codex_home() reads the same
-            # resolution for sub-agent rollout recovery, so both sides agree.
-            # HOME steers bash/sh; ZDOTDIR steers zsh (the macOS default
-            # shell), which ignores HOME for dotfile selection when it is set.
+            # _setup_login_shell_home). HOME steers bash/sh; ZDOTDIR steers zsh
+            # (the macOS default shell), which ignores HOME for dotfile selection
+            # when it is set.
             env["HOME"] = str(self._login_shell_home)
             env["ZDOTDIR"] = str(self._login_shell_home)
-            # The binary hard-errors on an explicitly set CODEX_HOME that does
-            # not exist (unset, it materializes the ~/.codex default itself) —
-            # hosts that auth via CODEX_API_KEY never ran `codex login`, so
-            # the dir may not exist yet. Create it before pinning.
-            codex_home = self._codex_home()
+        elif self.config.agent_run_uid is not None:
+            # Docker uid-drop with NO mock-PATH override (the common mock-free case):
+            # _setup_login_shell_home no-ops, so without this the dropped app-server
+            # would inherit root's HOME (0700 /root) and _codex_home() would default to
+            # /root/.codex — UNREACHABLE, since the agent uid cannot traverse root's
+            # 0700 home even after .codex is chowned to it. Point HOME at the baked,
+            # agent-owned AGENT_HOME (mirrors claude's _relocate_home_for_drop) so
+            # CODEX_HOME below resolves under a traversable, agent-writable dir.
+            from coder_eval.models import AGENT_HOME
+
+            env["HOME"] = AGENT_HOME
+
+        # Pin + prepare CODEX_HOME (codex state: auth, rollout sessions) when EITHER:
+        #  - a login-shell HOME override is in effect (mocks) — so codex state does not
+        #    follow the overridden HOME, and _codex_home() agrees for rollout recovery; or
+        #  - the docker uid-drop is active — so the dropped agent uid can WRITE it.
+        # This must sit OUTSIDE the login-shell block: _setup_login_shell_home no-ops
+        # for mock-free tasks (no PATH prepend), so a plain docker run would otherwise
+        # leave CODEX_HOME unset and codex would EACCES on the root-owned ~/.codex
+        # default under the drop. The binary hard-errors on a set-but-missing
+        # CODEX_HOME, so create it first; under the drop chown it to the agent uid
+        # (root builds this config) or codex EACCESes initializing its sqlite state.
+        if self._login_shell_home is not None or self.config.agent_run_uid is not None:
+            # CODEX_HOME resolution:
+            #  - login-shell (mock) path: keep _codex_home() (real Path.home()-based) so
+            #    codex state does NOT follow the overridden login HOME and both sides of
+            #    rollout recovery agree — unchanged behavior.
+            #  - drop WITHOUT a login-shell override: base CODEX_HOME under the AGENT_HOME
+            #    we relocated env["HOME"] to above. A bare _codex_home() reads os.environ's
+            #    HOME (still root's /root) and would compute the unreachable /root/.codex.
+            if self._login_shell_home is None and self.config.agent_run_uid is not None:
+                # Honor an explicitly-set CODEX_HOME; otherwise a bare _codex_home() would
+                # read os.environ's HOME (still root's /root) and compute the unreachable
+                # /root/.codex — so base it under the AGENT_HOME we relocated env["HOME"] to.
+                explicit_codex_home = os.environ.get("CODEX_HOME")
+                codex_home = Path(explicit_codex_home) if explicit_codex_home else Path(env["HOME"]) / ".codex"
+                # Keep the parent's _codex_home() (used for sub-agent rollout recovery,
+                # which reads os.environ) in agreement with the child's actual CODEX_HOME.
+                # Safe to mutate os.environ here: the uid-drop only runs in the dedicated
+                # single-task in-container process, so there is no parallel-task collision.
+                os.environ["CODEX_HOME"] = str(codex_home)
+            else:
+                codex_home = self._codex_home()
             codex_home.mkdir(parents=True, exist_ok=True)
+            if self.config.agent_run_uid is not None:
+                from coder_eval.isolation import container_perms
+
+                container_perms.grant_agent_ownership([codex_home])
             env["CODEX_HOME"] = str(codex_home)
         return env if env else None
 

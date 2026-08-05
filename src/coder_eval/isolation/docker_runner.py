@@ -26,8 +26,10 @@ import yaml
 
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
+    AGENT_UID,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_SKILL_DOCS_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
@@ -36,6 +38,8 @@ from coder_eval.models import (
     FinalStatus,
     PreservationMode,
     ResourceLimits,
+    plugin_path,
+    project_plugin_for_agent,
 )
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
@@ -383,13 +387,20 @@ def _resolve_workspace_dir(cfg_working_dir: str | None, image: str) -> str | Non
 
     ``None`` -> ``None`` (feature off). A concrete path -> re-asserted + returned.
     ``"auto"`` -> the image's WORKDIR via ``docker image inspect`` (falling back to
-    ``/root`` on an empty / ``"/"`` WORKDIR or any inspect failure -- never crash
-    the run over WORKDIR detection, mirroring ``_preflight_image_version``).
+    the agent-owned ``AGENT_HOME`` on an empty / ``"/"`` WORKDIR or any inspect
+    failure -- never crash the run over WORKDIR detection, mirroring
+    ``_preflight_image_version``). The fallback is ``AGENT_HOME`` (not ``/root``)
+    because the agent's CLI is dropped to the agent uid under the isolation barrier;
+    a ``/root`` (0700) workspace would EACCES every write. The image's OWN declared
+    WORKDIR is still honoured verbatim if present — a task image that sets one owns
+    the responsibility of making it agent-writable.
     """
+    from coder_eval.models import AGENT_HOME
+
     if cfg_working_dir is None:
         return None
     if cfg_working_dir == "auto":
-        resolved = "/root"
+        resolved = AGENT_HOME
         try:
             result = subprocess.run(
                 ["docker", "image", "inspect", "--format", "{{.Config.WorkingDir}}", image],
@@ -403,7 +414,7 @@ def _resolve_workspace_dir(cfg_working_dir: str | None, image: str) -> str | Non
             if workdir and workdir != "/":
                 resolved = workdir
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            logger.debug("WORKDIR inspect failed for %s; falling back to /root: %s", image, exc)
+            logger.debug("WORKDIR inspect failed for %s; falling back to %s: %s", image, resolved, exc)
         cfg_working_dir = resolved
     _assert_workspace_not_reserved(cfg_working_dir)
     return cfg_working_dir
@@ -482,6 +493,27 @@ class DockerRunner:
         # _build_argv mounts read-write. None when there is no ~/.claude to
         # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
         self._claude_mount_src: Path | None = None
+        # Set by _stage_inputs: the staging dir holding world-readable skill-DOCS
+        # copies of the agent's plugins (docs/commands/skills only, no grader
+        # trees). _build_argv mounts it read-only at CONTAINER_SKILL_DOCS_DIR so
+        # the agent's plugin discovery reads the sanitized copy under the
+        # user/permission isolation barrier. None when the task has no plugins.
+        self._skill_docs_src: Path | None = None
+        # Set by _stage_skill_docs: the RESOLVED (absolute, symlink-resolved) host
+        # plugin roots that _build_argv bind-mounts raw at `{path}:{path}` for
+        # grading. Forwarded into context.json so the in-container entrypoint locks
+        # THESE real in-container mount paths root-0700 (the staged task.yaml's
+        # plugin paths are rewritten to /work/skills, so the entrypoint can't
+        # recover the raw mount from the task alone). Grading (root) still reads
+        # them; the dropped agent uid gets EACCES.
+        self._plugin_host_paths: list[str] = []
+        # Set by _stage_inputs: the RESOLVED host mount targets for an absolute (or
+        # ``..``-escaping) reference.file/reference.directory. The reference solution is
+        # grading material ("NEVER shown to the agent being evaluated") but is bind-mounted
+        # at `{target}:{target}` for the in-container grader to read; forwarded here so the
+        # entrypoint locks it root-0700 like the plugin mounts. Empty for a relative
+        # reference (covered by the locked task_dir mount) or no reference.
+        self._reference_host_paths: list[str] = []
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -604,8 +636,16 @@ class DockerRunner:
 
     async def _stage_inputs(self, input_dir: Path) -> None:
         """Serialise the post-override TaskDefinition + lineage/variant context into the
-        staging ``input_dir`` (``task.yaml`` + ``context.json``). Pure I/O off the event
-        loop; no control-flow change.
+        staging ``input_dir``. Pure I/O off the event loop; no control-flow change.
+
+        Under the user/permission isolation barrier the agent-readable
+        ``task.yaml`` is criteria-STRIPPED (``agent_safe_dump`` — defence-in-depth)
+        and its ``agent.plugins[].path`` entries are rewritten to the sanitized
+        skill-DOCS mount. The FULL criteria/reference/raw source_yaml travel in a
+        root-only sibling (``task_full.json``) that the in-container entrypoint
+        (root) reads and merges back before grading; ``/work/input`` is locked
+        root-0700 in-container so the agent uid never reads either file.
+        ``context.json.source_yaml`` is nulled for the same reason.
         """
         # Always serialise the *post-override* TaskDefinition. We can't use
         # rt.source_yaml because that's the raw on-disk text -- _apply_cli_overrides
@@ -613,29 +653,154 @@ class DockerRunner:
         # container needs to see those mutations.
         task_yaml_in = input_dir / "task.yaml"
 
+        # Stage the world-readable skill-DOCS copies and get the map from the
+        # original host plugin path -> the in-container skill-DOCS path so the
+        # stripped task.yaml points the agent's plugin discovery at the sanitized
+        # copy (no grader/reference/RESOLUTION trees).
+        plugin_path_rewrite = await asyncio.to_thread(self._stage_skill_docs, input_dir.parent)
+        # Resolve the reference mount targets (grading material) so the entrypoint can
+        # lock them root-0700 alongside the plugin mounts (C2: else a dropped agent could
+        # `cat` the reference solution off the :ro bind mount).
+        self._reference_host_paths = await asyncio.to_thread(self._resolve_reference_host_paths)
+
         def _dump_task_yaml() -> str:
-            return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
+            safe = self.rt.task.agent_safe_dump()  # criteria + reference stripped
+            agent_block = safe.get("agent")
+            if isinstance(agent_block, dict) and isinstance(agent_block.get("plugins"), list):
+                for plugin in agent_block["plugins"]:
+                    if isinstance(plugin, dict):
+                        original = plugin.get("path")
+                        rewritten = plugin_path_rewrite.get(original) if isinstance(original, str) else None
+                        if rewritten is not None:
+                            plugin["path"] = rewritten
+            return yaml.safe_dump(safe, sort_keys=False)
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
+
+        # Root-only full copy: the entrypoint (root) reads this to merge the real
+        # criteria/reference back onto the parsed (stripped) task before grading.
+        # Never agent-readable (/work/input is root-0700 in-container).
+        def _dump_task_full() -> str:
+            return json.dumps(
+                {
+                    "success_criteria": self.rt.task.model_dump(mode="json").get("success_criteria", []),  # noqa: CE033
+                    "reference": self.rt.task.model_dump(mode="json").get("reference"),  # noqa: CE033
+                    "source_yaml": self.rt.source_yaml,
+                }
+            )
+
+        task_full_text = await asyncio.to_thread(_dump_task_full)
+        await asyncio.to_thread((input_dir / "task_full.json").write_text, task_full_text, encoding="utf-8")
+
         # Lineage + variant metadata so the in-container Orchestrator
         # reconstructs the same context (variant_id is load-bearing for
-        # report grouping). source_yaml carries the *raw* on-disk text
-        # so the in-container Orchestrator records the same audit trail
-        # as the in-process driver (task.json.task_config.source_yaml).
+        # report grouping). source_yaml is nulled on the agent-visible context;
+        # the real raw text rides on the root-only task_full.json above.
         context_payload = json.dumps(
             {
                 "variant_id": self.rt.variant_id,
                 "replicate_index": self.rt.replicate_index,
                 "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
                 "preservation_mode": self.preservation_mode.value,
-                "source_yaml": self.rt.source_yaml,
+                "source_yaml": None,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
+                # The unprivileged uid the entrypoint drops each agent's CLI
+                # subprocess to. Agent-agnostic: the entrypoint sets it on the
+                # resolved agent config and each agent wires its own spawn seam.
+                "agent_run_uid": AGENT_UID,
+                # ORIGINAL host plugin/skills-repo mount paths (resolved). The
+                # staged task.yaml rewrites plugin paths to /work/skills, so the
+                # entrypoint cannot recover the raw grader-bearing mounts from the
+                # task alone — it locks THESE root-0700 in-container instead.
+                "plugin_host_paths": self._plugin_host_paths,
+                # Resolved host mount targets for an absolute/escaping reference (grading
+                # material). Locked root-0700 in-container like the plugin mounts.
+                "reference_host_paths": self._reference_host_paths,
             }
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+
+    def _stage_skill_docs(self, staging: Path) -> dict[str, str]:
+        """Stage sanitized skill-DOCS copies of the agent's plugins under ``staging``.
+
+        Returns a map ``{original_host_plugin_path: in_container_skill_docs_path}``.
+        Records the staging root on ``self._skill_docs_src`` for ``_build_argv`` to
+        mount. No-op (empty map) when the task has no plugins.
+        """
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        rewrite: dict[str, str] = {}
+        host_mounts: list[str] = []
+        skill_docs_root = staging / "skills"
+        used_names: set[str] = set()
+        for plugin in plugins:
+            raw_path = plugin_path(plugin)
+            if not raw_path:
+                continue
+            src = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
+            if not src.is_dir():
+                continue
+            # Record the RESOLVED host path — this is exactly the path _build_argv
+            # bind-mounts raw at `{src}:{src}` and the entrypoint must lock in-container.
+            host_mounts.append(str(src))
+            # Disambiguate two plugins sharing a basename (e.g. /a/myskill and
+            # /b/myskill) so they don't merge into one docs dir / one container path.
+            name = src.name
+            if name in used_names:
+                suffix = 1
+                while f"{name}-{suffix}" in used_names:
+                    suffix += 1
+                name = f"{name}-{suffix}"
+            used_names.add(name)
+            dst = skill_docs_root / name
+            project_plugin_for_agent(src, dst)
+            rewrite[raw_path] = f"{CONTAINER_SKILL_DOCS_DIR}/{name}"
+        if rewrite:
+            self._skill_docs_src = skill_docs_root
+        # Forwarded into context.json for the in-container lock (deduped, order-stable).
+        self._plugin_host_paths = list(dict.fromkeys(host_mounts))
+        return rewrite
+
+    @staticmethod
+    def _auto_mount_target(raw_path: str, *, dir_only: bool) -> Path | None:
+        """The resolved bind-mount target for an auto-mounted path (mirrors ``_auto_mount``).
+
+        A dir mounts itself; a file mounts its parent dir. Returns ``None`` when the
+        resolved target isn't a directory (nothing to mount/lock).
+        """
+        resolved = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
+        target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
+        return target if target.is_dir() else None
+
+    def _resolve_reference_host_paths(self) -> list[str]:
+        """Resolved host mount targets for reference.file / reference.directory.
+
+        The reference solution is grading material bind-mounted for the in-container
+        grader; these targets must be locked root-0700 so the dropped agent uid can't
+        ``cat`` the answer. Mirrors the ``_auto_mount(reference.file/.directory)`` calls
+        in ``_build_argv`` exactly so the forwarded lock list matches the real mounts.
+        """
+        reference = self.rt.task.reference
+        if reference is None:
+            return []
+        targets: list[str] = []
+        if reference.file:
+            t = self._auto_mount_target(reference.file, dir_only=False)
+            if t is not None:
+                targets.append(str(t))
+        if reference.directory:
+            t = self._auto_mount_target(reference.directory, dir_only=True)
+            if t is not None:
+                targets.append(str(t))
+        return list(dict.fromkeys(targets))
+
+    def _skill_docs_mount_args(self) -> list[str]:
+        """The ``-v`` args for the world-readable skill-DOCS mount (empty when unset)."""
+        if self._skill_docs_src is None:
+            return []
+        return ["-v", f"{self._skill_docs_src.resolve()}:{CONTAINER_SKILL_DOCS_DIR}:ro"]
 
     async def _stream_container_output(self, proc: asyncio.subprocess.Process, log_fh: TextIO) -> int:
         """Stream the container's stdout, returning its exit code.
@@ -1161,7 +1326,18 @@ class DockerRunner:
         # Explicit value (not name-only) so it overrides any inherited/baked value.
         argv += ["--env", "TELEMETRY_ENABLED=false"]
 
-        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}:ro"]
+        # Read-WRITE (not :ro): the in-container root entrypoint locks this mount
+        # root-0700 (chmod/chown), which EROFS-fails silently on a :ro bind mount —
+        # so the answer key would stay agent-readable. rw lets the lock apply; the
+        # dropped agent still can't write it (0700-root denies the agent uid), and
+        # grading runs as root. Same rationale for the task-dir + raw plugin mounts below.
+        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}"]
+        # World-readable skill-DOCS copy (docs/commands/skills only — no grader
+        # trees). Read-only; chowned to the agent uid in-container so the dropped
+        # agent can read it. NOTE: NO container-level `--user` flag is added
+        # anywhere in _build_argv — the container stays root for grading; the
+        # per-agent uid drop happens inside the container.
+        argv += self._skill_docs_mount_args()
         # Mount the host run_dir to the container's standard output location
         # so the in-container Orchestrator writes task.json/task.log/etc.
         # directly to the host filesystem via bind-mount.
@@ -1170,10 +1346,11 @@ class DockerRunner:
         # in-container Orchestrator can set TASK_DIR (used by run_command
         # criteria via `$TASK_DIR/foo.json`) to a path that resolves
         # identically inside and outside the container.
+        # Read-WRITE (not :ro): locked root-0700 in-container (see /work/input above).
         host_task_dir: Path | None = None
         if self.rt.task_file:
             host_task_dir = self.rt.task_file.parent.resolve()
-            argv += ["-v", f"{host_task_dir}:{host_task_dir}:ro"]
+            argv += ["-v", f"{host_task_dir}:{host_task_dir}"]
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1206,7 +1383,7 @@ class DockerRunner:
         # `~/.aws/config`). The warning surfaces the surprise.
         sensitive_sources = self._sensitive_source_paths()
 
-        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
+        def _auto_mount(raw_path: str | None, *, dir_only: bool = True, writable: bool = False) -> None:
             if not raw_path:
                 return
             resolved = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
@@ -1223,11 +1400,17 @@ class DockerRunner:
                     )
                     break
             mounted.add(target)
-            argv.extend(["-v", f"{target}:{target}:ro"])
+            # `writable` (plugin/skills-repo mounts only): mount read-WRITE so the
+            # in-container root entrypoint can lock the raw grader-bearing mount
+            # root-0700 (chmod EROFS-fails silently on a :ro bind mount). The lock
+            # denies the dropped agent uid; grading runs as root. Used by the
+            # plugin/skills-repo AND reference mounts (both grading material); the
+            # templates + system_prompt_file auto-mounts stay :ro.
+            argv.extend(["-v", f"{target}:{target}{'' if writable else ':ro'}"])
 
         plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
         for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+            _auto_mount(plugin_path(plugin), writable=True)
 
         from coder_eval.models import TemplateDirSource
 
@@ -1250,8 +1433,13 @@ class DockerRunner:
         # task_dir are already covered by the symmetric task_dir mount.
         reference = self.rt.task.reference
         if reference is not None:
-            _auto_mount(reference.file, dir_only=False)
-            _auto_mount(reference.directory)
+            # Read-WRITE (like plugin mounts): the reference solution is grading material
+            # ("NEVER shown to the agent") and is locked root-0700 in-container via the
+            # forwarded reference_host_paths — a :ro mount would EROFS the lock chmod and
+            # leave the answer agent-readable. Only fires for an absolute/escaping path;
+            # a relative reference under task_dir is covered by the locked task_dir mount.
+            _auto_mount(reference.file, dir_only=False, writable=True)
+            _auto_mount(reference.directory, writable=True)
         for mount in cfg.extra_mounts:
             normalized = _validate_extra_mount(mount)
             argv += ["-v", normalized]

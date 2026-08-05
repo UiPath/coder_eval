@@ -17,13 +17,36 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 # System deps: git for repo-source templates; curl/ca-certs for HTTPS;
-# build-essential because some Python deps (pylint plugins) compile.
+# build-essential because some Python deps (pylint plugins) compile;
+# util-linux for `setpriv` (the user/permission isolation drop-privilege shim).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
         build-essential \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged agent user for the docker user/permission isolation barrier. The
+# in-container entrypoint stays root (grading needs it) and drops only the
+# agent-under-test's CLI subprocess to this uid via the setpriv shim below. The
+# uid/gid are the SSOT literals in src/coder_eval/models/container_paths.py
+# (AGENT_UID/AGENT_GID = 2000); a drift-guard test asserts they match. No `USER`
+# directive is set — the container process must remain root.
+ARG AGENT_UID=2000
+ARG AGENT_GID=2000
+# -m -d /home/agent bakes an agent-owned 0755 HOME so the dropped CLI's HOME can
+# point somewhere agent-writable (~/.claude etc.) instead of root's 0700 /root.
+# The /home/agent literal is the SSOT AGENT_HOME in container_paths.py; a
+# drift-guard test asserts they match.
+RUN groupadd -g ${AGENT_GID} agent \
+    && useradd -u ${AGENT_UID} -g ${AGENT_GID} -m -d /home/agent -s /usr/sbin/nologin agent \
+    && chmod 0755 /home/agent
+
+# Drop-privilege shim (mirrors CONTAINER_DROP_SHIM in container_paths.py). Baked
+# so the codex + antigravity spawn wiring can route their CLI binary through it.
+COPY docker/coder_eval_drop_privilege.sh /usr/local/bin/coder_eval_drop_privilege.sh
+RUN chmod +x /usr/local/bin/coder_eval_drop_privilege.sh
 
 # Node LTS + the Claude Code CLI, pinned. The agent binary is a dominant
 # non-model driver of eval results, so it travels with the coder_eval release

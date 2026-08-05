@@ -20,6 +20,7 @@ from tests.lint.rules.ce021_guarded_evaluationresult_parse import GuardedEvaluat
 from tests.lint.rules.ce022_dialog_loop_statement_cap import SimulationDialogLoopStatementCap
 from tests.lint.rules.ce023_no_proxy_shim_import import NoProxyShimImports
 from tests.lint.rules.ce024_discriminated_unions import DiscriminatedUnions
+from tests.lint.rules.ce033_harness_paths_locked import HarnessPathsLocked
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -63,6 +64,7 @@ ALL_RULES: list[RuleClass] = [
     SimulationDialogLoopStatementCap,
     NoProxyShimImports,
     DiscriminatedUnions,
+    HarnessPathsLocked,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

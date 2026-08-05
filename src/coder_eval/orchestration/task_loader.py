@@ -58,15 +58,42 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
     task_data = yaml.safe_load(raw_yaml)
 
     try:
-        task = TaskDefinition(**task_data)
-        # Resolve relative template paths
-        task = resolve_template_paths(task, task_file.parent)
-        task = resolve_initial_prompt_file(task, task_file.parent)
-        task = resolve_system_prompt_files(task, task_file.parent)
-        task = resolve_dockerfile_path(task, task_file.parent)
+        task = parse_task_dict(task_data, task_file.parent)
         return task, raw_yaml
     except Exception as e:
         raise ValueError(f"Invalid task definition: {e}") from e
+
+
+def parse_task_dict(raw: dict[str, Any], base_dir: Path) -> TaskDefinition:
+    """Construct and fully resolve a ``TaskDefinition`` from a raw dict.
+
+    Runs the ``TaskDefinition(**raw)`` construction plus all four
+    ``resolve_*(task, base_dir)`` steps (template paths, initial-prompt file,
+    system-prompt files, dockerfile path) that ``load_task`` used to inline.
+    Relative paths resolve against ``base_dir`` (the task YAML's directory).
+
+    Callers that hold a raw dict rather than a file (e.g. the docker in-container
+    entrypoint reconstructing a task after merging the full criteria back in) use
+    this to get the same parsed+resolved result ``load_task`` produces.
+
+    ``agent.agent_run_uid`` is framework-set ONLY (the docker isolation barrier
+    assigns it by direct attribute write on the resolved config). A non-``None``
+    value arriving in the authored dict is a task author trying to pick the drop uid
+    — refuse it. ``None`` (the default that survives a ``model_dump`` round-trip of an
+    un-dropped config, e.g. the container's staged task.yaml re-parse) is allowed.
+    """
+    agent_block = raw.get("agent")
+    if isinstance(agent_block, dict) and agent_block.get("agent_run_uid") is not None:
+        raise ValueError(
+            "agent.agent_run_uid is framework-set only (docker isolation barrier); "
+            + "it cannot be supplied from a task definition"
+        )
+    task = TaskDefinition(**raw)
+    task = resolve_template_paths(task, base_dir)
+    task = resolve_initial_prompt_file(task, base_dir)
+    task = resolve_system_prompt_files(task, base_dir)
+    task = resolve_dockerfile_path(task, base_dir)
+    return task
 
 
 def resolve_template_source_paths(sources: list[TemplateSource], base_dir: Path) -> None:

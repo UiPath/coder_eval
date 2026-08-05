@@ -289,6 +289,19 @@ class PreRunCommand(BaseModel):
     )
 
 
+# SSOT for the agent-hidden task fields: the fields whose values are grading
+# material (expected values / reference solution) and must never reach the
+# agent-readable staged task.yaml. Each maps to a validation-safe empty so the
+# stripped projection still re-parses as a valid TaskDefinition:
+#   - success_criteria is required (a bare list), so it becomes [] (not omitted).
+#   - reference is optional, so it becomes None.
+# Consumed by TaskDefinition.agent_safe_dump (defence-in-depth for the docker
+# user/permission barrier). AGENT_HIDDEN_TASK_FIELDS is derived from this map so
+# the field set and the empties never drift.
+_AGENT_HIDDEN_FIELD_EMPTIES: dict[str, Any] = {"success_criteria": [], "reference": None}
+AGENT_HIDDEN_TASK_FIELDS = frozenset(_AGENT_HIDDEN_FIELD_EMPTIES)
+
+
 class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unknown_fields below
     """Complete definition of an evaluation task.
 
@@ -465,6 +478,33 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         is present; an unresolved task that omits ``agent`` entirely is False.
         """
         return self.agent is not None and self.agent.type == AgentKind.NONE
+
+    def agent_safe_dump(self) -> dict[str, Any]:
+        """``model_dump(mode='json')`` with the agent-hidden fields replaced by
+        validation-safe empties.
+
+        Defence-in-depth for the docker user/permission barrier: the agent-readable
+        staged ``task.yaml`` must carry no grading material. ``success_criteria`` is
+        required so it becomes ``[]`` (not omitted); ``reference`` becomes ``None``.
+        The full criteria still reach grading via the root-only channel — this strip
+        only sanitizes the copy the agent uid can read.
+
+        SCOPE — only ``success_criteria`` and ``reference`` are stripped. Every OTHER
+        field the agent legitimately needs (``initial_prompt``, ``system_prompt``,
+        pre/post commands, ``metadata``) survives verbatim into the agent-readable
+        ``task.yaml``, so a task author MUST NOT hide grading material (expected values,
+        the reference answer, grader oracle hints) in any of those fields — it would
+        leak straight to the agent. This is a defence-in-depth layer; the primary
+        barrier is the root-0700 filesystem lock, which does not depend on this strip.
+
+        Idempotent on an already-empty task (``success_criteria=[]``,
+        ``reference=None``) and safe for a ``type: none`` task (only the two hidden
+        fields are touched).
+        """
+        data = self.model_dump(mode="json")
+        for field, empty in _AGENT_HIDDEN_FIELD_EMPTIES.items():
+            data[field] = empty
+        return data
 
     @model_validator(mode="after")
     def check_prompt_fields(self) -> Self:

@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docs-indexes docker-image docker-image-full coder-eval-runtime docker-images
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docs-indexes docker-image docker-image-full coder-eval-runtime docker-images test-docker-isolation
 
 # Single source of the installed coder-eval version (used to tag the docker
 # images). Referenced lazily inside the docker recipes, so it doesn't run on
@@ -37,7 +37,7 @@ typecheck:  ## Run type checking with pyright
 	uv run pyright
 
 test:  ## Run test suite (excludes live + lint tests; run `make lint` for those)
-	uv run pytest -n auto -m "not live and not lint" tests/
+	uv run pytest -n auto -m "not live and not lint and not docker_root" tests/
 
 test-live:  ## Run live-only tests (real Anthropic API + claude CLI; requires ANTHROPIC_API_KEY)
 	uv run pytest -m live tests/ -v
@@ -54,7 +54,7 @@ verify:  ## Run all verification steps (CI equivalent)
 	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r src/ -ll --format json -o bandit-report.json
-	uv run pytest tests/ -n auto -m "not live and not lint" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+	uv run pytest tests/ -n auto -m "not live and not lint and not docker_root" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 verify-noextra:  ## Verify the framework works without the optional [uipath] extra
 	# Build a throwaway venv that has ONLY the [dev] extra (no [uipath]); confirms
@@ -99,6 +99,13 @@ coder-eval-runtime:  ## Build the relocatable runtime kit image (COPY --from sou
 
 docker-images: docker-image coder-eval-runtime  ## Build BOTH base images (agent for rebase + runtime kit for inject); no creds
 	@echo "Built coder-eval-agent + coder-eval-runtime — ready for both rebase and inject tasks."
+
+test-docker-isolation:  ## Run the root-in-container EACCES isolation suite inside the built agent image
+	@VERSION=$$($(VERSION_CMD)); \
+	echo "Running docker user/permission isolation tests as root inside coder-eval-agent:$$VERSION"; \
+	docker run --rm --entrypoint "" -v $(PWD):/src -w /src coder-eval-agent:$$VERSION \
+		sh -c "uv pip install --system -q pytest pytest-asyncio pytest-mock pytest-cov >/dev/null 2>&1 || true; \
+			python -m pytest tests/test_docker_user_separation.py -m docker_root -p no:cacheprovider -o addopts='' -v"
 
 docker-image-full:  ## Build with the UiPath extra (opt-in; uipath resolves from public PyPI, no credentials needed). Codex is always baked in.
 	@VERSION=$$($(VERSION_CMD)); \

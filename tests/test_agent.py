@@ -239,6 +239,29 @@ async def test_claude_agent_max_turns_default_is_none():
 
 
 @pytest.mark.asyncio
+async def test_claude_agent_run_uid_sets_options_user():
+    """agent_run_uid set (docker isolation barrier) => ClaudeAgentOptions.user == 'agent'."""
+    from coder_eval.models import AGENT_USERNAME
+
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config.agent_run_uid = 2000
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+    assert captured_options[0].user == AGENT_USERNAME
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_no_run_uid_leaves_options_user_none():
+    """No agent_run_uid (off-docker) => ClaudeAgentOptions.user is None (unchanged)."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+    assert captured_options[0].user is None
+
+
+@pytest.mark.asyncio
 async def test_claude_agent_tool_search_always_disallowed_when_config_empty():
     """ToolSearch is always injected into disallowed_tools even when config specifies none."""
     config = parse_agent_config(

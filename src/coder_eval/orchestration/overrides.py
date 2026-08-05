@@ -121,6 +121,13 @@ def apply_overrides(
         root, _, rest = path.partition(".")
         if root not in by_root:
             raise OverrideError(f"unknown override root {root!r}; allowed roots: {', '.join(ALLOWED_OVERRIDE_ROOTS)}")
+        # agent_run_uid is framework-set only (docker isolation barrier); a `-D`
+        # override must not let an operator pick the drop uid — refuse it here (the
+        # merge would otherwise construct the model with the authored value).
+        if path == "agent.agent_run_uid":
+            raise OverrideError(
+                "agent.agent_run_uid is framework-set only (docker isolation barrier); it cannot be set via -D/--set"
+            )
         _assign_nested(by_root[root], rest.split("."), value)
 
     agent_detail: Mapping[str, str] | None = None
