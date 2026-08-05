@@ -76,6 +76,10 @@ Rules that matter:
   existence. A suite of `file_exists` checks passes when the agent writes an empty file.
 - Use `command_executed` sparingly — only when it genuinely matters *how* the result was
   produced. Set `require_success: false` unless the command must have succeeded.
+- When the prompt genuinely must name a literal — a flag like `--json`, an output
+  filename — a criterion matching that literal is a **smoke check**, not evidence: it
+  only proves the agent typed back what it was told. Keep it if you like, at a low
+  weight, and put the weight on a criterion that checks the resulting *behaviour*.
 - `weight` reflects importance: `0.5` nice-to-have, `1.0` standard, `1.5`–`2.0` critical.
   `weight: 0` makes a criterion informational (reported, but excluded from the score and
   the pass/fail gate).

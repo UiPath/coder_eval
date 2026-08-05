@@ -226,6 +226,12 @@ Variant Recommendation, Task Difficulty and Failure Clusters sections after Find
 
 - **Evidence-based** — every finding cites specific data: a command output, a score, a
   config value, a timing. No claims without a quote or a number.
+- **Every number is computed, never eyeballed.** Cluster sizes, per-status counts,
+  percentages, minimums and maximums come from the extraction command's output — count
+  them with `jq`/`python3` and read the result. A report whose headline is right but
+  whose counts are off by two is worse than no report: it reads as authoritative and
+  quietly corrupts the next decision. If you cannot produce the command that yields a
+  number, do not state the number.
 - **Actionable** — every recommendation carries a concrete fix (YAML snippet, diff,
   prompt rewrite, config change).
 - **Systemic over repetitive** — 3 or more failures sharing a root cause become one
