@@ -6,11 +6,12 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from .models import (
     CriterionAggregate,
     CriterionStats,
+    EarlyStopReason,
     FailedRowSummary,
     SuiteRollup,
     TaskResult,
@@ -164,6 +165,38 @@ def _count_crashed_partials(task_results: list[dict[str, Any]]) -> tuple[int, in
 def _fmt_rate(rate: float | None) -> str:
     """Render a 0-1 rate as a percentage, or ``n/a`` when it is unknown."""
     return f"{rate * 100:.1f}%" if rate is not None else "n/a"
+
+
+def early_stop_gate_note(reason: str) -> str:
+    """The gate-explaining sentence for an early-stopped run, shared verbatim by
+    every report surface (markdown run-time note, HTML badge tooltip) so the
+    prose can never drift between renderers.
+
+    ``reason`` is the ``EarlyStopReason`` string value (e.g. ``run.json``'s
+    ``early_stop_reason``); an unrecognized value (a legacy or hand-edited
+    record, or run.json's literal ``"unknown"``) gets the generic note. The
+    ``match`` is exhaustiveness-checked so a new ``EarlyStopReason`` member
+    cannot silently fall through to the wrong prose.
+    """
+    generic = "gated on armed criteria only; other criteria are advisory"
+    try:
+        member = EarlyStopReason(reason)
+    except ValueError:
+        return generic
+    note = generic
+    match member:
+        case EarlyStopReason.DECISION_BUDGET_EXCEEDED:
+            # The deciding criterion timed out undecided (an effective fail); it
+            # gates through the same weighted armed gate as a native live-fail.
+            note = (
+                "decision-step budget exceeded (criterion timed out undecided, treated as a failed "
+                "armed criterion); gated on armed criteria only; other criteria are advisory"
+            )
+        case EarlyStopReason.CRITERION_PASSED | EarlyStopReason.CRITERION_FAILED:
+            pass  # the generic note
+        case _:
+            assert_never(member)
+    return note
 
 
 def _pass_rate_lines(summary: RunSummary) -> list[str]:
@@ -438,14 +471,9 @@ class ReportGenerator:
                 reason = t.get("early_stop_reason") or "unknown"
                 turns_remaining = t.get("turns_remaining_at_stop")
                 avoided = f" <= {turns_remaining} turn(s) avoided —" if isinstance(turns_remaining, int) else ""
-                if reason == "decision_budget_exceeded":
-                    # No criterion gated here at all — an armed criterion's
-                    # decision-step budget expired unresolved, forcing FAILURE
-                    # outright, bypassing the weighted gate entirely.
-                    gate_note = " forced to FAILURE (decision-step budget exceeded, bypassing the gate)"
-                else:
-                    gate_note = " gated on armed criteria only; other criteria are advisory"
-                notes.append(f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided}" + gate_note)
+                notes.append(
+                    f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided} {early_stop_gate_note(reason)}"
+                )
         if not notes:
             return []
         return ["## Run-time Notes", "", *notes]

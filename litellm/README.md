@@ -55,7 +55,9 @@ bash litellm/start-litellm.sh          # foreground on :4000, Ctrl-C to stop
 ```
 
 Overridable via env: `LITELLM_PORT` (default 4000), `LITELLM_CONFIG`, `ENV_FILE`,
-`LITELLM_MASTER_KEY`.
+`LITELLM_MASTER_KEY`, and the proxy dep pins `LITELLM_SPEC` / `LITELLM_FASTAPI_SPEC`
+(full pip specifiers, e.g. `litellm[proxy]==1.95.0` / `fastapi==0.140.0` — set both
+together when bumping).
 
 ### Point coder_eval at it
 
@@ -190,4 +192,5 @@ subject to this. Bedrock models are single-provider and not affected.
 | `LiteLLM proxy not reachable at ...` (coder_eval startup) | Proxy not running — start it, or unset `LITELLM_BASE_URL`. |
 | `Invalid model name passed in model=...` | Model added to yaml but proxy not restarted — restart it. |
 | HTTP 401 / "Unable to locate credentials" | Missing `AWS_BEARER_TOKEN_BEDROCK` / `OPENROUTER_API_KEY` in `.env`, or key mismatch between `LITELLM_AUTH_TOKEN` (client) and the proxy's master key. |
+| `ModuleNotFoundError: No module named 'proxy_server'` (masked startup death) | fastapi drifted past 0.140.0 (`get_flat_dependant` removed). Use `start-litellm.sh` (it pins the deps), or run with `--with 'fastapi==0.140.0'`. If overriding `LITELLM_SPEC`, bump `LITELLM_FASTAPI_SPEC` to match. |
 | evalboard cost column blank for a model | Model missing from `evalboard/lib/pricing.ts`. |

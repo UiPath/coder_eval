@@ -18,8 +18,10 @@
 #   AWS_REGION=eu-north-1      — EU residency (Stockholm).
 #   LITELLM_MASTER_KEY         — the virtual key clients present as LITELLM_AUTH_TOKEN.
 #
-# Run manually:
-#   uvx --from 'litellm[proxy]' litellm --config litellm/litellm-config.yaml --port 4000
+# Run manually (pin fastapi==0.140.0 — a later 0.140.x patch removed a symbol
+# litellm's proxy imports; start-litellm.sh does this for you):
+#   uvx --from 'litellm[proxy]==1.95.0' --with 'fastapi==0.140.0' \
+#     litellm --config litellm/litellm-config.yaml --port 4000
 
 model_list:
   # DeepSeek V3.2 — cost lead ($0.74 / $2.22 per Mtok).

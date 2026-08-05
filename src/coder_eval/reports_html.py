@@ -17,7 +17,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from coder_eval.models import EarlyStopReason, FinalStatus, eval_result_total_cost, sum_costs
+from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
+
+from .reports import early_stop_gate_note
 
 
 if TYPE_CHECKING:
@@ -345,14 +347,9 @@ def _render_header(result: EvaluationResult) -> str:
         expected_turns_badge = f'<span class="badge warning">expected_turns exceeded ({actual}/{expected})</span>'
     early_stop_badge = ""
     if result.early_stop is not None:
-        if result.early_stop.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED:
-            # No criterion gated here at all — forced to FAILURE outright,
-            # bypassing the weighted gate.
-            title = "Forced to FAILURE (decision-step budget exceeded, bypassing the gate)"
-        else:
-            title = "Gated on armed criteria only; other criteria are advisory"
+        title = early_stop_gate_note(result.early_stop.reason.value)
         early_stop_badge = (
-            f'<span class="badge warning" title="{title}">'
+            f'<span class="badge warning" title="{_esc(title)}">'
             + f"stopped early ({_esc(result.early_stop.reason.value)})</span>"
         )
     return f"""
