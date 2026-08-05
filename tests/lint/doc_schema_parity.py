@@ -43,31 +43,43 @@ from typing import get_args
 from pydantic import BaseModel
 
 from coder_eval.models import Dataset, RunLimits, SimulationConfig, TaskDefinition
-from coder_eval.models.criteria import SuccessCriterion
+from coder_eval.models import criteria as _criteria_module
 
 
 _GUIDE = "docs/TASK_DEFINITION_GUIDE.md"
 
+# Module that owns the in-tree criteria. A plugin (e.g. the `uipath` SDK's
+# `coder_eval.plugins` hook) can inject its own criterion into the
+# ``SuccessCriterion`` union at load time; such a criterion is defined in the
+# plugin's package, is documented in the plugin's own repo, and must NOT impose a
+# doc obligation on THIS repo's guide. We therefore scope the parity check to
+# criteria defined here.
+_IN_TREE_CRITERIA_MODULE = _criteria_module.__name__
+
 
 def _criterion_models() -> list[type[BaseModel]]:
-    """Flatten the ``SuccessCriterion`` discriminated union into its member models.
+    """Flatten the ``SuccessCriterion`` union into its **in-tree** member models.
 
     Enumerates the union members (``FileExistsCriterion``, ``CommandExecutedCriterion``,
     …) without recursing into each member's own nested models, so the documentation
     promise covers every criterion a task author can write — and any newly added
-    criterion automatically — while staying bounded to the union itself.
+    in-tree criterion automatically — while staying bounded to the union itself.
+    Plugin-contributed criteria (``__module__`` outside ``coder_eval.models.criteria``)
+    are excluded: they belong to their plugin's docs, not this guide.
     """
     seen: list[type[BaseModel]] = []
 
     def walk(tp: object) -> None:
         for arg in get_args(tp):
             if isinstance(arg, type) and issubclass(arg, BaseModel):
-                if arg not in seen:
+                if arg not in seen and arg.__module__ == _IN_TREE_CRITERIA_MODULE:
                     seen.append(arg)
             else:
                 walk(arg)
 
-    walk(SuccessCriterion)
+    # Read the union live from the module (not an import-time-bound copy) so a
+    # plugin that reassigns it before this runs is still handled by the filter.
+    walk(_criteria_module.SuccessCriterion)
     return seen
 
 
