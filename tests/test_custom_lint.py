@@ -1443,6 +1443,23 @@ class TestPluginArtifacts:
             f"{offenders}. Update the prose alongside the table."
         )
 
+    def test_analyze_routes_fixes_to_the_right_layer(self):
+        # A shallow keyword sensor: it guards against the guidance being DELETED, not
+        # against it being badly written. The root-cause token has to survive too, because
+        # the routing rule is attached to it — `prompt_gap` naming a missing piece of
+        # knowledge is meaningless if nothing says which layer should have supplied it.
+        # Whitespace-collapsed so a reflowed paragraph does not fail it — these files are
+        # hard-wrapped prose, and a sensor that breaks on rewrapping trains people to
+        # distrust it.
+        text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "prompt_gap" in text, "analyze lost the `prompt_gap` root-cause token"
+        for phrase in ("fix the prompt", "file the tool bug", "which layer"):
+            assert phrase in text, (
+                f"analyze no longer routes a prompt_gap to the layer that should own it "
+                f"(missing {phrase!r}) — patching the prompt instead turns the score green "
+                "and changes nothing for users"
+            )
+
     def test_task_rubric_is_bundled_and_read_by_its_readers(self):
         # Both directions of the shared-SSOT decision: the rubric ships, and every skill
         # that is supposed to apply it actually points at it.

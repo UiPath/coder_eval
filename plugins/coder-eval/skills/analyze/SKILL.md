@@ -68,8 +68,21 @@ passes:
 1. **Outcome** — failed: root cause (`prompt_gap` / `environment_issue` /
    `agent_error` / `config_issue` / `impossible_task`), which criteria failed and by how
    much. Passed: are all criteria at 1.0, i.e. is the task too easy?
+
+   **A `prompt_gap` names a missing piece of knowledge; it does not name the layer that
+   should have supplied it.** Decide that before recommending anything, and say which layer
+   every such finding belongs to:
+   - Would **a real user plausibly have said it**? → fix the prompt.
+   - Should **the skill or the underlying tool** have supplied it? → fix the skill, or file
+     the tool bug, and leave the task failing until it is fixed.
+
+   Patching the prompt in the second case makes the score green and changes nothing for
+   users — it is the eval equivalent of updating a snapshot to match broken output. The
+   task was right to fail.
 2. **Prompt** — failed: missing context, flags, paths or identifiers; mismatch with what
-   the criteria check. Passed: over-specified, hand-holding, verbose.
+   the criteria check. Passed: over-specified, hand-holding, verbose. Before recommending a
+   prompt edit, apply dimension 1's layer test — a prompt is the right fix only when a real
+   user would have said the missing thing.
 3. **Agent efficiency** *(task scope only)* — turn utilization, command patterns, error
    recovery, stuck-in-loop behaviour, slow commands, when output files appeared. Skip at
    variant/run scope.
@@ -78,7 +91,15 @@ passes:
 5. **Configuration** — lineage conflicts (`source != "task"`), `max_turns` hit or
    wildly excessive, model fit, `allowed_tools` alignment with what the task needs.
 6. **Environment** — infrastructure errors, missing services, expired credentials, CLI
-   tool errors.
+   tool errors. Also **idempotency and cross-run contamination**: a criterion that passed on
+   an earlier run and fails now with no config change is the residue signature — a task
+   mutated shared state and did not reset it. Shared-state races break in **both**
+   directions: a false pass when something else already produced the expected state, and a
+   false failure when something else undid it mid-run. Recommend the fix at the
+   fixture-lifecycle layer (`pre_run` / `post_run`), never by loosening the criterion —
+   loosening converts an intermittent failure into a permanent blind spot. This needs at
+   least two data points; at single-replicate task scope, say what evidence would settle it
+   rather than asserting it.
 7. **Cost and performance** — token breakdown, cache hit rate
    (`cache_read / (cache_creation + cache_read)`), cost reasonableness, cost per score
    point, duration headroom.
@@ -244,3 +265,6 @@ Variant Recommendation, Task Difficulty and Failure Clusters sections after Find
   prominently that the p-values are unreliable.
 - **Impact over severity** — rank by how much a fix would improve outcomes, not by
   abstract severity.
+- **Fix the layer that is wrong.** A recommendation that makes a number move without
+  changing what a user experiences is not a fix. Prefer a failing task that names a real
+  gap over a passing task that hides one.

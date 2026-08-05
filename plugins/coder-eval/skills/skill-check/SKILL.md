@@ -26,6 +26,30 @@ frontmatter `description` and keep it in front of you: that string is what the m
 matches against, so it is the primary input to row design and the thing you will end
 up recommending edits to.
 
+**Measure its length while you are there — two separate budgets truncate it, and either
+one produces a low-recall result that looks exactly like bad wording.**
+
+1. **Per-skill truncation.** `description` and `when_to_use` are concatenated and cut at a
+   fixed character budget — **1,536 characters**, configurable via the
+   `skillListingMaxDescChars` setting. Trigger text past the cutoff cannot affect
+   activation at all, so it may as well not exist.
+2. **The whole-listing budget, which matters more in exactly the repositories that run
+   activation suites.** The listing always contains every skill *name*, but its total
+   character budget scales at about **1% of the model's context window**, shared across
+   **every** skill the user has installed. When it overflows, Claude Code drops
+   descriptions **starting with the skills you invoke least**.
+
+The second one has a consequence worth stating plainly: in a many-skill repository a skill
+can score near-zero recall with a **perfectly good description**, because its description
+was never in the listing. Rewriting the wording then fixes nothing. And the drop order is
+least-invoked-first, so a *newly authored* skill — which is by definition rarely invoked,
+and is exactly what someone runs this suite on — is the most likely victim. That is a
+systematic bias against the skill under test.
+
+Levers, if the listing is the problem: `skillListingBudgetFraction` (the 1% default), the
+`SLASH_COMMAND_TOOL_CHAR_BUDGET` environment variable (a fixed character count), and
+`skillOverrides` set to `"name-only"` to free budget from skills you do not need matched.
+
 If the skill has **no `description`** in its frontmatter, stop and report that as the
 finding — a skill with no description can never be model-invoked, so a suite would
 score zero recall by construction and tell you nothing you don't already know.
@@ -51,15 +75,31 @@ the operation the skill performs.
 **Distractor rows** — adjacent requests the skill should *not* claim, especially ones
 that share vocabulary with the description. These are what make precision meaningful.
 
+**Sibling-owned rows** *(optional)* — requests that legitimately belong to a **named
+other skill in the same repository**, with `expected_skill` set to that sibling. In a
+multi-skill repository, misrouting between two adjacent skills is the common failure, and
+a plain distractor only shows *that* a misfire happened, not *where it went*. These rows
+say where.
+
+Add them when two skills have overlapping subject matter and you want to know which one
+wins. They cost extra rows, and **every row is a full agent run** — so treat them as a
+targeted follow-up, not a default.
+
 **Never name the skill in a prompt.** That tests obedience, not activation:
 
 - Bad: "Use the pdf-forms skill to fill in this application."
 - Good: "I need to fill in the fields on this application PDF and send it back."
 
+This rule is unaffected by sibling-owned rows: `expected_skill` is a **label** in the
+dataset, read by the criterion and never shown to the agent. The row's `prompt` still must
+not name any skill, the sibling included.
+
 **Sizing.** Minimum 3 positive + 3 distractor. Aim for **8–12 of each** for a signal
 you can act on — recall over 3 rows moves in 33-point jumps, which is too coarse to
 tell a real regression from noise. The shipped template holds 6 rows because that is
-the illustrative minimum, not a target.
+the illustrative minimum, not a target. Any sibling-owned rows are **on top** of that:
+8–12 positives plus 8–12 distractors is already 16–24 runs, so state the resulting total
+before writing the suite.
 
 **Refuse to generate a suite with no distractor rows.** With no negatives, precision
 is 1.0 by definition and half the result is meaningless. Say why and ask for the
@@ -78,7 +118,8 @@ relative to the task file):
 
 - `task_id` → `<skill-name>-activation`
 - `skill_name` → the **bare** skill name
-- each positive row's `expected_skill` → the same bare name; distractor rows keep `""`
+- each positive row's `expected_skill` → the same bare name; distractor rows keep `""`;
+  a sibling-owned row's `expected_skill` → that **sibling's** bare name
 - every row's `prompt` → the requests designed in step 3, one JSON object per line
 
 `skill_name` must be the bare name even when the skill comes from a plugin and is
@@ -112,12 +153,21 @@ files off disk — so the same suite works whichever agent the task resolves to.
 
 Present recall, precision, F1 and the confusion matrix, then say what they mean:
 
-- **Low recall** (misses rows it should have caught): the description under-claims or
-  is too vague. It does not name the situations, file types, or phrasings that should
-  trigger it.
+- **Low recall** (misses rows it should have caught): **rule out truncation and listing
+  eviction before concluding the description under-claims.** Both produce a low-recall
+  result indistinguishable from bad wording, and both are cheap to check: `/doctor`
+  estimates the listing's context cost and its biggest contributors, and the **Skills row
+  in `/context`** reports the listing size *after* the budget is applied — that is what the
+  model actually received. Only once the description is demonstrably *in* the listing and
+  inside the per-skill cutoff is the wording the culprit: it does not name the situations,
+  file types, or phrasings that should trigger it.
 - **Low precision** (fires on distractors): the description over-claims and is
   stealing adjacent requests. Narrow it, and say explicitly what the skill is *not*
   for.
+- **Misfires concentrated on one sibling** (with sibling-owned rows): that is a boundary
+  dispute between two descriptions, not one vague description. Fixing the skill under test
+  alone tends to move the failure rather than remove it — say explicitly what **each** of
+  the two skills is not for, and re-run.
 - **Both high**: report the numbers and the row count, and note that a small suite
   says little — offer to widen it.
 
