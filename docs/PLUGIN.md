@@ -94,8 +94,44 @@ It then:
 4. validates with `coder-eval plan`, tells you the row count and the cost
    implication, and asks before running;
 5. reports recall, precision, F1 and the confusion matrix — then interprets them:
-   low recall means the description under-claims, low precision means it
-   over-claims and is stealing adjacent requests.
+   low precision means the description over-claims and is stealing adjacent
+   requests; low recall means it under-claims **once truncation and listing
+   eviction are ruled out** (see below).
+
+One prerequisite the suite cannot infer: the evaluated agent runs in a fresh
+sandbox holding none of your files, so it is offered no skills unless the task
+says where they live. The template reads that location from an environment
+variable — point it at the directory *containing* the skill's own directory:
+
+```bash
+export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
+```
+
+Leave it unset and the skill is simply absent, every positive row scores 0, and
+the result is indistinguishable from a skill that never fires. It stays an
+environment variable rather than a path baked into the YAML so the suite is
+portable — it is committed and re-run on other machines, and in CI.
+
+### A low-recall result has three causes, not one
+
+Two of them are budgets rather than wording, and both produce a number that looks
+exactly like a badly written description:
+
+- **Per-skill truncation.** `description` and `when_to_use` are concatenated and
+  cut at 1,536 characters (configurable via `skillListingMaxDescChars`). Trigger
+  text past the cutoff cannot affect activation at all.
+- **Whole-listing eviction.** The skill listing's character budget scales at about
+  1% of the model's context window and is shared with *every* skill you have
+  installed. On overflow, descriptions are dropped **starting with the skills you
+  invoke least** — so a newly authored skill, which is by definition rarely
+  invoked, is the likeliest casualty. That is a systematic bias against exactly
+  the skill you are testing.
+
+Check both before rewriting anything: `/doctor` estimates the listing's context
+cost and its biggest contributors, and the Skills row in `/context` reports the
+listing size *after* the budget is applied — what the model actually received.
+Only once the description is demonstrably in the listing is the wording the
+culprit.
 
 The suite is a normal task file, so it stays in your repository and can be re-run
 after every description edit — which is the point. Editing skill wording without
