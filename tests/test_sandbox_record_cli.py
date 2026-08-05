@@ -13,8 +13,8 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.cli_recorder import parse_log, render_recorder
 from coder_eval.evaluation.checker import SuccessChecker
+from coder_eval.invocation_log import parse_log, render_recorder
 from coder_eval.models import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
@@ -44,6 +44,12 @@ def _run_shim(sandbox_dir, tool: str, args: list[str]) -> subprocess.CompletedPr
     )
 
 
+def _records(text: str) -> list[dict]:
+    """Just the records; parse_log also returns the unusable count."""
+    usable, _ = parse_log(text)
+    return [record for _, record in usable]
+
+
 class TestGeneration:
     def test_generates_shim_cmd_twin_and_seeded_log(self):
         sandbox = _sandbox("record_gen", record_cli=[RecordedCli(tool="uip")])
@@ -66,9 +72,37 @@ class TestGeneration:
             sandbox_dir = sandbox.setup()
             (sandbox_dir / "mocks").mkdir(exist_ok=True)
             resolved = sandbox.resolved_mock_path_dirs
-            assert resolved[0] == sandbox_dir / RECORD_CLI_DIR
+            # The property resolves symlinks; comparing an unresolved path passes on
+            # Linux/Windows and fails wherever the tempdir traverses one (macOS /var).
+            assert resolved[0] == (sandbox_dir / RECORD_CLI_DIR).resolve()
         finally:
             sandbox.cleanup(preserve=False)
+
+    def test_reused_target_dir_does_not_carry_a_prior_runs_log(self, tmp_path):
+        """DIRECT_WRITE does not clear the target dir, so a preserved log let a
+        previous run's invocations score this one with zero agent activity."""
+        target = tmp_path / "artifacts"
+        stale = target / RECORD_CLI_LOG
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text(
+            json.dumps({"tool": "uip", "argv": ["ixp", "projects", "delete", "proj-1"]}) + "\n",
+            encoding="utf-8",
+        )
+        sandbox = _sandbox("record_reuse", record_cli=[RecordedCli(tool="uip")])
+        sandbox.setup(target_dir=target)
+        assert (target / RECORD_CLI_LOG).read_text(encoding="utf-8") == ""
+        criterion = CliCalledCriterion(description="deleted the project", verb="ixp projects delete", min_count=1)
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    def test_stale_shim_for_an_undeclared_tool_is_removed(self, tmp_path):
+        """A shim left by a previous run would stay on PATH shadowing the real tool."""
+        target = tmp_path / "artifacts"
+        (target / RECORD_CLI_DIR).mkdir(parents=True, exist_ok=True)
+        (target / RECORD_CLI_DIR / "curl").write_text("stale", encoding="utf-8")
+        sandbox = _sandbox("record_stale_shim", record_cli=[RecordedCli(tool="uip")])
+        sandbox.setup(target_dir=target)
+        assert not (target / RECORD_CLI_DIR / "curl").exists()
+        assert (target / RECORD_CLI_DIR / "uip").is_file()
 
     def test_no_record_cli_leaves_no_directory(self):
         sandbox = _sandbox("record_absent")
@@ -114,7 +148,7 @@ class TestRecording:
             assert proc.returncode == 1
             assert proc.stderr == "uip: not connected\n"
 
-            records = parse_log((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
             assert len(records) == 1
             assert records[0]["tool"] == "uip"
             assert records[0]["exit"] == 1
@@ -146,7 +180,7 @@ class TestRecording:
         try:
             sandbox_dir = sandbox.setup()
             _run_shim(sandbox_dir, "uip", ["fields", "rename", "--group", "Invoice Header"])
-            records = parse_log((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
             assert records[0]["argv"][-1] == "Invoice Header"
         finally:
             sandbox.cleanup(preserve=False)
@@ -158,7 +192,7 @@ class TestRecording:
         try:
             sandbox_dir = sandbox.setup()
             _run_shim(sandbox_dir, "uip", ["fields", "update-prompts", "--updates", payload])
-            records = parse_log((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
             assert len(records) == 1
             assert records[0]["argv"][-1] == payload
         finally:
@@ -170,7 +204,7 @@ class TestRecording:
             sandbox_dir = sandbox.setup()
             for n in range(3):
                 _run_shim(sandbox_dir, "uip", ["documents", "upload", f"doc{n}.pdf"])
-            records = parse_log((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
             assert [r["argv"][-1] for r in records] == ["doc0.pdf", "doc1.pdf", "doc2.pdf"]
         finally:
             sandbox.cleanup(preserve=False)
@@ -184,7 +218,7 @@ class TestRecording:
             sandbox_dir = sandbox.setup()
             _run_shim(sandbox_dir, "uip", ["projects", "list"])
             _run_shim(sandbox_dir, "curl", ["-s", "https://example.invalid"])
-            records = parse_log((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
             assert [r["tool"] for r in records] == ["uip", "curl"]
         finally:
             sandbox.cleanup(preserve=False)
@@ -305,6 +339,14 @@ class TestRenderedSource:
         source = render_recorder(RecordedCli(tool="uip"))
         source.encode("ascii")
 
-    def test_parse_log_skips_unparseable_lines(self):
-        text = json.dumps({"tool": "uip", "argv": []}) + "\ngarbage\n\n"
-        assert len(parse_log(text)) == 1
+    def test_parse_log_separates_usable_from_unusable(self):
+        text = (
+            json.dumps({"tool": "uip", "argv": ["a"]})
+            + "\ngarbage\n\n"
+            + json.dumps({"tool": "uip", "argv": "not-a-list"})
+            + "\n"
+        )
+        usable, unusable = parse_log(text)
+        assert [argv for argv, _ in usable] == [["a"]]
+        # An argv that is not list[str] is unusable, not a non-match.
+        assert unusable == 2

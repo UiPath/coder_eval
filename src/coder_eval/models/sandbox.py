@@ -334,7 +334,14 @@ class RecordedCli(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    tool: str = Field(description="Executable name to shadow on PATH (e.g. 'uip', 'curl', 'git')")
+    tool: str = Field(
+        pattern=r"^[A-Za-z0-9._+-]+$",
+        description=(
+            "Executable name to shadow on PATH (e.g. 'uip', 'curl', 'git'). Constrained to "
+            "executable-name characters: the value is interpolated into generated shim source, so a "
+            "quote or newline would emit a broken script"
+        ),
+    )
     exit_code: int = Field(
         default=1,
         description=(

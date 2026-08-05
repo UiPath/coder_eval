@@ -1,4 +1,8 @@
-"""Source template for the CLI recording shims that ``SandboxConfig.record_cli`` generates.
+"""The structured invocation log: the recording shim that writes it, and the reader.
+
+Named for the artifact rather than the writer because both sides live here -- the
+shim template `SandboxConfig.record_cli` renders, and `parse_log`, which the
+`cli_called` criterion reads it back with.
 
 The rendered script runs INSIDE the sandbox, where ``coder_eval`` is not
 installed, so it imports nothing from this package: its configuration arrives as
@@ -101,13 +105,16 @@ def render_recorder(spec: RecordedCli) -> str:
     )
 
 
-def parse_log(text: str) -> list[dict[str, object]]:
-    """Parse recorder-log text into records, skipping unparseable lines.
+def parse_log(text: str) -> tuple[list[tuple[list[str], dict[str, object]]], int]:
+    """Parse recorder-log text into ``(usable, unusable_count)``.
 
-    Shared with tests and any caller that wants the log without duplicating the
-    JSON-Lines handling in :mod:`coder_eval.criteria.cli_called`.
+    A usable entry pairs the record's ``argv`` with the whole record. Unusable
+    means unparseable, not an object, or an ``argv`` that is not a list of
+    strings — counted rather than dropped, because a record that cannot be read
+    might be the very call a negative guard forbids.
     """
-    records: list[dict[str, object]] = []
+    usable: list[tuple[list[str], dict[str, object]]] = []
+    unusable = 0
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -115,7 +122,14 @@ def parse_log(text: str) -> list[dict[str, object]]:
         try:
             parsed = json.loads(stripped)
         except ValueError:
+            unusable += 1
             continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
-    return records
+        if not isinstance(parsed, dict):
+            unusable += 1
+            continue
+        argv = parsed.get("argv")
+        if isinstance(argv, list) and all(isinstance(item, str) for item in argv):
+            usable.append((argv, parsed))
+        else:
+            unusable += 1
+    return usable, unusable

@@ -1,12 +1,12 @@
 """CLI-called criterion checker — structured matching over an invocation log."""
 
-import json
 import logging
 import re
 import shlex
 from typing import TYPE_CHECKING, Any
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
+from coder_eval.invocation_log import parse_log
 from coder_eval.models import CliCalledCriterion, CriterionResult, FlagMatch
 
 
@@ -98,19 +98,6 @@ def _flag_matches(predicate: FlagMatch, values: list[str] | None) -> bool:
     # Unreachable: FlagMatch guarantees exactly one predicate. Raise rather than
     # return False so a predicate added without a matcher arm here fails loudly.
     raise AssertionError(f"FlagMatch has no matcher arm: {predicate!r}")
-
-
-def _usable_argv(record: dict[str, Any]) -> list[str] | None:
-    """The record's ``argv`` when it is a list of strings, else None.
-
-    None means the record cannot be evaluated at all — a different thing from
-    "evaluated and did not match", which is why the caller reports it rather than
-    quietly treating it as a non-match.
-    """
-    argv = record.get("argv")
-    if isinstance(argv, list) and all(isinstance(item, str) for item in argv):
-        return argv
-    return None
 
 
 def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict[str, Any]) -> bool:
@@ -207,25 +194,7 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
 
         content = sandbox.get_file_content(criterion.log)
 
-        usable: list[tuple[list[str], dict[str, Any]]] = []
-        unusable = 0
-        for line in content.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                parsed = json.loads(stripped)
-            except ValueError:
-                unusable += 1
-                continue
-            if not isinstance(parsed, dict):
-                unusable += 1
-                continue
-            argv = _usable_argv(parsed)
-            if argv is None:
-                unusable += 1
-                continue
-            usable.append((argv, parsed))
+        usable, unusable = parse_log(content)
 
         if unusable:
             # A record we cannot read might BE the call a max_count: 0 guard

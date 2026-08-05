@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .cli_recorder import render_recorder
+from .invocation_log import render_recorder
 from .models import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
@@ -494,13 +494,18 @@ class Sandbox:
                 if clash.exists():
                     msg = (
                         f"record_cli would generate a '{spec.tool}' shim, but mock_path_dirs entry "
-                        f"'{rel}' already provides one ({clash.relative_to(self.sandbox_dir)}). "
+                        f"'{rel}' already provides one ({rel}/{spec.tool}). "
                         "Remove the record_cli entry to keep your own mock, or drop the file to use "
                         "the generated recorder."
                     )
                     raise RuntimeError(msg)
 
         recorder_dir = self._resolve_within_sandbox(RECORD_CLI_DIR, field="record_cli directory")
+        # Wipe rather than reuse: DIRECT_WRITE (the docker default) does not clear the
+        # target dir, so a reused --run-dir would leave a previous run's log to be
+        # scored as this run's, and stale shims for tools no longer declared on PATH.
+        if recorder_dir.exists():
+            shutil.rmtree(recorder_dir, ignore_errors=True)
         recorder_dir.mkdir(parents=True, exist_ok=True)
 
         # Seed the log so it always exists: `cli_called` treats a MISSING log as a
@@ -508,8 +513,7 @@ class Sandbox:
         # mock never ran, but wrong for a correct run that legitimately called
         # nothing. An empty file distinguishes the two.
         log_path = self.sandbox_dir / RECORD_CLI_LOG
-        if not log_path.exists():
-            log_path.write_text("", encoding="utf-8")
+        log_path.write_text("", encoding="utf-8")
 
         for spec in self.config.record_cli:
             shim = recorder_dir / spec.tool

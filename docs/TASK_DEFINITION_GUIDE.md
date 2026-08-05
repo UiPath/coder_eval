@@ -878,7 +878,7 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
 ```yaml
 - type: "cli_called"
   description: "Switched the project to the capable model"
-  log: "mocks/calls.jsonl"            # Path to the JSON Lines invocation log (required)
+  log: "mocks/calls.jsonl"            # Invocation log; omit it to use the record_cli default
   verb: "ixp projects configure-model" # Ordered prefix of the non-flag arguments
   positional: ["my_invoices-ixp"]      # Non-flag arguments following the verb, in order
   flags:
