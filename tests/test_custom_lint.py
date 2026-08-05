@@ -1570,6 +1570,62 @@ class TestCE026ActionDocSurfaces:
             + "\n".join(f"  {f}" for f in findings)
         )
 
+    def test_action_snippets_pass_only_real_action_inputs(self):
+        from tests.lint.action_docs import action_input_names, default_doc_paths, find_unknown_action_inputs
+
+        names = action_input_names(self.ACTION_YML)
+        findings = find_unknown_action_inputs(default_doc_paths(self.REPO_ROOT), names)
+        assert not findings, (
+            "\nAction snippet(s) passing a `with:` key action.yml does not declare — GitHub ignores "
+            "unknown inputs, so the copied step silently does less than the snippet promises:\n\n"
+            + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_action_input_names_reads_the_real_action(self):
+        # Belt: prove the parser returns real inputs, so a broken reader (empty set)
+        # can't make the clause above pass vacuously.
+        from tests.lint.action_docs import action_input_names
+
+        names = action_input_names(self.ACTION_YML)
+        assert {"tasks", "junit-path", "env"} <= names, names
+
+    def test_catches_an_unknown_action_input(self, tmp_path: Path):
+        from tests.lint.action_docs import find_unknown_action_inputs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "```yaml\n- uses: UiPath/coder_eval@v0\n  with:\n    tasks: t.yaml\n    junit: out.xml\n```\n",
+            encoding="utf-8",
+        )
+        findings = find_unknown_action_inputs([page], {"tasks", "junit-path"})
+        assert len(findings) == 1
+        assert "`with: junit:`" in findings[0].message
+
+    def test_finds_the_step_at_any_nesting_depth(self, tmp_path: Path):
+        # Pages show the step as a whole workflow, a bare step list, or one step alone.
+        from tests.lint.action_docs import find_unknown_action_inputs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "```yaml\njobs:\n  eval:\n    steps:\n      - uses: UiPath/coder_eval@v0\n"
+            "        with:\n          bogus: 1\n```\n",
+            encoding="utf-8",
+        )
+        assert len(find_unknown_action_inputs([page], {"tasks"})) == 1
+
+    def test_unparseable_or_unrelated_blocks_are_ignored(self, tmp_path: Path):
+        from tests.lint.action_docs import find_unknown_action_inputs
+
+        # A deliberate fragment next to a real reference must not raise or fire.
+        page = tmp_path / "page.md"
+        page.write_text(
+            "```yaml\n- uses: UiPath/coder_eval@v0\n  with:\n    tasks: t.yaml\n```\n\n"
+            "```yaml\n  : : not: valid: yaml\n```\n\n"
+            "```yaml\n- uses: actions/checkout@v6\n  with:\n    anything: goes\n```\n",
+            encoding="utf-8",
+        )
+        assert find_unknown_action_inputs([page], {"tasks"}) == []
+
     def test_required_prereqs_match_the_dogfood_job(self):
         # The constant is pinned to the executable reference: the dogfood job proves
         # in CI that these steps are what a fresh runner needs before `uses: ./`.
