@@ -766,8 +766,32 @@ def test_derivation_picks_up_a_staged_fixture_mount_point():
         sandbox={"template_sources": [{"type": "template_dir", "path": "fixtures", "mount_point": "stubs/uip"}]}
     )
     spec = derive_graded_material(task, None)
-    # Both the declared mount point and its root: the fixtures sit under either.
-    assert {"stubs/uip", "stubs"} <= spec.mock_segments
+    # Exactly the declared mount point: widening it to its first component would
+    # flag the agent's own files staged next to it under `stubs/`.
+    assert "stubs/uip" in spec.mock_segments
+    assert "stubs" not in spec.mock_segments
+
+
+def test_a_sibling_of_a_staged_mount_is_not_fixture_data():
+    task = _task(
+        sandbox={"template_sources": [{"type": "template_dir", "path": "fixtures", "mount_point": "stubs/uip"}]}
+    )
+    spec = derive_graded_material(task, None)
+
+    sibling = scan_commands([_turn([_bash("cat stubs/README.md")])], spec)
+    assert sibling.verdict is IntegrityVerdict.CLEAN
+
+    staged = scan_commands([_turn([_bash("cat stubs/uip/manifest.json")])], spec)
+    assert staged.verdict is IntegrityVerdict.TAINTED
+    assert staged.findings[0].kind is IntegrityFindingKind.MOCK_DATA_READ
+
+
+def test_a_mock_path_subdirectory_still_protects_its_root():
+    """The shim's recorded responses sit beside it under the root, so a
+    `mocks/bin` PATH declaration keeps `mocks/` protected."""
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["mocks/bin"]}), None)
+    info = scan_commands([_turn([_bash("cat mocks/responses/manifest.json")])], spec)
+    assert info.verdict is IntegrityVerdict.TAINTED
 
 
 def test_derivation_ignores_a_sandbox_root_mount_point():

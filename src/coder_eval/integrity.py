@@ -424,17 +424,17 @@ def _segment_to_regex(segment: str) -> re.Pattern[str]:
 
 
 def _path_segments(raw: str) -> set[str]:
-    """Normalize a declared sandbox-relative directory into matchable segments.
+    """Normalize a declared sandbox-relative directory into a matchable segment.
 
-    Returns the declared path itself plus its root component: a task that declares
-    ``mocks/bin`` as its shim directory still keeps the recorded responses it
-    replays under ``mocks/``. ``.`` (the sandbox root) yields nothing -- every
-    read would match it.
+    Exactly the declared prefix, nothing wider: a template mounted at
+    ``stubs/uip`` protects ``stubs/uip/…`` but NOT the agent's own siblings
+    under ``stubs/``. ``.`` (the sandbox root) yields nothing -- every read
+    would match it.
     """
     parts = [p for p in _normalize(raw).split("/") if p not in ("", ".")]
     if not parts:
         return set()
-    return {"/".join(parts), parts[0]}
+    return {"/".join(parts)}
 
 
 def _declared_mock_segments(task: TaskDefinition) -> set[str]:
@@ -443,13 +443,20 @@ def _declared_mock_segments(task: TaskDefinition) -> set[str]:
     Two declarations locate a scenario's fixture store: ``sandbox.mock_path_dirs``
     (the directories whose contents the harness makes executable and prepends to
     the agent's PATH -- the shims) and ``template_sources[*].mount_point`` (where a
-    staged tree lands). A mount point is only as precise as the task made it: one
-    that points at the agent's own working tree widens the spec to that tree, which
-    is why these are reported as MOCK_DATA_READ and not folded into GRADED_READ.
+    staged tree lands). A mock PATH dir declared as a subdirectory (``mocks/bin``)
+    also protects its root: the recorded responses the shim replays sit beside the
+    shim, under ``mocks/``. A template mount stays exact -- widening it to its
+    first component would flag the agent's own files mounted next to it. A mount
+    point is only as precise as the task made it: one that points at the agent's
+    own working tree widens the spec to that tree, which is why these are reported
+    as MOCK_DATA_READ and not folded into GRADED_READ.
     """
     segments: set[str] = set()
     for raw in task.sandbox.mock_path_dirs or []:
-        segments.update(_path_segments(raw))
+        parts = [p for p in _normalize(raw).split("/") if p not in ("", ".")]
+        if parts:
+            segments.add("/".join(parts))
+            segments.add(parts[0])
     for source in task.sandbox.template_sources or []:
         mount_point = getattr(source, "mount_point", None)
         if mount_point:
