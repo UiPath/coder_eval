@@ -52,18 +52,27 @@ def _normalize_shell(cmd_text: str) -> str | None:
         return None
     if not tokens:
         return None
-    # Unwrap `bash -lc "<script>"` / `sh -c "<script>"`: the real command is the
-    # argument immediately after the -c/-lc flag.
+    # Unwrap `bash -lc "<script>"` / `sh -c "<script>"`: the real command is
+    # everything after the -c/-lc flag.
     if tokens[0].rsplit("/", 1)[-1] in _SHELL_WRAPPERS:
         for i in range(1, len(tokens) - 1):
             tok = tokens[i]
             if tok in _SHELL_CMD_FLAGS:
-                try:
-                    inner = shlex.split(tokens[i + 1], posix=True)
-                except ValueError:
-                    return None
-                if inner:
-                    tokens = inner
+                rest = tokens[i + 1 :]
+                if len(rest) == 1:
+                    # Quoted whole-script form (`bash -lc "uip ... 'arg' ..."`):
+                    # the script is a single token that may still hold inner
+                    # quotes — re-split to resolve them.
+                    try:
+                        tokens = shlex.split(rest[0], posix=True)
+                    except ValueError:
+                        return None
+                else:
+                    # Argv-joined form: Codex rollout recovery joins argv WITHOUT
+                    # re-quoting (codex_agent.py), so `bash -lc uip is resources ...`
+                    # already arrives split — keep every token instead of
+                    # collapsing to the first word.
+                    tokens = rest
                 break
             if not tok.startswith("-"):
                 break  # first positional before any -c: not a command wrapper

@@ -826,6 +826,19 @@ class TestNormalizeShell:
     def test_unbalanced_quotes_return_none(self):
         assert _normalize_shell("echo 'unterminated") is None
 
+    def test_argv_joined_payload_is_not_collapsed_to_first_word(self):
+        """Codex rollout recovery joins argv WITHOUT re-quoting (codex_agent.py).
+
+        The wrapper unwrap must keep every token after ``-lc``, not just the
+        first — otherwise ``bash -lc uip is resources ...`` collapses to ``uip``,
+        making the fix a silent no-op on the sub-agent path.
+        """
+        raw = "bash -lc uip is resources run list slack curated_channels --output json"
+        assert _normalize_shell(raw) == "uip is resources run list slack curated_channels --output json"
+
+    def test_argv_joined_short_command(self):
+        assert _normalize_shell("bash -c echo hi there") == "echo hi there"
+
 
 class TestShellQuotingNormalization:
     """Patterns match regardless of how the agent quoted the command.
@@ -915,6 +928,46 @@ class TestShellQuotingNormalization:
             tool_name="Bash",
             command_pattern=r"echo\s+",
             min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_argv_joined_command_matches_full_pattern(self):
+        """The argv-joined (unquoted) shape matches a whole-command pattern.
+
+        This is Codex's sub-agent rollout-recovery telemetry — argv joined with
+        spaces and no re-quoting. Before the unwrap fix it collapsed to the first
+        word, so this pattern scored 0.0.
+        """
+        sandbox = MockSandbox()
+        cmd = "bash -lc uip is resources run list uipath-salesforce-slack curated_channels --output json"
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="listed curated_channels",
+            tool_name="Bash",
+            command_pattern=r"uip\s+is\s+resources\s+run\s+list\s+\S+\s+curated_channels",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_argv_joined_not_collapsed_into_false_anchored_match(self):
+        """The collapse-to-first-word bug could make ``^git$`` match ``git push ...``.
+
+        The real command is ``git push --force origin main``; an anchored
+        ``^git$`` negative assertion must PASS (score 1.0). The old code collapsed
+        the payload to the single token ``git``, which matched ``^git$`` and
+        force-failed the gate for a command the agent never actually ran bare.
+        """
+        sandbox = MockSandbox()
+        cmd = "bash -lc git push --force origin main"
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="must NOT run bare `git`",
+            tool_name="Bash",
+            command_pattern=r"^git$",
+            min_count=0,
+            max_count=0,
         )
         result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
         assert result.score == 1.0
