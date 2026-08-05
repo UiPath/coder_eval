@@ -607,6 +607,104 @@ def _git_is_read(tokens: list[str]) -> bool:
     return subcommand not in _GIT_NEUTRAL_SUBCOMMANDS
 
 
+def _strip_redirects(segment: str) -> tuple[str, list[str]]:
+    """Remove real output redirects from a segment; collect input-redirect targets.
+
+    The old ``partition(">")`` treated ANY ``>`` as an output redirect -- one
+    inside an awk program (``awk '$1 > 0' KEY``), a sed pattern, or a plain
+    operand list (``cat > /tmp/copy KEY``) -- and wrote off everything after it
+    as a write target, which made "put a ``>`` anywhere" a one-character bypass.
+    A real redirect is an UNQUOTED operator and consumes exactly one word; every
+    other operand is still passed to the utility.
+
+    Returns ``(stripped, input_targets)``: the segment with each output-redirect
+    operator (``>``, ``>>``, ``>&``, ``&>``, fd-prefixed forms) and the single
+    word it consumes removed, plus the target words of plain ``<`` input
+    redirects (which the SHELL reads, whatever the utility is). Heredoc
+    operators (``<<``), here-strings (``<<<``) and process substitution
+    (``<(…)``) are left in place: their text is data or an executing command,
+    and either way it must stay visible to the caller's matching.
+    """
+    out: list[str] = []
+    input_targets: list[str] = []
+    in_single = in_double = False
+    i = 0
+    n = len(segment)
+
+    def _consume_word(j: int) -> tuple[str, int]:
+        """Read one (possibly quoted) word starting at ``j``; return (word, end)."""
+        while j < n and segment[j] in " \t":
+            j += 1
+        word: list[str] = []
+        quote = ""
+        while j < n:
+            ch = segment[j]
+            if quote:
+                if ch == quote:
+                    quote = ""
+                else:
+                    word.append(ch)
+                j += 1
+                continue
+            if ch in "'\"":
+                quote = ch
+                j += 1
+                continue
+            if ch == "\\" and j + 1 < n:
+                word.append(segment[j + 1])
+                j += 2
+                continue
+            if ch in " \t<>|;&":
+                break
+            word.append(ch)
+            j += 1
+        return "".join(word), j
+
+    while i < n:
+        c = segment[i]
+        if in_single:
+            out.append(c)
+            in_single = c != "'"
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(segment[i : i + 2])
+            i += 2
+            continue
+        if in_double:
+            out.append(c)
+            in_double = c != '"'
+            i += 1
+            continue
+        if c in "'\"":
+            in_single = c == "'"
+            in_double = c == '"'
+            out.append(c)
+            i += 1
+            continue
+        if c == ">" or segment[i : i + 2] == "&>":
+            j = i + 1 if c == ">" else i + 2
+            if j < n and segment[j] == ">":
+                j += 1
+            if j < n and segment[j] == "&":  # fd duplication: >&2, 2>&1
+                j += 1
+            _, j = _consume_word(j)
+            out.append(" ")
+            i = j
+            continue
+        if c == "<" and segment[i + 1 : i + 2] not in ("<", "("):
+            word, j = _consume_word(i + 1)
+            if word:
+                input_targets.append(word)
+            out.append(" ")
+            i = j
+            continue
+        out.append(c)
+        i += 1
+
+    return "".join(out), input_targets
+
+
 def _search_is_files_only(tokens: list[str]) -> bool:
     """Whether a grep/rg invocation reports only file names or match counts."""
     for token in tokens:
@@ -632,11 +730,13 @@ def _classify_segment(segment: str, spec: GradedMaterialSpec) -> tuple[bool, str
     Rules, in order:
 
     1. No graded-material reference anywhere in the segment -> not a read.
-    2. A reference after an input redirect (``< file``) -> a read, whatever the
-       utility is; the shell does the reading.
-    3. A reference that appears ONLY after an output redirect (``>`` / ``>>``) ->
-       not a read: it is the destination the agent is writing, as in
-       ``cat > check_env.py``. A reference before the redirect still counts.
+    2. A reference consumed by an input redirect (``< file``) -> a read, whatever
+       the utility is; the shell does the reading.
+    3. An output redirect (``>`` / ``>>`` / ``>&`` / ``&>``) consumes exactly one
+       word; a reference that survives redirect stripping is an operand and still
+       counts, while one appearing ONLY as a write target is the destination the
+       agent is writing (``cat > check_env.py``) -> not a read. A quoted ``>``
+       (inside an awk/sed program) is not a redirect at all.
     4. ``git`` -> decided by its subcommand (:func:`_git_is_read`): ``git show`` /
        ``cat-file`` / ``diff`` / ``blame`` / ``grep`` / ``log -p`` print content,
        ``git add`` / ``status`` / ``checkout`` do not.
@@ -659,13 +759,12 @@ def _classify_segment(segment: str, spec: GradedMaterialSpec) -> tuple[bool, str
     utility, tokens = _segment_utility(segment)
     normalized_tokens = [Path(t.replace("\\", "/")).name.casefold().removesuffix(".exe") for t in tokens]
 
-    if "<" in segment:
-        _, _, after = segment.partition("<")
-        if _find_match(after, spec) is not None:
-            return True, matched
+    stripped, input_targets = _strip_redirects(segment)
+    if any(_find_match(target, spec) is not None for target in input_targets):
+        return True, matched
 
-    before_redirect, redirect, _ = segment.partition(">")
-    if redirect and _find_match(before_redirect, spec) is None:
+    if _find_match(stripped, spec) is None:
+        # Every reference sits in an output-redirect target: a write, not a read.
         return False, matched
 
     # Before the token sweep below: `git`'s own subcommand is the authority on

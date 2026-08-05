@@ -218,6 +218,39 @@ def test_stderr_redirection_does_not_hide_a_read():
     assert is_read is True
 
 
+# A redirect consumes exactly ONE word, and only when it is a real, unquoted
+# operator -- otherwise `>` anywhere in the segment wrote off the whole tail.
+
+REDIRECT_STILL_READS = [
+    pytest.param("cat 2>/dev/null RESOLUTION.md", id="operand-after-a-stderr-redirect"),
+    pytest.param("cat > /tmp/copy RESOLUTION.md", id="operand-after-the-write-target"),
+    pytest.param("awk '$1 > 0 {print}' RESOLUTION.md", id="quoted-gt-in-an-awk-program"),
+    pytest.param("sed -n '/x>y/p' RESOLUTION.md", id="quoted-gt-in-a-sed-pattern"),
+    pytest.param("awk 'NR>0' RESOLUTION.md", id="quoted-gt-without-spaces"),
+    pytest.param("cat RESOLUTION.md >> log.txt", id="append-redirect-after-the-operand"),
+    pytest.param("cat <RESOLUTION.md", id="input-redirect-without-a-space"),
+    pytest.param("head 'RESOLUTION.md' > out.txt", id="quoted-operand-before-the-redirect"),
+]
+
+REDIRECT_WRITES_ONLY = [
+    pytest.param("echo diagnosis > RESOLUTION.md", id="write-target-only"),
+    pytest.param("printf 'x' >>RESOLUTION.md", id="append-target-without-a-space"),
+    pytest.param("ls 2> 'RESOLUTION.md'", id="quoted-write-target"),
+]
+
+
+@pytest.mark.parametrize("command", REDIRECT_STILL_READS)
+def test_a_redirect_consumes_only_its_target_word(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is True, f"expected a read: {command!r}"
+
+
+@pytest.mark.parametrize("command", REDIRECT_WRITES_ONLY)
+def test_a_reference_only_in_a_write_target_is_not_a_read(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is False, f"false positive: {command!r}"
+
+
 def test_windows_separators_still_match():
     """A task file recorded with backslashes must match a forward-slash command."""
     spec = GradedMaterialSpec(paths=frozenset({r"C:\repo\tasks\leaky\task.yaml"}))
