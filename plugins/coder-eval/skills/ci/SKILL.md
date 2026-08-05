@@ -45,12 +45,20 @@ on:
   schedule:
     - cron: "0 6 * * 1"   # Mondays 06:00 UTC — catches model/skill drift
 
+# Least privilege: this job runs agent-generated code, so it gets no write scope.
+permissions:
+  contents: read
+
 jobs:
   eval:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Do not leave a credentialed .git/config in a workspace where
+          # agent-generated code runs.
+          persist-credentials: false
 
       # The action installs no coding-agent runtime — provide it here.
       - uses: actions/setup-node@v4
@@ -104,10 +112,22 @@ too high makes the gate flaky (agents are nondeterministic), one that is too low
 catches anything. Suggest running the suite once, then setting the floor a little below
 the observed minimum.
 
-## Step 7 — Warn about fork PRs
+## Step 7 — Warn about fork PRs, and explain the two hardening lines
 
 Evaluated tasks execute agent-generated code. Never run this under
 `pull_request_target` with secrets exposed to untrusted fork PRs — that combination
 hands a fork's code your API keys. If the repository takes outside contributions, use
 `pull_request` and accept that fork PRs will not have the secret (as the repository's own
 runs do), or gate the job on the PR being from the same repository.
+
+Say why the workflow carries `permissions: contents: read` and
+`persist-credentials: false`, so neither gets dropped as boilerplate. Both follow from the
+same fact: **this job runs agent-generated code on the runner**, and the default `tempdir`
+sandbox driver is not an OS-level confinement boundary. Without them the job inherits the
+repository's default `GITHUB_TOKEN` scope — still write-all in many organizations — and
+`actions/checkout` leaves that token in `.git/config` in the very workspace the agent's code
+executes in, so a misbehaving or prompt-injected task could push to the repository. Neither
+line costs anything: the eval only needs to read the checkout.
+
+If a task genuinely needs to write back (committing a baseline, say), add that one permission
+explicitly to that job rather than restoring the default.

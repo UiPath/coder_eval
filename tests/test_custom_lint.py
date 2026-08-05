@@ -1133,6 +1133,15 @@ PLUGIN_TEXT_FILES = sorted(
     p for p in PLUGIN_ROOT.rglob("*") if p.is_file() and p.suffix in {".md", ".yaml", ".yml", ".json", ".jsonl"}
 )
 
+# Skills that shell out to the `coder-eval` CLI and must therefore preflight
+# `coder-eval --version`. Both READMEs describe this behaviour, so it needs pinning:
+# `task` shipped without the check while running `coder-eval plan` AND `coder-eval run`,
+# which handed a first-run user a bare `command not found` only after writing N files.
+# `analyze` reads a finished run directory, `ci` only emits a workflow, and `lint-tasks`
+# has no `Bash` at all (the `coder-eval plan` in its report is a suggestion to the user,
+# not a command it runs) — so none of those three needs the CLI.
+SKILLS_REQUIRING_THE_CLI = {"init", "skill-check", "task"}
+
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
 # dead weight; a reader that stops reading it has silently forked the rubric.
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
@@ -1208,7 +1217,12 @@ class TestPluginArtifacts:
         expected = sorted(c.expected_skill for row in rows for c in row.success_criteria)  # type: ignore[attr-defined]
         assert expected == ["", "", "", "my-skill", "my-skill", "my-skill"]
         for row in rows:
-            assert "${row." not in row.initial_prompt, f"unsubstituted row placeholder in {row.task_id}"
+            # `initial_prompt` is `str | None` (a task may use `initial_prompt_file`), so
+            # narrow it — otherwise moving the template's prompt to a file turns this
+            # assertion into a TypeError instead of a readable failure.
+            assert row.initial_prompt and "${row." not in row.initial_prompt, (
+                f"unsubstituted or missing row placeholder in {row.task_id}"
+            )
 
     def test_activation_template_thresholds_use_real_metric_keys(self):
         from coder_eval.criteria import CriterionRegistry, init_criteria
@@ -1244,6 +1258,28 @@ class TestPluginArtifacts:
                 f"suite_thresholds names {metric!r}, which the skill_triggered aggregate does not "
                 f"emit (available: {sorted(aggregate.metrics)})"
             )
+
+    def test_activation_template_makes_the_skill_reachable(self):
+        # The suite runs in a fresh sandbox holding none of the user's files, so without a
+        # plugin source the agent is never OFFERED the skill: every positive row scores 0,
+        # `recall.yes` trips the template's own suite_thresholds, and Step 7 then reports
+        # "the description under-claims" — a confident, entirely fabricated diagnosis of a
+        # skill that was simply absent. `test_activation_template_expands_to_one_task_per_row`
+        # passes either way, so this is the only thing standing between a scaffolded suite
+        # and a guaranteed-meaningless number.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "activation.yaml")
+        assert task.agent is not None and task.agent.plugins, (
+            "the activation template must declare `agent.plugins` naming where the skill under "
+            "test lives — without it every positive row scores 0 and the suite reports recall 0.0"
+        )
+        paths = [p.get("path", "") for p in task.agent.plugins]
+        assert any("$" in p for p in paths), (
+            f"the template's plugin path(s) {paths} should come from an environment variable — "
+            "the suite is committed and re-run on other machines, so an absolute path bakes in "
+            "one developer's layout"
+        )
 
     def test_activation_rows_have_both_polarities(self):
         import json
@@ -1285,6 +1321,25 @@ class TestPluginArtifacts:
                     f"{skill}: `allowed-tools` entry {tool!r} uses the scoped form from .claude/commands; "
                     "the plugin spec takes bare names like 'Bash'"
                 )
+
+    @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
+    def test_cli_driving_skills_preflight_the_version_check(self, skill: Path):
+        # Both READMEs tell users that a CLI-driving skill checks `coder-eval --version`
+        # and stops with an install hint. Nothing verified that, and `task` did not do it
+        # while invoking the CLI twice — so a user without the CLI wrote N task files and
+        # then got a bare `command not found`. Declared as a set so a skill that STOPS
+        # driving the CLI has to be removed deliberately.
+        has_check = "coder-eval --version" in skill.read_text(encoding="utf-8")
+        if skill.parent.name in SKILLS_REQUIRING_THE_CLI:
+            assert has_check, (
+                f"{skill} shells out to the coder-eval CLI but never preflights "
+                "`coder-eval --version` — the user learns it is missing only mid-flow"
+            )
+        else:
+            assert not has_check, (
+                f"{skill} preflights `coder-eval --version` but is not in "
+                "SKILLS_REQUIRING_THE_CLI — add it there, or drop the check"
+            )
 
     @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
     def test_model_invocation_flags_match_the_design(self, skill: Path):
@@ -1492,6 +1547,40 @@ class TestPluginArtifacts:
                 f"(missing {phrase!r}) — patching the prompt instead turns the score green "
                 "and changes nothing for users"
             )
+
+    @pytest.mark.parametrize(
+        "doc",
+        [p for p in PLUGIN_TEXT_FILES if p.suffix == ".md"],
+        ids=[str(p.relative_to(PLUGIN_ROOT)) for p in PLUGIN_TEXT_FILES if p.suffix == ".md"],
+    )
+    def test_bundled_markdown_fences_balance(self, doc: Path):
+        # A skill body is an instruction document; an unbalanced fence silently swallows
+        # everything after it. `analyze` shipped a ```markdown block containing a ```diff
+        # block, and because a closing fence may not carry an info string, the inner
+        # opener closed the outer block early and the next bare ``` opened one that never
+        # closed — burying 32 lines including the whole Principles section. Nothing caught
+        # it, because it is still valid YAML frontmatter and valid-ish Markdown.
+        #
+        # CommonMark rule applied here: a fence closes only on a run of backticks at least
+        # as long as the opener AND carrying no info string. Nesting therefore requires the
+        # OUTER fence to be longer (````markdown wrapping ```diff).
+        open_len = 0
+        for n, raw in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line.startswith("```"):
+                continue
+            ticks = len(line) - len(line.lstrip("`"))
+            info = line[ticks:].strip()
+            if open_len == 0:
+                open_len = ticks
+                opened_at = n
+            elif ticks >= open_len and not info:
+                open_len = 0
+        assert open_len == 0, (
+            f"{doc}: code fence opened at line {opened_at} is never closed. A closing fence "
+            "may not carry an info string, so a nested block needs a LONGER outer fence "
+            "(````markdown around ```diff). Everything after the opener renders as code."
+        )
 
     def test_task_rubric_is_bundled_and_read_by_its_readers(self):
         # Both directions of the shared-SSOT decision: the rubric ships, and every skill

@@ -1,8 +1,8 @@
-# Run layout (shared)
+# Run layout
 
-The on-disk structure of a coder_eval evaluation run — the factual contract that
-`coder-eval-run-analysis` and `coder-eval-review` both read. If the run directory
-structure changes, update it here and every consumer follows.
+The on-disk structure of a coder_eval evaluation run — the factual contract every
+run-reading command and skill follows. If the run directory structure changes, update it
+here and every consumer follows.
 
 ```
 runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json, task.log, artifacts/}

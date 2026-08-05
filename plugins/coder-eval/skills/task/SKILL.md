@@ -13,7 +13,17 @@ Good tasks use simple prompts: state the goal and the expected output, then let 
 agent work out the approach. A single request can produce **several** task files —
 "create tasks for all the registry subcommands" means one task per subcommand.
 
-## Step 1 — Understand the request
+## Step 1 — Understand the request, and check the CLI is there
+
+Run `coder-eval --version` first. Steps 6 and 7 both shell out to it, and finding that out
+*after* writing several task files means the user gets a bare `command not found` with
+nothing to act on. If it is missing, say so and stop:
+
+```bash
+uv tool install coder-eval    # or: pip install coder-eval
+```
+
+Then establish:
 
 - **What is being tested** — which tool, SDK, CLI, skill, or capability?
 - **How many tasks** — one operation, or several?
@@ -109,14 +119,18 @@ One file per task, named after the task ID with underscores
 (`registry-list-processes` → `registry_list_processes.yaml`), in the repository's task
 directory.
 
+<!-- lint-skip: doc-yaml -->
 ```yaml
 task_id: "<kebab-case-id>"
 description: "<one line: what this task tests>"
 initial_prompt: |
   <the natural-language request>
-tags: [<difficulty>, <domain>]
+tags: ["smoke", "your-domain"]      # a difficulty tag plus the repo's domain vocabulary
 
 sandbox:
+  # `tempdir` runs the agent's commands on THIS machine — it isolates the working
+  # directory, not the host. For a task that fetches or executes third-party content,
+  # use `driver: "docker"` instead; that is the real confinement boundary.
   driver: "tempdir"
   python: {}              # a venv with no extra packages; add env_packages if needed
 

@@ -224,7 +224,11 @@ jobs:
 
       - name: Push release commit and tags
         if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
-        run: git push origin main "v${{ steps.release.outputs.version }}"
+        env:
+          # Passed via env (not interpolated into the script) per GitHub's
+          # injection guidance — matching the step above.
+          VERSION: ${{ steps.release.outputs.version }}
+        run: git push origin main "v${VERSION}"
 
       - name: Move major action tag (vN -> this release)
         if: steps.release.outputs.version != ''

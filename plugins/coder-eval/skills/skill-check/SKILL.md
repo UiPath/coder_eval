@@ -122,6 +122,22 @@ relative to the task file):
   a sibling-owned row's `expected_skill` → that **sibling's** bare name
 - every row's `prompt` → the requests designed in step 3, one JSON object per line
 
+**Then make the skill reachable, which is the step that decides whether the suite measures
+anything.** The task runs in a fresh sandbox that contains none of the user's files, so the
+agent is offered no skills unless the task says where they live. That is the `agent.plugins`
+block in the template: `path` is the directory **containing** the skill's own directory —
+for `.claude/skills/pdf-forms/SKILL.md` that is `.claude/skills`. Tell the user to export it
+before running, and to use the same variable in CI:
+
+```bash
+export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
+```
+
+Keep it an environment variable rather than baking an absolute path into the YAML — the
+suite is committed and re-run on other machines. If the variable is unset the skill is simply
+absent, every positive row scores 0, and the result is indistinguishable from a skill that
+never triggers, so confirm it is set before reporting any low-recall finding.
+
 `skill_name` must be the bare name even when the skill comes from a plugin and is
 invoked as `plugin:skill` — the checker strips the namespace before comparing. A
 namespaced value here silently scores zero recall on every row, which reads exactly
