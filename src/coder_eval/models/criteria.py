@@ -99,13 +99,15 @@ class BaseSuccessCriterion(BaseModel, ABC):
     weight: float = Field(
         default=1.0,
         ge=0.0,
+        allow_inf_nan=False,
         description=(
             "Relative importance of this criterion in the weighted score (default: 1.0). Set to 0 to "
             "make the criterion purely INFORMATIONAL -- useful for side-effect checks (e.g. a setup "
             "command): it is excluded from the weighted score AND from the pass/fail gate, so scoring "
             "below its pass_threshold no longer flips the task to FAILURE. The result is still "
-            "computed, stored, and rendered in reports. A weight=0 criterion may not set stop_when "
-            "or suite_thresholds (arming a non-gating criterion for a pass/fail gate is incoherent)."
+            "computed, stored, and rendered in reports. A weight=0 criterion may not set a stop_early "
+            "block or suite_thresholds (arming a non-gating criterion for a pass/fail gate is "
+            "incoherent)."
         ),
     )
 
@@ -123,25 +125,21 @@ class BaseSuccessCriterion(BaseModel, ABC):
         ),
     )
 
-    stop_when: Literal["pass", "fail", "decided", "auto"] | None = Field(
-        default=None,
-        description=(
-            "Opt-in early-stop polarity for this criterion (membership in the run's 'armed set'). "
-            "None (default) = not a stop criterion. 'pass' = a live PASS may contribute to a stop; "
-            "'fail' = a live definitive FAIL may trigger a stop; 'decided' = either (the instance "
-            "must be able to decide BOTH polarities). 'auto' = arm whichever polarities THIS instance "
-            "can actually decide (its live_decidable_polarities) - use it when the decidable polarity "
-            "is instance-dependent, e.g. skill_triggered under any-engagement, where a positive row "
-            "(skill_name == expected_skill) can only live-pass and a distractor can only live-fail, "
-            "so no single static polarity fits every fanned-out row. Inert unless "
-            "run_limits.stop_early is True. Only valid on criteria observable mid-run (e.g. "
-            "skill_triggered, command_executed); an unobservable armed criterion is rejected at "
-            "resolution time."
-        ),
-    )
-
     requires_agent: ClassVar[bool] = False
     """True if this criterion requires agent turn records to evaluate correctly."""
+
+    @property
+    def is_stop_armed(self) -> bool:
+        """True when this criterion participates in the run's early-stop armed set.
+
+        Always ``False`` on the base: only live-observable criteria
+        (``LiveSuccessCriterion`` subclasses) carry stop triggers, so arming an
+        unobservable criterion is unrepresentable rather than a validation
+        error. The armed set drives both the runtime watcher
+        (``EarlyStopWatcher``) and the weighted armed gate
+        (``EvaluationResult.armed_criteria_passed``).
+        """
+        return False
 
     def model_post_init(self, context: Any, /) -> None:
         # Pin the discriminator tag into model_fields_set so it survives
@@ -156,21 +154,27 @@ class BaseSuccessCriterion(BaseModel, ABC):
         """Reject ``weight: 0`` combined with any gate-arming field.
 
         ``weight: 0`` makes a criterion informational — excluded from the score
-        and from the pass/fail gate (see ``is_gating``). Both ``stop_when`` (arms
-        the per-row early-stop gate) and ``suite_thresholds`` (arms the
-        across-row suite gate, which drives the run's exit code) would let an
-        "informational" criterion flip a run to failure — directly contradicting
-        the field's contract. So both combinations are authoring errors, caught
-        at load time rather than surfacing as a confusing exit code later.
+        and from the pass/fail gate (see ``is_gating``). Both the early-stop
+        triggers (``is_stop_armed``: arms the per-row early-stop gate) and
+        ``suite_thresholds`` (arms the across-row suite gate, which drives the
+        run's exit code) would let an "informational" criterion flip a run to
+        failure — directly contradicting the field's contract. So both
+        combinations are authoring errors, caught at load time rather than
+        surfacing as a confusing exit code later.
         """
         if self.weight == 0.0:
-            for field, name in (("stop_when", "stop_when"), ("suite_thresholds", "suite_thresholds")):
-                if getattr(self, field) is not None:
-                    raise ValueError(
-                        f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
-                        + f"so it cannot also set {name} (which arms it for a pass/fail gate). "
-                        + f"Give it a non-zero weight, or drop {name}."
-                    )
+            if self.is_stop_armed:
+                raise ValueError(
+                    f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
+                    + "so it cannot also set a stop_early block, which arms it for a pass/fail gate. "
+                    + "Give it a non-zero weight, or drop the block."
+                )
+            if self.suite_thresholds is not None:
+                raise ValueError(
+                    f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
+                    + "so it cannot also set suite_thresholds (which arms it for a pass/fail gate). "
+                    + "Give it a non-zero weight, or drop suite_thresholds."
+                )
         return self
 
     @property
@@ -196,6 +200,52 @@ class BaseSuccessCriterion(BaseModel, ABC):
 LivePolarity = Literal["pass", "fail"]
 
 
+class StopEarlyPolicy(BaseModel):
+    """Per-criterion early-stop policy — presence of the block IS the arming.
+
+    Attaching ``stop_early:`` to a live-observable criterion arms it for the
+    run's early-stop watcher — there is no run-level master switch; the block
+    alone activates the watcher (``run_limits.stop_early: false`` is the
+    run-level veto). Arming carries ONE implicit trigger — a definitive *effective* fail
+    (a native live-fail, or the ``decide_within`` timeout expiring) may end the
+    run under the weighted ceiling rule — plus the two knobs below. A trigger
+    whose polarity the instance can never decide is inert by design, so one
+    dataset-fanned YAML line (same block on every row) serves both positive
+    rows (pass/timeout live) and distractor rows (fail live).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    on_pass: Literal["stop", "continue"] = Field(
+        default="continue",
+        description=(
+            "What a live PASS does. 'continue' (default): the verdict latches (the criterion is "
+            "not re-checked) and the run proceeds untouched — use with decide_within for a "
+            "fail-fast timeout that does not cut successful runs short. 'stop': end the run (a "
+            "pass-stop) the moment this criterion live-passes — subject to the weighted floor "
+            "rule: the stop fires only once the on_pass=stop subset's worst-case weighted score "
+            "already meets run_limits.stop_early_gate_threshold. Inert on an instance that can "
+            "never live-pass (e.g. a distractor row)."
+        ),
+    )
+
+    decide_within: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Timeout in tool-call steps: still 'undecided' after this many steps latches an "
+            "effective FAIL — fed through the same weighted ceiling fail-stop rule as a native "
+            "live-fail, reported as reason 'decision_budget_exceeded'. Inert on an instance "
+            "that can only ever live-fail (a distractor/guard, whose 'undecided' is its "
+            "success state). None (default) = no timeout. The step count is CUMULATIVE across "
+            "every retry attempt of the turn (the same EarlyStopWatcher instance, and its "
+            "counters, persist across retries) — including attempts that ultimately crashed or "
+            "timed out before this criterion's own investigation even began. Size it with that "
+            "headroom in mind."
+        ),
+    )
+
+
 class LiveSuccessCriterion(BaseSuccessCriterion):
     """Base for criteria observable from a PARTIAL, mid-run trajectory (early-stop).
 
@@ -205,8 +255,8 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
     set). That makes it genuinely computable on the data model rather than the
     checker, unlike the checker's ``live_verdict`` (``criteria/base.py``),
     which reads the actual trajectory and stays checker-side logic. Moving
-    decidability here also gives early-stop-only config (e.g.
-    ``max_steps_to_decide``) a home that doesn't pollute ``BaseSuccessCriterion``
+    decidability here also gives early-stop-only config (the
+    ``stop_early`` block) a home that doesn't pollute ``BaseSuccessCriterion``
     with a field meaningless for every non-observable criterion type.
 
     Only ``SkillTriggeredCriterion`` / ``CommandExecutedCriterion`` subclass
@@ -216,43 +266,35 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
     checker-side flag to keep in sync).
     """
 
-    max_steps_to_decide: int | None = Field(
+    stop_early: StopEarlyPolicy | None = Field(
         default=None,
-        ge=1,
         description=(
-            "Cap on tool-call steps this ARMED criterion (stop_when must be set) "
-            "may spend still 'undecided' before the run gives up on it. Once "
-            "exceeded, EarlyStopWatcher fires an early stop with reason "
-            "'decision_budget_exceeded' and the run is forced to FinalStatus."
-            "FAILURE outright — regardless of what any other armed criterion's "
-            "weighted score would otherwise gate to (this criterion never "
-            "reached a verdict at all, so there is nothing to weigh). None "
-            "(default) = no cap; the run relies solely on run_limits.max_turns. "
-            "Requires run_limits.stop_early and this criterion's own stop_when. "
-            "The step count is CUMULATIVE across every retry attempt of the "
-            "turn (the same EarlyStopWatcher instance, and its counters, "
-            "persist across retries) — including attempts that ultimately "
-            "crashed or timed out before this criterion's own investigation "
-            "even began. Size the budget with that headroom in mind."
+            "Opt-in early-stop policy block; its PRESENCE arms this criterion for the run's "
+            "early-stop watcher — the block alone activates the watcher, there is no run-level "
+            "master switch (run_limits.stop_early: false is the run-level veto). An armed "
+            "criterion's definitive effective FAIL — a native live-fail, or the decide_within "
+            "timeout expiring — may end the run under the weighted ceiling rule (deferred "
+            "while any pass-capable armed criterion is still undecided); set on_pass: stop to "
+            "also end the run on a live PASS. An empty block (stop_early: {}) is the idiomatic "
+            "distractor arming: fail-stop on misfire, nothing else. Triggers whose polarity "
+            "this instance cannot decide are inert by design (dataset fan-out support). "
+            "Unarmed criteria stay advisory on an early-stopped run. Only exists on "
+            "live-observable criteria, so arming anything else is a schema error."
         ),
     )
 
-    @model_validator(mode="after")
-    def _check_max_steps_requires_armed(self) -> Self:
-        """Reject a decision-step cap on a criterion that isn't armed for early-stop.
+    @property
+    def is_stop_armed(self) -> bool:
+        """True when the ``stop_early:`` block is present on this instance.
 
-        ``max_steps_to_decide`` only means anything relative to a criterion
-        that ``EarlyStopWatcher`` is actually tracking (``stop_when`` set);
-        setting it without ``stop_when`` is a dead field that silently does
-        nothing, so reject it at load time rather than let it rot unnoticed.
+        Presence of the block IS the arming — the implicit fail trigger comes
+        with it, ``on_pass`` / ``decide_within`` refine it. A trigger whose
+        polarity this instance can never decide is inert by design (see
+        ``StopEarlyPolicy``) — that is what lets one dataset-fanned YAML
+        line serve both positive and distractor rows without per-row
+        conditionals.
         """
-        if self.max_steps_to_decide is not None and self.stop_when is None:
-            raise ValueError(
-                f"criterion {self.type!r}: max_steps_to_decide requires stop_when to be set "
-                + "(the decision-step budget is meaningless for a criterion that isn't armed "
-                + "for early-stop)."
-            )
-        return self
+        return self.stop_early is not None
 
     @abstractmethod
     def live_decidable_polarities(self) -> frozenset[LivePolarity]:
@@ -260,10 +302,14 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
 
         Must return a subset of the polarities the corresponding checker's
         ``live_verdict`` can ever emit for this criterion type. Used by
-        ``validate_early_stop`` to reject arming a polarity this instance can
-        never reach, and by ``EarlyStopWatcher`` to resolve which polarities a
-        ``stop_when`` value actually arms for this instance (see
-        ``orchestration.early_stop._requested_polarities``).
+        ``EarlyStopWatcher`` to decide which triggers of an armed criterion's
+        ``stop_early`` block are live for this instance: ``on_pass: stop``
+        needs ``"pass"``, the implicit fail trigger needs ``"fail"``, and
+        ``decide_within`` needs ``"pass"`` (a fail-only instance's 'undecided'
+        is its success state, so the timeout is inert there). A trigger whose
+        polarity is missing from this set is inert by design, not an error —
+        that is what lets one dataset-fanned YAML line serve both positive and
+        distractor rows.
         """
 
 
@@ -361,6 +407,273 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     pattern: str = Field(description="Regex pattern that must match somewhere in the file")
     must_match: bool = Field(default=True, description="If True, pattern must match; if False, pattern must NOT match")
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
+
+
+class FlagMatch(BaseModel):
+    """Predicate for ONE flag value within :class:`CliCalledCriterion`.
+
+    Exactly one predicate field may be set. In YAML a bare scalar is accepted as
+    shorthand for ``equals`` (``model: gemini_2_5_pro`` == ``model: {equals:
+    gemini_2_5_pro}``), which keeps the common case unnested.
+
+    ``absent: true`` asserts the flag was NOT passed — distinct from "passed with
+    a different value", and the reason this is a predicate rather than a bare
+    ``dict[str, str]`` on the criterion.
+
+    The one-predicate rule means a conjunction on a single flag ("contains BOTH
+    A and B") is not expressible here. Either declare two ``cli_called`` criteria
+    over the same log, or use one ``matches_regex`` that spans both — the latter
+    is what a heredoc-built JSON payload usually wants, together with
+    ``flags: 16`` (``re.DOTALL``) so ``.`` crosses the payload's newlines.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    equals: str | None = Field(default=None, description="Flag value must equal this string exactly")
+    contains: str | None = Field(default=None, description="Flag value must contain this substring")
+    matches_regex: str | None = Field(
+        default=None,
+        description="Flag value must match this regex. Scoped to ONE value, unlike a whole-line pattern",
+    )
+    any_of: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Flag value must equal one of these strings. Non-empty: an empty list would match "
+            "nothing, so a max_count: 0 guard built on it would pass vacuously"
+        ),
+    )
+    absent: bool = Field(default=False, description="Flag must NOT be present in the invocation")
+    present: bool = Field(
+        default=False,
+        description=(
+            "Flag must be present, whatever its value -- the predicate for a boolean switch. Unlike "
+            '`equals: ""` it survives a CLI that spells the switch `--force true`, and it never makes '
+            "the flag value-bearing, so asserting a switch cannot swallow the next positional"
+        ),
+    )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Other names for the SAME flag, e.g. aliases: [y] on a `yes` predicate so `-y` and "
+            "`--yes` are one flag. Values are gathered across every name: `present` holds if any "
+            "appeared, `absent` only if none did, a value predicate matches if any value under any "
+            "name satisfies it"
+        ),
+    )
+    flags: int = Field(
+        default=0,
+        description=(
+            "Regex flags for matches_regex (re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16), "
+            "mirroring FileMatchesRegexCriterion.flags. DOTALL is the usual need, since a "
+            "heredoc-built flag value spans lines"
+        ),
+    )
+
+    @property
+    def needs_value(self) -> bool:
+        """Whether evaluating this predicate requires the flag's VALUE.
+
+        Presence predicates (``present`` / ``absent``) do not, so they must not
+        make a flag value-bearing. Otherwise asserting a boolean switch would
+        make it consume the following token: adding ``flags: {yes: {present:
+        true}}`` to a guard on ``delete --yes proj-1`` would bind
+        ``yes=proj-1``, drop ``proj-1`` from the positionals, and hand the guard
+        a false PASS -- reintroducing the very defect declared value-binding
+        exists to prevent.
+        """
+        return not (self.present or self.absent)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_scalar_shorthand(cls, value: Any) -> Any:
+        """Accept ``model: gemini_2_5_pro`` as ``model: {equals: ...}``."""
+        if isinstance(value, str):
+            return {"equals": value}
+        return value
+
+    @model_validator(mode="after")
+    def _exactly_one_predicate(self) -> FlagMatch:
+        set_predicates = [
+            name for name in ("equals", "contains", "matches_regex", "any_of") if getattr(self, name) is not None
+        ]
+        if self.absent:
+            set_predicates.append("absent")
+        if self.present:
+            set_predicates.append("present")
+        if len(set_predicates) != 1:
+            msg = (
+                "FlagMatch requires exactly one of equals / contains / matches_regex / any_of / absent / present, "
+                f"got {sorted(set_predicates) or 'none'}"
+            )
+            raise ValueError(msg)
+        # `flags` only reaches re.compile via matches_regex; setting it beside any
+        # other predicate is a silent no-op, so reject it rather than mislead.
+        if self.flags and self.matches_regex is None:
+            msg = f"FlagMatch.flags applies only to matches_regex, but the predicate is {set_predicates[0]!r}"
+            raise ValueError(msg)
+        return self
+
+
+class CliCalledCriterion(BaseSuccessCriterion):
+    """Check whether a CLI invocation matching a structured pattern was recorded.
+
+    Reads a **structured invocation log** the sandbox produced: JSON Lines, one
+    object per invocation, each with at minimum an ``argv`` list. A test harness
+    that shadows a CLI with a recording mock writes this log; this criterion
+    matches against it field-by-field instead of regexing a flattened command
+    string.
+
+    Record schema (extra keys ignored)::
+
+        {"argv": ["ixp", "projects", "get", "proj-1", "--output", "json"],
+         "tool": "uip", "exit": 1, "ts": 1785416844.987}
+
+    Only ``argv`` is required. ``tool`` enables one log to serve several shadowed
+    executables; ``exit`` and ``ts`` are recorded for reporting, not matched.
+
+    Why not ``file_matches_regex`` over a flattened log line: a flat line cannot
+    express "verb X was called AND flag Y had value Z" without stacked
+    lookaheads, cannot tell a quoted argument containing spaces from two
+    arguments, and cannot stop a match from running across shell operators.
+
+    Pure data model - checking logic in CliCalledChecker._check_impl()
+
+    Example YAML (positive — flag value must match)::
+
+        success_criteria:
+          - type: "cli_called"
+            description: "Switched the project to the capable model"
+            log: "mocks/calls.jsonl"
+            verb: "ixp projects configure-model"
+            positional: ["my_invoices-f1afa9ef-ixp"]
+            flags:
+              model: "gemini_2_5_pro"
+            min_count: 1
+
+    Example YAML (negative — must NOT have been called; ``min_count: 0`` + ``max_count: 0``)::
+
+        success_criteria:
+          - type: "cli_called"
+            description: "Did not use --corrections to flip a boolean field"
+            log: "mocks/calls.jsonl"
+            verb: "ixp labellings confirm"
+            flags:
+              corrections: {contains: "f-100"}
+            min_count: 0
+            max_count: 0
+    """
+
+    type: Literal["cli_called"] = "cli_called"
+    log: str = Field(description="Path to the JSON Lines invocation log, relative to the sandbox working directory")
+    verb: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's "
+            "non-flag arguments. Order matters, so 'labellings confirm' never matches "
+            "'labellings unconfirm'"
+        ),
+    )
+    tool: str | None = Field(
+        default=None,
+        description="Match only records whose 'tool' equals this (e.g. 'uip'). None matches any tool",
+    )
+    positional: list[str] | None = Field(
+        default=None,
+        description="Non-flag arguments that must follow the verb, in order",
+    )
+    flags: dict[str, FlagMatch] | None = Field(
+        default=None,
+        description=(
+            "Flag name (without leading dashes) to predicate. A bare scalar means 'equals'. "
+            "Flags not listed here are ignored, so an extra --output json never breaks a match"
+        ),
+    )
+    value_flags: list[str] = Field(
+        default_factory=lambda: ["output"],
+        description=(
+            "Flag names (no leading dashes) that consume a following token as their value. Keys of "
+            "`flags` are value-bearing already; everything else is a switch whose following token "
+            "stays positional. Declare a flag here when its value would otherwise be read as a "
+            "positional, e.g. [folder] for `--folder F proj-1`. Defaults to [output]"
+        ),
+    )
+    min_count: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Minimum matching invocations. Combine min_count: 0 with max_count: 0 for must-NOT-match. "
+            "Scoring is BINARY (in vs out of bounds), unlike command_executed's fractional field of "
+            "the same name"
+        ),
+    )
+    max_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="Maximum number of matching invocations. None means no upper bound; 0 forbids the call",
+    )
+    ignore_flags: list[str] = Field(
+        default_factory=lambda: ["output"],
+        description=(
+            "Flag names dropped before matching. Defaults to ['output'] so grading never depends on "
+            "--output json, which is outcome-invisible. An ignored flag that takes a value must also "
+            "appear in value_flags. Pass [] to disable"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> CliCalledCriterion:
+        # min_count 0 with no upper bound is satisfied by every possible log, so
+        # the criterion can never fail -- the same vacuity class as a blank verb.
+        if self.min_count == 0 and self.max_count is None:
+            msg = (
+                "cli_called with min_count: 0 and no max_count can never fail. Set max_count: 0 for a "
+                "negative guard, or raise min_count for a positive assertion."
+            )
+            raise ValueError(msg)
+        if self.max_count is not None and self.max_count < self.min_count:
+            msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
+            raise ValueError(msg)
+        # min_length=1 counts characters, so "   " passes it — and `"   ".split()`
+        # is `[]`, an empty prefix that matches every record.
+        if self.verb is not None and not self.verb.strip():
+            msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
+            raise ValueError(msg)
+        # Falsiness-symmetric on purpose: `verb: ""` used to slip past an `is None`
+        # check here and then match EVERY record (empty prefix), silently scoring 1.0.
+        if not self.verb and not self.positional and not self.flags and not self.tool:
+            msg = "cli_called requires at least one of verb / positional / flags / tool to match on"
+            raise ValueError(msg)
+        # A predicate on an ignored flag can never be evaluated: ignore_flags drops
+        # the flag before any predicate runs, so `absent` would pass vacuously and
+        # `equals` could never match.
+        # An alias that is also a key, or shared between two predicates, would make
+        # which predicate owns a recorded flag depend on dict order.
+        seen: dict[str, str] = {}
+        for key, predicate in (self.flags or {}).items():
+            for name in (key, *predicate.aliases):
+                if name in seen and seen[name] != key:
+                    msg = (
+                        f"cli_called flag name {name!r} is claimed by both {seen[name]!r} and {key!r} "
+                        "(via aliases); a flag can belong to only one predicate"
+                    )
+                    raise ValueError(msg)
+                seen[name] = key
+            if key in predicate.aliases:
+                msg = f"cli_called flag {key!r} lists itself in aliases"
+                raise ValueError(msg)
+
+        shadowed = sorted(set(seen) & set(self.ignore_flags))
+        if shadowed:
+            names = ", ".join(repr(n) for n in shadowed)
+            msg = (
+                f"cli_called flag predicate(s) {names} are also listed in ignore_flags (directly or as "
+                "an alias), which drops them before matching. Remove them from ignore_flags, or drop "
+                "the predicate."
+            )
+            raise ValueError(msg)
+        return self
 
 
 class RegexPattern(BaseModel):
@@ -650,9 +963,10 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
           the moment the count exceeds it (this includes the
           ``min_count: 0, max_count: 0`` "must-NOT-run" form).
 
-        So these instance shapes are dead arms the class-level check misses:
-        ``stop_when: pass`` with ``max_count`` set (pass can never fire);
-        ``stop_when: fail`` with ``max_count: None`` (fail can never fire);
+        So these instance shapes leave a trigger inert (by design, so a
+        dataset-fanned line works across row roles): ``on_pass: stop`` /
+        ``decide_within`` with ``max_count`` set (pass can never fire); the
+        implicit fail trigger with ``max_count: None`` (fail can never fire);
         ``min_count: 0, max_count: None`` (neither can ever fire).
         """
         decidable: set[LivePolarity] = set()
@@ -774,10 +1088,12 @@ class SkillTriggeredCriterion(LiveSuccessCriterion):
           live-``fail`` (a wrong skill engaging is a decidable miss; its
           absence is not).
 
-        ``validate_early_stop`` gates the requested ``stop_when`` on this set,
-        so arming a positive with ``fail`` / a distractor with ``pass`` — or
-        either with ``decided`` (which needs both) — is rejected at resolution
-        rather than silently degrading to a full run.
+        ``EarlyStopWatcher`` consults this set to decide which triggers are
+        live per instance: on a positive row ``on_pass: stop`` and
+        ``decide_within`` are live while the implicit fail trigger is inert;
+        on a distractor row the reverse. That per-row adaptivity is what lets
+        one dataset-fanned YAML line (same block on every row) serve both
+        roles.
         """
         expected_yes = self.expected_skill == self.skill_name
         return frozenset({"pass"}) if expected_yes else frozenset({"fail"})
@@ -1121,6 +1437,7 @@ SuccessCriterion = Annotated[
     | JsonCheckCriterion
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
+    | CliCalledCriterion
     | CommandsEfficiencyCriterion
     | UiPathEvalCriterion
     | ClassificationMatchCriterion

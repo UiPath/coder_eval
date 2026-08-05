@@ -32,12 +32,14 @@ from coder_eval.models.criteria import (
     AgentJudgeCriterion,
     BaseSuccessCriterion,
     ClassificationMatchCriterion,
+    CliCalledCriterion,
     CommandExecutedCriterion,
     CommandsEfficiencyCriterion,
     FileCheckCriterion,
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
+    FlagMatch,
     JMESPathAssertion,
     JsonCheckCriterion,
     LivePolarity,
@@ -47,6 +49,7 @@ from coder_eval.models.criteria import (
     RegexPattern,
     RunCommandCriterion,
     SkillTriggeredCriterion,
+    StopEarlyPolicy,
     SuccessCriterion,
     UiPathEvalCriterion,
 )
@@ -79,7 +82,7 @@ from coder_eval.models.judge import JudgeVerdict
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 
 # Limits
-from coder_eval.models.limits import RunLimits
+from coder_eval.models.limits import DEFAULT_STOP_EARLY_GATE_THRESHOLD, RunLimits
 
 # Merge strategy
 from coder_eval.models.merge_strategy import (
@@ -229,11 +232,14 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "FileMatchesRegexCriterion",
     "ReferenceComparisonCriterion",
     "CommandExecutedCriterion",
+    "CliCalledCriterion",
+    "FlagMatch",
     "CommandsEfficiencyCriterion",
     "UiPathEvalCriterion",
     "LLMJudgeCriterion",
     "AgentJudgeCriterion",
     "SkillTriggeredCriterion",
+    "StopEarlyPolicy",
     "LiveSuccessCriterion",
     "LivePolarity",
     "SuccessCriterion",
@@ -313,6 +319,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "simulator_cost_usd",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
+    "DEFAULT_STOP_EARLY_GATE_THRESHOLD",
     # Judge
     "JudgeVerdict",
     # Limits

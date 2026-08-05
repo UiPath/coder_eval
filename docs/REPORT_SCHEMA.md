@@ -189,8 +189,9 @@ backend), `num_turns`, `max_turns_exhausted`,
 
 Present (non-`null`) iff the run stopped early — there is no separate boolean.
 Fields: `reason` (`criterion_passed` / `criterion_failed` /
-`decision_budget_exceeded` — the last forces `FinalStatus.FAILURE` outright,
-bypassing the weighted gate),
+`decision_budget_exceeded` — the last marks a fail-stop whose deciding
+criterion timed out undecided past its `stop_early.decide_within`; it gates through
+the same weighted armed gate as a native fail),
 `deciding_criterion_type`, `deciding_criterion_description`, `armed_criteria`,
 `sdk_turn_index`, `tool_call_index` (1-based, includes the in-flight call),
 `elapsed_seconds`, `turns_remaining_at_stop`, `gate_threshold` (the

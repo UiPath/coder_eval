@@ -102,7 +102,7 @@ created are preserved under `runs/latest/<variant>/<task>/<NN>/` (`task.json`,
 ## Where to go deeper
 
 - **All 14 criterion types, weights, thresholds** → [Task Definition Guide](../TASK_DEFINITION_GUIDE.md)
-- **Stop a run early once the key criteria are decided** (opt-in `run_limits.stop_early` + `stop_when` on a criterion) → [Task Definition Guide → `stop_early`](../TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop)
+- **Stop a run early once the key criteria are decided** (an opt-in `stop_early:` block on a criterion; `run_limits.stop_early: false` is the run-level kill switch) → [Task Definition Guide → `stop_early`](../TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop)
 - **Fan one task out over a dataset of rows** → [Bring Your Own Dataset](../DATASETS.md)
 - **Full CLI & config reference** → [User Guide](../USER_GUIDE.md)
 - **Compare two configurations on this task** → [Tutorial 05](05-comparing-models.md)

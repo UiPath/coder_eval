@@ -268,11 +268,12 @@ variant's, on the already-mutated prompt.
 ## Recipe: Smoke vs. e2e Flavors (Early Stop)
 
 Run the **same** task file as both a fast `smoke` flavor and a full `e2e` flavor
-by flipping one boolean per variant — `run_limits.stop_early`. Arm the criteria
-that define "the interesting thing happened" with `stop_when` in the task file;
+with a one-line kill switch on the reference variant. Arm the criteria
+that define "the interesting thing happened" with `stop_early:` blocks in the
+task file;
 the `smoke` variant cuts off as soon as they're decided, while `e2e` runs to
 completion. Because the field merge is per-key, the variant sets only
-`stop_early` without disturbing the task's `max_turns`.
+`stop_early` (the run-level kill switch) without disturbing the task's `max_turns`.
 
 ```yaml
 experiment_id: early-stop-ab
@@ -281,13 +282,12 @@ description: "Smoke vs. e2e from one file via opt-in early stop"
 variants:
   - variant_id: e2e
     run_limits:
-      stop_early: false # full run to completion (the reference flavor)
+      stop_early: false # kill switch: force-disarm the blocks (the reference flavor)
   - variant_id: smoke
-    run_limits:
-      stop_early: true # cut off once the armed criteria are decided
+    # no override needed: the task's stop_early: blocks arm the watcher
 ```
 
-The task file supplies the arming (`stop_when` on the criteria that gate the
+The task file supplies the arming (`stop_early:` blocks on the criteria that gate the
 flavor) and a `max_turns` generous enough for `e2e`; see
 [`stop_early`](TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop). This recipe
 ships as `experiments/early-stop-ab.yaml`.

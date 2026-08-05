@@ -1,11 +1,12 @@
 experiment_id: early-stop-ab
 description: |
   Smoke vs. e2e flavors from ONE task file via opt-in early-stop. Both variants
-  share the same tasks, criteria, and max_turns; they differ only in the
-  run_limits.stop_early boolean (field-merged, so neither replaces the task's
-  run_limits block). The task's armed criteria (those carrying `stop_when`)
-  decide when the `smoke` variant cuts off — as soon as the designated criteria
-  are decided — while `e2e` runs every task to completion.
+  share the same tasks, criteria, and max_turns. Arming is per-criterion (the
+  `stop_early:` blocks in the task file), so the `smoke` variant needs NO
+  override at all — the armed criteria decide when it cuts off. The `e2e`
+  variant throws the run-level kill switch (`run_limits.stop_early: false`,
+  field-merged, so it does not replace the task's run_limits block) to
+  force-disarm every block and run every task to completion.
 
   Expect the `smoke` variant significantly lower on turns, duration, and tokens.
   Verdict parity is one-sided: the armed subset gates an early-stopped run
@@ -20,6 +21,5 @@ variants:
       stop_early: false
 
   - variant_id: smoke
-    description: "Opt-in early stop — cut off once the armed criteria are decided."
-    run_limits:
-      stop_early: true
+    description: "Early stop as armed in the task — cut off once the armed criteria are decided."
+    # No override needed: the task's per-criterion stop_early: blocks arm the watcher.
