@@ -1017,6 +1017,19 @@ def test_a_bare_protected_directory_name_still_matches(command: str):
         pytest.param('PATH="./m:$PATH" uip or folders list', id="path-prefix-shim-run"),
         pytest.param("PATH=m:$PATH uip jobs list --output json", id="path-prefix-unquoted-shim-run"),
         pytest.param('mkdir -p raw && PATH="./m:$PATH" uip or folders list | tee raw/f.json', id="path-prefix-shim-run-piped"),
+        pytest.param('PATH="$PWD/m:$PATH" uip or folders list --output json', id="pwd-path-prefix-shim-run"),
+        pytest.param(
+            'PATH="$PWD/m:$PATH" uip or folders list --output json --output-filter'
+            " \"[?Name=='\"'SecureOps'].{Key:Key,Path:Path,Type:Type}\\\""
+            " | tee .local/investigations/raw/triage-folders-list.json",
+            id="pwd-path-prefix-broken-nested-quoting",
+        ),
+        pytest.param(
+            'PATH="$PWD/m:$PATH" uip or folders list --output json --output-filter'
+            " \"[?Name=='SecureOps'].{Key:Key,Path:Path,Type:Type}\\\""
+            " | tee .local/investigations/raw/triage-folders-list.json",
+            id="pwd-path-prefix-unterminated-quote-swallows-the-pipe",
+        ),
         pytest.param(
             '/bin/bash -lc "m/uip or folders list --output json'
             " --output-filter '[].{Key:Key,Name:Name,Path:Path,Type:Type}'"
@@ -1048,6 +1061,10 @@ def test_executing_the_mock_shim_is_not_a_read(command: str):
         pytest.param("./m/uip m/r/abc.json", id="shim-run-handed-a-mock-operand"),
         pytest.param('PATH="./m:$PATH" cat m/.store', id="path-prefix-but-reader-utility"),
         pytest.param('PATH="./m:$PATH" uip run m/r/abc.json', id="path-prefix-with-a-mock-operand"),
+        pytest.param(
+            'PATH="$PWD/m:$PATH" uip run --config "broken\\" | tee m/copy.json',
+            id="unterminated-quote-with-a-mock-operand",
+        ),
         pytest.param(
             '/bin/bash -lc "mkdir -p .local/investigations/raw && ls -l m/uip m/uip.cmd && sed -n \'1,80p\' m/uip"',
             id="wrapped-shim-source-page",
