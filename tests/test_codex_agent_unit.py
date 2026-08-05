@@ -193,3 +193,36 @@ def test_turn_record_defaults_unrecovered_subagent_threads_to_zero():
     from coder_eval.models import TurnRecord
 
     assert TurnRecord(iteration=1, user_input="p", agent_output="a").unrecovered_subagent_threads == 0
+
+
+class TestFileChangeKinds:
+    """apply_patch change kinds ride along in Write telemetry parameters.
+
+    The integrity scan needs them: a Codex `update` of a file required its
+    current content (a read), while an `add` is a creation like Claude's Write.
+    """
+
+    def _agent(self) -> CodexAgent:
+        return CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+
+    def test_kinds_are_recorded_alongside_paths(self):
+        changes = [
+            SimpleNamespace(path="a.py", kind="update"),
+            SimpleNamespace(path="b.py", kind="add"),
+        ]
+        telemetry = self._agent()._extract_file_change_telemetry("fc_1", changes, "success", 0)
+        assert telemetry is not None
+        assert telemetry.tool_name == "Write"
+        assert telemetry.parameters == {"paths": ["a.py", "b.py"], "kinds": ["update", "add"]}
+
+    def test_kinds_are_omitted_when_the_sdk_provides_none(self):
+        changes = [SimpleNamespace(path="a.py")]
+        telemetry = self._agent()._extract_file_change_telemetry("fc_1", changes, "success", 0)
+        assert telemetry is not None
+        assert telemetry.parameters == {"paths": ["a.py"]}
+
+    def test_stream_parameters_carry_the_first_change_kind(self):
+        root = SimpleNamespace(
+            type="fileChange", id="f1", changes=[SimpleNamespace(path="a.py", kind="update")], status="success"
+        )
+        assert self._agent()._tool_parameters(root, "fileChange") == {"path": "a.py", "kind": "update"}

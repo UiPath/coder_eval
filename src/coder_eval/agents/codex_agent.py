@@ -1560,7 +1560,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if root_type == "fileChange":
             changes = getattr(root, "changes", None) or []
             path = str(changes[0].path) if changes and hasattr(changes[0], "path") else "?"
-            return {"path": path}
+            params: dict[str, Any] = {"path": path}
+            kind = _status_value(getattr(changes[0], "kind", None)) if changes else ""
+            if kind:
+                params["kind"] = kind
+            return params
         if root_type == "collabAgentToolCall":
             params: dict[str, Any] = {"operation": _status_value(getattr(root, "tool", ""))}
             if model := getattr(root, "model", None):
@@ -2124,9 +2128,20 @@ class CodexAgent(Agent[CodexAgentConfig]):
         apply_patch is recorded as an ``error`` (the old ``status != "error"``
         test never matched the real PatchApplyStatus values, so failed patches
         were scored as successful writes).
+
+        The per-change kinds ride along in ``parameters["kinds"]`` (positionally
+        aligned with ``paths``) when the SDK provides them: unlike Claude's Write,
+        an apply_patch can UPDATE an existing file -- a read of its current
+        content -- and the integrity scan needs the kind to tell an update from
+        an add. Omitted entirely when no change carries a kind.
         """
         try:
-            paths = [str(c.path) for c in changes if hasattr(c, "path")] if changes else []
+            with_paths = [c for c in changes if hasattr(c, "path")] if changes else []
+            paths = [str(c.path) for c in with_paths]
+            kinds = [_status_value(getattr(c, "kind", None)) for c in with_paths]
+            parameters: dict[str, Any] = {"paths": paths}
+            if any(kinds):
+                parameters["kinds"] = kinds
             status_str = _status_value(status)
             failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
             return CommandTelemetry(
@@ -2134,7 +2149,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 tool_id=change_id,
                 timestamp=datetime.now(),
                 duration_ms=None,
-                parameters={"paths": paths},
+                parameters=parameters,
                 result_status="error" if failed else "success",
                 result_summary=(
                     f"{len(paths)} file(s) changed"

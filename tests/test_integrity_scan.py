@@ -585,6 +585,53 @@ def test_a_path_parameter_of_a_known_tool_still_matches():
     assert info.verdict is IntegrityVerdict.TAINTED
 
 
+# Codex funnels apply_patch through the `Write` tool name with a `paths` list;
+# the per-change kinds tell a creation apart from an edit of graded material.
+
+
+def test_a_codex_patch_updating_graded_material_is_a_read():
+    """The identical Claude `Edit` is a read; the Codex arm must not be blind."""
+    cmd = _cmd("Write", {"paths": ["/repo/tasks/leaky/solution.py"], "kinds": ["update"]})
+    info = scan_commands([_turn([cmd])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+    assert info.findings[0].tool_name == "Write"
+
+
+def test_a_codex_patch_deleting_graded_material_is_a_read():
+    cmd = _cmd("Write", {"paths": ["/repo/tasks/leaky/solution.py"], "kinds": ["delete"]})
+    info = scan_commands([_turn([cmd])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+def test_a_codex_add_of_the_deliverable_is_a_creation():
+    commands = [
+        _cmd("Write", {"paths": ["RESOLUTION.md"], "kinds": ["add"]}, tool_id="t1"),
+        _bash("cat RESOLUTION.md"),
+    ]
+    info = scan_commands([_turn(commands)], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+def test_a_codex_patch_without_kinds_is_inconclusive_on_a_graded_hit():
+    """Add-vs-update cannot be told apart without kinds; CLEAN would be a lie."""
+    cmd = _cmd("Write", {"paths": ["/repo/tasks/leaky/solution.py"]})
+    info = scan_commands([_turn([cmd])], SPEC)
+    assert info.verdict is IntegrityVerdict.INCONCLUSIVE
+    assert info.findings == []
+
+
+def test_a_codex_patch_of_unrelated_files_is_clean():
+    cmd = _cmd("Write", {"paths": ["src/app.py", "src/util.py"], "kinds": ["update", "update"]})
+    info = scan_commands([_turn([cmd])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+def test_an_unknown_codex_change_kind_is_inconclusive():
+    cmd = _cmd("Write", {"paths": ["/repo/tasks/leaky/solution.py"], "kinds": ["mystery"]})
+    info = scan_commands([_turn([cmd])], SPEC)
+    assert info.verdict is IntegrityVerdict.INCONCLUSIVE
+
+
 def test_unknown_tool_touching_graded_material_is_inconclusive_not_tainted():
     """We do not guess at an unrecognised tool's semantics in either direction."""
     info = scan_commands([_turn([_cmd("mcp__some__fetch", {"target": "RESOLUTION.md"})])], SPEC)

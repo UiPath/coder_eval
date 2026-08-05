@@ -266,6 +266,15 @@ _PATH_PARAMETER_KEYS = ("file_path", "path", "paths", "notebook_path", "glob")
 # INCONCLUSIVE rather than TAINTED, so over-matching is the safe direction.
 _SCHEMA_KNOWN_TOOLS = _READ_TOOLS | _EDIT_TOOLS | _LISTING_TOOLS | _NEUTRAL_TOOLS | frozenset({"Grep"})
 
+# Codex apply_patch change kinds. Codex funnels every file change through the
+# `Write` tool name with a `paths` list; unlike Claude's Write (a whole-file
+# creation) an apply_patch can UPDATE a file, which required its current content
+# -- the same reasoning that makes `_EDIT_TOOLS` reads. A kind outside both sets
+# is a Codex vocabulary we have not seen: neither excused nor tainted, the call
+# is left "not understood" so the verdict degrades to INCONCLUSIVE, never CLEAN.
+_CODEX_ADD_KINDS = frozenset({"add", "create"})
+_CODEX_EDIT_KINDS = frozenset({"update", "delete", "modify", "rename"})
+
 # Basename patterns that are graded material in every suite, independent of what
 # this particular task declares. Deliberately short: each entry is a name the
 # framework or the task-authoring convention owns. One of them (`RESOLUTION.md`)
@@ -1074,8 +1083,17 @@ def scan_commands(turns: list[TurnRecord], spec: GradedMaterialSpec) -> Integrit
                     notes.append(
                         f"{cmd.tool_name} referenced {matched} but its read semantics are unknown; not counted"
                     )
-                if cmd.tool_name == "Write" and isinstance(cmd.parameters.get("file_path"), str):
-                    created.add(_created_path(cmd.parameters["file_path"]))
+                if cmd.tool_name == "Write":
+                    if isinstance(cmd.parameters.get("file_path"), str):
+                        created.add(_created_path(cmd.parameters["file_path"]))
+                    # Codex apply_patch: only the `add` changes are creations.
+                    paths, kinds = cmd.parameters.get("paths"), cmd.parameters.get("kinds")
+                    if isinstance(paths, list) and isinstance(kinds, list) and len(paths) == len(kinds):
+                        created.update(
+                            _created_path(str(path))
+                            for path, kind in zip(paths, kinds, strict=True)
+                            if str(kind).casefold() in _CODEX_ADD_KINDS
+                        )
 
             if is_read and matched is not None:
                 kind = _finding_kind(matched, spec)
@@ -1291,6 +1309,9 @@ def _structured_read(
     caller turns into INCONCLUSIVE -- neither a silent pass nor a taint on a tool
     whose behavior we are guessing at.
     """
+    if cmd.tool_name == "Write" and isinstance(cmd.parameters.get("paths"), list):
+        return _codex_file_change_read(cmd, spec, created)
+
     if cmd.tool_name in _SCHEMA_KNOWN_TOOLS:
         haystack = " ".join(str(cmd.parameters[key]) for key in _PATH_PARAMETER_KEYS if cmd.parameters.get(key))
     else:
@@ -1310,6 +1331,38 @@ def _structured_read(
         has_context = any(cmd.parameters.get(k) for k in ("-A", "-B", "-C"))
         return output_mode == "content" or has_context, matched, True
     return False, matched, False
+
+
+def _codex_file_change_read(
+    cmd: CommandTelemetry,
+    spec: GradedMaterialSpec,
+    created: frozenset[str] | set[str],
+) -> tuple[bool, str | None, bool]:
+    """Classify a Codex apply_patch: a ``Write`` telemetry with a ``paths`` list.
+
+    A change of kind ``update``/``delete`` required the file's current content,
+    so a graded path among those is a read -- the arm-specific twin of an Edit
+    tool call. A pure ``add`` is a creation, like Claude's Write. Without a kind
+    per path the two are indistinguishable (an add of the deliverable is the
+    honest flow, an update of a golden is the leak), so a graded hit is reported
+    "not understood" and the verdict degrades to INCONCLUSIVE, never CLEAN.
+    """
+    paths = [str(p) for p in cmd.parameters["paths"]]
+    kinds = cmd.parameters.get("kinds")
+    matched = next((m for m in (_find_match(p, spec, created) for p in paths) if m is not None), None)
+    if matched is None:
+        return False, None, True
+    if not (isinstance(kinds, list) and len(kinds) == len(paths)):
+        return False, matched, False
+    for path, kind in zip(paths, kinds, strict=True):
+        if _find_match(path, spec, created) is None:
+            continue
+        normalized_kind = str(kind).casefold()
+        if normalized_kind in _CODEX_EDIT_KINDS:
+            return True, matched, True
+        if normalized_kind not in _CODEX_ADD_KINDS:
+            return False, matched, False
+    return False, matched, True
 
 
 def evaluate_integrity(
