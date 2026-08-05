@@ -84,10 +84,14 @@ def _tag(cls: type[BaseSuccessCriterion]) -> str:
 
 
 def _summary(cls: type) -> str:
-    """The first non-blank line of the class docstring (empty when undocumented)."""
+    """The first non-blank line of the class docstring (empty when undocumented).
+
+    Emitted as body prose, so whitespace is collapsed but pipes are NOT escaped —
+    that escape belongs to table cells only (``_cell``).
+    """
     for line in (cls.__doc__ or "").splitlines():
         if line.strip():
-            return _cell(line)
+            return " ".join(line.split())
     return ""
 
 

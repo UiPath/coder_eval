@@ -43,6 +43,13 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 # unique trailing comment.
 _PIN_PATTERN = re.compile(r'^[ \t]*default: "(?P<version>\d+\.\d+\.\d+)"[ \t]+# <-- kept in sync', re.MULTILINE)
 
+# Likewise for plugin.json: release.yml's sed matches a whole line of this shape,
+# INCLUDING the trailing comma. A reformat that moves `version` to the last key of
+# the object (no comma) or collapses the JSON onto one line makes the bump a silent
+# no-op on the release path — caught there by a `grep -q` guard, but only once the
+# tag exists. Asserting the shape here moves that failure to every commit.
+_PLUGIN_PIN_PATTERN = re.compile(r'^[ \t]*"version": "(?P<version>\d+\.\d+\.\d+)",[ \t]*$', re.MULTILINE)
+
 
 def _project_version() -> str:
     return tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["version"]
@@ -69,7 +76,19 @@ def test_action_version_pin_matches_pyproject_version():
     )
 
 
+def test_plugin_manifest_version_pin_anchor_is_present_and_unique():
+    """release.yml's sed is keyed on this line shape; a reformat makes the bump a no-op."""
+    matches = _PLUGIN_PIN_PATTERN.findall(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
+    assert len(matches) == 1, (
+        f'expected exactly one `"version": "X.Y.Z",` line (trailing comma included) in '
+        f"{PLUGIN_MANIFEST.name}, found {len(matches)}; release.yml's sed anchor is keyed on it, "
+        "so keep `version` off the last line of the object"
+    )
+
+
 def test_plugin_manifest_version_matches_pyproject_version():
+    # Read through json, not the anchor regex: the VALUE invariant must hold whatever
+    # the formatting is. The anchor test above owns the formatting half.
     pinned = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))["version"]
     expected = _project_version()
     assert pinned == expected, (

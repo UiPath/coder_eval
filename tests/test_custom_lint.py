@@ -1150,7 +1150,8 @@ def _skill_frontmatter(path: Path) -> dict:
 
     text = path.read_text(encoding="utf-8")
     assert text.startswith("---\n"), f"{path} does not open with a YAML frontmatter fence"
-    end = text.index("\n---\n", 3)
+    end = text.find("\n---\n", 3)
+    assert end != -1, f"{path} opens with '---' but never closes the frontmatter fence"
     return yaml.safe_load(text[4:end])
 
 
@@ -1337,9 +1338,18 @@ class TestCE032PluginReferenceParity:
         from tests.lint.plugin_reference import render_criteria
 
         common_section, _, per_criterion = render_criteria().partition("## Criterion types")
-        for field in ("weight", "pass_threshold"):
+        # Match the two forms the render emits a field NAME in — a table row and an
+        # `Optional:` list entry — rather than a bare token, so a criterion whose prose
+        # happens to mention "weight" cannot fail this spuriously.
+        optional_lines = [line for line in per_criterion.splitlines() if line.startswith("Optional: ")]
+        for field in ("weight", "pass_threshold", "suite_thresholds", "stop_early"):
             assert f"`{field}`" in common_section, f"{field} must be documented once, in Common fields"
-            assert f"`{field}`" not in per_criterion, f"{field} is inherited and must not repeat per criterion"
+            assert f"| `{field}` |" not in per_criterion, (
+                f"{field} is inherited and must not be repeated as a per-criterion required field"
+            )
+            assert not any(f"`{field}`" in line for line in optional_lines), (
+                f"{field} is inherited and must not be repeated in a per-criterion Optional list"
+            )
 
     def test_render_is_deterministic(self):
         from tests.lint.plugin_reference import render_criteria
