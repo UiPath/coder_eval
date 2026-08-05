@@ -24,19 +24,24 @@ which is why the install target reads `coder-eval@coder-eval`.
 
 ## Prerequisite
 
-The plugin drives the `coder-eval` CLI; it does not bundle it. Install it once:
+**Installing the plugin does not install the CLI.** A plugin ships skills and
+references, not packages, so the `coder-eval` binary is a separate step:
 
 ```bash
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-`init` and `skill-check` check `coder-eval --version` up front and stop with this
-hint if it is missing; the other CLI-driving skills will simply fail at the point
-they invoke it. Running a suite additionally needs credentials for whichever agent
-the tasks use — `ANTHROPIC_API_KEY` for the default `claude-code` agent.
-`lint-tasks` needs neither the CLI nor credentials to do its own work: it only
-reads files, though the report it produces ends by suggesting you run
-`coder-eval plan` yourself.
+You do not have to do it in advance. `init`, `task` and `skill-check` — the three
+skills that shell out to the CLI — check `coder-eval --version` before doing any
+work and, if it is missing, **offer to install it and ask first**. They never
+install unprompted: that writes outside your repository, so it is your call, and
+they verify the install worked before continuing. `analyze` and `ci` do not invoke
+the CLI, and `lint-tasks` needs neither the CLI nor credentials — it only reads
+files, though the report it produces ends by suggesting you run `coder-eval plan`
+yourself.
+
+Running a suite additionally needs credentials for whichever agent the tasks use —
+`ANTHROPIC_API_KEY` for the default `claude-code` agent.
 
 ## The six skills
 
@@ -154,6 +159,8 @@ directories, so every file a skill reads travels with it under `reference/`:
   writes and `lint-tasks` applies to task files already on disk: could this task pass for
   the wrong reason, does it grade behavior or a self-report, do its fixtures reset and
   clean up.
+- `cli-setup.md` — how the CLI-driving skills handle a missing `coder-eval`
+  binary: offer the install, ask first, verify it worked.
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads.
 - `templates/` — the canonical activation suite `skill-check` copies.
 

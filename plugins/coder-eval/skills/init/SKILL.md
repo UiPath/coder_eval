@@ -14,11 +14,12 @@ The user's request is: `$ARGUMENTS`
 
 ## Step 1 — Check prerequisites
 
-Run `coder-eval --version`. If it is missing, say so and stop:
+Run `coder-eval --version`. Installing this plugin did not install the CLI, and
+every later step needs it.
 
-```bash
-uv tool install coder-eval    # or: pip install coder-eval
-```
+If it is missing, follow `${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md`: offer the
+install, **ask before running it**, and confirm with `coder-eval --version`
+afterwards. Never install unprompted, and do not continue if the user declines.
 
 ## Step 2 — Scan for what is testable
 

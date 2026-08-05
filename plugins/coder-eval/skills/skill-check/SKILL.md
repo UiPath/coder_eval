@@ -58,11 +58,12 @@ score zero recall by construction and tell you nothing you don't already know.
 
 ## Step 2 — Confirm coder-eval is installed
 
-Run `coder-eval --version`. If it is missing, tell the user to install it and stop:
+Run `coder-eval --version`. Installing this plugin did not install the CLI, and the
+suite cannot be validated or run without it.
 
-```bash
-uv tool install coder-eval    # or: pip install coder-eval
-```
+If it is missing, follow `${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md`: offer the
+install, **ask before running it**, and confirm with `coder-eval --version`
+afterwards. Never install unprompted, and do not continue if the user declines.
 
 ## Step 3 — Design the rows
 

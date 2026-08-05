@@ -16,9 +16,9 @@ separately.
 ## Prerequisites
 
 - Claude Code installed and working.
-- The `coder-eval` CLI. The plugin drives it but does not bundle it, and only two
-  of the six skills check for it up front — the rest fail at the moment they call
-  it, so confirm it now:
+- The `coder-eval` CLI. **Installing the plugin does not install it** — a plugin
+  ships skills, not packages. You can let the skills handle it (`init`, `task` and
+  `skill-check` check for it and offer to install it, asking first), or do it now:
 
     ```bash
     uv tool install coder-eval    # or: pip install coder-eval
@@ -155,7 +155,7 @@ covers telling them apart with `/doctor` and `/context`.
 | Symptom | Cause |
 | --- | --- |
 | No `/coder-eval:` commands after installing | Check `/plugin`; re-run the install |
-| A skill stops with an install hint, or Bash reports `command not found` | The CLI isn't on `PATH` — `uv tool install coder-eval` |
+| A skill offers to install the CLI, or Bash reports `command not found` | The CLI isn't installed or isn't on `PATH` — accept the offer, or install it yourself |
 | `coder-eval run` matches nothing | Wrong directory — use the path `init` reported in step 2 |
 | Every positive row in step 5 scores 0 | `SKILL_SOURCE_PATH` is unset, so the skill was never offered |
 

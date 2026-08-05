@@ -17,11 +17,11 @@ agent work out the approach. A single request can produce **several** task files
 
 Run `coder-eval --version` first. Steps 6 and 7 both shell out to it, and finding that out
 *after* writing several task files means the user gets a bare `command not found` with
-nothing to act on. If it is missing, say so and stop:
+nothing to act on. Installing this plugin did not install the CLI.
 
-```bash
-uv tool install coder-eval    # or: pip install coder-eval
-```
+If it is missing, follow `${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md`: offer the install,
+**ask before running it**, and confirm with `coder-eval --version` afterwards. Never install
+unprompted, and do not write any task files if the user declines.
 
 Then establish:
 

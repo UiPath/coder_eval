@@ -1582,6 +1582,32 @@ class TestPluginArtifacts:
             "(````markdown around ```diff). Everything after the opener renders as code."
         )
 
+    def test_cli_setup_is_bundled_and_read_by_the_cli_driving_skills(self):
+        # Installing the plugin does not install the CLI, so every CLI-driving skill has to
+        # handle a missing binary. The POLICY for that (offer, ask, verify, never install
+        # unprompted) is declared once in reference/cli-setup.md; each skill keeps only the
+        # one-line check locally. Both halves are asserted: the reference ships, and every
+        # skill that needs it points at it.
+        setup = PLUGIN_ROOT / "reference" / "cli-setup.md"
+        assert setup.exists() and setup.read_text(encoding="utf-8").strip(), (
+            f"{setup} must exist and be non-empty — the CLI-driving skills read it at runtime"
+        )
+        pointer = "${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md"
+        for name in sorted(SKILLS_REQUIRING_THE_CLI):
+            text = (PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+            assert pointer in text, (
+                f"{name} shells out to the CLI but no longer points at {pointer} — it has "
+                "forked the install policy, or dropped it"
+            )
+        # The policy is a shared declaration, so a skill must not restate the install
+        # command: two copies drift, and the wrong installer is a real footgun.
+        for name in sorted(SKILLS_REQUIRING_THE_CLI):
+            text = (PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+            assert "uv tool install" not in text and "pip install" not in text, (
+                f"{name} restates the install command that reference/cli-setup.md declares — "
+                "point at the reference instead"
+            )
+
     def test_task_rubric_is_bundled_and_read_by_its_readers(self):
         # Both directions of the shared-SSOT decision: the rubric ships, and every skill
         # that is supposed to apply it actually points at it.
