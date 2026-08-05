@@ -1,8 +1,8 @@
 ---
 description: >-
-  Install the Coder Eval plugin for Claude Code — five slash commands to scaffold,
-  author, run and analyze evaluation suites, including an activation suite that
-  measures whether your own Claude Code skills actually trigger.
+  Install the Coder Eval plugin for Claude Code — six slash commands to scaffold,
+  author, review, run and analyze evaluation suites, including an activation suite
+  that measures whether your own Claude Code skills actually trigger.
 ---
 
 # Claude Code plugin
@@ -30,24 +30,34 @@ The plugin drives the `coder-eval` CLI; it does not bundle it. Install it once:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-Every skill checks `coder-eval --version` before doing anything and stops with
-this hint if it is missing. Running a suite additionally needs credentials for
-whichever agent the tasks use — `ANTHROPIC_API_KEY` for the default
-`claude-code` agent.
+Any skill that drives the CLI checks `coder-eval --version` before doing anything
+and stops with this hint if it is missing. Running a suite additionally needs
+credentials for whichever agent the tasks use — `ANTHROPIC_API_KEY` for the
+default `claude-code` agent. `lint-tasks` is the exception on both counts: it only
+reads files, so it needs neither the CLI nor credentials.
 
-## The five skills
+## The six skills
 
 | Command | What it does |
 | --- | --- |
 | `/coder-eval:init` | Scans the repository for what is worth evaluating (Claude Code skills, an MCP server, a CLI), reports the findings, then scaffolds a task directory with one real task. |
 | `/coder-eval:skill-check` | Builds and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
 | `/coder-eval:task` | Turns a natural-language description into task YAML with criteria that check output *content*, validated through `coder-eval plan`. |
+| `/coder-eval:lint-tasks` | Reviews task YAML that already exists and reports, per task, criteria that cannot fail, prompts that leak the answer, fixtures with no cleanup and near-duplicates — each with a severity and a fix. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and writes `analysis.md`: systemic failure patterns, per-task findings, and concrete fixes. |
 | `/coder-eval:ci` | Emits a GitHub Actions workflow that runs the suite as a gate, or on a schedule to catch skill drift. |
 
 `init` and `ci` are explicit-invocation only — scaffolding a directory or writing
-a workflow is never something to do unprompted. The other three can also be
+a workflow is never something to do unprompted. The other four can also be
 reached by the agent on its own when a request clearly calls for them.
+
+`task` and `lint-tasks` are two halves of the same concern and share one bundled
+rubric: `task` applies it to work it is writing, `lint-tasks` applies it to files
+you already have. Authoring needs `Write`; a review pass must not, and tool policy
+is declared per skill rather than per invocation — which is why these are two
+skills rather than one with a review mode. `lint-tasks` both narrows its
+`allowed-tools` to reading and names every write tool in `disallowed-tools`, and
+its own instructions prohibit modifying a file at all.
 
 ## Worked example: does my skill actually trigger?
 

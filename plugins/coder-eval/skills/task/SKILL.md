@@ -134,8 +134,8 @@ choices, the second catches what you actually typed.
 
 Answer the rubric's framing question **in writing** — *what is the cheapest thing an agent
 could do that scores full marks?* — and if that cheapest path does not resemble the work
-the task claims to test, fix the criteria before going further. Work the rubric's six
-mechanical checks, and section 5 as well whenever the task touches state outside the
+the task claims to test, fix the criteria before going further. Work every section of the
+rubric, including its fixture-lifecycle section whenever the task touches state outside the
 sandbox.
 
 Fix what you find here rather than reporting it. Note which checks you applied; step 7 asks

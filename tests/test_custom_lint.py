@@ -1135,18 +1135,34 @@ PLUGIN_TEXT_FILES = sorted(
 
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
 # dead weight; a reader that stops reading it has silently forked the rubric.
-RUBRIC_READERS = {"task"}
+RUBRIC_READERS = {"task", "lint-tasks"}
 
 # Which skills are explicit-invocation only. Scaffolding a directory (`init`) or
-# writing a CI workflow (`ci`) is never something to do unprompted; the other three
-# are safe for the agent to reach for on its own.
+# writing a CI workflow (`ci`) is never something to do unprompted; the rest are
+# safe for the agent to reach for on its own.
 SKILL_DISABLE_MODEL_INVOCATION = {
     "analyze": False,
     "ci": True,
     "init": True,
+    "lint-tasks": False,
     "skill-check": False,
     "task": False,
 }
+
+# The surfaces that must name every shipped skill, so a new one cannot ship
+# undocumented. Adding a surface is one edit here.
+SKILL_DOC_SURFACES = ("plugins/coder-eval/README.md", "docs/PLUGIN.md", "README.md", "CLAUDE.md")
+
+# Claude Code loads a listing of every skill's name and description into context.
+# The listing's character budget scales at ~1% of the model's context window and is
+# SHARED with every other skill the user has installed; when it overflows,
+# descriptions are dropped starting with the least-invoked skills. So a plugin that
+# grows its descriptions without bound quietly evicts the user's own skills. This
+# ceiling makes growth a reviewed decision: raising it is allowed, in a commit that
+# says why — which is exactly what a silent drift would not be. Asserted on the SUM,
+# not per skill: the longest single description is ~300 against a 1,536 per-entry
+# truncation limit, so a per-skill cap would guard nothing.
+SKILL_LISTING_BUDGET_CHARS = 1_600
 
 # Tokens that name THIS repository's files. An installed plugin is copied to
 # ~/.claude/plugins/cache/ without its parent directories, so any of these in a
@@ -1245,12 +1261,18 @@ class TestPluginArtifacts:
     def test_skill_md_frontmatter_is_valid(self, skill: Path):
         # `claude plugin validate --strict` does NOT check skill frontmatter, so this
         # test is the only guard against a typo'd key silently disabling a skill.
-        supported = {"description", "disable-model-invocation", "allowed-tools"}
+        # This set is the PLUGIN's house style, not the specification's limit — the spec
+        # defines many more keys (`model`, `effort`, `context`, `agent`, `hooks`, …).
+        # Keeping it narrow is deliberate: an unexplained `context: fork` or `model:` on a
+        # shipped skill is exactly what should surface for review rather than pass silently.
+        supported = {"description", "when_to_use", "disable-model-invocation", "allowed-tools", "disallowed-tools"}
         meta = _skill_frontmatter(skill)
 
         unknown = set(meta) - supported
         assert not unknown, (
-            f"{skill}: unsupported frontmatter key(s) {sorted(unknown)} (the plugin spec allows {sorted(supported)})"
+            f"{skill}: frontmatter key(s) {sorted(unknown)} are outside the set this plugin "
+            f"deliberately restricts itself to ({sorted(supported)}). If one is genuinely needed, "
+            "add it here with a reason rather than working around it."
         )
         assert isinstance(meta.get("description"), str) and meta["description"].strip(), (
             f"{skill}: `description` must be a non-empty string — it is what the model matches on"
@@ -1312,6 +1334,113 @@ class TestPluginArtifacts:
             f"{skill} names this repository's path(s) {offenders} — an installed plugin is copied "
             "without its parent directories, so they do not exist at runtime. Bundle what the skill "
             "needs under plugins/coder-eval/ and address it via ${CLAUDE_PLUGIN_ROOT}."
+        )
+
+    def test_lint_tasks_skill_is_read_only(self):
+        # Assert BOTH keys, because neither alone carries the contract and their exact
+        # runtime semantics are the host's, not ours: `allowed-tools` names the tools this
+        # skill expects to use, `disallowed-tools` names the write tools that must not be
+        # reachable. Assert only the allowlist and a denylist regression passes; assert only
+        # the denylist and a widened allowlist (say `Bash`) passes. The skill body's standing
+        # "never modify a file" rule is the guarantee of last resort — these two keys are
+        # what keep the frontmatter honest about it.
+        meta = _skill_frontmatter(PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md")
+
+        # `and allowed` first: an ABSENT allowed-tools is the weakest state, not the
+        # strongest, and an empty set would satisfy the subset check vacuously.
+        allowed = set(meta.get("allowed-tools") or [])
+        assert allowed and allowed <= {"Read", "Glob", "Grep"}, (
+            f"lint-tasks pre-approves {sorted(allowed - {'Read', 'Glob', 'Grep'})} — an allowlist, "
+            "not a denylist, so anything beyond reading breaks the advisory contract"
+        )
+        assert {"Write", "Edit", "NotebookEdit"} <= set(meta.get("disallowed-tools") or []), (
+            "lint-tasks must name every write tool in `disallowed-tools` — that is the half "
+            "that actually removes them from the pool"
+        )
+
+    def test_lint_tasks_does_not_flag_the_shipped_activation_template(self):
+        # A prose sensor, guarding against deletion rather than judging quality — but it
+        # covers the one interaction where two shipped skills could contradict each other:
+        # the activation suite `skill-check` writes is exactly the shape a naive coverage
+        # pass reads as "one criterion, no content check" and flags. The worked example is
+        # in the repo (reference/templates/activation.yaml), so the carve-out cannot be
+        # written vaguely: it must be structural, since the file may be renamed.
+        import yaml
+
+        text = (PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md").read_text(encoding="utf-8")
+        for token in ("dataset:", "skill_triggered", "classification_match", "suite_thresholds"):
+            assert token in text, (
+                f"lint-tasks must name {token!r} in its activation-suite carve-out — without the "
+                "structural detection it will flag the suites skill-check generates as broken"
+            )
+        assert "do not apply" in text, (
+            "lint-tasks names the carve-out's conditions but no longer EXEMPTS anything — an "
+            "inverted carve-out would keep every token above and still flag activation suites"
+        )
+        # The conditions must still describe the template skill-check actually copies, or the
+        # carve-out has quietly stopped covering the one file it exists for.
+        template = yaml.safe_load((self.TEMPLATES / "activation.yaml").read_text(encoding="utf-8"))
+        assert template.get("dataset"), "the shipped activation template lost its `dataset:` block"
+        types = {c.get("type") for c in template["success_criteria"]}
+        assert types & {"skill_triggered", "classification_match"}, (
+            f"the shipped activation template's criteria are {sorted(types)} — no longer "
+            "classification-style, so lint-tasks' structural carve-out would not match it"
+        )
+        assert any(c.get("suite_thresholds") for c in template["success_criteria"]), (
+            "the shipped activation template lost `suite_thresholds` — the carve-out's third "
+            "condition no longer holds, so lint-tasks would flag the suite skill-check writes"
+        )
+
+    def test_skill_listing_budget_is_bounded(self):
+        # See SKILL_LISTING_BUDGET_CHARS for why a plugin should self-limit here.
+        # Filesystem-derived: no hardcoded skill names, no per-skill numbers.
+        per_skill: dict[str, int] = {}
+        for path in PLUGIN_SKILLS:
+            meta = _skill_frontmatter(path)
+            per_skill[path.parent.name] = len(meta.get("description") or "") + len(meta.get("when_to_use") or "")
+        total = sum(per_skill.values())
+        assert total <= SKILL_LISTING_BUDGET_CHARS, (
+            f"the plugin's skill descriptions total {total} characters, over the "
+            f"{SKILL_LISTING_BUDGET_CHARS} ceiling (per skill: {sorted(per_skill.items())}). Prefer "
+            "trimming an existing description; the listing budget is shared with every skill the "
+            "user has installed. Raising the ceiling is allowed in a commit that says why."
+        )
+
+    @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
+    def test_skill_docs_surfaces_list_every_skill(self, skill: Path):
+        # What stops the next skill from shipping undocumented. CLAUDE.md was normalized to
+        # the slash form when the sixth skill landed, so one form is accepted everywhere.
+        name = f"/coder-eval:{skill.parent.name}"
+        missing = [
+            surface
+            for surface in SKILL_DOC_SURFACES
+            if name not in (self.REPO_ROOT / surface).read_text(encoding="utf-8")
+        ]
+        assert not missing, f"{name} is not documented in {missing} — a shipped skill nobody can discover"
+
+    def test_skill_docs_surfaces_state_the_right_count(self):
+        # The companion to the test above, which only checks that each NAME appears. These
+        # surfaces also state the count in prose ("six slash commands", "## The six skills",
+        # "x 6"), and adding the sixth skill meant hand-editing eight such sites across four
+        # files. Without this, a seventh ships with every count silently wrong — the exact
+        # drift that repair was. Derived from disk: no count is written down here.
+        words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+        count = len(PLUGIN_SKILLS)
+        assert count in words, f"{count} skills — extend `words` to cover the new count"
+        stale = sorted(set(words.values()) - {words[count]})
+
+        offenders: list[str] = []
+        for surface in SKILL_DOC_SURFACES:
+            text = (self.REPO_ROOT / surface).read_text(encoding="utf-8")
+            offenders += [
+                f"{surface}: '{word} {noun}'"
+                for word in stale
+                for noun in ("skills", "slash commands")
+                if f"{word} {noun}" in text
+            ]
+        assert not offenders, (
+            f"there are {count} shipped skills, but these surfaces still state another count: "
+            f"{offenders}. Update the prose alongside the table."
         )
 
     def test_task_rubric_is_bundled_and_read_by_its_readers(self):

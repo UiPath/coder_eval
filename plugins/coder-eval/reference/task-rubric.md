@@ -8,6 +8,32 @@ file's.
 A task is an instrument. These checks ask whether the instrument measures what its
 description claims, or whether it measures nothing and reports a number anyway.
 
+## 0. First: what is this task's subject?
+
+Nearly every check below assumes the task measures **an agent's capability**. Some tasks
+deliberately do not — they exercise the evaluation framework itself: that a dataset expands,
+that a budget cap trips, that a template lands in the sandbox, that a judge is wired up. For
+those, several checks below turn into false alarms. Establish the subject before applying them.
+
+Signals that a task's subject is the framework rather than an agent: `agent: {type: none}`; a
+`smoke`-style tag; a criterion whose satisfaction is produced by `pre_run`, by the container
+image, or by `template_sources`; or a description that names a framework mechanism instead of
+a capability.
+
+For those tasks:
+
+- **Check 3 does not apply.** Reading back what the setup wrote *is* the measurement — a
+  criterion satisfiable by "inaction" is the correct design, not a no-op detector.
+- **A prompt that names the exact string a criterion greps for is correct**, not the
+  can't-fail trap. Proving substitution or redirection works requires a known string on both
+  ends.
+- **§3's "the judge must not be the only signal" does not apply** when the judge is the thing
+  under test. Its variance warning still does.
+
+Everything else still applies, and one extra check applies only here: **does the mechanism
+this task claims to exercise still exist?** A fixture whose feature was removed fails forever
+while appearing to test something.
+
 ## 1. Could this pass for the wrong reason?
 
 The framing question, asked before anything else:
@@ -15,16 +41,17 @@ The framing question, asked before anything else:
 > **What is the cheapest thing an agent could do that scores full marks?**
 
 Answer it out loud. If the cheapest path does not resemble the work the task claims to
-test, the criteria are wrong — not the agent. Then walk the six mechanical checks:
+test, the criteria are wrong — not the agent. Then walk the mechanical checks:
 
 | # | Check | Fix |
 |---|---|---|
 | 1 | Does a `command_executed` criterion credit an invocation that **failed**? | Set `require_success: true` whenever the command's success is what is being graded. The default is `false`, which counts a crashed invocation as evidence the work was done. |
 | 2 | Does the pattern also match a help probe, or a longer word that contains it? | Add `exclude_pattern` and word boundaries. Cover **both** `--help` and `-h`; an agent that runs `tool --help` and gives up otherwise satisfies a bare `tool` pattern. |
-| 3 | Would an agent that does **nothing** pass? | Total the `weight` of every criterion satisfiable by inaction — `min_count: 0`, a `max_count: 0` negative, a `file_exists` on a file the setup already created. If that total alone clears `pass_threshold`, the task is a no-op detector. |
+| 3 | Would an agent that does **nothing** pass? | List the criteria satisfiable by inaction — `min_count: 0`, a `max_count: 0` negative, a `file_exists` on a file the setup already created. A task passes only when **every** scoring criterion (`weight` above 0) meets its own `pass_threshold`, so if inaction satisfies all of them the task is a no-op detector. If it satisfies only some, total their `weight` against the task's: that share is how much of the score is free. |
 | 4 | Does a regex alternation launder the assertion? | An alternation branch that makes the payload opaque — matching an indirection flag such as `--from-file` instead of the content that flag points at — proves nothing. Keep the shape criterion on the shape-visible form and add a companion check on the payload itself. |
 | 5 | Does `min_count` express a *count* where the description promises distinct *content*? | Assert the distinct content. Three calls to the same endpoint satisfy `min_count: 3` and demonstrate none of the coverage the description claims. |
 | 6 | Is the end state reachable without the system under test? | Ask whether local file manipulation alone could satisfy every criterion. If an agent could hand-write the expected output instead of calling the tool, the tool is not being tested. |
+| 7 | Does a criterion match a literal the **prompt already dictates**? | Then it cannot fail — the agent was told the answer, and you are grading transcription. Either the literal is a real requirement (keep it in the prompt and score what the agent *did with it*) or it is the thing under test (drop it from the prompt). Never both. See section 0 first: for a framework-plumbing task a dictated literal is the correct design. |
 
 *Seen in the wild:* every one of these has shipped in a real suite and passed review.
 Check 1 is the most common by a wide margin — the field defaults to the permissive value,
