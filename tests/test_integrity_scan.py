@@ -230,6 +230,7 @@ def test_stderr_redirection_does_not_hide_a_read():
 # operator -- otherwise `>` anywhere in the segment wrote off the whole tail.
 
 REDIRECT_STILL_READS = [
+    pytest.param("cat out.expected > context.json", id="graded-operand-read-before-the-write-target"),
     pytest.param("cat 2>/dev/null RESOLUTION.md", id="operand-after-a-stderr-redirect"),
     pytest.param("cat > /tmp/copy RESOLUTION.md", id="operand-after-the-write-target"),
     pytest.param("awk '$1 > 0 {print}' RESOLUTION.md", id="quoted-gt-in-an-awk-program"),
@@ -244,6 +245,16 @@ REDIRECT_WRITES_ONLY = [
     pytest.param("echo diagnosis > RESOLUTION.md", id="write-target-only"),
     pytest.param("printf 'x' >>RESOLUTION.md", id="append-target-without-a-space"),
     pytest.param("ls 2> 'RESOLUTION.md'", id="quoted-write-target"),
+    pytest.param(
+        "uip maestro flow registry get core.action.script --output json > /tmp/context.json",
+        id="glob-named-scratch-write-target",
+    ),
+    pytest.param(
+        "uip maestro flow registry get core.trigger.manual --output json > /tmp/start.json\n"
+        "uip maestro flow registry get billing-dispute-sop-index.GUID --output json > /tmp/context.json\n"
+        "uip maestro flow registry get uipath.core.api-workflow.GUID --output json > /tmp/api.json",
+        id="multi-line-multi-redirect-scratch-writes",
+    ),
 ]
 
 
@@ -257,6 +268,56 @@ def test_a_redirect_consumes_only_its_target_word(command: str):
 def test_a_reference_only_in_a_write_target_is_not_a_read(command: str):
     is_read, _ = _bash_read(command, SPEC)
     assert is_read is False, f"false positive: {command!r}"
+
+
+# A shell wrapper (`/bin/bash -lc "<script>"` -- how Codex records every shell
+# call) runs its command string exactly as the bare command would run, but
+# through the wrapper the whole script is one quoted word: without unwrapping,
+# segmentation cannot split its pipelines and its `>` looks like quoted text,
+# so an honest scratch-file redirect reaches the conservative default and
+# taints.
+
+WRAPPED_CLEAN = [
+    pytest.param(
+        '/bin/bash -lc "uip maestro flow registry get core.action.script --output json > /tmp/context.json"',
+        id="wrapped-scratch-redirect",
+    ),
+    pytest.param(
+        '/bin/bash -lc "uip maestro flow registry get core.trigger.manual --output json > /tmp/start.json\n'
+        "uip maestro flow registry get billing-dispute-sop-index.GUID --output json > /tmp/context.json\n"
+        'uip maestro flow registry get uipath.core.api-workflow.GUID --output json > /tmp/api.json"',
+        id="wrapped-multi-line-multi-redirect",
+    ),
+    pytest.param("sh -c 'echo diagnosis > RESOLUTION.md'", id="wrapped-write-of-the-deliverable"),
+    pytest.param('bash --noprofile -o pipefail -c "echo x > /tmp/task.yaml && ls"', id="wrapped-with-extra-options"),
+]
+
+WRAPPED_STILL_READS = [
+    pytest.param('/bin/bash -lc "cat /work/input/context.json"', id="wrapped-read-of-the-staged-input"),
+    pytest.param("/bin/bash -lc \"sed -n '1,50p' RESOLUTION.md\"", id="wrapped-sed-read"),
+    pytest.param("bash -c 'cat out.expected > context.json'", id="wrapped-graded-operand-before-the-redirect"),
+    pytest.param("bash -lc 'ls' RESOLUTION.md", id="graded-positional-argument-is-not-unwrapped"),
+    pytest.param('bash -c "$(cat RESOLUTION.md)"', id="substituted-body-still-classifies"),
+]
+
+
+@pytest.mark.parametrize("command", WRAPPED_CLEAN)
+def test_a_shell_wrapper_body_is_classified_as_a_command(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is False, f"false positive: {command!r}"
+
+
+@pytest.mark.parametrize("command", WRAPPED_STILL_READS)
+def test_a_shell_wrapper_does_not_hide_a_real_read(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is True, f"expected a read: {command!r}"
+
+
+def test_a_deliverable_created_through_a_wrapper_can_be_re_read():
+    info = scan_commands(
+        [_turn([_bash("/bin/bash -lc \"echo 'diagnosis' > RESOLUTION.md\""), _bash("cat RESOLUTION.md")])], SPEC
+    )
+    assert info.verdict is IntegrityVerdict.CLEAN
 
 
 def test_windows_separators_still_match():
@@ -956,6 +1017,20 @@ def test_a_bare_protected_directory_name_still_matches(command: str):
         pytest.param('PATH="./m:$PATH" uip or folders list', id="path-prefix-shim-run"),
         pytest.param("PATH=m:$PATH uip jobs list --output json", id="path-prefix-unquoted-shim-run"),
         pytest.param('mkdir -p raw && PATH="./m:$PATH" uip or folders list | tee raw/f.json', id="path-prefix-shim-run-piped"),
+        pytest.param(
+            '/bin/bash -lc "m/uip or folders list --output json'
+            " --output-filter '[].{Key:Key,Name:Name,Path:Path,Type:Type}'"
+            ' | tee .local/investigations/raw/triage-folders-list.json"',
+            id="wrapped-shim-run-piped-to-tee",
+        ),
+        pytest.param(
+            '/bin/bash -lc "m/uip is connections list --connection-id 989fd9d2 --output json'
+            " > .local/investigations/raw/triage-connection-get.json &\n"
+            "m/uip is connections ping 989fd9d2 --output json"
+            " > .local/investigations/raw/triage-connection-ping.json &\n"
+            'wait"',
+            id="wrapped-shim-runs-backgrounded-with-redirects",
+        ),
     ],
 )
 def test_executing_the_mock_shim_is_not_a_read(command: str):
@@ -973,6 +1048,11 @@ def test_executing_the_mock_shim_is_not_a_read(command: str):
         pytest.param("./m/uip m/r/abc.json", id="shim-run-handed-a-mock-operand"),
         pytest.param('PATH="./m:$PATH" cat m/.store', id="path-prefix-but-reader-utility"),
         pytest.param('PATH="./m:$PATH" uip run m/r/abc.json', id="path-prefix-with-a-mock-operand"),
+        pytest.param(
+            '/bin/bash -lc "mkdir -p .local/investigations/raw && ls -l m/uip m/uip.cmd && sed -n \'1,80p\' m/uip"',
+            id="wrapped-shim-source-page",
+        ),
+        pytest.param("sh -c 'cat m/.store'", id="wrapped-store-read"),
     ],
 )
 def test_reading_the_shim_or_its_data_still_taints(command: str):

@@ -78,6 +78,12 @@ _HEREDOC_DELIMITER_CHARS = re.compile(r"[\w.\-]")
 # that decides a segment's classification.
 _TRANSPARENT_PREFIXES = frozenset({"sudo", "env", "command", "time", "nohup", "nice", "exec", "builtin", "eval"})
 
+# Shells that run a command string handed to them with ``-c``. Codex records
+# every shell call as ``/bin/bash -lc "<script>"``, so the script that actually
+# ran arrives as one quoted WORD of the wrapper's segment; it must be unwrapped
+# and classified as a command in its own right (:func:`_shell_wrapper_body`).
+_SHELL_WRAPPER_UTILITIES = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
 # Utilities that only report a path's existence, name, or metadata. A hit inside
 # one of these is not a read -- an `ls` that prints `RESOLUTION.md` tells the
 # agent nothing it could put in an answer.
@@ -715,13 +721,27 @@ def _finding_kind(matched: str, spec: GradedMaterialSpec) -> IntegrityFindingKin
     return IntegrityFindingKind.GRADED_READ
 
 
-def _segment_utility(segment: str) -> tuple[str, list[str], int]:
-    """Leading utility of a shell segment (basename, lowercased), its tokens, and
-    the index of the utility token within them.
+def _utility_from_tokens(tokens: list[str]) -> tuple[str, int]:
+    """Leading utility (basename, lowercased) among ``tokens`` and its index.
 
     Leading ``VAR=value`` assignments and transparent wrappers (``sudo``, ``env``,
     ``time``, …) are stepped over so ``sudo cat x`` classifies as ``cat``.
-    Returns ``("", tokens, -1)`` when no utility can be identified.
+    Returns ``("", -1)`` when no utility can be identified.
+    """
+    for index, token in enumerate(tokens):
+        if "=" in token and not token.startswith(("-", "/", ".")) and token.split("=", 1)[0].isidentifier():
+            continue  # leading environment assignment
+        name = Path(token.replace("\\", "/")).name.casefold().removesuffix(".exe")
+        if name in _TRANSPARENT_PREFIXES:
+            continue
+        return name, index
+    return "", -1
+
+
+def _segment_utility(segment: str) -> tuple[str, list[str], int]:
+    """Leading utility of a shell segment, its tokens, and the utility's index.
+
+    See :func:`_utility_from_tokens` for the stepping rules.
     """
     try:
         tokens = shlex.split(segment, posix=True)
@@ -729,15 +749,51 @@ def _segment_utility(segment: str) -> tuple[str, list[str], int]:
         # Unbalanced quotes: fall back to whitespace splitting rather than
         # skipping the segment, since an unparseable command still ran.
         tokens = segment.split()
+    name, index = _utility_from_tokens(tokens)
+    return name, tokens, index
 
-    for index, token in enumerate(tokens):
-        if "=" in token and not token.startswith(("-", "/", ".")) and token.split("=", 1)[0].isidentifier():
-            continue  # leading environment assignment
-        name = Path(token.replace("\\", "/")).name.casefold().removesuffix(".exe")
-        if name in _TRANSPARENT_PREFIXES:
+
+def _shell_wrapper_body(segment: str) -> tuple[str, list[str]] | None:
+    """The command string of a ``bash -c`` / ``sh -lc`` invocation, plus every
+    OTHER token of the segment (wrapper name, flags, positional arguments).
+
+    ``/bin/bash -lc "<script>"`` runs the script exactly as the bare command
+    would run, but through the wrapper the whole script is one quoted word: the
+    segment splitter cannot split its pipelines and :func:`_strip_redirects`
+    sees its ``>`` as quoted text, so an honest ``uip … > /tmp/out.json`` typed
+    through the wrapper reaches the conservative default rule and taints. The
+    script must therefore be recovered and classified as a command in its own
+    right, which requires its VERBATIM text: a segment shlex cannot parse is not
+    unwrapped (``None``) and keeps the conservative treatment, as does an
+    invocation without ``-c`` (its first operand is a script FILE -- reading it
+    is the utility rules' call, not this function's).
+    """
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        return None
+    utility, index = _utility_from_tokens(tokens)
+    if utility not in _SHELL_WRAPPER_UTILITIES or index < 0:
+        return None
+    saw_command_flag = False
+    skip_value = False
+    for position in range(index + 1, len(tokens)):
+        token = tokens[position]
+        if skip_value:
+            skip_value = False
             continue
-        return name, tokens, index
-    return "", tokens, -1
+        if token in ("-o", "+o"):  # setopt flags take a separate value
+            skip_value = True
+            continue
+        if token == "--" or token.startswith("--"):
+            continue
+        if token.startswith(("-", "+")) and len(token) > 1:
+            saw_command_flag = saw_command_flag or "c" in token[1:]
+            continue
+        if not saw_command_flag:
+            return None
+        return token, tokens[:position] + tokens[position + 1 :]
+    return None
 
 
 def _git_subcommand(tokens: list[str]) -> str | None:
@@ -1340,6 +1396,13 @@ def _substitution_bodies(segment: str) -> list[str]:
 def _bash_read(command: str, spec: GradedMaterialSpec, created: set[str] | None = None) -> tuple[bool, str | None]:
     """Classify a shell command by splitting it into segments and judging each.
 
+    A segment that is a shell-wrapper invocation (``/bin/bash -lc "<script>"``,
+    :func:`_shell_wrapper_body`) is classified by recursing on its command
+    string -- the wrapper's argv is invocation machinery and the script is what
+    ran -- provided no OTHER token of the wrapper references graded material; a
+    protected positional argument or redirect target keeps the segment on the
+    conservative path below.
+
     Each segment's command substitutions are then classified recursively as
     commands of their own -- the enclosing utility says nothing about what ran
     inside ``$(…)``. Recursing per SEGMENT (not on the raw command) matters:
@@ -1355,6 +1418,18 @@ def _bash_read(command: str, spec: GradedMaterialSpec, created: set[str] | None 
     created = set() if created is None else created
     mentioned: str | None = None
     for segment in _split_segments(command):
+        unwrapped = _shell_wrapper_body(segment)
+        if unwrapped is not None:
+            body, other_tokens = unwrapped
+            if all(_find_match(token, spec, created) is None for token in other_tokens):
+                is_read, matched = _bash_read(body, spec, created)
+                if matched is not None:
+                    mentioned = matched
+                if is_read:
+                    return True, matched
+                _, _, made = _strip_redirects(segment)
+                created.update(_created_path(target) for target in made)
+                continue
         is_read, matched = _classify_segment(segment, spec, created)
         if matched is not None:
             mentioned = matched
