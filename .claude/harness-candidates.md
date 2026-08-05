@@ -206,3 +206,20 @@ harness once for all of them.
   preceding `&&`/`||`, NOT on the string's shape — a "contains 'ubuntu'" heuristic
   silently fails on `uipath-ubunut-latest`, the exact transposition typo the rule is
   for. Caught in the multi-model review of PR #86.
+
+## From the 2026-08-04 Claude Code plugin marketplace run
+
+- [ ] **Plugin skills must not name a file that exists only in THIS repo** — the
+  `test_skills_reference_no_repo_paths` denylist (`docs/`, `src/`,
+  `.claude/shared/`, `.claude/commands/`, `uv run`, `../`) deliberately allows
+  `tasks/` and `.claude/skills/`, because those are user-workspace paths the
+  skills legitimately scan and scaffold. So a skill body naming a specific repo
+  file (e.g. `tasks/hello_date.yaml`) would slip past the guard even though an
+  installed plugin is copied to `~/.claude/plugins/cache/` without it. The
+  obvious rule — "extract path-shaped tokens, fail if the path exists at the repo
+  root" — is NOT cheap: `init` legitimately tells users to scan `pyproject.toml`
+  and `package.json`, and `pyproject.toml` exists here, so the heuristic
+  false-positives on correct prose. Needs a token classifier that distinguishes
+  "a file to look for in the user's repo" from "a file in ours", which is a
+  design problem, not a 30-minute one. No skill violates it today (grepped) —
+  caught in the 2026-08-04 claude-code-plugin-marketplace implementation run.
