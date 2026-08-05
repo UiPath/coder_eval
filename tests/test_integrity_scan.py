@@ -377,6 +377,34 @@ INERT_TEXT_STILL_READS = [
     pytest.param("cat > x <<EOF\n$(cat RESOLUTION.md)\nEOF", id="unquoted-heredoc-body-expands"),
 ]
 
+# Command substitutions EXECUTE: the enclosing utility's semantics do not apply
+# to what runs inside $(...) or backticks.
+
+SUBSTITUTION_READS = [
+    pytest.param("printf '%s\\n' \"$(cat RESOLUTION.md)\"", id="dollar-paren-inside-double-quotes"),
+    pytest.param("echo $(cat RESOLUTION.md)", id="bare-dollar-paren"),
+    pytest.param("echo `cat RESOLUTION.md`", id="backticks"),
+    pytest.param("echo \"$(head -1 $(dirname x)/RESOLUTION.md)\"", id="nested-substitution"),
+    pytest.param("VAR=$(cat RESOLUTION.md)", id="assignment-substitution"),
+]
+
+SUBSTITUTION_INERT = [
+    pytest.param("printf '%s\\n' '$(cat RESOLUTION.md)'", id="single-quotes-suppress-expansion"),
+    pytest.param("echo \"$(hostname) built for task.yaml\"", id="harmless-substitution-beside-a-mention"),
+]
+
+
+@pytest.mark.parametrize("command", SUBSTITUTION_READS)
+def test_a_command_substitution_is_classified_as_a_command(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is True, f"expected a read: {command!r}"
+
+
+@pytest.mark.parametrize("command", SUBSTITUTION_INERT)
+def test_an_inert_substitution_is_not_a_read(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is False, f"false positive: {command!r}"
+
 
 @pytest.mark.parametrize("command", INERT_TEXT_CLEAN)
 def test_inert_shell_text_is_not_a_command(command: str):

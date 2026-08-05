@@ -1269,8 +1269,69 @@ def _split_segments(command: str) -> list[str]:
     return segments
 
 
+def _substitution_bodies(segment: str) -> list[str]:
+    """The text inside a segment's command substitutions: ``$(…)`` and backticks.
+
+    That text EXECUTES -- ``printf '%s\\n' "$(cat KEY)"`` runs the ``cat`` even
+    though the enclosing utility is a harmless ``printf`` -- so each body must be
+    classified as a command in its own right. Single-quoted text is inert and
+    skipped; double quotes do not stop expansion, so ``"$(…)"`` is collected.
+    """
+    bodies: list[str] = []
+    in_single = False
+    i = 0
+    n = len(segment)
+    while i < n:
+        c = segment[i]
+        if c == "'":
+            in_single = not in_single
+            i += 1
+            continue
+        if in_single:
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if segment[i : i + 2] == "$(":
+            depth = 1
+            sub_single = False
+            j = i + 2
+            while j < n and depth:
+                ch = segment[j]
+                if ch == "\\" and not sub_single and j + 1 < n:
+                    j += 2
+                    continue
+                if ch == "'":
+                    sub_single = not sub_single
+                elif not sub_single and ch == "(":
+                    depth += 1
+                elif not sub_single and ch == ")":
+                    depth -= 1
+                j += 1
+            bodies.append(segment[i + 2 : j - 1 if depth == 0 else j])
+            i = j
+            continue
+        if c == "`":
+            end = segment.find("`", i + 1)
+            if end == -1:
+                i += 1
+                continue
+            bodies.append(segment[i + 1 : end])
+            i = end + 1
+            continue
+        i += 1
+    return bodies
+
+
 def _bash_read(command: str, spec: GradedMaterialSpec, created: set[str] | None = None) -> tuple[bool, str | None]:
     """Classify a shell command by splitting it into segments and judging each.
+
+    Each segment's command substitutions are then classified recursively as
+    commands of their own -- the enclosing utility says nothing about what ran
+    inside ``$(…)``. Recursing per SEGMENT (not on the raw command) matters:
+    segmentation has already dropped inert text, so a ``$(…)`` inside a quoted
+    heredoc body or a comment is never reached.
 
     ``created`` is the transcript-ordered set of paths the agent has written so
     far; each segment's truncating redirect targets are added AFTER the segment
@@ -1286,6 +1347,12 @@ def _bash_read(command: str, spec: GradedMaterialSpec, created: set[str] | None 
             mentioned = matched
         if is_read:
             return True, matched
+        for body in _substitution_bodies(segment):
+            is_read, matched = _bash_read(body, spec, created)
+            if matched is not None:
+                mentioned = matched
+            if is_read:
+                return True, matched
         _, _, made = _strip_redirects(segment)
         created.update(_created_path(target) for target in made)
     return False, mentioned
