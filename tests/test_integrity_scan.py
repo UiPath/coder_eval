@@ -470,6 +470,41 @@ def test_producing_content_is_not_a_read(tool_name: str, parameters: dict):
     assert info.findings == []
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "parameters"),
+    [
+        pytest.param(
+            "Grep",
+            {"pattern": "RESOLUTION.md", "path": "src", "output_mode": "content"},
+            id="grep-pattern-naming-the-deliverable",
+        ),
+        pytest.param(
+            "Edit",
+            {"file_path": "notes.md", "old_string": "see RESOLUTION.md", "new_string": "see report.md"},
+            id="edit-prose-naming-the-deliverable",
+        ),
+        pytest.param(
+            "Read",
+            {"file_path": "notes.md", "limit": 10, "comment": "compare with RESOLUTION.md later"},
+            id="read-with-a-non-path-parameter",
+        ),
+    ],
+)
+def test_non_path_parameters_of_known_tools_are_not_matched(tool_name: str, parameters: dict):
+    """Patterns and prose NAME graded material without opening it; matching every
+    parameter value as if it were a path voids honest rows."""
+    info = scan_commands([_turn([_cmd(tool_name, parameters)])], SPEC)
+    assert info.verdict is IntegrityVerdict.CLEAN
+    assert info.findings == []
+
+
+def test_a_path_parameter_of_a_known_tool_still_matches():
+    info = scan_commands(
+        [_turn([_cmd("Grep", {"pattern": "cause", "glob": "RESOLUTION.md", "output_mode": "content"})])], SPEC
+    )
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
 def test_unknown_tool_touching_graded_material_is_inconclusive_not_tainted():
     """We do not guess at an unrecognised tool's semantics in either direction."""
     info = scan_commands([_turn([_cmd("mcp__some__fetch", {"target": "RESOLUTION.md"})])], SPEC)

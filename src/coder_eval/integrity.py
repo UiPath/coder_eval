@@ -228,6 +228,20 @@ _EDIT_TOOLS = frozenset({"Edit", "MultiEdit", "NotebookEdit"})
 # graded material -- and `WebFetch` names a URL, not a local path.
 _NEUTRAL_TOOLS = frozenset({"Write", "WebFetch"})
 
+# Parameter keys that hold filesystem paths in the structured tools we know.
+# Everything else a tool call carries is prose or a pattern, not a file it
+# opens: `Grep(pattern="RESOLUTION.md", path="src")` searches FOR the name, and
+# an Edit whose old_string quotes a graded name has read only the file at its
+# file_path. `glob` counts as a path: in content mode it selects which files'
+# lines are emitted.
+_PATH_PARAMETER_KEYS = ("file_path", "path", "paths", "notebook_path", "glob")
+
+# The structured tools whose parameter schema this module knows, and may
+# therefore narrow to `_PATH_PARAMETER_KEYS`. An unrecognised tool keeps its
+# full parameter text: its schema is unknown, and a hit there ends as
+# INCONCLUSIVE rather than TAINTED, so over-matching is the safe direction.
+_SCHEMA_KNOWN_TOOLS = _READ_TOOLS | _EDIT_TOOLS | _LISTING_TOOLS | _NEUTRAL_TOOLS | frozenset({"Grep"})
+
 # Basename patterns that are graded material in every suite, independent of what
 # this particular task declares. Deliberately short: each entry is a name the
 # framework or the task-authoring convention owns, never a name an agent's own
@@ -1059,12 +1073,19 @@ def _structured_read(cmd: CommandTelemetry, text: str, spec: GradedMaterialSpec)
 
     Returns ``(is_read, matched, semantics_understood)``. Unlike a shell string, a
     structured tool has fixed semantics, so the decision is by tool name rather
-    than by heuristic. A tool this module does not recognise gets
+    than by heuristic -- and for a tool whose schema is known, only its path
+    parameters are matched (``_PATH_PARAMETER_KEYS``): patterns, replacement
+    text and mode switches name graded material without touching it. A tool this
+    module does not recognise keeps its full parameter text and gets
     ``semantics_understood=False`` when it touched graded material, which the
     caller turns into INCONCLUSIVE -- neither a silent pass nor a taint on a tool
     whose behavior we are guessing at.
     """
-    matched = _find_match(text, spec)
+    if cmd.tool_name in _SCHEMA_KNOWN_TOOLS:
+        haystack = " ".join(str(cmd.parameters[key]) for key in _PATH_PARAMETER_KEYS if cmd.parameters.get(key))
+    else:
+        haystack = text
+    matched = _find_match(haystack, spec)
     if matched is None:
         return False, None, True
 
