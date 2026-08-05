@@ -315,6 +315,39 @@ def test_unbalanced_quotes_do_not_skip_the_command():
 
 
 # --------------------------------------------------------------------------
+# Literal paths and directories match whole paths, not substrings of them
+# --------------------------------------------------------------------------
+
+LITERAL_BOUNDARY_CLEAN = [
+    pytest.param("cat /repo/tasks/leaky/solution.py.bak", id="own-backup-of-the-reference-name"),
+    pytest.param("cat /repo/tasks/leaky/solution.pyc", id="longer-extension"),
+    pytest.param("cat /repo/tasks/leaky/_reference_notes/output.txt", id="sibling-dir-sharing-the-prefix"),
+    pytest.param("cat /repo/tasks/leaky/_reference2/x.txt", id="sibling-dir-with-a-suffix-char"),
+]
+
+LITERAL_BOUNDARY_READS = [
+    pytest.param("cat /repo/tasks/leaky/solution.py", id="the-reference-file-itself"),
+    pytest.param("head '/repo/tasks/leaky/solution.py'", id="quoted"),
+    pytest.param("cat /repo/tasks/leaky/_reference/answer.py", id="inside-the-reference-directory"),
+    pytest.param("strange-tool /repo/tasks/leaky/_reference", id="the-reference-directory-itself"),
+]
+
+
+@pytest.mark.parametrize("command", LITERAL_BOUNDARY_CLEAN)
+def test_a_literal_path_does_not_match_inside_a_longer_name(command: str):
+    """`solution.py.bak` and `_reference_notes/` are the agent's own files; under
+    `void` a substring match on them destroys an honest row."""
+    assert _bash_read(command, SPEC) == (False, None)
+
+
+@pytest.mark.parametrize("command", LITERAL_BOUNDARY_READS)
+def test_a_whole_literal_path_still_matches(command: str):
+    is_read, matched = _bash_read(command, SPEC)
+    assert is_read is True, f"expected a read: {command!r}"
+    assert matched is not None
+
+
+# --------------------------------------------------------------------------
 # Segmentation: quoting, comments and heredocs make text inert, not a command
 # --------------------------------------------------------------------------
 

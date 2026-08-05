@@ -350,6 +350,22 @@ def _glob_to_regex(glob: str) -> re.Pattern[str]:
     return re.compile(r"(?<![\w.\-])" + body + r"(?![\w.\-])")
 
 
+def _literal_to_regex(path: str, *, directory: bool = False) -> re.Pattern[str]:
+    """Compile a literal (already-normalized) path into a whole-path pattern.
+
+    A raw substring test lets ``reference.file=solution.py`` match the agent's
+    own ``solution.py.bak``, and ``reference.directory=_reference`` match a
+    sibling ``_reference_notes/`` -- both honest files, both voided under
+    ``void``. A file therefore matches exactly, delimited by the same
+    ``[\\w.-]`` filename-boundary class :func:`_glob_to_regex` uses; a directory
+    matches exactly or continues with ``/`` into its contents, never into a
+    longer name.
+    """
+    body = re.escape(path.rstrip("/") if directory else path)
+    tail = r"(?=/|(?![\w.\-]))" if directory else r"(?![\w.\-])"
+    return re.compile(r"(?<![\w.\-])" + body + tail)
+
+
 def _segment_to_regex(segment: str) -> re.Pattern[str]:
     """Compile a path segment into a pattern that matches it as a path COMPONENT.
 
@@ -470,21 +486,22 @@ def _task_dir_operands(command: str, task_dir: Path | None = None) -> set[str]:
 def _find_match(text: str, spec: GradedMaterialSpec) -> str | None:
     """Return the graded-material reference found in ``text``, or None.
 
-    Literal paths and directory prefixes are substring-matched on the normalized
-    form; basename globs are regex-matched wherever they appear; path segments are
-    matched as a path component so a relatively-typed
-    ``../mocks/responses/manifest.json`` is caught too; grader scripts are matched
-    last and only under the task directory (:func:`_grader_match`).
+    Literal paths and directory prefixes are matched as whole paths on the
+    normalized form (:func:`_literal_to_regex`); basename globs are regex-matched
+    wherever they appear; path segments are matched as a path component so a
+    relatively-typed ``../mocks/responses/manifest.json`` is caught too; grader
+    scripts are matched last and only under the task directory
+    (:func:`_grader_match`).
     """
     haystack = _normalize(text)
 
     for candidate in spec.paths:
         needle = _normalize(candidate)
-        if needle and needle in haystack:
+        if needle and _literal_to_regex(needle).search(haystack):
             return candidate
     for candidate in spec.directories:
         needle = _normalize(candidate)
-        if needle and needle in haystack:
+        if needle and _literal_to_regex(needle, directory=True).search(haystack):
             return candidate
     for glob in spec.basename_globs:
         if _glob_to_regex(glob).search(haystack):
