@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import shlex
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, LiveVerdict, register_criterion
@@ -17,12 +18,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Limit regex search input length to mitigate ReDoS on large command strings
+# Limit regex search input length to mitigate ReDoS on large command strings.
+# Normalization runs over this same truncated window (see _match_haystacks), so
+# shlex never sees more than this many chars and needs no separate size guard.
 _MAX_PATTERN_SEARCH_LEN = 2000
-
-# Skip shell-normalization above this size — shlex is linear so this is only a
-# worst-case guard; real telemetry commands are far smaller.
-_MAX_NORMALIZE_LEN = 10 * _MAX_PATTERN_SEARCH_LEN
 
 
 def _is_shell_program(arg0: str) -> bool:
@@ -50,6 +49,7 @@ def _is_command_flag(tok: str) -> bool:
     return len(tok) >= 2 and tok[0] == "-" and tok[1] != "-" and tok[1:].isalpha() and "c" in tok[1:]
 
 
+@lru_cache(maxsize=1024)
 def _normalize_shell(cmd_text: str) -> str | None:
     """Quote-resolved, wrapper-stripped form of a shell command, or None.
 
@@ -66,6 +66,11 @@ def _normalize_shell(cmd_text: str) -> str | None:
     patterns that reference them keep working. Returns ``None`` when the text
     can't be parsed (unbalanced quotes, heredocs); the caller keeps the raw
     text as a haystack, so nothing that matched before can stop matching.
+
+    Memoized (pure function of ``cmd_text``): the early-stop watcher re-scans the
+    whole accumulated trajectory on every tool-call event, so the same command is
+    normalized many times per run — the cache collapses that to once per distinct
+    (already-truncated) command string.
     """
     try:
         tokens = shlex.split(cmd_text, posix=True)
@@ -100,21 +105,29 @@ def _normalize_shell(cmd_text: str) -> str | None:
     return " ".join(tokens)
 
 
-def _match_haystacks(cmd: "CommandTelemetry", cmd_text: str) -> list[str]:
+def _match_haystacks(cmd_text: str, *, is_shell: bool) -> list[str]:
     """Strings a pattern may match against for one command.
 
-    Always the raw ``cmd_text``; for Bash, additionally the quote-resolved
-    normalized form (see :func:`_normalize_shell`). Both are length-capped to
-    preserve the ReDoS bound. Matching is "either" — a pattern hits the command
-    if it matches ANY haystack — so normalization only ever repairs a missed
-    match, never removes one. Non-Bash tools serialize params to JSON, where
-    shell tokenization is meaningless, so they are never normalized.
+    Always the raw ``cmd_text`` truncated to the ReDoS bound; when ``is_shell``,
+    additionally the quote-resolved, wrapper-stripped form of that **same
+    truncated window** (see :func:`_normalize_shell`). Normalizing the already-
+    truncated slice keeps both haystacks describing the same window, so quote-
+    stripping can never slide content from past the cap into the match, and
+    caps ``shlex`` input at ``_MAX_PATTERN_SEARCH_LEN`` for free. Matching is
+    "either" — a pattern hits the command if it matches ANY haystack.
+
+    ``is_shell`` is decided once by the caller (a Bash tool whose ``command`` is
+    a non-empty ``str``) and passed in, rather than re-derived here from
+    ``tool_name`` alone: a Bash record with a missing/empty ``command`` serializes
+    its params to JSON, where shell tokenization is meaningless, and must NOT be
+    normalized (else stripped JSON quotes could newly satisfy an exclusion).
     """
-    haystacks = [cmd_text[:_MAX_PATTERN_SEARCH_LEN]]
-    if cmd.tool_name == "Bash" and 0 < len(cmd_text) <= _MAX_NORMALIZE_LEN:
-        normalized = _normalize_shell(cmd_text)
-        if normalized is not None and normalized != cmd_text:
-            haystacks.append(normalized[:_MAX_PATTERN_SEARCH_LEN])
+    window = cmd_text[:_MAX_PATTERN_SEARCH_LEN]
+    haystacks = [window]
+    if is_shell:
+        normalized = _normalize_shell(window)
+        if normalized is not None and normalized != window:
+            haystacks.append(normalized)
     return haystacks
 
 
@@ -161,13 +174,17 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             raw_command = cmd.parameters.get("command")
             if cmd.tool_name == "Bash" and isinstance(raw_command, str) and raw_command:
                 cmd_text = raw_command
+                is_shell = True
             else:
                 cmd_text = json.dumps(cmd.parameters)
+                is_shell = False
 
             # Match the pattern against the raw command AND its quote-resolved
             # form, so authors need not encode shell quoting/escaping (which they
             # do inconsistently, silently under-counting correctly-quoted calls).
-            haystacks = _match_haystacks(cmd, cmd_text)
+            # ``is_shell`` (decided once, above) tells the helper whether cmd_text
+            # is a shell command — it must not re-derive that from tool_name alone.
+            haystacks = _match_haystacks(cmd_text, is_shell=is_shell)
 
             # Filter by command pattern
             if pattern is not None and not any(pattern.search(h) for h in haystacks):

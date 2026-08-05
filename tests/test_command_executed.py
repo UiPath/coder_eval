@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from coder_eval.criteria.command_executed import _normalize_shell
+from coder_eval.criteria.command_executed import _MAX_PATTERN_SEARCH_LEN, _match_haystacks, _normalize_shell
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CommandExecutedCriterion
 from coder_eval.models.results import TurnRecord
@@ -874,6 +874,45 @@ class TestNormalizeShell:
             "uip is resources run list slack curated_channels"
         )
 
+    def test_empty_and_whitespace_input_return_none(self):
+        """Empty / whitespace-only input has no tokens -> None (benign, not an error)."""
+        assert _normalize_shell("") is None
+        assert _normalize_shell("   ") is None
+
+    def test_inner_unbalanced_quotes_return_none(self):
+        """A wrapper whose script token can't be re-split falls back to None."""
+        # Outer double quotes balance, so the script token is `echo 'unterminated`;
+        # re-splitting that raises ValueError on the stray single quote.
+        assert _normalize_shell('bash -lc "echo \'unterminated"') is None
+
+    def test_non_wrapper_positional_returns_verbatim(self):
+        """A shell with a positional before any -c is a script invocation, not `-c`.
+
+        `bash script.sh -c foo` runs the file `script.sh`; the later `-c` is an
+        argument to the script, not a command flag, so nothing is unwrapped.
+        """
+        assert _normalize_shell("bash script.sh -c foo") == "bash script.sh -c foo"
+
+    def test_shell_with_flags_but_no_command_flag_is_verbatim(self):
+        """A shell invoked with only non-``-c`` flags (no command) unwraps nothing.
+
+        The wrapper scan exhausts without finding a command flag or a positional,
+        so the tokens are returned as-is.
+        """
+        assert _normalize_shell("bash --norc -i") == "bash --norc -i"
+
+    def test_is_memoized(self):
+        """The hot early-stop path re-scans the trajectory; normalize once per command.
+
+        Counting via ``cache_info`` (not wall-clock) so the guard can't flake.
+        """
+        _normalize_shell.cache_clear()
+        raw = "bash -lc 'echo hello world'"
+        first = _normalize_shell(raw)
+        second = _normalize_shell(raw)
+        assert first == second == "echo hello world"
+        assert _normalize_shell.cache_info().hits >= 1  # second call served from cache
+
 
 class TestShellQuotingNormalization:
     """Patterns match regardless of how the agent quoted the command.
@@ -1006,6 +1045,48 @@ class TestShellQuotingNormalization:
         )
         result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
         assert result.score == 1.0
+
+    def test_bash_record_without_command_is_not_shell_normalized(self):
+        """A Bash record with no ``command`` key must not have its JSON params tokenized.
+
+        ``_match_haystacks`` is now told whether cmd_text is a shell command
+        (``is_shell``, decided once at the extraction site) instead of
+        re-deriving it from ``tool_name == "Bash"`` alone. A Bash record whose
+        ``command`` is missing (reachable on the Codex path) falls back to the
+        JSON blob and must NOT be normalized — otherwise shlex strips the JSON
+        quotes, adding a haystack that can newly satisfy an ``exclude_pattern``
+        and wrongly drop the command below ``min_count``.
+        """
+        sandbox = MockSandbox()
+        # Bash tool, but params carry a `description`, not a `command`.
+        turn_records = [
+            _make_turn([_make_command(tool_name="Bash", parameters={"description": "run the pytest suite"})])
+        ]
+        criterion = CommandExecutedCriterion(
+            description="counts the bash record",
+            tool_name="Bash",
+            # Matches the shlex-stripped JSON (`{description: run ...}`) but NOT the
+            # raw JSON (`{"description": "run ...}`); with the is_shell fix the raw
+            # is the only haystack, so the command is not excluded.
+            exclude_pattern=r"description:\s+run",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_normalized_haystack_shares_the_raw_truncation_window(self):
+        """Both haystacks describe the same <=2000-char window (no past-cap leak).
+
+        Previously the raw haystack was truncated at 2000 chars but normalization
+        ran over the FULL command, so quote-stripping could slide content from
+        past the cap into the normalized haystack — a task relying on the
+        2000-char bound changed verdict. Normalization now runs over the
+        already-truncated window.
+        """
+        cmd = "bash -lc " + ("word " * 600) + "TARGET"  # TARGET sits well past 2000 chars
+        haystacks = _match_haystacks(cmd, is_shell=True)
+        assert all(len(h) <= _MAX_PATTERN_SEARCH_LEN for h in haystacks)
+        assert not any("TARGET" in h for h in haystacks)
 
     def test_negative_assertion_not_dodged_by_quoting(self):
         """A quote-obfuscated retired call is still caught by a max_count=0 gate."""
