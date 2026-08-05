@@ -514,6 +514,50 @@ class TestCommandExecutedCriterion:
 
         assert result.score == 1.0
 
+    def test_non_str_command_does_not_crash_criterion(self):
+        """A non-``str`` ``command`` (Codex argv array) must not zero the criterion.
+
+        Codex sub-agent rollout recovery can carry ``command`` as an argv *list*
+        (codex_agent.py), which reaches ``CommandTelemetry.parameters`` verbatim.
+        Before the ``isinstance`` narrow, the list fell through to
+        ``shlex.split(list)`` -> ``AttributeError: 'list' object has no attribute
+        'read'``, which aborted ``_matching_commands`` for the entire trajectory
+        and scored a pattern-less, otherwise-passing criterion 0.0.
+        """
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": ["bash", "-lc", "ls"]}, tool_id="t1"),
+                    _make_command(tool_name="Bash", parameters={"command": "echo hi"}, tool_id="t2"),
+                ]
+            )
+        ]
+        # Pattern-less: both Bash commands count; the argv-list one must not crash.
+        criterion = CommandExecutedCriterion(description="ran bash", tool_name="Bash", min_count=1)
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.error is None
+        assert result.score == 1.0
+        assert "2/1" in result.details
+
+    def test_non_str_command_still_matches_sibling_by_pattern(self):
+        """One argv-list ``command`` must not poison a pattern match on its sibling."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": ["bash", "-lc", "ls"]}, tool_id="t1"),
+                    _make_command(tool_name="Bash", parameters={"command": "uip run foo"}, tool_id="t2"),
+                ]
+            )
+        ]
+        criterion = CommandExecutedCriterion(
+            description="ran uip", tool_name="Bash", command_pattern=r"uip\s+run", min_count=1
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.error is None
+        assert result.score == 1.0
+
     def test_crashed_turn_commands_are_counted(self):
         """Commands from crashed partial turns count toward min_count.
 

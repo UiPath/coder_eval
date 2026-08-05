@@ -122,9 +122,15 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             if criterion.require_success and cmd.result_status != "success":
                 continue
 
-            # Extract text for pattern matching (Bash: command param; others: JSON-serialized params)
-            if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
-                cmd_text = cmd.parameters["command"]
+            # Extract text for pattern matching (Bash: command param; others: JSON-serialized params).
+            # ``parameters`` is ``dict[str, Any]``, and a ``command`` value is not
+            # guaranteed to be a ``str`` — Codex sub-agent rollout recovery can carry
+            # it as an argv *list* (codex_agent.py). Narrow with ``isinstance`` so a
+            # non-``str`` value never reaches ``shlex.split``/slicing (which would raise
+            # ``AttributeError`` and zero the whole criterion); fall back to the JSON blob.
+            raw_command = cmd.parameters.get("command")
+            if cmd.tool_name == "Bash" and isinstance(raw_command, str) and raw_command:
+                cmd_text = raw_command
             else:
                 cmd_text = json.dumps(cmd.parameters)
 
@@ -142,9 +148,9 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             if exclude_re is not None and any(exclude_re.search(h) for h in haystacks):
                 continue
 
-            # Build a display label for the matched command
-            if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
-                label = cmd.parameters["command"]
+            # Build a display label for the matched command (same narrowing as above)
+            if cmd.tool_name == "Bash" and isinstance(raw_command, str) and raw_command:
+                label = raw_command
             else:
                 label = f"{cmd.tool_name}({json.dumps(cmd.parameters)[:80]})"
             matching.append(label)
