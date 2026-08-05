@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from coder_eval.criteria.command_executed import _MAX_PATTERN_SEARCH_LEN, _match_haystacks, _normalize_shell
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CommandExecutedCriterion
 from coder_eval.models.results import TurnRecord
@@ -513,6 +514,50 @@ class TestCommandExecutedCriterion:
 
         assert result.score == 1.0
 
+    def test_non_str_command_does_not_crash_criterion(self):
+        """A non-``str`` ``command`` (Codex argv array) must not zero the criterion.
+
+        Codex sub-agent rollout recovery can carry ``command`` as an argv *list*
+        (codex_agent.py), which reaches ``CommandTelemetry.parameters`` verbatim.
+        Before the ``isinstance`` narrow, the list fell through to
+        ``shlex.split(list)`` -> ``AttributeError: 'list' object has no attribute
+        'read'``, which aborted ``_matching_commands`` for the entire trajectory
+        and scored a pattern-less, otherwise-passing criterion 0.0.
+        """
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": ["bash", "-lc", "ls"]}, tool_id="t1"),
+                    _make_command(tool_name="Bash", parameters={"command": "echo hi"}, tool_id="t2"),
+                ]
+            )
+        ]
+        # Pattern-less: both Bash commands count; the argv-list one must not crash.
+        criterion = CommandExecutedCriterion(description="ran bash", tool_name="Bash", min_count=1)
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.error is None
+        assert result.score == 1.0
+        assert "2/1" in result.details
+
+    def test_non_str_command_still_matches_sibling_by_pattern(self):
+        """One argv-list ``command`` must not poison a pattern match on its sibling."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": ["bash", "-lc", "ls"]}, tool_id="t1"),
+                    _make_command(tool_name="Bash", parameters={"command": "uip run foo"}, tool_id="t2"),
+                ]
+            )
+        ]
+        criterion = CommandExecutedCriterion(
+            description="ran uip", tool_name="Bash", command_pattern=r"uip\s+run", min_count=1
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.error is None
+        assert result.score == 1.0
+
     def test_crashed_turn_commands_are_counted(self):
         """Commands from crashed partial turns count toward min_count.
 
@@ -750,3 +795,312 @@ class TestCommandExecutedCriterion:
                 min_count=5,
                 max_count=2,
             )
+
+
+class TestNormalizeShell:
+    """Unit tests for the shell-normalization helper."""
+
+    def test_unwraps_bash_lc_and_resolves_single_quotes(self):
+        raw = (
+            '/bin/bash -lc "uip is resources run list uipath-salesforce-slack '
+            "'curated_channels?types=public_channel,private_channel' --output json\""
+        )
+        assert _normalize_shell(raw) == (
+            "uip is resources run list uipath-salesforce-slack "
+            "curated_channels?types=public_channel,private_channel --output json"
+        )
+
+    def test_unwraps_escaped_double_quotes(self):
+        raw = '/bin/bash -lc "uip is resources run list \\"slack\\" \\"curated_channels\\""'
+        assert _normalize_shell(raw) == "uip is resources run list slack curated_channels"
+
+    def test_bare_command_is_just_requoted(self):
+        assert _normalize_shell("uip is resources run list slack 'curated_channels'") == (
+            "uip is resources run list slack curated_channels"
+        )
+
+    def test_shell_operators_survive_as_tokens(self):
+        raw = "uip maestro flow validate X.flow --output json && uip maestro flow format X.flow"
+        assert _normalize_shell(raw) == raw  # already unquoted; operators kept verbatim
+
+    def test_unbalanced_quotes_return_none(self):
+        assert _normalize_shell("echo 'unterminated") is None
+
+    def test_argv_joined_payload_is_not_collapsed_to_first_word(self):
+        """Codex rollout recovery joins argv WITHOUT re-quoting (codex_agent.py).
+
+        The wrapper unwrap must keep every token after ``-lc``, not just the
+        first — otherwise ``bash -lc uip is resources ...`` collapses to ``uip``,
+        making the fix a silent no-op on the sub-agent path.
+        """
+        raw = "bash -lc uip is resources run list slack curated_channels --output json"
+        assert _normalize_shell(raw) == "uip is resources run list slack curated_channels --output json"
+
+    def test_argv_joined_short_command(self):
+        assert _normalize_shell("bash -c echo hi there") == "echo hi there"
+
+    def test_every_wrapper_form_is_unwrapped(self):
+        """One case per shell/flag shape the agents emit — the allowlist can't rot.
+
+        The predicate replaced an enumerated allowlist that omitted ``zsh``
+        (Codex's shell on macOS, codex_agent.py) and ``-ic`` while listing the
+        exotic ``-lic``; on those hosts the normalization silently reverted to
+        the pre-fix false-negative behaviour. Each entry must strip the wrapper.
+        """
+        cases = {
+            # zsh — Codex's default login shell on macOS
+            '/bin/zsh -lc "uip is resources run list slack curated_channels"': (
+                "uip is resources run list slack curated_channels"
+            ),
+            'zsh -lc "echo hi"': "echo hi",
+            'sh -c "echo hi"': "echo hi",
+            'dash -c "echo hi"': "echo hi",
+            'ksh -c "echo hi"': "echo hi",
+            'bash -ic "echo hi"': "echo hi",  # interactive + command
+            '/usr/bin/bash -lic "echo hi"': "echo hi",  # login + interactive + command
+            "bash -l -c 'echo hi'": "echo hi",  # split login/command flags
+        }
+        for raw, expected in cases.items():
+            assert _normalize_shell(raw) == expected, raw
+
+    def test_non_shell_arg0_is_not_unwrapped(self):
+        """A non-shell program (basename not ending in ``sh``) is only re-quoted.
+
+        ``git -c <config>`` is the motivating case: ``-c`` is a real git flag, but
+        because ``git`` is not a shell the payload must NOT be unwrapped.
+        """
+        assert _normalize_shell("git -c user.name=x status") == "git -c user.name=x status"
+        assert _normalize_shell("uip is resources run list slack 'curated_channels'") == (
+            "uip is resources run list slack curated_channels"
+        )
+
+    def test_empty_and_whitespace_input_return_none(self):
+        """Empty / whitespace-only input has no tokens -> None (benign, not an error)."""
+        assert _normalize_shell("") is None
+        assert _normalize_shell("   ") is None
+
+    def test_inner_unbalanced_quotes_return_none(self):
+        """A wrapper whose script token can't be re-split falls back to None."""
+        # Outer double quotes balance, so the script token is `echo 'unterminated`;
+        # re-splitting that raises ValueError on the stray single quote.
+        assert _normalize_shell('bash -lc "echo \'unterminated"') is None
+
+    def test_non_wrapper_positional_returns_verbatim(self):
+        """A shell with a positional before any -c is a script invocation, not `-c`.
+
+        `bash script.sh -c foo` runs the file `script.sh`; the later `-c` is an
+        argument to the script, not a command flag, so nothing is unwrapped.
+        """
+        assert _normalize_shell("bash script.sh -c foo") == "bash script.sh -c foo"
+
+    def test_shell_with_flags_but_no_command_flag_is_verbatim(self):
+        """A shell invoked with only non-``-c`` flags (no command) unwraps nothing.
+
+        The wrapper scan exhausts without finding a command flag or a positional,
+        so the tokens are returned as-is.
+        """
+        assert _normalize_shell("bash --norc -i") == "bash --norc -i"
+
+    def test_is_memoized(self):
+        """The hot early-stop path re-scans the trajectory; normalize once per command.
+
+        Counting via ``cache_info`` (not wall-clock) so the guard can't flake.
+        """
+        _normalize_shell.cache_clear()
+        raw = "bash -lc 'echo hello world'"
+        first = _normalize_shell(raw)
+        second = _normalize_shell(raw)
+        assert first == second == "echo hello world"
+        assert _normalize_shell.cache_info().hits >= 1  # second call served from cache
+
+
+class TestShellQuotingNormalization:
+    """Patterns match regardless of how the agent quoted the command.
+
+    Regression for ``skill-flow-paginated-reference-lookup``: the agent
+    paginated ``uip is resources run list <slack> 'curated_channels?...'``
+    correctly (a sibling ``nextPage=`` criterion matched the same calls), but the
+    gating pagination criterion's pattern allowed only a bare or ``\\"``-escaped
+    token — the agent single-quoted the resource arg — so it scored 0.0 (false
+    negative). Normalizing the command before matching fixes the whole class
+    without touching any task YAML.
+    """
+
+    # The exact recorded shape: `bash -lc "..."` wrapper, resource arg in SINGLE
+    # quotes. Second call adds a nextPage token (still single-quoted).
+    _PAGE1 = (
+        '/bin/bash -lc "uip is resources run list uipath-salesforce-slack '
+        "'curated_channels?types=public_channel,private_channel' --connection-id abc --output json\""
+    )
+    _PAGE2 = (
+        '/bin/bash -lc "uip is resources run list uipath-salesforce-slack '
+        "'curated_channels?types=public_channel,private_channel' "
+        "--query 'nextPage=eyJwYWdlIjoyfQ' --output json\""
+    )
+    # The ORIGINAL, unchanged pattern from the task YAML: allows an optional
+    # backslash + optional DOUBLE quote, but no single quote.
+    _YAML_PATTERN = r'uip\s+is\s+resources\s+run\s+list\s+\\?"?uipath-salesforce-slack\\?"?\s+\\?"?curated_channels'
+
+    def test_single_quoted_calls_now_counted_with_original_pattern(self):
+        """The unchanged YAML pattern now counts both single-quoted calls."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": self._PAGE1}, tool_id="t1"),
+                    _make_command(tool_name="Bash", parameters={"command": self._PAGE2}, tool_id="t2"),
+                ]
+            )
+        ]
+        criterion = CommandExecutedCriterion(
+            description="paginated curated_channels list ran >1x",
+            tool_name="Bash",
+            command_pattern=self._YAML_PATTERN,
+            min_count=2,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+        assert "2/2" in result.details
+
+    def test_escaped_double_quote_form_still_matches(self):
+        """Backward compat: the escaping style the pattern anticipated still hits."""
+        sandbox = MockSandbox()
+        raw = (
+            '/bin/bash -lc "uip is resources run list \\"uipath-salesforce-slack\\" '
+            '\\"curated_channels?types=x\\" --output json"'
+        )
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": raw})])]
+        criterion = CommandExecutedCriterion(
+            description="curated_channels list ran",
+            tool_name="Bash",
+            command_pattern=self._YAML_PATTERN,
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_shell_operator_pattern_still_matches(self):
+        """`&&`/`|` patterns keep working — operators survive normalization."""
+        sandbox = MockSandbox()
+        cmd = "/bin/bash -lc 'uip maestro flow validate X.flow --output json && uip maestro flow format X.flow'"
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="validate then format",
+            tool_name="Bash",
+            command_pattern=r"uip\s+maestro\s+flow\s+validate.*&&.*uip\s+maestro\s+flow\s+format",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_unbalanced_quotes_fall_back_to_raw_without_crashing(self):
+        """A command shlex can't parse still matches against its raw text."""
+        sandbox = MockSandbox()
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": "echo 'unterminated"})])]
+        criterion = CommandExecutedCriterion(
+            description="echo ran",
+            tool_name="Bash",
+            command_pattern=r"echo\s+",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_argv_joined_command_matches_full_pattern(self):
+        """The argv-joined (unquoted) shape matches a whole-command pattern.
+
+        This is Codex's sub-agent rollout-recovery telemetry — argv joined with
+        spaces and no re-quoting. Before the unwrap fix it collapsed to the first
+        word, so this pattern scored 0.0.
+        """
+        sandbox = MockSandbox()
+        cmd = "bash -lc uip is resources run list uipath-salesforce-slack curated_channels --output json"
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="listed curated_channels",
+            tool_name="Bash",
+            command_pattern=r"uip\s+is\s+resources\s+run\s+list\s+\S+\s+curated_channels",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_argv_joined_not_collapsed_into_false_anchored_match(self):
+        """The collapse-to-first-word bug could make ``^git$`` match ``git push ...``.
+
+        The real command is ``git push --force origin main``; an anchored
+        ``^git$`` negative assertion must PASS (score 1.0). The old code collapsed
+        the payload to the single token ``git``, which matched ``^git$`` and
+        force-failed the gate for a command the agent never actually ran bare.
+        """
+        sandbox = MockSandbox()
+        cmd = "bash -lc git push --force origin main"
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": cmd})])]
+        criterion = CommandExecutedCriterion(
+            description="must NOT run bare `git`",
+            tool_name="Bash",
+            command_pattern=r"^git$",
+            min_count=0,
+            max_count=0,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_bash_record_without_command_is_not_shell_normalized(self):
+        """A Bash record with no ``command`` key must not have its JSON params tokenized.
+
+        ``_match_haystacks`` is now told whether cmd_text is a shell command
+        (``is_shell``, decided once at the extraction site) instead of
+        re-deriving it from ``tool_name == "Bash"`` alone. A Bash record whose
+        ``command`` is missing (reachable on the Codex path) falls back to the
+        JSON blob and must NOT be normalized — otherwise shlex strips the JSON
+        quotes, adding a haystack that can newly satisfy an ``exclude_pattern``
+        and wrongly drop the command below ``min_count``.
+        """
+        sandbox = MockSandbox()
+        # Bash tool, but params carry a `description`, not a `command`.
+        turn_records = [
+            _make_turn([_make_command(tool_name="Bash", parameters={"description": "run the pytest suite"})])
+        ]
+        criterion = CommandExecutedCriterion(
+            description="counts the bash record",
+            tool_name="Bash",
+            # Matches the shlex-stripped JSON (`{description: run ...}`) but NOT the
+            # raw JSON (`{"description": "run ...}`); with the is_shell fix the raw
+            # is the only haystack, so the command is not excluded.
+            exclude_pattern=r"description:\s+run",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_normalized_haystack_shares_the_raw_truncation_window(self):
+        """Both haystacks describe the same <=2000-char window (no past-cap leak).
+
+        Previously the raw haystack was truncated at 2000 chars but normalization
+        ran over the FULL command, so quote-stripping could slide content from
+        past the cap into the normalized haystack — a task relying on the
+        2000-char bound changed verdict. Normalization now runs over the
+        already-truncated window.
+        """
+        cmd = "bash -lc " + ("word " * 600) + "TARGET"  # TARGET sits well past 2000 chars
+        haystacks = _match_haystacks(cmd, is_shell=True)
+        assert all(len(h) <= _MAX_PATTERN_SEARCH_LEN for h in haystacks)
+        assert not any("TARGET" in h for h in haystacks)
+
+    def test_negative_assertion_not_dodged_by_quoting(self):
+        """A quote-obfuscated retired call is still caught by a max_count=0 gate."""
+        sandbox = MockSandbox()
+        # `'uip' or users list` doesn't match `uip\s+or` on the raw text (a quote
+        # sits right after uip), but the normalized form `uip or users list` does.
+        obfuscated = "/bin/bash -lc \"'uip' or users list\""
+        turn_records = [_make_turn([_make_command(tool_name="Bash", parameters={"command": obfuscated})])]
+        criterion = CommandExecutedCriterion(
+            description="must NOT use retired `uip or users list`",
+            tool_name="Bash",
+            command_pattern=r"uip\s+or\s+users\s+list",
+            min_count=0,
+            max_count=0,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 0.0
