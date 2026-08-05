@@ -37,46 +37,51 @@ over Markdown and is wired as ``tests/test_custom_lint.py::TestCE030DocSchemaPar
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from coder_eval.models import Dataset, RunLimits, SimulationConfig, TaskDefinition
 from coder_eval.models import criteria as _criteria_module
-from coder_eval.models.criteria import BaseSuccessCriterion, LiveSuccessCriterion
 
 
 _GUIDE = "docs/TASK_DEFINITION_GUIDE.md"
 
-# Module that owns the in-tree criteria.
-_IN_TREE_CRITERIA_MODULE = _criteria_module.__name__
+
+def _union_literal_criterion_names() -> list[str]:
+    """Class names in the ``SuccessCriterion = Annotated[A | B | ...]`` literal.
+
+    Read STATICALLY from ``criteria.py`` source, not from the runtime union
+    object. That is the whole point: a plugin's ``coder_eval.plugins`` hook can
+    inject its OWN criterion into the runtime union (and even into the module
+    namespace) at load time — the ``uipath`` SDK adds a ``CliCalledCriterion`` —
+    and such a criterion is documented in its plugin's own repo, not this guide.
+    A plugin cannot edit this repo's source, so the source literal is the
+    authoritative, contamination-proof list of the criteria THIS repo ships.
+    """
+    tree = ast.parse(Path(_criteria_module.__file__).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "SuccessCriterion" for t in node.targets
+        ):
+            # value is ``Annotated[<Name | Name | ...>, Field(...)]``; every
+            # criterion class name ends in "Criterion" (Annotated/Field/discriminator
+            # string do not), so this selects exactly the union members.
+            return [n.id for n in ast.walk(node.value) if isinstance(n, ast.Name) and n.id.endswith("Criterion")]
+    raise AssertionError("SuccessCriterion union assignment not found in criteria.py")
 
 
 def _criterion_models() -> list[type[BaseModel]]:
-    """The criterion models defined in ``coder_eval.models.criteria``.
+    """The in-tree ``SuccessCriterion`` member models, resolved from the source union.
 
-    Enumerates the concrete ``BaseSuccessCriterion`` subclasses that are genuine
-    module-level attributes of the criteria module — so any new in-tree criterion
-    is covered automatically — rather than flattening the ``SuccessCriterion``
-    union. A plugin's ``coder_eval.plugins`` hook can inject its OWN criterion into
-    that union at load time (the ``uipath`` SDK adds a ``CliCalledCriterion``, built
-    with ``pydantic.create_model`` and a spoofed ``__module__`` so it even reports
-    as living here), and such a criterion — documented in the plugin's own repo —
-    must not impose a doc obligation on THIS guide. A ``create_model`` class is not
-    inserted into the module namespace, so enumerating real module attributes (not
-    the union) excludes it while still covering every criterion this repo defines.
+    Names come from the source literal (see :func:`_union_literal_criterion_names`),
+    then each is resolved to its class via ``getattr`` on the criteria module. New
+    in-tree criteria are covered automatically (they're added to the union literal);
+    plugin-injected criteria are never named in the source, so they are excluded
+    even though they exist as runtime attributes.
     """
-    out: list[type[BaseModel]] = []
-    for obj in vars(_criteria_module).values():
-        if (
-            isinstance(obj, type)
-            and issubclass(obj, BaseSuccessCriterion)
-            and obj not in (BaseSuccessCriterion, LiveSuccessCriterion)  # abstract bases
-            and obj.__module__ == _IN_TREE_CRITERIA_MODULE  # not a re-export
-            and obj not in out
-        ):
-            out.append(obj)
-    return out
+    return [getattr(_criteria_module, name) for name in _union_literal_criterion_names()]
 
 
 # Models the project commits to documenting, paired with the doc page that owns
