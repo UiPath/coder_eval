@@ -394,6 +394,55 @@ class TestRegressionsFromReview:
         positive = forbidden.model_copy(update={"min_count": 1, "max_count": None})
         assert SuccessChecker(sandbox).check(positive).score == 1.0
 
+    def test_ignored_switch_does_not_swallow_the_next_positional(self, sandbox_with_log):
+        """Mirror of the --yes case, through ignore_flags.
+
+        Folding ignore_flags into the value-bearing set was right for
+        `--output json` but made every ignored SWITCH consume its neighbour,
+        reopening the same false PASS on a destructive call.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "--verbose", "proj-1"])])
+        guard = CliCalledCriterion(
+            description="did NOT delete proj-1",
+            log=LOG,
+            verb="ixp fields delete",
+            positional=["proj-1"],
+            ignore_flags=["verbose"],
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(sandbox).check(guard).score == 0.0
+
+    def test_ignored_value_flag_still_consumes_its_value(self, sandbox_with_log):
+        """The control: `output` is ignored AND declared value-bearing by default,
+        so `json` must not leak into the positionals."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "--output", "json", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="got proj-1", log=LOG, verb="ixp projects get", positional=["proj-1"]
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_failure_details_show_what_was_actually_recorded(self, sandbox_with_log):
+        """A bare count sends the reader to the sandbox; this criterion exists to
+        answer 'what did it actually run'."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(
+            sandbox_dir,
+            [
+                _call(["ixp", "projects", "get", "proj-1"]),
+                _call(["ixp", "projects", "list"]),
+                _call(["ixp", "fields", "rename", "proj-1"]),
+                _call(["ixp", "track"]),
+            ],
+        )
+        criterion = CliCalledCriterion(description="configured the model", log=LOG, verb="ixp projects configure-model")
+        details = SuccessChecker(sandbox).check(criterion).details or ""
+        assert "Recorded:" in details
+        assert "ixp projects get proj-1" in details
+        assert "(+1 more)" in details
+
     def test_declared_value_flag_consumes_a_dash_leading_value(self):
         """`--limit -1 proj-1`: declared value flags bind even a dash-leading value."""
         positional, flags = _split_flags(
@@ -565,6 +614,11 @@ class TestModelValidation:
     def test_empty_any_of_rejected(self):
         with pytest.raises(ValidationError):
             CliCalledCriterion(description="d", log=LOG, verb="v", flags={"m": {"any_of": []}})
+
+    def test_min_count_zero_without_max_count_rejected(self):
+        """Satisfied by every possible log, so the criterion could never fail."""
+        with pytest.raises(ValidationError, match="can never fail"):
+            CliCalledCriterion(description="d", log=LOG, verb="v", min_count=0)
 
     def test_alias_claimed_by_two_predicates_rejected(self):
         """Ambiguous ownership would make the verdict depend on dict order."""

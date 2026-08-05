@@ -439,39 +439,34 @@ class FlagMatch(BaseModel):
         default=None,
         min_length=1,
         description=(
-            "Flag value must equal one of these strings. min_length=1: an empty list would satisfy "
-            "the exactly-one-predicate rule and then match nothing, so a max_count: 0 guard built on "
-            "it would pass vacuously"
+            "Flag value must equal one of these strings. Non-empty: an empty list would match "
+            "nothing, so a max_count: 0 guard built on it would pass vacuously"
         ),
     )
     absent: bool = Field(default=False, description="Flag must NOT be present in the invocation")
     present: bool = Field(
         default=False,
         description=(
-            "Flag must be present, whatever its value. The right predicate for a boolean switch: "
-            '`equals: ""` also works when the switch records an empty value, but breaks if the CLI '
-            "spells it `--force true`. Presence predicates never make a flag value-bearing, so "
-            "asserting a switch cannot swallow the positional after it"
+            "Flag must be present, whatever its value -- the predicate for a boolean switch. Unlike "
+            '`equals: ""` it survives a CLI that spells the switch `--force true`, and it never makes '
+            "the flag value-bearing, so asserting a switch cannot swallow the next positional"
         ),
     )
     aliases: list[str] = Field(
         default_factory=list,
         description=(
-            "Other names for the SAME flag (without leading dashes), e.g. aliases: [y] on a `yes` "
-            "predicate so `-y` and `--yes` are one flag. Values are gathered across every name: "
-            "`present` holds if ANY of them appeared, `absent` only if NONE did, and a value "
-            "predicate matches if any value under any name satisfies it. Without this, short/long "
-            "pairs need one criterion per spelling -- which works for a guard (both are forbidden) "
-            "but cannot express 'either spelling' positively, and makes `absent` flag every "
-            "invocation whatever it did"
+            "Other names for the SAME flag, e.g. aliases: [y] on a `yes` predicate so `-y` and "
+            "`--yes` are one flag. Values are gathered across every name: `present` holds if any "
+            "appeared, `absent` only if none did, a value predicate matches if any value under any "
+            "name satisfies it"
         ),
     )
     flags: int = Field(
         default=0,
         description=(
-            "Regex flags for matches_regex (e.g. re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16), "
-            "mirroring FileMatchesRegexCriterion.flags. DOTALL is the usual need: a flag value built "
-            "from a heredoc spans lines, and without it `.` stops at the first newline"
+            "Regex flags for matches_regex (re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16), "
+            "mirroring FileMatchesRegexCriterion.flags. DOTALL is the usual need, since a "
+            "heredoc-built flag value spans lines"
         ),
     )
 
@@ -575,9 +570,9 @@ class CliCalledCriterion(BaseSuccessCriterion):
         default=None,
         min_length=1,
         description=(
-            "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the "
-            "invocation's non-flag arguments (e.g. 'ixp projects configure-model'). "
-            "Order matters, so 'labellings confirm' never matches 'labellings unconfirm'"
+            "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's "
+            "non-flag arguments. Order matters, so 'labellings confirm' never matches "
+            "'labellings unconfirm'"
         ),
     )
     tool: str | None = Field(
@@ -596,23 +591,21 @@ class CliCalledCriterion(BaseSuccessCriterion):
         ),
     )
     value_flags: list[str] = Field(
-        default_factory=list,
+        default_factory=lambda: ["output"],
         description=(
-            "Flag names (without leading dashes) that consume a following token as their value, for "
-            "flags this criterion does NOT assert on. Keys of `flags` are value-bearing automatically. "
-            "Everything else is treated as a boolean switch whose following token stays positional -- "
-            "so `delete --yes proj-1` keeps `proj-1` positional instead of binding it to `--yes`. "
-            "Declare a flag here when its value would otherwise be mistaken for a positional "
-            "(e.g. value_flags: [folder] for `--folder F proj-1`)"
+            "Flag names (no leading dashes) that consume a following token as their value. Keys of "
+            "`flags` are value-bearing already; everything else is a switch whose following token "
+            "stays positional. Declare a flag here when its value would otherwise be read as a "
+            "positional, e.g. [folder] for `--folder F proj-1`. Defaults to [output]"
         ),
     )
     min_count: int = Field(
         default=1,
         ge=0,
         description=(
-            "Minimum number of matching invocations. Combine min_count: 0 with max_count: 0 to "
-            "express must NOT match. Scoring is BINARY here (in vs out of bounds), unlike "
-            "command_executed, whose identically-named field scores fractionally"
+            "Minimum matching invocations. Combine min_count: 0 with max_count: 0 for must-NOT-match. "
+            "Scoring is BINARY (in vs out of bounds), unlike command_executed's fractional field of "
+            "the same name"
         ),
     )
     max_count: int | None = Field(
@@ -623,14 +616,22 @@ class CliCalledCriterion(BaseSuccessCriterion):
     ignore_flags: list[str] = Field(
         default_factory=lambda: ["output"],
         description=(
-            "Flag names dropped from an invocation before matching, because they never change WHICH "
-            "resource it addresses. Defaults to ['output'] so grading never depends on --output json, "
-            "which is outcome-invisible. Pass [] to disable"
+            "Flag names dropped before matching. Defaults to ['output'] so grading never depends on "
+            "--output json, which is outcome-invisible. An ignored flag that takes a value must also "
+            "appear in value_flags. Pass [] to disable"
         ),
     )
 
     @model_validator(mode="after")
     def _validate_bounds(self) -> CliCalledCriterion:
+        # min_count 0 with no upper bound is satisfied by every possible log, so
+        # the criterion can never fail -- the same vacuity class as a blank verb.
+        if self.min_count == 0 and self.max_count is None:
+            msg = (
+                "cli_called with min_count: 0 and no max_count can never fail. Set max_count: 0 for a "
+                "negative guard, or raise min_count for a positive assertion."
+            )
+            raise ValueError(msg)
         if self.max_count is not None and self.max_count < self.min_count:
             msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
             raise ValueError(msg)

@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import shlex
 from typing import TYPE_CHECKING, Any
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
@@ -23,34 +24,17 @@ def _split_flags(
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Split ``argv`` into non-flag arguments and a flag map.
 
-    Value binding is DECLARED, not guessed. ``value_flags`` names the flags that
-    consume a following token; every other flag is a switch whose following token
-    stays positional. The criterion supplies its own ``flags:`` keys plus
-    ``value_flags:`` as that set, so the author's assertion doubles as the grammar.
+    Only flags in ``value_flags`` consume a following token; everything else is a
+    switch. Guessing instead (``--yes proj-1`` binding ``yes=proj-1``) let a
+    ``max_count: 0`` guard pass on the delete it forbade, so ambiguity resolves
+    toward keeping the token positional.
 
-    This replaced a heuristic ("the next token is the value unless it starts with
-    ``-``") that silently swallowed a positional after a boolean switch. For
-    ``uip fields delete --yes proj-1`` it bound ``yes=proj-1`` and dropped
-    ``proj-1`` from the positionals, so a ``max_count: 0`` guard on
-    ``positional: [proj-1]`` reported a PASS while the log proved the delete had
-    happened. ``--yes``/``--force``/``-y`` before the target is how destructive
-    CLIs are invoked, which is exactly the shape a negative guard exists to catch,
-    so the default resolves ambiguity toward keeping the token positional.
+    ``--flag=value`` binds directly, being unambiguous. Repeated flags accumulate.
+    ``ignore`` names are dropped with their values. ``--`` ends flag parsing and is
+    itself dropped; a lone ``-`` is positional.
 
-    Other normalizations, each a case a flat-string regex gets wrong:
-
-    - ``--flag=value`` binds directly. The equals form is unambiguous, so it is
-      never re-run through any value/switch decision: ``--offset=-1`` keeps ``-1``
-      instead of dropping it and inventing a flag named ``1``.
-    - A declared value flag consumes its next token even when that token starts
-      with ``-``, so ``--limit -1`` binds ``-1``.
-    - Repeated flags accumulate, so ``--field a --field b`` keeps both values.
-    - Names in ``ignore`` are dropped along with their values.
-
-    A bare ``--`` terminates flag parsing (POSIX convention): everything after it
-    is positional, and the separator itself is dropped so it never has to be
-    written into a ``positional:`` expectation. A lone ``-`` is positional too
-    (the stdin convention), not a flag.
+    Known limitation: bundled short flags are not split, so ``-rf`` is one flag
+    named ``rf`` and a predicate on ``f`` will not see it.
     """
     positional: list[str] = []
     flags: dict[str, list[str]] = {}
@@ -134,18 +118,14 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
     if criterion.tool is not None and record.get("tool") != criterion.tool:
         return False
 
-    # The criterion's own flag predicates declare which flags carry a value;
-    # `value_flags` covers the rest (a flag whose value must not be mistaken for a
-    # positional even though nothing asserts on it).
-    ignore = frozenset(criterion.ignore_flags)
+    # Declarations only. Folding `ignore_flags` in here made ignored SWITCHES
+    # value-bearing, which swallowed the next positional and reopened the guard
+    # false-PASS; an ignored flag that takes a value declares it in value_flags.
     positional, flags = _split_flags(
         argv,
-        ignore,
-        # Ignored flags are value-bearing too: dropping `--output` while leaving
-        # `json` in the positionals would defeat the point of ignoring it.
+        frozenset(criterion.ignore_flags),
         frozenset(n for name, p in (criterion.flags or {}).items() if p.needs_value for n in (name, *p.aliases))
-        | frozenset(criterion.value_flags)
-        | ignore,
+        | frozenset(criterion.value_flags),
     )
 
     offset = 0
@@ -165,9 +145,8 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
 
     if criterion.flags:
         for name, predicate in criterion.flags.items():
-            # One flag, several spellings: gather values across every name it owns.
-            # [] means the flag was absent under all of them, which _flag_matches
-            # distinguishes from "present with an empty value" (a switch, [""]).
+            # [] means absent under every spelling, which _flag_matches
+            # distinguishes from a switch's "present with empty value" ([""]).
             collected = [v for n in (name, *predicate.aliases) for v in flags.get(n, [])]
             if not _flag_matches(predicate, collected or None):
                 return False
@@ -201,9 +180,8 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             Result with binary score (1.0 when the match count is within
             [min_count, max_count], 0.0 otherwise)
         """
-        # Compile every flag regex up front so a bad pattern reports itself as
-        # such, instead of surfacing as a generic caught exception once the first
-        # record happens to reach that predicate.
+        # Up front so a bad pattern names its flag, rather than surfacing as a
+        # generic caught exception when some record first reaches that predicate.
         for name, predicate in (criterion.flags or {}).items():
             if predicate.matches_regex is None:
                 continue
@@ -218,10 +196,8 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
                 )
 
         if not sandbox.file_exists(criterion.log):
-            # A missing log is a harness fault, not agent behaviour: the mock never
-            # ran or wrote elsewhere. Failing (rather than treating it as "zero
-            # matching calls") is what stops a negative guard — max_count: 0 —
-            # from passing vacuously against a log that does not exist.
+            # Harness fault, not agent behaviour. Failing stops a max_count: 0
+            # guard passing vacuously against a log that never existed.
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
@@ -252,12 +228,8 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             usable.append((argv, parsed))
 
         if unusable:
-            # Same footing as a missing log, and for the same reason: a record we
-            # cannot read might BE the invocation a max_count: 0 guard forbids, so
-            # scoring it as "did not match" would let the guard pass on the very
-            # call it exists to catch. Skipping these silently (the previous
-            # behaviour) contradicted the fail-loud missing-log path above and the
-            # sibling precedent in json_check.
+            # A record we cannot read might BE the call a max_count: 0 guard
+            # forbids, so scoring it "did not match" would let the guard pass.
             logger.warning(
                 f"cli_called: {unusable} unusable record(s) in '{criterion.log}'"
                 + " (unparseable line, non-object line, or argv that is not a list of strings)"
@@ -299,9 +271,14 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         if score == 1.0:
             details = f"{count} invocation(s) matched ({wanted}); satisfies {bound}"
         elif not within_lower:
+            # A bare count sends the reader to the sandbox; this criterion exists
+            # to answer "what did it actually run".
+            sample = "; ".join(shlex.join(argv)[:120] for argv, _ in usable[:3])
+            more = f" (+{len(usable) - 3} more)" if len(usable) > 3 else ""
+            recorded = f" Recorded: {sample}{more}" if sample else ""
             details = (
                 f"{count} invocation(s) matched ({wanted}); needs {bound}. "
-                f"{len(records)} invocation(s) recorded in '{criterion.log}'"
+                f"{len(records)} invocation(s) recorded in '{criterion.log}'.{recorded}"
             )
         else:
             details = f"{count} invocation(s) matched ({wanted}) but {bound} forbids it"
