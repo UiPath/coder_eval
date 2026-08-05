@@ -60,12 +60,20 @@ def _normalize_shell(cmd_text: str) -> str | None:
     the pattern. Authors then hand-model that escaping and get it subtly wrong
     (e.g. allowing ``"`` but not ``'``), silently under-counting correct calls.
 
-    This unwraps a ``bash``/``sh -c`` wrapper and resolves shell quoting with
-    ``shlex`` so a pattern can match argv semantics regardless of quoting.
+    This unwraps a ``bash``/``sh``/``zsh -c`` wrapper and resolves shell quoting
+    with ``shlex`` so a pattern can match argv semantics regardless of quoting.
     Shell operators (``&&``, ``|``, ``>``) survive as their own tokens, so
-    patterns that reference them keep working. Returns ``None`` when the text
-    can't be parsed (unbalanced quotes, heredocs); the caller keeps the raw
-    text as a haystack, so nothing that matched before can stop matching.
+    patterns that reference them keep working, and embedded newlines collapse to
+    single spaces. Returns ``None`` when the text can't be parsed (an odd quote
+    count — NOT heredocs, which tokenize fine); the caller then keeps only the
+    raw text as a haystack.
+
+    Adding a second (normalized) haystack is *not* purely additive: a
+    ``command_pattern`` can only gain matches, but the same haystacks feed
+    ``exclude_pattern`` and the ``max_count`` gate, so a normalized form can
+    newly satisfy an exclusion or trip a ``max_count`` cap — i.e. a command that
+    counted on the raw text alone can stop counting. See
+    ``CommandExecutedChecker._matching_commands``.
 
     Memoized (pure function of ``cmd_text``): the early-stop watcher re-scans the
     whole accumulated trajectory on every tool-call event, so the same command is

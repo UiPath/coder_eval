@@ -768,6 +768,7 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_exit_code` | 0 | Expected exit code |
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
+| `score_from_stdout` | `false` | Read a float score (0.0–1.0) from the first stdout line (remaining lines become details); a non-zero exit code or a parse failure scores 0.0. Mutually exclusive with `expected_stdout`. |
 
 ### `file_matches_regex`
 
@@ -795,6 +796,12 @@ Compares agent's code with a reference solution using similarity scoring. **Cont
   weight: 2.0
 ```
 
+| Field | Default | Description |
+|-------|---------|-------------|
+| `agent_file` | *required* | Path to the agent's generated file (relative to the sandbox root). |
+| `comparison_method` | `"ast"` | `ast` (structure), `token` (text), or `complexity` (metrics). |
+| `similarity_threshold` | 0.8 | Minimum similarity score to pass (0.0–1.0). |
+
 **Comparison methods:**
 - `ast` — Abstract Syntax Tree similarity (structure-based)
 - `token` — Token-based similarity (implementation details)
@@ -812,6 +819,17 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
   require_success: true               # Only count successful commands (default: false)
   description: "Agent must use curl to fetch weather"
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `tool_name` | `null` | Tool-name filter (e.g. `Bash`); `null` counts any tool. |
+| `command_pattern` | `null` | Regex to match the command; `null` matches any command. Matched with shell normalization (see below). |
+| `min_count` | 1 | Minimum matching commands required. `0` permits zero matches — combine with `max_count: 0` to assert a command must **NOT** run. |
+| `max_count` | `null` | Optional inclusive upper bound. When set, the criterion passes iff `min_count <= matches <= max_count`. |
+| `require_success` | `false` | Only count commands that completed successfully. |
+| `exclude_pattern` | `null` | Regex that must NOT match; a command matching both `command_pattern` and `exclude_pattern` is skipped. Also matched with shell normalization (see below). |
+
+**Shell normalization.** For a Bash command, both `command_pattern` and `exclude_pattern` are matched against the raw command text **and** its shell-normalized form — the `bash`/`sh`/`zsh -lc "..."` wrapper stripped and shell quoting resolved with `shlex` — and a hit on *either* form counts. So a pattern like `curated_channels` matches whether the agent wrote the argument bare, `'single'`-quoted, `"double"`-quoted, or `\"escaped\"`; you do **not** hand-encode shell quoting. Because the same haystacks also feed `exclude_pattern` and the `max_count` gate, normalization is **not** purely additive: a quote-obfuscated call can now be caught by an exclusion or a `max_count: 0` gate that the raw text alone would have missed — and, conversely, an unedited `exclude_pattern` may now exclude a call it previously let through. Cross-repo suites that hand-encoded quote tolerance in their patterns should re-baseline.
 
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
 
@@ -891,6 +909,8 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
 | `max_tokens` | `2000` | Maximum tokens in the judge's response |
 | `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
+| `capture_transcript` | `true` | Persist a `JudgeTranscript` (raw verdict + rendered prompts + token usage) to a sibling `judge-<idx>.yaml`. Set `false` to drop it when on-disk size matters (e.g. 1000-row datasets); the `findings` on the result persist regardless. |
+| `max_transcript_chars` | `100000` | Aggregate cap on captured transcript text (verdict + prompt + system, split 60/30/10). Exceeding it marks the transcript `truncated=True`. |
 
 **Transport selection.** The judge call is routed by the active `API_BACKEND`:
 
@@ -964,6 +984,8 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `max_turns` | `50` | Judge's inner-loop turn limit |
 | `turn_timeout` | `300` | Wall-clock timeout (seconds) |
 | `agent` | hardened judge defaults | Nested `AgentConfig` — `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `ignore_patterns`, `sdk_options`. A partial block (e.g. only `model:`) still applies the judge security defaults for missing fields, and the security floor (`.claude` / `.mcp.json` / `_reference` ignore patterns, `setting_sources=[]`) is always enforced. |
+| `capture_transcript` | `true` | Persist a `JudgeTranscript` (tool calls + token usage + raw verdict + rendered prompts) to a sibling `judge-<idx>.yaml`. Set `false` to drop the trajectory log when on-disk size matters; the `findings` on the result persist regardless. |
+| `max_transcript_chars` | `100000` | Aggregate cap on captured transcript text (verdict + prompt + system + tool detail/result-preview lines, split 60/30/10 with tool calls prioritized). Exceeding it marks the transcript `truncated=True`. |
 
 **Security**
 

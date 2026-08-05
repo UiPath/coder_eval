@@ -593,7 +593,14 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
     type: Literal["command_executed"] = "command_executed"
     tool_name: str | None = Field(default=None, description="Tool name filter (e.g., 'Bash'). None = any tool.")
     command_pattern: str | None = Field(
-        default=None, description="Regex to match command parameters. None = any command."
+        default=None,
+        description=(
+            "Regex to match command parameters. None = any command. For a Bash "
+            "command the pattern is matched against the raw command text OR its "
+            "shell-normalized form — `shlex`-resolved quoting with a "
+            "`bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not "
+            "hand-encode shell quoting/escaping (`'single'`, `\"double\"`, bare)."
+        ),
     )
     min_count: int = Field(
         default=1,
@@ -617,7 +624,9 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
     exclude_pattern: str | None = Field(
         default=None,
         description=(
-            "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped."
+            "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. "
+            "Like command_pattern, this is matched against the raw Bash command OR its shell-normalized form, so "
+            "it also excludes quote-obfuscated variants of the same call."
         ),
     )
 

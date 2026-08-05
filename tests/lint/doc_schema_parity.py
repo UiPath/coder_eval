@@ -12,10 +12,16 @@ Design choices, each load-bearing:
 * **Allowlist, not denylist.** A new field on a registered model that is neither
   documented nor exempted *fails* — which is the point. Adding a user-facing field
   now forces a doc update or a reasoned exemption in the same change.
-* **Explicit registry, no recursion.** Only the four registered models are
-  checked; nested models (``AgentConfig``, ``SandboxConfig``, criteria, …) are NOT
-  walked. Walking them would silently expand the documentation commitment to
-  dozens of models nobody signed up for.
+* **Registry + the criterion union, no recursion.** The four top-level models are
+  registered explicitly; the members of the ``SuccessCriterion`` discriminated
+  union are enumerated programmatically (a task author writes them directly, the
+  guide already claims to be their reference, and the set is closed/enumerable).
+  In neither case do we recurse into *nested* models (``AgentConfig``,
+  ``SandboxConfig``, the criteria's own sub-models, …) — that would silently
+  expand the commitment to dozens of models nobody signed up for. Enumerating the
+  union (not recursing) is what makes "the next criterion-semantics change cannot
+  ship undocumented" mechanical: a new criterion, or a new field on one, fails
+  until it is documented or exempted.
 * **Inline-code match, deliberately simple.** A field counts as documented when
   its bare name appears wrapped in Markdown inline-code backticks anywhere in the
   doc. This is a floor, not a proof — a field name that appears in an unrelated
@@ -32,20 +38,48 @@ over Markdown and is wired as ``tests/test_custom_lint.py::TestCE030DocSchemaPar
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_args
 
 from pydantic import BaseModel
 
 from coder_eval.models import Dataset, RunLimits, SimulationConfig, TaskDefinition
+from coder_eval.models.criteria import SuccessCriterion
+
+
+_GUIDE = "docs/TASK_DEFINITION_GUIDE.md"
+
+
+def _criterion_models() -> list[type[BaseModel]]:
+    """Flatten the ``SuccessCriterion`` discriminated union into its member models.
+
+    Enumerates the union members (``FileExistsCriterion``, ``CommandExecutedCriterion``,
+    …) without recursing into each member's own nested models, so the documentation
+    promise covers every criterion a task author can write — and any newly added
+    criterion automatically — while staying bounded to the union itself.
+    """
+    seen: list[type[BaseModel]] = []
+
+    def walk(tp: object) -> None:
+        for arg in get_args(tp):
+            if isinstance(arg, type) and issubclass(arg, BaseModel):
+                if arg not in seen:
+                    seen.append(arg)
+            else:
+                walk(arg)
+
+    walk(SuccessCriterion)
+    return seen
 
 
 # Models the project commits to documenting, paired with the doc page that owns
-# their field reference. Keep this list SHORT and explicit — every entry is a
-# standing documentation obligation.
+# their field reference. The four top-level models are explicit; the criterion
+# union members are enumerated so a new criterion (or field) can't ship undocumented.
 DOCUMENTED_MODELS: list[tuple[type[BaseModel], str]] = [
-    (TaskDefinition, "docs/TASK_DEFINITION_GUIDE.md"),
-    (RunLimits, "docs/TASK_DEFINITION_GUIDE.md"),
-    (Dataset, "docs/TASK_DEFINITION_GUIDE.md"),
-    (SimulationConfig, "docs/TASK_DEFINITION_GUIDE.md"),
+    (TaskDefinition, _GUIDE),
+    (RunLimits, _GUIDE),
+    (Dataset, _GUIDE),
+    (SimulationConfig, _GUIDE),
+    *[(m, _GUIDE) for m in _criterion_models()],
 ]
 
 # Fields deliberately absent from the user docs, with the reason each is not
