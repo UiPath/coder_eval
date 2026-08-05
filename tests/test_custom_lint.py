@@ -1337,13 +1337,16 @@ class TestPluginArtifacts:
         )
 
     def test_lint_tasks_skill_is_read_only(self):
-        # Assert BOTH keys, because neither alone carries the contract and their exact
-        # runtime semantics are the host's, not ours: `allowed-tools` names the tools this
-        # skill expects to use, `disallowed-tools` names the write tools that must not be
-        # reachable. Assert only the allowlist and a denylist regression passes; assert only
-        # the denylist and a widened allowlist (say `Bash`) passes. The skill body's standing
-        # "never modify a file" rule is the guarantee of last resort — these two keys are
-        # what keep the frontmatter honest about it.
+        # Assert BOTH keys, because neither alone carries the contract: `allowed-tools` names
+        # the tools this skill expects to use, `disallowed-tools` removes the write tools from
+        # the pool. Assert only the allowlist and a denylist regression passes; assert only the
+        # denylist and a widened allowlist (say `Bash`) passes.
+        #
+        # Neither key is the real guarantee, which is why the skill body carries a STANDING
+        # prohibition too: per the skills spec, `disallowed-tools` "clears when you send your
+        # next message", and this skill's step 1 deliberately asks the user one before linting a
+        # whole directory. So the frontmatter covers the first turn and the prose covers the
+        # rest — `test_lint_tasks_read_only_rule_survives_the_next_turn` guards that half.
         meta = _skill_frontmatter(PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md")
 
         # `and allowed` first: an ABSENT allowed-tools is the weakest state, not the
@@ -1356,6 +1359,19 @@ class TestPluginArtifacts:
         assert {"Write", "Edit", "NotebookEdit"} <= set(meta.get("disallowed-tools") or []), (
             "lint-tasks must name every write tool in `disallowed-tools` — that is the half "
             "that actually removes them from the pool"
+        )
+
+    def test_lint_tasks_read_only_rule_survives_the_next_turn(self):
+        # The frontmatter deny is turn-scoped ("clears when you send your next message"), and
+        # step 1 asks the user a question before linting a directory — so for most of a real
+        # review the prose rule is the only thing enforcing read-only. Deleting it would leave
+        # a skill that advertises "Read-only." in its description with nothing behind it after
+        # the first reply.
+        text = " ".join((PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "Never modify a file" in text, "lint-tasks lost its standing read-only prohibition"
+        assert "standing, not per-turn" in text, (
+            "lint-tasks no longer says its read-only rule outlives the frontmatter deny — the "
+            "deny clears on the user's next message, which step 1 explicitly solicits"
         )
 
     def test_lint_tasks_does_not_flag_the_shipped_activation_template(self):

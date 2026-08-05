@@ -210,7 +210,7 @@ harness once for all of them.
 ## From the 2026-08-04 Claude Code plugin marketplace run
 
 - [ ] **Plugin skills must not name a file that exists only in THIS repo** — the
-  `test_skills_reference_no_repo_paths` denylist (`docs/`, `src/`,
+  `test_bundled_files_reference_no_repo_paths` denylist (`docs/`, `src/`,
   `.claude/shared/`, `.claude/commands/`, `uv run`, `../`) deliberately allows
   `tasks/` and `.claude/skills/`, because those are user-workspace paths the
   skills legitimately scan and scaffold. So a skill body naming a specific repo
@@ -223,3 +223,8 @@ harness once for all of them.
   "a file to look for in the user's repo" from "a file in ours", which is a
   design problem, not a 30-minute one. No skill violates it today (grepped) —
   caught in the 2026-08-04 claude-code-plugin-marketplace implementation run.
+  *Update (2026-08-04, plugin-audit-p0-p1 run): the guard was renamed and widened
+  from `skills/*/SKILL.md` to every shipped text file under `plugins/coder-eval/`
+  (`PLUGIN_TEXT_FILES`), which closed the coverage half of this gap — a bundled
+  reference now cannot name a repo path either. The token-classifier problem
+  described above is unchanged and still deferred.*
