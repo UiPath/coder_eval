@@ -154,17 +154,53 @@ Then re-read your own work and check:
 - the prompt leaks no criteria detail;
 - at least one criterion inspects content.
 
+**A task nobody has ever run is not finished.** `plan` proves the YAML is well formed; it
+says nothing about whether the criteria can be satisfied, or whether they can be satisfied
+too easily. Only a run answers that, so once `plan` exits 0:
+
+State the task count, the agent and model the tasks resolve to, and that **a run costs real
+tokens** — then **offer to run it and ask**. Never run unprompted.
+
+```bash
+coder-eval run <path>
+```
+
+Then interpret the result rather than reporting it:
+
+- **A first run scoring 1.000 is suspicious, not a success.** A task written and passed on
+  the first attempt is more often a task that grades something trivial than a task that
+  happened to be perfect. Go back to the framing question in step 5 and re-answer it against
+  the trajectory you now have: what did the agent actually do, and would the cheapest path
+  have scored the same?
+- **A failing run is a diagnosis, not a prompt edit.** Decide first *which layer* is wrong:
+  something a real user would plausibly have said (fix the prompt), or something the skill
+  or the underlying tool should have supplied (fix that instead, and leave the task failing
+  until it exists). Patching the prompt to route around a missing capability makes the score
+  green and changes nothing for users.
+- **Never ship a task that cannot pass yet.** A task that always fails is noise: it trains
+  everyone reading the suite to ignore a red result. Either withdraw it, or say plainly what
+  has to exist before it is worth scheduling.
+
+If the user declines the run, that is a fine outcome — record it as declined in the report
+rather than implying the task is validated.
+
 ## Step 7 — Report
 
 Summarize what you wrote:
 
-| File | Task ID | Criteria | Tags |
-| --- | --- | --- | --- |
+| File | Task ID | Criteria | Tags | Run verdict |
+| --- | --- | --- | --- | --- |
+
+The **run verdict** is the score from step 6, or an explicit `not run` **with the reason**
+(the user declined, no credentials, a dependency does not exist yet). An empty cell reads as
+a pass to everyone who sees the table later.
 
 Then:
 
 - **Your answer to the framing question** — the cheapest path to full marks, and why the
   criteria do not accept it. One or two sentences, not a restatement of the rubric.
 - **Which rubric checks you applied**, and what any of them changed.
+- **What the run showed**, if it happened — particularly if it scored 1.000 and what you
+  concluded about that.
 - Any assumptions you made.
-- The command to run it: `coder-eval run <path>` (real tokens, real cost).
+- The command to re-run it: `coder-eval run <path>` (real tokens, real cost).
