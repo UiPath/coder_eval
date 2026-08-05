@@ -356,7 +356,18 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
-        # Every task the variant ran is in the denominator, errors included.
+        # Row: Voided (only when the integrity gate voided anything -- a voided row
+        # measured a leak, so it leaves the pass-rate denominator below).
+        if any(result.variant_aggregates[vid].tasks_voided > 0 for vid in result.variant_ids):
+            row = "| Voided (integrity)"
+            for vid in result.variant_ids:
+                row += f" | {result.variant_aggregates[vid].tasks_voided}"
+            if show_p_values:
+                row += " | —"
+            lines.append(row + " |")
+
+        # Every task the variant ran is in the denominator, errors included --
+        # except voided rows, which measured a leak and are excluded outright.
         row = "| Pass Rate"
         for vid in result.variant_ids:
             rate = result.variant_aggregates[vid].pass_rate
@@ -518,12 +529,14 @@ class ExperimentReportGenerator:
         """The ``## Replicate Statistics`` block: per-variant bootstrap-CI / Wilson
         pass-rate table. Returns ``[]`` when no variant ran more than one replicate.
 
-        The pass rate counts SCORES, and the integrity gate deliberately leaves a
-        voided row's ``weighted_score`` as computed (the high score is the
-        diagnostic). So a voided replicate would otherwise be counted as a pass here
-        and a variant whose every row was voided would report 100% in the one table a
-        reviewer reads when comparing arms. Voided replicates are excluded from the
-        pass rate and reported in their own column instead.
+        The pass rate and the mean/CI both count SCORES, and the integrity gate
+        deliberately leaves a voided row's ``weighted_score`` as computed (the high
+        score is the diagnostic). So a voided replicate would otherwise be counted
+        as a pass here and inflate the bootstrap mean beside it, and a variant whose
+        every row was voided would report 100% in the one table a reviewer reads
+        when comparing arms. Voided replicates are excluded from the pass rate AND
+        the mean/CI, and reported in their own column instead; a variant with no
+        honest replicate at all renders "n/a", not a number.
         """
         # ── Replicate Statistics (only when any variant ran >1 replicate) ──
         if not any(ts.replicate_count > 1 for ts in result.task_summaries):
@@ -536,7 +549,6 @@ class ExperimentReportGenerator:
         for vid in result.variant_ids:
             per_rep = result.per_replicate_scores.get(vid, {})
             voided_flags = result.per_replicate_voided.get(vid, {})
-            all_scores: list[float] = [s for scores in per_rep.values() for s in scores]
             scored: list[float] = []
             voided = 0
             for task_id, scores in per_rep.items():
@@ -547,12 +559,14 @@ class ExperimentReportGenerator:
                     else:
                         scored.append(score)
             passes = sum(1 for s in scored if s >= _REPLICATE_PASS_THRESHOLD)
-            m, lo, hi = bootstrap_mean_ci(all_scores)
+            m, lo, hi = bootstrap_mean_ci(scored)
+            mean_str = f"{m:.3f}" if scored else "n/a"
+            ci_str = f"[{lo:.3f}, {hi:.3f}]" if scored else "n/a"
             wlo, whi = wilson_interval(passes, len(scored))
             agg = result.variant_aggregates.get(vid)
             rep_count = agg.replicate_count if agg else 1
             lines.append(
-                f"| {vid} | {rep_count} | {m:.3f} | [{lo:.3f}, {hi:.3f}]"
+                f"| {vid} | {rep_count} | {mean_str} | {ci_str}"
                 + f" | {passes}/{len(scored)} [{wlo:.2f}, {whi:.2f}] | {voided} |"
             )
 
@@ -657,7 +671,9 @@ class ExperimentReportGenerator:
             f"- **Succeeded**: {agg.tasks_succeeded}",
             failed_line,
             f"- **Errors**: {agg.tasks_error}",
-            f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_run})",
+            # Voided rows leave the pass-rate denominator: they measured a leak.
+            *([f"- **Voided (integrity)**: {agg.tasks_voided}"] if agg.tasks_voided else []),
+            f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_run - agg.tasks_voided})",
             f"- **Average Score**: {agg.average_score:.3f}",
             f"- **Average Duration**: {agg.average_duration:.1f}s",
             f"- **Total Tokens**: {tokens_str}",

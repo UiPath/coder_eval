@@ -1164,16 +1164,17 @@ class TestReplicateStatistics:
         assert "95% CI" in md
         assert "Pass-rate" in md
 
-    def test_voided_replicates_are_excluded_from_the_pass_rate(self):
+    def test_voided_replicates_are_excluded_from_the_pass_rate_and_the_mean(self):
         """The gate leaves a voided row's score intact, so a score-based pass rate
-        counts it as a pass unless the void flag is honored."""
+        counts it as a pass -- and a score-based mean inflates -- unless the void
+        flag is honored. An all-voided variant has nothing to average: n/a."""
         per_rep = {"a": {"task-1": [1.0, 1.0, 1.0]}, "b": {"task-1": [1.0, 1.0, 1.0]}}
         voided = {"a": {"task-1": [True, True, True]}, "b": {"task-1": [False, False, False]}}
         result = self._make_result(replicate_count=3, per_replicate_scores=per_rep, per_replicate_voided=voided)
 
         md = ExperimentReportGenerator.generate_experiment_report(result)
 
-        assert "| a | 3 | 1.000 | [1.000, 1.000] | 0/0 [0.00, 0.00] | 3 |" in md
+        assert "| a | 3 | n/a | n/a | 0/0 [0.00, 0.00] | 3 |" in md
         assert "| b | 3 | 1.000 | [1.000, 1.000] | 3/3 [0.44, 1.00] | 0 |" in md
 
     def test_a_partly_voided_variant_keeps_its_honest_replicates(self):
@@ -1183,7 +1184,7 @@ class TestReplicateStatistics:
 
         md = ExperimentReportGenerator.generate_experiment_report(result)
 
-        assert "| a | 3 | 0.733" in md  # the mean still reports every score
+        assert "| a | 3 | 0.600" in md  # the mean averages only the honest replicates
         assert "| 1/2 [" in md  # the pass rate counts only the two that measured the agent
         assert md.count("| Voided |") == 1
 

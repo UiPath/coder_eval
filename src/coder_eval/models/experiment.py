@@ -191,14 +191,28 @@ class VariantResult(BaseModel):  # noqa: CE009 -- persisted result model; round-
         ge=1,
         description="Number of replicates aggregated into this VariantResult (1 when repeats disabled).",
     )
+    voided_replicates: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Replicates the integrity gate voided. weighted_score and final_status are "
+            "folded over the non-voided replicates only; when every replicate was voided "
+            "(voided_replicates == replicate_count) the row measured nothing but the leak "
+            "and aggregates exclude it."
+        ),
+    )
 
 
 class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; round-trip leniency like models/results.py
     """Aggregated statistics for a single variant across all tasks.
 
-    ``pass_rate`` uses the same denominator as ``RunSummary.pass_rate``: every task
-    the variant ran, errors included as misses. Otherwise an A/B whose variants
-    error at different rates compares two different denominators.
+    ``pass_rate`` uses the same denominator as ``RunSummary.pass_rate`` -- every task
+    the variant ran, errors included as misses (otherwise an A/B whose variants
+    error at different rates compares two different denominators) -- EXCEPT for
+    voided rows. A row the integrity gate voided measured a leak, not the agent, so
+    it belongs in neither the numerator nor the denominator: it is counted in
+    ``tasks_voided`` instead, and a variant whose every row was voided has no pass
+    rate at all (``None``), not 0.0.
     """
 
     variant_id: str
@@ -206,6 +220,14 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     tasks_succeeded: int
     tasks_failed: int
     tasks_error: int
+    tasks_voided: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Tasks whose every replicate the integrity gate voided. Excluded from "
+            "tasks_succeeded/failed/error, average_score and the pass_rate denominator."
+        ),
+    )
     average_score: float
     average_duration: float
     total_tokens: int | None = None
@@ -228,16 +250,22 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> VariantAggregate:
-        if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
-            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+        if self.tasks_succeeded + self.tasks_failed + self.tasks_error + self.tasks_voided != self.tasks_run:
+            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error} + {self.tasks_voided}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant."""
-        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+        """``tasks_succeeded / (tasks_run - tasks_voided)`` as a 0-1 fraction.
+
+        ``None`` on an empty variant AND on an all-voided one: a voided row is a
+        leak measurement, so with every row voided there is nothing to rate --
+        reporting 0.0 would read as "the agent failed everything".
+        """
+        scored = self.tasks_run - self.tasks_voided
+        return self.tasks_succeeded / scored if scored else None
 
 
 class TaskExperimentSummary(BaseModel):  # noqa: CE009 -- persisted result model; round-trip leniency like models/results.py

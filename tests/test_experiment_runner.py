@@ -13,6 +13,9 @@ from coder_eval.models import (
     ExperimentResult,
     ExperimentVariant,
     FinalStatus,
+    IntegrityInfo,
+    IntegrityMode,
+    IntegrityVerdict,
     PreservationMode,
     ResolvedTask,
     TaskResult,
@@ -750,3 +753,106 @@ class TestReplicateAggregation:
         vr = result.task_summaries[0].variant_results[0]
         assert abs(vr.duration_seconds - 0.0) < 1e-9
         assert vr.final_status == FinalStatus.ERROR
+
+
+class TestVoidedAggregation:
+    """A voided row measured a leak, not the agent, so it must leave the headline
+    pass rate and score entirely -- counting it as a failure is as wrong as
+    counting it as the pass its preserved score claims."""
+
+    def _make_tr(
+        self,
+        task_id: str,
+        variant_id: str,
+        score: float,
+        status: str = "SUCCESS",
+        *,
+        voided: bool = False,
+        replicate_index: int = 0,
+    ) -> TaskResult:
+        result = EvaluationResult(
+            task_id=task_id,
+            task_description="d",
+            variant_id=variant_id,
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status=status,
+            weighted_score=score,
+            duration_seconds=10.0,
+            iteration_count=1,
+            integrity=IntegrityInfo(
+                verdict=IntegrityVerdict.TAINTED if voided else IntegrityVerdict.CLEAN,
+                mode=IntegrityMode.VOID,
+                voided=voided,
+            ),
+        )
+        return TaskResult(
+            task_id=task_id,
+            variant_id=variant_id,
+            result=result,
+            duration=10.0,
+            replicate_index=replicate_index,
+        )
+
+    def test_a_voided_row_is_excluded_not_counted_as_a_failure(self):
+        """One voided FAILURE with its (deliberately preserved, inflated) score:
+        it must be an excluded row, not a miss in the denominator."""
+        reps = [self._make_tr("t", "v", score=1.0, status="FAILURE", voided=True)]
+
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=10.0
+        )
+
+        agg = result.variant_aggregates["v"]
+        assert agg.tasks_run == 1
+        assert agg.tasks_voided == 1
+        assert agg.tasks_succeeded == 0
+        assert agg.tasks_failed == 0
+        assert agg.pass_rate is None  # all-void has no rate at all, not 0.0
+        assert agg.average_score == 0.0
+
+    def test_an_all_voided_fold_does_not_keep_the_leaked_score(self):
+        reps = [self._make_tr("t", "v", score=1.0, status="FAILURE", voided=True, replicate_index=i) for i in range(2)]
+
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=20.0
+        )
+
+        vr = result.task_summaries[0].variant_results[0]
+        assert vr.weighted_score == 0.0
+        assert vr.voided_replicates == 2
+        assert vr.replicate_count == 2
+
+    def test_a_partly_voided_fold_keeps_only_the_honest_replicates(self):
+        reps = [
+            self._make_tr("t", "v", score=1.0, status="FAILURE", voided=True, replicate_index=0),
+            self._make_tr("t", "v", score=0.6, status="SUCCESS", replicate_index=1),
+        ]
+
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=20.0
+        )
+
+        vr = result.task_summaries[0].variant_results[0]
+        assert abs(vr.weighted_score - 0.6) < 1e-9  # the voided 1.0 does not average in
+        assert vr.final_status.category == "succeeded"  # the voided FAILURE does not fold in
+        assert vr.voided_replicates == 1
+        agg = result.variant_aggregates["v"]
+        assert agg.tasks_voided == 0  # an honest replicate survived, so the row is scored
+        assert agg.pass_rate == 1.0
+
+    def test_a_clean_task_beside_an_all_voided_one_keeps_its_rate(self):
+        trs = [
+            self._make_tr("t1", "v", score=1.0, status="SUCCESS"),
+            self._make_tr("t2", "v", score=1.0, status="FAILURE", voided=True),
+        ]
+
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=trs, total_duration=20.0
+        )
+
+        agg = result.variant_aggregates["v"]
+        assert agg.tasks_run == 2
+        assert agg.tasks_voided == 1
+        assert agg.pass_rate == 1.0  # 1 pass / 1 scored, not 1/2
+        assert agg.average_score == 1.0  # the voided task's inflated score does not average in

@@ -826,10 +826,19 @@ def aggregate_results(
 
     task_variants: dict[str, list[VariantResult]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
-        scores = [r.result.weighted_score or 0.0 for r in reps]
+        # A voided replicate's preserved score and gate-assigned FAILURE both measure
+        # the leak, not the agent, so score and status fold over the honest replicates
+        # only. When every replicate was voided there is nothing honest to fold: the
+        # score pins to 0.0 (the preserved scores are inflated by construction, and
+        # 0.0 keeps the row from winning a best-variant comparison) and the aggregate
+        # below drops the row from its score and pass-rate entirely via tasks_voided.
+        # Duration/token/turn metrics stay over ALL replicates -- they measure cost,
+        # which is real either way.
+        honest = [r for r in reps if not r.result.integrity.voided]
+        scores = [r.result.weighted_score or 0.0 for r in honest]
         non_errored = [r for r in reps if r.result.final_status.category != "error"]
         durations = [r.result.duration_seconds for r in non_errored]
-        statuses = [r.result.final_status for r in reps]
+        statuses = [r.result.final_status for r in (honest or reps)]
         iter_counts = [r.result.iteration_count for r in reps if r.result.iteration_count is not None]
         asst_turns = [r.result.total_assistant_turns for r in reps if r.result.total_assistant_turns is not None]
         token_vals = [r.result.total_token_usage.total_tokens for r in reps if r.result.total_token_usage is not None]
@@ -839,7 +848,7 @@ def aggregate_results(
         variant_result = VariantResult(
             variant_id=variant_id,
             task_id=task_id,
-            weighted_score=sum(scores) / len(scores),
+            weighted_score=sum(scores) / len(scores) if scores else 0.0,
             final_status=final_status,
             duration_seconds=sum(durations),
             total_tokens=sum(token_vals) if token_vals else None,
@@ -848,6 +857,7 @@ def aggregate_results(
             reference_similarity=ref_similarity,
             replicate_index=0,  # aggregate — points at first replicate for link rendering
             replicate_count=len(reps),
+            voided_replicates=len(reps) - len(honest),
         )
         task_variants.setdefault(task_id, []).append(variant_result)
 
@@ -887,15 +897,22 @@ def aggregate_results(
 
         token_values = [v.total_tokens for v in vr_list if v.total_tokens is not None]
         total_tokens = sum(token_values) if token_values else None
+        # A row whose every replicate was voided has no honest measurement in it:
+        # it leaves the status buckets and the score/pass-rate denominators and is
+        # reported in tasks_voided instead. Duration stays -- wall-clock cost is real.
+        scored_rows = [v for v in vr_list if v.voided_replicates < v.replicate_count]
         variant_aggregates[vid] = VariantAggregate(
             variant_id=vid,
             tasks_run=len(vr_list),
-            tasks_succeeded=sum(1 for v in vr_list if v.final_status.category == "succeeded"),
-            tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
-            tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
-            tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
-            tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
-            average_score=sum(v.weighted_score for v in vr_list) / len(vr_list),
+            tasks_succeeded=sum(1 for v in scored_rows if v.final_status.category == "succeeded"),
+            tasks_failed=sum(1 for v in scored_rows if v.final_status.category == "failed"),
+            tasks_error=sum(1 for v in scored_rows if v.final_status.category == "error"),
+            tasks_voided=len(vr_list) - len(scored_rows),
+            tasks_token_budget_exceeded=sum(
+                1 for v in scored_rows if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED
+            ),
+            tasks_cost_budget_exceeded=sum(1 for v in scored_rows if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
+            average_score=sum(v.weighted_score for v in scored_rows) / len(scored_rows) if scored_rows else 0.0,
             average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,
             replicate_count=vr_list[0].replicate_count if vr_list else 1,
