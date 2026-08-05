@@ -282,6 +282,43 @@ def test_unbalanced_quotes_do_not_skip_the_command():
 
 
 # --------------------------------------------------------------------------
+# Segmentation: quoting, comments and heredocs make text inert, not a command
+# --------------------------------------------------------------------------
+
+INERT_TEXT_CLEAN = [
+    pytest.param("printf '%s\\n' 'harmless; cat RESOLUTION.md'", id="quoted-separator-in-an-argument"),
+    pytest.param('echo "see; cat RESOLUTION.md" > notes.txt', id="double-quoted-separator"),
+    pytest.param("echo done # cat RESOLUTION.md", id="trailing-comment"),
+    pytest.param("# cat RESOLUTION.md", id="whole-line-comment"),
+    pytest.param("cat > notes.txt <<'EOF'\ncat RESOLUTION.md\nEOF", id="quoted-heredoc-body-is-data"),
+    pytest.param('cat > notes.txt <<"EOF"\ncat RESOLUTION.md\nEOF', id="double-quoted-heredoc-delimiter"),
+    pytest.param("cat > notes.txt <<\\EOF\ncat RESOLUTION.md\nEOF", id="backslash-heredoc-delimiter"),
+    pytest.param("cat > notes.txt <<-'EOF'\n\tcat RESOLUTION.md\n\tEOF", id="dash-heredoc-strips-tabs"),
+]
+
+INERT_TEXT_STILL_READS = [
+    pytest.param("echo 'x; y' && cat RESOLUTION.md", id="quoting-does-not-hide-the-next-segment"),
+    pytest.param("echo done#not-a-comment; cat RESOLUTION.md", id="hash-glued-to-a-word-is-not-a-comment"),
+    pytest.param("cat > x <<'EOF'\ndata\nEOF\ncat RESOLUTION.md", id="command-after-the-heredoc-terminator"),
+    pytest.param("cat > x <<EOF\n$(cat RESOLUTION.md)\nEOF", id="unquoted-heredoc-body-expands"),
+]
+
+
+@pytest.mark.parametrize("command", INERT_TEXT_CLEAN)
+def test_inert_shell_text_is_not_a_command(command: str):
+    """Data lines inside quotes, comments and quoted-delimiter heredocs never ran;
+    under `void` each of these destroys an honest row."""
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is False, f"false positive: {command!r}"
+
+
+@pytest.mark.parametrize("command", INERT_TEXT_STILL_READS)
+def test_inert_text_handling_does_not_hide_a_real_read(command: str):
+    is_read, _ = _bash_read(command, SPEC)
+    assert is_read is True, f"expected a read: {command!r}"
+
+
+# --------------------------------------------------------------------------
 # The regression guard for the truncation trap
 # --------------------------------------------------------------------------
 

@@ -67,9 +67,12 @@ _MAX_BLIND_COMMAND_RATIO = 0.10
 # not bloat the row.
 _MAX_EVIDENCE_CHARS = 240
 
-# Shell operators that end one command and begin another. `||` precedes `|` so
-# regex alternation consumes the two-character form first.
-_SEGMENT_SEPARATOR = re.compile(r"\|\||&&|;|\||\n|\r")
+# Characters that may precede `#` for it to start a comment (plus start-of-segment).
+# A `#` glued to a word (`file#1.txt`) is part of the word, not a comment.
+_COMMENT_BOUNDARY = " \t;|&(\n\r"
+
+# Characters a bare (unquoted) heredoc delimiter word is made of.
+_HEREDOC_DELIMITER_CHARS = re.compile(r"[\w.\-]")
 
 # Wrappers that delegate to the real utility; skipped when finding the utility
 # that decides a segment's classification.
@@ -789,12 +792,144 @@ def scan_commands(turns: list[TurnRecord], spec: GradedMaterialSpec) -> Integrit
     )
 
 
+def _split_segments(command: str) -> list[str]:
+    """Split a shell command into the segments that actually EXECUTE.
+
+    A naive split on every ``;``/``|``/newline classifies inert data as commands:
+    the argument of ``printf '%s\\n' 'harmless; cat KEY'``, the body of a heredoc,
+    the tail of a comment. Each of those voids an honest row under ``void`` mode,
+    so the split honors the three shell constructs that make text inert:
+
+    * **Quoting.** ``'…'`` and ``"…"`` spans (and backslash escapes) never
+      separate; their content stays inside the enclosing segment, where the
+      leading utility's semantics decide what it means.
+    * **Comments.** An unquoted ``#`` opening a word discards the rest of the
+      line -- commented-out text never ran.
+    * **Heredocs.** A ``<<'EOF'``-style QUOTED delimiter makes the body pure
+      data, so those lines are dropped. An unquoted delimiter (``<<EOF``) leaves
+      expansions live -- ``$(cat KEY)`` inside the body executes -- so those
+      lines stay scanned as segments: a false positive there is visible in the
+      finding's evidence, a missed substitution is not.
+
+    Separators are the unquoted operators ``&&``, ``||``, ``|``, ``;`` and line
+    breaks -- the same set the old regex split on, minus everything quoted.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    pending_heredocs: list[tuple[str, bool]] = []  # (delimiter, delimiter_was_quoted)
+    in_single = in_double = False
+    prev = ""  # last significant char, "" at a segment boundary
+    i = 0
+    n = len(command)
+
+    def _flush() -> None:
+        nonlocal prev
+        text = "".join(current)
+        current.clear()
+        prev = ""
+        if text.strip():
+            segments.append(text)
+
+    while i < n:
+        c = command[i]
+        if in_single:
+            current.append(c)
+            prev = c
+            in_single = c != "'"
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            current.append(command[i : i + 2])
+            prev = command[i + 1]
+            i += 2
+            continue
+        if in_double:
+            current.append(c)
+            prev = c
+            in_double = c != '"'
+            i += 1
+            continue
+        if c in "'\"":
+            in_single = c == "'"
+            in_double = c == '"'
+            current.append(c)
+            prev = c
+            i += 1
+            continue
+        if c == "#" and (prev == "" or prev in _COMMENT_BOUNDARY):
+            newline = command.find("\n", i)
+            i = n if newline == -1 else newline  # leave the newline for the branch below
+            continue
+        if c == "<" and command[i : i + 2] == "<<" and command[i : i + 3] != "<<<":
+            # Heredoc operator: record the delimiter and whether it was quoted;
+            # the body starts after the next unquoted newline.
+            j = i + 2
+            if j < n and command[j] == "-":
+                j += 1
+            while j < n and command[j] in " \t":
+                j += 1
+            quoted = False
+            delimiter_chars: list[str] = []
+            if j < n and command[j] in "'\"":
+                quote = command[j]
+                quoted = True
+                j += 1
+                while j < n and command[j] != quote:
+                    delimiter_chars.append(command[j])
+                    j += 1
+                j += 1  # closing quote
+            elif j < n and command[j] == "\\":
+                quoted = True
+                j += 1
+                while j < n and _HEREDOC_DELIMITER_CHARS.match(command[j]):
+                    delimiter_chars.append(command[j])
+                    j += 1
+            else:
+                while j < n and _HEREDOC_DELIMITER_CHARS.match(command[j]):
+                    delimiter_chars.append(command[j])
+                    j += 1
+            if delimiter_chars:
+                pending_heredocs.append(("".join(delimiter_chars), quoted))
+                current.append(command[i:j])
+                prev = command[j - 1]
+                i = j
+                continue
+            # `<<` with no delimiter: fall through and treat it as ordinary text.
+        if c in "\n\r":
+            _flush()
+            i += 1
+            while pending_heredocs and i < n:
+                delimiter, quoted = pending_heredocs.pop(0)
+                while i < n:
+                    end = command.find("\n", i)
+                    end = n if end == -1 else end
+                    line = command[i:end]
+                    i = end + 1
+                    if line.strip() == delimiter:
+                        break
+                    if not quoted and line.strip():
+                        segments.append(line)
+            continue
+        if command[i : i + 2] in ("&&", "||"):
+            _flush()
+            i += 2
+            continue
+        if c in ";|":
+            _flush()
+            i += 1
+            continue
+        current.append(c)
+        prev = c
+        i += 1
+
+    _flush()
+    return segments
+
+
 def _bash_read(command: str, spec: GradedMaterialSpec) -> tuple[bool, str | None]:
     """Classify a shell command by splitting it into segments and judging each."""
     mentioned: str | None = None
-    for segment in _SEGMENT_SEPARATOR.split(command):
-        if not segment.strip():
-            continue
+    for segment in _split_segments(command):
         is_read, matched = _classify_segment(segment, spec)
         if matched is not None:
             mentioned = matched
