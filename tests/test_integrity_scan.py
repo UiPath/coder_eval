@@ -1009,12 +1009,19 @@ def test_a_mock_segment_outside_an_installed_library_still_taints():
         pytest.param("rm -rf mocks", id="removing-the-mock-directory"),
         pytest.param("find mocks -name '*.json'", id="enumerating-the-mock-directory"),
         pytest.param("grep -rl secret mocks", id="files-only-search-of-the-mock-directory"),
+        pytest.param("export PATH=mocks:$PATH", id="path-export-naming-the-mock-directory"),
     ],
 )
 def test_utility_semantics_still_decide_a_bare_directory_touch(command: str):
     spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["mocks"]}), None)
     info = scan_commands([_turn([_bash(command)])], spec)
     assert info.verdict is IntegrityVerdict.CLEAN
+
+
+def test_a_substitution_inside_an_export_is_still_classified():
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["mocks"]}), None)
+    info = scan_commands([_turn([_bash('export STORE="$(cat mocks/manifest.json)"')])], spec)
+    assert info.verdict is IntegrityVerdict.TAINTED
 
 
 _CHECK_X_SPELLINGS = {"$TASK_DIR/check_x.py", "${TASK_DIR}/check_x.py", "/work/task_dir/check_x.py"}

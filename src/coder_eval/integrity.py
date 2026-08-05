@@ -109,12 +109,18 @@ _LISTING_UTILITIES = frozenset(
 )
 
 # Utilities and shell keywords that touch a path without emitting its contents:
-# file manipulation (`rm`, `mv`, `chmod`) and the loop / conditional keywords a
-# segment can start with (`for f in check_*.py`). Without these, rule 7 reads an
-# agent tidying up its own helper script as a leak and voids an honest row.
-# `git` is deliberately NOT here -- it is classified per subcommand
-# (:func:`_git_is_read`), because half of them print file content.
-_NEUTRAL_UTILITIES = frozenset({"rm", "mv", "chmod", "for", "while", "if", "do", "done", "then", "fi"})
+# file manipulation (`rm`, `mv`, `chmod`), the loop / conditional keywords a
+# segment can start with (`for f in check_*.py`), and the shell-state builtins
+# (`export PATH=m:$PATH` names the mock dir without opening anything -- though a
+# substitution inside the assignment is still classified on its own). Without
+# these, rule 8 reads an agent tidying up its own helper script or extending its
+# PATH as a leak and voids an honest row. `git` is deliberately NOT here -- it is
+# classified per subcommand (:func:`_git_is_read`), because half of its
+# subcommands print file content.
+_NEUTRAL_UTILITIES = frozenset(
+    {"rm", "mv", "chmod", "for", "while", "if", "do", "done", "then", "fi",
+     "export", "unset", "alias", "local", "declare", "typeset", "set"}
+)
 
 # `git` subcommands that do NOT emit file content: they stage, record, move or
 # report. Everything else -- `show`, `cat-file -p`, `diff`, `blame`, `grep`,
