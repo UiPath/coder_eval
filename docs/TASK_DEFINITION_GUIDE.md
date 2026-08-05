@@ -935,7 +935,7 @@ Defaulting to "switch" is deliberate: `--yes` / `--force` / `-y` before the targ
 
 `ignore_flags` drops a flag from matching but does **not** make it value-bearing — an ignored flag that takes a value must also appear in `value_flags` (as `output` does by default). Otherwise `ignore_flags: ["verbose"]` on `delete --verbose proj-1` would let `--verbose` eat `proj-1`.
 
-**Limitation: bundled short flags are not split.** `-rf` parses as one flag named `rf`, so a predicate on `f` will not see it — including `absent: true`, which passes despite `-rf` being present. Assert on the long spelling, or add the bundled form via `aliases`. Likewise a bare negative number in flag position (`seek -1`) is read as a flag named `1`.
+**Clustered short flags are split, and declarations win.** `-rf` matches predicates on `r` and `f` — so a `-yf` cannot escape an `aliases: ["y"]` guard. If your CLI has a genuine multi-character short flag, naming it (in `flags`, `value_flags`, or `ignore_flags`) keeps it whole; and `-fvalue` binds when `f` is value-bearing. A bare negative number stays positional (`seek -1`), unless you declare a flag by that name (`head -1`).
 
 **Negative guards want the FEWEST facets that capture the forbidden act.** This is the opposite of a positive assertion, and it is easy to get backwards. `max_count: 0` passes when *nothing matches*, so every facet you add is another way for the real invocation to slip past the pattern and report a false PASS.
 

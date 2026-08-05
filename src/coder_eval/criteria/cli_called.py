@@ -21,6 +21,7 @@ def _split_flags(
     argv: list[str],
     ignore: frozenset[str],
     value_flags: frozenset[str],
+    known_names: frozenset[str] = frozenset(),
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Split ``argv`` into non-flag arguments and a flag map.
 
@@ -33,8 +34,9 @@ def _split_flags(
     ``ignore`` names are dropped with their values. ``--`` ends flag parsing and is
     itself dropped; a lone ``-`` is positional.
 
-    Known limitation: bundled short flags are not split, so ``-rf`` is one flag
-    named ``rf`` and a predicate on ``f`` will not see it.
+    ``known_names`` are the flag names the criterion mentions at all (including
+    presence predicates and aliases). A declared name is always taken whole, so a
+    genuine multi-char short flag still matches; undeclared ones are split.
     """
     positional: list[str] = []
     flags: dict[str, list[str]] = {}
@@ -63,6 +65,28 @@ def _split_flags(
             continue
 
         name = token.lstrip("-")
+        known = name in value_flags or name in known_names
+
+        # A bare negative number is a value, not a flag. Reading `-1` as a flag
+        # named `1` drops it from the positionals -- the same silent-disappearance
+        # that let `--yes proj-1` slip a delete past a guard.
+        if not known and _is_number(name):
+            positional.append(token)
+            continue
+
+        # Clustered short flags: `-rf` is `-r -f`. Declared names win, so a real
+        # multi-char short flag still matches, and `-fvalue` binds when `f` takes
+        # a value; otherwise each character is its own switch, which is what stops
+        # `-yf` escaping an `aliases: [y]` predicate.
+        if not known and not token.startswith("--") and len(name) > 1:
+            head, rest = name[0], name[1:]
+            if head in value_flags:
+                record(head, rest)
+            else:
+                for char in name:
+                    record(char, "")
+            continue
+
         if name in value_flags and index < len(argv):
             record(name, argv[index])
             index += 1
@@ -71,6 +95,14 @@ def _split_flags(
             record(name, "")
 
     return positional, flags
+
+
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
 
 
 def _flag_matches(predicate: FlagMatch, values: list[str] | None) -> bool:
@@ -113,6 +145,8 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
         frozenset(criterion.ignore_flags),
         frozenset(n for name, p in (criterion.flags or {}).items() if p.needs_value for n in (name, *p.aliases))
         | frozenset(criterion.value_flags),
+        frozenset(n for name, p in (criterion.flags or {}).items() for n in (name, *p.aliases))
+        | frozenset(criterion.ignore_flags),
     )
 
     offset = 0
