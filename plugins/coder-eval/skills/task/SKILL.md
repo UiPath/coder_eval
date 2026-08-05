@@ -45,6 +45,13 @@ say so and offer to modify it instead of adding a near-duplicate.
 prompt. If a criterion checks that the output contains a `count` field, the prompt must
 not mention `count` — otherwise you are testing transcription, not capability.
 
+The subtle version of this, and the easiest to write by accident: a criterion that
+matches a literal the prompt already dictates. "Use `pypdf` to read the fields" in the
+prompt plus a criterion grepping for `pypdf` is a criterion that cannot fail — the agent
+was told the answer. Either the constraint is a real requirement (keep it in the prompt,
+and score what the agent *did with it* instead) or it is the thing under test (drop it
+from the prompt). Never both.
+
 **Success criteria** — pick by what actually needs verifying:
 
 | What to check | Criterion type |
