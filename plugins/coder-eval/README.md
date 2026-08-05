@@ -27,10 +27,10 @@ once:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-Any skill that drives the CLI checks `coder-eval --version` first and stops with this hint if
-it is missing. Running a suite also needs credentials for whichever agent the tasks use (e.g.
-`ANTHROPIC_API_KEY` for the default `claude-code` agent). `lint-tasks` needs neither — it only
-reads files.
+`init` and `skill-check` check `coder-eval --version` first and stop with this hint if it is
+missing; the other CLI-driving skills fail at the point they invoke it. Running a suite also
+needs credentials for whichever agent the tasks use (e.g. `ANTHROPIC_API_KEY` for the default
+`claude-code` agent). `lint-tasks` needs neither the CLI nor credentials — it only reads files.
 
 ## The six skills
 

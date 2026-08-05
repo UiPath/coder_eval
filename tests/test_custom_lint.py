@@ -1436,23 +1436,40 @@ class TestPluginArtifacts:
 
     def test_skill_docs_surfaces_state_the_right_count(self):
         # The companion to the test above, which only checks that each NAME appears. These
-        # surfaces also state the count in prose ("six slash commands", "## The six skills",
-        # "x 6"), and adding the sixth skill meant hand-editing eight such sites across four
-        # files. Without this, a seventh ships with every count silently wrong — the exact
-        # drift that repair was. Derived from disk: no count is written down here.
-        words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+        # surfaces also state the count in prose, and adding the sixth skill meant hand-editing
+        # seven such sites across four files. Without this, a seventh ships with every count
+        # silently wrong — the exact drift that repair was. Derived from disk: no count is
+        # written down here.
+        #
+        # Three phrasings are in use and all three are covered: "<word> skills" / "<word> slash
+        # commands" (both READMEs, docs/PLUGIN.md), "x <digit>" (CLAUDE.md's `SKILL.md` x 6),
+        # and "The other <word>" (the model-invokable subset, which is the skill count minus
+        # the explicit-invocation-only ones).
+        words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
         count = len(PLUGIN_SKILLS)
         assert count in words, f"{count} skills — extend `words` to cover the new count"
-        stale = sorted(set(words.values()) - {words[count]})
+        auto = count - sum(1 for v in SKILL_DISABLE_MODEL_INVOCATION.values() if v)
+        assert auto in words, f"{auto} model-invokable skills — extend `words`"
+
+        wrong_total = sorted(set(words.values()) - {words[count]})
+        wrong_subset = sorted(set(words.values()) - {words[auto]})
 
         offenders: list[str] = []
         for surface in SKILL_DOC_SURFACES:
             text = (self.REPO_ROOT / surface).read_text(encoding="utf-8")
             offenders += [
                 f"{surface}: '{word} {noun}'"
-                for word in stale
+                for word in wrong_total
                 for noun in ("skills", "slash commands")
                 if f"{word} {noun}" in text
+            ]
+            offenders += [f"{surface}: 'The other {word}'" for word in wrong_subset if f"The other {word}" in text]
+            # The multiplication sign CLAUDE.md writes is given as an escape below, so
+            # ruff's ambiguous-character rules do not flag a literal one.
+            offenders += [
+                f"{surface}: 'SKILL.md` \u00d7 {digit}'"
+                for digit in range(2, 9)
+                if digit != count and f"SKILL.md` \u00d7 {digit}" in text
             ]
         assert not offenders, (
             f"there are {count} shipped skills, but these surfaces still state another count: "

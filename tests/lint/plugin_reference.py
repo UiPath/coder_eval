@@ -24,7 +24,7 @@ Two rendering rules keep this small and are load-bearing:
   list would have started rendering the new field into all 14 per-criterion
   sections and leaked two dead names; the computed set absorbed it with no edit.)
 - **Every** field gets its model description, required and optional alike, each in
-  a table of its own under a ``Optional:`` label for the second group. What a
+  a table of its own, the second group under an ``Optional:`` label. What a
   field *means* is the half of the schema an authoring agent gets wrong (that
   ``min_count: 0`` lets a criterion pass when nothing matched, that ``weight: 0``
   makes a criterion informational), so it is rendered in full — never truncated,

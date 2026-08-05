@@ -52,6 +52,10 @@ was told the answer. Either the constraint is a real requirement (keep it in the
 and score what the agent *did with it* instead) or it is the thing under test (drop it
 from the prompt). Never both.
 
+(The rubric below carries this same trap as a review-time check, and is the declaration a
+reviewer applies. The paragraphs above are the authoring-time version: they exist to stop you
+writing it in the first place.)
+
 **Success criteria** — read `${CLAUDE_PLUGIN_ROOT}/reference/task-rubric.md` *before*
 choosing them. It is what this work will be checked against in step 5, and a criterion set
 designed against it is far cheaper than one repaired after the fact.

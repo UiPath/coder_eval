@@ -30,11 +30,13 @@ The plugin drives the `coder-eval` CLI; it does not bundle it. Install it once:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-Any skill that drives the CLI checks `coder-eval --version` before doing anything
-and stops with this hint if it is missing. Running a suite additionally needs
-credentials for whichever agent the tasks use — `ANTHROPIC_API_KEY` for the
-default `claude-code` agent. `lint-tasks` is the exception on both counts: it only
-reads files, so it needs neither the CLI nor credentials.
+`init` and `skill-check` check `coder-eval --version` up front and stop with this
+hint if it is missing; the other CLI-driving skills will simply fail at the point
+they invoke it. Running a suite additionally needs credentials for whichever agent
+the tasks use — `ANTHROPIC_API_KEY` for the default `claude-code` agent.
+`lint-tasks` needs neither the CLI nor credentials to do its own work: it only
+reads files, though the report it produces ends by suggesting you run
+`coder-eval plan` yourself.
 
 ## The six skills
 
@@ -53,11 +55,18 @@ reached by the agent on its own when a request clearly calls for them.
 
 `task` and `lint-tasks` are two halves of the same concern and share one bundled
 rubric: `task` applies it to work it is writing, `lint-tasks` applies it to files
-you already have. Authoring needs `Write`; a review pass must not, and tool policy
-is declared per skill rather than per invocation — which is why these are two
-skills rather than one with a review mode. `lint-tasks` both narrows its
-`allowed-tools` to reading and names every write tool in `disallowed-tools`, and
-its own instructions prohibit modifying a file at all.
+you already have. They are separate skills because authoring needs `Write` and a
+review pass should not have it, and frontmatter declares tool policy per skill —
+so one skill cannot hold both stances.
+
+`lint-tasks` expresses read-only three ways, and it is worth being precise about
+what each buys, because only the last one spans a whole review: its
+`allowed-tools` lists just `Read`, `Glob` and `Grep`; its `disallowed-tools` names
+every write tool, which removes them from the pool **for the invoking turn only** —
+the restriction clears when you send your next message, and the skill asks you one
+before linting a whole directory; and its own instructions carry a standing
+prohibition on modifying a file, which is what actually holds for the rest of the
+review.
 
 ## Worked example: does my skill actually trigger?
 

@@ -1,9 +1,13 @@
 # Task quality rubric
 
-Two readers use this file: `/coder-eval:task` applies it to work it just wrote, and
-`/coder-eval:lint-tasks` applies it to task files already on disk. It declares **checks
-only** — how to rank or report what you find is the reviewing skill's business, not this
-file's.
+**Consumers** (keep this list current when you add one):
+
+- `/coder-eval:task` — applies it to work it just wrote.
+- `/coder-eval:lint-tasks` — applies it to task files already on disk.
+- this repository's own `coder-eval-task-create` contributor command.
+
+It declares **checks only** — how to rank or report what you find is the reviewing skill's
+business, not this file's.
 
 A task is an instrument. These checks ask whether the instrument measures what its
 description claims, or whether it measures nothing and reports a number anyway.
@@ -27,7 +31,7 @@ For those tasks:
 - **A prompt that names the exact string a criterion greps for is correct**, not the
   can't-fail trap. Proving substitution or redirection works requires a known string on both
   ends.
-- **§3's "the judge must not be the only signal" does not apply** when the judge is the thing
+- **The judges section's "the judge must not be the only signal" does not apply** when the judge is the thing
   under test. Its variance warning still does.
 
 Everything else still applies, and one extra check applies only here: **does the mechanism
@@ -58,7 +62,17 @@ Check 1 is the most common by a wide margin — the field defaults to the permis
 so it is what you get by not thinking about it. Check 3 is the most expensive, because a
 no-op detector reports a healthy score forever and nobody looks at it again.
 
-## 2. Grade behaviour, not self-reports
+## 2. Does anything check the output's *content*?
+
+At least one criterion must inspect what the output **says**, not merely that it exists. A
+suite of `file_exists` checks passes when the agent writes an empty file, and `touch out.json`
+satisfies every one of them.
+
+Exempt (see section 0): a framework-plumbing task whose subject is that a file arrives at all,
+and a classification suite whose rows have no artifact to inspect — there the aggregate across
+rows is the content check.
+
+## 3. Grade behaviour, not self-reports
 
 A criterion that reads a file the prompt asked the agent to write *about its own work*
 grades a claim, not an outcome. "Write a summary of the changes you made to `report.md`"
@@ -71,7 +85,7 @@ reports.
 
 *Seen in the wild:* a task whose only content check read the agent's own changelog entry.
 
-## 3. Judges complement, they do not carry
+## 4. Judges complement, they do not carry
 
 `llm_judge` and `agent_judge` are the right tool for open-ended quality and the wrong tool
 for anything a deterministic criterion can check. Two failure shapes:
@@ -87,7 +101,7 @@ for anything a deterministic criterion can check. Two failure shapes:
 *Seen in the wild:* a six-clause judge rubric at `pass_threshold: 1.0` that scored
 anywhere from 0.4 to 1.0 across identical runs.
 
-## 4. Scope match
+## 5. Scope match
 
 Read `initial_prompt` and `description` against the criteria as a set:
 
@@ -103,10 +117,12 @@ still asks, nothing still checks.
 *Seen in the wild:* a task whose prompt asked for three output files after the criteria for
 two of them had been removed as flaky. It scored 1.0 while testing a third of its subject.
 
-## 5. Fixture lifecycle
+## 6. Fixture lifecycle
 
-**This section is the canonical home for these checks.** Other skills point here rather
-than restating them.
+**This section is the canonical home for these checks.** The skills that *apply* this rubric
+point here rather than restating them. (`/coder-eval:analyze` separately diagnoses the same
+failure from the other end — a finished run's residue signature — which is a different job
+from reviewing a task file, so it states its own version.)
 
 It fires only when a task touches state **outside** the sandbox — a tenant, a hosted
 service, a shared account, a remote registry. A task confined to its own temporary
