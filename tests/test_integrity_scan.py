@@ -953,6 +953,9 @@ def test_a_bare_protected_directory_name_still_matches(command: str):
         pytest.param("./m/uip or folders list", id="path-qualified-shim-run"),
         pytest.param("m/uip --version", id="relative-shim-run"),
         pytest.param("./m/uip jobs list > out.json", id="shim-run-with-a-redirect"),
+        pytest.param('PATH="./m:$PATH" uip or folders list', id="path-prefix-shim-run"),
+        pytest.param("PATH=m:$PATH uip jobs list --output json", id="path-prefix-unquoted-shim-run"),
+        pytest.param('mkdir -p raw && PATH="./m:$PATH" uip or folders list | tee raw/f.json', id="path-prefix-shim-run-piped"),
     ],
 )
 def test_executing_the_mock_shim_is_not_a_read(command: str):
@@ -968,6 +971,8 @@ def test_executing_the_mock_shim_is_not_a_read(command: str):
         pytest.param("sed -n '1,80p' m/uip", id="paging-the-shim-source"),
         pytest.param("cat m/uip", id="cat-the-shim"),
         pytest.param("./m/uip m/r/abc.json", id="shim-run-handed-a-mock-operand"),
+        pytest.param('PATH="./m:$PATH" cat m/.store', id="path-prefix-but-reader-utility"),
+        pytest.param('PATH="./m:$PATH" uip run m/r/abc.json', id="path-prefix-with-a-mock-operand"),
     ],
 )
 def test_reading_the_shim_or_its_data_still_taints(command: str):

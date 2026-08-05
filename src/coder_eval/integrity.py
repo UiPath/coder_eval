@@ -965,13 +965,16 @@ def _classify_segment(
        and ``xargs cat`` do not slip past on their wrapper's name.
     7. A listing/metadata utility, or a utility that moves, removes or otherwise
        manipulates a file without emitting it -> not a read.
-    8. Anything else -> a read, with one carve-out: a MOCK path appearing only
-       as argv[0] is the shim being EXECUTED (``./m/uip or folders list``), which
-       is its intended use -- reading its source arrives via a reader utility and
-       took rule 5 or 6 above. Otherwise conservative on purpose: an unrecognised
-       utility holding a path to the answer key is more likely a read than not,
-       and a false positive is visible in the finding's evidence while a false
-       negative is invisible.
+    8. Anything else -> a read, with one carve-out: a MOCK path confined to the
+       command's invocation prefix -- argv[0] itself (``./m/uip or folders list``)
+       or a leading ``PATH=./m:$PATH uip …`` assignment that puts the shim dir on
+       PATH so a bare ``uip`` resolves to it -- is the shim being EXECUTED, its
+       intended use. Both spellings are invocation machinery, not an operand being
+       read; a mock path in an actual operand still taints, and reading the shim
+       SOURCE arrives via a reader utility and took rule 5 or 6 above. Otherwise
+       conservative on purpose: an unrecognised utility holding a path to the
+       answer key is more likely a read than not, and a false positive is visible
+       in the finding's evidence while a false negative is invisible.
     """
     matched = _find_match(segment, spec, created)
     if matched is None:
@@ -1003,19 +1006,23 @@ def _classify_segment(
     if utility in _LISTING_UTILITIES or utility in _NEUTRAL_UTILITIES:
         return False, matched
 
-    # Rule 8 carve-out: a mock path in argv[0] with no other graded reference in
-    # the segment is the shim being run, not read.
-    if (
-        matched in spec.mock_segments
-        and utility_index >= 0
-        and _find_match(tokens[utility_index], spec, created) is not None
-        and not any(
+    # Rule 8 carve-out: a mock path confined to the invocation prefix -- argv[0]
+    # itself or a leading `PATH=`-style env assignment the utility parser stepped
+    # over (indices <= utility_index) -- is the shim being run, not read. A mock
+    # reference in an operand (index > utility_index) still taints.
+    if matched in spec.mock_segments and utility_index >= 0:
+        prefix_has_ref = any(
             _find_match(token, spec, created) is not None
             for index, token in enumerate(tokens)
-            if index != utility_index
+            if index <= utility_index
         )
-    ):
-        return False, matched
+        operand_has_ref = any(
+            _find_match(token, spec, created) is not None
+            for index, token in enumerate(tokens)
+            if index > utility_index
+        )
+        if prefix_has_ref and not operand_has_ref:
+            return False, matched
 
     return True, matched
 
