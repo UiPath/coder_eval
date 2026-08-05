@@ -228,3 +228,19 @@ harness once for all of them.
   (`PLUGIN_TEXT_FILES`), which closed the coverage half of this gap — a bundled
   reference now cannot name a repo path either. The token-classifier problem
   described above is unchanged and still deferred.*
+
+## From 2026-08-04 plugin-audit-p0-p1 run
+
+- [ ] **A skill's advertised `description` must not promise a check that no bundled
+  reference declares.** `lint-tasks` ships a user-facing description claiming it
+  finds "prompts that give away the answer", but that check was declared only in
+  `skills/task/SKILL.md` prose — a file `lint-tasks` never reads — so the two
+  rubric readers had already forked on it before the skill shipped. Caught by a
+  reviewer, not by a test; fixed by promoting it to rubric check 7. A guard would
+  have to map claim-phrases in a description onto declarations in
+  `reference/task-rubric.md`, which is natural-language matching, not a token
+  grep — the phrasings are deliberately different (a description sells, a rubric
+  check instructs), so any cheap version either misses the real case or fails on
+  correct prose. Needs a fixed vocabulary of claim tags shared between the two
+  files to become mechanical, which is a design change rather than a 30-minute
+  rule — caught in the 2026-08-04 plugin-audit-p0-p1 implementation run.
