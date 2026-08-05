@@ -910,43 +910,54 @@ class TestCE030DocSchemaParity:
             + "\n".join(f"  {model}: {', '.join(fields)}" for model, fields in sorted(findings.items()))
         )
 
-    def test_criterion_models_cover_the_in_tree_union(self):
-        # The criterion members must all come from the in-tree criteria module,
-        # and the set must be non-empty (guards against the flatten silently
-        # returning nothing after a refactor).
+    def test_criterion_models_are_the_in_tree_criteria(self):
+        # Every enumerated criterion is a real module attribute of the in-tree
+        # criteria module, the set is non-empty, and it matches the union literal
+        # written in criteria.py (so this can't silently under- or over-count).
+        from coder_eval.models import criteria as crit
         from tests.lint.doc_schema_parity import _IN_TREE_CRITERIA_MODULE, _criterion_models
 
         models = _criterion_models()
-        assert models, "expected the SuccessCriterion union to yield in-tree criterion models"
+        assert models, "expected in-tree criterion models"
         assert all(m.__module__ == _IN_TREE_CRITERIA_MODULE for m in models)
+        assert all(getattr(crit, m.__name__, None) is m for m in models)
 
-    def test_plugin_contributed_criterion_is_excluded(self, monkeypatch):
-        """A criterion a plugin injects into the union (foreign ``__module__``) is
-        NOT held to this repo's doc obligation.
+    def test_plugin_injected_criterion_is_excluded(self, monkeypatch):
+        """A criterion a plugin injects into the union is NOT held to this repo's
+        doc obligation — even when it spoofs ``__module__`` to look in-tree.
 
         Regression: the ``uipath`` SDK's ``coder_eval.plugins`` hook adds a
-        ``CliCalledCriterion`` (fields ``log``/``positional``) to the union in CI;
-        the first CE030-over-the-union attempt wrongly demanded the in-repo guide
-        document it. The doc promise is scoped to in-tree criteria only.
+        ``CliCalledCriterion`` (fields ``log``/``positional``) to the union in CI,
+        built via ``create_model`` with ``__module__="coder_eval.models.criteria"``,
+        so a ``__module__``-string filter did not exclude it. Enumerating genuine
+        module attributes (not the union) does: a ``create_model`` class is not
+        inserted into the module namespace. This pins that behaviour.
         """
         from typing import Annotated, Literal
 
-        from pydantic import Field
+        from pydantic import Field, create_model
 
         from coder_eval.models import criteria as crit
         from tests.lint.doc_schema_parity import _criterion_models
 
-        class _PluginCriterion(crit.BaseSuccessCriterion):
-            type: Literal["_plugin_only"] = "_plugin_only"
-            undocumented_plugin_field: str = ""
-
-        _PluginCriterion.__module__ = "some_plugin.criteria"  # not the in-tree module
-        extended = Annotated[crit.FileExistsCriterion | _PluginCriterion, Field(discriminator="type")]
-        monkeypatch.setattr(crit, "SuccessCriterion", extended)
+        # Mirror the plugin's shape: __module__ spoofed to the in-tree module, and
+        # spliced into the union — but never assigned as a module attribute.
+        injected = create_model(
+            "CliCalledCriterionStub",
+            __base__=crit.BaseSuccessCriterion,
+            __module__=crit.__name__,
+            type=(Literal["_cli_called_stub"], "_cli_called_stub"),
+            undocumented_plugin_field=(str, ""),
+        )
+        monkeypatch.setattr(
+            crit,
+            "SuccessCriterion",
+            Annotated[crit.FileExistsCriterion | injected, Field(discriminator="type")],
+        )
 
         names = [m.__name__ for m in _criterion_models()]
-        assert "FileExistsCriterion" in names
-        assert "_PluginCriterion" not in names
+        assert "FileExistsCriterion" in names  # a genuine module attribute
+        assert "CliCalledCriterionStub" not in names  # union-injected, not a module attr
 
     def test_exempt_fields_carry_a_reason(self):
         from tests.lint.doc_schema_parity import EXEMPT
