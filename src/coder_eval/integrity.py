@@ -560,6 +560,21 @@ def _task_dir_operands(command: str, task_dir: Path | None = None) -> set[str]:
 # Characters that end a path token inside an already-normalized command string.
 _TOKEN_DELIMITERS = " \t'\";|&<>()="
 
+# Directory components that mark an INSTALLED library's internals. `mocks` is an
+# ordinary package-internal name (`site-packages/uipath/eval/mocks/…`), and a
+# protected-segment hit inside an installed dependency is the library's own code,
+# not the scenario's fixture store.
+_INSTALLED_LIBRARY_MARKERS = ("site-packages/", "dist-packages/", "node_modules/")
+
+
+def _in_installed_library(haystack: str, start: int) -> bool:
+    """Whether the path token containing position ``start`` sits inside an
+    installed library (see ``_INSTALLED_LIBRARY_MARKERS``)."""
+    left = start
+    while left > 0 and haystack[left - 1] not in _TOKEN_DELIMITERS:
+        left -= 1
+    return any(marker in haystack[left:start] for marker in _INSTALLED_LIBRARY_MARKERS)
+
 
 def _created_path(raw: str) -> str:
     """Normalize a path the agent created, for :func:`_is_agent_created` lookups."""
@@ -634,8 +649,9 @@ def _find_match(text: str, spec: GradedMaterialSpec, created: frozenset[str] | s
             if not _is_agent_created(haystack, match.start(), match.end(), created):
                 return glob
     for segment in (*spec.path_segments, *spec.mock_segments):
-        if _segment_to_regex(segment).search(haystack):
-            return segment
+        for match in _segment_to_regex(segment).finditer(haystack):
+            if not _in_installed_library(haystack, match.start()):
+                return segment
     return _grader_match(haystack, spec)
 
 
@@ -684,12 +700,13 @@ def _finding_kind(matched: str, spec: GradedMaterialSpec) -> IntegrityFindingKin
     return IntegrityFindingKind.GRADED_READ
 
 
-def _segment_utility(segment: str) -> tuple[str, list[str]]:
-    """Leading utility of a shell segment (basename, lowercased) and its tokens.
+def _segment_utility(segment: str) -> tuple[str, list[str], int]:
+    """Leading utility of a shell segment (basename, lowercased), its tokens, and
+    the index of the utility token within them.
 
     Leading ``VAR=value`` assignments and transparent wrappers (``sudo``, ``env``,
     ``time``, …) are stepped over so ``sudo cat x`` classifies as ``cat``.
-    Returns ``("", tokens)`` when no utility can be identified.
+    Returns ``("", tokens, -1)`` when no utility can be identified.
     """
     try:
         tokens = shlex.split(segment, posix=True)
@@ -698,14 +715,14 @@ def _segment_utility(segment: str) -> tuple[str, list[str]]:
         # skipping the segment, since an unparseable command still ran.
         tokens = segment.split()
 
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if "=" in token and not token.startswith(("-", "/", ".")) and token.split("=", 1)[0].isidentifier():
             continue  # leading environment assignment
         name = Path(token.replace("\\", "/")).name.casefold().removesuffix(".exe")
         if name in _TRANSPARENT_PREFIXES:
             continue
-        return name, tokens
-    return "", tokens
+        return name, tokens, index
+    return "", tokens, -1
 
 
 def _git_subcommand(tokens: list[str]) -> str | None:
@@ -933,16 +950,19 @@ def _classify_segment(
        and ``xargs cat`` do not slip past on their wrapper's name.
     7. A listing/metadata utility, or a utility that moves, removes or otherwise
        manipulates a file without emitting it -> not a read.
-    8. Anything else -> a read. Conservative on purpose: an unrecognised utility
-       holding a path to the answer key is more likely a read than not, and a
-       false positive is visible in the finding's evidence while a false negative
-       is invisible.
+    8. Anything else -> a read, with one carve-out: a MOCK path appearing only
+       as argv[0] is the shim being EXECUTED (``./m/uip or folders list``), which
+       is its intended use -- reading its source arrives via a reader utility and
+       took rule 5 or 6 above. Otherwise conservative on purpose: an unrecognised
+       utility holding a path to the answer key is more likely a read than not,
+       and a false positive is visible in the finding's evidence while a false
+       negative is invisible.
     """
     matched = _find_match(segment, spec, created)
     if matched is None:
         return False, None
 
-    utility, tokens = _segment_utility(segment)
+    utility, tokens, utility_index = _segment_utility(segment)
     normalized_tokens = [Path(t.replace("\\", "/")).name.casefold().removesuffix(".exe") for t in tokens]
 
     stripped, input_targets, _ = _strip_redirects(segment)
@@ -966,6 +986,20 @@ def _classify_segment(
         return True, matched
 
     if utility in _LISTING_UTILITIES or utility in _NEUTRAL_UTILITIES:
+        return False, matched
+
+    # Rule 8 carve-out: a mock path in argv[0] with no other graded reference in
+    # the segment is the shim being run, not read.
+    if (
+        matched in spec.mock_segments
+        and utility_index >= 0
+        and _find_match(tokens[utility_index], spec, created) is not None
+        and not any(
+            _find_match(token, spec, created) is not None
+            for index, token in enumerate(tokens)
+            if index != utility_index
+        )
+    ):
         return False, matched
 
     return True, matched

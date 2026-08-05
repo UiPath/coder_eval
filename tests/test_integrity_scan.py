@@ -875,6 +875,61 @@ def test_a_bare_protected_directory_name_still_matches(command: str):
 @pytest.mark.parametrize(
     "command",
     [
+        pytest.param("./m/uip or folders list", id="path-qualified-shim-run"),
+        pytest.param("m/uip --version", id="relative-shim-run"),
+        pytest.param("./m/uip jobs list > out.json", id="shim-run-with-a-redirect"),
+    ],
+)
+def test_executing_the_mock_shim_is_not_a_read(command: str):
+    """Running the shim is its intended use; only reading its source leaks."""
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["m"]}), None)
+    info = scan_commands([_turn([_bash(command)])], spec)
+    assert info.verdict is IntegrityVerdict.CLEAN, f"false positive: {command!r}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("sed -n '1,80p' m/uip", id="paging-the-shim-source"),
+        pytest.param("cat m/uip", id="cat-the-shim"),
+        pytest.param("./m/uip m/r/abc.json", id="shim-run-handed-a-mock-operand"),
+    ],
+)
+def test_reading_the_shim_or_its_data_still_taints(command: str):
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["m"]}), None)
+    info = scan_commands([_turn([_bash(command)])], spec)
+    assert info.verdict is IntegrityVerdict.TAINTED, f"missed: {command!r}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            "cat .venv/lib/python3.13/site-packages/uipath/eval/mocks/mockable.py",
+            id="site-packages",
+        ),
+        pytest.param(
+            "python -c \"print(open('.venv/lib/python3.13/site-packages/uipath/eval/mocks/mockable.py').read())\"",
+            id="site-packages-via-python",
+        ),
+        pytest.param("cat node_modules/lib/mocks/index.js", id="node-modules"),
+    ],
+)
+def test_a_protected_segment_inside_an_installed_library_is_not_fixture_data(command: str):
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["mocks"]}), None)
+    info = scan_commands([_turn([_bash(command)])], spec)
+    assert info.verdict is IntegrityVerdict.CLEAN, f"false positive: {command!r}"
+
+
+def test_a_mock_segment_outside_an_installed_library_still_taints():
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["mocks"]}), None)
+    info = scan_commands([_turn([_bash("cat src/mocks/manifest.json")])], spec)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         pytest.param("ls -la _fixtures", id="listing-the-fixture-directory"),
         pytest.param("rm -rf mocks", id="removing-the-mock-directory"),
         pytest.param("find mocks -name '*.json'", id="enumerating-the-mock-directory"),
