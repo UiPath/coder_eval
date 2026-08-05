@@ -1338,18 +1338,46 @@ class TestCE032PluginReferenceParity:
         from tests.lint.plugin_reference import render_criteria
 
         common_section, _, per_criterion = render_criteria().partition("## Criterion types")
-        # Match the two forms the render emits a field NAME in — a table row and an
-        # `Optional:` list entry — rather than a bare token, so a criterion whose prose
-        # happens to mention "weight" cannot fail this spuriously.
-        optional_lines = [line for line in per_criterion.splitlines() if line.startswith("Optional: ")]
+        # Match the table-row form the render emits a field NAME in, rather than a bare
+        # token, so a criterion whose prose happens to mention "weight" cannot fail this
+        # spuriously. A table row is now the ONLY form a field name is emitted in —
+        # optional fields are described rows too — so this one assertion covers required
+        # and optional alike.
         for field in ("weight", "pass_threshold", "suite_thresholds", "stop_early"):
             assert f"`{field}`" in common_section, f"{field} must be documented once, in Common fields"
             assert f"| `{field}` |" not in per_criterion, (
-                f"{field} is inherited and must not be repeated as a per-criterion required field"
+                f"{field} is inherited and must not be repeated in a per-criterion section"
             )
-            assert not any(f"`{field}`" in line for line in optional_lines), (
-                f"{field} is inherited and must not be repeated in a per-criterion Optional list"
-            )
+
+    def test_every_criterion_field_has_a_description(self):
+        # Optional fields now render their description into a table cell, so a field
+        # declared without one produces a silently empty cell in the shipped
+        # reference. Union-driven: a 15th criterion is covered with zero edits here.
+        from coder_eval.models import BaseSuccessCriterion, LiveSuccessCriterion
+        from tests.lint.plugin_reference import _DISCRIMINATOR, _VARIANTS
+
+        missing = [
+            f"{cls.__name__}.{name}"
+            for cls in (*_VARIANTS, BaseSuccessCriterion, LiveSuccessCriterion)
+            for name, info in cls.model_fields.items()
+            if name != _DISCRIMINATOR and not (info.description or "").strip()
+        ]
+        assert not missing, (
+            f"criterion field(s) with no `description=`: {sorted(set(missing))} — the bundled "
+            "reference renders every field's description, so a missing one ships as an empty cell"
+        )
+
+    def test_optional_fields_render_with_descriptions(self):
+        # Read the expected text off the model rather than hardcoding it, so a
+        # reworded description does not fail this test spuriously.
+        from coder_eval.models import CommandExecutedCriterion
+        from tests.lint.plugin_reference import _cell, render_criteria
+
+        described = _cell(CommandExecutedCriterion.model_fields["require_success"].description or "")
+        assert described, "require_success lost its description — the fixture for this test is gone"
+        assert f"| `require_success` | {described} |" in render_criteria(), (
+            "an optional field must render as a described table row, not a bare name"
+        )
 
     def test_render_is_deterministic(self):
         from tests.lint.plugin_reference import render_criteria

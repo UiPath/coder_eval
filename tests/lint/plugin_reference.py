@@ -23,8 +23,14 @@ Two rendering rules keep this small and are load-bearing:
   ``stop_early:`` replaced ``stop_when`` + ``max_steps_to_decide``, a hardcoded
   list would have started rendering the new field into all 14 per-criterion
   sections and leaked two dead names; the computed set absorbed it with no edit.)
-- Required fields get a table with descriptions; optional fields get bare names
-  only. Rendering defaults would mean handling ``default_factory`` (whose
+- **Every** field gets its model description, required and optional alike, each in
+  a table of its own under a ``Optional:`` label for the second group. What a
+  field *means* is the half of the schema an authoring agent gets wrong (that
+  ``min_count: 0`` lets a criterion pass when nothing matched, that ``weight: 0``
+  makes a criterion informational), so it is rendered in full — never truncated,
+  never a curated subset, which would need a hardcoded name list and so a second
+  declaration of the schema. Defaults and types are still deliberately absent:
+  rendering defaults would mean handling ``default_factory`` (whose
   ``FieldInfo.default`` is ``PydanticUndefined``) and rendering types would mean
   normalizing ``X | None`` annotations — two helpers serving the half of the
   reference an authoring agent needs least. ``coder-eval plan`` and the model
@@ -105,23 +111,32 @@ def _own_fields(cls: type[BaseSuccessCriterion]) -> list[tuple[str, FieldInfo]]:
     return [(name, info) for name, info in cls.model_fields.items() if name not in _COMMON]
 
 
+def _table(fields: Sequence[tuple[str, FieldInfo]]) -> list[str]:
+    """A Markdown table of field names and their model descriptions."""
+    return [
+        "| Field | What it is |",
+        "| --- | --- |",
+        *(f"| `{name}` | {_cell(info.description or '')} |" for name, info in fields),
+    ]
+
+
 def _field_sections(fields: Sequence[tuple[str, FieldInfo]]) -> list[str]:
-    """Render a required-fields table and an optional-field name list."""
+    """Render a required-fields table, then an optional-fields table under its own label."""
     required = [(name, info) for name, info in fields if info.is_required()]
-    optional = [name for name, info in fields if not info.is_required()]
+    optional = [(name, info) for name, info in fields if not info.is_required()]
 
     if not required and not optional:
         return ["No fields beyond the common ones."]
 
     out: list[str] = []
     if required:
-        out.append("| Field | What it is |")
-        out.append("| --- | --- |")
-        out += [f"| `{name}` | {_cell(info.description or '')} |" for name, info in required]
+        out += _table(required)
     if optional:
         if required:
             out.append("")
-        out.append("Optional: " + ", ".join(f"`{name}`" for name in optional))
+        out.append("Optional:")
+        out.append("")
+        out += _table(optional)
     return out
 
 
