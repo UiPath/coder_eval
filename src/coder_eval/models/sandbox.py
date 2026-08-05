@@ -312,7 +312,17 @@ class DockerDriverConfig(BaseModel):
 # hidden files, and the log is primary evidence for every `cli_called` criterion,
 # so it must survive into the run artifact.
 RECORD_CLI_DIR = "cli_mocks"
-RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/calls.jsonl"
+RECORD_CLI_LOG_NAME = "calls.jsonl"
+RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/{RECORD_CLI_LOG_NAME}"
+
+# Shadowing any of these breaks the harness rather than the tool under test: the
+# shim is a script run by an interpreter, and its directory goes FIRST on a PATH
+# the orchestrator also reuses for run_command criteria. `tool: python3` made the
+# shim re-resolve its own interpreter to itself -- an exec loop that spins to the
+# task timeout, since tempdir enforces no pid cap.
+RECORD_CLI_RESERVED_TOOLS = frozenset(
+    {"python", "python3", "py", "env", "sh", "bash", "zsh", "cmd", "node", "uv", "git"}
+)
 
 
 class RecordedCli(BaseModel):
@@ -344,6 +354,8 @@ class RecordedCli(BaseModel):
     )
     exit_code: int = Field(
         default=1,
+        ge=0,
+        le=255,
         description=(
             "Exit status the shim returns. Defaults to 1 so an unconfigured tool looks like a failing "
             "one rather than silently succeeding"
@@ -370,6 +382,19 @@ class RecordedCli(BaseModel):
             raise ValueError("record_cli tool must be a non-empty name without surrounding whitespace")
         if "/" in v or "\\" in v or v in {".", ".."}:
             raise ValueError(f"record_cli tool {v!r} must be a bare executable name, not a path")
+        stem = v.lower().removesuffix(".exe")
+        if stem in RECORD_CLI_RESERVED_TOOLS:
+            reserved = ", ".join(sorted(RECORD_CLI_RESERVED_TOOLS))
+            msg = (
+                f"record_cli tool {v!r} is reserved: shadowing it breaks the harness itself (the "
+                + "shim's own interpreter, or the shell run_command criteria use). "
+                + f"Reserved: {reserved}"
+            )
+            raise ValueError(msg)
+        if v == RECORD_CLI_LOG_NAME:
+            raise ValueError(f"record_cli tool {v!r} would overwrite the invocation log criteria read")
+        if v.lower().endswith((".cmd", ".bat")):
+            raise ValueError(f"record_cli tool {v!r} collides with the generated Windows twin; declare the bare name")
         return v
 
 

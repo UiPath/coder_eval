@@ -7,6 +7,7 @@ asserted in prose across two repositories.
 """
 
 import json
+import os
 import subprocess
 import sys
 
@@ -132,6 +133,61 @@ class TestGeneration:
         finally:
             if sandbox.sandbox_dir is not None:
                 sandbox.cleanup(preserve=False)
+
+
+class TestInvokedThroughPath:
+    """Exercise the shim the way the agent does -- bare name, resolved via PATH.
+
+    Every other test runs it as `sys.executable <abs path>`, which bypasses the
+    three mechanisms the agent actually depends on: the baked shebang, the +x bit,
+    and the PATH prepend. Without this, removing any of them kept the suite green.
+    """
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX shebang + exec bit path")
+    def test_bare_name_through_path_records_and_is_gradeable(self):
+        sandbox = _sandbox("record_path_exec", record_cli=[RecordedCli(tool="uip", exit_code=3)])
+        try:
+            sandbox_dir = sandbox.setup()
+            recorder_dir = sandbox_dir / RECORD_CLI_DIR
+            env = {**os.environ, "PATH": f"{recorder_dir}{os.pathsep}{os.environ['PATH']}"}
+            proc = subprocess.run(
+                ["uip", "ixp", "projects", "list", "--output", "json"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                check=False,
+            )
+            assert proc.returncode == 3, proc.stderr
+            criterion = CliCalledCriterion(description="listed", verb="ixp projects list")
+            assert SuccessChecker(sandbox).check(criterion).score == 1.0
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_shebang_is_an_absolute_interpreter(self):
+        """`#!/usr/bin/env python3` resolved through the PATH this feature prepends,
+        so `tool: python3` made the shim re-exec itself until the task timed out."""
+        source = render_recorder(RecordedCli(tool="uip"))
+        shebang = source.splitlines()[0]
+        assert shebang.startswith("#!")
+        interpreter = shebang[2:]
+        assert os.path.isabs(interpreter), shebang
+        assert "env " not in shebang
+
+    def test_cmd_twin_body_uses_the_absolute_interpreter(self):
+        sandbox = _sandbox("record_cmd_body", record_cli=[RecordedCli(tool="uip")])
+        try:
+            sandbox_dir = sandbox.setup()
+            # newline="" so the CRLF survives -- read_text() would translate it away
+            # on Windows and the assertion below would pass vacuously.
+            body = (sandbox_dir / RECORD_CLI_DIR / "uip.cmd").read_text(encoding="utf-8", newline="")
+            assert "%~dp0uip" in body
+            assert "\r\n" in body, "cmd needs CRLF"
+            # A bare `python` would resolve through the prepended dir too.
+            assert '"python"' not in body and "\npython " not in body
+            assert os.path.isabs(body.splitlines()[-1].split('"')[1])
+        finally:
+            sandbox.cleanup(preserve=False)
 
 
 class TestRecording:
@@ -284,10 +340,64 @@ class TestRoundTripWithCliCalled:
 
 
 class TestModelValidation:
-    @pytest.mark.parametrize("bad", ["../evil", "a/b", "a\\b", ".", "..", "", " uip"])
-    def test_tool_must_be_a_bare_name(self, bad):
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "../evil",
+            "a/b",
+            "a\\b",
+            ".",
+            "..",
+            "",
+            " uip",
+            # Not path-shaped, but interpolated into generated source: these emitted
+            # an unparseable shim, which the path-only cases never caught.
+            'a"""b',
+            'x") or 1 or ("',
+            "a\nb",
+            "a b",
+            "a;b",
+            "a$b",
+            "a`b",
+        ],
+    )
+    def test_tool_must_be_an_executable_name(self, bad):
         with pytest.raises(ValidationError):
             RecordedCli(tool=bad)
+
+    @pytest.mark.parametrize("reserved", ["python", "python3", "env", "sh", "bash", "node", "git", "uv", "cmd"])
+    def test_reserved_tool_names_rejected(self, reserved):
+        """Shadowing these breaks the harness, not the tool under test: the shim's own
+        interpreter, or the shell run_command criteria use. `tool: python3` hung the
+        task outright by re-execing itself."""
+        with pytest.raises(ValidationError, match="reserved"):
+            RecordedCli(tool=reserved)
+
+    @pytest.mark.parametrize("name", ["PYTHON3", "Python.exe"])
+    def test_reserved_names_are_case_and_exe_aware(self, name):
+        with pytest.raises(ValidationError, match="reserved"):
+            RecordedCli(tool=name)
+
+    def test_log_filename_as_tool_rejected(self):
+        """It overwrote the log every cli_called criterion reads by default."""
+        with pytest.raises(ValidationError, match="invocation log"):
+            RecordedCli(tool="calls.jsonl")
+
+    @pytest.mark.parametrize("name", ["uip.cmd", "uip.bat"])
+    def test_windows_twin_name_as_tool_rejected(self, name):
+        with pytest.raises(ValidationError, match="Windows twin"):
+            RecordedCli(tool=name)
+
+    @pytest.mark.parametrize("bad_exit", [256, -1, 300])
+    def test_exit_code_outside_posix_range_rejected(self, bad_exit):
+        """sys.exit truncates mod 256, so exit_code: 256 made a 'failing' tool exit 0
+        while the log still recorded 256."""
+        with pytest.raises(ValidationError):
+            RecordedCli(tool="uip", exit_code=bad_exit)
+
+    def test_exit_code_bounds_are_inclusive(self):
+        assert RecordedCli(tool="uip", exit_code=0).exit_code == 0
+        assert RecordedCli(tool="uip", exit_code=255).exit_code == 255
 
     @pytest.mark.parametrize("field", ["mode", "response", "passthrough"])
     def test_unknown_field_rejected(self, field):

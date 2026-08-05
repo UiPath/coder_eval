@@ -527,7 +527,9 @@ sandbox:
     - tool: curl                   # so a disobedient agent cannot reach the network
 ```
 
-Each shim records the invocation, writes the configured `stdout`/`stderr`, and exits with `exit_code`. **Nothing is executed** — no network, no auth, no side effects.
+Each shim records the invocation, writes the configured `stdout`/`stderr`, and exits with `exit_code` — which **defaults to 1**, so a bare `- tool: curl` makes the shadowed tool look like it failed. Set `exit_code: 0` when the agent should see success. Values outside 0-255 are rejected, since `sys.exit` truncates mod 256.
+
+`tool` must be a bare executable name, and a small reserved set (`python`, `python3`, `env`, `sh`, `bash`, `node`, `git`, `uv`, `cmd`) is refused: shadowing those breaks the harness itself rather than the tool under test — the shim's own interpreter, or the shell that `run_command` criteria use.
 
 The sandbox writes the shims into `cli_mocks/` and PATH-prepends that directory, then appends one JSON record per invocation to `cli_mocks/calls.jsonl` — the log [`cli_called`](#cli_called) reads by default. Nothing else to wire: no `mock_path_dirs`, no `template_sources`, no `log:` on the criterion.
 

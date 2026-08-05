@@ -226,6 +226,21 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
                 error=f"Invocation log '{criterion.log}' does not exist",
             )
 
+        # The recorder leaves this beside the log when a write failed, so a record
+        # it could not append does not read as "the agent never ran the command".
+        sentinel = f"{criterion.log}.error"
+        if sandbox.file_exists(sentinel):
+            detail = sandbox.get_file_content(sentinel).strip().splitlines()
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                error=(
+                    f"Recorder could not write to '{criterion.log}' ({len(detail)} dropped record(s)); "
+                    f"the log is incomplete so the verdict cannot be trusted. First: {detail[0] if detail else '?'}"
+                ),
+            )
+
         content = sandbox.get_file_content(criterion.log)
 
         usable, unusable = parse_log(content)
