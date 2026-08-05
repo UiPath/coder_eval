@@ -1249,6 +1249,32 @@ class TestReplicateStatistics:
         md = ExperimentReportGenerator.generate_variant_report("a", result)
         assert "Score 95% CI" not in md
 
+    def test_variant_report_ci_excludes_voided_replicates(self):
+        """A voided replicate keeps its inflated score; bootstrapping over it
+        would contaminate the CI beside a pass rate that excludes it."""
+        per_rep = {"a": {"task-1": [1.0, 0.5, 0.5]}}
+        voided = {"a": {"task-1": [True, False, False]}}
+        result = self._make_result(
+            replicate_count=3,
+            per_replicate_scores=per_rep,
+            per_replicate_voided=voided,
+            variant_ids=["a"],
+        )
+        md = ExperimentReportGenerator.generate_variant_report("a", result)
+        assert "[0.500, 0.500] (bootstrap over 2 samples)" in md
+
+    def test_variant_report_omits_the_ci_when_every_replicate_was_voided(self):
+        per_rep = {"a": {"task-1": [1.0, 1.0, 1.0]}}
+        voided = {"a": {"task-1": [True, True, True]}}
+        result = self._make_result(
+            replicate_count=3,
+            per_replicate_scores=per_rep,
+            per_replicate_voided=voided,
+            variant_ids=["a"],
+        )
+        md = ExperimentReportGenerator.generate_variant_report("a", result)
+        assert "Score 95% CI" not in md
+
 
 class TestCollectVariantSeries:
     """The one series collector both reporters share."""

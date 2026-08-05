@@ -525,6 +525,26 @@ class ExperimentReportGenerator:
         return lines
 
     @staticmethod
+    def _honest_replicate_scores(result: ExperimentResult, variant_id: str) -> tuple[list[float], int]:
+        """A variant's per-replicate scores split into (non-voided scores, voided count).
+
+        The integrity gate deliberately preserves a voided replicate's inflated
+        score, so every score-based statistic has to drop those samples itself.
+        """
+        per_rep = result.per_replicate_scores.get(variant_id, {})
+        voided_flags = result.per_replicate_voided.get(variant_id, {})
+        scored: list[float] = []
+        voided = 0
+        for task_id, scores in per_rep.items():
+            flags = voided_flags.get(task_id, [])
+            for index, score in enumerate(scores):
+                if index < len(flags) and flags[index]:
+                    voided += 1
+                else:
+                    scored.append(score)
+        return scored, voided
+
+    @staticmethod
     def _replicate_stats_lines(result: ExperimentResult) -> list[str]:
         """The ``## Replicate Statistics`` block: per-variant bootstrap-CI / Wilson
         pass-rate table. Returns ``[]`` when no variant ran more than one replicate.
@@ -547,17 +567,7 @@ class ExperimentReportGenerator:
         lines.append("| Variant | Replicates/task | Mean score | 95% CI | Pass-rate (Wilson 95%) | Voided |")
         lines.append("|---------|-----------------|------------|--------|------------------------|--------|")
         for vid in result.variant_ids:
-            per_rep = result.per_replicate_scores.get(vid, {})
-            voided_flags = result.per_replicate_voided.get(vid, {})
-            scored: list[float] = []
-            voided = 0
-            for task_id, scores in per_rep.items():
-                flags = voided_flags.get(task_id, [])
-                for index, score in enumerate(scores):
-                    if index < len(flags) and flags[index]:
-                        voided += 1
-                    else:
-                        scored.append(score)
+            scored, voided = ExperimentReportGenerator._honest_replicate_scores(result, vid)
             passes = sum(1 for s in scored if s >= _REPLICATE_PASS_THRESHOLD)
             m, lo, hi = bootstrap_mean_ci(scored)
             mean_str = f"{m:.3f}" if scored else "n/a"
@@ -691,12 +701,13 @@ class ExperimentReportGenerator:
         if durations and len(durations) >= 2:
             lines.append(f"- **Duration Stddev**: {stddev(durations):.1f}s")
         if agg.replicate_count > 1:
-            per_rep = result.per_replicate_scores.get(variant_id, {})
-            all_rep_scores: list[float] = [s for rep_scores in per_rep.values() for s in rep_scores]
-            if all_rep_scores:
-                _, lo, hi = bootstrap_mean_ci(all_rep_scores)
+            # Voided replicates keep their inflated scores on purpose; the CI must
+            # not bootstrap over them any more than the pass rate counts them.
+            honest_scores, _ = ExperimentReportGenerator._honest_replicate_scores(result, variant_id)
+            if honest_scores:
+                _, lo, hi = bootstrap_mean_ci(honest_scores)
                 lines.append(f"- **Replicates/task**: {agg.replicate_count}")
-                lines.append(f"- **Score 95% CI**: [{lo:.3f}, {hi:.3f}] (bootstrap over {len(all_rep_scores)} samples)")
+                lines.append(f"- **Score 95% CI**: [{lo:.3f}, {hi:.3f}] (bootstrap over {len(honest_scores)} samples)")
 
         # Task Details table
         has_similarity = any(vr.reference_similarity is not None for vr in variant_results)
