@@ -28,6 +28,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
   - [file_matches_regex](#file_matches_regex)
   - [reference_comparison](#reference_comparison)
   - [command_executed](#command_executed)
+  - [cli_called](#cli_called)
   - [uipath_eval](#uipath_eval)
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
@@ -620,7 +621,7 @@ All criteria share these fields:
 | `stop_early` | `null` | **Only on live-observable criteria** (`skill_triggered`, `command_executed`). Presence arms the criterion for early stop (no run-level switch needed): an effective fail may end the run (weighted ceiling rule, recall deferral). Keys: `on_pass: stop\|continue` (default `continue`), `decide_within: N` (timeout → effective fail, reported as `decision_budget_exceeded`). Inert triggers by design on instances that can't decide their polarity (dataset fan-out support). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
-- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `classification_match`, `skill_triggered`
+- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `cli_called`, `classification_match`, `skill_triggered`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
 - **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`
 
@@ -841,6 +842,113 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 ```
 
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
+
+### `cli_called`
+
+Checks whether a CLI invocation matching a **structured** pattern was recorded, by reading a JSON Lines invocation log the sandbox produced. **Binary scoring.**
+
+Use this instead of `command_executed` or `file_matches_regex` when a test shadows a CLI with a recording mock and needs to assert on *what was actually executed*, field by field.
+
+```yaml
+- type: "cli_called"
+  description: "Switched the project to the capable model"
+  log: "mocks/calls.jsonl"            # Path to the JSON Lines invocation log (required)
+  verb: "ixp projects configure-model" # Ordered prefix of the non-flag arguments
+  positional: ["my_invoices-ixp"]      # Non-flag arguments following the verb, in order
+  flags:
+    model: "gemini_2_5_pro"            # Bare scalar == {equals: ...}
+  tool: "uip"                          # Optional: match only records with this tool
+  min_count: 1                         # Minimum matching invocations (default: 1)
+  max_count: null                      # Maximum; null = unbounded, 0 = forbidden
+  ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
+```
+
+**Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
+
+```json
+{"ts": 1785416844.987, "tool": "uip", "argv": ["ixp", "projects", "get", "proj-1"], "exit": 1}
+```
+
+**Flag predicates.** Each entry under `flags:` takes **exactly one** of:
+
+| Predicate | Matches when the flag value… |
+|-----------|------------------------------|
+| `equals` | equals the string exactly (the bare-scalar shorthand) |
+| `contains` | contains the substring |
+| `matches_regex` | matches the regex — scoped to one value, not the whole line |
+| `any_of` | equals one of the listed strings |
+| `present: true` | the flag was passed, whatever its value — the right predicate for a boolean switch |
+| `absent: true` | the flag was **not** passed at all |
+
+`matches_regex` also accepts `flags:` (the `re` module's integers, e.g. `2` = `IGNORECASE`, `8` = `MULTILINE`, `16` = `DOTALL`), mirroring [`file_matches_regex`](#file_matches_regex). Setting `flags` next to any other predicate is rejected rather than silently ignored.
+
+Flags the criterion does not mention are ignored, so an extra `--output json` never breaks a match. Repeated flags (`--fields a --fields b`) are satisfied by any one value. A predicate on a flag also listed in `ignore_flags` is rejected at load time — the flag is dropped before predicates run, so it could never be evaluated.
+
+**Which flags carry a value is declared, not guessed.** A flag consumes the following token only if it appears in `flags:`, in `value_flags:`, or in `ignore_flags:`. Everything else is a switch, and the token after it stays positional:
+
+```yaml
+# `uip ixp fields delete --yes proj-1`
+- type: "cli_called"
+  description: "Did not delete proj-1"
+  verb: "ixp fields delete"
+  positional: ["proj-1"]        # --yes is a switch, so proj-1 stays positional
+  min_count: 0
+  max_count: 0                  # correctly FAILS -- the log proves the delete happened
+
+# `uip ixp projects list --folder Finance proj-1`
+- type: "cli_called"
+  description: "Listed proj-1"
+  verb: "ixp projects list"
+  positional: ["proj-1"]
+  value_flags: ["folder"]       # without this, "Finance" would count as a positional
+```
+
+Defaulting to "switch" is deliberate: `--yes` / `--force` / `-y` before the target is how destructive CLIs are invoked, so guessing that the flag swallows its neighbour is precisely how a `max_count: 0` guard ends up passing on the call it exists to forbid. The equals form (`--offset=-1`) is unambiguous and always binds directly, and a declared value flag binds even a dash-leading value (`--limit -1`).
+
+`ignore_flags` drops a flag from matching but does **not** make it value-bearing — an ignored flag that takes a value must also appear in `value_flags` (as `output` does by default). Otherwise `ignore_flags: ["verbose"]` on `delete --verbose proj-1` would let `--verbose` eat `proj-1`.
+
+**Limitation: bundled short flags are not split.** `-rf` parses as one flag named `rf`, so a predicate on `f` will not see it — including `absent: true`, which passes despite `-rf` being present. Assert on the long spelling, or add the bundled form via `aliases`. Likewise a bare negative number in flag position (`seek -1`) is read as a flag named `1`.
+
+**Negative guards want the FEWEST facets that capture the forbidden act.** This is the opposite of a positive assertion, and it is easy to get backwards. `max_count: 0` passes when *nothing matches*, so every facet you add is another way for the real invocation to slip past the pattern and report a false PASS.
+
+In the delete example above, it is tempting to also assert `--yes`. Don't:
+
+- `--yes` is not the forbidden thing — the deletion is. The CLI *requires* a confirmation flag, so asserting it adds no discriminating power.
+- It adds escape routes: `-y` instead of `--yes` (a different flag name) no longer matches, and the guard passes on a delete that did happen.
+
+Use `present: true` — not `equals: ""` — when you do need to assert a switch. `present` needs no value, so it never makes the flag value-bearing; `equals: ""` depends on how the mock happens to record a switch and breaks if the CLI spells it `--force true`.
+
+**Short and long spellings are one flag via `aliases`.** A predicate matches a flag *name*, so `--yes` and `-y` are otherwise unrelated flags:
+
+```yaml
+flags:
+  yes:
+    present: true
+    aliases: ["y"]        # values gathered across --yes AND -y
+```
+
+`present` holds if any listed name appeared, `absent` only if none did, and a value predicate matches if any value under any name satisfies it — so `-f f-002` binds like `--fields f-002`. Splitting the spellings into one criterion each works for a *guard* (both forbidden, and criteria are ANDed) but cannot express "either spelling" positively, and makes `absent` flag **every** invocation, because whichever spelling was not used is always absent. A flag may belong to only one predicate: an alias that is also another key, or that appears in `ignore_flags`, is rejected at load time.
+
+The mirror rule for positive assertions: add every facet that distinguishes the right call from a near-miss, because there a missing facet makes the assertion *too easy* to satisfy.
+
+**Unusable records fail the criterion.** A line that is not JSON, not an object, or whose `argv` is not a list of strings scores 0.0 with an error, on the same footing as a missing log — a record that cannot be read might *be* the invocation a negative guard forbids.
+
+**One predicate per flag** — so a conjunction on a single flag ("contains *both* A and B") is not expressible directly. Two ways to write it:
+
+```yaml
+# 1. One matches_regex spanning both. DOTALL (16) is usually needed: a payload
+#    built with a heredoc contains newlines, and without it `.` stops at the first.
+flags:
+  updates:
+    matches_regex: '"name": "Invoice Number".*Do NOT use the Purchase Order'
+    flags: 16
+
+# 2. Or two criteria over the same log, which scores and reports each part separately.
+```
+
+**Negative guards.** Set `min_count: 0` and `max_count: 0` to assert a call did **not** happen. A missing log file *fails* rather than counting as zero matches — otherwise a mock writing to the wrong path would make every negative guard pass vacuously.
+
+**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`.
 
 ### `commands_efficiency`
 
