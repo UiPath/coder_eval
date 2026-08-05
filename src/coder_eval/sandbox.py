@@ -822,8 +822,26 @@ class Sandbox:
         """
         from .utils import resolve_uipath_plugin_dir
 
-        resolved = resolve_uipath_plugin_dir(self.uip_search_path)
+        resolved = resolve_uipath_plugin_dir(self._plugin_discovery_path())
         self._plugin_tools_dir = str(resolved) if resolved is not None else None
+
+    def _plugin_discovery_path(self) -> str:
+        """``uip_search_path`` minus the generated recorder dir.
+
+        A recording shim is not the real CLI, so letting it win the `uip` lookup
+        made resolve_uipath_plugin_dir return None (a shim is not inside a
+        node_modules/@uipath tree) and silently drop the PLUGIN_TOOLS_DIR pin for
+        every run_command criterion -- for `record_cli: [{tool: uip}]`, the
+        documented example. A hand-written mock under mock_path_dirs shadows the
+        lookup the same way, but that predates this feature and changing it would
+        alter existing tasks.
+        """
+        search_path = self.uip_search_path
+        if not self.config.record_cli or self.sandbox_dir is None:
+            return search_path
+        recorder_dir = str((self.sandbox_dir / RECORD_CLI_DIR).resolve())
+        kept = [entry for entry in search_path.split(os.pathsep) if entry and os.path.realpath(entry) != recorder_dir]
+        return os.pathsep.join(kept)
 
     def _maybe_remediate_home_plugins_pollution(self) -> Path | None:
         """Optionally delete ``$HOME/node_modules/@uipath`` before the task runs.

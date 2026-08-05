@@ -105,6 +105,23 @@ class TestGeneration:
         assert not (target / RECORD_CLI_DIR / "curl").exists()
         assert (target / RECORD_CLI_DIR / "uip").is_file()
 
+    def test_recorder_dir_is_excluded_from_plugin_discovery(self):
+        """A shim must not win the `uip` lookup that pins PLUGIN_TOOLS_DIR.
+
+        It is not inside a node_modules/@uipath tree, so letting it win made
+        resolve_uipath_plugin_dir return None and silently stop exporting the pin
+        to every run_command criterion -- for the documented `tool: uip` example.
+        """
+        sandbox = _sandbox("record_plugin_dir", record_cli=[RecordedCli(tool="uip")])
+        try:
+            sandbox_dir = sandbox.setup()
+            recorder = str((sandbox_dir / RECORD_CLI_DIR).resolve())
+            sandbox.set_command_base_path(f"{recorder}{os.pathsep}{os.environ.get('PATH', '')}")
+            assert recorder in sandbox.uip_search_path.split(os.pathsep)
+            assert recorder not in sandbox._plugin_discovery_path().split(os.pathsep)
+        finally:
+            sandbox.cleanup(preserve=False)
+
     def test_no_record_cli_leaves_no_directory(self):
         sandbox = _sandbox("record_absent")
         try:
@@ -161,6 +178,33 @@ class TestInvokedThroughPath:
             assert proc.returncode == 3, proc.stderr
             criterion = CliCalledCriterion(description="listed", verb="ixp projects list")
             assert SuccessChecker(sandbox).check(criterion).score == 1.0
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_shim_returns_with_stdin_left_open(self):
+        """The invariant the docstring claims: stdin is never read, so an open pipe
+        cannot hang the task. Nothing asserted it before."""
+        sandbox = _sandbox("record_stdin", record_cli=[RecordedCli(tool="uip", exit_code=2)])
+        try:
+            sandbox_dir = sandbox.setup()
+            shim = sandbox_dir / RECORD_CLI_DIR / "uip"
+            proc = subprocess.Popen(
+                [sys.executable, str(shim), "ixp", "projects", "list"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                # Deliberately never write or close stdin before waiting.
+                assert proc.wait(timeout=20) == 2
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.stdin.close()
+                proc.stdout.close()
+                proc.stderr.close()
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            assert records[0]["argv"] == ["ixp", "projects", "list"]
         finally:
             sandbox.cleanup(preserve=False)
 
