@@ -212,6 +212,30 @@ _SEARCH_FILES_ONLY_LONG = frozenset(
 )
 _SEARCH_FILES_ONLY_SHORT = frozenset({"l", "L", "c"})
 
+# Search-utility options that take a SEPARATE value operand. The token after one
+# of these is data, not a flag: `grep -e -c file` searches FOR "-c". Keyed by
+# utility because the same letter differs between tools (rg's `-E` takes an
+# encoding, grep's takes nothing); utilities not listed use the grep set.
+_GREP_VALUE_OPTIONS = frozenset(
+    {"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file", "--max-count", "--include", "--exclude",
+     "--exclude-dir", "--include-dir", "--label", "--binary-files", "--devices", "--directories"}
+)
+_SEARCH_VALUE_OPTIONS: dict[str, frozenset[str]] = {
+    "grep": _GREP_VALUE_OPTIONS,
+    "egrep": _GREP_VALUE_OPTIONS,
+    "fgrep": _GREP_VALUE_OPTIONS,
+    "rg": frozenset(
+        {"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-E", "-M", "-j", "-r", "--regexp", "--file",
+         "--glob", "--iglob", "--type", "--type-not", "--type-add", "--max-count", "--max-columns", "--max-depth",
+         "--max-filesize", "--context", "--after-context", "--before-context", "--encoding", "--threads", "--pre",
+         "--pre-glob", "--replace", "--sort", "--sortr", "--colors", "--ignore-file"}
+    ),
+    "ag": frozenset({"-A", "-B", "-C", "-g", "-G", "-m", "--after", "--before", "--context", "--file-search-regex",
+                     "--ignore", "--ignore-dir", "--max-count", "--pager", "--workers"}),
+    "ack": frozenset({"-A", "-B", "-C", "-m", "-g", "--match", "--max-count", "--after-context", "--before-context",
+                      "--context", "--type", "--ignore-dir", "--ignore-file", "--pager", "--output"}),
+}
+
 # Structured tools whose whole purpose is to return file content.
 _READ_TOOLS = frozenset({"Read", "NotebookRead", "ReadFile", "read_file", "view", "View"})
 
@@ -796,18 +820,45 @@ def _strip_redirects(segment: str) -> tuple[str, list[str], list[str]]:
     return "".join(out), input_targets, created_targets
 
 
-def _search_is_files_only(tokens: list[str]) -> bool:
-    """Whether a grep/rg invocation reports only file names or match counts."""
+def _search_is_files_only(utility: str, tokens: list[str]) -> bool:
+    """Whether a grep/rg invocation reports only file names or match counts.
+
+    Options are parsed, not swept: a token is only a flag when it sits in flag
+    position. ``--`` ends option parsing (``grep -- '-c' KEY`` searches FOR the
+    text "-c"), and an option that takes a separate value consumes the next
+    token (``grep -e -c KEY`` searches for "-c" too). Anything after either is
+    an operand, and an operand can never put the search into files-only mode.
+    """
+    value_options = _SEARCH_VALUE_OPTIONS.get(utility, _GREP_VALUE_OPTIONS)
+    seen_utility = False
+    expect_value = False
     for token in tokens:
+        if not seen_utility:
+            # Step over wrappers/assignments to the utility itself, mirroring
+            # _segment_utility: its tokens are not search options.
+            seen_utility = Path(token.replace("\\", "/")).name.casefold().removesuffix(".exe") == utility
+            continue
+        if expect_value:
+            expect_value = False
+            continue
+        if token == "--":
+            return False  # only operands remain, and none of the flags so far matched
         if token in _SEARCH_FILES_ONLY_LONG:
             return True
-        # Bundled short flags: `-rl`, `-il`. A lone `-` or a long flag is skipped.
-        if (
-            token.startswith("-")
-            and not token.startswith("--")
-            and any(c in _SEARCH_FILES_ONLY_SHORT for c in token[1:])
-        ):
-            return True
+        if token in value_options:
+            expect_value = True
+            continue
+        if token.startswith("--"):
+            continue  # long flag (a `--opt=value` carries its value inline)
+        if token.startswith("-") and len(token) > 1:
+            # Bundled short flags: `-rl`, `-il`. A bundled value-taking option
+            # consumes the rest of the bundle (or the next token) as its value.
+            for position, char in enumerate(token[1:], start=1):
+                if "-" + char in value_options:
+                    expect_value = position == len(token) - 1
+                    break
+                if char in _SEARCH_FILES_ONLY_SHORT:
+                    return True
     return False
 
 
@@ -872,7 +923,7 @@ def _classify_segment(
         return _git_is_read(tokens), matched
 
     if utility in _SEARCH_UTILITIES:
-        return not _search_is_files_only(tokens), matched
+        return not _search_is_files_only(utility, tokens), matched
 
     if any(name in _READ_UTILITIES for name in normalized_tokens):
         return True, matched
