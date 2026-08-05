@@ -15,10 +15,12 @@ The user's request is: `$ARGUMENTS`
 
 ## Step 1 — Locate the target skill
 
-`$ARGUMENTS` may be a path to a `SKILL.md`, a skill name, or empty.
+`$ARGUMENTS` may be a path to a `SKILL.md`, a path to the skill's **directory**, a
+skill name, or empty.
 
 - Empty: glob `.claude/skills/*/SKILL.md` and `**/skills/*/SKILL.md`. One match →
   use it. Several → list them and ask which. None → say so and stop.
+- A directory: use the `SKILL.md` inside it.
 - A name: find the matching skill directory.
 
 The **bare skill name is the directory name** containing `SKILL.md`. Read the

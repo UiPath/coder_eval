@@ -48,7 +48,7 @@ and A/B plumbing.
 - [04 · Writing a task](https://coder-eval.com/docs/tutorials/04-writing-a-task)
 - [05 · Comparing two models](https://coder-eval.com/docs/tutorials/05-comparing-models)
 - [06 · Docker isolation](https://coder-eval.com/docs/tutorials/06-use-docker-isolation)
-- [07 · Coder Eval inside Claude Code](https://coder-eval.com/docs/tutorials/07-plugin-in-claude-code)
+- [07 · Driving Coder Eval from Claude Code](https://coder-eval.com/docs/tutorials/07-plugin-in-claude-code)
 <!-- docs-index:end:tutorials -->
 
 ## Source

@@ -152,7 +152,7 @@ directories, so every file a skill reads travels with it under `reference/`:
   cannot drift from the schema the CLI validates against.
 - `task-rubric.md` — the adversarial task-quality checklist `task` applies to work it
   writes and `lint-tasks` applies to task files already on disk: could this task pass for
-  the wrong reason, does it grade behaviour or a self-report, do its fixtures reset and
+  the wrong reason, does it grade behavior or a self-report, do its fixtures reset and
   clean up.
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads.
 - `templates/` — the canonical activation suite `skill-check` copies.
