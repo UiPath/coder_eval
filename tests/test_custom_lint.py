@@ -1125,6 +1125,18 @@ class TestCE028DocIndexParity:
 PLUGIN_ROOT = Path(__file__).parent.parent / "plugins" / "coder-eval"
 PLUGIN_SKILLS = sorted(PLUGIN_ROOT.glob("skills/*/SKILL.md"))
 
+# Every text file the plugin ships, not just its skills: a bundled reference is
+# copied to the same parentless cache directory and so carries the identical
+# runtime-path constraint. Extension-filtered rather than read-and-hope, so a
+# future binary asset is skipped instead of crashing the guard.
+PLUGIN_TEXT_FILES = sorted(
+    p for p in PLUGIN_ROOT.rglob("*") if p.is_file() and p.suffix in {".md", ".yaml", ".yml", ".json", ".jsonl"}
+)
+
+# The skills that read the shared task-quality rubric. A rubric no skill reads is
+# dead weight; a reader that stops reading it has silently forked the rubric.
+RUBRIC_READERS = {"task"}
+
 # Which skills are explicit-invocation only. Scaffolding a directory (`init`) or
 # writing a CI workflow (`ci`) is never something to do unprompted; the other three
 # are safe for the agent to reach for on its own.
@@ -1290,8 +1302,10 @@ class TestPluginArtifacts:
             "over the bundled one (keeping the pointer comment only in the shared original)"
         )
 
-    @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
-    def test_skills_reference_no_repo_paths(self, skill: Path):
+    @pytest.mark.parametrize(
+        "skill", PLUGIN_TEXT_FILES, ids=[str(p.relative_to(PLUGIN_ROOT)) for p in PLUGIN_TEXT_FILES]
+    )
+    def test_bundled_files_reference_no_repo_paths(self, skill: Path):
         text = skill.read_text(encoding="utf-8")
         offenders = [token for token in REPO_PATH_TOKENS if token in text]
         assert not offenders, (
@@ -1299,6 +1313,20 @@ class TestPluginArtifacts:
             "without its parent directories, so they do not exist at runtime. Bundle what the skill "
             "needs under plugins/coder-eval/ and address it via ${CLAUDE_PLUGIN_ROOT}."
         )
+
+    def test_task_rubric_is_bundled_and_read_by_its_readers(self):
+        # Both directions of the shared-SSOT decision: the rubric ships, and every skill
+        # that is supposed to apply it actually points at it.
+        rubric = PLUGIN_ROOT / "reference" / "task-rubric.md"
+        assert rubric.exists() and rubric.read_text(encoding="utf-8").strip(), (
+            f"{rubric} must exist and be non-empty — `task` and `lint-tasks` read it at runtime"
+        )
+        pointer = "${CLAUDE_PLUGIN_ROOT}/reference/task-rubric.md"
+        for name in sorted(RUBRIC_READERS):
+            skill = PLUGIN_ROOT / "skills" / name / "SKILL.md"
+            assert pointer in skill.read_text(encoding="utf-8"), (
+                f"{skill} no longer reads {pointer} — it has silently forked the shared rubric"
+            )
 
 
 @pytest.mark.lint

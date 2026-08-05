@@ -52,7 +52,11 @@ was told the answer. Either the constraint is a real requirement (keep it in the
 and score what the agent *did with it* instead) or it is the thing under test (drop it
 from the prompt). Never both.
 
-**Success criteria** — pick by what actually needs verifying:
+**Success criteria** — read `${CLAUDE_PLUGIN_ROOT}/reference/task-rubric.md` *before*
+choosing them. It is what this work will be checked against in step 5, and a criterion set
+designed against it is far cheaper than one repaired after the fact.
+
+Pick by what actually needs verifying:
 
 | What to check | Criterion type |
 | --- | --- |
@@ -75,7 +79,10 @@ Rules that matter:
 - **Every task needs at least one criterion that checks output *content***, not just
   existence. A suite of `file_exists` checks passes when the agent writes an empty file.
 - Use `command_executed` sparingly — only when it genuinely matters *how* the result was
-  produced. Set `require_success: false` unless the command must have succeeded.
+  produced. Set `require_success: true` whenever the command's success is what you are
+  grading; the permissive default (`false`) counts a crashed invocation as evidence the
+  work was done, and survives only for a genuine exception — a probe whose failure is an
+  acceptable outcome.
 - When the prompt genuinely must name a literal — a flag like `--json`, an output
   filename — a criterion matching that literal is a **smoke check**, not evidence: it
   only proves the agent typed back what it was told. Keep it if you like, at a low
@@ -119,7 +126,22 @@ success_criteria:
 Add `template_sources` if the task needs starter files (a codebase to modify, a fixture
 to read).
 
-## Step 5 — Validate
+## Step 5 — Could this pass for the wrong reason?
+
+Now re-apply `${CLAUDE_PLUGIN_ROOT}/reference/task-rubric.md` to the files you just wrote.
+Designing against it and checking against it are different acts: the first shapes your
+choices, the second catches what you actually typed.
+
+Answer the rubric's framing question **in writing** — *what is the cheapest thing an agent
+could do that scores full marks?* — and if that cheapest path does not resemble the work
+the task claims to test, fix the criteria before going further. Work the rubric's six
+mechanical checks, and section 5 as well whenever the task touches state outside the
+sandbox.
+
+Fix what you find here rather than reporting it. Note which checks you applied; step 7 asks
+for them.
+
+## Step 6 — Validate
 
 For each file written, run `coder-eval plan <path>` and fix everything it reports. It
 validates through the real Pydantic models, so a mistyped field name or a missing
@@ -132,12 +154,17 @@ Then re-read your own work and check:
 - the prompt leaks no criteria detail;
 - at least one criterion inspects content.
 
-## Step 6 — Report
+## Step 7 — Report
 
 Summarize what you wrote:
 
 | File | Task ID | Criteria | Tags |
 | --- | --- | --- | --- |
 
-Then list any assumptions you made, and the command to run it:
-`coder-eval run <path>` (real tokens, real cost).
+Then:
+
+- **Your answer to the framing question** — the cheapest path to full marks, and why the
+  criteria do not accept it. One or two sentences, not a restatement of the rubric.
+- **Which rubric checks you applied**, and what any of them changed.
+- Any assumptions you made.
+- The command to run it: `coder-eval run <path>` (real tokens, real cost).

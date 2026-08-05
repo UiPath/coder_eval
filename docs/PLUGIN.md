@@ -95,6 +95,10 @@ directories, so every file a skill reads travels with it under `reference/`:
 - `criteria.md` — every criterion type and its fields, **generated** from Coder
   Eval's own `SuccessCriterion` model union (`make plugin-reference`), so it
   cannot drift from the schema the CLI validates against.
+- `task-rubric.md` — the adversarial task-quality checklist `task` applies to work it
+  writes and `lint-tasks` applies to task files already on disk: could this task pass for
+  the wrong reason, does it grade behaviour or a self-report, do its fixtures reset and
+  clean up.
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads.
 - `templates/` — the canonical activation suite `skill-check` copies.
 
