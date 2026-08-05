@@ -283,9 +283,10 @@ _GRADED_BASENAME_GLOBS = ("RESOLUTION.md", "*.expected", "task.yaml", "context.j
 _GRADER_SCRIPT_GLOBS = ("check_*.py", "check.py")
 
 # Directory markers that put a grader script in the task's own directory: the
-# suite layout every task YAML lives under, and both spellings of the framework's
-# task-dir variable. The resolved task directory is added per task.
-_GRADER_DIR_MARKERS = ("tests/tasks/", "$task_dir/", f"{CONTAINER_TASK_DIR}/")
+# suite layout every task YAML lives under, and every spelling of the framework's
+# task-dir variable -- bare, braced, and container-resolved. The resolved task
+# directory is added per task.
+_GRADER_DIR_MARKERS = ("tests/tasks/", "$task_dir/", "${task_dir}/", f"{CONTAINER_TASK_DIR}/")
 
 # Path SEGMENTS that hold answer keys wherever they appear. Segments rather than
 # resolved prefixes because this is how an agent types them -- `cat
@@ -486,10 +487,15 @@ def derive_graded_material(task: TaskDefinition, task_file: Path | None) -> Grad
         base = task_file.parent
         reference = task.reference
         if reference is not None:
+            # A relative reference resolves to ONE on-disk spelling, but an agent
+            # that discovered the task-dir variable types the symbolic one --
+            # `cat "$TASK_DIR/solution.py"` -- so every spelling is stored.
             if reference.file:
                 paths.add(str(base / reference.file))
+                paths.update(_task_dir_spellings(reference.file))
             if reference.directory:
                 directories.add(str(base / reference.directory))
+                directories.update(_task_dir_spellings(reference.directory))
 
     # Operands the task's OWN criteria reach for. `python3 $TASK_DIR/check_x.py`
     # names the grader; an agent that runs the grader is grading itself.
@@ -515,21 +521,37 @@ def derive_graded_material(task: TaskDefinition, task_file: Path | None) -> Grad
     )
 
 
+def _task_dir_spellings(relative: str) -> set[str]:
+    """Every task-dir-rooted spelling of a task-relative path: the bare and
+    braced variable forms plus the container mount. An absolute path has no
+    task-dir spelling and yields nothing."""
+    normalized = relative.replace("\\", "/")
+    if Path(normalized).is_absolute():
+        return set()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return {
+        f"$TASK_DIR/{normalized}",
+        f"${{TASK_DIR}}/{normalized}",
+        f"{CONTAINER_TASK_DIR}/{normalized}",
+    }
+
+
 def _task_dir_operands(command: str, task_dir: Path | None = None) -> set[str]:
     """Extract ``$TASK_DIR``-rooted operands from a framework-run command.
 
-    Three spellings of the same read, because which one the agent types depends on
-    the driver: the raw form (``$TASK_DIR/check_x.py``, what an agent that
-    discovered the variable would use), the container-resolved form
-    (``/work/task_dir/check_x.py``), and -- when the task directory is known -- the
-    real on-disk path. Under ``driver: tempdir`` the task lives in the host
-    checkout and the agent reads THAT path, which neither symbolic form matches.
+    Four spellings of the same read, because which one the agent types depends on
+    the driver: the raw and braced variable forms (``$TASK_DIR/check_x.py`` /
+    ``${TASK_DIR}/check_x.py``, what an agent that discovered the variable would
+    use), the container-resolved form (``/work/task_dir/check_x.py``), and --
+    when the task directory is known -- the real on-disk path. Under
+    ``driver: tempdir`` the task lives in the host checkout and the agent reads
+    THAT path, which no symbolic form matches.
     """
     operands: set[str] = set()
     for match in re.finditer(r"\$\{?TASK_DIR\}?(/[^\s'\";|&)]+)", command):
         suffix = match.group(1)
-        operands.add(f"$TASK_DIR{suffix}")
-        operands.add(f"{CONTAINER_TASK_DIR}{suffix}")
+        operands.update(_task_dir_spellings(suffix.lstrip("/")))
         if task_dir is not None:
             operands.add(str((task_dir / suffix.lstrip("/")).resolve()))
     return operands
@@ -592,8 +614,12 @@ def _find_match(text: str, spec: GradedMaterialSpec, created: frozenset[str] | s
     relatively-typed ``../mocks/responses/manifest.json`` is caught too; grader
     scripts are matched last and only under the task directory
     (:func:`_grader_match`).
+
+    Quotes are removed from the haystack before matching -- that is what the
+    shell does to a word, so ``cat "$TASK_DIR"/solution.py`` is the same read as
+    the unquoted spelling, and a quote-split path cannot dodge a needle.
     """
-    haystack = _normalize(text)
+    haystack = _normalize(text).replace('"', "").replace("'", "")
 
     for candidate in spec.paths:
         needle = _normalize(candidate)

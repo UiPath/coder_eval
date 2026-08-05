@@ -736,6 +736,7 @@ def test_task_dir_operands_add_the_resolved_spelling():
     operands = _task_dir_operands("python3 $TASK_DIR/check_x.py", task_dir)
     assert operands == {
         "$TASK_DIR/check_x.py",
+        "${TASK_DIR}/check_x.py",
         "/work/task_dir/check_x.py",
         str((task_dir / "check_x.py").resolve()),
     }
@@ -886,18 +887,55 @@ def test_utility_semantics_still_decide_a_bare_directory_touch(command: str):
     assert info.verdict is IntegrityVerdict.CLEAN
 
 
+_CHECK_X_SPELLINGS = {"$TASK_DIR/check_x.py", "${TASK_DIR}/check_x.py", "/work/task_dir/check_x.py"}
+
+
 @pytest.mark.parametrize(
     ("command", "expected"),
     [
-        ("python3 $TASK_DIR/check_x.py", {"$TASK_DIR/check_x.py", "/work/task_dir/check_x.py"}),
-        ("python3 ${TASK_DIR}/check_x.py", {"$TASK_DIR/check_x.py", "/work/task_dir/check_x.py"}),
-        ('cat "$TASK_DIR/a.txt" && ls', {"$TASK_DIR/a.txt", "/work/task_dir/a.txt"}),
+        ("python3 $TASK_DIR/check_x.py", _CHECK_X_SPELLINGS),
+        ("python3 ${TASK_DIR}/check_x.py", _CHECK_X_SPELLINGS),
+        ('cat "$TASK_DIR/a.txt" && ls', {"$TASK_DIR/a.txt", "${TASK_DIR}/a.txt", "/work/task_dir/a.txt"}),
         ("echo $TASK_DIR", set()),
         ("no variable here", set()),
     ],
 )
 def test_task_dir_operand_extraction(command: str, expected: set[str]):
     assert _task_dir_operands(command) == expected
+
+
+# --------------------------------------------------------------------------
+# Every $TASK_DIR spelling of a declared reference is a match
+# --------------------------------------------------------------------------
+
+
+def test_a_relative_reference_keeps_its_symbolic_spellings():
+    task = _task(reference={"file": "solution.py"})
+    spec = derive_graded_material(task, Path("/repo/tasks/leaky/task.yaml"))
+    assert "$TASK_DIR/solution.py" in spec.paths
+    assert "${TASK_DIR}/solution.py" in spec.paths
+    assert "/work/task_dir/solution.py" in spec.paths
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('cat "$TASK_DIR/solution.py"', id="quoted-variable-spelling"),
+        pytest.param('cat "$TASK_DIR"/solution.py', id="quote-split-spelling"),
+        pytest.param("cat ${TASK_DIR}/solution.py", id="braced-spelling"),
+        pytest.param("cat /work/task_dir/solution.py", id="container-spelling"),
+    ],
+)
+def test_every_task_dir_spelling_of_the_reference_is_a_read(command: str):
+    task = _task(reference={"file": "solution.py"})
+    spec = derive_graded_material(task, Path("/repo/tasks/leaky/task.yaml"))
+    info = scan_commands([_turn([_bash(command)])], spec)
+    assert info.verdict is IntegrityVerdict.TAINTED, f"missed: {command!r}"
+
+
+def test_a_braced_task_dir_marker_locates_the_grader():
+    info = scan_commands([_turn([_bash('python3 "${TASK_DIR}/check.py"')])], SPEC)
+    assert info.verdict is IntegrityVerdict.TAINTED
 
 
 # --------------------------------------------------------------------------
