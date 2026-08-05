@@ -411,12 +411,16 @@ def _segment_to_regex(segment: str) -> re.Pattern[str]:
     """Compile a path segment into a pattern that matches it as a path COMPONENT.
 
     ``m`` must match ``m/.store`` and ``<artifacts>/m/.store`` but not
-    ``stream/x``, so the component is anchored on its trailing separator plus a
-    leading boundary that rejects any character a path component could continue
-    from. A leading separator is NOT required: agents open these paths relatively
-    and quoted (``open('m/.store')``).
+    ``stream/x`` or ``m.json``, so the component is anchored between a leading
+    boundary that rejects any character a path component could continue from and
+    either its trailing separator OR the same boundary: ``rg . _fixtures`` and
+    ``grep -R . mocks`` hand the whole protected directory to a recursive
+    search without ever typing a ``/``, and whether that emits or merely lists
+    is the utility's call, not the matcher's. A leading separator is NOT
+    required either: agents open these paths relatively and quoted
+    (``open('m/.store')``).
     """
-    return re.compile(r"(?<![\w.\-])" + re.escape(_normalize(segment).strip("/")) + "/")
+    return re.compile(r"(?<![\w.\-])" + re.escape(_normalize(segment).strip("/")) + r"(?=/|(?![\w.\-]))")
 
 
 def _path_segments(raw: str) -> set[str]:

@@ -823,10 +823,41 @@ def test_a_sealed_fixture_store_decode_is_flagged():
         pytest.param("cat program/main.py", id="segment-inside-another-component"),
         pytest.param("cat streams/m.json", id="segment-as-a-filename"),
         pytest.param("cat my_mocks_notes.md", id="segment-inside-a-basename"),
+        pytest.param("cat m.json", id="bare-name-with-an-extension"),
     ],
 )
 def test_a_segment_only_matches_a_whole_path_component(command: str):
     spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["m"]}), None)
+    info = scan_commands([_turn([_bash(command)])], spec)
+    assert info.verdict is IntegrityVerdict.CLEAN
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("rg . _fixtures", id="rg-emits-the-fixture-directory"),
+        pytest.param("grep -R . mocks", id="grep-emits-the-mock-directory"),
+        pytest.param("tail -n +1 mocks", id="reader-on-the-bare-directory"),
+    ],
+)
+def test_a_bare_protected_directory_name_still_matches(command: str):
+    """A recursive search does not need a trailing slash to emit a directory."""
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["mocks"]}), None)
+    info = scan_commands([_turn([_bash(command)])], spec)
+    assert info.verdict is IntegrityVerdict.TAINTED
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("ls -la _fixtures", id="listing-the-fixture-directory"),
+        pytest.param("rm -rf mocks", id="removing-the-mock-directory"),
+        pytest.param("find mocks -name '*.json'", id="enumerating-the-mock-directory"),
+        pytest.param("grep -rl secret mocks", id="files-only-search-of-the-mock-directory"),
+    ],
+)
+def test_utility_semantics_still_decide_a_bare_directory_touch(command: str):
+    spec = derive_graded_material(_task(sandbox={"mock_path_dirs": ["mocks"]}), None)
     info = scan_commands([_turn([_bash(command)])], spec)
     assert info.verdict is IntegrityVerdict.CLEAN
 
