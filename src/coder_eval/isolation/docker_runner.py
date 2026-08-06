@@ -831,7 +831,12 @@ class DockerRunner:
                 container_fixture = f"/opt/coder-eval/mock/fixtures/{filename}"
                 self._host_to_private_paths[str(source)] = container_fixture
                 tools.append(
-                    {"tool": spec.tool, "fixture": container_fixture, "max_requests": spec.max_requests}
+                    {
+                        "tool": spec.tool,
+                        "fixture": container_fixture,
+                        "max_requests": spec.max_requests,
+                        "passthrough_argv_prefixes": spec.passthrough_argv_prefixes,
+                    }
                 )
             config_path = mock_root / "mock-config.json"
             config_path.write_text(json.dumps({"version": 1, "tools": tools}), encoding="utf-8")

@@ -419,6 +419,14 @@ class ProtectedMockConfig(BaseModel):
     tool: str = Field(description="Bare executable name presented to the agent (for example, 'uip')")
     fixture: str = Field(description="Path to the protected exact-command response fixture")
     max_requests: int = Field(default=100, ge=1, le=10_000, description="Per-run request budget for this tool")
+    passthrough_argv_prefixes: list[list[str]] = Field(
+        default_factory=list,
+        max_length=16,
+        description=(
+            "Public argv prefixes that mockd may proxy to the real tool, for example [['docsai', 'ask']]. "
+            "All other invocations remain fixture-backed or receive the fixed default response."
+        ),
+    )
 
     @field_validator("tool")
     @classmethod
@@ -428,6 +436,23 @@ class ProtectedMockConfig(BaseModel):
         if value.lower().endswith((".cmd", ".bat", ".exe")):
             raise ValueError("protected mock tool must not include a platform executable suffix")
         return value
+
+    @field_validator("passthrough_argv_prefixes")
+    @classmethod
+    def validate_passthrough_prefixes(cls, prefixes: list[list[str]]) -> list[list[str]]:
+        normalized: list[list[str]] = []
+        seen: set[tuple[str, ...]] = set()
+        for prefix in prefixes:
+            if not prefix or len(prefix) > 8:
+                raise ValueError("protected mock passthrough prefixes must contain 1 to 8 argv tokens")
+            if any(not isinstance(token, str) or not token or len(token) > 256 for token in prefix):
+                raise ValueError("protected mock passthrough prefix tokens must be non-empty strings up to 256 chars")
+            key = tuple(prefix)
+            if key in seen:
+                raise ValueError("protected mock passthrough prefixes must be unique")
+            seen.add(key)
+            normalized.append(list(prefix))
+        return normalized
 
 
 class SandboxConfig(BaseModel):

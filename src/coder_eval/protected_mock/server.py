@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
 import socketserver
 import struct
+import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,8 +30,42 @@ class CommandResponse:
 @dataclass
 class ToolState:
     responses: dict[tuple[str, ...], CommandResponse]
+    normalized_responses: dict[tuple[str, ...], CommandResponse]
     default: CommandResponse
     remaining: int
+    passthrough_prefixes: tuple[tuple[str, ...], ...]
+    passthrough_executable: str | None
+    passthrough_cache: dict[tuple[str, ...], CommandResponse]
+
+
+PASSTHROUGH_TIMEOUT_SECONDS = 60
+_NOISE_VALUE_FLAGS = frozenset({"--output"})
+
+
+def _normalized_argv(argv: list[str]) -> tuple[str, ...]:
+    """Canonical finite-command key: flag form/order agnostic, never subset matching."""
+
+    expanded: list[str] = []
+    for raw in argv:
+        if raw.startswith("-") and "=" in raw:
+            flag, value = raw.split("=", 1)
+            expanded.append(flag)
+            if value:
+                expanded.append(value)
+        else:
+            expanded.append(raw)
+
+    cleaned: list[str] = []
+    skip_next = False
+    for token in expanded:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _NOISE_VALUE_FLAGS:
+            skip_next = True
+            continue
+        cleaned.append(token)
+    return tuple(sorted(cleaned))
 
 
 def _response(raw: object, *, context: str) -> CommandResponse:
@@ -48,7 +84,12 @@ def _response(raw: object, *, context: str) -> CommandResponse:
     return CommandResponse(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
 
-def _load_tool(fixture_path: Path, max_requests: int) -> ToolState:
+def _load_tool(
+    tool: str,
+    fixture_path: Path,
+    max_requests: int,
+    passthrough_prefixes: list[list[str]],
+) -> ToolState:
     raw = json.loads(fixture_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or raw.get("version") != PROTOCOL_VERSION:
         raise ValueError(f"fixture {fixture_path} must declare version {PROTOCOL_VERSION}")
@@ -56,6 +97,7 @@ def _load_tool(fixture_path: Path, max_requests: int) -> ToolState:
     if not isinstance(entries, list):
         raise ValueError(f"fixture {fixture_path} responses must be a list")
     responses: dict[tuple[str, ...], CommandResponse] = {}
+    normalized_responses: dict[tuple[str, ...], CommandResponse] = {}
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             raise ValueError(f"fixture {fixture_path} response {index} must be an object")
@@ -63,9 +105,14 @@ def _load_tool(fixture_path: Path, max_requests: int) -> ToolState:
         if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
             raise ValueError(f"fixture {fixture_path} response {index}.argv must be a string list")
         key = tuple(argv)
-        if key in responses:
-            raise ValueError(f"fixture {fixture_path} contains duplicate argv {argv!r}")
-        responses[key] = _response(entry, context=f"response {index}")
+        match_mode = entry.get("match_mode", "exact")
+        if match_mode not in {"exact", "normalized"}:
+            raise ValueError(f"fixture {fixture_path} response {index}.match_mode must be exact or normalized")
+        destination = responses if match_mode == "exact" else normalized_responses
+        command_key = key if match_mode == "exact" else _normalized_argv(argv)
+        if command_key in destination:
+            raise ValueError(f"fixture {fixture_path} contains duplicate argv {argv!r} for {match_mode} matching")
+        destination[command_key] = _response(entry, context=f"response {index}")
     default = _response(
         raw.get(
             "default",
@@ -73,7 +120,18 @@ def _load_tool(fixture_path: Path, max_requests: int) -> ToolState:
         ),
         context="default",
     )
-    return ToolState(responses=responses, default=default, remaining=max_requests)
+    executable = shutil.which(tool) if passthrough_prefixes else None
+    if passthrough_prefixes and executable is None:
+        raise ValueError(f"protected mock passthrough tool is not installed: {tool}")
+    return ToolState(
+        responses=responses,
+        normalized_responses=normalized_responses,
+        default=default,
+        remaining=max_requests,
+        passthrough_prefixes=tuple(tuple(prefix) for prefix in passthrough_prefixes),
+        passthrough_executable=executable,
+        passthrough_cache={},
+    )
 
 
 def load_config(config_path: Path) -> dict[str, ToolState]:
@@ -90,11 +148,19 @@ def load_config(config_path: Path) -> dict[str, ToolState]:
         tool = entry.get("tool")
         fixture = entry.get("fixture")
         max_requests = entry.get("max_requests")
+        passthrough_prefixes = entry.get("passthrough_argv_prefixes", [])
         if not isinstance(tool, str) or not tool or tool in loaded:
             raise ValueError("mock config tools must have unique non-empty names")
         if not isinstance(fixture, str) or not isinstance(max_requests, int) or max_requests < 1:
             raise ValueError(f"mock config entry for {tool!r} has invalid fixture or max_requests")
-        loaded[tool] = _load_tool(Path(fixture), max_requests)
+        if not isinstance(passthrough_prefixes, list) or not all(
+            isinstance(prefix, list)
+            and prefix
+            and all(isinstance(token, str) and token for token in prefix)
+            for prefix in passthrough_prefixes
+        ):
+            raise ValueError(f"mock config entry for {tool!r} has invalid passthrough prefixes")
+        loaded[tool] = _load_tool(tool, Path(fixture), max_requests, passthrough_prefixes)
     return loaded
 
 
@@ -107,6 +173,7 @@ class ProtectedMockServer(socketserver.ThreadingMixIn, _UnixStreamServer):
     def __init__(self, path: str, tools: dict[str, ToolState]) -> None:
         self.tools = tools
         self.budget_lock = threading.Lock()
+        self.passthrough_lock = threading.Lock()
         super().__init__(path, ProtectedMockHandler)  # pyright: ignore[reportCallIssue]
 
     def dispatch(self, tool: str, argv: list[str]) -> CommandResponse:
@@ -117,7 +184,43 @@ class ProtectedMockServer(socketserver.ThreadingMixIn, _UnixStreamServer):
             if state.remaining <= 0:
                 return CommandResponse(75, "", "protected mock: request budget exhausted\n")
             state.remaining -= 1
-        return state.responses.get(tuple(argv), state.default)
+        response = state.responses.get(tuple(argv))
+        if response is None:
+            response = state.normalized_responses.get(_normalized_argv(argv))
+        if response is not None:
+            return response
+        if any(tuple(argv[: len(prefix)]) == prefix for prefix in state.passthrough_prefixes):
+            return self._passthrough(state, argv)
+        return state.default
+
+    def _passthrough(self, state: ToolState, argv: list[str]) -> CommandResponse:
+        key = tuple(argv)
+        with self.passthrough_lock:
+            cached = state.passthrough_cache.get(key)
+            if cached is not None:
+                return cached
+            if state.passthrough_executable is None:
+                return CommandResponse(69, "", "protected mock: passthrough is unavailable\n")
+            try:
+                result = subprocess.run(
+                    [state.passthrough_executable, *argv],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                    timeout=PASSTHROUGH_TIMEOUT_SECONDS,
+                )
+                exit_code = result.returncode if 0 <= result.returncode <= 255 else 70
+                response = CommandResponse(exit_code, result.stdout, result.stderr)
+            except (OSError, subprocess.SubprocessError):
+                response = CommandResponse(70, "", "protected mock: passthrough failed\n")
+            encoded_size = len(response.stdout.encode("utf-8")) + len(response.stderr.encode("utf-8"))
+            if encoded_size > MAX_RESPONSE_BYTES // 2:
+                response = CommandResponse(70, "", "protected mock: passthrough response exceeds size limit\n")
+            state.passthrough_cache[key] = response
+            return response
 
 
 class ProtectedMockHandler(socketserver.StreamRequestHandler):

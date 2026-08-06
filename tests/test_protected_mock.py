@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -113,6 +114,102 @@ def test_fixture_rejects_duplicate_argv(tmp_path: Path) -> None:
         load_config(config)
 
 
+def test_normalized_fixture_matching_remains_finite(tmp_path: Path) -> None:
+    fixture = tmp_path / "normalized.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "responses": [
+                    {
+                        "argv": ["rpa", "get-errors", "--job-id", "42"],
+                        "match_mode": "normalized",
+                        "exit_code": 0,
+                        "stdout": "configured\n",
+                    }
+                ],
+                "default": {"exit_code": 2, "stderr": "not configured\n"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"version": 1, "tools": [{"tool": "uip", "fixture": str(fixture), "max_requests": 2}]}),
+        encoding="utf-8",
+    )
+    fake_server = MagicMock()
+    fake_server.tools = load_config(config)
+    fake_server.budget_lock = threading.Lock()
+
+    matched = ProtectedMockServer.dispatch(
+        fake_server,
+        "uip",
+        ["--job-id=42", "get-errors", "rpa", "--output", "json"],
+    )
+    assert matched.stdout == "configured\n"
+
+    extra_argument = ProtectedMockServer.dispatch(
+        fake_server,
+        "uip",
+        ["rpa", "get-errors", "--job-id", "42", "--include-secrets"],
+    )
+    assert extra_argument.exit_code == 2
+
+
+def test_passthrough_is_prefix_limited_and_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = _fixture(tmp_path / "uip.json")
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "tools": [
+                    {
+                        "tool": "uip",
+                        "fixture": str(fixture),
+                        "max_requests": 3,
+                        "passthrough_argv_prefixes": [["docsai", "ask"]],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("coder_eval.protected_mock.server.shutil.which", lambda _tool: "/usr/local/bin/uip")
+    run = MagicMock(return_value=subprocess.CompletedProcess([], 0, "answer\n", ""))
+    monkeypatch.setattr("coder_eval.protected_mock.server.subprocess.run", run)
+    fake_server = MagicMock()
+    fake_server.tools = load_config(config)
+    fake_server.budget_lock = threading.Lock()
+    fake_server.passthrough_lock = threading.Lock()
+    fake_server._passthrough.side_effect = lambda state, argv: ProtectedMockServer._passthrough(
+        fake_server, state, argv
+    )
+
+    argv = ["docsai", "ask", "what failed?"]
+    first = ProtectedMockServer.dispatch(fake_server, "uip", argv)
+    second = ProtectedMockServer.dispatch(fake_server, "uip", argv)
+    blocked = ProtectedMockServer.dispatch(fake_server, "uip", ["auth", "token"])
+
+    assert first.stdout == second.stdout == "answer\n"
+    assert blocked.exit_code == 2
+    run.assert_called_once()
+    assert run.call_args.args[0] == ["/usr/local/bin/uip", *argv]
+    assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_passthrough_prefixes_are_validated() -> None:
+    with pytest.raises(ValidationError, match="must be unique"):
+        ProtectedMockConfig(
+            tool="uip",
+            fixture="fixture.json",
+            passthrough_argv_prefixes=[["docsai", "ask"], ["docsai", "ask"]],
+        )
+    with pytest.raises(ValidationError, match="1 to 8"):
+        ProtectedMockConfig(tool="uip", fixture="fixture.json", passthrough_argv_prefixes=[[]])
+
+
 def test_sandbox_generates_data_free_client_wrapper(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path / "uip.json")
     config = SandboxConfig(
@@ -150,7 +247,14 @@ def test_docker_stages_fixture_copy_only_under_mockd_parent(tmp_path: Path) -> N
         sandbox=SandboxConfig(
             driver="docker",
             docker=DockerDriverConfig(agent_isolation=True),
-            protected_mocks=[ProtectedMockConfig(tool="uip", fixture=str(fixture), max_requests=3)],
+            protected_mocks=[
+                ProtectedMockConfig(
+                    tool="uip",
+                    fixture=str(fixture),
+                    max_requests=3,
+                    passthrough_argv_prefixes=[["docsai", "ask"]],
+                )
+            ],
         ),
         success_criteria=[FileExistsCriterion(description="done", path="done.txt")],
     )
@@ -169,3 +273,5 @@ def test_docker_stages_fixture_copy_only_under_mockd_parent(tmp_path: Path) -> N
     assert str(fixture) not in json.dumps(payload)
     protected = payload["sandbox"]["protected_mocks"]  # type: ignore[index]
     assert protected[0]["fixture"] == "/opt/coder-eval/mock/fixtures/fixture-0.json"  # type: ignore[index]
+    config = json.loads((runner._mock_fixture_mount / "mock-config.json").read_text(encoding="utf-8"))
+    assert config["tools"][0]["passthrough_argv_prefixes"] == [["docsai", "ask"]]
