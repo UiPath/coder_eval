@@ -1,6 +1,6 @@
 """Tests for the agent-visible plugin bundle (file-level allowlist + digest verification).
 
-Covers the tempdir-driver answer-key-leak fix: the agent's ``plugins[].path``
+Covers the tempdir-driver answer-key exposure fix: the agent's ``plugins[].path``
 must point at a verified bundle carrying only plugin-discovery content — never
 the raw skills checkout with its ``RESOLUTION.md`` answers, ``check_*.py``
 graders, and ``tests/`` fixtures — while grading (``run_command`` criteria via
@@ -34,7 +34,7 @@ _SKIP_NO_SYMLINK = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _isolated_staging(tmp_path: Path, monkeypatch):
-    """Fresh per-test bundle cache + staging root (module-level state otherwise leaks)."""
+    """Fresh per-test bundle cache + staging root (module-level state otherwise carries over)."""
     monkeypatch.setattr(plugin_bundle, "_BUNDLE_CACHE", {})
     monkeypatch.setattr(plugin_bundle, "_STAGING_ROOT", tmp_path / "bundle-staging")
 
@@ -119,19 +119,19 @@ class TestHiddenMaterialInsideAllowedSubtrees:
 
     def test_resolution_md_inside_skills_fails_build(self, tmp_path: Path):
         repo = _make_skills_repo(tmp_path)
-        (repo / "skills" / "uipath-troubleshoot" / "RESOLUTION.md").write_text("leak", encoding="utf-8")
+        (repo / "skills" / "uipath-troubleshoot" / "RESOLUTION.md").write_text("the answer", encoding="utf-8")
         with pytest.raises(PluginBundleError, match="hidden grading material"):
             build_manifest(repo)
 
     def test_check_script_inside_skills_fails_build(self, tmp_path: Path):
         repo = _make_skills_repo(tmp_path)
-        (repo / "skills" / "uipath-troubleshoot" / "check_output.py").write_text("leak", encoding="utf-8")
+        (repo / "skills" / "uipath-troubleshoot" / "check_output.py").write_text("the answer", encoding="utf-8")
         with pytest.raises(PluginBundleError, match="hidden grading material"):
             build_manifest(repo)
 
     def test_case_insensitive_match(self, tmp_path: Path):
         repo = _make_skills_repo(tmp_path)
-        (repo / "skills" / "uipath-troubleshoot" / "Resolution.MD").write_text("leak", encoding="utf-8")
+        (repo / "skills" / "uipath-troubleshoot" / "Resolution.MD").write_text("the answer", encoding="utf-8")
         with pytest.raises(PluginBundleError, match="hidden grading material"):
             build_manifest(repo)
 
@@ -156,7 +156,7 @@ class TestSymlinkSafety:
         repo = _make_skills_repo(tmp_path)
         outside = tmp_path / "outside.txt"
         outside.write_text("secret", encoding="utf-8")
-        os.symlink(outside, repo / "skills" / "uipath-troubleshoot" / "leak.txt")
+        os.symlink(outside, repo / "skills" / "uipath-troubleshoot" / "escaped.txt")
         with pytest.raises(PluginBundleError, match="escapes the source root"):
             build_manifest(repo)
 

@@ -314,7 +314,7 @@ def _get_or_build_bundle(source: Path, log: logging.Logger | logging.LoggerAdapt
         if not manifest.files and not manifest.symlinks:
             log.warning(
                 "Plugin source %s contains none of the allowed subtrees %s; the agent sees an EMPTY plugin "
-                + "bundle (nothing leaks, but no skills will be discovered — check the plugin path)",
+                + "bundle - no skills will be discovered from this source (check the plugin path)",
                 source,
                 sorted(PLUGIN_AGENT_ALLOWED_SUBDIRS),
             )
