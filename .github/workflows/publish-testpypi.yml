@@ -34,7 +34,7 @@ permissions:
 jobs:
   publish-testpypi:
     name: Build and publish to TestPyPI
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
     environment:
       name: testpypi

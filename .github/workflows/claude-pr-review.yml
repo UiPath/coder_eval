@@ -22,7 +22,7 @@ permissions: {}
 jobs:
   claude-review:
     name: Claude Code Review
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 15
 
     # Trusted triggers only — this repo is public.

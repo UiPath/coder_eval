@@ -30,7 +30,7 @@ env:
 jobs:
   quality-gate:
     name: Quality Gate (Format, Lint, Type, Test, Security)
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
 
     # Shared env for all steps: safe-chain min-age exclusions and a dummy
@@ -202,14 +202,14 @@ jobs:
     # registry validates, and the uipath-specific code paths fail with a
     # clear hint instead of an import error.
     name: No-Extra Install (uipath optional)
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
@@ -247,7 +247,7 @@ jobs:
 
   windows-smoke:
     name: Windows Smoke Test
-    runs-on: windows-latest
+    runs-on: uipath-windows-latest
     # 15min headroom: the smoke task itself completes in ~7min, but the
     # actions/cache post-step on Windows is slow when ``.venv`` is large.
     # We also exclude ``.venv`` from the cached paths (uv re-creates it
@@ -365,7 +365,7 @@ jobs:
 
   e2e-smoke:
     name: E2E Smoke Tests (Real API)
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
     # Skip on fork PRs where secrets aren't available
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -548,7 +548,7 @@ jobs:
 
   live-tests:
     name: Live Integration Tests (Settings Enforcement + Cost Budget)
-    runs-on: ubuntu-24.04
+    runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -719,7 +719,7 @@ jobs:
 
   codex-live-tests:
     name: Live Integration Tests (Codex)
-    runs-on: ubuntu-24.04
+    runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -795,7 +795,7 @@ jobs:
 
   byoa-live-tests:
     name: Live Integration Tests (BYOA Plugin)
-    runs-on: ubuntu-24.04
+    runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -873,7 +873,7 @@ jobs:
 
   action-dogfood:
     name: Action Dogfood (composite action, real API)
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available (matches e2e-smoke).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

@@ -52,7 +52,7 @@ jobs:
     # GitHub-hosted so cutting a release does not depend on the self-hosted
     # `uipath-ubuntu-latest` pool. semantic-release, uv, twine, and the docker
     # buildx -> GHCR push all run fine here.
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 15
     outputs:
       # Exposed so the downstream publish-pypi job gates on a version having been
@@ -416,7 +416,7 @@ jobs:
     name: Publish to PyPI
     needs: release
     if: needs.release.outputs.version != ''
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
     environment:
       name: pypi
