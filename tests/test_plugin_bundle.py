@@ -231,6 +231,11 @@ class TestStageAgentPlugins:
         assert staged[0]["type"] == "local"
         bundle_dir = Path(staged[0]["path"])
         assert bundle_dir != repo.resolve()
+        # The path handed to the agent lives under the bundle staging tempdir,
+        # not anywhere inside the source checkout.
+        assert plugin_bundle._STAGING_ROOT is not None
+        assert bundle_dir.is_relative_to(plugin_bundle._STAGING_ROOT)
+        assert not bundle_dir.is_relative_to(repo.resolve())
         assert (bundle_dir / "skills" / "uipath-troubleshoot" / "SKILL.md").exists()
         assert not (bundle_dir / "tests").exists()
         assert digests == {str(repo.resolve()): verify_bundle(bundle_dir).digest}
