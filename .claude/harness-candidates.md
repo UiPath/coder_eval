@@ -406,6 +406,45 @@ with the two `action.yml` items above — one considered change to the action's 
   `verify-published-action.yml`; **`actionlint` + shellcheck do NOT flag it**
   (verified against the exact snippet), so the actionlint candidate above does not
   subsume this one.
+- [ ] **CE036 — ban the skipped-green job gate.** Fail a job-level `if:` in
+  `.github/workflows/**` whose only discriminator is an emptiness/equality test on
+  `needs.<job>.outputs.<key>`. A lost output on a partial "Re-run failed jobs" resolves
+  the job to SKIPPED-**green**, so an operator sees a green re-run while nothing ran.
+  Fixed by hand twice now: `promote` was designed around the hazard, and
+  `publish-pypi`'s `if: needs.release.outputs.version != ''` (dead *and* dangerous — a
+  skipped publish also skipped `promote`) was removed in the follow-up review. CE035
+  catches the *typo* class; this catches the *shape*. Escape hatch: inline
+  `# noqa: CE036 — <reason>` for value-driven gates that cannot strand a release.
+- [ ] **CE037 — `if: failure()` is wrong in a job containing a `continue-on-error`
+  step.** Require `always()` (or a reference to the tolerated step's
+  `steps.<id>.outcome`) on diagnostic/upload steps in such a job. Fixed by hand in
+  `verify-published-action.yml`: the run dir was discarded in exactly the tolerated-red
+  case the gate is designed around, because a tolerated red leaves the job green and
+  `failure()` never fires. Pure YAML shape check, ~30 lines.
+- [ ] **CE040 — cap inline `run:` bodies; oversized decision logic belongs in
+  `.github/scripts/`.** `verify-published-action.yml`'s parity step (~70 lines, 7
+  decision points) and its e2e gate (~66 lines, switching from bash to a `python3`
+  heredoc mid-step) are 10-20-branch units invisible to `make check`, `make lint`,
+  `pyright` and coverage — which is the structural reason the `steps.parity.outputs.version`
+  bug survived to `main`. Analogous to CE022's statement cap; composes with CE032/CE033.
+  Deferred as a refactor, not a fix: extraction touches all 423 lines of a workflow that
+  cannot be exercised before merge, and CE035 + `tests/test_verify_published_workflow.py`
+  now cover the specific failure classes. Precedent for the extraction:
+  `.github/scripts/release_notes.py` + `tests/test_release_notes.py`.
+- [ ] **Exercise the Action's score gate in the FAILING direction.** Both
+  consumer-simulating jobs pass `minimum-task-score: "0.0"`
+  (`verify-published-action.yml`'s `e2e`, `pr-checks.yml`'s `action-dogfood`), so the gate
+  is only ever proven to *pass*. The new exit-contract assertion catches a gate that
+  wrongly fails; nothing catches one that wrongly passes — the direction that silently
+  disables every consumer's quality gate. Needs a second invocation with an unmeetable
+  score floor, i.e. a second paid agent run per nightly; deferred on cost, and better
+  placed in `action-dogfood` (PR-time, already paying) than in the cron.
+- [ ] **Extend CE026's `REQUIRED_PREREQ_TOKENS` anchor to the `e2e` job.** The lint pins
+  the documented Node + `@anthropic-ai/claude-code` prerequisite steps to a single
+  executable reference (`action-dogfood` in `pr-checks.yml`, via
+  `tests/lint/action_docs.py::DOGFOOD_JOB`). `verify-published-action.yml`'s `e2e` job is
+  now a third copy of the same two steps — and the truer consumer proof (no checkout,
+  published action, default pin) — so the two can drift while the docs follow only one.
 - [ ] **Runtime-key parity for `run.json` consumers outside `src/`.** The e2e gate in
   `verify-published-action.yml` reads `task_results[*].status` / `weighted_score` /
   `total_tokens`, and `action.yml`'s score gate reads `weighted_score` / `task_id`.

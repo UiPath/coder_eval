@@ -2760,3 +2760,96 @@ class TestGeneratedSurfaceEngine:
         findings = diff_all({target: "body\n"})
         assert list(findings) == [str(target)]
         assert "+body" in findings[str(target)]
+
+
+@pytest.mark.lint
+class TestCE035WorkflowOutputParity:
+    """CE035 — a `steps.<id>.outputs.<key>` / `needs.<job>.outputs.<key>` reference must
+    resolve to a key its writer actually produces.
+
+    The motivating bug: `verify-published-action.yml` read
+    `steps.parity.outputs.version` twice, but that step writes `pin`/`newest`/`lagging`
+    (the shell *variable* was `VERSION`, the output *key* was `newest`). GitHub expands an
+    unwritten output to '', so `TAG_REF: v${{ … }}` became the bare `v`, `git show
+    "v:action.yml"` exited 128 under `set -euo pipefail`, and the preflight job was red on
+    100% of triggers — taking the paid e2e tier (`needs: preflight`) with it. Invisible to
+    ruff/pyright/pytest, and actionlint models `steps.*.outputs` as an open string map.
+    Reasons over workflow YAML + embedded shell, so it lives here, not in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_all_workflow_output_refs_resolve(self):
+        from tests.lint.workflow_outputs import find_unresolved_output_refs, workflow_paths
+
+        findings = find_unresolved_output_refs(workflow_paths(self.REPO_ROOT), self.REPO_ROOT)
+        assert not findings, "unresolvable workflow output references:\n" + "\n".join(f"  {f}" for f in findings)
+
+    def test_catches_an_unwritten_step_output(self, tmp_path: Path):
+        """The exact shape of the shipped bug: reading a key the writer never echoes."""
+        from tests.lint.workflow_outputs import find_unresolved_output_refs
+
+        wf = tmp_path / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "w.yml").write_text(
+            "jobs:\n"
+            "  j:\n"
+            "    steps:\n"
+            "      - id: parity\n"
+            "        run: |\n"
+            "          {\n"
+            '            echo "pin=$PIN"\n'
+            '            echo "newest=$VERSION"\n'
+            '          } >> "$GITHUB_OUTPUT"\n'
+            "      - env:\n"
+            "          TAG_REF: v${{ steps.parity.outputs.version }}\n"
+            "          PIN_REF: ${{ steps.parity.outputs.pin }}\n"
+            "        run: echo hi\n",
+            encoding="utf-8",
+        )
+        findings = find_unresolved_output_refs([wf / "w.yml"], tmp_path)
+        assert len(findings) == 1, [str(f) for f in findings]
+        assert "outputs.version` is never written" in findings[0].message
+        assert "['newest', 'pin']" in findings[0].message
+
+    def test_catches_a_missing_step_id_and_an_undeclared_needs_output(self, tmp_path: Path):
+        from tests.lint.workflow_outputs import find_unresolved_output_refs
+
+        wf = tmp_path / "w.yml"
+        wf.write_text(
+            "jobs:\n"
+            "  a:\n"
+            "    outputs:\n"
+            "      version: ${{ steps.ver.outputs.version }}\n"
+            "    steps:\n"
+            "      - id: ver\n"
+            '        run: echo "version=1.2.3" >> "$GITHUB_OUTPUT"\n'
+            "  b:\n"
+            "    if: needs.a.outputs.released_version != ''\n"
+            "    steps:\n"
+            "      - run: echo ${{ steps.nope.outputs.x }}\n",
+            encoding="utf-8",
+        )
+        messages = [f.message for f in find_unresolved_output_refs([wf], tmp_path)]
+        assert any("does not exist in this job" in m for m in messages), messages
+        assert any("needs.a.outputs.released_version` is not declared" in m for m in messages), messages
+
+    def test_skips_third_party_actions_and_unreadable_writers(self, tmp_path: Path):
+        """Boundaries that keep the rule sound: a pinned action's outputs are not on disk,
+        and a body that writes outputs from an embedded interpreter is not guessed at."""
+        from tests.lint.workflow_outputs import find_unresolved_output_refs
+
+        wf = tmp_path / "w.yml"
+        wf.write_text(
+            "jobs:\n"
+            "  j:\n"
+            "    steps:\n"
+            "      - id: app-token\n"
+            "        uses: actions/create-github-app-token@abc123\n"
+            "      - id: py\n"
+            "        run: |\n"
+            '          python3 -c \'import os; open(os.environ["GITHUB_OUTPUT"], "a")\'\n'
+            "      - run: echo ${{ steps.app-token.outputs.token }} ${{ steps.py.outputs.whatever }}\n",
+            encoding="utf-8",
+        )
+        assert find_unresolved_output_refs([wf], tmp_path) == []
