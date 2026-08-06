@@ -558,6 +558,34 @@ async def test_harness_spawn_guard_restores_absent_path(monkeypatch):
     assert "PATH" not in antigravity_agent.os.environ
 
 
+async def test_harness_spawn_guard_scrubs_harness_vars_for_spawn(monkeypatch):
+    """SKILLS_REPO_PATH / CODER_EVAL_* are absent from os.environ during the spawn
+    window (the localharness inherits os.environ wholesale — no env seam) and
+    restored for the harness process afterwards."""
+    monkeypatch.setenv("SKILLS_REPO_PATH", "/host/skills")
+    monkeypatch.setenv("CODER_EVAL_DEBUG", "1")
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+
+    async with agent._harness_spawn_guard():
+        assert "SKILLS_REPO_PATH" not in os.environ
+        assert "CODER_EVAL_DEBUG" not in os.environ
+    assert os.environ["SKILLS_REPO_PATH"] == "/host/skills"  # restored for the harness itself
+    assert os.environ["CODER_EVAL_DEBUG"] == "1"
+
+
+async def test_harness_spawn_guard_restores_scrubbed_vars_when_body_raises(monkeypatch):
+    """The scrub restore lives in ``finally`` — a failed harness boot must not
+    leave the harness process without its own SKILLS_REPO_PATH (grading needs it)."""
+    monkeypatch.setenv("SKILLS_REPO_PATH", "/host/skills")
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+
+    with pytest.raises(RuntimeError, match="harness boot failed"):
+        async with agent._harness_spawn_guard():
+            assert "SKILLS_REPO_PATH" not in os.environ
+            raise RuntimeError("harness boot failed")
+    assert os.environ["SKILLS_REPO_PATH"] == "/host/skills"
+
+
 async def test_harness_spawn_guard_restores_path_when_body_raises(monkeypatch):
     """PATH is restored even when the guarded spawn raises (the failed-boot path).
 

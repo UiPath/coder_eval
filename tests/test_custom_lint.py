@@ -531,6 +531,51 @@ class TestCE024DiscriminatedUnions:
 
 
 @pytest.mark.lint
+class TestCE034PluginBundleChokePoint:
+    """CE034: in orchestrator.py, self._create_agent() requires a preceding
+    self._stage_agent_plugin_bundles() in the same method (agents must never
+    receive raw plugin paths)."""
+
+    @staticmethod
+    def _run(src: str, *, path: str = "src/coder_eval/orchestrator.py"):
+        import ast
+
+        from tests.lint.rules.ce034_plugin_bundle_choke_point import PluginBundleChokePoint
+
+        return PluginBundleChokePoint(path).check(ast.parse(src))
+
+    def test_flags_create_agent_without_staging(self):
+        src = "class O:\n    async def _setup(self):\n        self.agent = await self._create_agent()"
+        assert self._run(src)
+
+    def test_flags_create_agent_before_staging(self):
+        src = (
+            "class O:\n"
+            "    async def _setup(self):\n"
+            "        self.agent = await self._create_agent()\n"
+            "        await self._stage_agent_plugin_bundles()"
+        )
+        assert self._run(src)
+
+    def test_allows_staging_before_create_agent(self):
+        src = (
+            "class O:\n"
+            "    async def _setup(self):\n"
+            "        await self._stage_agent_plugin_bundles()\n"
+            "        self.agent = await self._create_agent()"
+        )
+        assert not self._run(src)
+
+    def test_ignores_methods_without_create_agent(self):
+        src = "class O:\n    async def _setup(self):\n        await self._run_pre_run_commands()"
+        assert not self._run(src)
+
+    def test_ignores_files_other_than_orchestrator(self):
+        src = "class O:\n    async def _setup(self):\n        self.agent = await self._create_agent()"
+        assert not self._run(src, path="src/coder_eval/evaluation/sub_agent.py")
+
+
+@pytest.mark.lint
 class TestCE025LiveVerdictConsistency:
     """CE025: a criterion type's ``LiveSuccessCriterion`` subclassing (models/criteria.py)
     and its checker's ``live_verdict`` override (criteria/) must agree.

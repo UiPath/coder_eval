@@ -70,7 +70,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import dump_dataclass, process_plugins
+from coder_eval.utils import dump_dataclass, process_plugins, scrub_agent_env_overrides
 
 
 logger = logging.getLogger(__name__)
@@ -765,7 +765,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
         """
-        base_env: dict[str, str] = {}
+        # Defence-in-depth: the SDK spawns the CLI with {**os.environ,
+        # **options.env}, so harness-internal vars (SKILLS_REPO_PATH — the raw
+        # skills checkout with grading material — and CODER_EVAL_*) reach the
+        # agent unless explicitly overridden here. The grading env
+        # (Sandbox._build_run_command_env) keeps them.
+        base_env: dict[str, str] = scrub_agent_env_overrides()
         if path := os.environ.get("PATH"):
             base_env["PATH"] = path
 

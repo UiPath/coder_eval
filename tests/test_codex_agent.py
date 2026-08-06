@@ -125,16 +125,26 @@ class TestSandboxAlwaysFullAccess:
         assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
 
 
-class TestCodexEnvironmentConfiguration:
-    """Test _build_codex_env: only CODEX_API_KEY travels via env."""
+def _without_scrub(env: dict[str, str] | None) -> dict[str, str]:
+    """Drop the always-present harness-env scrub entries (SKILLS_REPO_PATH,
+    ambient CODER_EVAL_*) so the remaining assertions stay exact-equality."""
+    assert env is not None
+    return {k: v for k, v in env.items() if k != "SKILLS_REPO_PATH" and not k.startswith("CODER_EVAL_")}
 
-    def test_build_codex_env_returns_none_without_key(self, monkeypatch):
-        """No CODEX_API_KEY -> None (base URL alone is not enough)."""
+
+class TestCodexEnvironmentConfiguration:
+    """Test _build_codex_env: only CODEX_API_KEY (plus the harness scrub) travels via env."""
+
+    def test_build_codex_env_scrub_only_without_key(self, monkeypatch):
+        """No CODEX_API_KEY -> only the harness scrub travels (base URL alone adds nothing)."""
         monkeypatch.delenv("CODEX_API_KEY", raising=False)
         monkeypatch.setenv("CODEX_BASE_URL", "https://custom.api/v1")
 
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
-        assert agent._build_codex_env() is None
+        env = agent._build_codex_env()
+        assert env is not None
+        assert env["SKILLS_REPO_PATH"] == ""
+        assert _without_scrub(env) == {}
 
     def test_build_codex_env_with_api_key(self, monkeypatch):
         """CODEX_API_KEY is delivered via env."""
@@ -142,7 +152,7 @@ class TestCodexEnvironmentConfiguration:
 
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         env = agent._build_codex_env()
-        assert env == {"CODEX_API_KEY": "test-key-123"}
+        assert _without_scrub(env) == {"CODEX_API_KEY": "test-key-123"}
 
     def test_build_codex_env_omits_base_url(self, monkeypatch):
         """Base URL is applied via provider config, never via env."""
@@ -151,8 +161,7 @@ class TestCodexEnvironmentConfiguration:
 
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         env = agent._build_codex_env()
-        assert env == {"CODEX_API_KEY": "k"}
-        assert "CODEX_BASE_URL" not in env
+        assert _without_scrub(env) == {"CODEX_API_KEY": "k"}
 
     def test_build_codex_env_ignores_openai_and_azure_keys(self, monkeypatch):
         """Only CODEX_API_KEY is read; OPENAI_*/AZURE_* are not."""
@@ -161,7 +170,20 @@ class TestCodexEnvironmentConfiguration:
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
 
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
-        assert agent._build_codex_env() is None
+        assert _without_scrub(agent._build_codex_env()) == {}
+
+    def test_build_codex_env_masks_harness_vars(self, monkeypatch):
+        """SKILLS_REPO_PATH / CODER_EVAL_* are explicitly overridden to '' — the
+        Codex SDK merges this dict over os.environ, so omission would inherit."""
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setenv("SKILLS_REPO_PATH", "/host/skills")
+        monkeypatch.setenv("CODER_EVAL_DEBUG", "1")
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        env = agent._build_codex_env()
+        assert env is not None
+        assert env["SKILLS_REPO_PATH"] == ""
+        assert env["CODER_EVAL_DEBUG"] == ""
 
     def test_build_codex_env_prepends_path_when_env_path_prepend_set(self, monkeypatch):
         """env_path_prepend dirs land at the FRONT of PATH, in order, parent appended.
@@ -183,7 +205,7 @@ class TestCodexEnvironmentConfiguration:
         assert env["PATH"] == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
 
     def test_build_codex_env_returns_path_only_when_no_api_key(self, monkeypatch):
-        """Prepend dirs set but no CODEX_API_KEY -> {"PATH": ...} alone, not None."""
+        """Prepend dirs set but no CODEX_API_KEY -> {"PATH": ...} alone (plus scrub)."""
         import os
 
         monkeypatch.delenv("CODEX_API_KEY", raising=False)
@@ -193,7 +215,7 @@ class TestCodexEnvironmentConfiguration:
         agent._env_path_prepend = ["/sandbox/mocks"]
 
         env = agent._build_codex_env()
-        assert env == {"PATH": f"/sandbox/mocks{os.pathsep}/parent/bin"}
+        assert _without_scrub(env) == {"PATH": f"/sandbox/mocks{os.pathsep}/parent/bin"}
 
     def test_build_codex_env_no_prepend_omits_path(self, monkeypatch):
         """Default (no env_path_prepend) never adds a PATH key — only the API key travels."""
@@ -202,8 +224,8 @@ class TestCodexEnvironmentConfiguration:
 
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         env = agent._build_codex_env()
-        assert env == {"CODEX_API_KEY": "k"}
-        assert "PATH" not in env
+        assert _without_scrub(env) == {"CODEX_API_KEY": "k"}
+        assert env is not None and "PATH" not in env
 
     def test_build_codex_env_resolves_path_key_case_insensitively(self, monkeypatch):
         """A non-uppercase PATH key (e.g. Windows 'Path') is reused, not duplicated."""
@@ -217,7 +239,7 @@ class TestCodexEnvironmentConfiguration:
         agent._env_path_prepend = ["/sandbox/mocks"]
 
         env = agent._build_codex_env()
-        assert env == {"Path": f"/sandbox/mocks{_os.pathsep}/parent/bin"}
+        assert _without_scrub(env) == {"Path": f"/sandbox/mocks{_os.pathsep}/parent/bin"}
 
     @pytest.mark.asyncio
     async def test_start_propagates_env_path_prepend(self, monkeypatch, tmp_path):

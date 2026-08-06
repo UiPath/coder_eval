@@ -66,7 +66,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import expand_env_vars
+from coder_eval.utils import AGENT_ENV_SCRUB_PREFIXES, AGENT_ENV_SCRUB_VARS, expand_env_vars
 
 
 logger = logging.getLogger(__name__)
@@ -389,22 +389,32 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         never affects the live harness. The lock is taken even when no prepend dirs
         were configured: a no-prepend spawn must still wait out any in-flight mutated-
         PATH window, or its harness would inherit another task's mock dirs.
+
+        The same spawn window scrubs harness-internal vars (SKILLS_REPO_PATH — the
+        raw skills checkout with grading material — and CODER_EVAL_*) out of
+        ``os.environ`` so the harness subprocess never inherits them; they are
+        restored for the harness process itself in the same ``finally``.
         """
         async with _harness_spawn_lock():
-            if not self._env_path_prepend:
-                yield
-                return
+            scrubbed = {
+                k: os.environ.pop(k)
+                for k in list(os.environ)
+                if k in AGENT_ENV_SCRUB_VARS or k.startswith(AGENT_ENV_SCRUB_PREFIXES)
+            }
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
             original = os.environ.get(path_key)
-            os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original or ""])
-            self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
+            if self._env_path_prepend:
+                os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original or ""])
+                self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
             try:
                 yield
             finally:
-                if original is None:
-                    os.environ.pop(path_key, None)
-                else:
-                    os.environ[path_key] = original
+                os.environ.update(scrubbed)
+                if self._env_path_prepend:
+                    if original is None:
+                        os.environ.pop(path_key, None)
+                    else:
+                        os.environ[path_key] = original
 
     async def communicate(
         self,

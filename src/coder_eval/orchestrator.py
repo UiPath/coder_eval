@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import re
 import time
 import uuid
@@ -59,6 +60,7 @@ from .models import (
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
+from .plugin_bundle import stage_agent_plugins
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -1077,6 +1079,13 @@ class Orchestrator:
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
 
+        # Stage agent-visible plugin bundles BEFORE the agent is created:
+        # agent.plugins[].path is rewritten from the raw source checkout (which
+        # carries graders / reference answers) to a verified, file-allowlisted
+        # bundle. Grading keeps the raw path — run_command criteria resolve
+        # $SKILLS_REPO_PATH from the untouched sandbox/process env.
+        await self._stage_agent_plugin_bundles()
+
         # Create and start the agent. For a no-op (type: none) task this dispatches
         # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
         # runs the normal lifecycle without any agentless branching, and the
@@ -1253,6 +1262,35 @@ class Orchestrator:
                 self.result.environment_info["tool_plugins"] = versions["tool_plugins"]
         except Exception as exc:
             logger.debug("Failed to refresh runtime tool versions: %s", exc)
+
+    async def _stage_agent_plugin_bundles(self) -> None:
+        """Rewrite ``agent.plugins[].path`` to verified agent-visible bundles.
+
+        The bundle is built once per resolved source path per run and
+        digest-verified on EVERY task before its agent starts (see
+        :mod:`coder_eval.plugin_bundle`); a drifted bundle raises
+        ``PluginBundleError``, which lands the task as ``FinalStatus.ERROR``
+        with component ``orchestrator.setup`` — it never falls back to the raw
+        path. Each source's manifest digest is recorded on
+        ``environment_info["plugin_bundles"]`` for audit.
+
+        Skipped inside docker task containers (``CODER_EVAL_IN_CONTAINER``):
+        the docker driver owns its own host-side plugin staging/mount surface
+        (isolation/docker_runner.py), and re-bundling in-container would add a
+        per-container recursive copy without changing what the host mounted.
+        """
+        agent_cfg = self.task.agent
+        if agent_cfg is None or not agent_cfg.plugins:
+            return
+        if os.environ.get("CODER_EVAL_IN_CONTAINER"):
+            return
+        staged, digests = await asyncio.to_thread(
+            stage_agent_plugins,
+            agent_cfg.plugins,  # type: ignore[arg-type]
+        )
+        agent_cfg.plugins = staged  # type: ignore[assignment]
+        if digests and self.result is not None:
+            self.result.environment_info["plugin_bundles"] = digests
 
     async def _create_agent(self) -> Agent[Any]:
         """Create the appropriate agent based on task configuration.

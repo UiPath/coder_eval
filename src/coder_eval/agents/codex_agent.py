@@ -52,7 +52,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import expand_env_vars
+from coder_eval.utils import expand_env_vars, scrub_agent_env_overrides
 
 
 logger = logging.getLogger(__name__)
@@ -1089,9 +1089,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         The SDK merges this dict over ``os.environ`` for the app-server process
         (and normalizes the PATH key case-insensitively), so a full PATH value
-        here safely replaces the inherited one.
+        here safely replaces the inherited one. That same merge is why the
+        harness-internal vars (SKILLS_REPO_PATH / CODER_EVAL_*) are masked with
+        explicit empty-string overrides — omitting them would leave the
+        inherited values visible to the agent.
         """
-        env: dict[str, str] = {}
+        env: dict[str, str] = scrub_agent_env_overrides()
         api_key = os.getenv("CODEX_API_KEY")
         if api_key:
             env["CODEX_API_KEY"] = api_key

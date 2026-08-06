@@ -86,6 +86,32 @@ def process_plugins(
     return processed
 
 
+# Harness-internal env vars that must never reach the agent-under-test's
+# subprocess: SKILLS_REPO_PATH points at the raw skills checkout (which carries
+# grading material), and CODER_EVAL_* are harness knobs the agent has no
+# business reading. The grading side (Sandbox._build_run_command_env) and the
+# harness process itself deliberately KEEP these — run_command criteria invoke
+# graders via `$SKILLS_REPO_PATH/...`.
+AGENT_ENV_SCRUB_VARS: tuple[str, ...] = ("SKILLS_REPO_PATH",)
+AGENT_ENV_SCRUB_PREFIXES: tuple[str, ...] = ("CODER_EVAL_",)
+
+
+def scrub_agent_env_overrides() -> dict[str, str]:
+    """Empty-string overrides masking harness-internal env vars from the agent.
+
+    Agent SDKs spawn their CLI subprocess with ``{**os.environ, **overrides}``
+    (verified against claude_agent_sdk's subprocess transport), so a variable
+    can only be removed from the agent's view by explicitly overriding it —
+    omitting it from the overrides dict leaves the inherited value intact.
+    ``AGENT_ENV_SCRUB_VARS`` are always masked (deterministic contract);
+    ``AGENT_ENV_SCRUB_PREFIXES`` mask whatever matching vars this process
+    currently carries.
+    """
+    scrub = dict.fromkeys(AGENT_ENV_SCRUB_VARS, "")
+    scrub.update({k: "" for k in os.environ if k.startswith(AGENT_ENV_SCRUB_PREFIXES)})
+    return scrub
+
+
 SKIP = object()  # Sentinel marking values that serialize_value should drop from the result.
 
 
