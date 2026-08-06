@@ -106,6 +106,16 @@ def scrub_agent_env_overrides() -> dict[str, str]:
     ``AGENT_ENV_SCRUB_VARS`` are always masked (deterministic contract);
     ``AGENT_ENV_SCRUB_PREFIXES`` mask whatever matching vars this process
     currently carries.
+
+    Empty-string, not unset, is load-bearing for the Claude/Codex seams: the
+    merge offers no removal semantics, and unsetting via a transient
+    ``os.environ`` mutation would be process-global — concurrent tasks copy
+    ``os.environ`` for their grading subprocesses (``_build_run_command_env``)
+    and could observe the gap. The tradeoff is benign: a shell expanding
+    ``$SKILLS_REPO_PATH`` yields ``""`` for a present-but-empty var exactly as
+    it does for an unset one, and no agent-side code reads the variable.
+    (Antigravity, which has no env seam and already serializes its harness
+    spawn under a lock, does truly unset — see ``_harness_spawn_guard``.)
     """
     scrub = dict.fromkeys(AGENT_ENV_SCRUB_VARS, "")
     scrub.update({k: "" for k in os.environ if k.startswith(AGENT_ENV_SCRUB_PREFIXES)})

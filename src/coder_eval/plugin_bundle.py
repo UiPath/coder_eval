@@ -68,11 +68,17 @@ logger = logging.getLogger(__name__)
 # projection in PR #85's plugin_projection module.
 PLUGIN_AGENT_ALLOWED_SUBDIRS = frozenset({"skills", "commands", "agents", ".claude-plugin", "hooks"})
 
-# Grading material recognizable by NAME even inside an allowed subtree.
+# Grading material recognizable by FILE NAME even inside an allowed subtree.
 # Matched case-insensitively; a hit FAILS the build (loud, not a silent skip)
 # so answer-key material can never ship by being filed under skills/.
+#
+# Deliberately NO directory-name check: the graders' repo-root ``tests/`` tree
+# is already excluded by construction (``tests`` is not an allowed subtree and
+# is never walked), while a nested ``tests`` directory inside a skill is
+# legitimately shipped client content (e.g. a dashboard scaffold's test folder
+# under ``skills/uipath-coded-apps/assets/``) — a deep path-component check
+# rejected the real skills repo outright.
 HIDDEN_MATERIAL_FILE_PATTERNS: tuple[str, ...] = ("resolution.md", "check_*.py")
-HIDDEN_MATERIAL_DIR_NAMES: frozenset[str] = frozenset({"tests"})
 
 MANIFEST_SUFFIX = ".manifest.json"
 
@@ -110,10 +116,8 @@ def _hash_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _is_hidden_material(name: str, *, is_dir: bool) -> bool:
+def _is_hidden_material(name: str) -> bool:
     lowered = name.lower()
-    if is_dir:
-        return lowered in HIDDEN_MATERIAL_DIR_NAMES
     return any(fnmatchcase(lowered, pattern) for pattern in HIDDEN_MATERIAL_FILE_PATTERNS)
 
 
@@ -139,8 +143,8 @@ def build_manifest(source: Path) -> BundleManifest:
     """Walk ``source``'s allowed subtrees and declare every agent-visible file.
 
     Raises :class:`PluginBundleError` on a symlink escaping the source root or
-    on hidden grading material (``HIDDEN_MATERIAL_FILE_PATTERNS`` /
-    ``HIDDEN_MATERIAL_DIR_NAMES``) inside an allowed subtree.
+    on hidden grading material (``HIDDEN_MATERIAL_FILE_PATTERNS``) inside an
+    allowed subtree.
     """
     files: dict[str, str] = {}
     symlinks: dict[str, str] = {}
@@ -149,7 +153,7 @@ def build_manifest(source: Path) -> BundleManifest:
         rel = path.relative_to(source).as_posix()
         if path.is_symlink():
             symlinks[rel] = _check_symlink_in_root(path, source)
-        elif _is_hidden_material(path.name, is_dir=False):
+        elif _is_hidden_material(path.name):
             raise PluginBundleError(
                 f"Plugin bundle build failed: hidden grading material inside an allowed subtree: {rel} "
                 + f"(patterns: {', '.join(HIDDEN_MATERIAL_FILE_PATTERNS)})"
@@ -170,11 +174,6 @@ def build_manifest(source: Path) -> BundleManifest:
             root = Path(root_str)
             for dirname in sorted(dirnames):
                 child = root / dirname
-                if _is_hidden_material(dirname, is_dir=True):
-                    rel = child.relative_to(source).as_posix()
-                    raise PluginBundleError(
-                        f"Plugin bundle build failed: hidden grading directory inside an allowed subtree: {rel}/"
-                    )
                 if child.is_symlink():
                     # Listed but never descended into by os.walk; record verbatim.
                     symlinks[child.relative_to(source).as_posix()] = _check_symlink_in_root(child, source)

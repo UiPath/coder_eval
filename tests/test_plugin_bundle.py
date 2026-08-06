@@ -45,6 +45,13 @@ def _make_skills_repo(root: Path) -> Path:
     (repo / "skills" / "uipath-troubleshoot" / "references").mkdir(parents=True)
     (repo / "skills" / "uipath-troubleshoot" / "SKILL.md").write_text("# troubleshoot", encoding="utf-8")
     (repo / "skills" / "uipath-troubleshoot" / "references" / "guide.md").write_text("guide", encoding="utf-8")
+    # A nested `tests` dir inside a skill is LEGITIMATE shipped client content
+    # (mirrors skills/uipath-coded-apps/assets/scripts/dashboards/tests/ in the
+    # real repo) — it must project into the bundle, unlike the repo-root tests/.
+    (repo / "skills" / "uipath-coded-apps" / "assets" / "scripts" / "dashboards" / "tests").mkdir(parents=True)
+    (repo / "skills" / "uipath-coded-apps" / "assets" / "scripts" / "dashboards" / "tests" / "dash.test.ts").write_text(
+        "test", encoding="utf-8"
+    )
     (repo / "commands").mkdir()
     (repo / "commands" / "triage.md").write_text("cmd", encoding="utf-8")
     (repo / ".claude-plugin").mkdir()
@@ -73,6 +80,7 @@ class TestAdversarialProjection:
         assert _bundle_rel_paths(bundle) == {
             "skills/uipath-troubleshoot/SKILL.md",
             "skills/uipath-troubleshoot/references/guide.md",
+            "skills/uipath-coded-apps/assets/scripts/dashboards/tests/dash.test.ts",
             "commands/triage.md",
             ".claude-plugin/marketplace.json",
         }
@@ -84,9 +92,12 @@ class TestAdversarialProjection:
         stage_bundle(repo, bundle)
         for path in bundle.rglob("*"):
             rel = path.relative_to(bundle).as_posix().lower()
-            assert "tests/" not in rel and not rel.startswith("tests")
-            assert "resolution.md" not in rel
-            assert not (path.name.startswith("check_") and path.suffix == ".py")
+            assert not rel.startswith("tests/")  # the repo-root grader tree
+            assert "tests/tasks" not in rel
+            # Exact-name semantics, matching the builder: a doc like
+            # reference-resolution.md is legitimate; the answer file is not.
+            assert path.name.lower() != "resolution.md"
+            assert not (path.name.lower().startswith("check_") and path.suffix == ".py")
             assert "reference_agents" not in rel
 
     def test_empty_source_yields_empty_bundle_loudly(self, tmp_path: Path, caplog):
@@ -124,11 +135,19 @@ class TestHiddenMaterialInsideAllowedSubtrees:
         with pytest.raises(PluginBundleError, match="hidden grading material"):
             build_manifest(repo)
 
-    def test_tests_dir_inside_skills_fails_build(self, tmp_path: Path):
+    def test_nested_tests_dir_inside_skill_is_allowed(self, tmp_path: Path):
+        """Regression lock: a skill's own `tests` folder is shipped client
+        content, NOT grading material — the real skills repo carries
+        skills/uipath-coded-apps/assets/scripts/dashboards/tests/ and a deep
+        `tests` path-component check rejected the whole repo. Grading material
+        lives at the repo-root tests/ tree, which the subtree allowlist already
+        excludes by construction. Do not reintroduce a directory-name check."""
         repo = _make_skills_repo(tmp_path)
-        (repo / "skills" / "uipath-troubleshoot" / "tests").mkdir()
-        with pytest.raises(PluginBundleError, match="hidden grading directory"):
-            build_manifest(repo)
+        bundle = tmp_path / "bundle"
+        manifest = stage_bundle(repo, bundle)
+        nested = "skills/uipath-coded-apps/assets/scripts/dashboards/tests/dash.test.ts"
+        assert nested in manifest.files
+        assert (bundle / nested).exists()
 
 
 class TestSymlinkSafety:
@@ -231,6 +250,30 @@ class TestStageAgentPlugins:
         second, _ = stage_agent_plugins(plugins)
         assert len(calls) == 1  # once per run, not once per task
         assert first[0]["path"] == second[0]["path"]
+
+    async def test_concurrent_staging_copies_exactly_once(self, tmp_path: Path, monkeypatch):
+        """run_batch executes tasks concurrently (asyncio + to_thread); N
+        concurrent stagings of the same source must produce exactly ONE copy —
+        a lock that merely serializes N copies would still be a regression at
+        suite scale (~297 tasks x a 17 MB skills checkout)."""
+        import asyncio
+
+        repo = _make_skills_repo(tmp_path)
+        copies: list[Path] = []
+        real_stage = plugin_bundle.stage_bundle
+
+        def counting_stage(source: Path, bundle_dir: Path):
+            copies.append(bundle_dir)
+            return real_stage(source, bundle_dir)
+
+        monkeypatch.setattr(plugin_bundle, "stage_bundle", counting_stage)
+        plugins = [{"type": "local", "path": str(repo)}]
+        results = await asyncio.gather(
+            *(asyncio.to_thread(stage_agent_plugins, plugins) for _ in range(8)),
+        )
+        assert len(copies) == 1  # one copy total, not one per concurrent task
+        staged_paths = {staged[0]["path"] for staged, _ in results}
+        assert staged_paths == {str(copies[0])}
 
     def test_drifted_bundle_aborts_instead_of_falling_back(self, tmp_path: Path):
         repo = _make_skills_repo(tmp_path)
