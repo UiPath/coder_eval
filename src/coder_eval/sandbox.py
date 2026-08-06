@@ -586,6 +586,12 @@ class Sandbox:
         if not self.config.protected_mocks:
             return
 
+        # Absolutize: a relative --run-dir would otherwise bake a relative log
+        # path that resolves against the AGENT's cwd (the sandbox) at invocation
+        # time, so every append fails. Resolved here, against the harness cwd,
+        # where the caller's intent (run-dir-relative) still holds.
+        call_log = call_log.resolve()
+
         for rel in self.config.mock_path_dirs or []:
             user_dir = self._resolve_within_sandbox(rel, field="mock_path_dirs entry")
             if not user_dir.is_dir():

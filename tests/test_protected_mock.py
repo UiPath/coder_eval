@@ -619,6 +619,37 @@ def test_shim_bakes_harness_interpreter_verbatim(tmp_path: Path) -> None:
         sandbox.cleanup()
 
 
+def test_shim_bakes_absolute_call_log_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A relative call-log path (relative --run-dir) is absolutized before baking.
+
+    Regression: baked relative, it resolved against the AGENT's cwd (the
+    sandbox) at invocation time, so every log append failed with
+    FileNotFoundError echoed into agent-visible stderr.
+    """
+    fixture = _fixture(tmp_path / "uip.json")
+    config = SandboxConfig(
+        driver="tempdir",
+        python=None,
+        protected_mocks=[ProtectedMockConfig(tool="uip", fixture=str(fixture))],
+    )
+    sandbox = Sandbox(config, task_id="protected-relative-log")
+    workspace = tmp_path / "workspace"
+    monkeypatch.chdir(tmp_path)  # pin the cwd the relative path resolves against
+    try:
+        sandbox.setup(workspace)
+        sandbox.generate_protected_mock_shims(
+            endpoint="tcp:127.0.0.1:5001",
+            token="t",
+            call_log=Path("run/protected_mock_calls.jsonl"),
+        )
+        text = (workspace / "protected_mocks" / "uip").read_text(encoding="utf-8")
+        expected = (tmp_path / "run" / "protected_mock_calls.jsonl").resolve()
+        assert f"{CALL_LOG_ENV!r}: {str(expected)!r}" in text
+        assert f"{CALL_LOG_ENV!r}: 'run" not in text  # no relative form anywhere
+    finally:
+        sandbox.cleanup()
+
+
 def test_shim_collision_with_mock_path_dirs_is_rejected(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path / "uip.json")
     config = SandboxConfig(

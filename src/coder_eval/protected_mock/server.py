@@ -396,6 +396,10 @@ def serve(config_path: Path, runtime_dir: Path, transport: str = "auto") -> None
     The endpoint file is written atomically (temp + rename) once the socket is
     bound, so a reader that sees the file always sees a complete, live endpoint.
     """
+    # The runtime always passes an absolute dir (tempfile.mkdtemp); resolve
+    # anyway so a hand-launched relative --runtime-dir cannot publish a
+    # relative socket path in the endpoint file.
+    runtime_dir = runtime_dir.resolve()
     token_file = runtime_dir / TOKEN_FILE_NAME
     token = token_file.read_text(encoding="utf-8").strip() if token_file.is_file() else None
     tools = load_config(config_path)
