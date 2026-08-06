@@ -593,6 +593,32 @@ def test_sandbox_generates_data_free_client_shims(tmp_path: Path) -> None:
         sandbox.cleanup()
 
 
+def test_shim_bakes_harness_interpreter_verbatim(tmp_path: Path) -> None:
+    """The baked interpreter is ``sys.executable`` exactly, venv included.
+
+    Regression: resolving it with realpath followed the POSIX venv symlink to
+    the base interpreter, where ``coder_eval`` is not installed, so the shim
+    died with ModuleNotFoundError on Linux.
+    """
+    fixture = _fixture(tmp_path / "uip.json")
+    config = SandboxConfig(
+        driver="tempdir",
+        python=None,
+        protected_mocks=[ProtectedMockConfig(tool="uip", fixture=str(fixture))],
+    )
+    sandbox = Sandbox(config, task_id="protected-interpreter")
+    workspace = tmp_path / "workspace"
+    try:
+        sandbox.setup(workspace)
+        sandbox.generate_protected_mock_shims(
+            endpoint="tcp:127.0.0.1:5001", token="t", call_log=tmp_path / "calls.jsonl"
+        )
+        text = (workspace / "protected_mocks" / "uip").read_text(encoding="utf-8")
+        assert f"INTERPRETER = {sys.executable!r}" in text
+    finally:
+        sandbox.cleanup()
+
+
 def test_shim_collision_with_mock_path_dirs_is_rejected(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path / "uip.json")
     config = SandboxConfig(

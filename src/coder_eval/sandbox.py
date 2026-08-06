@@ -615,7 +615,10 @@ class Sandbox:
             shutil.rmtree(shim_dir, ignore_errors=True)
         shim_dir.mkdir(parents=True, exist_ok=True)
 
-        interpreter = os.path.realpath(sys.executable)
+        # sys.executable verbatim, NOT realpath: on POSIX the venv python is a
+        # symlink to the base interpreter, and resolving it would drop the venv
+        # (and its site-packages) — the client must import coder_eval.
+        interpreter = sys.executable
         for spec in self.config.protected_mocks:
             shim = shim_dir / spec.tool
             shim.write_text(
