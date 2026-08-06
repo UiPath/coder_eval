@@ -541,6 +541,60 @@ Notes:
 - **Collisions are rejected.** If a `mock_path_dirs` entry already provides an executable of the same name, setup raises rather than letting directory order decide which one runs.
 - **It stubs a tool; it does not proxy one, and it does not serve per-invocation responses.** Recording a *real* executable on the way through, or returning different output per invocation, stays a hand-written mock under `mock_path_dirs` — both depend on state the harness cannot guarantee (the tool being installed, PATH order, live credentials, a fixture set).
 
+### Protected Fixture-Backed CLIs
+
+Use `protected_mocks` when `uip` or another mock needs different fixture-backed responses per invocation and the fixture itself must not be readable by the evaluated agent. The fixture is loaded host-side by a small per-run server; the agent's workspace only ever contains a thin client shim, so no encoding or sealing of grading material is involved:
+
+```yaml
+sandbox:
+  driver: tempdir
+  protected_mocks:
+    - tool: uip
+      fixture: ./fixtures/uip-troubleshoot.json
+      max_requests: 100
+      passthrough_argv_prefixes:
+        - [docsai, ask]
+```
+
+Notes:
+
+- **Drivers.** Supported under `driver: tempdir` (the default). Under `driver: docker` the task fails validation: protected mocks under the docker driver require the UID/GID isolation layer, which is not yet available — that combination fails closed rather than running without the isolation it assumes.
+- **Endpoint.** The server binds a per-run endpoint at start: an AF_UNIX socket in a run-scoped scratch directory when the platform supports it (probed with a real bind), else TCP on `127.0.0.1` with an ephemeral port. Every request must carry the run's random token, which the generated shim bakes in. The token keeps other local processes from casually querying the service; it is same-user hygiene, not a security boundary — the protection comes from the server only ever answering with configured command responses, never fixture contents.
+- **Fixture paths.** `fixture` resolves against the task YAML's directory (like `uipath_eval.eval_set`). The file is read host-side only and is never copied into the sandbox.
+- **Shims.** Each entry generates a `protected_mocks/<tool>` shim (plus a `.cmd` twin for Windows PATHEXT lookup) that is PATH-prepended for the agent exactly like `mock_path_dirs` entries. The shim carries its endpoint, token, and call-log path itself; it does not rely on the agent's environment.
+- **Call log.** Every invocation is appended, in the `cli_called` JSON Lines schema, to `protected_mock_calls.jsonl` next to `task.json` in the run directory — outside the sandbox. This is a diagnostic surface: the [`cli_called`](#cli_called) criterion resolves its `log` field sandbox-relative and cannot read this host-side file today.
+- **Budget and audit.** `max_requests` caps calls per tool per run (exceeded calls get exit 75). The run's `environment_info` records the endpoint kind and a SHA-256 digest of the fixture contents.
+- `protected_mocks` and `record_cli` cannot claim the same tool name.
+
+Fixture files map argument lists to responses:
+
+```json
+{
+  "version": 1,
+  "responses": [
+    {
+      "argv": ["rpa", "get-errors", "--output", "json"],
+      "exit_code": 0,
+      "stdout": "{\"errors\":[]}\n",
+      "stderr": ""
+    }
+  ],
+  "default": {
+    "exit_code": 2,
+    "stderr": "command not configured for this scenario\n"
+  }
+}
+```
+
+Matching defaults to exact argv equality. Two further modes exist, selected per response via `match_mode`:
+
+- `"normalized"` still selects from a finite command map but ignores `--output <format>`, treats `--flag=value` like `--flag value`, and permits token reordering. Duplicate keys are rejected at load for both finite modes.
+- `"subset"` matches when every rule token appears in the invocation's normalized token set, regardless of order or extra arguments. Subset rules are evaluated in fixture-file order and the first match wins; exact and normalized matches always take precedence over subset scanning. Duplicate subset rules are allowed (an earlier rule shadows a later one); an empty subset `argv` is rejected at load.
+
+Malformed responses, oversized output, request-budget exhaustion, and service startup failures all fail loudly.
+
+`passthrough_argv_prefixes` is for deliberately public live operations such as `uip docsai ask`. The server invokes the real tool only when argv begins with one of these typed prefixes, caches the response in memory for the run, and never reveals the executable path to the agent. Do not use a broad prefix such as `[or]` or `[auth]`.
+
 ## Template Sources
 
 Tasks can start with preset files instead of an empty sandbox. Multiple sources are applied sequentially (last wins for conflicts).

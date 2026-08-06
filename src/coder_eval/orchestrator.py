@@ -59,6 +59,8 @@ from .models import (
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
+from .protected_mock.runtime import CALL_LOG_NAME as PROTECTED_MOCK_CALL_LOG_NAME
+from .protected_mock.runtime import ProtectedMockRuntime
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -394,6 +396,10 @@ class Orchestrator:
         # stop_early: block and the kill switch is not thrown; None otherwise,
         # so the default path is entirely unaffected).
         self._early_stop_watcher: EarlyStopWatcher | None = None
+
+        # Protected mock service (started in _setup only when the task declares
+        # sandbox.protected_mocks; stopped unconditionally in _cleanup).
+        self._protected_mock_runtime: ProtectedMockRuntime | None = None
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
         # exactly once per task even if _check_run_limits fires every turn.
@@ -1077,6 +1083,12 @@ class Orchestrator:
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
 
+        # Start the protected mock service (host-side fixture server) and write
+        # its client shims into the sandbox BEFORE the agent's PATH is assembled
+        # below. Teardown is unconditional in _cleanup, which runs on every exit
+        # path (success, crash, timeout, early stop) via run()'s finally block.
+        await self._start_protected_mocks()
+
         # Create and start the agent. For a no-op (type: none) task this dispatches
         # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
         # runs the normal lifecycle without any agentless branching, and the
@@ -1115,6 +1127,51 @@ class Orchestrator:
         # Add installed tool versions (from npm packages etc.)
         if self.sandbox and self.sandbox.installed_tool_versions:
             self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
+
+        # After the environment_info re-capture above, which would otherwise
+        # discard keys written earlier in _setup.
+        self._record_protected_mock_environment_info()
+
+    async def _start_protected_mocks(self) -> None:
+        """Start the host-side fixture service and generate its sandbox shims.
+
+        No-op unless the task declares ``sandbox.protected_mocks``. Fixture
+        paths resolve against the task YAML's directory host-side; fixture
+        bytes never enter the sandbox. The per-task invocation log lands next
+        to task.json in the run dir, outside the sandbox.
+        """
+        mocks = self.task.sandbox.protected_mocks
+        if not mocks:
+            return
+        assert self.sandbox is not None
+        task_dir = self.task_file.parent.resolve() if self.task_file else None
+        runtime = ProtectedMockRuntime(mocks, task_dir=task_dir)
+        await asyncio.to_thread(runtime.start)
+        # Stored before shim generation so _cleanup stops the server even if
+        # generation fails.
+        self._protected_mock_runtime = runtime
+        call_log = self.run_dir / PROTECTED_MOCK_CALL_LOG_NAME
+        # Seed the log so the diagnostic surface always exists, even for a run
+        # that never called the tool.
+        await asyncio.to_thread(call_log.write_text, "", encoding="utf-8")
+        await asyncio.to_thread(
+            self.sandbox.generate_protected_mock_shims,
+            endpoint=runtime.endpoint,
+            token=runtime.token,
+            call_log=call_log,
+        )
+        logger.info(
+            "Protected mock service up (%s endpoint) for tool(s): %s",
+            runtime.endpoint_kind,
+            ", ".join(mock.tool for mock in mocks),
+        )
+
+    def _record_protected_mock_environment_info(self) -> None:
+        """Persist the protected mock audit record into ``result.environment_info``."""
+        if self._protected_mock_runtime is None or self.result is None:
+            return
+        self.result.environment_info["protected_mock_endpoint_kind"] = self._protected_mock_runtime.endpoint_kind
+        self.result.environment_info["protected_mock_fixture_digest"] = self._protected_mock_runtime.fixture_digest
 
     def _sync_sandbox_command_path_with_agent(self) -> None:
         """Align criteria command PATH with the PATH used for the last agent query.
@@ -2268,6 +2325,15 @@ class Orchestrator:
                 await self.agent.stop()
             except Exception as e:
                 logger.warning(f"Failed to stop agent: {e}")
+
+        # Stop the protected mock service. After the agent (no in-flight calls),
+        # before sandbox teardown; the server must never outlive the task.
+        if self._protected_mock_runtime is not None:
+            try:
+                await asyncio.to_thread(self._protected_mock_runtime.stop)
+            except Exception as e:
+                logger.warning(f"Failed to stop protected mock service: {e}")
+            self._protected_mock_runtime = None
 
         # Cleanup sandbox. Preservation and cleanup() are SIBLING try blocks:
         # a preservation failure (e.g. disk full during preserve_to) must never

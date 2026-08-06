@@ -398,6 +398,69 @@ class RecordedCli(BaseModel):
         return v
 
 
+# Sandbox-relative directory the protected-mock client shims are generated into.
+# Separate from RECORD_CLI_DIR so a wipe-and-regenerate of either feature can
+# never delete the other's shims. Not dot-prefixed for the same artifact-upload
+# reason as RECORD_CLI_DIR.
+PROTECTED_MOCK_DIR = "protected_mocks"
+
+
+class ProtectedMockConfig(BaseModel):
+    """Fixture-backed CLI served by the host-side protected mock service.
+
+    ``fixture`` is read host-side by the service process, never by the
+    evaluated agent, and is never copied into the agent workspace. The fixture
+    schema maps argv lists to bounded stdout/stderr/exit-code responses; it
+    exposes no general file or search operation. Relative ``fixture`` paths
+    resolve against the task YAML's directory.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str = Field(description="Bare executable name presented to the agent (for example, 'uip')")
+    fixture: str = Field(
+        description=(
+            "Path to the protected command-response fixture, resolved against the task YAML's "
+            "directory when relative. Read host-side only; never copied into the sandbox."
+        )
+    )
+    max_requests: int = Field(default=100, ge=1, le=10_000, description="Per-run request budget for this tool")
+    passthrough_argv_prefixes: list[list[str]] = Field(
+        default_factory=list,
+        max_length=16,
+        description=(
+            "Public argv prefixes the service may proxy to the real tool, for example [['docsai', 'ask']]. "
+            "All other invocations remain fixture-backed or receive the fixed default response."
+        ),
+    )
+
+    @field_validator("tool")
+    @classmethod
+    def validate_tool_name(cls, value: str) -> str:
+        if not value or value != value.strip() or value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("protected mock tool must be a non-empty bare executable name")
+        if value.lower().endswith((".cmd", ".bat", ".exe")):
+            raise ValueError("protected mock tool must not include a platform executable suffix")
+        return value
+
+    @field_validator("passthrough_argv_prefixes")
+    @classmethod
+    def validate_passthrough_prefixes(cls, prefixes: list[list[str]]) -> list[list[str]]:
+        normalized: list[list[str]] = []
+        seen: set[tuple[str, ...]] = set()
+        for prefix in prefixes:
+            if not prefix or len(prefix) > 8:
+                raise ValueError("protected mock passthrough prefixes must contain 1 to 8 argv tokens")
+            if any(not isinstance(token, str) or not token or len(token) > 256 for token in prefix):
+                raise ValueError("protected mock passthrough prefix tokens must be non-empty strings up to 256 chars")
+            key = tuple(prefix)
+            if key in seen:
+                raise ValueError("protected mock passthrough prefixes must be unique")
+            seen.add(key)
+            normalized.append(list(prefix))
+        return normalized
+
+
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment.
 
@@ -451,6 +514,17 @@ class SandboxConfig(BaseModel):
         ),
     )
 
+    protected_mocks: list[ProtectedMockConfig] | None = MergeField(
+        strategy="replace",
+        default=None,
+        description=(
+            "Fixture-backed mock CLIs served by a host-side per-run service. The agent receives a thin "
+            "client shim; fixture bytes stay host-side and are never copied into its workspace. "
+            "Supported under driver: tempdir. Under driver: docker this fails validation until the "
+            "UID/GID isolation layer lands. Replaced (not merged) across config layers."
+        ),
+    )
+
     record_cli: list[RecordedCli] | None = MergeField(
         strategy="replace",
         default=None,
@@ -489,4 +563,17 @@ class SandboxConfig(BaseModel):
         """Validate template sources configuration."""
         if self.template_sources:
             validate_template_sources_list(self.template_sources)
+        if self.protected_mocks:
+            if self.driver == "docker":
+                raise ValueError(
+                    "sandbox.protected_mocks under the docker driver requires the UID/GID isolation "
+                    + "layer; not yet available. Use driver: tempdir."
+                )
+            tools = [mock.tool for mock in self.protected_mocks]
+            if len(tools) != len(set(tools)):
+                raise ValueError("sandbox.protected_mocks tool names must be unique")
+            recorded = {spec.tool for spec in self.record_cli or []}
+            overlap = sorted(recorded & set(tools))
+            if overlap:
+                raise ValueError(f"protected_mocks and record_cli cannot both provide: {overlap}")
         return self

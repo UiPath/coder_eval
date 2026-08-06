@@ -155,11 +155,13 @@ from coder_eval.models.routing import (
 
 # Sandbox
 from coder_eval.models.sandbox import (
+    PROTECTED_MOCK_DIR,
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
     DockerBuildConfig,
     DockerDriverConfig,
     NodeEnvConfig,
+    ProtectedMockConfig,
     PythonEnvConfig,
     RecordedCli,
     ResourceLimits,
@@ -274,6 +276,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "NodeEnvConfig",
     "PythonEnvConfig",
     "SandboxConfig",
+    "ProtectedMockConfig",
+    "PROTECTED_MOCK_DIR",
     "RecordedCli",
     "RECORD_CLI_DIR",
     "RECORD_CLI_LOG",
