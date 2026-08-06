@@ -675,3 +675,314 @@ class TestWorkspaceDir:
     def test_container_paths_reexported_from_docker_runner(self):
         # Existing importers read CONTAINER_OUTPUT_DIR from docker_runner; keep that working.
         assert CONTAINER_OUTPUT_DIR == "/work/output"
+
+
+class TestCopyPruneAgentMounts:
+    """COPY/PRUNE: the agent container mounts only the sanitized skills copy (:ro),
+    /work/input (:ro), /work/output (rw), and the ~/.claude / ~/.uipath copies (rw).
+    No raw host task-dir, no raw plugin root, no reference mount."""
+
+    def _make_runner(self, tmp_path: Path, *, plugin_dir: Path | None = None, task_file: Path | None = None):
+        from coder_eval.models import ReferenceSource
+
+        agent = {"type": "claude-code"}
+        if plugin_dir is not None:
+            agent["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            sandbox=SandboxConfig(),
+            agent=agent,
+            reference=ReferenceSource(directory=str(tmp_path / "refdir")),
+            success_criteria=[FileExistsCriterion(description="c", path="o.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = task_file
+        return DockerRunner(rt)
+
+    def _volume_mounts(self, argv):
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+
+    def _argv(self, runner, tmp_path):
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True)
+        return runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+
+    def test_sanitized_skills_mounted_ro_and_no_raw_plugin(self, tmp_path):
+        from coder_eval.models import CONTAINER_SKILL_DOCS_DIR
+
+        plugin = tmp_path / "myplugin"
+        (plugin / "skills").mkdir(parents=True)
+        (plugin / "skills" / "SKILL.md").write_text("doc", encoding="utf-8")
+        (plugin / "tests").mkdir()
+        (plugin / "tests" / "check_x.py").write_text("x", encoding="utf-8")
+
+        runner = self._make_runner(tmp_path, plugin_dir=plugin)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_host_mounts(staging)
+        mounts = self._volume_mounts(self._argv(runner, tmp_path))
+
+        # The sanitized copy is mounted :ro at CONTAINER_SKILL_DOCS_DIR.
+        skills_copy = staging / "skills"
+        assert f"{skills_copy}:{CONTAINER_SKILL_DOCS_DIR}:ro" in mounts
+        # The RAW plugin root is NOT mounted (no `<plugin>:<plugin>:ro`).
+        assert not any(str(plugin) == m.split(":")[0] for m in mounts)
+        # The pruned bundle contains skills/ but not tests/.
+        assert (skills_copy / "myplugin" / "skills" / "SKILL.md").is_file()
+        assert not (skills_copy / "myplugin" / "tests").exists()
+
+    def test_no_raw_task_dir_mount(self, tmp_path):
+        task_file = tmp_path / "taskdir" / "task.yaml"
+        task_file.parent.mkdir(parents=True)
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, task_file=task_file)
+        mounts = self._volume_mounts(self._argv(runner, tmp_path))
+        host_task_dir = task_file.parent.resolve()
+        # No -v mounting the raw host task dir, and no --task-dir passed.
+        assert not any(str(host_task_dir) in m for m in mounts)
+        argv = self._argv(runner, tmp_path)
+        assert "--task-dir" not in argv
+
+    def test_no_reference_mount(self, tmp_path):
+        (tmp_path / "refdir").mkdir()
+        runner = self._make_runner(tmp_path)
+        mounts = self._volume_mounts(self._argv(runner, tmp_path))
+        assert not any(str((tmp_path / "refdir").resolve()) in m for m in mounts)
+
+    def test_no_raw_rw_host_mount(self, tmp_path):
+        """Exit-criterion guard: every -v mount source is a staging copy or a
+        framework path; nothing is a raw host original mounted rw."""
+        from coder_eval.models import CONTAINER_INPUT_DIR, CONTAINER_OUTPUT_DIR
+
+        plugin = tmp_path / "p"
+        (plugin / "skills").mkdir(parents=True)
+        runner = self._make_runner(tmp_path, plugin_dir=plugin)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_host_mounts(staging)
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        argv = runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+        for m in self._volume_mounts(argv):
+            parts = m.split(":")
+            src, mode = parts[0], (parts[2] if len(parts) == 3 else "")
+            # The only rw (mode-less) mounts allowed: /work/output and staging copies.
+            if mode == "ro":
+                continue
+            dst = parts[1] if len(parts) >= 2 else ""
+            is_output = dst == CONTAINER_OUTPUT_DIR
+            is_staging_copy = str(staging) in src
+            assert is_output or is_staging_copy, f"unexpected rw mount of a host original: {m}"
+            assert CONTAINER_INPUT_DIR  # ensure input const referenced
+
+
+class TestAutoMountRejectsGraderDirOverlap:
+    """MED-3: an auto-mount (template_sources[].path / system_prompt_file) whose
+    resolved target equals, contains, or is contained by the host grader dir
+    (rt.task_file.parent — holds check_*.py + reference + unstripped criteria) is a
+    hard error. A sibling templates/ dir OUTSIDE the task dir is fine."""
+
+    def _make_runner(self, tmp_path: Path, *, template_path: str, task_file: Path):
+        from coder_eval.models import TemplateDirSource
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            sandbox=SandboxConfig(template_sources=[TemplateDirSource(path=template_path)]),
+            agent={"type": "claude-code"},
+            success_criteria=[FileExistsCriterion(description="c", path="o.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = task_file
+        return DockerRunner(rt)
+
+    def _argv(self, runner, tmp_path):
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True)
+        return runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+
+    def test_template_source_at_task_dir_is_rejected(self, tmp_path):
+        """template_sources[].path == the task dir re-exposes the graders → reject."""
+        task_dir = tmp_path / "taskdir"
+        task_dir.mkdir()
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, template_path=str(task_dir), task_file=task_file)
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
+
+    def test_template_source_inside_task_dir_is_rejected(self, tmp_path):
+        """A subdir of the task dir is still contained by the grader dir → reject."""
+        task_dir = tmp_path / "taskdir"
+        sub = task_dir / "templates"
+        sub.mkdir(parents=True)
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, template_path=str(sub), task_file=task_file)
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
+
+    def test_template_source_containing_task_dir_is_rejected(self, tmp_path):
+        """A parent of the task dir contains the grader dir → reject."""
+        task_dir = tmp_path / "parent" / "taskdir"
+        task_dir.mkdir(parents=True)
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, template_path=str(tmp_path / "parent"), task_file=task_file)
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
+
+    def test_sibling_templates_dir_is_allowed(self, tmp_path):
+        """A templates/ dir OUTSIDE the task dir (neither contains the other) is fine."""
+        task_dir = tmp_path / "taskdir"
+        task_dir.mkdir()
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        sibling = tmp_path / "shared_templates"
+        sibling.mkdir()
+        runner = self._make_runner(tmp_path, template_path=str(sibling), task_file=task_file)
+        argv = self._argv(runner, tmp_path)  # must not raise
+        mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+        assert any(str(sibling.resolve()) in m for m in mounts)
+
+
+class TestExtraMountsRejectGraderDirOverlap:
+    """extra_mounts bypasses _auto_mount, so it must enforce the SAME grader-dir
+    overlap guard — otherwise `extra_mounts: ["<taskdir>:/mnt:ro"]` re-exposes
+    check_*.py / reference / unstripped criteria that GRADE-OUTSIDE keeps host-side."""
+
+    def _make_runner(self, tmp_path: Path, *, extra_mounts: list[str], task_file: Path):
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            sandbox=SandboxConfig(docker={"extra_mounts": extra_mounts}),
+            agent={"type": "claude-code"},
+            success_criteria=[FileExistsCriterion(description="c", path="o.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = task_file
+        return DockerRunner(rt)
+
+    def _argv(self, runner, tmp_path):
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True)
+        return runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+
+    def test_extra_mount_at_task_dir_is_rejected(self, tmp_path):
+        task_dir = tmp_path / "taskdir"
+        task_dir.mkdir()
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, extra_mounts=[f"{task_dir}:/mnt/x:ro"], task_file=task_file)
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
+
+    def test_extra_mount_inside_task_dir_is_rejected(self, tmp_path):
+        task_dir = tmp_path / "taskdir"
+        sub = task_dir / "sub"
+        sub.mkdir(parents=True)
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, extra_mounts=[f"{sub}:/mnt/x:ro"], task_file=task_file)
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
+
+    def test_extra_mount_outside_task_dir_is_allowed(self, tmp_path):
+        task_dir = tmp_path / "taskdir"
+        task_dir.mkdir()
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        outside = tmp_path / "shared_data"
+        outside.mkdir()
+        runner = self._make_runner(tmp_path, extra_mounts=[f"{outside}:/mnt/x:ro"], task_file=task_file)
+        argv = self._argv(runner, tmp_path)  # must not raise
+        mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+        assert any(str(outside.resolve()) in m for m in mounts)
+
+
+class TestUipathHomeRWCopyMount:
+    """~/.uipath is forwarded as a throwaway RW copy, never the host original."""
+
+    def _make_runner(self, tmp_path):
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="o.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = None
+        return DockerRunner(rt)
+
+    def _volume_mounts(self, argv):
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+
+    @pytest.fixture
+    def fake_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        (home / ".uipath").mkdir(parents=True)
+        (home / ".uipath" / ".auth").write_text("token", encoding="utf-8")
+        (home / ".uipath" / "config.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("CODER_EVAL_NO_CLAUDE_MOUNT", "1")  # isolate uipath from claude copy
+        return home
+
+    def test_uipath_copy_mounted_rw_not_host_original(self, fake_home, tmp_path):
+        runner = self._make_runner(tmp_path)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_host_mounts(staging)
+
+        copy = runner._uipath_mount_src
+        assert copy == staging / "uipath-home"
+        assert (copy / ".auth").is_file()
+
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        argv = runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+        mounts = self._volume_mounts(argv)
+        host_uipath = fake_home / ".uipath"
+        # The copy is mounted at the symmetric path, RW (no :ro).
+        assert f"{copy}:{host_uipath}" in mounts
+        # The host original is NEVER a mount source.
+        assert not any(m.split(":")[0] == str(host_uipath) for m in mounts)
+
+    def test_absent_uipath_no_mount_no_error(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()  # no ~/.uipath
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("CODER_EVAL_NO_CLAUDE_MOUNT", "1")
+        runner = self._make_runner(tmp_path)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_host_mounts(staging)
+        assert runner._uipath_mount_src is None
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        argv = runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+        assert not any(".uipath" in m for m in self._volume_mounts(argv))

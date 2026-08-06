@@ -31,11 +31,17 @@ _ROW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
-def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
+def load_task(task_file: Path, *, allow_empty_criteria: bool = False) -> tuple[TaskDefinition, str]:
     """Load a task definition from a YAML file.
 
     Args:
         task_file: Path to the task YAML file
+        allow_empty_criteria: Bypass the "≥1 success criterion" guard for an
+            authored task. Set ONLY by the in-container staging re-parse
+            (``_run-task-internal``), which loads a ``task.yaml`` deliberately
+            stripped to ``success_criteria: []`` (the host holds the real criteria
+            and grades after the container exits). A human-authored task must keep
+            the guard, so this defaults False.
 
     Returns:
         Tuple of (parsed TaskDefinition, raw YAML text)
@@ -58,15 +64,48 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
     task_data = yaml.safe_load(raw_yaml)
 
     try:
-        task = TaskDefinition(**task_data)
-        # Resolve relative template paths
-        task = resolve_template_paths(task, task_file.parent)
-        task = resolve_initial_prompt_file(task, task_file.parent)
-        task = resolve_system_prompt_files(task, task_file.parent)
-        task = resolve_dockerfile_path(task, task_file.parent)
+        task = parse_task_dict(task_data, task_file.parent, allow_empty_criteria=allow_empty_criteria)
         return task, raw_yaml
     except Exception as e:
         raise ValueError(f"Invalid task definition: {e}") from e
+
+
+def parse_task_dict(raw: dict[str, Any], base_dir: Path, *, allow_empty_criteria: bool = False) -> TaskDefinition:
+    """Construct and fully resolve a ``TaskDefinition`` from a raw dict.
+
+    Runs the ``TaskDefinition(**raw)`` construction plus all four
+    ``resolve_*(task, base_dir)`` steps (template paths, initial-prompt file,
+    system-prompt files, dockerfile path) that ``load_task`` used to inline.
+    Relative paths resolve against ``base_dir`` (the task YAML's directory).
+
+    Callers that hold a raw dict rather than a file (e.g. reconstructing a task
+    from a staged/serialized dict) use this to get the same parsed+resolved
+    result ``load_task`` produces.
+
+    Args:
+        allow_empty_criteria: Bypass the "≥1 success criterion" guard. The model
+            layer accepts an empty ``success_criteria`` list because it is a valid
+            INTERNAL state (the docker driver stages a criteria-stripped copy for
+            the agent container). But an authored task with no gradable criterion
+            would then load and report SUCCESS against nothing, so this guard
+            rejects an empty list at the authored-load path. Only the in-container
+            staging re-parse passes True.
+    """
+    task = TaskDefinition(**raw)
+    # AUTHORED-EMPTY GUARD: reject a task that would grade vacuously (both field
+    # omission and an explicit `success_criteria: []` raise). The container's
+    # staging re-parse loads a deliberately-stripped `[]` copy and passes
+    # allow_empty_criteria=True to bypass this — the host holds the real criteria.
+    if not allow_empty_criteria and not task.success_criteria:
+        raise ValueError(
+            "Task defines no success_criteria; a task must have at least one criterion to gate on. "
+            + "(An empty list grades vacuously as SUCCESS against nothing.)"
+        )
+    task = resolve_template_paths(task, base_dir)
+    task = resolve_initial_prompt_file(task, base_dir)
+    task = resolve_system_prompt_files(task, base_dir)
+    task = resolve_dockerfile_path(task, base_dir)
+    return task
 
 
 def resolve_template_source_paths(sources: list[TemplateSource], base_dir: Path) -> None:

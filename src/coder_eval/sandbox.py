@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 _WORKSPACE_CAPTURE_IGNORE = (
     # --- Security: credential stores ---
     ".claude",  # RW lean copy of host ~/.claude (carries .credentials.json)
+    ".uipath",  # RW throwaway copy of host ~/.uipath (carries .auth)
     ".aws",  # AWS credentials / config
     ".ssh",  # SSH keys
     ".gnupg",  # GPG keys
@@ -140,7 +141,7 @@ class Sandbox:
         """
         return not self._cleanup_on_exit
 
-    def setup(self, target_dir: Path | None = None) -> Path:
+    def setup(self, target_dir: Path | None = None, *, regrade: bool = False) -> Path:
         """Set up the sandbox environment.
 
         The sandbox is a plain temporary directory on the host -- there is no
@@ -150,16 +151,25 @@ class Sandbox:
         Args:
             target_dir: If provided, use this directory instead of creating a temp dir.
                         The directory will NOT be deleted on cleanup (persistent mode).
+            regrade: When True, WRAP an already-materialized ``target_dir`` for a
+                grade-only pass over its existing contents: skip template
+                materialization and venv/package install (re-running them would
+                clobber the agent's produced files with pristine starter content).
+                An existing ``.venv`` is still detected so graders resolve against
+                it. Used by the docker GRADE-OUTSIDE host re-grade, which wraps the
+                agent's copied-out artifacts. Requires ``target_dir``.
 
         Returns:
             Path to the sandbox directory
 
         Raises:
-            ValueError: If driver is not supported
+            ValueError: If driver is not supported, or ``regrade`` without ``target_dir``.
             RuntimeError: If setup fails
         """
+        if regrade and target_dir is None:
+            raise ValueError("Sandbox.setup(regrade=True) requires target_dir (the dir to wrap).")
         if self.config.driver == "tempdir":
-            return self._setup_tempdir(target_dir=target_dir)
+            return self._setup_tempdir(target_dir=target_dir, regrade=regrade)
         if self.config.driver == "docker":
             # Docker isolation is dispatched at the orchestrator-entry boundary
             # (coder_eval.isolation.docker_runner). Inside the container, the
@@ -171,12 +181,14 @@ class Sandbox:
             )
         raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
 
-    def _setup_tempdir(self, target_dir: Path | None = None) -> Path:
+    def _setup_tempdir(self, target_dir: Path | None = None, *, regrade: bool = False) -> Path:
         """Set up a sandbox directory.
 
         Args:
             target_dir: If provided, use this directory instead of creating a temp dir.
                         Sets _cleanup_on_exit=False so cleanup() preserves the directory.
+            regrade: Wrap an existing populated target_dir without re-materializing
+                     templates/venv (see :meth:`setup`).
 
         Returns:
             Path to the sandbox directory
@@ -186,6 +198,21 @@ class Sandbox:
             target_dir.mkdir(parents=True, exist_ok=True)
             self.sandbox_dir = target_dir
             self._cleanup_on_exit = False
+            if regrade:
+                # WRAP the already-materialized dir for a grade-only pass. Do NOT
+                # re-run _setup_template / venv-create / package-install: the
+                # agent already ran here (in-container) and its edits must survive
+                # — re-materializing would overwrite them with pristine starter
+                # content and corrupt the grade. Only detect an existing venv (so
+                # graders resolve $VENV/bin) and prepare the mock PATH / plugin
+                # pins, which are cheap, non-destructive, and grader-relevant.
+                existing_venv = self.sandbox_dir / ".venv"
+                if self.config.python and existing_venv.is_dir():
+                    self.venv_dir = existing_venv
+                self._prepare_mock_path_dirs()
+                self._check_parent_node_modules_contamination()
+                self._refresh_plugin_tools_dir()
+                return self.sandbox_dir
         else:
             # Default: create a temporary directory. Dataset row tasks have IDs like
             # "parent/row" -- flatten path separators so they don't become subdirectories

@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docs-indexes docker-image docker-image-full coder-eval-runtime docker-images
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docs-indexes docker-image docker-image-full coder-eval-runtime docker-images test-docker-detectors
 
 # Single source of the installed coder-eval version (used to tag the docker
 # images). Referenced lazily inside the docker recipes, so it doesn't run on
@@ -99,6 +99,10 @@ coder-eval-runtime:  ## Build the relocatable runtime kit image (COPY --from sou
 
 docker-images: docker-image coder-eval-runtime  ## Build BOTH base images (agent for rebase + runtime kit for inject); no creds
 	@echo "Built coder-eval-agent + coder-eval-runtime — ready for both rebase and inject tasks."
+
+test-docker-detectors:  ## Run the docker isolation detectors (host-unchanged proxy + criteria absence + baked-image scan). Daemon-less; CI-cheap.
+	uv run pytest tests/test_docker_host_unchanged.py tests/test_docker_criteria_isolation.py \
+		tests/test_docker_image_no_answer_leak.py -m "not live"
 
 docker-image-full:  ## Build with the UiPath extra (opt-in; uipath resolves from public PyPI, no credentials needed). Codex is always baked in.
 	@VERSION=$$($(VERSION_CMD)); \

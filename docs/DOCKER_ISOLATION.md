@@ -282,17 +282,49 @@ The host's run dir is bind-mounted **read-write** into the container at the same
 - **Do not** point `--run-dir` at a sensitive parent (e.g. `$HOME` directly, `/etc`, a repo root). Use a dedicated `runs/` subtree.
 - The default (`runs/<timestamp>/`) is safe.
 
+## Isolation model: COPY/PRUNE + GRADE-OUTSIDE
+
+Under `--driver docker` the agent container receives **only read-only or copied inputs and its own throwaway workspace** — it never gets rw access to a host original, and never read access to grading material. Grading runs **outside the agent's reach**, on the host, after the container exits. The guiding rule is: **never chmod a host bind mount; give the agent only copies or read-only inputs.**
+
+**Exit criterion:** a run leaves every host file **byte-for-byte AND metadata-identical** (contents, uid/gid, mode, mtime, symlink targets). Detector A below is the sensor for it.
+
+Three coordinated moves close the criteria/grader leak by **absence**, not by permission:
+
+1. **COPY/PRUNE the agent's inputs.** For each plugin, the host stages a *sanitized bundle copy* (`project_plugin_for_agent` — `skills`/`commands`/`agents`/`hooks`/`.claude-plugin` only, from the `PLUGIN_AGENT_ALLOWED_SUBDIRS` allowlist) and mounts that copy **read-only** at `/work/skills` (`CONTAINER_SKILL_DOCS_DIR`). The raw `$SKILLS_REPO_PATH` checkout, the reference, and the host task dir are **not mounted into the agent container at all**. The staged `task.yaml` is criteria-stripped via `agent_safe_dump()` (`success_criteria: []`, `reference: null`) and `context.json`'s `source_yaml` is nulled — so no grading material is in the agent's mount namespace.
+2. **GRADE OUTSIDE the agent's reach (host).** The container runs the **agent only**; its artifacts cross the boundary via the `/work/output` bind mount. After the container exits, the host grades the copied-out artifacts through the orchestrator's evaluate-only re-grade path (`regrade_on_host`), using the full, unstripped `TaskDefinition` it still holds — with `TASK_DIR` pointing at the **real host task dir**, so `run_command`/`file_check` graders resolve `$TASK_DIR/check_*.py` against the host grader, never agent-written content. Only runs whose final status is `SUCCESS`/`FAILURE`/`MAX_TURNS_EXHAUSTED` are re-graded (an explicit allowlist); a terminal agent-side failure (`ERROR`/`TIMEOUT`/`BUILD_FAILED`/budget) stands untouched.
+3. **`~/.uipath` copy-then-mount.** Like `~/.claude`, `~/.uipath` is forwarded as a throwaway rw **copy**, never the host original — so an agent can never overwrite the host credential.
+
+### Detector A — host-unchanged-after-run
+
+`tests/test_docker_host_unchanged.py`. Two variants: a **daemon-less proxy** (always runs in CI) that asserts no `-v` mount source is a host original mounted rw — only staging copies, `/work/input` (`:ro`), and `/work/output` — proving there is no rw host mount to mutate; and a **daemon-gated real-run** (`-m live`) that snapshots content hash + `os.lstat` metadata (mode, uid, gid, mtime) + symlink targets (including the mount root itself) of the host skills / task dir / reference before and after a real run and asserts they are **byte-for-byte AND metadata-identical**. The real-run check is **Linux-authoritative** (native overlayfs); macOS/Windows Docker Desktop's uid-remap masks host mutation.
+
+### Detector B — zero-grading-material-in-agent-mount
+
+`tests/test_docker_criteria_isolation.py`. Stages a task carrying real criteria + a plugin bundling grader/reference material, scans the **entire agent mount view** (`/work/input` + the sanitized skills copy) and asserts zero grading-material hits (criteria values, `check_*.py`, `RESOLUTION.md`, `reference_agents/`, reference values). A positive control asserts the **host** still holds the full criteria, so a vacuous "staged nothing" bug cannot pass.
+
+## Residual leaks
+
+Allowlist-by-absence has **no DAC backstop** (there is no permission barrier — the agent simply never receives the material), so the boundary correctness is load-bearing:
+
+1. **Prune-boundary miss.** A plugin that puts answers *inside* an allowed dir (e.g. `skills/answers.md`) defeats the prune — `PLUGIN_AGENT_ALLOWED_SUBDIRS` is a coder_eval-side guess about what is answer-free. Durable fix (cross-repo follow-up): push the agent-bundle boundary into the skills repo (a manifest declaring the agent-safe surface).
+2. **Reference/golden material inside the bundle.** A plugin bundling a reference solution under an allowed subtree ships to the agent. Detector B catches known sentinels, not an unknown golden file — reinforces risk 1.
+3. **Un-stripped `task.yaml` fields / author-pointed mounts.** `agent_safe_dump` strips only `success_criteria`/`reference`. A task author who hides expected values in `initial_prompt`/`system_prompt`/pre-post commands/`metadata` leaks them to the agent (semantic, not mechanically enforceable — see the `agent_safe_dump` docstring). The remaining agent-container mounts are `template_sources[]` dirs, a stray absolute `system_prompt_file` (normally inlined+nulled at load), and any `sandbox.docker.extra_mounts` entries, all mounted `:ro`. All three now go through the **grader-dir overlap guard**: a mount whose source equals, contains, or is contained by the host task dir (`rt.task_file.parent` — holds `check_*.py` / reference / unstripped criteria) is a hard error, so the task dir can no longer be re-exposed that way. The residual risk is a mount pointed at *another* answer-bearing location outside the task tree — the guard can't know about it, so keep template/system-prompt/extra-mount paths off any grading material.
+4. **Grade-outside boundary bleed.** If the host re-grade read agent-written content as if it were the reference, grading integrity would be compromised. Mitigation: the re-grade `Sandbox.task_dir` is the real host task dir (`rt.task_file.parent`), never the agent workspace (Detector-adjacent test in `tests/test_docker_regrade.py`).
+5. **Baked image content.** Mocks/tooling baked into `docker/Dockerfile` must not encode task-specific expected values — authoring invariant + the baked-image scan (`tests/test_docker_image_no_answer_leak.py`).
+6. **Env signposts.** `TASK_DIR`/`SKILLS_REPO_PATH` live on the grader (host) env only — never in the agent container's env (which has no task-dir/skills-repo mount to point at anyway).
+
 ## Boundary
 
 | Layer | Location |
 |---|---|
 | Agent process (Claude Code SDK) | inside container |
-| Sandbox + per-row criterion checking | inside container |
-| **`task.json` serialization** | **container → host bind mount** |
+| Sandbox setup + agent turn | inside container |
+| **`task.json` (agent trajectory) serialization** | **container → host bind mount** |
+| **Criterion checking / grading (GRADE-OUTSIDE)** | **host, after the container exits** |
 | Per-criterion `aggregate()` (P/R/F1, suite thresholds) | host |
 | Reports, run summary, experiment rollups | host |
 
-`task.json` is the only artifact crossing the boundary. Aggregation reads it via the existing host pipeline unchanged.
+`task.json` is the only artifact crossing the boundary (agent trajectory + artifacts). The host re-grade merges the real grades onto it and re-persists it, so the on-disk record carries both the trajectory and the authoritative grade.
 
 ## Limitations
 
@@ -300,10 +332,32 @@ The host's run dir is bind-mounted **read-write** into the container at the same
 - **No container reuse across tasks**: each task = one fresh container. Adds ~1–3 s startup overhead per task; negligible vs. LLM latency.
 - **macOS Keychain auth**: not reachable from the container; set `ANTHROPIC_API_KEY` (direct) or Bedrock credentials instead.
 
+### Early stop (`stop_early`) is not supported under `--driver docker`
+
+Criterion-level early stop (a `stop_early:` block, driven by the `EarlyStopWatcher`)
+relies on **live criterion verdicts computed during the agent turn**. Under COPY/PRUNE
++ GRADE-OUTSIDE the container runs the agent with the criteria **stripped**, and grading
+happens on the host **after** the container exits — so the in-container watcher can never
+arm. A `stop_early:` block is therefore a **no-op under docker**: the run does not stop
+early. `DockerRunner` logs a loud warning when a task arms early stop under docker, so it
+is a documented, signposted limitation rather than a silent one.
+
+**Verdict is unaffected.** The host re-grade still grades the full criteria, and a run
+that completes naturally gates strict-AND — the same authoritative outcome, just without
+the early cutoff (a cost/time optimization) and its telemetry.
+
+The leak-free way to make early stop work under docker is a **host-side watcher**: the
+host already receives the container's per-tool-call event stream and already signals the
+container via the heartbeat channel, and the agent already supports cooperative stop — so
+the watcher can run on the host (where the full criteria live, never entering the
+container), compute verdicts against the real criteria, and cooperatively signal the
+container to stop. That is the intended follow-up; until then, run `stop_early` suites
+with `--driver tempdir`.
+
 ## Architecture
 
 The host's `DockerRunner` (`coder_eval/isolation/docker_runner.py`) renders the `docker run` argv, bind-mounts task inputs at `/work/input`, allocates an output dir at `/work/output`, and tails container stdout into `docker.log` in the task's run dir.
 
-Inside the container, the entrypoint invokes `coder-eval _run-task-internal` (hidden subcommand), which loads the staged YAML + context, runs the standard in-process Orchestrator (driver auto-coerced back to `tempdir`), and writes `task.json` to the output mount. Host reads it and feeds the existing aggregation pipeline.
+Inside the container, the entrypoint invokes `coder-eval _run-task-internal` (hidden subcommand), which loads the *criteria-stripped* staged YAML + context, runs the standard in-process Orchestrator (driver auto-coerced back to `tempdir`) to execute the **agent turn only**, and writes `task.json` to the output mount. The host then re-grades the copied-out artifacts (`regrade_on_host`) against the full criteria it holds, merges the authoritative grades onto the trajectory, and feeds the existing aggregation pipeline. The container never receives the criteria, reference, or graders (see [Isolation model](#isolation-model-copyprune--grade-outside)).
 
 A `result_kind` discriminator on `CriterionResult` ensures `ClassificationCriterionResult` subclasses survive the JSON round-trip — without it, host-side aggregation would silently lose `observed_label`/`expected_label`.

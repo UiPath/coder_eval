@@ -169,7 +169,11 @@ def run_task_internal_command(
     # Orchestrator's `task_file.parent` reasoning -- specifically the
     # `TASK_DIR` env exposed to `run_command` criteria -- resolves to the
     # original host task directory rather than `/work/input/`.
-    task, source_yaml = load_task(task_yaml)
+    # allow_empty_criteria=True: the staged task.yaml is agent_safe_dump-stripped
+    # (success_criteria: []) so the agent container carries no grading material;
+    # the host holds the real criteria and grades after the container exits. This
+    # is the ONLY caller allowed to bypass the authored-empty-criteria guard.
+    task, source_yaml = load_task(task_yaml, allow_empty_criteria=True)
     if host_source_yaml is not None:
         source_yaml = host_source_yaml
     # The path below is never re-read; it only seeds Orchestrator's TASK_DIR.

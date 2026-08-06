@@ -21,6 +21,7 @@ from coder_eval.models.agent_config import (
 from coder_eval.models.container_paths import (
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_SKILL_DOCS_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
@@ -106,6 +107,13 @@ from coder_eval.models.mutations import (
     apply_prompt_mutations,
 )
 
+# Tasks
+from coder_eval.models.plugin_projection import (
+    PLUGIN_AGENT_ALLOWED_SUBDIRS,
+    plugin_path,
+    project_plugin_for_agent,
+)
+
 # Results
 from coder_eval.models.results import (
     ClassificationCriterionResult,
@@ -163,9 +171,8 @@ from coder_eval.models.sandbox import (
     SandboxConfig,
     validate_template_sources_list,
 )
-
-# Tasks
 from coder_eval.models.tasks import (
+    AGENT_HIDDEN_TASK_FIELDS,
     DEFAULT_SIMULATION_STOP_TOKEN,
     CriteriaCheckTiming,
     Dataset,
@@ -264,6 +271,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DockerBuildConfig",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
+    "CONTAINER_SKILL_DOCS_DIR",
     "CONTAINER_TASK_DIR",
     "CONTAINER_WORK_DIR",
     "RESERVED_CONTAINER_DIRS",
@@ -335,6 +343,10 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "merge_strategy_of",
     # Tasks
     "TaskDefinition",
+    "AGENT_HIDDEN_TASK_FIELDS",
+    "PLUGIN_AGENT_ALLOWED_SUBDIRS",
+    "plugin_path",
+    "project_plugin_for_agent",
     "DEFAULT_SIMULATION_STOP_TOKEN",
     "CriteriaCheckTiming",
     "Dataset",

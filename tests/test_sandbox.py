@@ -1199,6 +1199,10 @@ def test_capture_to_copies_and_tolerates_dangling_symlink(tmp_path):
         # Security denylist: credential stores that must never leak into artifacts.
         (ws / ".claude").mkdir()
         (ws / ".claude" / ".credentials.json").write_text("SECRET", encoding="utf-8")
+        # ~/.uipath is a throwaway RW copy mounted for the in-container `uip` CLI;
+        # its .auth must never be captured out (mirrors the .claude treatment).
+        (ws / ".uipath").mkdir()
+        (ws / ".uipath" / ".auth").write_text("UIPATH_TOKEN", encoding="utf-8")
         (ws / ".aws").mkdir()
         (ws / ".aws" / "credentials").write_text("[default]\naws_access_key_id=FAKE", encoding="utf-8")
         (ws / ".ssh").mkdir()
@@ -1236,6 +1240,7 @@ def test_capture_to_copies_and_tolerates_dangling_symlink(tmp_path):
         assert not (dest / "dangling").exists()
         # Security denylist: no credential stores in artifacts.
         assert not (dest / ".claude").exists()
+        assert not (dest / ".uipath").exists()
         assert not (dest / ".aws").exists()
         assert not (dest / ".ssh").exists()
         assert not (dest / ".gnupg").exists()
@@ -1259,6 +1264,7 @@ def test_capture_to_copies_and_tolerates_dangling_symlink(tmp_path):
         # Source workspace is COPIED, not moved (originals untouched).
         assert (ws / "real.txt").exists()
         assert (ws / ".claude" / ".credentials.json").exists()
+        assert (ws / ".uipath" / ".auth").exists()
         assert sandbox.sandbox_dir == ws
         # Cross-uid read granted on the copy (group/other read on the dir).
         assert (dest.stat().st_mode & 0o044) == 0o044

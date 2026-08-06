@@ -405,6 +405,18 @@ jobs:
       - name: Build coder-eval-agent base Docker image
         run: make docker-image
 
+      # Docker isolation detectors (COPY/PRUNE + GRADE-OUTSIDE). The daemon-less
+      # set is the load-bearing CI sensor: host-unchanged proxy (no rw host-original
+      # mount) + criteria absence + baked-image scan + no-uid-drop-machinery guard.
+      - name: Run docker isolation detectors (daemon-less)
+        run: make test-docker-detectors
+
+      # Exit-criterion sensor: a real docker run must leave the host byte-for-byte
+      # AND metadata-identical. A daemon + the base image are present on this
+      # runner, so the -m live variant executes here (Linux-authoritative).
+      - name: Run docker host-unchanged live detector
+        run: .venv/bin/pytest tests/test_docker_host_unchanged.py -m live -p no:cacheprovider
+
       - name: Build BYOD template Docker image
         run: docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/
 

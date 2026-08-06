@@ -157,7 +157,7 @@ async def run_batch(
                     # serializes stream events as NDJSON on stdout; we
                     # forward them to the host callback so --stream
                     # renders identically to the in-process path.
-                    from ..isolation.docker_runner import DockerRunner
+                    from ..isolation.docker_runner import DockerRunner, regrade_on_host
 
                     result = await DockerRunner(
                         rt,
@@ -165,10 +165,18 @@ async def run_batch(
                         stream_callback=task_callback,
                         verbose=config.verbose,
                     ).run()
+                    # GRADE-OUTSIDE: the container ran the AGENT ONLY (it never
+                    # received the criteria/reference/graders). Grade the
+                    # copied-out artifacts on the host, where the full unstripped
+                    # rt.task lives, via the evaluate-only re-grade path. No-ops
+                    # for ungraded tasks or terminal agent-side failures.
+                    result = await regrade_on_host(result, rt)
                     # The in-container _finalize_result can't emit task telemetry
                     # (connection-string env vars aren't forwarded into the
                     # container), so emit the Task.End event host-side here
                     # — keeping docker runs at parity with the in-process path.
+                    # Emit AFTER the host re-grade so the telemetry status/score
+                    # reflect the authoritative host grade, not the container's.
                     from ..orchestrator import build_task_event
                     from ..telemetry import track_event
 

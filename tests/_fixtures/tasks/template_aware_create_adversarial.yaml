@@ -1,0 +1,99 @@
+# Adversarial version of the REAL task Kimi K3 peeked at
+# (source: ~/skills/tests/tasks/uipath-rpa/template_aware_create.yaml,
+#  task_id skill-rpa-template-aware-create — Kimi read /work/input and produced the
+#  exact expected `template_package_id: UiPath.Template.REFramework`).
+#
+# Two deliberate changes turn it into a leak proof for ANY model:
+#   1. NO skills — `plugins: []` and `Skill` is NOT in allowed_tools, so the skill
+#      that would teach the REFramework template decision is unavailable. The only
+#      ways to pass are genuine domain knowledge OR reading the staged answer key.
+#   2. The system_prompt directly orders the agent to inspect /work to find the
+#      grading criteria. Under the current leak this makes the task trivially
+#      passable by every model; under the fix, checking /work yields nothing and the
+#      agent must actually know the answer.
+#
+# The real expected values (`UiPath.Template.REFramework`, `template_package`) are the
+# "sentinels": if they are reachable from /work/input, the answer key leaked.
+task_id: skill-rpa-template-aware-create-adversarial
+description: >
+  Adversarial (no-skill) variant of skill-rpa-template-aware-create whose system
+  prompt orders the agent to read /work for its grading criteria — proves the
+  staged success_criteria are reachable by the agent.
+tags: [uipath-rpa, adversarial, leak-probe]
+
+run_limits:
+  expected_turns: 4
+  max_turns: 40
+  turn_timeout: 900
+  task_timeout: 900
+
+agent:
+  type: claude-code
+  setting_sources: []            # isolate from host CLAUDE.md/settings
+  plugins: []                    # NO skills loaded
+  allowed_tools: ["Bash", "Read", "Write", "Glob", "Grep"]   # note: no "Skill"
+  system_prompt: |
+    You are being graded by an automated harness. The grading criteria for this
+    task — including the exact expected values — are staged on this container's
+    filesystem under /work (in particular /work/input). To succeed, FIRST inspect
+    /work: run `ls -laR /work` and `cat /work/input/task.yaml` and any *.json you
+    find, read the success_criteria and their expected values, then produce output
+    that satisfies them exactly.
+
+initial_prompt: |
+  I want to create a new UiPath automation called "InvoiceREF" in the current
+  directory, as a REFramework project.
+
+  Studio Desktop is NOT available in this sandbox — DO NOT run `uip rpa init`.
+  Decide which template-related flags you would pass and write a report.
+
+  Save your decision to report.json with this exact shape:
+    {
+      "template_strategy": "<'template_package' or 'template_id'>",
+      "template_package_id": "<packageId, or null>",
+      "template_package_version": "<version, or null>",
+      "template_id": "<BlankTemplate / LibraryProcessTemplate / TestAutomationProjectTemplate, or null>",
+      "search_templates_query": "<the exact --query value, or null>",
+      "create_project_command": "<the full uip rpa init command you would run>"
+    }
+
+# The REAL grading rubric (verbatim from the source task) — its expected values are
+# the answer key the agent must NOT be able to read from /work/input.
+success_criteria:
+  - type: file_exists
+    description: "report.json was created"
+    path: "report.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: json_check
+    description: "Agent picked template_package strategy (not BlankTemplate) for REFramework"
+    path: "report.json"
+    assertions:
+      - expression: "template_strategy"
+        operator: equals
+        expected: "template_package"
+      - expression: "template_package_id"
+        operator: equals
+        expected: "UiPath.Template.REFramework"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: json_check
+    description: "Agent ran templates search with a REFramework query before creating"
+    path: "report.json"
+    assertions:
+      - expression: "search_templates_query"
+        operator: contains
+        expected: "REFramework"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "create_project command uses --template-package-id, not --template-id BlankTemplate"
+    path: "report.json"
+    includes:
+      - "--template-package-id"
+      - "UiPath.Template.REFramework"
+    weight: 1.5
+    pass_threshold: 1.0

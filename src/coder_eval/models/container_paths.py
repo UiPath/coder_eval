@@ -17,10 +17,21 @@ CONTAINER_WORK_DIR = "/work"
 CONTAINER_INPUT_DIR = "/work/input"
 CONTAINER_OUTPUT_DIR = "/work/output"
 CONTAINER_TASK_DIR = "/work/task_dir"
+# Agent-readable sanitized skill-bundle copy mount (docs/commands/skills only;
+# no grader trees). The agent's plugin discovery reads from here, never the raw
+# skills-repo checkout (which is not mounted into the agent container at all).
+CONTAINER_SKILL_DOCS_DIR = "/work/skills"
 
 # Paths a task's WORKDIR must never collide with: the container root and every
 # framework-owned mount under /work. Consumed by SandboxConfig's working_dir
 # validator (models/sandbox.py) and re-asserted host-side in docker_runner.
 RESERVED_CONTAINER_DIRS = frozenset(
-    {"/", CONTAINER_WORK_DIR, CONTAINER_INPUT_DIR, CONTAINER_OUTPUT_DIR, CONTAINER_TASK_DIR}
+    {
+        "/",
+        CONTAINER_WORK_DIR,
+        CONTAINER_INPUT_DIR,
+        CONTAINER_OUTPUT_DIR,
+        CONTAINER_TASK_DIR,
+        CONTAINER_SKILL_DOCS_DIR,
+    }
 )

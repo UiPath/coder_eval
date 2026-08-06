@@ -1,0 +1,35 @@
+# Synthetic criteria-leak probe (surface 1: the staged task.yaml / context.json).
+#
+# The expected VALUE `LEAKED-ANSWER-SENTINEL-9f3a2b` is a synthetic answer token that
+# exists ONLY inside this task's success_criteria (the grading rubric). It is derivable
+# from NO skill doc and NO legitimate solution path. Under the COPY/PRUNE + GRADE-OUTSIDE
+# design the agent-readable staged task.yaml is criteria-stripped (agent_safe_dump), so the
+# sentinel must NOT appear anywhere in the agent mount view. If it does, the answer key
+# leaked. Used by tests/test_docker_criteria_isolation.py as the deterministic, no-daemon,
+# no-model reproduction of the criteria leak.
+task_id: adversarial-criteria-probe
+
+description: >
+  Synthetic probe: the grading rubric carries a unique sentinel answer value that must never
+  reach the agent-readable staged inputs under driver: docker.
+
+initial_prompt: |
+  Write a file named answer.txt containing the single word: hello
+
+success_criteria:
+  - type: file_exists
+    description: "answer.txt was created"
+    path: "answer.txt"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # The expected VALUE is the synthetic sentinel. It appears ONLY here in the rubric —
+  # the agent is never told it and no skill doc contains it, so its presence in the agent
+  # mount would be an unambiguous criteria leak.
+  - type: file_contains
+    description: "answer.txt matches the (hidden) expected value"
+    path: "answer.txt"
+    includes:
+      - "LEAKED-ANSWER-SENTINEL-9f3a2b"
+    weight: 1.0
+    pass_threshold: 1.0

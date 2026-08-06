@@ -28,6 +28,7 @@ from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_SKILL_DOCS_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
@@ -36,6 +37,8 @@ from coder_eval.models import (
     FinalStatus,
     PreservationMode,
     ResourceLimits,
+    plugin_path,
+    project_plugin_for_agent,
 )
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
@@ -115,6 +118,15 @@ CLAUDE_COPY_IGNORE = (
     "telemetry",
     "history.jsonl",
     "*.lock",
+    # Operator-session state, NOT anything the agent-under-test needs: background-job
+    # timelines/state under ~/.claude/jobs carry the operator's own conversation and
+    # task history. Copying them exposes the host operator's session to the agent (a
+    # privacy/hygiene leak — and, when the harness itself runs inside a Claude Code
+    # job, the operator's messages). NOTE: this ignore list is a DENYLIST, so any
+    # future new ~/.claude subdir defaults to COPIED — a follow-up should flip it to an
+    # allowlist (copy only settings.json/.credentials.json/plugins) so new dirs default
+    # to excluded.
+    "jobs",
     # Volatile per-session churn rewritten by the live host CLI (race-prone):
     "statsig",
     ".statusline_cache",
@@ -336,6 +348,33 @@ def _validate_extra_mount(spec: str) -> str:
     return f"{expanded_src}:{dst}:{mode}"
 
 
+def _extra_mount_source(normalized: str) -> Path:
+    """Resolve the host source path from a normalized ``_validate_extra_mount`` spec.
+
+    ``_validate_extra_mount`` returns ``expanded_src:dst:mode`` (source already
+    ``~``/``$VAR``-expanded). Split off an optional leading Windows drive letter
+    first so ``C:\\foo:/dst:ro`` isn't misread, then take everything up to the
+    first POSIX ``:`` as the source.
+    """
+    if _DRIVE_PREFIX.match(normalized):
+        return Path(normalized[:2] + normalized[2:].split(":", 1)[0]).resolve()
+    return Path(normalized.split(":", 1)[0]).resolve()
+
+
+def _overlaps_grader_dir(target: Path, grader_dir: Path | None) -> bool:
+    """True if ``target`` equals, contains, or is contained by the host grader dir.
+
+    The host grader dir holds ``check_*.py`` + reference + the raw ``task.yaml``
+    (full, unstripped ``success_criteria``). Any mount whose source overlaps it
+    re-exposes the graders into the agent container — exactly the leak
+    GRADE-OUTSIDE closes. A sibling ``templates/`` dir is unaffected (neither
+    contains the other). Shared by ``_auto_mount`` and the ``extra_mounts`` loop.
+    """
+    if grader_dir is None:
+        return False
+    return target == grader_dir or grader_dir in target.parents or target in grader_dir.parents
+
+
 class DockerRunError(RuntimeError):
     """Raised when ``docker run`` exits non-zero AND no task.json was produced.
 
@@ -460,6 +499,54 @@ def _copy_claude_home(host_claude_dir: Path, claude_copy: Path) -> None:
     ) from last_exc
 
 
+# Top-level entries under ~/.uipath that the per-task RW copy SKIPS. Like the
+# ~/.claude copy, we mount a throwaway COPY read-write so the in-container `uip`
+# CLI can write freely without ever touching the host's real ~/.uipath (which
+# holds `.auth`). ~/.uipath is small compared to ~/.claude, and correctness
+# (auth present, host untouched) matters more than copy size, so the skip set is
+# deliberately empty by default — trim only if a real ~/.uipath proves large.
+# Patterns match by basename at every level (shutil.ignore_patterns semantics).
+_UIPATH_HOME_SKIP: tuple[str, ...] = ()
+
+
+def _copy_uipath_home(host_uipath_dir: Path, uipath_copy: Path) -> None:
+    """Copy the host ``~/.uipath`` into ``uipath_copy`` with bounded retries.
+
+    Mirrors :func:`_copy_claude_home`: the in-container ``uip`` CLI needs the
+    auth/config under ``~/.uipath`` (notably ``.auth``), but the host original
+    must never be a live rw mount — an agent could otherwise overwrite the host
+    credential and downgrade later tasks (``models/sandbox.py`` documents this
+    hazard). So we copy it into a throwaway dir and mount that copy read-write.
+    Symlinks are copied verbatim (loop-proof) and the bounded retry clears a
+    partial copy between attempts, exactly like the ``~/.claude`` path.
+    """
+    last_exc: OSError | None = None
+    for attempt in range(1, CLAUDE_COPY_MAX_ATTEMPTS + 1):
+        try:
+            shutil.copytree(
+                host_uipath_dir,
+                uipath_copy,
+                ignore=shutil.ignore_patterns(*_UIPATH_HOME_SKIP) if _UIPATH_HOME_SKIP else None,
+                symlinks=True,
+                ignore_dangling_symlinks=True,
+                dirs_exist_ok=True,
+            )
+            return
+        except OSError as exc:
+            last_exc = exc
+            shutil.rmtree(uipath_copy, ignore_errors=True)
+            logger.warning(
+                "Copy of host ~/.uipath failed (attempt %d/%d), retrying: %s",
+                attempt,
+                CLAUDE_COPY_MAX_ATTEMPTS,
+                exc,
+            )
+    raise DockerRunError(
+        f"Failed to copy host ~/.uipath into the container staging dir after {CLAUDE_COPY_MAX_ATTEMPTS} "
+        + f"attempts (last error: {last_exc})."
+    ) from last_exc
+
+
 class DockerRunner:
     """Spawns a per-task container and reconstructs the EvaluationResult.
 
@@ -482,6 +569,16 @@ class DockerRunner:
         # _build_argv mounts read-write. None when there is no ~/.claude to
         # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
         self._claude_mount_src: Path | None = None
+        # Set by _prepare_host_mounts: the tmp COPY of ~/.uipath that _build_argv
+        # mounts read-write. None when there is no ~/.uipath to forward. Mirrors
+        # _claude_mount_src so the host original is never a live rw mount.
+        self._uipath_mount_src: Path | None = None
+        # Set by _prepare_host_mounts: the staging dir holding the sanitized,
+        # answer-free plugin bundles (staging/skills/<name>) that _build_argv
+        # mounts read-ONLY at CONTAINER_SKILL_DOCS_DIR. None when the task has no
+        # plugins. The raw skills-repo checkout is NEVER mounted into the agent
+        # container.
+        self._skill_docs_src: Path | None = None
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -503,6 +600,24 @@ class DockerRunner:
         dispatcher converts that to an ERROR-status EvaluationResult.
         """
         _preflight()
+        # Option-A early-stop guard (KNOWN LIMITATION, not silent): under
+        # --driver docker the agent runs criteria-stripped in the container and
+        # grading happens on the HOST afterwards, so the in-container
+        # EarlyStopWatcher can never arm — a stop_early: block is a no-op here. Warn
+        # loudly once (correctness is unaffected: the host re-grade still grades the
+        # full criteria and a completed run gates strict-AND). The leak-free fix that
+        # WOULD make early-stop work under docker is a host-side watcher over the
+        # live event stream (see docs/DOCKER_ISOLATION.md § Limitations).
+        from coder_eval.orchestration.early_stop import early_stop_active
+
+        if early_stop_active(self.rt.task):
+            logger.warning(
+                "Task %r arms early-stop (stop_early), but early-stop is NOT supported under "
+                + "--driver docker (criteria are graded on the host after the container exits, so the "
+                + "in-container watcher cannot arm). The stop_early block is ignored; the run will not "
+                + "stop early. Verdict is unaffected. See docs/DOCKER_ISOLATION.md.",
+                self.rt.task.task_id,
+            )
         # Resolve the run image: build from a Dockerfile if configured (which
         # overrides `image`), else use the configured image. The build is
         # side-effecting, so it runs in a worker thread like the other docker
@@ -602,6 +717,33 @@ class DockerRunner:
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)
 
+    def _plugin_bundles(self) -> list[tuple[str, str]]:
+        """Resolve the task's plugins to ``(host_path, bundle_name)`` pairs.
+
+        ``bundle_name`` is a filesystem-safe, collision-free directory name under
+        the sanitized skills copy (and thus under ``CONTAINER_SKILL_DOCS_DIR`` in
+        the container). The same mapping drives three sites: the staged
+        ``task.yaml`` path rewrite (``_stage_inputs``), the sanitized copy
+        (``_prepare_host_mounts``), and the ``:ro`` mount (``_build_argv``) — so
+        they cannot drift. Plugins with no usable path are skipped.
+        """
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        bundles: list[tuple[str, str]] = []
+        used: set[str] = set()
+        for plugin in plugins:
+            raw = plugin_path(plugin)
+            if raw is None:
+                continue
+            base = _sanitize_container_name_component(Path(raw).name) or "plugin"
+            name = base
+            i = 1
+            while name in used:
+                name = f"{base}_{i}"
+                i += 1
+            used.add(name)
+            bundles.append((raw, name))
+        return bundles
+
     async def _stage_inputs(self, input_dir: Path) -> None:
         """Serialise the post-override TaskDefinition + lineage/variant context into the
         staging ``input_dir`` (``task.yaml`` + ``context.json``). Pure I/O off the event
@@ -614,22 +756,45 @@ class DockerRunner:
         task_yaml_in = input_dir / "task.yaml"
 
         def _dump_task_yaml() -> str:
-            return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
+            # CRITERIA-STRIP: the agent container only ever runs the agent turn;
+            # the host grades the copied-out artifacts after the container exits.
+            # agent_safe_dump() replaces success_criteria/reference with empties so
+            # no grading material reaches the agent-readable staged task.yaml. The
+            # full criteria stay on the host (which holds the resolved TaskDefinition).
+            data = self.rt.task.agent_safe_dump()
+            # Point the in-container plugin discovery at the sanitized bundle copy
+            # mounted read-only at CONTAINER_SKILL_DOCS_DIR/<name>, NOT the raw
+            # host skills-repo path (which is never mounted into the agent
+            # container). The bundle names come from the shared _plugin_bundles
+            # mapping so the rewrite matches the copy + the mount exactly.
+            agent_block = data.get("agent")
+            if isinstance(agent_block, dict) and isinstance(agent_block.get("plugins"), list):
+                by_host = dict(self._plugin_bundles())
+                for plugin in agent_block["plugins"]:
+                    if not isinstance(plugin, dict):
+                        continue
+                    host = plugin_path(plugin)
+                    name = by_host.get(host) if host is not None else None
+                    if name is not None:
+                        plugin["path"] = f"{CONTAINER_SKILL_DOCS_DIR}/{name}"
+            return yaml.safe_dump(data, sort_keys=False)
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
         # Lineage + variant metadata so the in-container Orchestrator
         # reconstructs the same context (variant_id is load-bearing for
-        # report grouping). source_yaml carries the *raw* on-disk text
-        # so the in-container Orchestrator records the same audit trail
-        # as the in-process driver (task.json.task_config.source_yaml).
+        # report grouping). source_yaml is deliberately NULL in the staged
+        # context: the raw on-disk YAML carries the full success_criteria/
+        # reference, so forwarding it would re-leak the grading material the
+        # task.yaml strip removes. The host re-grade records the authoritative
+        # source_yaml audit trail (task.json.task_config.source_yaml).
         context_payload = json.dumps(
             {
                 "variant_id": self.rt.variant_id,
                 "replicate_index": self.rt.replicate_index,
                 "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
                 "preservation_mode": self.preservation_mode.value,
-                "source_yaml": self.rt.source_yaml,
+                "source_yaml": None,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
@@ -925,6 +1090,31 @@ class DockerRunner:
         stay pure (it may run twice — for logging then exec), so the copy is
         made here, exactly once, rather than in ``_build_argv``.
         """
+        # Sanitized plugin bundles: copy ONLY the agent-legitimate subtrees of
+        # each plugin (skills/commands/agents/hooks/.claude-plugin) into
+        # staging/skills/<name>. The raw skills-repo checkout — which carries
+        # grader trees, reference agents, RESOLUTION.md, fixtures — is NEVER
+        # mounted into the agent container. _build_argv mounts this copy :ro.
+        bundles = self._plugin_bundles()
+        if bundles:
+            skills_root = staging / "skills"
+            for host_raw, name in bundles:
+                src = Path(os.path.expandvars(os.path.expanduser(host_raw))).resolve()
+                if not src.is_dir():
+                    continue
+                project_plugin_for_agent(src, skills_root / name)
+            self._skill_docs_src = skills_root
+
+        # Copy ~/.uipath (auth/config) into a throwaway dir and mount that COPY
+        # read-write, so the in-container `uip` CLI has credentials without ever
+        # sharing the host's real ~/.uipath (an agent could otherwise overwrite
+        # host .auth). Mirrors the ~/.claude copy-then-mount below.
+        host_uipath_dir = Path.home() / ".uipath"
+        if host_uipath_dir.is_dir():
+            uipath_copy = staging / "uipath-home"
+            _copy_uipath_home(host_uipath_dir, uipath_copy)
+            self._uipath_mount_src = uipath_copy
+
         if os.environ.get("CODER_EVAL_NO_CLAUDE_MOUNT"):
             return
         host_claude_dir = Path.home() / ".claude"
@@ -1166,14 +1356,17 @@ class DockerRunner:
         # so the in-container Orchestrator writes task.json/task.log/etc.
         # directly to the host filesystem via bind-mount.
         argv += ["-v", f"{output_dir}:{CONTAINER_OUTPUT_DIR}"]
-        # Mount the original task dir at the SAME host path so the
-        # in-container Orchestrator can set TASK_DIR (used by run_command
-        # criteria via `$TASK_DIR/foo.json`) to a path that resolves
-        # identically inside and outside the container.
-        host_task_dir: Path | None = None
-        if self.rt.task_file:
-            host_task_dir = self.rt.task_file.parent.resolve()
-            argv += ["-v", f"{host_task_dir}:{host_task_dir}:ro"]
+        # GRADE-OUTSIDE: the raw host task dir is deliberately NOT mounted into
+        # the agent container. It carries the graders ($TASK_DIR/check_*.py) and
+        # the source YAML with the full criteria — grading material. The host
+        # re-grades the copied-out artifacts after the container exits, with
+        # TASK_DIR pointing at the real host task dir (never the agent's mount).
+        # Sanitized plugin bundle: mount the answer-free copy read-ONLY at
+        # CONTAINER_SKILL_DOCS_DIR. The in-container plugin paths were rewritten
+        # to point here in _stage_inputs. The raw skills-repo checkout is never
+        # mounted into the agent container.
+        if self._skill_docs_src is not None:
+            argv += ["-v", f"{self._skill_docs_src}:{CONTAINER_SKILL_DOCS_DIR}:ro"]
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1186,16 +1379,22 @@ class DockerRunner:
             host_claude_dir = Path.home() / ".claude"
             argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
 
-        # Auto-mount host paths the task references so they resolve inside
-        # the container at the *same* path they have on the host.
-        # Includes:
-        #   - Claude Code plugin dirs (`agent.plugins[].path`)
+        # Forward ~/.uipath as a throwaway COPY read-write (mirrors ~/.claude):
+        # the in-container `uip` CLI gets the auth/config it needs, but the host
+        # original is never mounted, so an agent can't overwrite the host's real
+        # .auth. None when ~/.uipath is absent (env-cred fallback intact).
+        if self._uipath_mount_src is not None:
+            host_uipath_dir = Path.home() / ".uipath"
+            argv += ["-v", f"{self._uipath_mount_src}:{host_uipath_dir}"]
+
+        # Auto-mount host paths the task legitimately needs (non-grading):
         #   - Template directories (`sandbox.template_sources[].path` for
         #     TemplateDirSource entries -- already absolute after
         #     resolve_template_paths runs on the host).
-        # Reference files (`task.reference.file`) and `run_command`
-        # criteria that use `$TASK_DIR/...` are covered by the symmetric
-        # task_dir mount above. ``mounted`` dedupes overlapping entries.
+        #   - A stray absolute `system_prompt_file` a variant could inject.
+        # Plugins are served via the sanitized :ro bundle above (NOT auto-mounted
+        # raw); reference files are grading material and are NOT mounted at all
+        # (the host holds them for the re-grade). ``mounted`` dedupes overlaps.
         mounted: set[Path] = set()
         # Auto-mount sources that look like credential / secret dirs get a
         # loud warning. Task YAMLs typically come from in-house suite authors,
@@ -1206,6 +1405,13 @@ class DockerRunner:
         # `~/.aws/config`). The warning surfaces the surprise.
         sensitive_sources = self._sensitive_source_paths()
 
+        # The host grader dir (holds check_*.py + reference + the raw task.yaml
+        # with the full success_criteria). An auto-mount whose resolved target
+        # equals, contains, or is contained by this dir would re-expose the
+        # graders into the agent container — exactly the leak GRADE-OUTSIDE closes.
+        # None only on library/test paths that build a runner without a task_file.
+        grader_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
+
         def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
             if not raw_path:
                 return
@@ -1213,6 +1419,13 @@ class DockerRunner:
             # File paths get mounted as the parent dir so a single -v covers
             # the file; container-side reads still resolve at the same path.
             target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
+            # Hard-reject an auto-mount that would re-expose the host grader dir.
+            if _overlaps_grader_dir(target, grader_dir):
+                raise DockerRunError(
+                    f"Auto-mount source {target} overlaps the host grader dir {grader_dir} "
+                    + "(check_*.py / reference / unstripped criteria live there). Point "
+                    + "template_sources[].path / system_prompt_file at a directory OUTSIDE the task dir."
+                )
             if target in mounted or not target.is_dir():
                 return
             for sensitive in sensitive_sources:
@@ -1224,10 +1437,6 @@ class DockerRunner:
                     break
             mounted.add(target)
             argv.extend(["-v", f"{target}:{target}:ro"])
-
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
 
         from coder_eval.models import TemplateDirSource
 
@@ -1244,16 +1453,22 @@ class DockerRunner:
         if agent_cfg and agent_cfg.system_prompt_file:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
-        # reference.file / reference.directory: if a task ships absolute
-        # paths (or relative paths that escape the task_dir mount via
-        # ``..``), they must be mounted explicitly. Relative paths under
-        # task_dir are already covered by the symmetric task_dir mount.
-        reference = self.rt.task.reference
-        if reference is not None:
-            _auto_mount(reference.file, dir_only=False)
-            _auto_mount(reference.directory)
+        # NOTE: task.reference (reference.file / reference.directory) is grading
+        # material and is deliberately NOT mounted into the agent container. The
+        # host holds the resolved TaskDefinition (with the reference) and grades
+        # the copied-out artifacts after the container exits.
         for mount in cfg.extra_mounts:
             normalized = _validate_extra_mount(mount)
+            # extra_mounts is author-controlled and bypasses _auto_mount, so apply
+            # the SAME grader-dir overlap guard here — otherwise `extra_mounts:
+            # ["<taskdir>:/mnt:ro"]` would re-expose check_*.py / reference /
+            # unstripped criteria that GRADE-OUTSIDE deliberately keeps host-side.
+            if _overlaps_grader_dir(_extra_mount_source(normalized), grader_dir):
+                raise DockerRunError(
+                    f"extra_mounts source {_extra_mount_source(normalized)} overlaps the host grader dir "
+                    + f"{grader_dir} (check_*.py / reference / unstripped criteria live there). "
+                    + "Mount a directory OUTSIDE the task dir."
+                )
             argv += ["-v", normalized]
 
         # Docker WORKDIR alignment: run the agent at the image's own WORKDIR. Set
@@ -1270,9 +1485,258 @@ class DockerRunner:
         if self.verbose:
             argv += ["-v"]
         argv += ["--output", str(CONTAINER_OUTPUT_DIR)]
-        if host_task_dir is not None:
-            argv += ["--task-dir", str(host_task_dir)]
+        # GRADE-OUTSIDE: no --task-dir is passed. The host task dir is not mounted
+        # into the agent container (it carries graders + criteria); the container
+        # runs the agent only and the host re-grades. Without the mount, the
+        # in-container --task-dir would point at a non-existent path anyway.
         return argv
+
+
+# GRADE-OUTSIDE re-grade ALLOWLIST. Only these statuses mean "the agent ran to a
+# normal end and left gradable artifacts", so the host re-grade is meaningful.
+# Every OTHER FinalStatus (ERROR / BUILD_FAILED / TIMEOUT / TOKEN_BUDGET_EXCEEDED
+# / COST_BUDGET_EXCEEDED) is a terminal agent-side failure that produced no
+# gradable artifact — it must stand, never be overwritten by a re-grade. An
+# allowlist (not a denylist) so a future new FinalStatus member defaults to
+# "do NOT re-grade" rather than silently grading a novel failure mode (CE018).
+REGRADE_STATUS_ALLOWLIST = frozenset({FinalStatus.SUCCESS, FinalStatus.FAILURE, FinalStatus.MAX_TURNS_EXHAUSTED})
+
+
+async def regrade_on_host(result: EvaluationResult, rt: ResolvedTask) -> EvaluationResult:
+    """Re-grade a docker agent-only run's copied-out artifacts on the HOST.
+
+    Under ``driver: docker`` the container runs the AGENT ONLY: it never receives
+    the grading material (criteria are stripped from the staged ``task.yaml``,
+    the reference is not mounted, the raw task dir is not mounted), so its
+    ``task.json`` carries the trajectory + artifacts but no real grades. This
+    step grades those artifacts on the host — which still holds the full,
+    unstripped ``rt.task`` — via the orchestrator's evaluate-only re-grade path
+    (``Orchestrator`` with no agent attached), with ``TASK_DIR`` pointing at the
+    REAL host task dir so ``run_command``/``file_check`` graders resolve
+    ``$TASK_DIR/check_*.py`` against the host grader, never agent-written content.
+
+    Returns ``result`` unchanged (no re-grade) when:
+      - ``rt.task`` has no gating criteria (nothing to grade), or
+      - ``result.final_status`` is not in :data:`REGRADE_STATUS_ALLOWLIST`
+        (a terminal agent-side failure that must stand).
+
+    Otherwise copies the host grade (``success_criteria_results`` +
+    ``final_status``) onto ``result`` and returns it. If the artifacts cannot be
+    located or graded (no ``sandbox_path``, missing artifacts dir, or a grading-side
+    exception), the run is degraded to :data:`FinalStatus.ERROR` — never left as the
+    container's vacuous ``[]``-criteria SUCCESS.
+    """
+    # Skip if no gating criterion (mirrors evaluate_command's is_gating gate) —
+    # a type: none / ungraded task's container result stands as-is.
+    if not any(c.is_gating for c in rt.task.success_criteria):
+        return result
+    # Skip terminal agent-side failures: the agent never produced a gradable
+    # artifact, so the failure status is authoritative and must not be clobbered.
+    if result.final_status not in REGRADE_STATUS_ALLOWLIST:
+        return result
+
+    # The artifacts cross the boundary via the /work/output bind mount, but that
+    # mount is NOT path-symmetric: the host binds rt.run_dir at the fixed
+    # container path CONTAINER_OUTPUT_DIR (/work/output). So the in-container
+    # orchestrator records a CONTAINER-absolute sandbox_path
+    # (/work/output/artifacts/<id>), which does not exist on the host. Re-root the
+    # portion under CONTAINER_OUTPUT_DIR onto the real host rt.run_dir to get the
+    # host path the artifacts physically live at.
+    if not result.sandbox_path:
+        # Cannot locate the copied-out artifacts, so the full criteria cannot be
+        # graded. The container graded stripped `[]` criteria (a vacuous SUCCESS),
+        # so returning it as-is would ship a false pass — degrade to ERROR instead.
+        logger.warning(
+            "Docker host re-grade: result has no sandbox_path for task %s; degrading to ERROR"
+            + " (gating criteria could not be graded).",
+            rt.task.task_id,
+        )
+        await _degrade_regrade_to_error(
+            result, rt, "Docker host re-grade could not locate artifacts (no sandbox_path); gating criteria ungraded."
+        )
+        return result
+    container_path = Path(result.sandbox_path)
+    container_out = Path(CONTAINER_OUTPUT_DIR)
+    if container_path == container_out or container_out in container_path.parents:
+        artifacts_dir = rt.run_dir.resolve() / container_path.relative_to(container_out)
+    else:
+        # Not under /work/output (e.g. a host-side result, or a workspace_dir
+        # capture mode with a non-standard path) — use it as-is.
+        artifacts_dir = container_path
+    # Fail-safe: never grade an auto-created empty dir. If the translated path
+    # doesn't exist, the artifacts didn't land where expected — we cannot grade
+    # the full criteria, so degrade to ERROR rather than let the container's
+    # vacuous `[]`-criteria SUCCESS stand (an ungradable run is not a pass).
+    if not artifacts_dir.is_dir():
+        logger.warning(
+            "Docker host re-grade: artifacts dir %s (from sandbox_path %r) does not exist for task %s;"
+            + " degrading to ERROR (gating criteria could not be graded).",
+            artifacts_dir,
+            result.sandbox_path,
+            rt.task.task_id,
+        )
+        await _degrade_regrade_to_error(
+            result,
+            rt,
+            f"Docker host re-grade could not find artifacts dir {artifacts_dir}; gating criteria ungraded.",
+        )
+        return result
+
+    # Late imports: avoid a heavy import cycle at module load (orchestrator pulls
+    # the anthropic SDK etc.); this only runs on the docker grade path.
+    from ..orchestrator import Orchestrator
+    from ..sandbox import Sandbox
+
+    # FALSE-SUCCESS GUARD: the container already wrote an authoritative-looking
+    # task.json into rt.run_dir BEFORE this re-grade runs. Because the container
+    # graded the stripped `[]` criteria, `all_criteria_passed([])` is True, so that
+    # on-disk file reads SUCCESS with vacuous grades. If the re-grade body below
+    # raises (sandbox.setup, the evaluate-only orchestrator.run — a grader timeout,
+    # a judge network blip, an OSError), the exception escapes to batch's broad
+    # `except` and the task is recorded ERROR in memory / run.json — but the on-disk
+    # task.json would still show that vacuous SUCCESS, so disk and memory diverge.
+    # We therefore run the whole body under a guard: on ANY grading-side exception we
+    # stamp the in-memory result ERROR and re-persist it to disk (option (a) from the
+    # review), so the on-disk record can NEVER stand as a false SUCCESS, then re-raise
+    # so the batch layer still records the run-level ERROR exactly as before.
+    try:
+        # Wrap the EXISTING copied-out artifacts dir (no template/venv re-materialize,
+        # no rmtree on cleanup). task_dir = the REAL host task dir so graders resolve
+        # $TASK_DIR against the host grader, never the agent's throwaway workspace.
+        host_task_dir = rt.task_file.parent.resolve()
+        # The host re-grade runs IN-PROCESS on the host, not in a container, so the
+        # sandbox driver must be switched off 'docker' — Sandbox.setup() hard-rejects
+        # driver='docker' ("must be dispatched via DockerRunner"). Mirror the driver
+        # switch run_task_internal_command already does in-container.
+        regrade_sandbox_cfg = rt.task.sandbox.model_copy(update={"driver": "tempdir"})
+        sandbox = Sandbox(regrade_sandbox_cfg, task_id=rt.task.task_id, task_dir=host_task_dir)
+        # regrade=True: wrap the copied-out artifacts WITHOUT re-materializing
+        # templates/venv (which would clobber the agent's produced files with
+        # pristine starter content and corrupt the grade).
+        await asyncio.to_thread(lambda: sandbox.setup(artifacts_dir, regrade=True))
+
+        # Run the re-grade against a THROWAWAY run_dir, NOT rt.run_dir. The container
+        # already wrote the authoritative task.json (full agent trajectory + tokens +
+        # cost) into rt.run_dir; the evaluate-only Orchestrator would otherwise
+        # overwrite it with an empty-trajectory task.json (no agent ran on the host),
+        # destroying the trajectory. We extract only the grade from the scratch run
+        # and re-persist the MERGED result to rt.run_dir ourselves below.
+        scratch_run_dir = Path(tempfile.mkdtemp(prefix="coder_eval_regrade_"))
+        try:
+            orchestrator = Orchestrator(
+                task=rt.task.model_copy(update={"sandbox": regrade_sandbox_cfg}),
+                run_dir=scratch_run_dir,
+                preservation_mode=PreservationMode.NONE,
+                task_file=rt.task_file,
+                sandbox=sandbox,
+                variant_id=rt.variant_id,
+                source_yaml=rt.source_yaml,
+                config_lineage=rt.config_lineage,
+                replicate_index=rt.replicate_index,
+                # Seed the container agent's trajectory so trajectory-based criteria
+                # (skill_triggered / command_executed / agent_judge / llm_judge
+                # capture_transcript) grade against the REAL turns. Without this the
+                # host re-grade runs agent-less with an empty trajectory and e.g.
+                # skill_triggered reports "not triggered" for every docker task.
+                # DEEP-copy: the scratch orchestrator's _finalize_result mutates
+                # TurnRecord token_usage/provider_call_costs IN PLACE (litellm join);
+                # a shallow list() would share the container result's authoritative
+                # TurnRecord objects and could corrupt its persisted cost/tokens.
+                existing_turns=[t.model_copy(deep=True) for t in result.iterations],
+                # GRADE-OUTSIDE: the container already ran pre_run/post_run against the
+                # agent turn. This host re-grade is evaluate-only (agent is None); it
+                # must NOT re-run those commands against the agent-modified artifacts
+                # (a non-idempotent or fail_on_error=True step could perturb the grade
+                # or flip a gradable run to ERROR). The scoped flag keeps the standalone
+                # `coder-eval evaluate` path — also agent-less — running pre/post as before.
+                skip_pre_post_commands=True,
+                # This scratch orchestrator runs on the HOST with the driver switched
+                # to tempdir; the authoritative driver=docker Task.End is emitted by
+                # batch.py. Suppress the scratch emit so the task isn't double-counted
+                # (once as tempdir here, once as docker on the host).
+                suppress_task_telemetry=True,
+            )
+            regraded = await orchestrator.run()
+        finally:
+            await asyncio.to_thread(shutil.rmtree, scratch_run_dir, ignore_errors=True)
+
+        # Merge the authoritative host grade onto the container result. The container
+        # ran with success_criteria stripped to [], so its grade-derived fields are
+        # vacuous (weighted_score == 0.0, empty results); the host re-grade over the
+        # FULL criteria is authoritative. Copy ALL grade-derived fields —
+        # success_criteria_results, weighted_score, AND final_status — onto the
+        # container result, which keeps its real trajectory/token/cost fields.
+        result.success_criteria_results = regraded.success_criteria_results
+        result.weighted_score = regraded.weighted_score
+        # Preserve the MAX_TURNS_EXHAUSTED diagnostic. The evaluate-only re-grade
+        # orchestrator has no agent, so a non-passing grade always comes back as
+        # plain FAILURE — but if the CONTAINER hit the turn cap, that "why did it
+        # fail" distinction is worth keeping (both are category==failed). Only the
+        # authoritative host grade can promote to SUCCESS; a failing grade keeps
+        # the container's more-specific MAX_TURNS_EXHAUSTED.
+        if result.final_status == FinalStatus.MAX_TURNS_EXHAUSTED and regraded.final_status != FinalStatus.SUCCESS:
+            pass  # leave result.final_status as MAX_TURNS_EXHAUSTED
+        else:
+            result.final_status = regraded.final_status
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        # A grading-side failure must never leave the container's vacuous
+        # `[]`-criteria SUCCESS standing on disk. Stamp the in-memory result ERROR
+        # (with the failure recorded on error_message) and re-persist so disk and
+        # the batch layer's ERROR agree, then re-raise so batch records the ERROR.
+        logger.error("Docker host re-grade failed for %s: %s", rt.task.task_id, exc, exc_info=True)
+        await _degrade_regrade_to_error(result, rt, f"Docker host re-grade failed: {type(exc).__name__}: {exc}")
+        raise
+
+    # Re-persist the MERGED result to rt.run_dir/task.json so the on-disk record
+    # carries BOTH the container's trajectory/tokens AND the host's real grades
+    # (the container's task.json had the trajectory but vacuous grades). Atomic
+    # write; best-effort — a persist failure logs but does not fail the run (the
+    # in-memory result the batch layer folds into run.json is already correct).
+    await _persist_regrade_result(result, rt)
+
+    return result
+
+
+async def _degrade_regrade_to_error(result: EvaluationResult, rt: ResolvedTask, reason: str) -> None:
+    """Stamp ``result`` ERROR (vacuous grade cleared) and re-persist to disk.
+
+    Shared by the re-grade fail-safes (no ``sandbox_path`` / artifacts dir absent)
+    and the exception guard. All three reach a state where the host CANNOT grade a
+    task that HAS gating criteria, so the container's vacuous ``[]``-criteria grade
+    (``all_criteria_passed([]) is True`` → a false SUCCESS) must never be allowed to
+    stand — on disk or in memory. Callers own control flow (return vs re-raise)
+    after this returns.
+    """
+    result.final_status = FinalStatus.ERROR
+    result.error_message = reason
+    result.success_criteria_results = []
+    result.weighted_score = 0.0
+    await _persist_regrade_result(result, rt)
+
+
+async def _persist_regrade_result(result: EvaluationResult, rt: ResolvedTask) -> None:
+    """Atomically (re-)persist ``result`` to ``rt.run_dir/task.json``.
+
+    Used on BOTH the success path (the merged container-trajectory + host-grade
+    record) and the failure path (the ERROR stamp that overwrites the container's
+    vacuous SUCCESS, so disk and the batch layer's in-memory status agree). Atomic
+    (tmp + os.replace) and best-effort — a persist failure logs but never masks the
+    caller's control flow.
+    """
+
+    def _write() -> None:
+        rt.run_dir.mkdir(parents=True, exist_ok=True)
+        target = rt.run_dir / "task.json"
+        tmp = target.with_suffix(target.suffix + ".regrade.tmp")
+        tmp.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+
+    try:
+        await asyncio.to_thread(_write)
+    except OSError as exc:
+        logger.warning("Docker host re-grade: failed to persist merged task.json for %s: %s", rt.task.task_id, exc)
 
 
 def build_error_result(

@@ -216,8 +216,10 @@ class DockerDriverConfig(BaseModel):
             "UIPATH_URL",
             "UIPATH_TENANT_ID",
             "UIPATH_ORGANIZATION_ID",
-            # Disable uip CLI version-sync: the shared ~/.uipath mount lets one
-            # task's post-login re-pin downgrade later tasks' CLI/tools.
+            # Disable uip CLI version-sync so a task's post-login re-pin can't
+            # drift the CLI/tools version. (Under docker the container gets a
+            # throwaway COPY of ~/.uipath, never the host original — see
+            # docker_runner._copy_uipath_home — so a re-pin can't reach the host.)
             "UIPATH_CLI_DISABLE_VERSION_SYNC",
             "AWS_BEARER_TOKEN_BEDROCK",
             "AWS_REGION",

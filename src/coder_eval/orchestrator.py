@@ -322,6 +322,9 @@ class Orchestrator:
         config_lineage: dict[str, ConfigLineageEntry] | None = None,
         replicate_index: int = 0,
         workspace_dir: Path | None = None,
+        skip_pre_post_commands: bool = False,
+        existing_turns: list[TurnRecord] | None = None,
+        suppress_task_telemetry: bool = False,
     ):
         """Initialize the orchestrator.
 
@@ -344,6 +347,22 @@ class Orchestrator:
                 run_dir/artifacts/<task>, and the workspace is copied out to run_dir/artifacts/<task>
                 at cleanup. Resolved host-side by DockerRunner; None keeps standard behavior.
                 Takes precedence over preservation_mode when set.
+            skip_pre_post_commands: When True, skip ``pre_run``/``post_run`` command
+                execution entirely. Set ONLY by the docker host re-grade
+                (``regrade_on_host``): the container already ran those commands
+                against the agent turn, so re-running them on the host against the
+                agent-modified artifacts could perturb the grade or (with
+                ``fail_on_error=True``) flip a gradable run to ERROR. This is a
+                scoped flag rather than a blanket "skip when agent is None" so the
+                standalone ``coder-eval evaluate`` path — also agent-less — keeps
+                running pre/post commands as before.
+            suppress_task_telemetry: When True, skip the in-process
+                ``CoderEval.Task.End`` emit in ``_finalize_result``. Set ONLY by the
+                docker host re-grade (``regrade_on_host``): that scratch orchestrator
+                runs with the driver switched to ``tempdir``, so an unsuppressed emit
+                would fire a spurious ``driver=tempdir`` event that double-counts the
+                task — the host already emits the authoritative ``driver=docker``
+                event from ``batch.py``.
         """
         self.task = task
         self.run_dir = run_dir
@@ -355,6 +374,8 @@ class Orchestrator:
         self._cost_attempt_nonce = uuid.uuid4().hex
         self.preservation_mode = preservation_mode
         self.workspace_dir = workspace_dir
+        self.skip_pre_post_commands = skip_pre_post_commands
+        self.suppress_task_telemetry = suppress_task_telemetry
         self.task_file = task_file
         self.stream_callback = stream_callback
         self.sandbox = sandbox
@@ -386,6 +407,13 @@ class Orchestrator:
 
         # Result tracking
         self.result: EvaluationResult | None = None
+
+        # Evaluate-only re-grade only: the agent's turns from a PRIOR run (e.g. the
+        # docker agent-only container's task.json), seeded into result.iterations so
+        # trajectory-based criteria (skill_triggered / command_executed / agent_judge /
+        # llm_judge capture_transcript) grade against the REAL trajectory instead of an
+        # empty one. None on every normal (agent-attached) run.
+        self._existing_turns: list[TurnRecord] | None = existing_turns
 
         # Reference solution cache (loaded on-demand)
         self._reference_code: str | None = None
@@ -456,6 +484,12 @@ class Orchestrator:
             iteration_count=0,
             environment_info=get_version_info(),
         )
+
+        # Evaluate-only re-grade: seed the prior run's trajectory so trajectory-based
+        # criteria see the real agent turns (the grading call below reads
+        # self.result.iterations). Only set on the re-grade path; empty otherwise.
+        if self._existing_turns is not None:
+            self.result.iterations = list(self._existing_turns)
 
         # Calculate task log path
         task_log_file = task_log_path(self.run_dir)
@@ -766,9 +800,14 @@ class Orchestrator:
         # build_task_event. Non-docker tasks finalize on the host and emit here.
         from .telemetry import track_event
 
-        driver = self.task.sandbox.driver if self.task.sandbox else ""
-        name, props = build_task_event(self.result, driver=driver, variant_id=self.variant_id or "")
-        track_event(name, props)
+        # The docker host re-grade runs this orchestrator on the host with the
+        # driver switched to tempdir purely to grade copied-out artifacts; the
+        # authoritative driver=docker Task.End is emitted by batch.py. Suppress the
+        # scratch emit so the task isn't double-counted (once tempdir, once docker).
+        if not self.suppress_task_telemetry:
+            driver = self.task.sandbox.driver if self.task.sandbox else ""
+            name, props = build_task_event(self.result, driver=driver, variant_id=self.variant_id or "")
+            track_event(name, props)
 
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
@@ -1481,10 +1520,13 @@ class Orchestrator:
             # below.) Check the criteria directly against the sandbox.
             assert self.success_checker is not None
             assert self.result is not None
+            # Only WARN when there is genuinely no trajectory to grade against.
+            # On the docker grade-outside path the container's turns are seeded via
+            # existing_turns, so trajectory-based (requires_agent) criteria DO have
+            # their real trajectory — no warning, and they grade correctly.
             unsupported = [c.type for c in self.task.success_criteria if c.requires_agent]
-            if unsupported:
-                # Only reachable on the evaluate-only path (no agent attached):
-                # re-grading a completed agent run whose trajectory is gone.
+            if unsupported and not self.result.iterations:
+                # Re-grading a completed agent run whose trajectory is gone.
                 logger.warning(
                     "Criteria %s require agent execution; results may be incomplete with no agent",
                     unsupported,
@@ -2244,8 +2286,12 @@ class Orchestrator:
         outer ``except Exception`` handler and lands the run as
         ``FinalStatus.ERROR``. Post-run commands and cleanup still execute via
         the ``finally`` block.
+
+        Skipped entirely under ``skip_pre_post_commands`` (docker host re-grade):
+        the container already ran pre_run against the agent turn, and re-running it
+        against the agent-modified artifacts could perturb the grade.
         """
-        if self.result is None:
+        if self.result is None or self.skip_pre_post_commands:
             return
         await self._run_command_list(self.task.pre_run, self.result.pre_run_results, "pre_run")
 
@@ -2255,8 +2301,11 @@ class Orchestrator:
         See ``_run_command_list``. Post-run commands are informational only —
         ``fail_on_error`` is not part of ``PostRunCommand``, so failures are
         warning-logged and never affect the evaluation verdict.
+
+        Skipped entirely under ``skip_pre_post_commands`` (docker host re-grade):
+        the container already ran post_run; re-running it on the host is redundant.
         """
-        if self.result is None:
+        if self.result is None or self.skip_pre_post_commands:
             return
         await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
 

@@ -289,6 +289,19 @@ class PreRunCommand(BaseModel):
     )
 
 
+# SSOT for the agent-hidden task fields: the fields whose values are grading
+# material (expected values / reference solution) and must never reach the
+# agent-readable staged task.yaml under driver: docker. Each maps to a
+# validation-safe empty so the stripped projection still re-parses as a valid
+# TaskDefinition:
+#   - success_criteria is required (a bare list), so it becomes [] (not omitted).
+#   - reference is optional, so it becomes None.
+# Consumed by TaskDefinition.agent_safe_dump. AGENT_HIDDEN_TASK_FIELDS is derived
+# from this map so the field set and the empties never drift.
+_AGENT_HIDDEN_FIELD_EMPTIES: dict[str, Any] = {"success_criteria": [], "reference": None}
+AGENT_HIDDEN_TASK_FIELDS = frozenset(_AGENT_HIDDEN_FIELD_EMPTIES)
+
+
 class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unknown_fields below
     """Complete definition of an evaluation task.
 
@@ -466,6 +479,33 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         """
         return self.agent is not None and self.agent.type == AgentKind.NONE
 
+    def agent_safe_dump(self) -> dict[str, Any]:
+        """``model_dump(mode='json')`` with the agent-hidden fields replaced by
+        validation-safe empties.
+
+        Under ``driver: docker`` the agent container never receives the full
+        ``TaskDefinition``: the host stages this stripped copy as the agent-readable
+        ``task.yaml`` so it carries no grading material. ``success_criteria`` is
+        required so it becomes ``[]`` (not omitted); ``reference`` becomes ``None``.
+        The full criteria stay on the HOST (which grades the copied-out artifacts
+        after the container exits) and never cross the container boundary.
+
+        SCOPE — only ``success_criteria`` and ``reference`` are stripped. Every OTHER
+        field the agent legitimately needs (``initial_prompt``, ``system_prompt``,
+        pre/post commands, ``metadata``) survives verbatim into the agent-readable
+        ``task.yaml``, so a task author MUST NOT hide grading material (expected
+        values, the reference answer, grader oracle hints) in any of those fields —
+        it would leak straight to the agent.
+
+        Idempotent on an already-empty task (``success_criteria=[]``,
+        ``reference=None``) and safe for a ``type: none`` task (only the two hidden
+        fields are touched).
+        """
+        data = self.model_dump(mode="json")
+        for field, empty in _AGENT_HIDDEN_FIELD_EMPTIES.items():
+            data[field] = empty
+        return data
+
     @model_validator(mode="after")
     def check_prompt_fields(self) -> Self:
         """Validate initial_prompt / initial_prompt_file combination.
@@ -622,7 +662,19 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
     @field_validator("success_criteria")
     @classmethod
     def validate_success_criteria(cls, v: Any) -> Any:
-        """Ensure at least one success criterion is defined."""
-        if not v:
-            raise ValueError("At least one success criterion must be defined")
+        """Require the field to be a (possibly empty) list.
+
+        An empty list is a valid INTERNAL state: under ``driver: docker`` the
+        agent container runs the agent turn only and is handed a criteria-stripped
+        copy of the task (``agent_safe_dump`` sets ``success_criteria: []`` so no
+        grading material crosses the boundary), which the in-container path must be
+        able to re-parse to run the agent. The host holds the full, unstripped
+        criteria and grades the copied-out artifacts after the container exits.
+
+        Authored tasks still supply real criteria; an empty list only ever arises
+        from the framework's own strip, never from a hand-written task YAML that a
+        user expects to gate on.
+        """
+        if v is None:
+            raise ValueError("success_criteria must be a list")
         return v
