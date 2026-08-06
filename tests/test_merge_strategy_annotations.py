@@ -32,6 +32,7 @@ class TestSandboxStrategies:
         [
             (SandboxConfig, "template_sources", "append"),
             (SandboxConfig, "mock_path_dirs", "replace"),
+            (SandboxConfig, "record_cli", "replace"),
             (SandboxConfig, "ignore_patterns", "replace"),
             (SandboxConfig, "driver", "replace"),
             # nested models / dicts take the type-aware deep default (no annotation):

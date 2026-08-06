@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
+from coder_eval.models.sandbox import RECORD_CLI_LOG
 
 
 # SECURITY: ignore_patterns floor. The judge's working directory is a copy of
@@ -565,7 +566,14 @@ class CliCalledCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["cli_called"] = "cli_called"
-    log: str = Field(description="Path to the JSON Lines invocation log, relative to the sandbox working directory")
+    log: str = Field(
+        default=RECORD_CLI_LOG,
+        description=(
+            "Path to the JSON Lines invocation log, relative to the sandbox working directory. "
+            f"Defaults to '{RECORD_CLI_LOG}', where SandboxConfig.record_cli writes, so a task using "
+            "generated recorders never repeats it"
+        ),
+    )
     verb: str | None = Field(
         default=None,
         min_length=1,

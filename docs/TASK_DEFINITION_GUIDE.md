@@ -17,6 +17,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Agent Configuration](#agent-configuration)
 - [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
+  - [Recording CLI Invocations](#recording-cli-invocations)
 - [Template Sources](#template-sources)
 - [Success Criteria](#success-criteria)
   - [Continuous Scoring](#continuous-scoring)
@@ -513,6 +514,33 @@ Under `driver: tempdir` only `timeout` is enforced — the agent can consume
 arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
 container limits above to actually bind.
 
+### Recording CLI Invocations
+
+`record_cli` shadows executables with generated recording shims, so a task can assert on **what the agent actually ran** without hand-writing a mock:
+
+```yaml
+sandbox:
+  record_cli:
+    - tool: uip
+      exit_code: 1
+      stderr: "uip: not connected to a tenant in this sandbox.\n"
+    - tool: curl                   # so a disobedient agent cannot reach the network
+```
+
+Each shim records the invocation, writes the configured `stdout`/`stderr`, and exits with `exit_code` — which **defaults to 1**, so a bare `- tool: curl` makes the shadowed tool look like it failed. Set `exit_code: 0` when the agent should see success. Values outside 0-255 are rejected, since `sys.exit` truncates mod 256.
+
+`tool` must be a bare executable name, and a small reserved set (`python`, `python3`, `env`, `sh`, `bash`, `node`, `git`, `uv`, `cmd`) is refused: shadowing those breaks the harness itself rather than the tool under test — the shim's own interpreter, or the shell that `run_command` criteria use.
+
+The sandbox writes the shims into `cli_mocks/` and PATH-prepends that directory, then appends one JSON record per invocation to `cli_mocks/calls.jsonl` — the log [`cli_called`](#cli_called) reads by default. Nothing else to wire: no `mock_path_dirs`, no `template_sources`, no `log:` on the criterion.
+
+Notes:
+
+- **A `.cmd` twin** is generated beside each shim so a bare `uip` also resolves through Windows PATHEXT lookup.
+- **The log is seeded empty**, so a correct run that legitimately calls nothing still satisfies a `max_count: 0` guard — while a *missing* log (mock never ran, or wrote elsewhere) still fails.
+- **stdin is never read** by the shim: reading it would block whenever the sandbox leaves stdin attached to an open pipe, hanging the task.
+- **Collisions are rejected.** If a `mock_path_dirs` entry already provides an executable of the same name, setup raises rather than letting directory order decide which one runs.
+- **It stubs a tool; it does not proxy one, and it does not serve per-invocation responses.** Recording a *real* executable on the way through, or returning different output per invocation, stays a hand-written mock under `mock_path_dirs` — both depend on state the harness cannot guarantee (the tool being installed, PATH order, live credentials, a fixture set).
+
 ## Template Sources
 
 Tasks can start with preset files instead of an empty sandbox. Multiple sources are applied sequentially (last wins for conflicts).
@@ -870,7 +898,7 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
 ```yaml
 - type: "cli_called"
   description: "Switched the project to the capable model"
-  log: "mocks/calls.jsonl"            # Path to the JSON Lines invocation log (required)
+  log: "mocks/calls.jsonl"            # Invocation log; omit it to use the record_cli default
   verb: "ixp projects configure-model" # Ordered prefix of the non-flag arguments
   positional: ["my_invoices-ixp"]      # Non-flag arguments following the verb, in order
   flags:
@@ -880,6 +908,8 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
   max_count: null                      # Maximum; null = unbounded, 0 = forbidden
   ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
 ```
+
+`log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
 
 **Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
 
@@ -925,7 +955,7 @@ Defaulting to "switch" is deliberate: `--yes` / `--force` / `-y` before the targ
 
 `ignore_flags` drops a flag from matching but does **not** make it value-bearing — an ignored flag that takes a value must also appear in `value_flags` (as `output` does by default). Otherwise `ignore_flags: ["verbose"]` on `delete --verbose proj-1` would let `--verbose` eat `proj-1`.
 
-**Limitation: bundled short flags are not split.** `-rf` parses as one flag named `rf`, so a predicate on `f` will not see it — including `absent: true`, which passes despite `-rf` being present. Assert on the long spelling, or add the bundled form via `aliases`. Likewise a bare negative number in flag position (`seek -1`) is read as a flag named `1`.
+**Clustered short flags are split, and declarations win.** `-rf` matches predicates on `r` and `f` — so a `-yf` cannot escape an `aliases: ["y"]` guard. If your CLI has a genuine multi-character short flag, naming it (in `flags`, `value_flags`, or `ignore_flags`) keeps it whole; and `-fvalue` binds when `f` is value-bearing. A bare negative number stays positional (`seek -1`), unless you declare a flag by that name (`head -1`).
 
 **Negative guards want the FEWEST facets that capture the forbidden act.** This is the opposite of a positive assertion, and it is easy to get backwards. `max_count: 0` passes when *nothing matches*, so every facet you add is another way for the real invocation to slip past the pattern and report a false PASS.
 
