@@ -33,7 +33,15 @@ from .protocol import (
 )
 
 
-STARTUP_TIMEOUT_SECONDS = 10.0
+# Generous on purpose: normal startup is well under a second, but a loaded box
+# running many parallel test workers can stretch subprocess spawn + import +
+# bind far past a tight deadline. The common case is unaffected -- the poll
+# returns as soon as the endpoint file appears.
+STARTUP_TIMEOUT_SECONDS = 30.0
+
+# Child stderr is captured here (inside the runtime dir) so a startup failure
+# or timeout can report what the server actually said.
+SERVER_STDERR_NAME = "server-stderr.log"
 
 # Host-side per-task invocation log, written next to task.json in the run dir
 # (never inside the sandbox). Diagnostic surface: the `cli_called` criterion
@@ -118,20 +126,24 @@ class ProtectedMockRuntime:
             )
             self.token = secrets.token_hex(16)
             (self._runtime_dir / TOKEN_FILE_NAME).write_text(self.token + "\n", encoding="utf-8")
-            self._process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "coder_eval.protected_mock.server",
-                    "--config",
-                    str(config_path),
-                    "--runtime-dir",
-                    str(self._runtime_dir),
-                    "--transport",
-                    self._transport,
-                ],
-                stdin=subprocess.DEVNULL,
-            )
+            # Capture stderr to a file (not a pipe -- nothing drains a pipe, and a
+            # full one would deadlock the child) so failures are diagnosable.
+            with (self._runtime_dir / SERVER_STDERR_NAME).open("wb") as stderr_sink:
+                self._process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "coder_eval.protected_mock.server",
+                        "--config",
+                        str(config_path),
+                        "--runtime-dir",
+                        str(self._runtime_dir),
+                        "--transport",
+                        self._transport,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stderr=stderr_sink,
+                )
             self.endpoint = self._await_endpoint()
         except Exception:
             self.stop()
@@ -140,16 +152,37 @@ class ProtectedMockRuntime:
     def _await_endpoint(self) -> str:
         assert self._runtime_dir is not None and self._process is not None
         endpoint_file = self._runtime_dir / ENDPOINT_FILE_NAME
-        deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+        started = time.monotonic()
+        deadline = started + STARTUP_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
-                raise RuntimeError(f"protected mock server exited during startup with code {self._process.returncode}")
+                raise RuntimeError(
+                    f"protected mock server exited during startup with code {self._process.returncode}"
+                    + self._server_stderr_suffix()
+                )
             if endpoint_file.is_file():
                 endpoint = endpoint_file.read_text(encoding="utf-8").strip()
                 if endpoint:
                     return endpoint
             time.sleep(0.02)
-        raise RuntimeError(f"protected mock server did not publish its endpoint within {STARTUP_TIMEOUT_SECONDS}s")
+        waited = time.monotonic() - started
+        raise RuntimeError(
+            f"protected mock server did not publish its endpoint within {waited:.1f}s "
+            f"(deadline {STARTUP_TIMEOUT_SECONDS}s)" + self._server_stderr_suffix()
+        )
+
+    def _server_stderr_suffix(self) -> str:
+        """Tail of the child's captured stderr, formatted for an error message."""
+        if self._runtime_dir is None:
+            return ""
+        stderr_file = self._runtime_dir / SERVER_STDERR_NAME
+        try:
+            text = stderr_file.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        if not text:
+            return ""
+        return f"; server stderr (tail): {text[-2000:]}"
 
     def stop(self) -> None:
         """Terminate the server (kill on a slow exit) and remove the scratch dir."""
@@ -157,15 +190,33 @@ class ProtectedMockRuntime:
             if self._process.poll() is None:
                 self._process.terminate()
                 try:
-                    self._process.wait(timeout=3)
+                    # Generous under load: the graceful window only delays the
+                    # slow path, and kill() below is unconditional force.
+                    self._process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self._process.kill()
                     with contextlib.suppress(subprocess.TimeoutExpired):
-                        self._process.wait(timeout=3)
+                        self._process.wait(timeout=5)
             self._process = None
         if self._runtime_dir is not None:
-            shutil.rmtree(self._runtime_dir, ignore_errors=True)
+            self._remove_runtime_dir(self._runtime_dir)
             self._runtime_dir = None
+
+    @staticmethod
+    def _remove_runtime_dir(runtime_dir: Path) -> None:
+        """Remove the scratch dir, retrying briefly.
+
+        Windows releases a killed child's file handles asynchronously after
+        ``wait()`` returns, so an immediate rmtree can silently strand the
+        directory. Still best-effort: gives up without raising after the
+        deadline -- teardown must never take the run down.
+        """
+        deadline = time.monotonic() + 10.0
+        while True:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+            if not runtime_dir.exists() or time.monotonic() >= deadline:
+                return
+            time.sleep(0.05)
 
     def __enter__(self) -> ProtectedMockRuntime:
         self.start()
