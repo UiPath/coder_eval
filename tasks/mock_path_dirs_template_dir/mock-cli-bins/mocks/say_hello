@@ -1,2 +1,11 @@
 #!/bin/sh
-echo "MOCK_PATH_OK from say_hello, args=$*"
+# The receipt line is assembled at RUNTIME from the invocation (argument count
+# and total argument length), so the exact text the task's criteria assert on
+# appears nowhere in this file. Reading the source is not a substitute for
+# executing the mock.
+argc=$#
+argchars=0
+for arg in "$@"; do
+    argchars=$((argchars + ${#arg}))
+done
+printf 'MOCK_PATH_OK say_hello argc=%s argchars=%s\n' "$argc" "$argchars"

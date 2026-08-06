@@ -26,7 +26,20 @@ initial_prompt: |
   Make all tests pass.
 
 success_criteria:
+  # The template ships `tests/` into the sandbox on purpose -- they are the spec
+  # the agent codes against. Grading therefore runs the PRISTINE host copy of the
+  # same tests against the sandbox's `src/` (cwd stays the sandbox), so edits to
+  # the sandbox copy cannot move the bar.
+  #
+  # TASK_DIR is read via os.environ rather than shell `$TASK_DIR` so the command
+  # behaves identically under sh and cmd.exe. `-c` pins the template's own
+  # pytest.ini as the config, so the enclosing repo's pytest settings are not
+  # inherited; `-B` and `-p no:cacheprovider` keep the run from writing bytecode
+  # or a cache directory into the host template.
   - type: run_command
-    description: "All tests pass"
-    command: "python -m pytest tests/"
+    description: "All tests pass (graded against the pristine host copy of tests/)"
+    command: >-
+      python -B -c "import os, pathlib, sys, pytest;
+      tpl = pathlib.Path(os.environ['TASK_DIR']).parent / 'templates' / 'fibonacci-starter';
+      sys.exit(pytest.main(['-p', 'no:cacheprovider', '-c', str(tpl / 'pytest.ini'), str(tpl / 'tests')]))"
     timeout: 60

@@ -1,5 +1,13 @@
 #!/bin/sh
-echo "ECHO_ARGS_OK count=$#"
+# Same runtime-derived receipt shape as say_hello: the header counts the
+# arguments and their total length, and each argument is echoed with its own
+# length. None of the asserted lines exist verbatim in this file.
+argc=$#
+argchars=0
 for arg in "$@"; do
-    echo "  arg: $arg"
+    argchars=$((argchars + ${#arg}))
+done
+printf 'ECHO_ARGS_OK argc=%s argchars=%s\n' "$argc" "$argchars"
+for arg in "$@"; do
+    printf 'arg[%s]=%s\n' "${#arg}" "$arg"
 done

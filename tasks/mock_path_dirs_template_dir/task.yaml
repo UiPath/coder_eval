@@ -19,8 +19,7 @@ sandbox:
 
 initial_prompt: |
   Two mock CLI binaries (`say_hello`, `echo_args`) have been placed on the agent's
-  PATH via the sandbox's mock_path_dirs feature. Their sources live under `mocks/`
-  in the working directory.
+  PATH via the sandbox's mock_path_dirs feature.
 
   Run, in this order, capturing stdout to the named files (do not write the files
   yourself -- they must be produced by shell redirection from the command):
@@ -30,18 +29,22 @@ initial_prompt: |
 
   Confirm afterwards that both output files exist.
 
+# Each mock composes its receipt at runtime from the invocation (argument count
+# and argument lengths), so none of the asserted lines exist verbatim in the
+# scripts that ship into the sandbox. Reading the mock sources is therefore not a
+# shortcut to satisfying these criteria -- the mocks have to be executed.
 success_criteria:
   - type: "file_exists"
     path: "say_hello.out"
     description: "say_hello.out must be produced by the say_hello mock's stdout."
   - type: "file_contains"
     path: "say_hello.out"
-    includes: ["MOCK_PATH_OK from say_hello, args=world"]
-    description: "say_hello.out must contain the mock's signature line with the passed arg."
+    includes: ["MOCK_PATH_OK say_hello argc=1 argchars=5"]
+    description: "say_hello.out must contain the receipt say_hello computes from its arguments."
   - type: "file_exists"
     path: "echo_args.out"
     description: "echo_args.out must be produced by the echo_args mock."
   - type: "file_contains"
     path: "echo_args.out"
-    includes: ["ECHO_ARGS_OK count=3", "arg: one", "arg: two", "arg: three"]
-    description: "echo_args.out must contain the mock's args breakdown."
+    includes: ["ECHO_ARGS_OK argc=3 argchars=11", "arg[3]=one", "arg[3]=two", "arg[5]=three"]
+    description: "echo_args.out must contain the receipt echo_args computes from its arguments."

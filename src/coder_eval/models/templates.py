@@ -6,7 +6,7 @@ import os
 from abc import ABC
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class StarterFile(BaseModel):
@@ -56,6 +56,16 @@ class TemplateDirSource(BaseTemplateSource):
             "see `_matches_template_include_pattern`."
         ),
     )
+    exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Template-relative glob patterns that are never copied into the sandbox. Exclusion is "
+            "terminal: it beats `include_patterns` and beats a `!`-negated default ignore pattern, "
+            "so an excluded path cannot be brought back by either. Use it to keep grading material "
+            "(expected outputs, reference solutions, verifier fixtures) out of the agent's working "
+            "copy. `*` does not stop at `/`, see `_matches_template_exclude_pattern`."
+        ),
+    )
 
     @field_validator("mount_point")
     @classmethod
@@ -69,17 +79,18 @@ class TemplateDirSource(BaseTemplateSource):
             raise ValueError(f"mount_point must not contain '..' segments, got: {v!r}")
         return v
 
-    @field_validator("include_patterns")
+    @field_validator("include_patterns", "exclude_patterns")
     @classmethod
-    def _validate_include_patterns(cls, v: list[str]) -> list[str]:
+    def _validate_patterns(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        field = info.field_name
         for pattern in v:
             if not pattern:
-                raise ValueError("include_patterns entries must not be empty")
+                raise ValueError(f"{field} entries must not be empty")
             if os.path.isabs(pattern) or pattern.startswith(("/", "\\")):
-                raise ValueError(f"include_patterns entries must be relative, got: {pattern!r}")
+                raise ValueError(f"{field} entries must be relative, got: {pattern!r}")
             parts = pattern.replace("\\", "/").split("/")
             if any(p == ".." for p in parts):
-                raise ValueError(f"include_patterns entries must not contain '..' segments, got: {pattern!r}")
+                raise ValueError(f"{field} entries must not contain '..' segments, got: {pattern!r}")
         return v
 
 

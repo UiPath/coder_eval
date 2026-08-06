@@ -19,6 +19,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Sandbox Configuration](#sandbox-configuration)
   - [Recording CLI Invocations](#recording-cli-invocations)
 - [Template Sources](#template-sources)
+- [Grading Assets and the Sandbox Boundary](#grading-assets-and-the-sandbox-boundary)
 - [Success Criteria](#success-criteria)
   - [Continuous Scoring](#continuous-scoring)
   - [file_exists](#file_exists)
@@ -565,6 +566,8 @@ template_sources:
   - type: "template_dir"
     path: "../templates/python-starter"  # Relative to task YAML file
     mount_point: "."                      # Optional: subdir inside sandbox to copy into (default ".")
+    include_patterns: []                  # Optional: copy these even if default-ignored
+    exclude_patterns: []                  # Optional: never copy these
 ```
 
 The framework automatically ignores `.venv`, `.git`, `__pycache__`, `node_modules`, `dist`, `build`, and other common build/cache artifacts (full list: `coder_eval/resources/default_ignore_patterns.yaml`).
@@ -575,6 +578,23 @@ Override the defaults via `sandbox.ignore_patterns` (or `agent.ignore_patterns` 
 - A `!`-prefixed pattern (gitignore-style negation, e.g. `!dist`) — removes that pattern from the defaults so the directory survives the template copy. Useful for tasks that ship a vendored toolchain under `dist/` or `node_modules/`. Surrounding whitespace is stripped; bare `!` and empty entries raise `ValueError` at YAML load.
 
 `mount_point` controls where inside the sandbox the template contents land. With `mount_point: "."` (default) files are copied to the sandbox root. With `mount_point: "c"` everything from the source directory ends up under `<sandbox>/c/`. The mount point must be a relative path that stays within the sandbox.
+
+#### Per-source `include_patterns` and `exclude_patterns`
+
+Two optional per-source lists refine which template paths reach the sandbox. Both take template-relative glob patterns matched with `fnmatch`, where `*` does **not** stop at `/`, so `grading/*` also matches `grading/fixtures/expected.json`. A leading `./` is stripped. Absolute paths, `..` segments, and empty entries are rejected at YAML load.
+
+- `include_patterns` - copy a path **even though** it matches a default ignore pattern. Useful for a template that commits a build output under `dist/`. This is author-controlled, so re-including sensitive directories such as `.git` or `.env` is possible; review the patterns you write.
+- `exclude_patterns` - **never** copy a path. Exclusion is terminal: it beats `include_patterns` and beats a `!`-negated `ignore_patterns` entry, so an excluded path cannot be brought back by either.
+
+```yaml
+template_sources:
+  - type: "template_dir"
+    path: "./project"
+    # The agent gets the project; the grading oracle stays on the host.
+    exclude_patterns: ["grading", "grading/*", "**/*.expected"]
+```
+
+`exclude_patterns` is the mechanism for a template that doubles as both the agent's starting point and the source of grading material: ship the working files, withhold the expected outputs. See [Grading Assets and the Sandbox Boundary](#grading-assets-and-the-sandbox-boundary) for where grading material should live in the first place.
 
 ### Inline Starter Files
 
@@ -632,6 +652,44 @@ variants:
 In this example, the `with-context-hint` variant gets the same sandbox as `baseline`, plus a `CLAUDE.md` file written into the sandbox root. Since variant template sources are appended last, they can also overwrite files from earlier sources (last-wins).
 
 This pattern is especially useful for A/B testing whether additional context improves agent performance.
+
+## Grading Assets and the Sandbox Boundary
+
+Anything copied into the sandbox is material the agent can read. If a criterion's answer is sitting in the working directory, the task stops measuring the skill it was written for: the agent can satisfy the criterion by reading grading material rather than by doing the work.
+
+**Convention: grading assets live next to the task YAML, not in a template.** Expected outputs, reference data, rubrics, and verifier scripts belong in the task's own directory. The task directory is never copied into the sandbox, so the agent has no path to it, while the framework, which runs host-side, does:
+
+| Surface | How it reaches the task directory |
+|---------|-----------------------------------|
+| `run_command` criteria (and `pre_run` / `post_run`) | The `TASK_DIR` environment variable is set for every command, so `"$TASK_DIR/verifier/check.py"` resolves host-side while the command's working directory stays the sandbox. Commands run through the platform shell, so `$TASK_DIR` expands under `sh` but not under `cmd.exe`; a command that must grade identically on both should read the variable from inside the program it launches instead. |
+| `llm_judge` / `agent_judge` `files:` entries | An entry prefixed with `$TASK_DIR/` is read from the host filesystem relative to the task YAML's parent directory instead of from the sandbox. |
+| `reference:` | `reference.file` is resolved relative to the task YAML and loaded host-side; the reference solution never enters the sandbox. |
+
+A task directory therefore looks like this:
+
+```text
+tasks/my-task/
+├── task.yaml            # references ./verifier and ../templates/my-project
+├── verifier/            # grading only - stays on the host
+│   └── check.py
+└── expected/
+    └── report.json
+```
+
+**When the sandbox copy and the grading copy are the same files.** Some tasks ship tests on purpose - TDD-style, the tests *are* the spec the agent codes against. That is fine, but grade against the pristine host copy, not the sandbox copy the agent can edit. `tasks/fibonacci_with_template.yaml` is the worked example: the template ships `tests/` into the sandbox, and the criterion resolves the same tests under `TASK_DIR` and runs that host copy against the sandbox's `src/`, so rewriting the sandbox copy cannot move the bar.
+
+Where a template mixes working files and grading files in one tree, [`exclude_patterns`](#per-source-include_patterns-and-exclude_patterns) withholds the grading paths from the copy while the rest of the template still ships.
+
+### Test-data separation and its limits
+
+These mechanisms are hygiene, not containment. Under the `tempdir` driver the agent runs as the host user with the host filesystem in reach, so nothing here prevents a determined agent from reading a file outside its working directory. What they do is remove every path the agent is *pointed at*: the criterion's answer is no longer in the working directory, no longer named in the prompt, and no longer a plausible thing to stumble over while working.
+
+Two separate efforts cover what this does not:
+
+- **Containment** - the `docker` driver's UID/GID isolation, which makes host paths genuinely unreachable rather than merely unadvertised.
+- **Detection** - transcript-level analysis of what the agent actually read during a run.
+
+Treat unintended access to grading material as a task-authoring defect: if a criterion can be satisfied without doing the work, the exposure is in the task, and moving the asset host-side is the fix.
 
 ## Success Criteria
 

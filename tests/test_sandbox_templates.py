@@ -337,6 +337,95 @@ class TestTemplateIgnorePatterns:
         with pytest.raises(ValueError, match="must not be empty"):
             TemplateDirSource(path="/tmp/x", include_patterns=[""])
 
+    def test_template_exclude_patterns_withhold_nested_paths(self, tmp_path):
+        """`exclude_patterns` keeps grading material out of the sandbox copy."""
+        template_dir = tmp_path / "template"
+        (template_dir / "src").mkdir(parents=True)
+        (template_dir / "grading" / "fixtures").mkdir(parents=True)
+        (template_dir / "src" / "main.py").write_text("def solve(): ...")
+        (template_dir / "grading" / "expected.json").write_text('{"answer": 42}')
+        (template_dir / "grading" / "fixtures" / "oracle.txt").write_text("42")
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            template_sources=[
+                TemplateDirSource(path=str(template_dir), exclude_patterns=["grading", "grading/*"]),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-exclude-nested")
+
+        try:
+            sandbox_path = sandbox.setup()
+
+            assert (sandbox_path / "src" / "main.py").exists()
+            assert not (sandbox_path / "grading").exists()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_exclude_patterns_beat_include_patterns(self, tmp_path):
+        """An excluded path cannot be brought back by `include_patterns`."""
+        template_dir = tmp_path / "template"
+        dist_dir = template_dir / "tools" / "fil" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("console.log('built')")
+        (dist_dir / "answers.json").write_text('{"answer": 42}')
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            template_sources=[
+                TemplateDirSource(
+                    path=str(template_dir),
+                    include_patterns=["tools/*/dist", "tools/*/dist/**"],
+                    exclude_patterns=["tools/*/dist/answers.json"],
+                ),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-exclude-beats-include")
+
+        try:
+            sandbox_path = sandbox.setup()
+
+            assert (sandbox_path / "tools" / "fil" / "dist" / "index.js").exists()
+            assert not (sandbox_path / "tools" / "fil" / "dist" / "answers.json").exists()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_exclude_patterns_beat_ignore_negation(self, tmp_path):
+        """An excluded path stays out even when `!`-negation un-ignores its directory."""
+        template_dir = tmp_path / "template"
+        (template_dir / "dist").mkdir(parents=True)
+        (template_dir / "dist" / "bundle.js").write_text("console.log('built')")
+        (template_dir / "dist" / "answers.json").write_text('{"answer": 42}')
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            ignore_patterns=["!dist"],
+            template_sources=[
+                TemplateDirSource(path=str(template_dir), exclude_patterns=["dist/answers.json"]),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-exclude-beats-negation")
+
+        try:
+            sandbox_path = sandbox.setup()
+
+            assert (sandbox_path / "dist" / "bundle.js").exists()
+            assert not (sandbox_path / "dist" / "answers.json").exists()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_exclude_patterns_reject_absolute_or_parent(self):
+        """Validator rejects absolute paths and `..` segments in exclude_patterns."""
+        with pytest.raises(ValueError, match="must be relative"):
+            TemplateDirSource(path="/tmp/x", exclude_patterns=["/etc/passwd"])
+        with pytest.raises(ValueError, match=r"must not contain '\.\.'"):
+            TemplateDirSource(path="/tmp/x", exclude_patterns=["../escape/**"])
+        with pytest.raises(ValueError, match="must not be empty"):
+            TemplateDirSource(path="/tmp/x", exclude_patterns=[""])
+
 
 class TestStarterFiles:
     """Tests for starter_files functionality."""

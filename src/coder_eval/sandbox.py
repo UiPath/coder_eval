@@ -354,6 +354,12 @@ class Sandbox:
         for item in template_path.rglob("*"):
             # Calculate relative path
             rel_path = item.relative_to(template_path)
+            # Exclusion is terminal and is therefore checked first: an excluded path is
+            # never copied, so it beats `include_patterns` and beats a `!`-negated
+            # default ignore pattern. This is how a task keeps grading material out of
+            # the agent's working copy while still shipping the rest of the template.
+            if self._matches_template_exclude_pattern(rel_path, source.exclude_patterns):
+                continue
             # Match ignore patterns against the template-relative path only —
             # checking the absolute path would let an ancestor directory named
             # `dist`, `build`, `env`, `venv`, or `node_modules` filter out the
@@ -619,6 +625,17 @@ class Sandbox:
             if fnmatch.fnmatchcase(normalized_path, normalized_pattern):
                 return True
         return False
+
+    def _matches_template_exclude_pattern(self, rel_path: Path, exclude_patterns: list[str]) -> bool:
+        """Return whether a template-relative path is withheld from the sandbox copy.
+
+        Matching is identical to :meth:`_matches_template_include_pattern`: the
+        same ``fnmatchcase`` form where ``*`` does not stop at ``/``, so
+        ``grading/*`` also withholds every descendant of ``grading/``. Only the
+        decision differs: an exclude match is terminal, so the path is dropped
+        regardless of ``include_patterns`` or ignore-pattern negations.
+        """
+        return self._matches_template_include_pattern(rel_path, exclude_patterns)
 
     def _setup_virtualenv(self) -> None:
         """Create a Python virtual environment in the sandbox."""
