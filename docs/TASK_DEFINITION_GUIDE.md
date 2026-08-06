@@ -541,6 +541,43 @@ Notes:
 - **Collisions are rejected.** If a `mock_path_dirs` entry already provides an executable of the same name, setup raises rather than letting directory order decide which one runs.
 - **It stubs a tool; it does not proxy one, and it does not serve per-invocation responses.** Recording a *real* executable on the way through, or returning different output per invocation, stays a hand-written mock under `mock_path_dirs` — both depend on state the harness cannot guarantee (the tool being installed, PATH order, live credentials, a fixture set).
 
+### Protected Fixture-Backed CLIs
+
+Use `protected_mocks` when `uip` or another mock needs different fixture-backed responses and the fixture itself must not be readable by the evaluated agent. Runtime sealing is unnecessary: the protected fixture is staged directly for `mockd` and never enters the agent workspace. This requires the Docker driver and its default UID/GID isolation:
+
+```yaml
+sandbox:
+  driver: docker
+  protected_mocks:
+    - tool: uip
+      fixture: ./fixtures/uip-troubleshoot.json
+      max_requests: 100
+```
+
+The agent receives a thin `cli_mocks/uip` wrapper. The fixture is copied into a per-run staging directory, mounted below the private `mockd` filesystem parent, and read only by the `mockd` UID. The client speaks a bounded Unix-socket protocol and has no file-read, path, glob, search, dump, or debug operation. Calls use the existing `cli_mocks/calls.jsonl` schema.
+
+Fixture files map exact argument lists to responses:
+
+```json
+{
+  "version": 1,
+  "responses": [
+    {
+      "argv": ["rpa", "get-errors", "--output", "json"],
+      "exit_code": 0,
+      "stdout": "{\"errors\":[]}\n",
+      "stderr": ""
+    }
+  ],
+  "default": {
+    "exit_code": 2,
+    "stderr": "command not configured for this scenario\n"
+  }
+}
+```
+
+Matching is deliberately exact. Duplicate argv entries, malformed responses, oversized output, request-budget exhaustion, and service startup failures all fail loudly. `protected_mocks` and `record_cli` cannot claim the same tool name.
+
 ## Template Sources
 
 Tasks can start with preset files instead of an empty sandbox. Multiple sources are applied sequentially (last wins for conflicts).

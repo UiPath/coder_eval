@@ -4,8 +4,8 @@ Covers the post-merge follow-up hardening: ``:ro`` default when mode is
 omitted, rejection of destinations that shadow framework-owned mounts
 (``/work``, ``/``), and ``~`` / ``$VAR`` expansion on the source side.
 
-Also covers user/output directory fixes: --user flag on POSIX, output
-directory mounted to /work/output, and --output argument using container path.
+Also covers protected output and agent-home mounts plus the container-side
+``--output`` argument.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from coder_eval.isolation.docker_runner import (
     _sanitize_container_name_component,
     _validate_extra_mount,
 )
-from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
+from coder_eval.models import AGENT_HOME, FileExistsCriterion, SandboxConfig, TaskDefinition
 
 
 # DockerRunner targets Linux containers from POSIX hosts. On Windows the test
@@ -137,7 +137,7 @@ class TestDockerRunnerUserAndOutput:
         return DockerRunner(rt)
 
     def test_output_mounted_to_container_output_dir(self):
-        """Output directory should be mounted to CONTAINER_OUTPUT_DIR (/work/output)."""
+        """Output directory should be mounted below the protected grader root."""
         runner = self._make_runner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -380,8 +380,8 @@ class TestClaudeHomeRWCopyMount:
     ``_prepare_host_mounts`` copies the host ``~/.claude`` (minus heavy
     per-session state) into a tmp dir and records it on
     ``_claude_mount_src``; ``_build_argv`` then mounts that copy read-WRITE at
-    the symmetric ``$HOME/.claude`` path. The old two-layer (``:ro`` parent +
-    ``session-env`` RW child) scheme is gone.
+    the dropped agent's dedicated ``/home/agent/.claude`` path. The old
+    symmetric-host-home and two-layer schemes are gone.
     """
 
     def _make_runner(self) -> DockerRunner:
@@ -432,7 +432,7 @@ class TestClaudeHomeRWCopyMount:
         monkeypatch.delenv("CODER_EVAL_NO_CLAUDE_MOUNT", raising=False)
         return home
 
-    def test_rw_copy_mounted_at_symmetric_path(self, fake_home, tmp_path):
+    def test_rw_copy_mounted_at_agent_home(self, fake_home, tmp_path):
         runner = self._make_runner()
         staging = tmp_path / "staging"
         staging.mkdir()
@@ -450,10 +450,11 @@ class TestClaudeHomeRWCopyMount:
         mounts = self._volume_mounts(argv)
 
         host_claude = fake_home / ".claude"
-        # Exactly one claude mount: the copy → symmetric path, read-WRITE (no :ro).
-        assert f"{copy}:{host_claude}" in mounts
-        claude_mounts = [m for m in mounts if m.endswith(str(host_claude)) or f":{host_claude}" in m]
-        assert claude_mounts == [f"{copy}:{host_claude}"]
+        agent_claude = Path(AGENT_HOME) / ".claude"
+        # Exactly one Claude mount: disposable copy → agent HOME, read-WRITE.
+        assert f"{copy}:{agent_claude}" in mounts
+        claude_mounts = [m for m in mounts if m.endswith(str(agent_claude))]
+        assert claude_mounts == [f"{copy}:{agent_claude}"]
         # The retired two-layer scheme leaves no trace.
         assert f"{host_claude}:{host_claude}:ro" not in mounts
         assert not any("session-env" in m for m in mounts)
@@ -674,4 +675,4 @@ class TestWorkspaceDir:
 
     def test_container_paths_reexported_from_docker_runner(self):
         # Existing importers read CONTAINER_OUTPUT_DIR from docker_runner; keep that working.
-        assert CONTAINER_OUTPUT_DIR == "/work/output"
+        assert CONTAINER_OUTPUT_DIR == "/opt/coder-eval/grader/output"

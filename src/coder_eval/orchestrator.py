@@ -473,6 +473,10 @@ class Orchestrator:
                 # the run as FinalStatus.ERROR; _run_post_run_commands and
                 # _cleanup still execute via the finally block.
                 await self._run_pre_run_commands()
+                # Trusted pre-run commands may create root-owned files. Re-grant
+                # only the disposable sandbox before the first model turn;
+                # hidden harness mounts live outside this tree.
+                await self._grant_current_sandbox_to_agent()
 
                 # Enforce task-level timeout via an OS-thread watchdog that
                 # SIGKILLs the in-flight CLI subprocess AND cancels this
@@ -597,6 +601,11 @@ class Orchestrator:
                 # awaits below run normally after the CancelledError is caught.
                 teardown_interrupt: BaseException | None = None
                 try:
+                    # Protected Docker runs stop the SDK process and kill any
+                    # same-UID descendants before post-run commands, capture,
+                    # or task.json publication. Background shells must not
+                    # observe trusted finalization or keep using the mock RPC.
+                    await self._stop_isolated_agent_processes()
                     # BEFORE post-run/cleanup: needs the live sandbox to resolve
                     # the agent-aligned `uip`, and post-task tool state on disk.
                     self._refresh_runtime_tool_versions()
@@ -1070,6 +1079,10 @@ class Orchestrator:
         # Assert result is initialized (set in run())
         assert self.result is not None, "Result not initialized"
         self.result.sandbox_path = str(sandbox_dir)
+
+        # Root prepares templates and dependencies, then hands the generated
+        # workspace—not any raw task/plugin/reference source—to the agent UID.
+        await self._grant_current_sandbox_to_agent()
 
         # Determine API routing from settings.api_backend enum
         self.route = resolve_route(settings)
@@ -2259,6 +2272,27 @@ class Orchestrator:
         if self.result is None:
             return
         await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
+
+    async def _stop_isolated_agent_processes(self) -> None:
+        """Stop the SDK and residual same-UID children before finalization."""
+
+        from .isolation.agent_identity import agent_isolation_enabled, terminate_agent_processes
+
+        if not agent_isolation_enabled():
+            return
+        if self.agent is not None:
+            with suppress(Exception):
+                await self.agent.stop()
+        await asyncio.to_thread(terminate_agent_processes)
+
+    async def _grant_current_sandbox_to_agent(self) -> None:
+        """Transfer only the generated sandbox tree to the agent identity."""
+
+        if self.sandbox is None or self.sandbox.sandbox_dir is None:
+            return
+        from .isolation.agent_identity import grant_agent_workspace
+
+        await asyncio.to_thread(grant_agent_workspace, self.sandbox.sandbox_dir)
 
     async def _cleanup(self) -> None:
         """Clean up all resources."""

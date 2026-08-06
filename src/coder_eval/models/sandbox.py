@@ -195,6 +195,14 @@ class DockerDriverConfig(BaseModel):
         default="bridge",
         description="Container network. 'bridge' for tasks needing LLM/pkg access; 'none' for fully sealed runs.",
     )
+    agent_isolation: bool = Field(
+        default=True,
+        description=(
+            "Run the evaluated agent under the image's dedicated unprivileged UID/GID and expose local plugins "
+            "only through manifest-verified bundles. Enabled by default. Set false only for temporary migration "
+            "of a trusted task; false is not a secure evaluation boundary."
+        ),
+    )
     working_dir: str | None = Field(
         default=None,
         description=(
@@ -398,6 +406,30 @@ class RecordedCli(BaseModel):
         return v
 
 
+class ProtectedMockConfig(BaseModel):
+    """Fixture-backed CLI served across the protected mock Unix socket.
+
+    ``fixture`` is read by the mockd identity, never by the evaluated agent.
+    The fixture schema maps exact argv lists to bounded stdout/stderr/exit-code
+    responses; it exposes no general file or search operation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str = Field(description="Bare executable name presented to the agent (for example, 'uip')")
+    fixture: str = Field(description="Path to the protected exact-command response fixture")
+    max_requests: int = Field(default=100, ge=1, le=10_000, description="Per-run request budget for this tool")
+
+    @field_validator("tool")
+    @classmethod
+    def validate_tool_name(cls, value: str) -> str:
+        if not value or value != value.strip() or value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError("protected mock tool must be a non-empty bare executable name")
+        if value.lower().endswith((".cmd", ".bat", ".exe")):
+            raise ValueError("protected mock tool must not include a platform executable suffix")
+        return value
+
+
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment.
 
@@ -451,6 +483,15 @@ class SandboxConfig(BaseModel):
         ),
     )
 
+    protected_mocks: list[ProtectedMockConfig] | None = MergeField(
+        strategy="replace",
+        default=None,
+        description=(
+            "Docker-only fixture-backed mock CLIs served by the isolated mockd UID over a Unix socket. "
+            "The agent receives a thin client; fixture bytes are never copied into its workspace."
+        ),
+    )
+
     record_cli: list[RecordedCli] | None = MergeField(
         strategy="replace",
         default=None,
@@ -489,4 +530,14 @@ class SandboxConfig(BaseModel):
         """Validate template sources configuration."""
         if self.template_sources:
             validate_template_sources_list(self.template_sources)
+        if self.protected_mocks:
+            if self.driver != "docker":
+                raise ValueError("sandbox.protected_mocks requires driver: docker")
+            tools = [mock.tool for mock in self.protected_mocks]
+            if len(tools) != len(set(tools)):
+                raise ValueError("sandbox.protected_mocks tool names must be unique")
+            recorded = {spec.tool for spec in self.record_cli or []}
+            overlap = sorted(recorded & set(tools))
+            if overlap:
+                raise ValueError(f"protected_mocks and record_cli cannot both provide: {overlap}")
         return self

@@ -26,8 +26,13 @@ import yaml
 
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
+    AGENT_HOME,
+    CONTAINER_AGENT_SKILLS_DIR,
+    CONTAINER_AGENT_WORK_DIR,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_PRIVATE_PLUGIN_DIR,
+    CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
@@ -37,6 +42,7 @@ from coder_eval.models import (
     PreservationMode,
     ResourceLimits,
 )
+from coder_eval.plugin_bundle import stage_bundle
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -64,6 +70,7 @@ CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
 # explicitly via `--add-host host.docker.internal:host-gateway`.
 _DOCKER_HOST_ALIAS = "host.docker.internal"
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+DEFAULT_AGENT_ISOLATION_MAX_PIDS = 512
 
 
 def _rewrite_loopback_for_container(url: str) -> str | None:
@@ -253,6 +260,37 @@ def _preflight_image_version(image: str) -> None:
             image,
             image_version,
             host_version,
+        )
+
+
+def _preflight_agent_isolation_image(image: str) -> None:
+    """Require an image that contains the declared UID/GID launch boundary."""
+
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                '{{ index .Config.Labels "org.coder-eval.agent-isolation" }}',
+                image,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise DockerRunError(
+            f"cannot verify UID/GID isolation support for image {image!r}; build or pull the image first"
+        ) from exc
+    capability = result.stdout.strip()
+    if capability != "uid-gid-v1":
+        raise DockerRunError(
+            f"image {image!r} does not declare org.coder-eval.agent-isolation=uid-gid-v1; "
+            + "rebuild it from the latest coder-eval-agent image or disable isolation explicitly"
         )
 
 
@@ -482,6 +520,14 @@ class DockerRunner:
         # _build_argv mounts read-write. None when there is no ~/.claude to
         # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
         self._claude_mount_src: Path | None = None
+        # Prepared before argv rendering. Agent-visible plugin mounts contain
+        # only manifest-verified projections; raw sources are mounted under the
+        # root-only grader parent at unrelated container paths.
+        self._agent_plugin_mounts: list[tuple[Path, str]] = []
+        self._private_source_mounts: list[tuple[Path, str]] = []
+        self._host_to_private_paths: dict[str, str] = {}
+        self._host_plugin_to_agent_paths: dict[str, str] = {}
+        self._mock_fixture_mount: Path | None = None
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -503,6 +549,7 @@ class DockerRunner:
         dispatcher converts that to an ERROR-status EvaluationResult.
         """
         _preflight()
+        self._validate_agent_isolation_compatibility()
         # Resolve the run image: build from a Dockerfile if configured (which
         # overrides `image`), else use the configured image. The build is
         # side-effecting, so it runs in a worker thread like the other docker
@@ -521,6 +568,8 @@ class DockerRunner:
         # a task-supplied Dockerfile won't carry the org.coder-eval.version label.
         if not self._docker_config.dockerfile_path:
             await asyncio.to_thread(_preflight_image_version, image)
+        if self._docker_config.agent_isolation:
+            await asyncio.to_thread(_preflight_agent_isolation_image, image)
         await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
 
         # Docker WORKDIR alignment: resolve the concrete workspace path
@@ -528,6 +577,20 @@ class DockerRunner:
         # /root). Forwarded to the in-container orchestrator via the staged context
         # and rendered as `docker run -w`. None keeps the standard artifacts workspace.
         self._workspace_dir = await asyncio.to_thread(_resolve_workspace_dir, self._docker_config.working_dir, image)
+        if self._docker_config.agent_isolation:
+            if self._workspace_dir is not None:
+                raise DockerRunError(
+                    "docker.agent_isolation does not yet support docker.working_dir; "
+                    + "use the default generated /work/agent workspace or disable isolation explicitly"
+                )
+            if self._docker_config.extra_mounts:
+                raise DockerRunError(
+                    "docker.agent_isolation rejects extra_mounts because their agent/private audience is ambiguous; "
+                    + "stage the required input through template_sources or disable isolation explicitly"
+                )
+            self._workspace_dir = CONTAINER_AGENT_WORK_DIR
+        elif self.rt.task.sandbox.protected_mocks:
+            raise DockerRunError("sandbox.protected_mocks requires docker.agent_isolation: true")
 
         # Stage only the inputs (task YAML + context). The *output* dir is
         # the host's run_dir itself, bind-mounted at the same path inside
@@ -612,9 +675,13 @@ class DockerRunner:
         # has since mutated rt.task in-memory (e.g. --model, -D run_limits.max_turns), and the
         # container needs to see those mutations.
         task_yaml_in = input_dir / "task.yaml"
+        task_payload = self.rt.task.model_dump(mode="json")
+        if self._docker_config.agent_isolation:
+            await asyncio.to_thread(self._prepare_isolated_sources, input_dir.parent)
+            task_payload = self._rewrite_task_paths(task_payload)
 
         def _dump_task_yaml() -> str:
-            return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
+            return yaml.safe_dump(task_payload, sort_keys=False)
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
@@ -633,9 +700,197 @@ class DockerRunner:
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
+                "protected_mock_config": (
+                    "/opt/coder-eval/mock/fixtures/mock-config.json" if self._mock_fixture_mount else None
+                ),
             }
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+
+    def _validate_agent_isolation_compatibility(self) -> None:
+        """Reject task features whose privileged behavior is not isolated yet."""
+
+        if not self._docker_config.agent_isolation:
+            return
+        agent_type = str(self.rt.task.agent.type) if self.rt.task.agent and self.rt.task.agent.type else ""
+        supported_agents = {
+            AgentKind.CLAUDE_CODE.value,
+            AgentKind.CODEX.value,
+            AgentKind.ANTIGRAVITY.value,
+            AgentKind.NONE.value,
+        }
+        if agent_type not in supported_agents:
+            raise DockerRunError(
+                f"docker.agent_isolation has no verified UID-drop launch seam for agent type {agent_type!r}"
+            )
+
+        # These criterion implementations can execute another agent or arbitrary
+        # task-authored commands in the privileged harness. If that execution
+        # imports candidate-controlled code, it can act as a confused deputy and
+        # publish hidden grader bytes. A separate minimal-input grader sandbox is
+        # required before they can run in protected mode.
+        unsupported_criteria = sorted(
+            {
+                criterion.type
+                for criterion in self.rt.task.success_criteria
+                if criterion.type in {"agent_judge", "run_command", "uipath_eval"}
+            }
+        )
+        if unsupported_criteria:
+            raise DockerRunError(
+                "docker.agent_isolation rejects privileged dynamic criteria until they have a separate grader "
+                + f"sandbox: {unsupported_criteria}. Use static/built-in criteria or explicitly disable isolation."
+            )
+
+    def _prepare_isolated_sources(self, staging: Path) -> None:
+        """Prepare public plugin bundles and private raw-source mount mappings.
+
+        This method never changes ownership or permissions on a source checkout.
+        Raw sources remain read-only and are mounted only below the image's
+        root-owned ``/opt/coder-eval/grader`` directory.
+        """
+
+        self._agent_plugin_mounts = []
+        self._private_source_mounts = []
+        self._host_to_private_paths = {}
+        self._host_plugin_to_agent_paths = {}
+        self._mock_fixture_mount = None
+
+        task_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
+        if task_dir is not None:
+            self._host_to_private_paths[str(task_dir)] = CONTAINER_TASK_DIR
+
+        if self.rt.task.agent and self.rt.task.agent.system_prompt_file:
+            raise DockerRunError(
+                "docker.agent_isolation requires system_prompt_file to be resolved to inline system_prompt "
+                + "before container staging"
+            )
+
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        bundle_root = staging / "agent-skills"
+        for index, plugin in enumerate(plugins):
+            raw = plugin.get("path") if isinstance(plugin, dict) else None
+            if not raw:
+                continue
+            source = Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+            if not source.is_dir():
+                raise DockerRunError(f"agent plugin source does not exist or is not a directory: {source}")
+
+            bundle_source = bundle_root / f"plugin-{index}"
+            manifest = stage_bundle(source, bundle_source)
+            public_target = f"{CONTAINER_AGENT_SKILLS_DIR}/plugin-{index}"
+            private_target = f"{CONTAINER_PRIVATE_PLUGIN_DIR}/plugin-{index}"
+            self._agent_plugin_mounts.append((bundle_source, public_target))
+            self._register_private_mount(source, private_target)
+            self._host_plugin_to_agent_paths[str(source)] = public_target
+            logger.info(
+                "Prepared agent-visible plugin bundle %s -> %s (%d files, digest %s)",
+                source,
+                public_target,
+                len(manifest.files),
+                manifest.digest[:12],
+            )
+
+        from coder_eval.models import TemplateDirSource
+
+        template_index = 0
+        for source in self.rt.task.sandbox.template_sources or []:
+            if not isinstance(source, TemplateDirSource):
+                continue
+            host_path = Path(source.path).resolve()
+            if task_dir is not None and (host_path == task_dir or task_dir in host_path.parents):
+                continue
+            self._register_private_mount(host_path, f"/opt/coder-eval/grader/templates/source-{template_index}")
+            template_index += 1
+
+        reference = self.rt.task.reference
+        if reference is not None:
+            if reference.directory:
+                self._register_external_private_path(
+                    Path(reference.directory), "/opt/coder-eval/grader/references/directory"
+                )
+            if reference.file:
+                reference_file = Path(reference.file).resolve()
+                self._register_external_private_path(
+                    reference_file.parent, "/opt/coder-eval/grader/references/file-parent"
+                )
+
+        protected_mocks = self.rt.task.sandbox.protected_mocks or []
+        if protected_mocks:
+            mock_root = staging / "protected-mock-fixtures"
+            mock_root.mkdir(parents=True, exist_ok=True)
+            tools: list[dict[str, object]] = []
+            for index, spec in enumerate(protected_mocks):
+                source = Path(spec.fixture).resolve()
+                if not source.is_file():
+                    raise DockerRunError(f"protected mock fixture does not exist: {source}")
+                filename = f"fixture-{index}.json"
+                destination = mock_root / filename
+                shutil.copy2(source, destination)
+                destination.chmod(0o444)
+                container_fixture = f"/opt/coder-eval/mock/fixtures/{filename}"
+                self._host_to_private_paths[str(source)] = container_fixture
+                tools.append(
+                    {"tool": spec.tool, "fixture": container_fixture, "max_requests": spec.max_requests}
+                )
+            config_path = mock_root / "mock-config.json"
+            config_path.write_text(json.dumps({"version": 1, "tools": tools}), encoding="utf-8")
+            config_path.chmod(0o444)
+            mock_root.chmod(0o555)
+            self._mock_fixture_mount = mock_root
+
+    def _register_external_private_path(self, source: Path, target: str) -> None:
+        source = source.resolve()
+        task_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
+        if task_dir is not None and (source == task_dir or task_dir in source.parents):
+            return
+        self._register_private_mount(source, target)
+
+    def _register_private_mount(self, source: Path, target: str) -> None:
+        source = source.resolve()
+        key = str(source)
+        if key in self._host_to_private_paths:
+            return
+        self._host_to_private_paths[key] = target
+        self._private_source_mounts.append((source, target))
+
+    def _rewrite_task_paths(self, payload: dict[str, object]) -> dict[str, object]:
+        """Rewrite host paths to their protected container mount locations."""
+
+        replacements = sorted(self._host_to_private_paths.items(), key=lambda item: len(item[0]), reverse=True)
+
+        def rewrite(value: object) -> object:
+            if isinstance(value, str):
+                for source, target in replacements:
+                    value = value.replace(source, target)
+                return value
+            if isinstance(value, list):
+                return [rewrite(item) for item in value]
+            if isinstance(value, dict):
+                return {key: rewrite(item) for key, item in value.items()}
+            return value
+
+        rewritten = rewrite(payload)
+        if not isinstance(rewritten, dict):
+            raise DockerRunError("internal error rewriting staged task paths")
+
+        # The harness and criteria use private paths, but plugin discovery must
+        # point at the public projections. Override these fields after the broad
+        # path rewrite so no raw plugin path can survive serialization.
+        agent = rewritten.get("agent")
+        if isinstance(agent, dict):
+            staged_plugins = agent.get("plugins")
+            original_plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+            if isinstance(staged_plugins, list):
+                for original, staged in zip(original_plugins, staged_plugins, strict=False):
+                    raw = original.get("path") if isinstance(original, dict) else None
+                    if not raw or not isinstance(staged, dict):
+                        continue
+                    resolved = str(Path(os.path.expandvars(os.path.expanduser(raw))).resolve())
+                    public_target = self._host_plugin_to_agent_paths.get(resolved)
+                    if public_target is not None:
+                        staged["path"] = public_target
+        return rewritten
 
     async def _stream_container_output(self, proc: asyncio.subprocess.Process, log_fh: TextIO) -> int:
         """Stream the container's stdout, returning its exit code.
@@ -1067,7 +1322,7 @@ class DockerRunner:
                 + "task-specific layers on top. See docs/DOCKER_ISOLATION.md."
             )
 
-    def _build_argv(
+    def _build_argv(  # noqa: PLR0912, PLR0915 - one ordered rendering pipeline mirrors docker-run argv
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
         cfg = self._docker_config
@@ -1078,7 +1333,10 @@ class DockerRunner:
         if image is None:
             image = cfg.image
 
-        argv: list[str] = ["docker", "run", "--rm", "--name", container_name]
+        # tini as PID 1 reaps orphaned grandchildren. The harness also scans
+        # and kills the dedicated agent UID before finalization; --init keeps a
+        # double-forked process from surviving only as an unreapable zombie.
+        argv: list[str] = ["docker", "run", "--rm", "--init", "--name", container_name]
 
         # Pin the framework entrypoint at run time rather than trusting whatever
         # the task image baked into ENTRYPOINT. This makes the orchestrator launch
@@ -1099,6 +1357,8 @@ class DockerRunner:
             argv += ["--cpus", str(self._limits.max_cpus)]
         if self._limits.max_pids is not None:
             argv += ["--pids-limit", str(self._limits.max_pids)]
+        elif cfg.agent_isolation:
+            argv += ["--pids-limit", str(DEFAULT_AGENT_ISOLATION_MAX_PIDS)]
 
         # Forward environment variables: explicit allowlist (optionally extended via env_passthrough_extra).
         # `--env VAR` (name-only) tells docker to copy the value from our current env at
@@ -1113,10 +1373,20 @@ class DockerRunner:
         for env_var in merged_allowlist:
             # LITELLM_BASE_URL / LITELLM_COST_LOG are forwarded below with a value
             # rewrite (host alias / absolute mount path), not name-only.
-            if env_var in ("LITELLM_BASE_URL", "LITELLM_COST_LOG"):
+            if env_var in ("LITELLM_BASE_URL", "LITELLM_COST_LOG", "SKILLS_REPO_PATH"):
+                continue
+            if cfg.agent_isolation and env_var == "HOME":
                 continue
             if env_var in os.environ:
                 argv += ["--env", env_var]
+
+        if cfg.agent_isolation and (skills_repo := os.environ.get("SKILLS_REPO_PATH")):
+            resolved_skills = str(Path(skills_repo).expanduser().resolve())
+            private_skills = self._host_to_private_paths.get(resolved_skills)
+            if private_skills is not None:
+                argv += ["--env", f"SKILLS_REPO_PATH={private_skills}"]
+            else:
+                logger.debug("Not forwarding unstaged SKILLS_REPO_PATH into protected container: %s", resolved_skills)
 
         # LITELLM_BASE_URL points at a proxy on the HOST. A bridge-network container
         # can't reach the host's loopback, so rewrite localhost/127.0.0.1 to the
@@ -1151,6 +1421,10 @@ class DockerRunner:
         # sandbox: Codex's Landlock-backed read-only / workspace-write sandboxes
         # can't initialize inside a container and otherwise fail writes silently.
         argv += ["--env", "CODER_EVAL_IN_CONTAINER=1"]
+        if cfg.agent_isolation:
+            argv += ["--env", "CODER_EVAL_AGENT_ISOLATION=1"]
+            if self.rt.task.sandbox.protected_mocks:
+                argv += ["--env", "CODER_EVAL_AGENT_ALLOW_RPC=1"]
 
         # Hard-disable telemetry INSIDE the container. The app ships a baked-in
         # default connection string, so without this the in-container orchestrator
@@ -1173,7 +1447,7 @@ class DockerRunner:
         host_task_dir: Path | None = None
         if self.rt.task_file:
             host_task_dir = self.rt.task_file.parent.resolve()
-            argv += ["-v", f"{host_task_dir}:{host_task_dir}:ro"]
+            argv += ["-v", f"{host_task_dir}:{CONTAINER_TASK_DIR}:ro"]
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1184,7 +1458,15 @@ class DockerRunner:
         # doesn't exist or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT=1).
         if self._claude_mount_src is not None:
             host_claude_dir = Path.home() / ".claude"
-            argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
+            claude_target = Path(AGENT_HOME) / ".claude" if cfg.agent_isolation else host_claude_dir
+            argv += ["-v", f"{self._claude_mount_src}:{claude_target}"]
+
+        for source, target in self._agent_plugin_mounts:
+            argv += ["-v", f"{source.resolve()}:{target}:ro"]
+        for source, target in self._private_source_mounts:
+            argv += ["-v", f"{source.resolve()}:{target}:ro"]
+        if self._mock_fixture_mount is not None:
+            argv += ["-v", f"{self._mock_fixture_mount.resolve()}:/opt/coder-eval/mock/fixtures:ro"]
 
         # Auto-mount host paths the task references so they resolve inside
         # the container at the *same* path they have on the host.
@@ -1226,22 +1508,24 @@ class DockerRunner:
             argv.extend(["-v", f"{target}:{target}:ro"])
 
         plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+        if not cfg.agent_isolation:
+            for plugin in plugins:
+                _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
 
         from coder_eval.models import TemplateDirSource
 
         sandbox_cfg = self.rt.task.sandbox
-        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
-            if isinstance(source, TemplateDirSource):
-                _auto_mount(source.path)
+        if not cfg.agent_isolation:
+            for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
+                if isinstance(source, TemplateDirSource):
+                    _auto_mount(source.path)
 
         # Defensive: system_prompt_file is normally inlined into
         # system_prompt by load_task / experiment resolution, but a variant
         # could conceivably inject an absolute path that survives. Cover
         # that path so the in-container Orchestrator can read it.
         agent_cfg = self.rt.task.agent
-        if agent_cfg and agent_cfg.system_prompt_file:
+        if not cfg.agent_isolation and agent_cfg and agent_cfg.system_prompt_file:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
         # reference.file / reference.directory: if a task ships absolute
@@ -1249,7 +1533,7 @@ class DockerRunner:
         # ``..``), they must be mounted explicitly. Relative paths under
         # task_dir are already covered by the symmetric task_dir mount.
         reference = self.rt.task.reference
-        if reference is not None:
+        if not cfg.agent_isolation and reference is not None:
             _auto_mount(reference.file, dir_only=False)
             _auto_mount(reference.directory)
         for mount in cfg.extra_mounts:
@@ -1271,7 +1555,7 @@ class DockerRunner:
             argv += ["-v"]
         argv += ["--output", str(CONTAINER_OUTPUT_DIR)]
         if host_task_dir is not None:
-            argv += ["--task-dir", str(host_task_dir)]
+            argv += ["--task-dir", str(CONTAINER_TASK_DIR)]
         return argv
 
 

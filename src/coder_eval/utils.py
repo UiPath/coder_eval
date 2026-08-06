@@ -86,6 +86,31 @@ def process_plugins(
     return processed
 
 
+AGENT_ENV_SCRUB_VARS: tuple[str, ...] = (
+    "SKILLS_REPO_PATH",
+    "TASK_DIR",
+)
+AGENT_ENV_SCRUB_PREFIXES: tuple[str, ...] = ("CODER_EVAL_",)
+AGENT_ENV_PASSTHROUGH_VARS: tuple[str, ...] = ("CODER_EVAL_AGENT_ALLOW_RPC",)
+
+
+def scrub_agent_env_overrides() -> dict[str, str]:
+    """Mask harness-only variables in SDK subprocess environments.
+
+    Claude and Codex merge their explicit environment over ``os.environ``;
+    empty-string overrides are therefore the only concurrency-safe removal
+    mechanism. Antigravity has no environment seam and removes the same names
+    during its serialized spawn window.
+    """
+
+    return {
+        name: ""
+        for name in os.environ
+        if name in AGENT_ENV_SCRUB_VARS
+        or (name.startswith(AGENT_ENV_SCRUB_PREFIXES) and name not in AGENT_ENV_PASSTHROUGH_VARS)
+    }
+
+
 SKIP = object()  # Sentinel marking values that serialize_value should drop from the result.
 
 
