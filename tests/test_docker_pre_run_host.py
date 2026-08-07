@@ -349,3 +349,222 @@ async def test_seed_round_trips_to_copied_out_workspace_for_post_run(tmp_path):
     )
     await run_post_run_on_host(result, rt)
     assert '"resource": "xyz"' in result.post_run_results[0].stdout
+
+
+# --------------------------------------------------------------------------
+# runs_in: host | agent split
+# --------------------------------------------------------------------------
+
+
+async def test_stage_inputs_context_flags_for_agent_pre_run(tmp_path):
+    """A task with a ``runs_in: agent`` pre_run stages context.json with
+    ``pre_run_in_container=True`` and ``skip_pre_post_commands=False`` (the
+    container runs the ``agent`` subset)."""
+    from coder_eval.isolation.docker_runner import DockerRunner
+
+    task = _task(
+        [
+            PreRunCommand(command="cp -r fixtures ."),  # host (default)
+            PreRunCommand(command="uv sync", runs_in="agent"),
+        ]
+    )
+    rt = _make_rt(tmp_path, task)
+    runner = DockerRunner(rt)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    await runner._stage_inputs(input_dir)
+
+    import json
+
+    ctx = json.loads((input_dir / "context.json").read_text())
+    assert ctx["pre_run_in_container"] is True
+    assert ctx["skip_pre_post_commands"] is False
+    assert ctx["workspace_seed_dir"] is not None  # seed mount present (host subset seeds it)
+
+
+async def test_stage_inputs_context_flags_for_host_only_pre_run(tmp_path):
+    """A task with only ``runs_in: host`` (default) pre_run stages context.json
+    with ``skip_pre_post_commands=True`` (blanket suppress; nothing runs in the
+    container) and ``pre_run_in_container=False`` — Stage-2 behavior preserved."""
+    from coder_eval.isolation.docker_runner import DockerRunner
+
+    task = _task(
+        [
+            PreRunCommand(command="python seed.py"),
+            PreRunCommand(command="cp -r fixtures ."),
+        ]
+    )
+    rt = _make_rt(tmp_path, task)
+    runner = DockerRunner(rt)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    await runner._stage_inputs(input_dir)
+
+    import json
+
+    ctx = json.loads((input_dir / "context.json").read_text())
+    assert ctx["skip_pre_post_commands"] is True
+    assert ctx["pre_run_in_container"] is False
+
+
+async def test_host_runs_only_host_subset_of_pre_run(tmp_path):
+    """The host pre_run step runs ONLY the ``runs_in: host`` subset. The
+    ``runs_in: agent`` command is NOT run host-side (it would run in-container).
+    Asserted via the recording file each command writes into the seed dir."""
+    from coder_eval.isolation import docker_runner
+    from coder_eval.isolation.docker_runner import DockerRunner
+
+    task = _task(
+        [
+            PreRunCommand(command="printf host > host_marker.txt"),  # runs_in: host
+            PreRunCommand(command="printf agent > agent_marker.txt", runs_in="agent"),
+        ]
+    )
+    rt = _make_rt(tmp_path, task)
+    runner = DockerRunner(rt)
+
+    captured: dict[str, Path] = {}
+    real_rmtree = docker_runner.shutil.rmtree
+
+    def _capture_rmtree(path, *args, **kwargs):
+        # Snapshot the seed dir contents BEFORE staging is removed.
+        seed = Path(path) / "workspace_seed"
+        if seed.is_dir():
+            captured["host_marker"] = seed / "host_marker.txt"
+            captured["agent_marker"] = seed / "agent_marker.txt"
+            captured["host_exists"] = (seed / "host_marker.txt").exists()  # type: ignore[assignment]
+            captured["agent_exists"] = (seed / "agent_marker.txt").exists()  # type: ignore[assignment]
+        return real_rmtree(path, *args, **kwargs)
+
+    async def _fake_stream(self, proc, log_fh):
+        return 0
+
+    async def _fake_parse(self, output_dir, returncode, log_path):
+        return EvaluationResult(
+            task_id="t",
+            task_description="d",
+            variant_id="v",
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status=FinalStatus.SUCCESS,
+            iteration_count=1,
+        )
+
+    class _FakeProc:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    with (
+        patch.object(docker_runner, "_preflight", return_value=None),
+        patch.object(DockerRunner, "_build_image", return_value="img"),
+        patch.object(docker_runner, "_preflight_image_version", return_value=None),
+        patch.object(docker_runner, "_resolve_workspace_dir", return_value=None),
+        patch.object(DockerRunner, "_stage_inputs", new=AsyncMock(return_value=None)),
+        patch.object(DockerRunner, "_prepare_host_mounts", return_value=None),
+        patch.object(DockerRunner, "_build_argv", return_value=["true"]),
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_FakeProc())),
+        patch.object(DockerRunner, "_stream_container_output", new=_fake_stream),
+        patch.object(DockerRunner, "_parse_result_or_raise", new=_fake_parse),
+        patch.object(docker_runner.shutil, "rmtree", side_effect=_capture_rmtree),
+    ):
+        await runner.run()
+
+    assert captured["host_exists"] is True
+    assert captured["agent_exists"] is False
+
+
+def _orch_with(tmp_path: Path, pre_run, post_run=None, **kwargs):
+    """Build an Orchestrator with a fake sandbox + result so the real
+    ``_run_pre_run_commands`` / ``_run_post_run_commands`` execute against a
+    patched ``run_command_list`` (which records exactly what was dispatched)."""
+    from coder_eval.orchestrator import Orchestrator
+
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        initial_prompt="p",
+        sandbox=SandboxConfig(driver="tempdir"),
+        agent={"type": "claude-code"},
+        success_criteria=[{"type": "file_exists", "description": "c", "path": "x.txt"}],
+        pre_run=pre_run,
+        post_run=post_run or [],
+    )
+    orch = Orchestrator(
+        task=task,
+        run_dir=tmp_path / "run",
+        task_file=tmp_path / "task.yaml",
+        variant_id="v",
+        **kwargs,
+    )
+    orch.result = EvaluationResult(
+        task_id="t",
+        task_description="d",
+        variant_id="v",
+        agent_type="claude-code",
+        started_at=datetime.now(),
+        final_status=FinalStatus.SUCCESS,
+        iteration_count=1,
+    )
+    # Minimal fake sandbox so _run_command_list doesn't early-return.
+    from types import SimpleNamespace
+
+    orch.sandbox = SimpleNamespace(sandbox_dir=tmp_path / "sb")  # type: ignore[assignment]
+    return orch
+
+
+async def test_in_container_orchestrator_runs_only_agent_subset(tmp_path):
+    """The in-container orchestrator (pre_run_in_container=True) runs ONLY the
+    ``runs_in: agent`` pre_run subset and skips ALL post_run — via the REAL
+    _run_pre_run_commands / _run_post_run_commands against a recording stub."""
+    from coder_eval import orchestrator as orch_mod
+    from coder_eval.models import PostRunCommand
+
+    orch = _orch_with(
+        tmp_path,
+        pre_run=[
+            PreRunCommand(command="host cmd"),  # runs_in: host — must NOT run in-container
+            PreRunCommand(command="agent cmd", runs_in="agent"),
+        ],
+        post_run=[PostRunCommand(command="teardown")],
+        pre_run_in_container=True,
+    )
+
+    dispatched: list[list[str]] = []
+
+    async def _record(commands, results, label, **kwargs):
+        dispatched.append([c.command for c in commands])
+
+    with patch.object(orch_mod, "run_command_list", new=_record):
+        await orch._run_pre_run_commands()
+        await orch._run_post_run_commands()  # must be a no-op (post is host-only)
+
+    assert dispatched == [["agent cmd"]]  # only the agent subset; post_run never dispatched
+
+
+async def test_tempdir_runs_all_pre_run_and_ignores_runs_in(tmp_path):
+    """Under tempdir (both flags False), the FULL pre_run runs in-process AND
+    post_run runs — ``runs_in: agent`` behaves identically to ``host``."""
+    from coder_eval import orchestrator as orch_mod
+    from coder_eval.models import PostRunCommand
+
+    orch = _orch_with(
+        tmp_path,
+        pre_run=[
+            PreRunCommand(command="host cmd"),
+            PreRunCommand(command="agent cmd", runs_in="agent"),
+        ],
+        post_run=[PostRunCommand(command="teardown")],
+    )
+
+    dispatched: list[list[str]] = []
+
+    async def _record(commands, results, label, **kwargs):
+        dispatched.append([c.command for c in commands])
+
+    with patch.object(orch_mod, "run_command_list", new=_record):
+        await orch._run_pre_run_commands()
+        await orch._run_post_run_commands()
+
+    assert dispatched == [["host cmd", "agent cmd"], ["teardown"]]

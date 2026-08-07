@@ -705,12 +705,12 @@ def resolve_all_tasks(
                         )
         # Early-stop arming errors are deliberate hard stops: they always
         # propagate (never demoted to skipped) so a misconfigured run fails
-        # loudly. The interim docker pre_run guard
-        # (DockerPreRunHostUnsafeError) deliberately does NOT hard-abort here:
-        # it subclasses ValueError, so it falls through to the per-task
-        # collecting branch below — one `uv sync` docker task is quarantined
-        # as a skipped task carrying the `--driver tempdir` redirect, while the
-        # rest of the suite runs. (The `plan` surface keeps it loud.)
+        # loudly. The docker pre_run guard (DockerPreRunHostUnsafeError)
+        # deliberately does NOT hard-abort here: it subclasses ValueError, so it
+        # falls through to the per-task collecting branch below — one docker task
+        # with an in-container-only pre_run left `runs_in: host` is quarantined as
+        # a skipped task carrying the "mark it `runs_in: agent`" redirect, while
+        # the rest of the suite runs. (The `plan` surface keeps it loud.)
         except EarlyStopConfigError:
             raise
         # Narrow set, matching the load/expand block above: config-resolution

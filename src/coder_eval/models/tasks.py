@@ -287,6 +287,21 @@ class PreRunCommand(BaseModel):
             "with FinalStatus.ERROR. Set to False for optional/informational setup commands."
         ),
     )
+    runs_in: Literal["host", "agent"] = Field(
+        default="host",
+        description=(
+            "Where this pre_run command executes under --driver docker. 'host' (default) runs it "
+            "on the host, before the container, into a staging dir that seeds the agent workspace — "
+            "the right place for setups that need the host repo/creds (fixture copies, seed scripts). "
+            "'agent' runs it INSIDE the coder_eval container, in the seeded workspace, before the agent "
+            "turn — for setups that must run where they'll be used (e.g. `uv sync` building a venv, "
+            "`uip codedagent setup`). It is SDK-agnostic (executed by the in-container orchestrator, not "
+            "a per-SDK hook) and self-contained by contract: it gets the image + seeded workspace + "
+            "forwarded creds + network, but NOT the graders/criteria/skills tests tree, so it cannot "
+            "re-open the criteria leak. Under --driver tempdir there is no container, so 'agent' is a "
+            "no-op and behaves identically to 'host' (everything runs in the one sandbox)."
+        ),
+    )
 
 
 # SSOT for the agent-hidden task fields: the fields whose values are grading

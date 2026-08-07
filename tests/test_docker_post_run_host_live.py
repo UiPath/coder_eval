@@ -126,3 +126,29 @@ async def test_host_pre_run_seed_reaches_the_agent(tmp_path):
     if not _docker_daemon_up():
         pytest.skip("docker daemon not running")
     pytest.skip("live e2e sketch — flesh out on a Linux host with the coder-eval-agent image")
+
+
+@pytest.mark.asyncio
+async def test_agent_pre_run_builds_in_container_and_agent_sees_it(tmp_path):
+    """SKETCH (fill in on a Linux host with a daemon + image): a
+    ``runs_in: agent`` ``pre_run`` runs INSIDE the container, in the seeded
+    workspace, before the agent — and the agent sees its result.
+
+    Wiring: write a task YAML with ``sandbox.driver: docker`` and::
+
+        pre_run:
+          - command: "python -m venv .v"
+            runs_in: agent
+
+    Run it via the CLI (or ``run_batch``) against the real image. Assert the
+    venv (``.v/bin/python``) was built INSIDE the container (the agent's
+    trajectory / a criterion can confirm the agent read it), proving the
+    ``runs_in: agent`` command executed in-container, not host-side. Contrast:
+    the same command marked ``runs_in: host`` builds a venv on the host whose
+    absolute interpreter path is not portable into the container — the split is
+    what makes the coded-agent (`uv sync`) tasks docker-eligible. Deliberately
+    not executed in the non-live suite.
+    """
+    if not _docker_daemon_up():
+        pytest.skip("docker daemon not running")
+    pytest.skip("live e2e sketch — flesh out on a Linux host with the coder-eval-agent image")

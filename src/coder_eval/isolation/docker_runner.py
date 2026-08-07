@@ -48,11 +48,23 @@ from coder_eval.utils import get_default_docker_image_tag
 
 
 if TYPE_CHECKING:
-    from coder_eval.models import ResolvedTask
+    from coder_eval.models import PreRunCommand, ResolvedTask
     from coder_eval.streaming.callbacks import StreamCallback
 
 
 logger = logging.getLogger(__name__)
+
+
+def _has_agent_pre_run(pre_run: list[PreRunCommand]) -> bool:
+    """True if any ``pre_run`` command is marked ``runs_in: agent``.
+
+    Under ``--driver docker`` a ``runs_in: agent`` command runs INSIDE the
+    container (venv build / live-tenant provisioning that must run where it is
+    used); the ``runs_in: host`` default runs host-side. Presence of an ``agent``
+    command is what flips the in-container orchestrator from blanket-suppress to
+    "run only the ``agent`` pre_run subset" (see ``_stage_inputs``).
+    """
+    return any(c.runs_in == "agent" for c in pre_run)
 
 
 # Container-side paths (CONTAINER_WORK_DIR/_INPUT_DIR/_OUTPUT_DIR/_TASK_DIR,
@@ -685,17 +697,22 @@ class DockerRunner:
             # _build_argv to mount. Cleaned up with `staging` in the finally.
             await asyncio.to_thread(self._prepare_host_mounts, staging)
 
-            # HARNESS-OUTSIDE: run pre_run on the HOST, BEFORE the container.
-            # The helper scripts + skills-repo tree the commands invoke live only
-            # host-side (never mounted into the agent container), so pre_run runs
-            # here with the host env/creds — the SAME trust boundary as the
-            # host-side graders. Its CWD is a fresh staging dir whose contents
-            # seed the container's initial agent workspace (mounted :ro at
-            # CONTAINER_WORKSPACE_SEED_DIR). A required (fail_on_error) pre_run
-            # failure aborts NOW, before docker run, so no LLM budget is spent on
-            # a broken environment. pre_run_results are folded into the returned
-            # result (the error result here, or the parsed result below).
+            # HARNESS-OUTSIDE: run the `runs_in: host` pre_run subset on the HOST,
+            # BEFORE the container. The helper scripts + skills-repo tree the
+            # commands invoke live only host-side (never mounted into the agent
+            # container), so these run here with the host env/creds — the SAME
+            # trust boundary as the host-side graders. Their CWD is a fresh
+            # staging dir whose contents seed the container's initial agent
+            # workspace (mounted :ro at CONTAINER_WORKSPACE_SEED_DIR). The
+            # `runs_in: agent` subset is NOT run here — it runs inside the
+            # container (via context.json → run_task_internal_command) where its
+            # venv/live-tenant side effects belong. A required (fail_on_error)
+            # host pre_run failure aborts NOW, before docker run, so no LLM budget
+            # is spent on a broken environment. pre_run_results are folded into
+            # the returned result (the error result here, or the parsed result
+            # below).
             pre_run_results: list[PostRunResult] = []
+            host_pre_run = [c for c in self.rt.task.pre_run if c.runs_in == "host"]
             if self.rt.task.pre_run:
                 seed_dir = staging / "workspace_seed"
                 await asyncio.to_thread(seed_dir.mkdir)
@@ -703,7 +720,7 @@ class DockerRunner:
                 from ..evaluation.host_commands import run_command_list
 
                 try:
-                    await run_command_list(self.rt.task.pre_run, pre_run_results, "pre_run", cwd=seed_dir)
+                    await run_command_list(host_pre_run, pre_run_results, "pre_run", cwd=seed_dir)
                 except RuntimeError as exc:
                     # A fail_on_error pre_run command failed. Abort before the
                     # container: synthesize an ERROR result carrying the captured
@@ -860,13 +877,25 @@ class DockerRunner:
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
-                # HARNESS-OUTSIDE: BOTH pre_run and post_run run on the HOST for
-                # docker tasks (pre_run before the container into a staging dir
-                # that seeds the workspace; post_run after the container exits
-                # over the copied-out workspace). The helper scripts + repo live
-                # only host-side. Tell the in-container orchestrator to skip
-                # both phases (blanket suppress).
-                "skip_pre_post_commands": True,
+                # HARNESS-OUTSIDE: post_run is HOST-only (runs after the container
+                # exits over the copied-out workspace). pre_run is SPLIT by each
+                # command's `runs_in`: the `host` subset runs host-side (before the
+                # container, seeding the workspace); the `agent` subset runs INSIDE
+                # the container, in the seeded workspace, before the agent (for
+                # venv builds / live-tenant provisioning that must run where
+                # they'll be used). The helper scripts + skills-repo tree live only
+                # host-side and never enter the container, so the `agent` subset is
+                # self-contained (image + seeded workspace + creds + network, NOT
+                # the graders/criteria/tests tree) — it cannot re-open the leak.
+                #
+                # Two mutually-exclusive knobs tell the in-container orchestrator
+                # what to do:
+                #   - no `runs_in: agent` pre_run → skip_pre_post_commands=True
+                #     (blanket suppress: nothing to run in-container).
+                #   - ≥1 `runs_in: agent` pre_run → pre_run_in_container=True
+                #     (run ONLY the `agent` subset; still skip all post_run).
+                "skip_pre_post_commands": not _has_agent_pre_run(self.rt.task.pre_run),
+                "pre_run_in_container": _has_agent_pre_run(self.rt.task.pre_run),
                 # Presence of the host-produced workspace-seed mount. The
                 # in-container orchestrator copies its contents into the sandbox
                 # after template materialization, before the agent starts.

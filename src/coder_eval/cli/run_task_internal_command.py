@@ -158,12 +158,16 @@ def run_task_internal_command(
     # Absent -> None -> standard run_dir/artifacts workspace.
     workspace_dir_raw = context.get("workspace_dir")
     workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
-    # HARNESS-OUTSIDE: under docker, BOTH pre_run and post_run run HOST-side
-    # (pre_run before the container into a staging dir that seeds the workspace;
-    # post_run after the container exits over the copied-out workspace). The
-    # container runs the agent turn only, so it must skip both phases. Absent ->
-    # False (in-process driver), so pre/post run in-process as before.
+    # HARNESS-OUTSIDE: under docker, post_run is HOST-only and pre_run is SPLIT by
+    # each command's `runs_in`. The host forwards exactly one of two knobs:
+    #   - skip_pre_post_commands=True  → no `runs_in: agent` pre_run; the container
+    #     runs the agent turn only (both phases suppressed).
+    #   - pre_run_in_container=True    → ≥1 `runs_in: agent` pre_run; the container
+    #     runs ONLY that `agent` subset (in the seeded workspace, before the agent)
+    #     and still skips all post_run (post is host-only).
+    # Both absent -> False (in-process driver), so pre/post run in-process as before.
     skip_pre_post_commands: bool = bool(context.get("skip_pre_post_commands", False))
+    pre_run_in_container: bool = bool(context.get("pre_run_in_container", False))
     # Host-produced workspace-seed mount: the in-container orchestrator copies
     # its contents into the sandbox after template materialization, before the
     # agent starts (seed wins over template starters). Absent -> None -> no-op.
@@ -214,6 +218,7 @@ def run_task_internal_command(
         workspace_dir=workspace_dir,
         workspace_seed_dir=workspace_seed_dir,
         skip_pre_post_commands=skip_pre_post_commands,
+        pre_run_in_container=pre_run_in_container,
     )
 
     # Install the stdout-NDJSON stream callback so per-tool-call events

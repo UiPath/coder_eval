@@ -288,6 +288,7 @@ class Orchestrator:
         workspace_dir: Path | None = None,
         workspace_seed_dir: Path | None = None,
         skip_pre_post_commands: bool = False,
+        pre_run_in_container: bool = False,
         existing_turns: list[TurnRecord] | None = None,
         suppress_task_telemetry: bool = False,
     ):
@@ -334,6 +335,20 @@ class Orchestrator:
                 scoped flag rather than a blanket "skip when agent is None" so the
                 standalone ``coder-eval evaluate`` path — also agent-less — and
                 the tempdir path both keep running pre/post in-process as before.
+            pre_run_in_container: When True, the in-container docker orchestrator
+                runs ONLY the ``runs_in == "agent"`` subset of ``pre_run`` (in the
+                seeded workspace, before the agent) and skips ALL ``post_run``
+                (post is host-only). Set under ``--driver docker`` when the task
+                has at least one ``runs_in: agent`` pre_run command: those must run
+                where they'll be used (a venv build, live-tenant provisioning), so
+                they cannot move host-side like the ``runs_in: host`` subset (which
+                the host runs into the workspace-seed staging dir). The ``agent``
+                subset is self-contained by contract — it sees the image + seeded
+                workspace + forwarded creds + network, NOT the graders/criteria/
+                skills ``tests/`` tree — so it cannot re-open the leak. Mutually
+                exclusive in effect with ``skip_pre_post_commands`` (the host sets
+                exactly one): a task with no ``agent`` pre_run keeps the blanket
+                ``skip_pre_post_commands=True`` (nothing to run in-container).
             suppress_task_telemetry: When True, skip the in-process
                 ``CoderEval.Task.End`` emit in ``_finalize_result``. Set ONLY by the
                 docker host re-grade (``regrade_on_host``): that scratch orchestrator
@@ -354,6 +369,7 @@ class Orchestrator:
         self.workspace_dir = workspace_dir
         self.workspace_seed_dir = workspace_seed_dir
         self.skip_pre_post_commands = skip_pre_post_commands
+        self.pre_run_in_container = pre_run_in_container
         self.suppress_task_telemetry = suppress_task_telemetry
         self.task_file = task_file
         self.stream_callback = stream_callback
@@ -2196,16 +2212,27 @@ class Orchestrator:
         ``FinalStatus.ERROR``. Post-run commands and cleanup still execute via
         the ``finally`` block.
 
-        Skipped entirely under ``skip_pre_post_commands``: the in-container
-        docker run AND the docker host re-grade (``regrade_on_host``) both set
-        it. Under ``--driver docker`` pre_run runs HOST-side (before the
-        container, seeding the workspace), so the in-container orchestrator must
-        not run it. The tempdir/``evaluate`` paths leave the flag False and run
-        pre_run in-process as before.
+        Skipped entirely under ``skip_pre_post_commands``: the docker host
+        re-grade (``regrade_on_host``) sets it, and so does the in-container run
+        for a task with NO ``runs_in: agent`` pre_run — everything ran host-side.
+
+        Under ``pre_run_in_container`` (the in-container run for a task that HAS
+        at least one ``runs_in: agent`` pre_run), run ONLY that ``agent`` subset,
+        in the seeded workspace, before the agent. The ``runs_in: host`` subset
+        already ran host-side (seeding the workspace), so re-running it here would
+        double-run it — every pre_run command runs exactly once, host XOR
+        container by its ``runs_in``.
+
+        The tempdir/``evaluate`` paths leave both flags False and run the FULL
+        ``pre_run`` in-process as before — ``runs_in`` is a no-op there (there is
+        no container, so ``agent`` behaves identically to ``host``).
         """
         if self.result is None or self.skip_pre_post_commands:
             return
-        await self._run_command_list(self.task.pre_run, self.result.pre_run_results, "pre_run")
+        commands = self.task.pre_run
+        if self.pre_run_in_container:
+            commands = [c for c in commands if c.runs_in == "agent"]
+        await self._run_command_list(commands, self.result.pre_run_results, "pre_run")
 
     async def _run_post_run_commands(self) -> None:
         """Execute post-run commands inside the sandbox after evaluation.
@@ -2214,15 +2241,16 @@ class Orchestrator:
         ``fail_on_error`` is not part of ``PostRunCommand``, so failures are
         warning-logged and never affect the evaluation verdict.
 
-        Skipped entirely under ``skip_pre_post_commands``: the in-container
-        docker run AND the docker host re-grade (``regrade_on_host``) both set
-        it. Under ``--driver docker`` post_run teardown is moved to the HOST
-        after the container exits (over the copied-out workspace), where the
-        helper scripts + repo live, so the in-container orchestrator must not run
-        it. The tempdir/``evaluate`` paths leave the flag False and run post_run
-        in-process as before.
+        Skipped entirely under ``skip_pre_post_commands`` OR
+        ``pre_run_in_container``: the in-container docker run (either flag) AND the
+        docker host re-grade (``skip_pre_post_commands``) all skip it. Under
+        ``--driver docker`` ``post_run`` teardown is HOST-only — it runs after the
+        container exits over the copied-out workspace, where the helper scripts +
+        repo live — so the in-container orchestrator must never run it (there is no
+        per-command ``runs_in`` for ``post_run``). The tempdir/``evaluate`` paths
+        leave both flags False and run post_run in-process as before.
         """
-        if self.result is None or self.skip_pre_post_commands:
+        if self.result is None or self.skip_pre_post_commands or self.pre_run_in_container:
             return
         await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
 

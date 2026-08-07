@@ -1,11 +1,13 @@
-"""Interim guard: docker tasks whose ``pre_run`` must run inside the container.
+"""Narrow guard: docker ``pre_run`` mis-marked ``runs_in: host``.
 
-Under ``--driver docker`` pre_run runs on the HOST. A ``uv sync`` / ``uip
-codedagent setup`` pre_run must run inside the container instead (non-portable
-venv, live-tenant provisioning), so it is rejected at resolution time with a
-redirect to ``--driver tempdir``. The guard reads the RESOLVED driver, so a CLI
-``--driver docker`` is honored, and anchors the match to a command position so a
-quoted/argument mention (``echo 'uv sync'``) does not false-positive-gate.
+Under ``--driver docker`` pre_run is split by ``runs_in``. A ``uv sync`` / ``uip
+codedagent setup`` command must run inside the container (non-portable venv,
+live-tenant provisioning) — i.e. ``runs_in: agent``. Leaving it at the
+``runs_in: host`` default is rejected at resolution time, instructing the author
+to mark it ``runs_in: agent``; a command already marked ``runs_in: agent``
+passes. The guard reads the RESOLVED driver, so a CLI ``--driver docker`` is
+honored, and anchors the match to a command position so a quoted/argument
+mention (``echo 'uv sync'``) does not false-positive-gate.
 """
 
 from __future__ import annotations
@@ -36,8 +38,22 @@ def test_raises_for_docker_uv_sync():
         "docker",
         [PreRunCommand(command="bash -c 'cd proj && uv sync && source .venv/bin/activate'")],
     )
-    with pytest.raises(DockerPreRunHostUnsafeError, match="tempdir"):
+    with pytest.raises(DockerPreRunHostUnsafeError, match="runs_in: agent"):
         validate_docker_pre_run_host_safety(task)
+
+
+def test_no_raise_for_docker_uv_sync_marked_agent():
+    """A ``uv sync`` correctly marked ``runs_in: agent`` runs in-container — not gated."""
+    task = _task(
+        "docker",
+        [PreRunCommand(command="bash -c 'cd proj && uv sync'", runs_in="agent")],
+    )
+    validate_docker_pre_run_host_safety(task)  # no raise
+
+
+def test_no_raise_for_docker_uip_codedagent_setup_marked_agent():
+    task = _task("docker", [PreRunCommand(command="uip codedagent setup --force", runs_in="agent")])
+    validate_docker_pre_run_host_safety(task)  # no raise
 
 
 def test_raises_for_docker_uip_codedagent_setup():
@@ -139,7 +155,7 @@ def test_guard_skips_offending_task_not_whole_batch(tmp_path):
     # The uv-sync task is quarantined with the redirect message.
     assert len(skipped) == 1
     assert str(bad) == skipped[0].path
-    assert "tempdir" in skipped[0].reason
+    assert "runs_in: agent" in skipped[0].reason
     assert "DockerPreRunHostUnsafeError" in skipped[0].reason
 
 

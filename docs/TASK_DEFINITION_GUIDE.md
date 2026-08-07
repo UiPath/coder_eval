@@ -1244,10 +1244,34 @@ pre_run:
 | `command` | *required* | Shell command to execute (supports pipes, redirects, `&` for background) |
 | `timeout` | 30 | Maximum seconds to wait (1–300) |
 | `fail_on_error` | `true` | When true, failure aborts evaluation with `FinalStatus.ERROR` |
+| `runs_in` | `host` | Under `driver: docker`, where the command runs: `host` or `agent` (see below) |
 
 Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are
 captured in `pre_run_results` on the evaluation result (truncated to 100KB each). When a
 command fails with `fail_on_error: true`, remaining commands are skipped.
+
+**`runs_in: host | agent` (docker only).** Under `driver: docker` the container runs the
+agent turn only; the grading material and helper scripts live host-side. So each `pre_run`
+command's `runs_in` decides *where* it runs:
+
+- `runs_in: host` (default) — runs on the **host**, before the container, into a staging dir
+  whose contents seed the agent workspace. The right place for setups that need the host repo
+  or credentials (fixture copies, seed scripts). This preserves behavior for the vast majority
+  of tasks — a `pre_run` with no `runs_in` runs host-side exactly as before.
+- `runs_in: agent` — runs **inside** the coder_eval container, in the seeded workspace, before
+  the agent turn. Use it for setups that must run where they will be used — e.g. `uv sync`
+  building a virtualenv the agent runs against, or `uip codedagent setup` (live-tenant
+  provisioning). It is SDK-agnostic (executed by the in-container orchestrator, not a per-SDK
+  hook) and **self-contained by contract**: it gets the image + seeded workspace + forwarded
+  creds + network, but **not** the graders/criteria/skills `tests/` tree — so it cannot see
+  grading material.
+
+`post_run` has **no** `runs_in` — under docker it is always host-only (runs after the container
+exits, over the copied-out workspace). Under `driver: tempdir` there is no container, so
+`runs_in` is a no-op: `agent` behaves identically to `host` (everything runs in the one
+sandbox). A docker `pre_run` that needs the container (`uv sync` / `uip codedagent setup`) but
+is left at the `host` default is rejected at task resolution with an instruction to mark it
+`runs_in: agent`.
 
 **Execution order:**
 
