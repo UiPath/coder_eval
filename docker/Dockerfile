@@ -67,6 +67,7 @@ ARG CLAUDE_CODE_VERSION=2.1.177
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
+    && npm config set prefix /usr/local \
     && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Every built-in agent backend routes its SDK-owned subprocess through the
