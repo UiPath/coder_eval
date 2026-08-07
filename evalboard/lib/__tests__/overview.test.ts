@@ -1,10 +1,13 @@
 import { describe, expect, test, vi } from "vitest";
 import {
     buildAdhocRows,
+    buildTagTaskRows,
     collectPipelineRuns,
     projectRunRow,
     scopeRunTasks,
     summarizeListing,
+    taskCarriesRepoTag,
+    taskMatchesTag,
     turnBudgetRateForTasks,
     type PerRun,
     type RunListingRow,
@@ -488,6 +491,320 @@ describe("buildAdhocRows", () => {
         expect(row.title).toBe("My run");
         expect(row.tasksSucceeded).toBe(1);
         expect(row.tasksRun).toBe(2);
+    });
+});
+
+// buildTagTaskRows drives /path-to-ga. Two behaviours are asserted here that no
+// other test covers: a task de-tagged upstream (present in a newer run WITHOUT
+// the tag) must disappear, and a mature carry-forward must leave both the
+// numerator AND the denominator of passRate — the page-local divergence from
+// trends.ts, which counts a carry-forward as a pass.
+describe("buildTagTaskRows", () => {
+    const TAG = "path-to-ga";
+
+    function perRun(id: string, tasks: RunOverviewTask[]): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                tasks,
+                totalCostUsd: null,
+                taskDurationSeconds: null,
+                componentShas: [],
+            },
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+        };
+    }
+
+    test("keeps a task still tagged in the newest run", () => {
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        expect(rows[0].appearances).toBe(2);
+        expect(rows[0].latestRunId).toBe("r2");
+    });
+
+    test("drops a task present-but-untagged in a newer run (the de-tag bug)", () => {
+        // Models ipe-drive-to-slack: tagged in r1, still running in the newer r2
+        // but with the tag removed from its YAML. That is proof of de-tagging, so
+        // the row must vanish rather than linger until r1 ages out of the window.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "detagged", tags: [TAG] })]),
+                perRun("r2", [task({ taskId: "detagged", tags: ["other"] })]),
+            ],
+            TAG,
+        );
+        expect(rows).toEqual([]);
+    });
+
+    test("keeps a task that simply stopped appearing, dated to its newest tagged run", () => {
+        // Retired / renamed / skip:true is unknowable from run data, so the row
+        // stays and latestRunId is what the page renders as "Last seen".
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "gone", tags: [TAG] })]),
+                perRun("r2", [task({ taskId: "other", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["gone", "other"]);
+        expect(rows[0].latestRunId).toBe("r1");
+    });
+
+    test("one untagged replicate in the newest run is not a de-tag", () => {
+        // A replicated task has several rows per run; the de-tag check collapses
+        // with any-row semantics, so a single untagged replicate cannot drop it.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG] }),
+                    task({ taskId: "a", tags: [] }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        // Only the tagged row accumulates.
+        expect(rows[0].appearances).toBe(1);
+    });
+
+    test("matureSkips counts carry-forwards; appearances still includes them", () => {
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].appearances).toBe(2);
+        expect(rows[0].matureSkips).toBe(1);
+    });
+
+    test("passRate excludes mature skips from both numerator and denominator", () => {
+        // 4 appearances, 1 mature skip, 2 executed passes out of 3 executed rows
+        // → 66.67%. The old mature-inclusive rule would have said 75% (3/4).
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], status: "FAILURE" }),
+                ]),
+                perRun("r3", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r4", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].appearances).toBe(4);
+        expect(rows[0].matureSkips).toBe(1);
+        expect(rows[0].passRate).toBeCloseTo(66.6667, 3);
+    });
+
+    test("passRate is null when every tagged appearance was a mature skip", () => {
+        // Nothing was measured, so the page must show "—" rather than a
+        // measured-looking 100% (or a divide-by-zero NaN).
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].matureSkips).toBe(2);
+        expect(rows[0].passRate).toBeNull();
+    });
+
+    test("latestMatureSkipped reflects the newest tagged appearance", () => {
+        const skippedLatest = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(skippedLatest[0].latestMatureSkipped).toBe(true);
+
+        const executedLatest = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(executedLatest[0].latestMatureSkipped).toBe(false);
+    });
+
+    test("a tag matched via skill is never dropped", () => {
+        // taskCarriesRepoTag's first clause: every run containing the task
+        // matches, so `tagged` is always true. Using a raw tags.includes() here
+        // would wrongly drop every skill-tag row.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", skill: TAG })]),
+                perRun("r2", [task({ taskId: "a", skill: TAG })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+    });
+
+    test("a task carrying the tag only as a review tag does not appear", () => {
+        // Review tags are a post-hoc, effectively disjoint namespace; this page
+        // reports repo-declared tags only.
+        const r = perRun("r1", [task({ taskId: "a", tags: [] })]);
+        const rows = buildTagTaskRows(
+            [{ ...r, reviewTagsByTask: { a: [TAG] } }],
+            TAG,
+        );
+        expect(rows).toEqual([]);
+    });
+
+    test("a review-tagged older appearance is not folded into a kept row", () => {
+        // Discriminates the accumulate path specifically: the row IS kept (its
+        // newest run carries the repo tag), so only `appearances` reveals which
+        // predicate accumulated. Widening the accumulate path back to
+        // taskMatchesTag would count r1's review-tag-only row too and report 2.
+        const older = perRun("r1", [task({ taskId: "a", tags: [] })]);
+        const rows = buildTagTaskRows(
+            [
+                { ...older, reviewTagsByTask: { a: [TAG] } },
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].appearances).toBe(1);
+    });
+
+    test("a task that only recently GAINED the tag is kept", () => {
+        // Mirror image of the de-tag case, and the reason the newest-appearance
+        // rule is first-write-wins rather than "tagged in every appearance": a
+        // task tagged on day 20 of a 30-day window is present-but-untagged in the
+        // older runs, and must not read as de-tagged.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [] })]),
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        expect(rows[0].appearances).toBe(1);
+        expect(rows[0].latestRunId).toBe("r2");
+    });
+
+    test("a newest run with a null overview neither adds nor drops anything", () => {
+        // A transient blob failure on the newest run must not read as a de-tag of
+        // every row.
+        const broken: PerRun = {
+            id: "r9",
+            overview: null,
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+        };
+        const rows = buildTagTaskRows(
+            [broken, perRun("r1", [task({ taskId: "a", tags: [TAG] })])],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        expect(rows[0].appearances).toBe(1);
+        expect(rows[0].latestRunId).toBe("r1");
+    });
+
+    test("empty input returns an empty list", () => {
+        expect(buildTagTaskRows([], TAG)).toEqual([]);
+    });
+
+    test("rows come back sorted by taskId", () => {
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "c", tags: [TAG] }),
+                    task({ taskId: "a", tags: [TAG] }),
+                    task({ taskId: "b", tags: [TAG] }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a", "b", "c"]);
+    });
+
+    test("all three latest* fields come off the same row on replicate disagreement", () => {
+        // The newest run has an executed replicate and a carried-forward one.
+        // First-row-wins decides, and the Mature pill must never sit beside a
+        // measured score from the other replicate.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({
+                        taskId: "a",
+                        tags: [TAG],
+                        matureSkipped: true,
+                        status: "SUCCESS",
+                        weightedScore: 1.0,
+                    }),
+                    task({
+                        taskId: "a",
+                        tags: [TAG],
+                        status: "FAILURE",
+                        weightedScore: 0.25,
+                    }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].latestMatureSkipped).toBe(true);
+        expect(rows[0].latestStatus).toBe("SUCCESS");
+        expect(rows[0].latestScore).toBe(1.0);
+        // Both replicates are tagged, so `appearances` counts ROWS (2), not runs
+        // (1) — the semantics the interface comment promises.
+        expect(rows[0].appearances).toBe(2);
+        expect(rows[0].matureSkips).toBe(1);
+    });
+});
+
+// taskMatchesTag was rebuilt on top of the extracted taskCarriesRepoTag so
+// buildTagTaskRows could reuse the repo-provenance half. scopeRunTasks and the
+// front-page rails still go through taskMatchesTag and legitimately filter on
+// review tags, so the extraction has to be behaviour-preserving.
+describe("taskCarriesRepoTag / taskMatchesTag", () => {
+    test("taskCarriesRepoTag matches skill and YAML tags, not review tags", () => {
+        expect(taskCarriesRepoTag(task({ skill: "x" }), "x")).toBe(true);
+        expect(taskCarriesRepoTag(task({ tags: ["x"] }), "x")).toBe(true);
+        expect(taskCarriesRepoTag(task({ tags: ["y"] }), "x")).toBe(false);
+    });
+
+    test("taskMatchesTag still matches via skill, tags, or a review tag", () => {
+        expect(taskMatchesTag(task({ skill: "x" }), {}, "x")).toBe(true);
+        expect(taskMatchesTag(task({ tags: ["x"] }), {}, "x")).toBe(true);
+        expect(
+            taskMatchesTag(task({ taskId: "t" }), { t: ["x"] }, "x"),
+        ).toBe(true);
+        expect(taskMatchesTag(task({ taskId: "t", tags: ["y"] }), {}, "x")).toBe(
+            false,
+        );
     });
 });
 

@@ -182,7 +182,9 @@ export default async function PathToGaPage({
                                         <span
                                             className={`font-medium ${passClass(r.passRate)}`}
                                         >
-                                            {r.passRate.toFixed(0)}%
+                                            {r.passRate != null
+                                                ? `${r.passRate.toFixed(0)}%`
+                                                : "—"}
                                         </span>
                                     </td>
                                     <td className="py-3 px-4">
