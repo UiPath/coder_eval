@@ -584,7 +584,7 @@ class Sandbox:
             wrapper.write_text(
                 "#!/bin/sh\n"
                 + f"CODER_EVAL_MOCK_CALL_LOG={shlex.quote(str(log_path))} "
-                + f"exec {shlex.quote(CLIENT_EXECUTABLE)} {shlex.quote(spec.tool)} \"$@\"\n",
+                + f'exec {shlex.quote(CLIENT_EXECUTABLE)} {shlex.quote(spec.tool)} "$@"\n',
                 encoding="utf-8",
                 newline="\n",
             )

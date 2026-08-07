@@ -244,7 +244,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         shim_dir = Path(tempfile.mkdtemp(prefix="antigravity-drop-"))
         wrapper = shim_dir / "localharness"
         wrapper.write_text(
-            f"#!/usr/bin/env bash\nexec {CONTAINER_DROP_SHIM} {shlex.quote(real)} \"$@\"\n",
+            f'#!/usr/bin/env bash\nexec {CONTAINER_DROP_SHIM} {shlex.quote(real)} "$@"\n',
             encoding="utf-8",
         )
         wrapper.chmod(0o555)

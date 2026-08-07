@@ -49,11 +49,14 @@ def _receive_line(connection: socket.socket) -> bytes:
 
 
 def invoke(tool: str, argv: list[str]) -> int:
-    request = json.dumps(
-        {"version": PROTOCOL_VERSION, "tool": tool, "argv": argv},
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8") + b"\n"
+    request = (
+        json.dumps(
+            {"version": PROTOCOL_VERSION, "tool": tool, "argv": argv},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
     if len(request) > MAX_REQUEST_BYTES:
         sys.stderr.write("protected mock client: request exceeds size limit\n")
         _record(tool, argv, 125)

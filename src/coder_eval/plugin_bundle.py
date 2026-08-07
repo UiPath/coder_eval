@@ -247,9 +247,7 @@ def verify_bundle(bundle_dir: Path) -> BundleManifest:
         missing = sorted(declared_paths - actual_paths)[:5]
         added = sorted(actual_paths - declared_paths)[:5]
         changed = sorted(
-            key
-            for key in set(actual_files) & set(manifest.files)
-            if actual_files[key] != manifest.files[key]
+            key for key in set(actual_files) & set(manifest.files) if actual_files[key] != manifest.files[key]
         )[:5]
         raise PluginBundleError(
             f"plugin bundle differs from its manifest: {bundle_dir} "

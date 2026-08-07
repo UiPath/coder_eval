@@ -154,9 +154,7 @@ def load_config(config_path: Path) -> dict[str, ToolState]:
         if not isinstance(fixture, str) or not isinstance(max_requests, int) or max_requests < 1:
             raise ValueError(f"mock config entry for {tool!r} has invalid fixture or max_requests")
         if not isinstance(passthrough_prefixes, list) or not all(
-            isinstance(prefix, list)
-            and prefix
-            and all(isinstance(token, str) and token for token in prefix)
+            isinstance(prefix, list) and prefix and all(isinstance(token, str) and token for token in prefix)
             for prefix in passthrough_prefixes
         ):
             raise ValueError(f"mock config entry for {tool!r} has invalid passthrough prefixes")
@@ -257,16 +255,19 @@ class ProtectedMockHandler(socketserver.StreamRequestHandler):
         return uid
 
     def _write(self, response: CommandResponse) -> None:
-        payload = json.dumps(
-            {
-                "version": PROTOCOL_VERSION,
-                "exit_code": response.exit_code,
-                "stdout": response.stdout,
-                "stderr": response.stderr,
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-        ).encode("utf-8") + b"\n"
+        payload = (
+            json.dumps(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "exit_code": response.exit_code,
+                    "stdout": response.stdout,
+                    "stderr": response.stderr,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
         if len(payload) > MAX_RESPONSE_BYTES:
             payload = (
                 json.dumps(

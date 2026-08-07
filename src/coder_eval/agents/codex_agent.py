@@ -1195,11 +1195,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         original_home = AGENT_HOME if agent_isolation_enabled() else os.environ.get("HOME", "")
         # Where the user's REAL zsh dotfiles live: their own ZDOTDIR when set,
         # else their home (zsh's fallback).
-        original_zdotdir = (
-            AGENT_HOME
-            if agent_isolation_enabled()
-            else os.environ.get("ZDOTDIR", "") or original_home
-        )
+        original_zdotdir = AGENT_HOME if agent_isolation_enabled() else os.environ.get("ZDOTDIR", "") or original_home
         # The profile only ever executes under a POSIX shell, so the PATH
         # separator is ':' regardless of the host building it.
         quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
