@@ -164,10 +164,13 @@ from coder_eval.models.routing import (
 
 # Sandbox
 from coder_eval.models.sandbox import (
+    RECORD_CLI_DIR,
+    RECORD_CLI_LOG,
     DockerBuildConfig,
     DockerDriverConfig,
     NodeEnvConfig,
     PythonEnvConfig,
+    RecordedCli,
     ResourceLimits,
     SandboxConfig,
     validate_template_sources_list,
@@ -281,6 +284,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "NodeEnvConfig",
     "PythonEnvConfig",
     "SandboxConfig",
+    "RecordedCli",
+    "RECORD_CLI_DIR",
+    "RECORD_CLI_LOG",
     "ResourceLimits",
     "validate_template_sources_list",
     # Telemetry

@@ -58,3 +58,10 @@ compiled:
   - "*.so"
   - "*.dylib"
   - "*.dll"
+
+# Harness-generated content, not agent work: SandboxConfig.record_cli writes
+# recording shims and the invocation log here. Excluded from the agent_judge
+# workspace copy so a Bash-enabled judge does not read them as authored files.
+# Artifact capture uses a separate list, so the log is still preserved as evidence.
+harness_generated:
+  - "cli_mocks"
