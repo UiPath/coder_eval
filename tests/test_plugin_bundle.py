@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -35,6 +36,15 @@ def _symlink_or_skip(target: str, link: Path, *, is_dir: bool = False) -> None:
         os.symlink(target, link, target_is_directory=is_dir)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symlinks unavailable: {exc}")
+
+
+# Windows stores a relative reparse-point target verbatim and resolves it with
+# backslash-only NT parsing, so a POSIX-separated target like "../shared/x.md"
+# dangles there. Plugin bundles are only consumed by the POSIX-only DockerRunner.
+posix_relative_symlink = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="relative POSIX symlink targets do not resolve on Windows; plugin bundles are POSIX-only",
+)
 
 
 def test_bundle_includes_only_plugin_discovery_subtrees(tmp_path: Path) -> None:
@@ -73,6 +83,7 @@ def test_bundle_rejects_absolute_symlink_back_to_source(tmp_path: Path) -> None:
         build_manifest(source)
 
 
+@posix_relative_symlink
 def test_bundle_rejects_relative_symlink_to_excluded_tree(tmp_path: Path) -> None:
     source = tmp_path / "plugin"
     _write(source / "fixtures" / "answer.json", "hidden")
@@ -84,6 +95,7 @@ def test_bundle_rejects_relative_symlink_to_excluded_tree(tmp_path: Path) -> Non
         build_manifest(source)
 
 
+@posix_relative_symlink
 def test_bundle_preserves_safe_relative_symlink(tmp_path: Path) -> None:
     source = tmp_path / "plugin"
     _write(source / "skills" / "shared" / "guide.md", "public")
@@ -108,6 +120,10 @@ def test_bundle_verification_detects_drift(tmp_path: Path, mutation: str) -> Non
     stage_bundle(source, bundle)
 
     staged = bundle / "skills" / "demo" / "SKILL.md"
+    # stage_bundle hardens the projection (dirs 0o555, files 0o444). Adding or
+    # removing an entry needs write permission on the directory, not just the
+    # file, so relax both before simulating drift.
+    staged.parent.chmod(0o755)
     staged.chmod(0o644)
     if mutation == "change":
         staged.write_text("tampered", encoding="utf-8")
