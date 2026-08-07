@@ -35,8 +35,16 @@ describe("resolvePricing", () => {
         expect(resolvePricing("__proto__")).toBeNull();
     });
 
-    test("knows the current default opus id", () => {
-        expect(resolvePricing("claude-opus-4-8")?.outputPerMTok).toBe(75);
+    test("knows the current default opus id, at the repriced tier", () => {
+        // Opus 4.5 REPRICED the family from $15/$75 to $5/$25 per Mtok. The two
+        // generations differ 3x, so pin the boundary: an id on the wrong side of
+        // it triples (or thirds) every Opus cost the board renders, which reads
+        // as a plausible number rather than an obvious error.
+        // pricing-parity.test.ts is the authority on the rates themselves; this
+        // asserts the split survives an edit to the table.
+        expect(resolvePricing("claude-opus-4-8")?.outputPerMTok).toBe(25);
+        expect(resolvePricing("claude-opus-5")?.outputPerMTok).toBe(25);
+        expect(resolvePricing("claude-opus-4-1")?.outputPerMTok).toBe(75);
     });
 
     test("strips LiteLLM/Bedrock routing + region prefixes (recorded model_used is qualified)", () => {
