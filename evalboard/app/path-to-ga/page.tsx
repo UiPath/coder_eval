@@ -1,18 +1,14 @@
-import Link from "next/link";
 import {
     getOverview,
     getTagTaskBreakdown,
     listRecentHarnesses,
 } from "@/lib/overview";
 import { parseHarnessScope } from "@/lib/harness";
-import { humanizeTaskId } from "@/lib/format";
-import { passClass } from "@/lib/pass-rate";
 import { HarnessSelector } from "../_components/harness-selector";
 import { harnessShortLabel } from "../_components/harness-badge";
 import { type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "../_overview/daily-chart";
-import { TableScroll } from "../_components/scroll-table";
-import { StatusPill } from "@/lib/pills";
+import { TagTaskTable } from "./task-table";
 
 export const dynamic = "force-dynamic";
 
@@ -98,10 +94,22 @@ export default async function PathToGaPage({
                             {taskRows.length}
                         </div>
                         <div className="text-xs text-gray-500">
-                            distinct task{taskRows.length === 1 ? "" : "s"}
+                            distinct task{taskRows.length === 1 ? "" : "s"} still
+                            tagged
                         </div>
                     </div>
                 </div>
+                {/* The tile above and the chart below keep their original
+                    mature-blind, union-over-the-window semantics (they feed the
+                    front page and every tag-filtered view); the table does not.
+                    Say so, rather than let the two silently disagree. */}
+                <p className="text-xs text-gray-500">
+                    The rate above and the chart cover every run that carried a{" "}
+                    <span className="font-mono">{TAG}</span> task at the time it
+                    ran, counting mature carry-forwards as passes. The table
+                    below is narrower: only tasks still carrying the tag, scored
+                    on runs that actually executed.
+                </p>
                 {runsInWindow > 0 ? (
                     <DailySuccessChart
                         data={overview.runs}
@@ -116,105 +124,12 @@ export default async function PathToGaPage({
                 )}
             </section>
 
-            <div className="space-y-2">
-                <div className="flex flex-wrap items-baseline gap-2">
-                    <h2 className="text-sm font-semibold text-gray-900">
-                        Tasks
-                    </h2>
-                    {/* Unscoped, a task's appearances span harnesses, so its rate
-                        pools regimes that aren't strictly comparable. Say so
-                        rather than let the number read as one harness's. */}
-                    {!harness && (
-                        <span className="text-xs text-gray-500">
-                            pooled across harnesses · pick one above to separate
-                            them
-                        </span>
-                    )}
-                </div>
-                <TableScroll>
-                    <table className="w-full text-sm">
-                        <thead>
-                            <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
-                                <th className="py-3 px-4 font-medium">
-                                    Task
-                                </th>
-                                <th className="py-3 px-4 font-medium">
-                                    Skill
-                                </th>
-                                <th className="py-3 px-4 font-medium text-right">
-                                    Appearances
-                                </th>
-                                <th className="py-3 px-4 font-medium text-right">
-                                    Pass rate
-                                </th>
-                                <th className="py-3 px-4 font-medium">
-                                    Latest status
-                                </th>
-                                <th className="py-3 px-4 font-medium text-right">
-                                    Latest score
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {taskRows.map((r) => (
-                                <tr
-                                    key={r.taskId}
-                                    className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
-                                >
-                                    <td className="py-3 px-4">
-                                        <Link
-                                            href={`/runs/${r.latestRunId}`}
-                                            className="text-gray-900 hover:text-studio-blue font-medium"
-                                        >
-                                            {humanizeTaskId(r.taskId)}
-                                        </Link>
-                                        <div className="font-mono text-[11px] text-gray-400">
-                                            {r.taskId}
-                                        </div>
-                                    </td>
-                                    <td className="py-3 px-4 text-gray-700">
-                                        {r.skill ?? "—"}
-                                    </td>
-                                    <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                        {r.appearances}
-                                    </td>
-                                    <td className="py-3 px-4 text-right tabular-nums">
-                                        <span
-                                            className={`font-medium ${passClass(r.passRate)}`}
-                                        >
-                                            {r.passRate != null
-                                                ? `${r.passRate.toFixed(0)}%`
-                                                : "—"}
-                                        </span>
-                                    </td>
-                                    <td className="py-3 px-4">
-                                        <StatusPill
-                                            status={r.latestStatus}
-                                            relabel
-                                        />
-                                    </td>
-                                    <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                        {r.latestScore != null
-                                            ? r.latestScore.toFixed(2)
-                                            : "—"}
-                                    </td>
-                                </tr>
-                            ))}
-                            {taskRows.length === 0 && (
-                                <tr>
-                                    <td
-                                        colSpan={6}
-                                        className="py-6 px-4 text-center text-sm text-gray-500"
-                                    >
-                                        No tasks tagged {TAG} in the last{" "}
-                                        {WINDOW}.
-                                    </td>
-                                </tr>
-                            )}
-                        </tbody>
-                    </table>
-                </TableScroll>
-            </div>
+            <TagTaskTable
+                rows={taskRows}
+                tag={TAG}
+                window={WINDOW}
+                harness={harness}
+            />
         </div>
     );
 }
