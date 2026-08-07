@@ -127,3 +127,51 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   that environment injects the criterion. Until then CE030 stays scoped to the four
   top-level models; the `command_pattern`/`exclude_pattern` contract this PR changed is
   documented in the Field descriptions and TASK_DEFINITION_GUIDE regardless.
+
+## From the evalboard Path-to-GA de-tag / mature-passes fix (4e5bbc4…dd5f7e9) — TS-side guards deferred
+
+Context: the CExxx harness is a **Python** AST runner over `src/coder_eval/`, so none
+of the invariants below are mechanizable in it. Each would need a TypeScript lint
+harness (eslint config + custom rules) that `evalboard/` does not have today —
+standing one up for three call sites fails the KISS/YAGNI gate. Deferring rather
+than dropping; promote if a fourth TS-side invariant appears, and stand up the
+harness once for all of them.
+
+- [ ] **"Every consumer of `RunOverviewTask.matureSkipped` must decide explicitly
+  whether a carry-forward row counts."** Four consumers now, and they deliberately
+  DISAGREE: `lib/trends.ts` and `app/runs/[id]/run-view.tsx` count a mature skip as
+  a pass; `lib/overview.ts::buildTagTaskRows` excludes it from both terms
+  (`/path-to-ga` is a GA-readiness page). A new consumer silently inheriting either
+  convention is a real hazard. Guard shape: flag a file that reads `.matureSkipped`
+  without a nearby comment naming its convention — weak, hence the deferral. Closed
+  for now by unit tests that assert the exclusion from BOTH numerator and denominator
+  (`lib/__tests__/overview.test.ts` → `describe("buildTagTaskRows")`).
+
+- [ ] **`taskCarriesRepoTag` is the single repo-provenance tag predicate — but one
+  duplicate survives.** `app/runs/[id]/run-view.tsx:283` still inlines its exact body
+  (`(tag) => t.tags.includes(tag) || t.skill === tag`). NOT adopted deliberately:
+  `run-view.tsx` is `"use client"` and `lib/overview.ts` imports `next/cache` plus the
+  blob readers, so importing the predicate there would drag server-only code into the
+  client bundle. Fixing it properly means extracting the predicate into a
+  dependency-free module (e.g. `lib/tags.ts`) — worth doing next time either file is
+  touched, not worth a standalone change. A lint rule ("no inline `tags.includes(x) ||
+  skill === x`") would catch future copies.
+
+- [ ] **The de-tag rule fails CLOSED on a newest run that loads fine but stamps no
+  `tags`** (`lib/overview.ts::buildTagTaskRows`): every tagged task would read as
+  de-tagged and the table would empty, rendering an empty state indistinguishable from
+  a genuine full de-tagging. Its sibling failure mode (`overview == null`, a transient
+  blob read failure) IS guarded, with exactly this rationale. Currently unreachable —
+  0 of ~116k date-shaped non-ad-hoc task rows in `runs-remote/` lack `tags`, and the
+  six zero-tag runs found are all ad-hoc (filtered upstream by id shape + `meta.adhoc`)
+  — so the barrier is two upstream filters rather than a check at the seam. Left
+  unguarded on purpose: a `if (taggedInRun.size === 0) skip the de-tag signal` guard
+  would also mask a real, total de-tagging. Revisit if the pipeline ever stops
+  stamping tags, or if a non-ad-hoc run legitimately carries zero tagged rows.
+
+- [ ] **Discriminating-test discipline for predicate narrowings.** Two tests in this
+  change passed for the wrong reason — a downstream rule (the de-tag drop) masked the
+  mutation they claimed to catch — and the plan leaned on a `grep` acceptance criterion
+  that CI never runs. Both were found by mutation-testing the suite and fixed. No
+  mechanizable guard; the durable lesson is: when a test names a narrowing, construct
+  the fixture so the row SURVIVES every other rule, or the assertion proves nothing.
