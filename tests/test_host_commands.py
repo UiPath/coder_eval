@@ -11,8 +11,6 @@ covered end-to-end by ``test_pre_run.py`` / ``test_post_run.py``.)
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from coder_eval.evaluation.host_commands import DEFAULT_MAX_OUTPUT, run_command_list
@@ -96,14 +94,19 @@ async def test_cwd_honored(tmp_path):
 
 
 async def test_cwd_accepts_str(tmp_path):
+    # Prove run_command_list accepts a str cwd AND runs the command there by the
+    # file it creates in the working dir. Asserting the file lands in tmp_path is
+    # cross-platform; parsing `pwd` output is not (git-bash on Windows reports a
+    # POSIX-style `/c/Users/...` for a `C:\Users\...` cwd, so a raw Path compare
+    # fails there).
     results: list[PostRunResult] = []
     await run_command_list(
-        [PostRunCommand(command="pwd")],
+        [PostRunCommand(command="echo ran > cwd_marker.txt")],
         results,
         "post_run",
         cwd=str(tmp_path),
     )
-    assert Path(results[0].stdout.strip()) == tmp_path
+    assert (tmp_path / "cwd_marker.txt").is_file()
 
 
 async def test_empty_command_list_noop(tmp_path):

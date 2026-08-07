@@ -17,7 +17,7 @@ tags: [smoke, smoke-pass, byod, docker]
 agent:
   type: claude-code
   permission_mode: acceptEdits
-  allowed_tools: ["Bash", "Read"]
+  allowed_tools: ["Bash", "Read", "Write"]
 
 sandbox:
   driver: docker
@@ -29,10 +29,19 @@ sandbox:
   limits:
     timeout: 60
 
+# The custom image bakes a marker at /opt/byod_marker (an absolute container
+# path OUTSIDE the /work workspace). Under --driver docker grading runs on the
+# HOST over the copied-out workspace, so it cannot see /opt directly. The agent
+# runs INSIDE the container (where /opt exists), so it surfaces the marker into
+# its workspace; the criterion then grades that copied-out file host-side. The
+# read only succeeds if the custom image was actually used (a non-BYOD image has
+# no /opt/byod_marker), so the marker's content still proves BYOD worked.
 initial_prompt: |
-  Do nothing. The task will verify that the custom Docker image was used.
+  Read the file /opt/byod_marker and write its exact contents into a new file
+  named byod_marker_proof.txt in your current working directory. Do nothing else.
 
 success_criteria:
-  - type: file_exists
-    path: /opt/byod_marker
-    description: Marker file added by custom BYOD image (verifies custom image was used)
+  - type: file_contains
+    path: byod_marker_proof.txt
+    includes: ["BYOD custom image loaded"]
+    description: Agent surfaced the image-baked /opt/byod_marker into the workspace (verifies the custom image was used, grade-outside-compatible)

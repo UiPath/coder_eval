@@ -89,8 +89,10 @@ coder-eval run task.yaml -D sandbox.docker.image=my-team/image:latest
 The default when you set nothing is `coder-eval-agent:<installed package version>`.
 
 A worked example ships in-tree: `tasks/byod_smoke_test.yaml` runs against
-`templates/byod_smoke_test/Dockerfile`, which extends the framework image and drops a marker file
-that the task's success criterion then asserts — proving the custom image was actually used. (The
+`templates/byod_smoke_test/Dockerfile`, which extends the framework image and drops a marker file at
+`/opt/byod_marker`. Because that path is outside the copied-out `/work` workspace, the task has the
+agent (which runs inside the container) surface the marker into its workspace, and the criterion then
+asserts it host-side — proving the custom image was actually used. (The
 `byod_*` names here mean "Bring Your Own **Docker**"; they are unrelated to the
 [Bring Your Own Dataset](DATASETS.md) guide, which is about fanning one task out over data rows.)
 
