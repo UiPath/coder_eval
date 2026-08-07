@@ -378,6 +378,32 @@ async def test_claude_settings_none_default():
 
 
 @pytest.mark.asyncio
+async def test_system_prompt_appends_to_claude_code_preset():
+    """system_prompt keeps the Claude Code default prompt and appends via the SDK preset."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="You are a coding agent.")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "append": "You are a coding agent.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_none_leaves_sdk_default():
+    """No system_prompt -> ClaudeAgentOptions.system_prompt stays None (SDK default prompt)."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt is None
+
+
+@pytest.mark.asyncio
 async def test_sdk_options_forwarded_to_sdk():
     """An sdk_options key (e.g. effort) is splatted into ClaudeAgentOptions."""
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, sdk_options={"effort": "medium"})

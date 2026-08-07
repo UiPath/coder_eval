@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     TaskNotificationMessage,
     query,
 )
+from claude_agent_sdk.types import SystemPromptPreset
 
 # Private SDK import — the public `query()` API doesn't expose the subprocess
 # handle, but we need it to SIGKILL on timeout (the SDK's anyio task groups
@@ -1173,6 +1174,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if "ToolSearch" not in disallowed_tools:
             disallowed_tools.append("ToolSearch")
 
+        # A plain-string system_prompt would REPLACE Claude Code's default system
+        # prompt, dropping its behavioral guidance (parallel tool-call batching,
+        # conciseness). Always keep the default via the SDK preset and append the
+        # configured prompt after it.
+        system_prompt: SystemPromptPreset | None = None
+        if self.config.system_prompt is not None:
+            system_prompt = SystemPromptPreset(type="preset", preset="claude_code", append=self.config.system_prompt)
+
         # as_posix(), not str(): bash on Windows strips backslashes from unquoted
         # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
         options = ClaudeAgentOptions(
@@ -1192,7 +1201,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             # summing per-message values undercounts by 10x+. Without this flag
             # StreamEvents are suppressed by the SDK.
             include_partial_messages=True,
-            system_prompt=self.config.system_prompt,
+            system_prompt=system_prompt,
             setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
             resume=self._session_id,
             settings=json.dumps(self.config.claude_settings)
