@@ -20,7 +20,6 @@ from claude_agent_sdk import (
     TaskNotificationMessage,
     query,
 )
-from claude_agent_sdk.types import SystemPromptPreset
 
 # Private SDK import — the public `query()` API doesn't expose the subprocess
 # handle, but we need it to SIGKILL on timeout (the SDK's anyio task groups
@@ -28,6 +27,7 @@ from claude_agent_sdk.types import SystemPromptPreset
 # CLI). If this import breaks on an SDK upgrade, the threaded watchdog loses
 # its kill target and timeouts will no longer be enforced at the agent layer.
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+from claude_agent_sdk.types import SystemPromptPreset
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
