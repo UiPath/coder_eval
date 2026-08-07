@@ -1550,7 +1550,12 @@ class DockerRunner:
         # runs the agent there). NO bind mount targets it -- capture is a copy-out
         # (see Orchestrator._cleanup), not a mount, so baked inputs/HOME survive.
         if self._workspace_dir is not None:
-            _assert_workspace_not_reserved(self._workspace_dir)
+            # Under isolation the workspace is the framework's OWN agent dir
+            # (assigned above, not task-authored), and that path is deliberately
+            # in RESERVED_CONTAINER_DIRS. The assertion guards task/image-supplied
+            # values, so exempt exactly the isolation-managed constant.
+            if not (cfg.agent_isolation and self._workspace_dir == CONTAINER_AGENT_WORK_DIR):
+                _assert_workspace_not_reserved(self._workspace_dir)
             argv += ["-w", self._workspace_dir]
 
         argv += [image]
