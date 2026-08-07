@@ -73,14 +73,21 @@ describe("TagTaskTable", () => {
 
     test("renders an em dash for an unmeasured pass rate", () => {
         // Every appearance was a carry-forward → nothing executed → no rate.
-        // Must not read as NaN% or a measured 0%.
+        // Must not read as NaN% or a measured 0%. `latestMatureSkipped` is true
+        // by construction here: buildTagTaskRows reads latest* off one of the
+        // counted appearances, so matureSkips === appearances forces it — the
+        // score dashes too, hence two dashes rather than one.
         renderTable([
-            row({ appearances: 4, matureSkips: 4, passRate: null }),
+            row({
+                appearances: 4,
+                matureSkips: 4,
+                passRate: null,
+                latestMatureSkipped: true,
+            }),
         ]);
         expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
         expect(screen.queryByText("0%")).not.toBeInTheDocument();
-        // Only the pass-rate cell dashes here (the latest row still executed).
-        expect(screen.getAllByText("—")).toHaveLength(1);
+        expect(screen.getAllByText("—")).toHaveLength(2);
     });
 
     test("Last seen shows the date half of the latest run id", () => {

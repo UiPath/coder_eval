@@ -16,9 +16,28 @@ import { type Window } from "@/lib/reviews-types";
 // lib/overview.ts::buildTagTaskRows), which is narrower than the headline tile
 // and chart above it — hence the caveat paragraph in page.tsx. A mature
 // carry-forward's inherited status/score are dashed out rather than shown as if
-// they were measured (same idiom as app/trends/trends-view.tsx and
-// app/runs/[id]/task-grid.tsx; deliberately not extracted into a shared helper,
-// the column shapes differ).
+// they were measured (same idiom as app/trends/trends-view.tsx; note
+// app/runs/[id]/task-grid.tsx deliberately still shows the carried-forward 1.00
+// beside its own MaturePill, so the two surfaces differ). Not extracted into a
+// shared helper — the column shapes differ, so it would be a wrapper around a
+// ternary.
+function passRateTooltip(r: TagTaskRow): string {
+    const executed = r.appearances - r.matureSkips;
+    if (executed === 0) {
+        return (
+            `Not executed once in this window — all ${r.appearances} appearance` +
+            `${r.appearances === 1 ? "" : "s"} were mature carry-forwards, so ` +
+            "there is no measured pass rate."
+        );
+    }
+    return (
+        `Measured over ${executed} executed appearance` +
+        `${executed === 1 ? "" : "s"}` +
+        (r.matureSkips > 0
+            ? ` (${r.matureSkips} mature carry-forward${r.matureSkips === 1 ? "" : "s"} excluded).`
+            : ".")
+    );
+}
 export function TagTaskTable({
     rows,
     tag,
@@ -35,11 +54,16 @@ export function TagTaskTable({
             <div className="flex flex-wrap items-baseline gap-2">
                 <h2 className="text-sm font-semibold text-gray-900">Tasks</h2>
                 {/* Unscoped, a task's appearances span harnesses, so its rate
-                    pools regimes that aren't strictly comparable. Say so
-                    rather than let the number read as one harness's. */}
+                    pools regimes that aren't strictly comparable — and the row
+                    then mixes scopes: Appearances/Pass rate are pooled, while
+                    Last seen and the two Latest columns describe ONE run (and
+                    maturity is per-harness pipeline state, so a Mature pill can
+                    legitimately sit beside a middling pooled rate). Say both,
+                    rather than let either read as one harness's. */}
                 {!harness && (
                     <span className="text-xs text-gray-500">
-                        pooled across harnesses · pick one above to separate them
+                        pooled across harnesses · Last seen and Latest describe a
+                        single run · pick one above to separate them
                     </span>
                 )}
             </div>
@@ -107,7 +131,17 @@ export function TagTaskTable({
                                 >
                                     {fmtRunDate(r.latestRunId)}
                                 </td>
-                                <td className="py-3 px-4 text-right tabular-nums">
+                                {/* The denominator is `appearances - matureSkips`,
+                                    which is NOT the Appearances shown two cells
+                                    left — a mature task is re-validated about
+                                    weekly, so a 24-appearance row can rest on a
+                                    single executed run and still tint green.
+                                    Name the sample size on hover so a confident
+                                    percentage can't hide a tiny denominator. */}
+                                <td
+                                    className="py-3 px-4 text-right tabular-nums"
+                                    title={passRateTooltip(r)}
+                                >
                                     <span
                                         className={`font-medium ${passClass(r.passRate)}`}
                                     >

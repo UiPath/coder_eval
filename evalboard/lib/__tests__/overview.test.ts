@@ -628,6 +628,12 @@ describe("buildTagTaskRows", () => {
         );
         expect(rows[0].matureSkips).toBe(2);
         expect(rows[0].passRate).toBeNull();
+        // Producer invariant the table's rendering relies on: latest* is read
+        // off one of the counted appearances, so "nothing executed" necessarily
+        // means the latest appearance was a skip. The table dashes BOTH cells on
+        // the strength of this — it can never show a measured-looking score
+        // beside an unmeasured rate.
+        expect(rows[0].latestMatureSkipped).toBe(true);
     });
 
     test("latestMatureSkipped reflects the newest tagged appearance", () => {
