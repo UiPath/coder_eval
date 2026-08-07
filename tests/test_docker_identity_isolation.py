@@ -66,6 +66,8 @@ def test_agent_environment_scrubs_only_present_harness_paths(monkeypatch: pytest
     monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
     monkeypatch.setenv("CODER_EVAL_AGENT_ALLOW_RPC", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "needed-by-agent")
+    # Keep the exact-equality assertion below valid on a host that exports it.
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
 
     overrides = scrub_agent_env_overrides()
 
@@ -76,6 +78,25 @@ def test_agent_environment_scrubs_only_present_harness_paths(monkeypatch: pytest
     }
     assert "ANTHROPIC_API_KEY" not in overrides
     assert "CODER_EVAL_AGENT_ALLOW_RPC" not in overrides
+
+
+def test_agent_environment_scrubs_inherited_bedrock_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The evaluated agent must not inherit the evaluator's Bedrock token.
+
+    The UID barrier blocks filesystem access to grading material but cannot hide a
+    process's own environment, so a credential left there is readable by the agent
+    itself. Claude re-sets this explicitly from a resolved BedrockRoute, so masking
+    the inherited value costs the Bedrock path nothing.
+    """
+
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "evaluator-only-secret")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+    overrides = scrub_agent_env_overrides()
+
+    assert overrides["AWS_BEARER_TOKEN_BEDROCK"] == ""
+    # The region is not a credential and stays inherited.
+    assert "AWS_REGION" not in overrides
 
 
 def test_isolated_codex_profiles_never_restore_root_harness_home(monkeypatch: pytest.MonkeyPatch) -> None:

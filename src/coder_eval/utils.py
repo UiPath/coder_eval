@@ -89,6 +89,15 @@ def process_plugins(
 AGENT_ENV_SCRUB_VARS: tuple[str, ...] = (
     "SKILLS_REPO_PATH",
     "TASK_DIR",
+    # The evaluator's Bedrock credential. No agent needs to INHERIT it: the Claude
+    # backend sets it explicitly from a resolved BedrockRoute (and blanks it on the
+    # LiteLLM route), Codex authenticates via CODEX_API_KEY, and Antigravity does not
+    # use Bedrock. Left inherited it reaches the dropped agent process, where it is
+    # readable through that process's own environment -- the UID barrier stops
+    # filesystem access to grading material but cannot hide an agent's own env.
+    # Scrubbing it also stops an inherited token from silently steering a DirectRoute
+    # run onto Bedrock (the CLI auto-selects on `process.env.AWS_BEARER_TOKEN_BEDROCK`).
+    "AWS_BEARER_TOKEN_BEDROCK",
 )
 AGENT_ENV_SCRUB_PREFIXES: tuple[str, ...] = ("CODER_EVAL_",)
 AGENT_ENV_PASSTHROUGH_VARS: tuple[str, ...] = ("CODER_EVAL_AGENT_ALLOW_RPC",)
