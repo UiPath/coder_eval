@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,7 +26,8 @@ from coder_eval.models import (
     TaskDefinition,
 )
 from coder_eval.protected_mock.protocol import CLIENT_EXECUTABLE
-from coder_eval.protected_mock.server import ProtectedMockServer, load_config
+from coder_eval.protected_mock.runtime import running_mock_server
+from coder_eval.protected_mock.server import ProtectedMockServer, ToolState, _normalized_argv, load_config
 from coder_eval.sandbox import Sandbox
 
 
@@ -44,6 +49,27 @@ def _fixture(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def _write_config(config: Path, fixture: Path, max_requests: int = 10) -> Path:
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "tools": [{"tool": "uip", "fixture": str(fixture), "max_requests": max_requests}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
+def _fake_server(tools: dict[str, ToolState]) -> MagicMock:
+    fake = MagicMock()
+    fake.tools = tools
+    fake.budget_lock = threading.Lock()
+    fake.passthrough_lock = threading.Lock()
+    return fake
 
 
 def test_protected_mocks_require_docker_driver(tmp_path: Path) -> None:
@@ -155,6 +181,182 @@ def test_normalized_fixture_matching_remains_finite(tmp_path: Path) -> None:
         ["rpa", "get-errors", "--job-id", "42", "--include-secrets"],
     )
     assert extra_argument.exit_code == 2
+
+
+def test_noise_flag_tokenizer_only_swallows_real_values() -> None:
+    # An --output <format> pair is still stripped, in either flag form.
+    assert _normalized_argv(["rpa", "get-errors", "--output", "json"]) == ("get-errors", "rpa")
+    assert _normalized_argv(["rpa", "get-errors", "--output=json"]) == ("get-errors", "rpa")
+
+    # A valueless --output must not swallow the flag that follows it.
+    assert _normalized_argv(["deploy", "--output", "--delete-all"]) == ("--delete-all", "deploy")
+    assert _normalized_argv(["deploy", "--output=", "--delete-all"]) == ("--delete-all", "deploy")
+
+    # A trailing --output is simply dropped.
+    assert _normalized_argv(["deploy", "--output"]) == ("deploy",)
+
+
+def _subset_fixture(path: Path, responses: list[dict[str, Any]]) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "responses": responses,
+                "default": {"exit_code": 2, "stderr": "not configured\n"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_subset_matching_is_order_independent_and_tolerates_extra_tokens(tmp_path: Path) -> None:
+    fixture = _subset_fixture(
+        tmp_path / "subset.json",
+        [{"argv": ["rpa", "get-errors"], "match_mode": "subset", "exit_code": 0, "stdout": "subset\n"}],
+    )
+    fake_server = _fake_server(load_config(_write_config(tmp_path / "config.json", fixture)))
+
+    # Extra tokens, reordering, and --flag=value form are all tolerated.
+    matched = ProtectedMockServer.dispatch(fake_server, "uip", ["get-errors", "--job-id=42", "rpa"])
+    assert matched.stdout == "subset\n"
+
+    # A rule token missing from the invocation is not a match.
+    missing = ProtectedMockServer.dispatch(fake_server, "uip", ["rpa", "list-jobs"])
+    assert missing.exit_code == 2
+
+
+def test_subset_rules_scan_in_fixture_order_first_match_wins(tmp_path: Path) -> None:
+    fixture = _subset_fixture(
+        tmp_path / "subset.json",
+        [
+            {"argv": ["rpa"], "match_mode": "subset", "exit_code": 0, "stdout": "broad\n"},
+            {"argv": ["rpa", "get-errors"], "match_mode": "subset", "exit_code": 0, "stdout": "narrow\n"},
+        ],
+    )
+    fake_server = _fake_server(load_config(_write_config(tmp_path / "config.json", fixture)))
+
+    # Both rules match; the earlier (broader) one wins because order decides.
+    response = ProtectedMockServer.dispatch(fake_server, "uip", ["rpa", "get-errors"])
+    assert response.stdout == "broad\n"
+
+
+def test_exact_and_normalized_take_precedence_over_subset(tmp_path: Path) -> None:
+    fixture = _subset_fixture(
+        tmp_path / "subset.json",
+        [
+            {"argv": ["rpa", "get-errors"], "match_mode": "subset", "exit_code": 0, "stdout": "subset\n"},
+            {"argv": ["rpa", "get-errors"], "exit_code": 0, "stdout": "exact\n"},
+            {
+                "argv": ["rpa", "list-jobs", "--job-id", "42"],
+                "match_mode": "normalized",
+                "exit_code": 0,
+                "stdout": "normalized\n",
+            },
+            {"argv": ["rpa", "list-jobs"], "match_mode": "subset", "exit_code": 0, "stdout": "subset-jobs\n"},
+        ],
+    )
+    fake_server = _fake_server(load_config(_write_config(tmp_path / "config.json", fixture)))
+
+    assert ProtectedMockServer.dispatch(fake_server, "uip", ["rpa", "get-errors"]).stdout == "exact\n"
+    assert (
+        ProtectedMockServer.dispatch(fake_server, "uip", ["--job-id=42", "list-jobs", "rpa"]).stdout == "normalized\n"
+    )
+    # No exact/normalized hit -> the subset rule catches the variant.
+    assert ProtectedMockServer.dispatch(fake_server, "uip", ["rpa", "list-jobs", "--all"]).stdout == "subset-jobs\n"
+
+
+def test_subset_duplicates_are_allowed_and_empty_argv_is_rejected(tmp_path: Path) -> None:
+    duplicate = {"argv": ["rpa"], "match_mode": "subset", "exit_code": 0, "stdout": "first\n"}
+    fixture = _subset_fixture(tmp_path / "dup.json", [duplicate, {**duplicate, "stdout": "second\n"}])
+    fake_server = _fake_server(load_config(_write_config(tmp_path / "config.json", fixture)))
+    assert ProtectedMockServer.dispatch(fake_server, "uip", ["rpa"]).stdout == "first\n"
+
+    empty = _subset_fixture(tmp_path / "empty.json", [{"argv": [], "match_mode": "subset", "exit_code": 0}])
+    with pytest.raises(ValueError, match="non-empty for subset"):
+        load_config(_write_config(tmp_path / "config2.json", empty))
+
+    # Noise-flag-only argv normalizes to an empty token set: also rejected.
+    noise = _subset_fixture(
+        tmp_path / "noise.json", [{"argv": ["--output", "json"], "match_mode": "subset", "exit_code": 0}]
+    )
+    with pytest.raises(ValueError, match="non-empty for subset"):
+        load_config(_write_config(tmp_path / "config3.json", noise))
+
+
+def _stub_mockd_child(monkeypatch: pytest.MonkeyPatch, script: str, tmp_path: Path) -> list[Path]:
+    """Run ``script`` in place of mockd; returns the stderr temp files it created.
+
+    ``script`` is formatted with a ``{ready}`` marker path it must create once its
+    stderr is flushed. The fake ``Popen`` blocks on that marker (or on the child
+    exiting), so the readiness deadline only starts ticking after the child has
+    actually said something -- interpreter startup cost stays out of the clock.
+    """
+    monkeypatch.setattr("coder_eval.protected_mock.runtime.SOCKET_PATH", str(tmp_path / "uip.sock"))
+    ready = tmp_path / "child-ready"
+    source = script.format(ready=str(ready))
+    real_popen = subprocess.Popen
+    real_named_temp = tempfile.NamedTemporaryFile
+    created: list[Path] = []
+
+    def fake_popen(_argv: list[str], **kwargs: Any) -> Any:
+        child = real_popen([sys.executable, "-c", source], **kwargs)
+        while not ready.exists() and child.poll() is None:
+            time.sleep(0.01)
+        return child
+
+    def recording_named_temp(**kwargs: Any) -> Any:
+        handle = real_named_temp(**kwargs)
+        created.append(Path(handle.name))
+        return handle
+
+    monkeypatch.setattr("coder_eval.protected_mock.runtime.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("coder_eval.protected_mock.runtime.tempfile.NamedTemporaryFile", recording_named_temp)
+    return created
+
+
+def test_mockd_startup_exit_reports_child_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _stub_mockd_child(
+        monkeypatch,
+        "import sys; sys.stderr.write('mockd fixture load failed\\n'); raise SystemExit(3)",
+        tmp_path,
+    )
+    monkeypatch.setattr("coder_eval.protected_mock.runtime.STARTUP_TIMEOUT_SECONDS", 10.0)
+
+    with (
+        pytest.raises(RuntimeError, match="exited during startup") as excinfo,
+        running_mock_server(tmp_path / "config.json"),
+    ):
+        pass
+
+    assert "mockd fixture load failed" in str(excinfo.value)
+    assert created and not created[0].exists()
+
+
+def test_mockd_startup_timeout_reports_wait_time_and_child_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = _stub_mockd_child(
+        monkeypatch,
+        "import sys, time, pathlib; "
+        "sys.stderr.write('mockd still binding\\n'); sys.stderr.flush(); "
+        "pathlib.Path(r'{ready}').write_text('1'); time.sleep(30)",
+        tmp_path,
+    )
+    monkeypatch.setattr("coder_eval.protected_mock.runtime.STARTUP_TIMEOUT_SECONDS", 0.3)
+
+    with (
+        pytest.raises(RuntimeError, match="did not create its socket within") as excinfo,
+        running_mock_server(tmp_path / "config.json"),
+    ):
+        pass
+
+    assert "mockd still binding" in str(excinfo.value)
+    if sys.platform != "win32":
+        # Windows releases a just-terminated child's inherited handle
+        # asynchronously, so the best-effort unlink only lands reliably on the
+        # platform mockd actually runs on.
+        assert created and not created[0].exists()
 
 
 def test_passthrough_is_prefix_limited_and_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

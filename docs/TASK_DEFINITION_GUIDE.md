@@ -558,7 +558,7 @@ sandbox:
 
 The agent receives a thin `cli_mocks/uip` wrapper. The fixture is copied into a per-run staging directory, mounted below the private `mockd` filesystem parent, and read only by the `mockd` UID. The client speaks a bounded Unix-socket protocol and has no file-read, path, glob, search, dump, or debug operation. Calls use the existing `cli_mocks/calls.jsonl` schema.
 
-Fixture files map exact argument lists to responses:
+Fixture files map argument lists to responses:
 
 ```json
 {
@@ -578,7 +578,12 @@ Fixture files map exact argument lists to responses:
 }
 ```
 
-Matching defaults to exact argv equality. A response may opt into `"match_mode": "normalized"`; this still selects from a finite command map but ignores `--output <format>`, treats `--flag=value` like `--flag value`, and permits token reordering. It never performs subset or substring matching. Duplicate keys, malformed responses, oversized output, request-budget exhaustion, and service startup failures all fail loudly.
+Matching defaults to exact argv equality. Two further modes exist, selected per response via `match_mode`:
+
+- `"normalized"` still selects from a finite command map but ignores `--output <format>`, treats `--flag=value` like `--flag value`, and permits token reordering. Duplicate keys are rejected at load for both finite modes.
+- `"subset"` matches when every rule token appears in the invocation's normalized token set, regardless of order or extra arguments. Subset rules are evaluated in fixture-file order and the first match wins; exact and normalized matches always take precedence over subset scanning. Duplicate subset rules are allowed (an earlier rule shadows a later one); an empty subset `argv` is rejected at load.
+
+Malformed responses, oversized output, request-budget exhaustion, and service startup failures all fail loudly.
 
 `passthrough_argv_prefixes` is for deliberately public live operations such as `uip docsai ask`. `mockd` invokes the real tool only when argv begins with one of these typed prefixes, caches the response in memory for the run, and never reveals the executable path to the agent. Do not use a broad prefix such as `[or]` or `[auth]`. `protected_mocks` and `record_cli` cannot claim the same tool name.
 
