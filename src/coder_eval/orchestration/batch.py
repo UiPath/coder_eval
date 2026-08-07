@@ -157,7 +157,7 @@ async def run_batch(
                     # serializes stream events as NDJSON on stdout; we
                     # forward them to the host callback so --stream
                     # renders identically to the in-process path.
-                    from ..isolation.docker_runner import DockerRunner, regrade_on_host
+                    from ..isolation.docker_runner import DockerRunner, regrade_on_host, run_post_run_on_host
 
                     result = await DockerRunner(
                         rt,
@@ -182,6 +182,13 @@ async def run_batch(
 
                     name, props = build_task_event(result, driver="docker", variant_id=rt.variant_id)
                     track_event(name, props)
+                    # HARNESS-OUTSIDE: post_run teardown runs HOST-side, LAST —
+                    # after the container exits and after the grade. It is NOT
+                    # gated behind regrade_on_host's short-circuits (no gating
+                    # criteria; terminal agent-side failure): cloud teardown must
+                    # happen regardless of grade or resources orphan. Best-effort
+                    # + non-fatal; skipped with a warning when no artifacts dir.
+                    await run_post_run_on_host(result, rt)
                 else:
                     orchestrator = Orchestrator(
                         task=rt.task,

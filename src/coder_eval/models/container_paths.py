@@ -21,6 +21,12 @@ CONTAINER_TASK_DIR = "/work/task_dir"
 # no grader trees). The agent's plugin discovery reads from here, never the raw
 # skills-repo checkout (which is not mounted into the agent container at all).
 CONTAINER_SKILL_DOCS_DIR = "/work/skills"
+# Read-only mount of the host-produced workspace-seed staging dir. pre_run runs
+# on the HOST (into a staging dir) before the container starts; its output is
+# mounted here :ro and copied into the agent workspace by the in-container
+# orchestrator (after template materialization, before the agent starts). Holds
+# only seed files/fixture trees the pre_run produced -- never grader material.
+CONTAINER_WORKSPACE_SEED_DIR = "/work/seed"
 
 # Paths a task's WORKDIR must never collide with: the container root and every
 # framework-owned mount under /work. Consumed by SandboxConfig's working_dir
@@ -33,5 +39,6 @@ RESERVED_CONTAINER_DIRS = frozenset(
         CONTAINER_OUTPUT_DIR,
         CONTAINER_TASK_DIR,
         CONTAINER_SKILL_DOCS_DIR,
+        CONTAINER_WORKSPACE_SEED_DIR,
     }
 )

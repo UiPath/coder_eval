@@ -30,11 +30,13 @@ from coder_eval.models import (
     CONTAINER_OUTPUT_DIR,
     CONTAINER_SKILL_DOCS_DIR,
     CONTAINER_WORK_DIR,
+    CONTAINER_WORKSPACE_SEED_DIR,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
     DockerDriverConfig,
     EvaluationResult,
     FinalStatus,
+    PostRunResult,
     PreservationMode,
     ResourceLimits,
     plugin_path,
@@ -582,6 +584,11 @@ class DockerRunner:
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
+        # Set in run() when the task has a pre_run: the host staging dir the
+        # pre_run wrote into. _build_argv mounts it read-ONLY at
+        # CONTAINER_WORKSPACE_SEED_DIR; the in-container orchestrator copies it
+        # into the sandbox before the agent starts. None when no pre_run.
+        self._workspace_seed_src: Path | None = None
 
     @property
     def _docker_config(self) -> DockerDriverConfig:
@@ -677,6 +684,55 @@ class DockerRunner:
             # under `staging` and records it on self._claude_mount_src for
             # _build_argv to mount. Cleaned up with `staging` in the finally.
             await asyncio.to_thread(self._prepare_host_mounts, staging)
+
+            # HARNESS-OUTSIDE: run pre_run on the HOST, BEFORE the container.
+            # The helper scripts + skills-repo tree the commands invoke live only
+            # host-side (never mounted into the agent container), so pre_run runs
+            # here with the host env/creds — the SAME trust boundary as the
+            # host-side graders. Its CWD is a fresh staging dir whose contents
+            # seed the container's initial agent workspace (mounted :ro at
+            # CONTAINER_WORKSPACE_SEED_DIR). A required (fail_on_error) pre_run
+            # failure aborts NOW, before docker run, so no LLM budget is spent on
+            # a broken environment. pre_run_results are folded into the returned
+            # result (the error result here, or the parsed result below).
+            pre_run_results: list[PostRunResult] = []
+            if self.rt.task.pre_run:
+                seed_dir = staging / "workspace_seed"
+                await asyncio.to_thread(seed_dir.mkdir)
+                self._workspace_seed_src = seed_dir
+                from ..evaluation.host_commands import run_command_list
+
+                try:
+                    await run_command_list(self.rt.task.pre_run, pre_run_results, "pre_run", cwd=seed_dir)
+                except RuntimeError as exc:
+                    # A fail_on_error pre_run command failed. Abort before the
+                    # container: synthesize an ERROR result carrying the captured
+                    # pre_run_results so reports/telemetry see what ran.
+                    logger.error("Docker host pre_run failed for %s: %s", self.rt.task.task_id, exc)
+                    error_result = build_error_result(self.rt, exc)
+                    error_result.pre_run_results = pre_run_results
+                    # Teardown parity with the tempdir orchestrator (whose
+                    # `finally` runs post_run even when pre_run aborts). A partial
+                    # pre_run may have provisioned cloud resources before failing;
+                    # run post_run teardown host-side over the seed dir (which
+                    # holds any seed.json the teardown reads). Best-effort — never
+                    # mask the pre_run failure.
+                    if self.rt.task.post_run:
+                        try:
+                            await run_command_list(
+                                self.rt.task.post_run,
+                                error_result.post_run_results,
+                                "post_run",
+                                cwd=seed_dir,
+                            )
+                        except Exception as post_exc:  # pragma: no cover - defensive; post_run is non-fatal
+                            logger.warning(
+                                "Docker host post_run teardown after pre_run failure failed for %s: %s",
+                                self.rt.task.task_id,
+                                post_exc,
+                            )
+                    return error_result
+
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
             # Prime the heartbeat before the container starts so the
@@ -713,7 +769,13 @@ class DockerRunner:
                 if proc.returncode is None:
                     await self._kill_container(proc, container_name)
 
-            return await self._parse_result_or_raise(output_dir, returncode, log_path)
+            parsed = await self._parse_result_or_raise(output_dir, returncode, log_path)
+            # Fold the host-side pre_run record onto the parsed result. This
+            # survives the downstream regrade_on_host (it mutates in place and
+            # never touches pre_run_results).
+            if pre_run_results:
+                parsed.pre_run_results = pre_run_results
+            return parsed
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)
 
@@ -798,6 +860,17 @@ class DockerRunner:
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
+                # HARNESS-OUTSIDE: BOTH pre_run and post_run run on the HOST for
+                # docker tasks (pre_run before the container into a staging dir
+                # that seeds the workspace; post_run after the container exits
+                # over the copied-out workspace). The helper scripts + repo live
+                # only host-side. Tell the in-container orchestrator to skip
+                # both phases (blanket suppress).
+                "skip_pre_post_commands": True,
+                # Presence of the host-produced workspace-seed mount. The
+                # in-container orchestrator copies its contents into the sandbox
+                # after template materialization, before the agent starts.
+                "workspace_seed_dir": CONTAINER_WORKSPACE_SEED_DIR if self.rt.task.pre_run else None,
             }
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
@@ -1367,6 +1440,13 @@ class DockerRunner:
         # mounted into the agent container.
         if self._skill_docs_src is not None:
             argv += ["-v", f"{self._skill_docs_src}:{CONTAINER_SKILL_DOCS_DIR}:ro"]
+        # HARNESS-OUTSIDE: mount the host-produced workspace-seed staging dir
+        # read-ONLY. pre_run ran host-side into this dir; the in-container
+        # orchestrator copies it into the agent workspace before the agent
+        # starts. Read-only so the agent (or a container process) can't mutate
+        # the host staging dir. None when the task has no pre_run.
+        if self._workspace_seed_src is not None:
+            argv += ["-v", f"{self._workspace_seed_src}:{CONTAINER_WORKSPACE_SEED_DIR}:ro"]
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1502,6 +1582,77 @@ class DockerRunner:
 REGRADE_STATUS_ALLOWLIST = frozenset({FinalStatus.SUCCESS, FinalStatus.FAILURE, FinalStatus.MAX_TURNS_EXHAUSTED})
 
 
+def _resolve_artifacts_dir(result: EvaluationResult, rt: ResolvedTask) -> Path | None:
+    """Translate the container-absolute ``result.sandbox_path`` to the host path.
+
+    The artifacts cross the boundary via the ``/work/output`` bind mount, which
+    is NOT path-symmetric: the host binds ``rt.run_dir`` at the fixed container
+    path ``CONTAINER_OUTPUT_DIR``. So the in-container orchestrator records a
+    CONTAINER-absolute ``sandbox_path`` that does not exist on the host; re-root
+    the portion under ``CONTAINER_OUTPUT_DIR`` onto ``rt.run_dir``. A path not
+    under ``/work/output`` (a host-side result, or a ``workspace_dir`` capture
+    with a non-standard path) is used as-is. Returns ``None`` when there is no
+    ``sandbox_path`` to translate. Does NOT check existence — callers do.
+    """
+    if not result.sandbox_path:
+        return None
+    container_path = Path(result.sandbox_path)
+    container_out = Path(CONTAINER_OUTPUT_DIR)
+    if container_path == container_out or container_out in container_path.parents:
+        return rt.run_dir.resolve() / container_path.relative_to(container_out)
+    return container_path
+
+
+async def run_post_run_on_host(result: EvaluationResult, rt: ResolvedTask) -> None:
+    """Run a docker task's ``post_run`` teardown HOST-side, over the copied-out
+    workspace, AFTER the container exits and AFTER the host re-grade.
+
+    Under ``--driver docker`` the container runs the agent + ``pre_run`` only;
+    the grading material and the skills-repo ``tests/`` helper scripts the
+    ``post_run`` commands invoke are never mounted into the agent container. So
+    teardown moves to the host, where the full repo + creds (``SKILLS_REPO_PATH``
+    etc.) already live — the same trust boundary as grading. ``cwd`` is the
+    copied-out workspace so a teardown that reads a seeded ``seed.json`` sees it.
+
+    ALWAYS-RUN by design: this is called unconditionally after the container
+    exits, NOT gated behind ``regrade_on_host``'s short-circuits (no gating
+    criteria; terminal agent-side failure). Cloud teardown must happen
+    regardless of grade or resources orphan. Runs best-effort whenever an
+    artifacts dir exists (even for ERROR/TIMEOUT status); skipped with a warning
+    when no artifacts dir can be located. ``PostRunCommand`` is informational —
+    a failing teardown command is warning-logged, never fatal — so this never
+    raises. Populates ``result.post_run_results`` and re-persists via
+    ``_persist_regrade_result`` so the on-disk ``task.json`` carries the record.
+    """
+    if not rt.task.post_run:
+        return
+
+    artifacts_dir = _resolve_artifacts_dir(result, rt)
+    if artifacts_dir is None or not artifacts_dir.is_dir():
+        logger.warning(
+            "Docker host post_run: no artifacts dir for task %s (sandbox_path=%r); skipping teardown"
+            + " (%d command(s) not run).",
+            rt.task.task_id,
+            result.sandbox_path,
+            len(rt.task.post_run),
+        )
+        return
+
+    # Late import: keep the evaluation package out of the docker_runner import
+    # path (parity with regrade_on_host's late imports).
+    from ..evaluation.host_commands import run_command_list
+
+    # post_run is informational (no fail_on_error) — run_command_list never
+    # raises for it — but guard defensively so a teardown mishap can never mask
+    # the already-authoritative grade the caller holds.
+    try:
+        await run_command_list(rt.task.post_run, result.post_run_results, "post_run", cwd=artifacts_dir)
+    except Exception as exc:  # pragma: no cover - defensive; post_run is non-fatal
+        logger.warning("Docker host post_run teardown failed for %s: %s", rt.task.task_id, exc)
+
+    await _persist_regrade_result(result, rt)
+
+
 async def regrade_on_host(result: EvaluationResult, rt: ResolvedTask) -> EvaluationResult:
     """Re-grade a docker agent-only run's copied-out artifacts on the HOST.
 
@@ -1555,19 +1706,12 @@ async def regrade_on_host(result: EvaluationResult, rt: ResolvedTask) -> Evaluat
             result, rt, "Docker host re-grade could not locate artifacts (no sandbox_path); gating criteria ungraded."
         )
         return result
-    container_path = Path(result.sandbox_path)
-    container_out = Path(CONTAINER_OUTPUT_DIR)
-    if container_path == container_out or container_out in container_path.parents:
-        artifacts_dir = rt.run_dir.resolve() / container_path.relative_to(container_out)
-    else:
-        # Not under /work/output (e.g. a host-side result, or a workspace_dir
-        # capture mode with a non-standard path) — use it as-is.
-        artifacts_dir = container_path
+    artifacts_dir = _resolve_artifacts_dir(result, rt)
     # Fail-safe: never grade an auto-created empty dir. If the translated path
     # doesn't exist, the artifacts didn't land where expected — we cannot grade
     # the full criteria, so degrade to ERROR rather than let the container's
     # vacuous `[]`-criteria SUCCESS stand (an ungradable run is not a pass).
-    if not artifacts_dir.is_dir():
+    if artifacts_dir is None or not artifacts_dir.is_dir():
         logger.warning(
             "Docker host re-grade: artifacts dir %s (from sandbox_path %r) does not exist for task %s;"
             + " degrading to ERROR (gating criteria could not be graded).",

@@ -59,6 +59,7 @@ def plan_command(
     check_api_keys()
 
     # Lazy import to avoid circular dependency at module level
+    from ..orchestration.docker_guard import DockerPreRunHostUnsafeError, validate_docker_pre_run_host_safety
     from ..orchestration.early_stop import EarlyStopConfigError, validate_early_stop
     from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
 
@@ -136,6 +137,8 @@ def plan_command(
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
                     # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
                     validate_early_stop(resolved)
+                    # Interim docker guard: docker pre_run that must run in-container.
+                    validate_docker_pre_run_host_safety(resolved)
                     agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""
@@ -144,6 +147,11 @@ def plan_command(
                     # A hard config error (unlike generic per-variant resolution
                     # failures, which stay soft): flip the plan exit code.
                     console.print(f"    [red]Variant '{variant.variant_id}': early-stop config error - {e}[/red]")
+                    all_valid = False
+                except DockerPreRunHostUnsafeError as e:
+                    # Interim docker guard: same hard-error treatment (flip the
+                    # exit code) — a docker pre_run that must run in-container.
+                    console.print(f"    [red]Variant '{variant.variant_id}': docker config error - {e}[/red]")
                     all_valid = False
                 except Exception as e:
                     console.print(f"    [red]Variant '{variant.variant_id}': resolution failed - {e}[/red]")

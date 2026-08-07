@@ -24,6 +24,7 @@ from coder_eval.models.container_paths import (
     CONTAINER_SKILL_DOCS_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
+    CONTAINER_WORKSPACE_SEED_DIR,
     RESERVED_CONTAINER_DIRS,
 )
 
@@ -274,6 +275,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CONTAINER_SKILL_DOCS_DIR",
     "CONTAINER_TASK_DIR",
     "CONTAINER_WORK_DIR",
+    "CONTAINER_WORKSPACE_SEED_DIR",
     "RESERVED_CONTAINER_DIRS",
     "DockerDriverConfig",
     "NodeEnvConfig",

@@ -95,6 +95,12 @@ def _grant_read_traverse(root: Path) -> None:
             _add_bits(os.path.join(dirpath, name))
 
 
+# Upper bound on the cumulative bytes Sandbox.seed_from will copy into the
+# workspace. A host-side pre_run seeds small state (seed.json) or a fixture
+# tree; this caps a runaway pre_run from filling the host disk through the seed.
+MAX_SEED_BYTES = 512 * 1024 * 1024  # 512 MiB
+
+
 class Sandbox:
     """Manages sandboxed execution environments for agent tasks.
 
@@ -264,6 +270,98 @@ class Sandbox:
             raise
 
         return self.sandbox_dir
+
+    def seed_from(self, seed_dir: Path) -> int:
+        """Copy a host-produced workspace-seed tree into the sandbox, in place.
+
+        Under ``--driver docker`` the task's ``pre_run`` runs on the HOST (its
+        helper scripts + repo live only host-side) into a staging dir; that
+        staging dir is mounted read-only into the container, and this method
+        copies its contents into the already-materialized sandbox workspace so
+        the agent starts against the seeded state.
+
+        Runs AFTER template materialization, so a seed entry OVERWRITES a
+        colliding template starter file. This matches the in-process tempdir
+        ordering (there, ``_setup_template`` runs, then ``pre_run`` writes into
+        the same workspace and wins), so behavior is identical across drivers.
+
+        Copy is RECURSIVE: seeds range from a single ``seed.json`` to a whole
+        ``cp -r _fixtures/<proj>`` directory tree, so both files and nested
+        directories must be reproduced under ``sandbox_dir``.
+
+        Size-bounded: aborts with ``RuntimeError`` if the cumulative copied byte
+        count exceeds :data:`MAX_SEED_BYTES` (a runaway ``pre_run`` shouldn't be
+        able to fill the host disk via the seed). Symlinks are copied as links
+        (not followed): copy-as-link DEFERS target resolution to the destination
+        tree, so a link whose target resolves OUTSIDE ``seed_dir`` (an absolute
+        target like ``/etc/passwd`` or an escaping relative ``../../x``) would
+        point outside the sandbox once reproduced — such links are SKIPPED with a
+        warning. Within-tree relative symlinks are preserved. Returns the number
+        of entries copied (files + dirs; skipped escaping links do not count). A
+        missing/empty seed dir is a no-op returning 0.
+
+        Keys off ``sandbox_dir``, so it works identically for the
+        ``run_dir/artifacts/<task_id>`` (DIRECT_WRITE) and the ``workspace_dir``
+        (docker WORKDIR) capture modes.
+        """
+        if self.sandbox_dir is None:
+            raise RuntimeError("Sandbox not set up; seed_from requires a materialized sandbox_dir.")
+        if not seed_dir.is_dir():
+            return 0
+
+        dest_root = self.sandbox_dir
+        copied = 0
+        total_bytes = 0
+        # Walk the seed tree top-down; recreate dirs, copy files (overwriting
+        # template collisions), and preserve symlinks as links.
+        for src in sorted(seed_dir.rglob("*")):
+            rel = src.relative_to(seed_dir)
+            dest = dest_root / rel
+            if src.is_symlink():
+                # Copy-as-link defers target resolution to the destination tree.
+                # A link whose target resolves outside seed_dir (absolute, or an
+                # escaping ``../..``) would point outside the sandbox once
+                # reproduced — skip it rather than copy an escape hatch in.
+                target = os.readlink(src)
+                resolved = (src.parent / target).resolve()
+                seed_root = seed_dir.resolve()
+                if resolved != seed_root and seed_root not in resolved.parents:
+                    logger.warning("Skipping seed symlink %s -> %s: target escapes the seed tree", rel, target)
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if dest.exists() or dest.is_symlink():
+                    if dest.is_dir() and not dest.is_symlink():
+                        shutil.rmtree(dest, ignore_errors=True)
+                    else:
+                        dest.unlink()
+                os.symlink(target, dest)
+                copied += 1
+            elif src.is_dir():
+                # If a template starter left a plain file/symlink where the seed
+                # has a directory, drop it so mkdir doesn't raise FileExistsError
+                # (symmetric with the file branch's dir-clobber below; seed wins).
+                if (dest.exists() or dest.is_symlink()) and not (dest.is_dir() and not dest.is_symlink()):
+                    dest.unlink()
+                dest.mkdir(parents=True, exist_ok=True)
+                copied += 1
+            elif src.is_file():
+                total_bytes += src.stat().st_size
+                if total_bytes > MAX_SEED_BYTES:
+                    raise RuntimeError(
+                        f"Workspace seed exceeds size limit ({MAX_SEED_BYTES} bytes) at {rel}; "
+                        + "a pre_run produced too much data to seed into the container workspace."
+                    )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # If a template starter left a directory where the seed has a
+                # file, drop it so the seed (which wins) can land.
+                if dest.is_dir() and not dest.is_symlink():
+                    shutil.rmtree(dest, ignore_errors=True)
+                shutil.copy2(src, dest)
+                copied += 1
+
+        if copied:
+            logger.info("Seeded %d workspace entry(ies) from %s into %s", copied, seed_dir, dest_root)
+        return copied
 
     def _apply_repo_source(self, source: RepoSource) -> None:
         """Clone a git repository into the sandbox.

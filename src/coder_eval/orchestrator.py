@@ -5,7 +5,6 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,6 +27,7 @@ from .errors import (
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
+from .evaluation.host_commands import DEFAULT_MAX_OUTPUT, DEFAULT_STREAM_LIMIT, run_command_list
 from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
@@ -74,42 +74,6 @@ logger = logging.getLogger(__name__)
 # Grace on outer wait_for so the agent's in-band watchdog (which preserves a partial)
 # wins the race against the asyncio cancel path (which doesn't).
 _WAIT_FOR_GRACE_SECONDS = 2.0
-
-
-async def _pump_stream(
-    stream: asyncio.StreamReader | None,
-    log_fn: Callable[..., None],
-    label: str,
-    chunks: list[str],
-) -> None:
-    """Read ``stream`` line-by-line, log each non-empty line via ``log_fn``,
-    and accumulate the raw text into ``chunks`` for later capture.
-
-    Used to forward post_run subprocess output to the orchestrator log in
-    real time while still preserving it for ``PostRunResult``. If a single
-    line exceeds the StreamReader buffer (rare — only for binary-ish or
-    malformed output), it is drained as a chunk and logged as a partial.
-    """
-    if stream is None:
-        return
-    while True:
-        try:
-            raw = await stream.readline()
-        except asyncio.LimitOverrunError as e:
-            # Single line larger than the buffer; drain the buffered bytes so
-            # readline() can make progress on the next iteration.
-            raw = await stream.readexactly(e.consumed)
-            text = raw.decode(errors="replace")
-            chunks.append(text)
-            log_fn("[%s] (partial line, %d bytes)", label, len(raw))
-            continue
-        if not raw:
-            break
-        text = raw.decode(errors="replace")
-        chunks.append(text)
-        line = text.rstrip()
-        if line:
-            log_fn("[%s] %s", label, line)
 
 
 # Structural tags emitted by ClaudeCodeAgent._format_messages. Other
@@ -322,6 +286,7 @@ class Orchestrator:
         config_lineage: dict[str, ConfigLineageEntry] | None = None,
         replicate_index: int = 0,
         workspace_dir: Path | None = None,
+        workspace_seed_dir: Path | None = None,
         skip_pre_post_commands: bool = False,
         existing_turns: list[TurnRecord] | None = None,
         suppress_task_telemetry: bool = False,
@@ -347,15 +312,28 @@ class Orchestrator:
                 run_dir/artifacts/<task>, and the workspace is copied out to run_dir/artifacts/<task>
                 at cleanup. Resolved host-side by DockerRunner; None keeps standard behavior.
                 Takes precedence over preservation_mode when set.
-            skip_pre_post_commands: When True, skip ``pre_run``/``post_run`` command
-                execution entirely. Set ONLY by the docker host re-grade
-                (``regrade_on_host``): the container already ran those commands
-                against the agent turn, so re-running them on the host against the
-                agent-modified artifacts could perturb the grade or (with
+            workspace_seed_dir: Host-produced workspace-seed directory to copy
+                into the sandbox after template materialization and before the
+                agent starts. Set by the in-container docker orchestrator (via
+                the staged ``context.json``): under ``--driver docker`` the
+                task's ``pre_run`` runs HOST-side into a staging dir that is
+                mounted read-only into the container; this is that mount. Seed
+                entries WIN over colliding template starters (matching the
+                tempdir ordering, where pre_run runs after ``_setup_template``).
+                None (tempdir / ``evaluate``) is a no-op.
+            skip_pre_post_commands: When True, the in-container orchestrator
+                skips BOTH ``pre_run`` and ``post_run``. Set under ``--driver
+                docker`` (via the staged ``context.json``) and by the docker host
+                re-grade (``regrade_on_host``): under docker both hooks run
+                HOST-side, not in the container — ``pre_run`` before the container
+                into a staging dir that seeds the agent workspace, ``post_run``
+                after the container exits over the copied-out workspace, where the
+                helper scripts + skills-repo tree + creds live. Re-running them
+                in-container would either duplicate that work or (with
                 ``fail_on_error=True``) flip a gradable run to ERROR. This is a
                 scoped flag rather than a blanket "skip when agent is None" so the
-                standalone ``coder-eval evaluate`` path — also agent-less — keeps
-                running pre/post commands as before.
+                standalone ``coder-eval evaluate`` path — also agent-less — and
+                the tempdir path both keep running pre/post in-process as before.
             suppress_task_telemetry: When True, skip the in-process
                 ``CoderEval.Task.End`` emit in ``_finalize_result``. Set ONLY by the
                 docker host re-grade (``regrade_on_host``): that scratch orchestrator
@@ -374,6 +352,7 @@ class Orchestrator:
         self._cost_attempt_nonce = uuid.uuid4().hex
         self.preservation_mode = preservation_mode
         self.workspace_dir = workspace_dir
+        self.workspace_seed_dir = workspace_seed_dir
         self.skip_pre_post_commands = skip_pre_post_commands
         self.suppress_task_telemetry = suppress_task_telemetry
         self.task_file = task_file
@@ -1109,6 +1088,17 @@ class Orchestrator:
         # Assert result is initialized (set in run())
         assert self.result is not None, "Result not initialized"
         self.result.sandbox_path = str(sandbox_dir)
+
+        # Workspace seeding (docker harness-outside): under --driver docker the
+        # task's pre_run ran HOST-side into a staging dir mounted read-only in
+        # the container; copy its contents into the just-materialized sandbox
+        # (AFTER _setup_template, BEFORE the agent starts) so the agent sees the
+        # seeded state. Seed entries win over template starters — matching the
+        # tempdir ordering where pre_run runs after template materialization.
+        # None on every non-docker path -> no-op.
+        if self.workspace_seed_dir is not None:
+            assert self.sandbox is not None
+            await asyncio.to_thread(self.sandbox.seed_from, self.workspace_seed_dir)
 
         # Determine API routing from settings.api_backend enum
         self.route = resolve_route(settings)
@@ -2169,8 +2159,8 @@ class Orchestrator:
             ),
         )
 
-    _POST_RUN_MAX_OUTPUT = 100_000  # Truncate stdout/stderr to 100KB
-    _POST_RUN_STREAM_LIMIT = 262_144  # StreamReader per-line buffer (256KB)
+    _POST_RUN_MAX_OUTPUT = DEFAULT_MAX_OUTPUT  # Truncate stdout/stderr to 100KB
+    _POST_RUN_STREAM_LIMIT = DEFAULT_STREAM_LIMIT  # StreamReader per-line buffer (256KB)
 
     async def _run_command_list(
         self,
@@ -2180,103 +2170,22 @@ class Orchestrator:
     ) -> None:
         """Run a list of shell commands inside the sandbox, capturing output.
 
-        stdout/stderr are streamed line-by-line to the orchestrator logger and
-        accumulated into ``results`` for the report (truncated to
-        ``_POST_RUN_MAX_OUTPUT`` per stream). ``label`` is used in stream/log
-        labels (e.g. ``"pre_run"`` -> ``[pre_run stdout]``).
-
-        For commands carrying ``fail_on_error=True`` (PreRunCommand only), a
-        non-zero exit, timeout, or exception appends the failure result and then
-        raises ``RuntimeError``, aborting the loop. PostRunCommand never has
-        ``fail_on_error`` set, so failures are warning-logged and the loop
-        continues — preserving existing post-run "informational only" semantics.
+        Thin wrapper over :func:`evaluation.host_commands.run_command_list` that
+        pins ``cwd`` to the sandbox dir. Semantics (fail_on_error abort for
+        pre_run, informational-continue for post_run, per-command timeout,
+        output truncation, line-by-line streaming) live in the shared function
+        so the host-side docker path can reuse them without an Orchestrator.
         """
         if not commands or not self.sandbox or not self.sandbox.sandbox_dir or not self.result:
             return
-
-        sandbox_dir = self.sandbox.sandbox_dir
-        max_out = self._POST_RUN_MAX_OUTPUT
-        human = label.replace("_", "-").capitalize()  # "pre_run" -> "Pre-run"
-
-        for cmd in commands:
-            fail_on_error = isinstance(cmd, PreRunCommand) and cmd.fail_on_error
-            start = time.time()
-            logger.info("Running %s command: %s", human.lower(), cmd.command)
-
-            try:
-                proc = await asyncio.create_subprocess_shell(
-                    cmd.command,
-                    cwd=str(sandbox_dir),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    limit=self._POST_RUN_STREAM_LIMIT,
-                )  # nosec B602,B604 - commands come from task YAML, not user input
-
-                stdout_chunks: list[str] = []
-                stderr_chunks: list[str] = []
-
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(
-                            _pump_stream(proc.stdout, logger.info, f"{label} stdout", stdout_chunks),
-                            _pump_stream(proc.stderr, logger.warning, f"{label} stderr", stderr_chunks),
-                            proc.wait(),
-                        ),
-                        timeout=cmd.timeout,
-                    )
-                except TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                    results.append(
-                        PostRunResult(
-                            command=cmd.command,
-                            stdout="".join(stdout_chunks)[:max_out],
-                            stderr="".join(stderr_chunks)[:max_out],
-                            error=f"Timed out after {cmd.timeout}s",
-                            duration_seconds=time.time() - start,
-                        )
-                    )
-                    if fail_on_error:
-                        raise RuntimeError(f"{human} command timed out after {cmd.timeout}s: {cmd.command!r}") from None
-                    logger.warning("%s command '%s' timed out after %ds", human, cmd.command, cmd.timeout)
-                    continue
-
-                stdout_text = "".join(stdout_chunks)[:max_out]
-                stderr_text = "".join(stderr_chunks)[:max_out]
-                results.append(
-                    PostRunResult(
-                        command=cmd.command,
-                        exit_code=proc.returncode,
-                        stdout=stdout_text,
-                        stderr=stderr_text,
-                        duration_seconds=time.time() - start,
-                    )
-                )
-                if proc.returncode != 0:
-                    if fail_on_error:
-                        raise RuntimeError(f"{human} command failed (exit {proc.returncode}): {cmd.command!r}")
-                    logger.warning(
-                        "%s command '%s' exited with code %d: %s",
-                        human,
-                        cmd.command,
-                        proc.returncode,
-                        stderr_text[:200],
-                    )
-            except RuntimeError:
-                # Propagate abort signal from fail_on_error=True branches unchanged;
-                # otherwise the catch-all below would re-wrap it as a new RuntimeError.
-                raise
-            except Exception as e:
-                results.append(
-                    PostRunResult(
-                        command=cmd.command,
-                        error=str(e),
-                        duration_seconds=time.time() - start,
-                    )
-                )
-                if fail_on_error:
-                    raise RuntimeError(f"{human} command failed: {cmd.command!r}") from e
-                logger.warning("%s command '%s' failed: %s", human, cmd.command, e)
+        await run_command_list(
+            commands,
+            results,
+            label,
+            cwd=self.sandbox.sandbox_dir,
+            max_output=self._POST_RUN_MAX_OUTPUT,
+            stream_limit=self._POST_RUN_STREAM_LIMIT,
+        )
 
     async def _run_pre_run_commands(self) -> None:
         """Execute pre-run commands inside the sandbox before evaluation.
@@ -2287,9 +2196,12 @@ class Orchestrator:
         ``FinalStatus.ERROR``. Post-run commands and cleanup still execute via
         the ``finally`` block.
 
-        Skipped entirely under ``skip_pre_post_commands`` (docker host re-grade):
-        the container already ran pre_run against the agent turn, and re-running it
-        against the agent-modified artifacts could perturb the grade.
+        Skipped entirely under ``skip_pre_post_commands``: the in-container
+        docker run AND the docker host re-grade (``regrade_on_host``) both set
+        it. Under ``--driver docker`` pre_run runs HOST-side (before the
+        container, seeding the workspace), so the in-container orchestrator must
+        not run it. The tempdir/``evaluate`` paths leave the flag False and run
+        pre_run in-process as before.
         """
         if self.result is None or self.skip_pre_post_commands:
             return
@@ -2302,8 +2214,13 @@ class Orchestrator:
         ``fail_on_error`` is not part of ``PostRunCommand``, so failures are
         warning-logged and never affect the evaluation verdict.
 
-        Skipped entirely under ``skip_pre_post_commands`` (docker host re-grade):
-        the container already ran post_run; re-running it on the host is redundant.
+        Skipped entirely under ``skip_pre_post_commands``: the in-container
+        docker run AND the docker host re-grade (``regrade_on_host``) both set
+        it. Under ``--driver docker`` post_run teardown is moved to the HOST
+        after the container exits (over the copied-out workspace), where the
+        helper scripts + repo live, so the in-container orchestrator must not run
+        it. The tempdir/``evaluate`` paths leave the flag False and run post_run
+        in-process as before.
         """
         if self.result is None or self.skip_pre_post_commands:
             return

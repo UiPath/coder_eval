@@ -580,6 +580,7 @@ def resolve_all_tasks(
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
     """
+    from .docker_guard import validate_docker_pre_run_host_safety
     from .early_stop import EarlyStopConfigError, validate_early_stop
 
     resolved: list[ResolvedTask] = []
@@ -672,6 +673,14 @@ def resolve_all_tasks(
                     # a bad arming raises EarlyStopConfigError (a ValueError).
                     validate_early_stop(resolved_task)
 
+                    # Interim docker guard: reject a docker task whose pre_run
+                    # must run inside the container (uv sync / uip codedagent
+                    # setup) — host-side execution would break it. Reads the
+                    # resolved driver (honors CLI --driver docker). Raises
+                    # DockerPreRunHostUnsafeError (a ValueError) → collected as
+                    # a per-task skip below, not a batch abort.
+                    validate_docker_pre_run_host_safety(resolved_task)
+
                     # Fan-out: simulation n_trials takes precedence over experiment repeats
                     # when simulation is active; otherwise use experiment-level repeats.
                     sim = resolved_task.simulation
@@ -694,8 +703,14 @@ def resolve_all_tasks(
                                 config_lineage=dict(lineage),
                             )
                         )
-        # Early-stop arming errors are a deliberate hard stop: they always
-        # propagate (never demoted to skipped) so a misarmed run fails loudly.
+        # Early-stop arming errors are deliberate hard stops: they always
+        # propagate (never demoted to skipped) so a misconfigured run fails
+        # loudly. The interim docker pre_run guard
+        # (DockerPreRunHostUnsafeError) deliberately does NOT hard-abort here:
+        # it subclasses ValueError, so it falls through to the per-task
+        # collecting branch below — one `uv sync` docker task is quarantined
+        # as a skipped task carrying the `--driver tempdir` redirect, while the
+        # rest of the suite runs. (The `plan` surface keeps it loud.)
         except EarlyStopConfigError:
             raise
         # Narrow set, matching the load/expand block above: config-resolution

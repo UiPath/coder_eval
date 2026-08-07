@@ -313,14 +313,29 @@ Allowlist-by-absence has **no DAC backstop** (there is no permission barrier —
 5. **Baked image content.** Mocks/tooling baked into `docker/Dockerfile` must not encode task-specific expected values — authoring invariant + the baked-image scan (`tests/test_docker_image_no_answer_leak.py`).
 6. **Env signposts.** `TASK_DIR`/`SKILLS_REPO_PATH` live on the grader (host) env only — never in the agent container's env (which has no task-dir/skills-repo mount to point at anyway).
 
+## Harness-outside: `pre_run` and `post_run` run on the host
+
+`pre_run` / `post_run` commands invoke helper scripts under the skills-repo `tests/` tree (seed generators, fixture copies, cloud teardown) — the same tree that is **never mounted into the agent container** (it carries graders + criteria). So under `--driver docker` both phases run **on the host**, where the full repo + credentials (`SKILLS_REPO_PATH` etc.) already live — the **same trust boundary as grading**. The container runs the **agent turn only**; the in-container orchestrator skips both phases.
+
+- **`pre_run` runs host-side, before the container**, with `cwd` = a per-task **staging dir** (`staging/workspace_seed/`). Every seed a `pre_run` produces (a `seed.json`, a `cp -r …_fixtures/<proj>` directory tree) lands there. The staging dir is mounted **read-only** at `/work/seed` (`CONTAINER_WORKSPACE_SEED_DIR`); the in-container orchestrator copies its contents into the agent workspace **after** template materialization and **before** the agent starts (`Sandbox.seed_from`, recursive + size-bounded). **Collision policy: a seed entry wins over a colliding template starter** — identical to the tempdir ordering, where `pre_run` runs after `_setup_template`. A required (`fail_on_error`) `pre_run` failure aborts **before** the container starts, so no LLM budget is spent on a broken environment; the failure is recorded on an `ERROR` result with `pre_run_results` populated.
+- **`post_run` runs host-side, after the container exits**, with `cwd` = the copied-out workspace (so a teardown that reads a seeded `seed.json` sees it — the seed round-trips out of the container). It is informational (non-fatal) and runs best-effort regardless of grade, so cloud resources are torn down even for `ERROR`/`TIMEOUT` runs.
+
+The helper scripts and the raw repo tree stay host-side throughout — moving the phases out of the container does **not** re-open the leak.
+
+### Interim carve-out: 6 tasks must use `--driver tempdir`
+
+A handful of `uipath-agents/coded/` tasks have a `pre_run` that builds a virtualenv (`uv sync`) bundled with live-tenant provisioning (`uip codedagent setup --force`). Those must run **inside** the container (the venv's absolute paths are non-portable off the host; provisioning needs the in-container CLIs), which host-side `pre_run` cannot yet do. Until in-container `pre_run` execution lands, a resolution-time guard hard-errors these under `--driver docker` (matching `uv sync` / `uip codedagent setup` in a `pre_run` command) with a redirect: **run them with `--driver tempdir`.** The guard reads the *resolved* driver, so a CLI `--driver docker` is honored. All other docker tasks (seed / fixture-copy `pre_run`, cloud-teardown `post_run`) run host-side unchanged.
+
 ## Boundary
 
 | Layer | Location |
 |---|---|
+| **`pre_run` (seeds the agent workspace)** | **host, before the container (staging dir → `/work/seed` :ro → copied into the workspace)** |
 | Agent process (Claude Code SDK) | inside container |
 | Sandbox setup + agent turn | inside container |
 | **`task.json` (agent trajectory) serialization** | **container → host bind mount** |
 | **Criterion checking / grading (GRADE-OUTSIDE)** | **host, after the container exits** |
+| **`post_run` (teardown over the copied-out workspace)** | **host, after the container exits** |
 | Per-criterion `aggregate()` (P/R/F1, suite thresholds) | host |
 | Reports, run summary, experiment rollups | host |
 
