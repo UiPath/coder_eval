@@ -944,10 +944,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
         recorded to avoid leaking any embedded credentials; the API key is never
         recorded.
         """
+        # system_prompt_semantics: Codex appends system_prompt as
+        # developer_instructions on top of its base prompt. Runs from before this
+        # marker existed silently DROPPED the field — dashboards must not pool
+        # system_prompt-setting tasks across that boundary.
+        info: dict[str, Any] = {"system_prompt_semantics": "append"}
         base_url = self._resolve_base_url()
         if not base_url:
-            return {}
+            return info
         return {
+            **info,
             "codex_base_url_host": urlparse(base_url).hostname or "",
             "codex_wire_api": _CODEX_WIRE_API,
             "codex_api_version": self._resolve_api_version() or "",

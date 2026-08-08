@@ -64,6 +64,14 @@ def test_effective_model_prefers_config_then_default():
     assert unpinned._effective_model() == _DEFAULT_MODEL
 
 
+def test_environment_info_reports_append_prompt_semantics():
+    """Antigravity always appends system_prompt (TemplatedSystemInstructions);
+    the cross-agent marker in run.json records that regime."""
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+
+    assert agent.get_environment_info()["system_prompt_semantics"] == "append"
+
+
 def _make_skill(parent, name: str) -> None:
     d = parent / name
     d.mkdir(parents=True)

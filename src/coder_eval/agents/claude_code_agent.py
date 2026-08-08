@@ -1239,6 +1239,17 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         return options, transport, effective_model
 
+    def get_environment_info(self) -> dict[str, Any]:
+        """Record which system-prompt regime built this run's prompts.
+
+        ``append`` = the claude_code preset (dynamic sections excluded) with the
+        configured system_prompt, if any, appended; ``replace`` = the configured
+        prompt is the ENTIRE system prompt (judge sub-agents). Runs from before
+        this marker existed used replace-on-set / empty-on-unset semantics —
+        trend dashboards must not pool scores across that boundary.
+        """
+        return {"system_prompt_semantics": self.config.system_prompt_mode}
+
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""
         self.client = None

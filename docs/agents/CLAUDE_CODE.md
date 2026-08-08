@@ -119,7 +119,9 @@ agent:
 > SDK re-injects the stripped content into the first user message, so the agent
 > loses nothing. Note the default-prompt baseline tracks the installed Claude Code
 > CLI version; `environment_info.claude_code_cli` in `run.json` records which
-> version a run used.
+> version a run used, and `environment_info.system_prompt_semantics`
+> (`append` / `replace`) records the prompt regime — runs predating that marker
+> used replace-on-set / empty-on-unset semantics and are not score-comparable.
 
 ### Setting fields from the CLI
 

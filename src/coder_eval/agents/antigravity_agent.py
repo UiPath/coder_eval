@@ -561,6 +561,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         return {
             "antigravity_model": self._effective_model(),
             "antigravity_thinking_level": self.config.thinking_level,
+            # Antigravity has always appended (TemplatedSystemInstructions);
+            # emitted for cross-agent uniformity of the marker.
+            "system_prompt_semantics": "append",
         }
 
     def _conversation_or_none(self) -> Any:

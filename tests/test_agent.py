@@ -458,6 +458,19 @@ async def test_system_prompt_mode_replace_sends_plain_string():
     assert "--append-system-prompt" not in cmd
 
 
+def test_environment_info_reports_system_prompt_semantics():
+    """The resolved system_prompt_mode lands in run.json (environment_info) so
+    trend dashboards can segment runs by prompt regime instead of pooling
+    pre-/post-append-semantics scores."""
+    default_agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+    assert default_agent.get_environment_info() == {"system_prompt_semantics": "append"}
+
+    judge_like = ClaudeCodeAgent(
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="grader", system_prompt_mode="replace")
+    )
+    assert judge_like.get_environment_info() == {"system_prompt_semantics": "replace"}
+
+
 @pytest.mark.asyncio
 async def test_sdk_options_forwarded_to_sdk():
     """An sdk_options key (e.g. effort) is splatted into ClaudeAgentOptions."""
