@@ -151,9 +151,8 @@ class BaseAgentConfig(BaseModel):
     system_prompt: str | None = Field(
         default=None,
         description=(
-            "Custom system prompt, appended to the agent's default system prompt — never a replacement "
-            "(claude-code: the SDK 'claude_code' preset with append; codex: developer_instructions "
-            "on top of the base prompt; antigravity: TemplatedSystemInstructions sections). "
+            "Custom system prompt, appended to the agent's default system prompt — never a replacement. "
+            "Each agent's doc page (docs/agents/) states the exact mechanism. "
             "Supports inline text or multi-line YAML strings. "
             "Mutually exclusive with system_prompt_file."
         ),
@@ -199,6 +198,15 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
 
+    system_prompt_mode: Literal["append", "replace"] = Field(
+        default="append",
+        description=(
+            "How system_prompt combines with the Claude Code default prompt: 'append' layers it "
+            "after the SDK 'claude_code' preset, keeping the default's behavioral guidance; "
+            "'replace' sends it as the ENTIRE system prompt. Judge sub-agents force 'replace' so "
+            "the scoring instrument never carries the coding-agent persona."
+        ),
+    )
     claude_settings: str | dict[str, Any] | None = MergeField(
         strategy="deep",
         default=None,

@@ -715,6 +715,22 @@ def test_agent_judge_prompt_requires_findings(sandbox: Sandbox, direct_route: Di
     assert "findings" in user_msg.lower()
 
 
+def test_agent_judge_system_prompt_replaces_not_appends(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """The judge prompt is its ENTIRE identity: system_prompt_mode must be 'replace'
+    so the Claude Code coding-agent preset never prefixes the scoring instrument —
+    forced even when the user's YAML says 'append'."""
+    criterion = AgentJudgeCriterion(
+        description="x", prompt="grade", agent={"type": "claude-code", "system_prompt_mode": "append"}
+    )
+    mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    (agent_config,) = mock_cls.call_args.args
+    assert agent_config.system_prompt_mode == "replace"
+    assert agent_config.system_prompt.startswith("You are a strict code reviewer")
+
+
 def test_agent_judge_transcript_captures_tool_calls(sandbox: Sandbox, direct_route: DirectRoute) -> None:
     """Tool calls made by the judge sub-agent must surface on the transcript so
     reviewers can audit the verdict."""

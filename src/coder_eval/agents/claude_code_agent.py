@@ -27,6 +27,9 @@ from claude_agent_sdk import (
 # CLI). If this import breaks on an SDK upgrade, the threaded watchdog loses
 # its kill target and timeouts will no longer be enforced at the agent layer.
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+# SystemPromptPreset is not re-exported from the SDK root, so claude_agent_sdk.types
+# is the only import route (same treatment as evaluation/verdict_tool.py).
 from claude_agent_sdk.types import SystemPromptPreset
 
 from coder_eval.agent import Agent, AgentState
@@ -1174,13 +1177,24 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if "ToolSearch" not in disallowed_tools:
             disallowed_tools.append("ToolSearch")
 
-        # A plain-string system_prompt would REPLACE Claude Code's default system
-        # prompt, dropping its behavioral guidance (parallel tool-call batching,
-        # conciseness). Always keep the default via the SDK preset and append the
-        # configured prompt after it.
-        system_prompt: SystemPromptPreset | None = None
-        if self.config.system_prompt is not None:
-            system_prompt = SystemPromptPreset(type="preset", preset="claude_code", append=self.config.system_prompt)
+        # The SDK maps system_prompt=None to `--system-prompt ""` (an explicit
+        # EMPTY custom prompt) and a plain string to a full replacement — either
+        # way Claude Code's default behavioral guidance (parallel tool-call
+        # batching, conciseness) is lost. So ALWAYS send the claude_code preset:
+        # without `append` the CLI runs its default prompt; with it the configured
+        # prompt is appended. exclude_dynamic_sections keeps the prompt static
+        # across runs (the per-run tempdir path would otherwise be baked into the
+        # system prompt, breaking prompt caching and run comparability); the SDK
+        # re-injects the stripped sections into the first user message.
+        # system_prompt_mode="replace" (judge sub-agents) opts out of the preset:
+        # the configured prompt IS the entire system prompt.
+        system_prompt: str | SystemPromptPreset
+        if self.config.system_prompt_mode == "replace" and self.config.system_prompt is not None:
+            system_prompt = self.config.system_prompt
+        else:
+            system_prompt = SystemPromptPreset(type="preset", preset="claude_code", exclude_dynamic_sections=True)
+            if self.config.system_prompt is not None:
+                system_prompt["append"] = self.config.system_prompt
 
         # as_posix(), not str(): bash on Windows strips backslashes from unquoted
         # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".

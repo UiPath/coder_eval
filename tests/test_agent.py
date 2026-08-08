@@ -377,6 +377,19 @@ async def test_claude_settings_none_default():
     assert captured_options[0].settings is None
 
 
+def _transport_command(options) -> list[str]:
+    """Render captured ClaudeAgentOptions into the actual CLI argv.
+
+    The dict-shape assertions pin the values we set; this pins the SDK contract
+    (which flag the transport emits) — the surface the original replace-vs-append
+    bug lived on — and survives an SDK TypedDict reshape.
+    """
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    options.cli_path = "claude"
+    return SubprocessCLITransport(prompt="x", options=options)._build_command()
+
+
 @pytest.mark.asyncio
 async def test_system_prompt_appends_to_claude_code_preset():
     """system_prompt keeps the Claude Code default prompt and appends via the SDK preset."""
@@ -388,19 +401,61 @@ async def test_system_prompt_appends_to_claude_code_preset():
     assert captured_options[0].system_prompt == {
         "type": "preset",
         "preset": "claude_code",
+        "exclude_dynamic_sections": True,
         "append": "You are a coding agent.",
     }
+    cmd = _transport_command(captured_options[0])
+    assert "--append-system-prompt" in cmd
+    assert "--system-prompt" not in cmd
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_none_leaves_sdk_default():
-    """No system_prompt -> ClaudeAgentOptions.system_prompt stays None (SDK default prompt)."""
+async def test_system_prompt_unset_sends_bare_preset():
+    """No system_prompt -> the bare claude_code preset, which the transport renders
+    as NO system-prompt flag (the CLI default). Passing None instead would emit
+    `--system-prompt \"\"` — an explicit EMPTY prompt that loses the default."""
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
 
-    assert captured_options[0].system_prompt is None
+    assert captured_options[0].system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "exclude_dynamic_sections": True,
+    }
+    cmd = _transport_command(captured_options[0])
+    assert "--append-system-prompt" not in cmd
+    assert "--system-prompt" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_empty_string_appends_empty():
+    """system_prompt: \"\" is configured, not unset — it appends (harmlessly), and a
+    future truthiness refactor must not route it into the preset-loss path."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt["append"] == ""
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_mode_replace_sends_plain_string():
+    """system_prompt_mode='replace' (the judge seam) sends the configured prompt as
+    the ENTIRE system prompt — no preset, no coding-agent persona."""
+    config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE, system_prompt="You are a strict grader.", system_prompt_mode="replace"
+    )
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt == "You are a strict grader."
+    cmd = _transport_command(captured_options[0])
+    assert "--system-prompt" in cmd
+    assert "--append-system-prompt" not in cmd
 
 
 @pytest.mark.asyncio

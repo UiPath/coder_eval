@@ -99,7 +99,8 @@ agent:
 | `allowed_tools` | `list[str] \| null` | Tool allowlist. Unset ⇒ all tools allowed. |
 | `disallowed_tools` | `list[str] \| null` | Tool denylist. (`ToolSearch` is always appended for Bedrock parity.) |
 | `plugins` | `list[{type: local, path}]` | Local plugin/skill directories; `$VAR` in `path` is expanded and resolved to an absolute path. |
-| `system_prompt` | `str \| null` | **Appended** to the default Claude Code system prompt (via the SDK's `claude_code` preset with `append`) — the default's behavioral guidance is always kept. Mutually exclusive with `system_prompt_file`. |
+| `system_prompt` | `str \| null` | **Appended** to the default Claude Code system prompt (via the SDK's `claude_code` preset) — the default's behavioral guidance is always kept, whether or not this is set. Mutually exclusive with `system_prompt_file`. |
+| `system_prompt_mode` | `"append"` (default) / `"replace"` | `replace` sends `system_prompt` as the **entire** system prompt (no preset). Used by judge sub-agents, which must not carry the coding-agent persona; rarely needed in tasks. |
 | `system_prompt_file` | `str \| null` | Path (relative to the task YAML) loaded into `system_prompt` at resolution. |
 | `setting_sources` | `list["user"\|"project"\|"local"] \| null` | Which host setting sources the SDK reads. Default resolves to `["project"]`. See [Sandbox isolation](#sandbox-isolation). |
 | `claude_settings` | `str \| dict \| null` | Passed to the SDK `--settings`. A dict is JSON-serialized; a str is a settings file path. Use `permissions.deny` to block tools/paths. |
@@ -110,6 +111,15 @@ agent:
 > `permission_mode`, `allowed_tools`, `mcp_servers`, `resume`, `max_turns`,
 > `setting_sources`, `include_partial_messages`, …) are rejected there — set those
 > through their typed fields or `-D run_limits.*`. MCP servers are not a YAML field.
+
+> **System-prompt reproducibility.** In `append` mode the preset's *dynamic
+> sections* (working directory, git status, auto-memory) are excluded so the system
+> prompt stays identical across runs — the per-run sandbox tempdir path would
+> otherwise be baked into it, breaking prompt caching and run comparability. The
+> SDK re-injects the stripped content into the first user message, so the agent
+> loses nothing. Note the default-prompt baseline tracks the installed Claude Code
+> CLI version; `environment_info.claude_code_cli` in `run.json` records which
+> version a run used.
 
 ### Setting fields from the CLI
 
