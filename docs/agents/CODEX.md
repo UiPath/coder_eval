@@ -213,6 +213,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 | **SDK Type** | Subprocess (CLI via JSON generator) | Sync client (app-server subprocess) |
 | **Command Tracking** | Full telemetry (tool name, params, duration) | Streamed telemetry: shell → `Bash`, apply_patch → `Write` |
 | **Model Selection** | Direct via `--model` or config | `agent.model` pinned into `thread_start` |
+| **System prompt** | `system_prompt` appended to the default prompt (SDK `claude_code` preset) | `system_prompt` passed as `developer_instructions` on top of the Codex base prompt |
 | **Session Resume** | `--resume {session_id}` | Via thread ID |
 | **Permissions** | `permission_mode` + `allowed_tools` | `permission_mode` → sandbox/approval + `allowed_tools`/`disallowed_tools` → thread config |
 | **Tool Enforcement** | Not enforced by Coder Eval wrapper | `enabled_tools` honored; `disabled_tools` NOT enforced by the SDK |

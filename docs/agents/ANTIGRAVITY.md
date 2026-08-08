@@ -109,6 +109,14 @@ Antigravity exposes a `thinking_level` field (`minimal` / `low` / `medium` /
 Antigravity-specific — Claude Code and Codex don't take this field. Thinking tokens
 are billed as **output** tokens (see [Telemetry](#telemetry)).
 
+### `system_prompt`
+
+`agent.system_prompt` is passed to the SDK as `system_instructions`, whose string
+shorthand maps to `TemplatedSystemInstructions` — a named section **appended** to
+the harness's default system instructions, never a replacement. This matches the
+append-only semantics of the shared config field across agents (Claude Code appends
+via the `claude_code` preset; Codex via `developer_instructions`).
+
 ### Skills (SKILL.md)
 
 Antigravity supports [Agent Skills](https://agentskills.io/specification)

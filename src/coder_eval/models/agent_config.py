@@ -151,8 +151,9 @@ class BaseAgentConfig(BaseModel):
     system_prompt: str | None = Field(
         default=None,
         description=(
-            "Custom system prompt, appended to the agent's default system prompt "
-            "(claude-code: the SDK 'claude_code' preset with append). "
+            "Custom system prompt, appended to the agent's default system prompt — never a replacement "
+            "(claude-code: the SDK 'claude_code' preset with append; codex: developer_instructions "
+            "on top of the base prompt; antigravity: TemplatedSystemInstructions sections). "
             "Supports inline text or multi-line YAML strings. "
             "Mutually exclusive with system_prompt_file."
         ),

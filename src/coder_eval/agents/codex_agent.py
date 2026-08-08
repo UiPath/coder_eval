@@ -1276,6 +1276,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
             options["model"] = effective_model
             self._log.debug(f"Codex model pinned to {effective_model}")
 
+        # system_prompt maps to developer_instructions: injected ON TOP of Codex's
+        # base prompt, matching the append-only contract of the shared config field
+        # (Claude Code appends via the claude_code preset; Antigravity via
+        # TemplatedSystemInstructions). base_instructions (full replacement of the
+        # base prompt) is deliberately not exposed.
+        if self.config.system_prompt is not None:
+            options["developer_instructions"] = self.config.system_prompt
+
         permission_mode = self.config.permission_mode.value
         approval_mode_str = _CODEX_APPROVAL_MODE
 

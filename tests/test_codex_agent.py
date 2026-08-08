@@ -125,6 +125,22 @@ class TestSandboxAlwaysFullAccess:
         assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
 
 
+class TestSystemPrompt:
+    """system_prompt travels as developer_instructions — injected on top of Codex's
+    base prompt, mirroring the append-only semantics of the other agents."""
+
+    def test_system_prompt_forwarded_as_developer_instructions(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, system_prompt="You are a coding agent."))
+
+        assert agent._build_thread_options()["developer_instructions"] == "You are a coding agent."
+
+    def test_no_system_prompt_omits_developer_instructions(self):
+        """No system_prompt -> the key is absent, leaving the SDK default untouched."""
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+
+        assert "developer_instructions" not in agent._build_thread_options()
+
+
 class TestCodexEnvironmentConfiguration:
     """Test _build_codex_env: only CODEX_API_KEY travels via env."""
 
