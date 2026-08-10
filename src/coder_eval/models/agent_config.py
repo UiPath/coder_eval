@@ -186,6 +186,20 @@ class BaseAgentConfig(BaseModel):
 
         return [normalize_ignore_pattern_entry(v) for v in values]
 
+    @field_validator("system_prompt", mode="after")
+    @classmethod
+    def _blank_prompt_is_no_prompt(cls, v: str | None) -> str | None:
+        """Collapse an empty or whitespace-only ``system_prompt`` to ``None``.
+
+        Every agent branches on ``system_prompt is not None`` to decide whether a
+        prompt was configured, so a blank string is the one value that reads as
+        "configured" while carrying nothing — producing an empty *entire* system
+        prompt under ``replace``, and empty ``system_instructions`` on Antigravity.
+        Normalizing here fixes both, and makes ``check_replace_mode_has_prompt``
+        reject ``replace`` + blank instead of silently honoring it.
+        """
+        return v if v is None or v.strip() else None
+
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:
         """Ensure system_prompt and system_prompt_file are mutually exclusive."""
@@ -263,7 +277,10 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
         claude_code preset (the append regime) while run.json's
         ``system_prompt_semantics`` marker could label the run 'replace' —
         silently mis-bucketing trend dashboards. ``system_prompt_file`` counts:
-        the task loader inlines it into ``system_prompt`` at resolution time.
+        the task loader inlines it into ``system_prompt`` at resolution time
+        (atomically — see ``resolve_agent_system_prompt``, which must never leave a
+        half-updated config for this validator to see). A blank prompt does NOT
+        count: ``_blank_prompt_is_no_prompt`` has already collapsed it to ``None``.
         """
         if self.system_prompt_mode == "replace" and self.system_prompt is None and self.system_prompt_file is None:
             raise ValueError(

@@ -89,14 +89,16 @@ class SubAgentRunner:
             )
         # A sub-agent's system_prompt is its entire identity (judge instructions,
         # simulator persona) — the claude_code coding-agent preset must never
-        # prefix it. Same fail-loud contract as setting_sources above: callers
-        # own their config, so a misconfigured one raises instead of being
-        # silently mutated.
-        if agent_config.system_prompt is not None and agent_config.system_prompt_mode != "replace":
+        # prefix it. That takes BOTH halves: an omitted prompt gets the bare
+        # preset, which is the same failure reached via the other branch, so
+        # neither is accepted. Same fail-loud contract as setting_sources above:
+        # callers own their config, so a misconfigured one raises instead of
+        # being silently mutated.
+        if agent_config.system_prompt is None or agent_config.system_prompt_mode != "replace":
             raise ValueError(
-                "SubAgentRunner requires agent_config.system_prompt_mode='replace' when a "
-                + "system_prompt is set: the sub-agent prompt is its entire identity and must "
-                + "not be appended to the claude_code coding-agent preset."
+                "SubAgentRunner requires agent_config.system_prompt to be set with "
+                + "system_prompt_mode='replace': the sub-agent prompt is its entire identity "
+                + "and must not be appended to (or replaced by) the claude_code coding-agent preset."
             )
         assert sandbox.sandbox_dir is not None, "sandbox not initialized"
         self._sandbox = sandbox

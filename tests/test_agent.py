@@ -1,5 +1,6 @@
 """Tests for the agent implementations."""
 
+import logging
 import tempfile
 import time
 from pathlib import Path
@@ -433,10 +434,12 @@ async def test_system_prompt_unset_sends_bare_preset():
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_empty_string_appends_empty():
-    """system_prompt: \"\" is configured, not unset — it appends (harmlessly), and a
-    future truthiness refactor must not route it into the preset-loss path."""
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="")
+@pytest.mark.parametrize("blank", ["", "   \n\t "])
+async def test_blank_system_prompt_is_treated_as_unset(blank: str):
+    """A blank system_prompt is no prompt at all: it normalizes to None, so the bare
+    preset goes out with no `append` key rather than an empty appended section."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt=blank)
+    assert config.system_prompt is None
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -445,7 +448,6 @@ async def test_system_prompt_empty_string_appends_empty():
         "type": "preset",
         "preset": "claude_code",
         "exclude_dynamic_sections": True,
-        "append": "",
     }
 
 
@@ -479,21 +481,41 @@ def test_environment_info_reports_system_prompt_semantics():
     assert judge_like.get_environment_info() == {"system_prompt_semantics": "replace"}
 
 
-def test_system_prompt_mode_replace_requires_prompt():
-    """The fourth cell of the mode x prompt matrix: 'replace' with no prompt is
-    rejected at config validation — otherwise the options builder would fall
-    back to the preset (append regime) while run.json recorded 'replace'."""
+def test_replace_mode_without_prompt_fails_open_and_warns(caplog):
+    """Defense in depth: the config validator rejects this pair at load, so reaching
+    the agent means a mutated or hand-built config. Fail OPEN to append — never send
+    an empty entire system prompt — and warn so the downgrade shows up in task.log
+    rather than only in run.json."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="x", system_prompt_mode="replace")
+    # Bypass validate_assignment the way only a hand-built/mutated config could.
+    object.__setattr__(config, "system_prompt", None)
+    agent = ClaudeCodeAgent(config)
+
+    with caplog.at_level(logging.WARNING):
+        assert agent._effective_prompt_mode() == "append"
+
+    assert "falling back to the claude_code preset" in caplog.text
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_system_prompt_mode_replace_requires_a_non_blank_prompt(blank: str):
+    """The fourth cell of the mode x prompt matrix: 'replace' with no usable prompt is
+    rejected at config validation — otherwise the options builder would fall back to
+    the preset (append regime) while run.json recorded 'replace'. A blank prompt is
+    normalized to None first, so it is rejected here too rather than sending an empty
+    entire system prompt.
+
+    The system_prompt_file cell is covered end-to-end through load_task in
+    tests/test_resolve_task_files.py — asserting construction alone would not exercise
+    the loader's field swap, which is where this combination actually resolves.
+    """
     import pydantic
 
     with pytest.raises(pydantic.ValidationError, match="system_prompt_mode='replace' requires"):
         parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_mode="replace")
 
-    # system_prompt_file satisfies the requirement: task_loader inlines it into
-    # system_prompt at resolution time.
-    config = parse_agent_config(
-        type=AgentKind.CLAUDE_CODE, system_prompt_file="prompt.md", system_prompt_mode="replace"
-    )
-    assert config.system_prompt_mode == "replace"
+    with pytest.raises(pydantic.ValidationError, match="system_prompt_mode='replace' requires"):
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt=blank, system_prompt_mode="replace")
 
 
 @pytest.mark.asyncio

@@ -1249,8 +1249,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         prompt (the config validator rejects the pair at load, but a mutated or
         hand-built config falls back to the preset here — fail open to append).
         """
-        if self.config.system_prompt_mode == "replace" and self.config.system_prompt is not None:
-            return "replace"
+        if self.config.system_prompt_mode == "replace":
+            if self.config.system_prompt is not None:
+                return "replace"
+            # Warn on the downgrade so it's visible in task.log rather than only
+            # inferable from run.json's system_prompt_semantics marker.
+            logger.warning(
+                "system_prompt_mode='replace' with no system_prompt — falling back to the claude_code "
+                + "preset (append regime). run.json records the regime actually used."
+            )
         return "append"
 
     def get_environment_info(self) -> dict[str, Any]:

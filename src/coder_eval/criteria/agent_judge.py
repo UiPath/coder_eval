@@ -266,18 +266,27 @@ def _build_agent_config(
     user_overrides = criterion.agent.model_dump(exclude_unset=True)
     if "sdk_options" in user_overrides:
         user_overrides["sdk_options"] = {**defaults.sdk_options, **user_overrides["sdk_options"]}
-    config = defaults.model_copy(update=user_overrides, deep=True)
-    config.system_prompt = system_prompt
-    # Force replace regardless of user YAML: the judge prompt is its entire
-    # identity — the coding-agent preset must never prefix the scoring
-    # instrument (see the note on _SYSTEM_PROMPT).
-    config.system_prompt_mode = "replace"
-    # SECURITY: force setting_sources=[] regardless of user YAML so the SDK
-    # does NOT load .claude/settings.json or .mcp.json from the judge's cwd.
-    # Those files can install pre-LLM lifecycle hooks (SessionStart /
-    # PreToolUse) or MCP subprocesses that run with the evaluator's
-    # credentials BEFORE the allowed_tools gate kicks in.
-    config.setting_sources = []
+    config = defaults.model_copy(
+        update={
+            **user_overrides,
+            # Force the judge's own prompt in replace mode regardless of user YAML
+            # (see the note on _SYSTEM_PROMPT for why, and SubAgentRunner.__init__
+            # for the enforcement point). system_prompt_file must be cleared in the
+            # SAME update: it is mutually exclusive with system_prompt, and
+            # BaseAgentConfig has validate_assignment=True, so a user YAML that set
+            # it would make a sequential assignment raise on the intermediate state.
+            "system_prompt": system_prompt,
+            "system_prompt_file": None,
+            "system_prompt_mode": "replace",
+            # SECURITY: force setting_sources=[] regardless of user YAML so the SDK
+            # does NOT load .claude/settings.json or .mcp.json from the judge's cwd.
+            # Those files can install pre-LLM lifecycle hooks (SessionStart /
+            # PreToolUse) or MCP subprocesses that run with the evaluator's
+            # credentials BEFORE the allowed_tools gate kicks in.
+            "setting_sources": [],
+        },
+        deep=True,
+    )
     # SECURITY: ensure the ignore_patterns floor is present even if the
     # user supplied their own list. Set-union guarantees idempotence and
     # doesn't depend on order.
