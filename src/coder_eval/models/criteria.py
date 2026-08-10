@@ -321,7 +321,9 @@ class FileExistsCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_exists"] = "file_exists"
-    path: str = Field(description="Path to the file that must exist")
+    path: str = Field(
+        description="Path to the file that must exist; a glob pattern passes when it matches at least one file"
+    )
 
 
 class FileContainsCriterion(BaseSuccessCriterion):
@@ -331,7 +333,7 @@ class FileContainsCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_contains"] = "file_contains"
-    path: str = Field(description="Path to the file to check")
+    path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     includes: list[str] = Field(description="List of strings that must be present in the file")
     excludes: list[str] | None = Field(default=None, description="List of strings that must NOT be present in the file")
 
@@ -404,7 +406,7 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_matches_regex"] = "file_matches_regex"
-    path: str = Field(description="Path to the file to check")
+    path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     pattern: str = Field(description="Regex pattern that must match somewhere in the file")
     must_match: bool = Field(default=True, description="If True, pattern must match; if False, pattern must NOT match")
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
@@ -777,8 +779,13 @@ class JsonCheckCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["json_check"] = "json_check"
-    path: str = Field(description="Path to the JSON file (relative to sandbox root)")
-    json_schema: str | None = Field(default=None, description="Path to JSON Schema file (relative to sandbox root)")
+    path: str = Field(
+        description="Path to the JSON file (relative to sandbox root); may be a glob matching exactly one file"
+    )
+    json_schema: str | None = Field(
+        default=None,
+        description="Path to JSON Schema file (relative to sandbox root); may be a glob matching exactly one file",
+    )
     assertions: list[JMESPathAssertion] = Field(
         default_factory=list, description="JMESPath assertions to evaluate against the parsed JSON"
     )
@@ -809,7 +816,9 @@ class FileCheckCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_check"] = "file_check"
-    path: str = Field(description="Path to the file to check (relative to sandbox root)")
+    path: str = Field(
+        description="Path to the file to check (relative to sandbox root); may be a glob matching exactly one file"
+    )
     includes: list[str] = Field(default_factory=list, description="Strings that must be present in the file")
     excludes: list[str] = Field(default_factory=list, description="Strings that must NOT be present in the file")
     patterns: list[RegexPattern] = Field(
@@ -841,7 +850,9 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     type: Literal["reference_comparison"] = "reference_comparison"
 
     # Required fields
-    agent_file: str = Field(description="Path to agent's generated file (relative to sandbox root)")
+    agent_file: str = Field(
+        description="Path to agent's generated file (relative to sandbox root); may be a glob matching exactly one file"
+    )
 
     comparison_method: Literal["ast", "token", "complexity"] = Field(
         default="ast",
@@ -1033,7 +1044,12 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["classification_match"] = "classification_match"
-    path: str = Field(description="Path to the file (relative to sandbox) containing the agent's predicted label")
+    path: str = Field(
+        description=(
+            "Path to the file (relative to sandbox) containing the agent's predicted label; "
+            "may be a glob matching exactly one file"
+        )
+    )
     expected_label: str = Field(description="Ground-truth label for this row")
     allowed_labels: list[str] = Field(
         min_length=1,

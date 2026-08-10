@@ -24,6 +24,9 @@ class TestComplexityBaseline:
         agent_file = tmp_path / "solution.py"
         agent_file.write_text(agent_code)
         sandbox.file_exists.return_value = True
+        # agent_file resolves through the shared path seam (glob expansion,
+        # ignore filtering, exactly-one), not a direct sandbox_dir read.
+        sandbox.get_file_content.return_value = agent_code
 
         criterion = ReferenceComparisonCriterion(
             description="Compare complexity",
