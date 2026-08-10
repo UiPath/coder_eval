@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.models import SandboxConfig
+from coder_eval.models import PythonEnvConfig, SandboxConfig
 from coder_eval.sandbox import Sandbox
 
 
@@ -1316,3 +1316,315 @@ def test_capture_to_self_referential_is_noop(tmp_path):
         assert (dest / "f.txt").read_text(encoding="utf-8") == "keep"
     finally:
         sandbox.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Host-side (regrade) grader-env hardening.
+#
+# Under driver:docker grade-outside, the host re-grade wraps the agent's
+# copied-out artifacts via setup(regrade=True). Those artifacts are
+# agent-produced, so the grader must run under a trusted interpreter (no agent
+# .venv/node_modules/.bin on PATH) with operator credentials scrubbed — unless
+# the per-task opt-in trust_agent_env=True restores the agent env for
+# venv-dependent graders. The three headline security tests below fail on the
+# pre-fix tree (planted interpreter runs; secret present; venv on PATH) and pass
+# after. Pure subprocess/env assertions: no docker daemon, no model, no LLM.
+# ---------------------------------------------------------------------------
+
+_SCRIPT_EXT = ".bat" if os.name == "nt" else ""
+
+
+def _plant_venv_sentinel_interpreter(artifacts: Path, sentinel: Path) -> None:
+    """Plant a malicious <artifacts>/.venv/<scripts>/python3 that touches `sentinel`.
+
+    If the untrusted grader PATH still carries the agent .venv, a grader that runs
+    `python3` would resolve to THIS script and create the sentinel — the exact RCE
+    the hardening closes.
+    """
+    scripts = "Scripts" if os.name == "nt" else "bin"
+    bindir = artifacts / ".venv" / scripts
+    bindir.mkdir(parents=True, exist_ok=True)
+    for name in ("python", "python3"):
+        shim = bindir / (name + _SCRIPT_EXT)
+        if os.name == "nt":
+            shim.write_text(f"@echo off\r\ntype nul > {sentinel}\r\n", encoding="utf-8")
+        else:
+            shim.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+            shim.chmod(0o755)
+
+
+def test_regrade_untrusted_env_scrubs_operator_secret(monkeypatch, tmp_path):
+    """Denylisted operator secrets are absent from the untrusted regrade grader env.
+
+    FAILS on pre-fix code: they were inherited via os.environ.copy().
+    """
+    monkeypatch.setenv("MY_API_KEY", "leak")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "leak")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="scrub", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        for var in ("MY_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"):
+            code, out, _ = sandbox.run_command(f"python3 -c \"import os; print(os.environ.get('{var}', 'ABSENT'))\"")
+            assert code == 0
+            assert out.strip() == "ABSENT", f"{var} leaked into untrusted grader env"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_untrusted_env_keeps_task_dir_and_path(tmp_path):
+    """Graders still work: TASK_DIR present and PATH non-empty under untrusted regrade."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="keep", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        env = sandbox._build_run_command_env()
+        assert env.get("TASK_DIR") == str(tmp_path)
+        assert env.get("PATH")
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_untrusted_skips_agent_venv_on_path(tmp_path):
+    """A planted agent .venv/bin/python3 is NOT executed under default untrusted regrade.
+
+    FAILS on pre-fix code: venv_dir was set to the agent .venv and its bin was on PATH,
+    so `python3` resolved to the planted interpreter.
+    """
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "PLANTED_RAN"
+    _plant_venv_sentinel_interpreter(artifacts, sentinel)
+    config = SandboxConfig(driver="tempdir", python=PythonEnvConfig())
+    sandbox = Sandbox(config, task_id="venvskip", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        assert sandbox.venv_dir is None
+        code, _out, _err = sandbox.run_command('python3 -c "pass"')
+        assert code == 0
+        assert not sentinel.exists(), "planted agent .venv interpreter ran under untrusted regrade"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_untrusted_skips_node_modules_bin(tmp_path):
+    """A planted <artifacts>/node_modules/.bin/<tool> is NOT resolved under untrusted regrade."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "NODEBIN_RAN"
+    node_bin = artifacts / "node_modules" / ".bin"
+    node_bin.mkdir(parents=True)
+    tool = node_bin / ("plantedtool" + _SCRIPT_EXT)
+    if os.name == "nt":
+        tool.write_text(f"@echo off\r\ntype nul > {sentinel}\r\n", encoding="utf-8")
+    else:
+        tool.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+        tool.chmod(0o755)
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="nodeskip", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        code, _out, _err = sandbox.run_command("plantedtool")
+        assert code != 0, "bare planted node_modules/.bin tool resolved under untrusted regrade"
+        assert not sentinel.exists()
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_untrusted_env_neutralizes_cwd_module_hijack(tmp_path):
+    """A grader-imported module planted in the artifacts CWD does NOT hijack the trusted
+    interpreter under untrusted regrade.
+
+    run_command executes with cwd = the agent-produced artifacts dir. Without
+    PYTHONSAFEPATH, CPython puts the cwd on sys.path[0], so an agent-planted
+    ``artifacts/json.py`` shadows stdlib ``json`` for the canonical grader
+    ``python3 -c "import json; ..."`` — running arbitrary code as the operator AND
+    forging the grade. The untrusted grader env must set PYTHONSAFEPATH=1 to drop
+    the implicit cwd. FAILS on pre-fix code (planted module runs and forges).
+    """
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "CWD_IMPORT_RAN"
+    # Shadow stdlib json: run code + forge json.load to always report success.
+    (artifacts / "json.py").write_text(
+        f"open(r'{sentinel}', 'w').write('x')\ndef load(fp):\n    return {{'ok': True}}\n",
+        encoding="utf-8",
+    )
+    (artifacts / "out.json").write_text('{"ok": false}', encoding="utf-8")
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="cwdimport", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        code, out, _err = sandbox.run_command("python3 -c \"import json; print(json.load(open('out.json'))['ok'])\"")
+        assert code == 0
+        assert not sentinel.exists(), "agent-planted cwd module ran in the host re-grade"
+        # The real stdlib json parsed the real file, so the grade is not forged.
+        assert out.strip() == "False", "planted json.py forged the grade (cwd import hijack)"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_untrusted_env_scrubs_python_path_injectors(monkeypatch, tmp_path):
+    """PYTHONPATH / PYTHONSTARTUP / PYTHONHOME are dropped from the untrusted grader env
+    so an agent cannot inject a module search path or startup hook into the trusted
+    interpreter. FAILS on pre-fix code (inherited via os.environ.copy())."""
+    for var in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"):
+        monkeypatch.setenv(var, "/agent/controlled")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="pyinject", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        env = sandbox._build_run_command_env()
+        for var in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"):
+            assert var not in env, f"{var} survived into the untrusted grader env"
+        assert env.get("PYTHONSAFEPATH") == "1"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_opt_in_restores_agent_env(monkeypatch, tmp_path):
+    """trust_agent_env=True restores the agent .venv on PATH and does NOT scrub creds."""
+    monkeypatch.setenv("MY_API_KEY", "present")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "OPTIN_RAN"
+    _plant_venv_sentinel_interpreter(artifacts, sentinel)
+    config = SandboxConfig(driver="tempdir", python=PythonEnvConfig())
+    sandbox = Sandbox(config, task_id="optin", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True, trust_agent_env=True)
+        assert sandbox.venv_dir == artifacts / ".venv"
+        env = sandbox._build_run_command_env()
+        # Opt-in is an explicit trust escalation: secrets are NOT scrubbed.
+        assert env.get("MY_API_KEY") == "present"
+        # The agent .venv bin is on PATH, so `python3` resolves to the planted shim.
+        code, _out, _err = sandbox.run_command('python3 -c "pass"')
+        assert code == 0
+        assert sentinel.exists(), "opt-in did not restore the agent .venv on the grader PATH"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_trust_agent_env_ignored_when_not_regrade(monkeypatch, tmp_path):
+    """trust_agent_env is meaningless without regrade: normal setup env is unchanged."""
+    monkeypatch.setenv("MY_API_KEY", "present")
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="nonregrade", task_dir=tmp_path)
+    try:
+        sandbox.setup(trust_agent_env=True)
+        assert sandbox._untrusted_grader_env is False
+        env = sandbox._build_run_command_env()
+        assert env.get("MY_API_KEY") == "present"  # non-regrade path never scrubs
+    finally:
+        sandbox.cleanup()
+
+
+def test_normal_setup_env_unchanged(monkeypatch, tmp_path):
+    """Normal (non-regrade) setup leaves _untrusted_grader_env False and inherits secrets +
+    prepends the sandbox venv/node PATH exactly as before (in-container/tempdir non-regression)."""
+    monkeypatch.setenv("MY_API_KEY", "present")
+    sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id="normal", task_dir=tmp_path)
+    try:
+        sandbox_dir = sandbox.setup()
+        assert sandbox._untrusted_grader_env is False
+        env = sandbox._build_run_command_env()
+        assert env.get("MY_API_KEY") == "present"
+        # venv scripts dir is prepended on PATH (venv was created for a python config).
+        assert sandbox.venv_dir is not None
+        scripts = "Scripts" if os.name == "nt" else "bin"
+        assert str(sandbox_dir / ".venv" / scripts) in env["PATH"].split(os.pathsep)
+    finally:
+        sandbox.cleanup()
+
+
+def test_scrub_operator_secrets_unit():
+    """Direct unit test of _scrub_operator_secrets over each denylist rule and keep-set."""
+    from coder_eval.sandbox import _scrub_operator_secrets
+
+    env = {
+        # --- dropped: denylist rules ---
+        "ANTHROPIC_API_KEY": "x",  # exact
+        "MY_API_KEY": "x",  # suffix _API_KEY
+        "SOME_TOKEN": "x",  # suffix _TOKEN
+        "APP_SECRET": "x",  # suffix _SECRET
+        "AWS_SECRET_ACCESS_KEY": "x",  # prefix AWS_ (and suffix)
+        "UIPATH_ACCESS_TOKEN": "x",  # prefix UIPATH_
+        "OPENAI_ORG": "x",  # prefix OPENAI_
+        "OPENROUTER_KEY": "x",  # prefix OPENROUTER_
+        "AWS_BEARER_TOKEN_BEDROCK": "x",  # substring BEARER
+        "DB_CREDENTIALS": "x",  # substring CREDENTIAL
+        # --- broadened denylist (plan-owner decision) ---
+        "LITELLM_MASTER_KEY": "x",  # prefix LITELLM_ + suffix _KEY
+        "TELEMETRY_CONNECTION_STRING": "x",  # prefix TELEMETRY_ + substring CONNECTION_STRING
+        "NPM_AUTH_TOKEN": "x",  # prefix NPM_ + suffix _TOKEN
+        "GH_PASSWORD": "x",  # prefix GH_ + substring PASSWORD
+        "MY_PRIVATE_KEY": "x",  # substring PRIVATE_KEY
+        # --- inline-credential carriers (no _KEY/_TOKEN/_SECRET suffix) ---
+        "DATABASE_URL": "postgres://u:p@h/db",
+        "REDIS_URL": "redis://u:p@h",
+        "SENTRY_DSN": "https://k@sentry/1",
+        # --- concrete operator secrets matching no pattern rule (exact keys) ---
+        "SSH_AUTH_SOCK": "/run/ssh",
+        "KUBECONFIG": "/home/u/.kube/config",
+        "DOCKER_AUTH": "x",
+        "VAULT_ADDR": "https://vault",
+        "CI_JOB_JWT": "x",  # substring JWT
+        # --- kept: keep-set exact names win even on a pattern match ---
+        "PATH": "/usr/bin",
+        "HOME": "/home/u",
+        "LANG": "en_US.UTF-8",
+        "LC_ALL": "C",  # LC_* prefix keep
+        "TASK_DIR": "/task",
+        "VIRTUAL_ENV": "/venv",
+        "PLUGIN_TOOLS_DIR": "/plugins",
+        "NODE_PATH": "",
+        "NPM_CONFIG_PREFIX": "/npm",  # matches NPM_ prefix but kept
+        "TMPDIR": "/tmp",
+        "TMP": "/tmp",
+        "TEMP": "/tmp",
+        # --- kept: no rule matches ---
+        "EDITOR": "vim",
+    }
+    out = _scrub_operator_secrets(dict(env))
+    dropped = {
+        "ANTHROPIC_API_KEY",
+        "MY_API_KEY",
+        "SOME_TOKEN",
+        "APP_SECRET",
+        "AWS_SECRET_ACCESS_KEY",
+        "UIPATH_ACCESS_TOKEN",
+        "OPENAI_ORG",
+        "OPENROUTER_KEY",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "DB_CREDENTIALS",
+        "LITELLM_MASTER_KEY",
+        "TELEMETRY_CONNECTION_STRING",
+        "NPM_AUTH_TOKEN",
+        "GH_PASSWORD",
+        "MY_PRIVATE_KEY",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "SENTRY_DSN",
+        "SSH_AUTH_SOCK",
+        "KUBECONFIG",
+        "DOCKER_AUTH",
+        "VAULT_ADDR",
+        "CI_JOB_JWT",
+    }
+    kept = {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TASK_DIR",
+        "VIRTUAL_ENV",
+        "PLUGIN_TOOLS_DIR",
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "EDITOR",
+    }
+    assert dropped.isdisjoint(out.keys()), f"leaked: {dropped & out.keys()}"
+    assert kept <= out.keys(), f"wrongly dropped: {kept - out.keys()}"

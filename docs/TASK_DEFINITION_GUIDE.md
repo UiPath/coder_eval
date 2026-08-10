@@ -508,11 +508,24 @@ sandbox:
     max_cpus: 2                        # driver:docker -> `--cpus`; ignored under tempdir
     max_pids: 512                      # driver:docker -> `--pids-limit`; ignored under tempdir
     max_disk_mb: 1024                  # NOT enforced (reserved: no portable docker knob)
+  docker:                              # driver:docker overrides (ignored under tempdir)
+    regrade_trusts_agent_env: false    # see note below; default false is the safe lockdown
 ```
 
 Under `driver: tempdir` only `timeout` is enforced — the agent can consume
 arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
 container limits above to actually bind.
+
+Under `driver: docker` the framework grades **grade-outside**: the container
+copies the agent's produced artifacts out to the host, then the host re-grades
+them. Because those artifacts are agent-produced, the host grader runs under a
+**trusted interpreter** with operator credentials scrubbed by default — an
+agent cannot get the host grader to execute a planted `.venv/bin/python` or
+`node_modules/.bin` tool, nor read the operator's API keys. Set
+`regrade_trusts_agent_env: true` (under `sandbox.docker`) only for a task whose
+grader must run inside the agent's own venv (e.g. `uv run uipath eval`): it is a
+deliberate **trust escalation** that puts the agent `.venv` on the grader PATH
+and stops scrubbing the inherited environment for that task's re-grade.
 
 ### Recording CLI Invocations
 

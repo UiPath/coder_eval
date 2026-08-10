@@ -519,6 +519,15 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         data = self.model_dump(mode="json")
         for field, empty in _AGENT_HIDDEN_FIELD_EMPTIES.items():
             data[field] = empty
+        # regrade_trusts_agent_env is a HOST-only re-grade concern (read by
+        # regrade_on_host before the driver swap); the container switches to
+        # tempdir and never reads it. Drop it from the staged copy so it neither
+        # crosses the container boundary nor trips extra="forbid" on an image
+        # built before the field existed — a host-only field must not force a
+        # container image rebuild.
+        docker_cfg = (data.get("sandbox") or {}).get("docker")
+        if isinstance(docker_cfg, dict):
+            docker_cfg.pop("regrade_trusts_agent_env", None)
         return data
 
     @model_validator(mode="after")

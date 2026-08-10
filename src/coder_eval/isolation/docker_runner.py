@@ -1819,6 +1819,13 @@ async def regrade_on_host(result: EvaluationResult, rt: ResolvedTask) -> Evaluat
         # no rmtree on cleanup). task_dir = the REAL host task dir so graders resolve
         # $TASK_DIR against the host grader, never the agent's throwaway workspace.
         host_task_dir = rt.task_file.parent.resolve()
+        # Per-task opt-in read off the ORIGINAL (docker) config, before the driver
+        # swap below: when true the host re-grade trusts the agent-built env (agent
+        # .venv on PATH, inherited operator creds) for venv-dependent graders; when
+        # false (default) graders run under a trusted interpreter with creds scrubbed.
+        # Read from rt.task.sandbox.docker rather than the tempdir-swapped copy so the
+        # tempdir Sandbox stays decoupled from docker config.
+        trust_agent_env = rt.task.sandbox.docker.regrade_trusts_agent_env
         # The host re-grade runs IN-PROCESS on the host, not in a container, so the
         # sandbox driver must be switched off 'docker' — Sandbox.setup() hard-rejects
         # driver='docker' ("must be dispatched via DockerRunner"). Mirror the driver
@@ -1828,7 +1835,7 @@ async def regrade_on_host(result: EvaluationResult, rt: ResolvedTask) -> Evaluat
         # regrade=True: wrap the copied-out artifacts WITHOUT re-materializing
         # templates/venv (which would clobber the agent's produced files with
         # pristine starter content and corrupt the grade).
-        await asyncio.to_thread(lambda: sandbox.setup(artifacts_dir, regrade=True))
+        await asyncio.to_thread(lambda: sandbox.setup(artifacts_dir, regrade=True, trust_agent_env=trust_agent_env))
 
         # Run the re-grade against a THROWAWAY run_dir, NOT rt.run_dir. The container
         # already wrote the authoritative task.json (full agent trajectory + tokens +

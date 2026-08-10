@@ -195,6 +195,16 @@ class DockerDriverConfig(BaseModel):
         default="bridge",
         description="Container network. 'bridge' for tasks needing LLM/pkg access; 'none' for fully sealed runs.",
     )
+    regrade_trusts_agent_env: bool = Field(
+        default=False,
+        description=(
+            "Docker grade-outside only. When true, the HOST re-grade of the agent's copied-out "
+            "artifacts runs graders in the agent-built environment (agent .venv on PATH, "
+            "node_modules/.bin, inherited operator env). TRUST ESCALATION: only set this for tasks "
+            "whose grader must run inside the agent's venv (e.g. `uv run uipath eval`). Default false "
+            "runs graders under a trusted interpreter with operator credentials scrubbed."
+        ),
+    )
     working_dir: str | None = Field(
         default=None,
         description=(

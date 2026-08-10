@@ -127,6 +127,28 @@ def test_stripped_fields_are_the_ssot_set() -> None:
     assert frozenset({"success_criteria", "reference"}) == AGENT_HIDDEN_TASK_FIELDS
 
 
+def test_agent_safe_dump_omits_host_only_regrade_flag() -> None:
+    """``regrade_trusts_agent_env`` is a HOST-only re-grade concern; it must NOT
+    appear in the staged (agent-visible) task.yaml. Otherwise a container image
+    built before the field existed rejects the staged config via extra="forbid"
+    and dies before the agent runs. Set it to a non-default value to prove the
+    strip is unconditional (not merely default-omission)."""
+    from coder_eval.models import DockerDriverConfig, SandboxConfig, TaskDefinition
+
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        initial_prompt="p",
+        sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(regrade_trusts_agent_env=True)),
+        agent={"type": "claude-code"},
+        success_criteria=[],
+    )
+    docker_dump = (task.agent_safe_dump().get("sandbox") or {}).get("docker") or {}
+    assert "regrade_trusts_agent_env" not in docker_dump
+    # The host still sees the real value on the full task (regrade reads it there).
+    assert task.sandbox.docker.regrade_trusts_agent_env is True
+
+
 # ---- Detector B: zero grading material in the agent mount --------------------
 
 
@@ -340,3 +362,228 @@ class TestArgvGraderDirLeakDetector:
         )
         with pytest.raises(DockerRunError, match="grader dir"):
             self._argv(runner, tmp_path)
+
+
+# ---- Detector C: host-side (regrade) grader-exec hardening -------------------
+#
+# Under driver:docker grade-outside, the host RE-GRADE wraps the agent's
+# copied-out artifacts (sandbox.setup(regrade=True)). Those artifacts are
+# agent-produced, so by default the host grader must run under a trusted
+# interpreter (no agent .venv/node_modules/.bin on PATH) with operator
+# credentials scrubbed — an agent must not be able to get the host grader to
+# execute a planted binary or read the operator's API keys. The per-task opt-in
+# sandbox.docker.regrade_trusts_agent_env restores the agent env for
+# venv-dependent graders. These tests are daemon-less and model-less; picked up
+# by `make test-docker-detectors`. The headline security tests FAIL on the
+# pre-fix tree (planted interpreter runs / node bin resolves / secret present)
+# and PASS after.
+
+_REGRADE_SCRIPT_EXT = ".bat" if sys.platform == "win32" else ""
+
+
+def _plant_regrade_venv_interpreter(artifacts: Path, sentinel: Path) -> None:
+    """Plant a malicious <artifacts>/.venv/bin/python3 that touches `sentinel` if run."""
+    bindir = artifacts / ".venv" / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    for name in ("python", "python3"):
+        shim = bindir / (name + _REGRADE_SCRIPT_EXT)
+        shim.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+        shim.chmod(0o755)
+
+
+def _regrade_sandbox(artifacts: Path, task_dir: Path, *, with_python: bool):
+    """A tempdir Sandbox over the copied-out artifacts, mirroring regrade_on_host's
+    driver swap (docker → tempdir, sandbox.docker kept intact)."""
+    from coder_eval.models import PythonEnvConfig, SandboxConfig
+    from coder_eval.sandbox import Sandbox
+
+    cfg = SandboxConfig(driver="tempdir", python=PythonEnvConfig() if with_python else None)
+    return Sandbox(cfg, task_id="regrade_t", task_dir=task_dir)
+
+
+def test_regrade_grader_does_not_execute_planted_interpreter(tmp_path) -> None:
+    """HEADLINE: a malicious .venv/bin/python3 in the copied-out artifacts is NOT
+    executed by the default (no opt-in) host re-grade grader. FAILS pre-fix."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "PLANTED_RAN"
+    _plant_regrade_venv_interpreter(artifacts, sentinel)
+    sandbox = _regrade_sandbox(artifacts, tmp_path, with_python=True)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        assert sandbox.venv_dir is None
+        code, _out, _err = sandbox.run_command('python3 -c "pass"')
+        assert code == 0
+        assert not sentinel.exists(), "planted agent interpreter ran in the host re-grade"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_grader_env_scrubs_operator_secret(monkeypatch, tmp_path) -> None:
+    """HEADLINE: operator credentials are scrubbed from the default host re-grade
+    grader env. FAILS pre-fix (inherited via os.environ.copy())."""
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "leak")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sandbox = _regrade_sandbox(artifacts, tmp_path, with_python=False)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        code, out, _err = sandbox.run_command(
+            "python3 -c \"import os; print(os.environ.get('AWS_BEARER_TOKEN_BEDROCK', 'ABSENT'))\""
+        )
+        assert code == 0
+        assert out.strip() == "ABSENT", "operator secret leaked into the host re-grade grader env"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_grader_does_not_resolve_planted_node_bin(tmp_path) -> None:
+    """HEADLINE: a planted <artifacts>/node_modules/.bin/<tool> is NOT resolvable by
+    the default host re-grade grader. FAILS pre-fix (node bin prepended to PATH)."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "NODEBIN_RAN"
+    node_bin = artifacts / "node_modules" / ".bin"
+    node_bin.mkdir(parents=True)
+    tool = node_bin / ("plantedtool" + _REGRADE_SCRIPT_EXT)
+    tool.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+    tool.chmod(0o755)
+    sandbox = _regrade_sandbox(artifacts, tmp_path, with_python=False)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        code, _out, _err = sandbox.run_command("plantedtool")
+        assert code != 0, "planted node_modules/.bin tool resolved in the host re-grade"
+        assert not sentinel.exists()
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_opt_in_restores_agent_env(monkeypatch, tmp_path) -> None:
+    """Opt-in (regrade_trusts_agent_env: true) restores the agent .venv on the grader
+    PATH so venv-dependent graders (`uv run uipath eval`) still work."""
+    monkeypatch.setenv("MY_API_KEY", "present")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "OPTIN_RAN"
+    _plant_regrade_venv_interpreter(artifacts, sentinel)
+    sandbox = _regrade_sandbox(artifacts, tmp_path, with_python=True)
+    try:
+        sandbox.setup(artifacts, regrade=True, trust_agent_env=True)
+        assert sandbox.venv_dir == artifacts / ".venv"
+        code, _out, _err = sandbox.run_command('python3 -c "pass"')
+        assert code == 0
+        assert sentinel.exists(), "opt-in did not restore the agent .venv on the grader PATH"
+    finally:
+        sandbox.cleanup()
+
+
+def _capture_regrade_setup_args(monkeypatch, tmp_path: Path, flag: bool) -> dict:
+    """Drive regrade_on_host over a spy Sandbox and return the args it passed to
+    Sandbox.setup. The spy raises once captured; the guard degrades (mocked no-op)
+    and re-raises, which we swallow."""
+    import coder_eval.isolation.docker_runner as dr
+    import coder_eval.sandbox as sandbox_mod
+    from coder_eval.models import DockerDriverConfig, FileExistsCriterion, FinalStatus, SandboxConfig, TaskDefinition
+
+    artifacts = tmp_path / f"artifacts_{flag}"
+    artifacts.mkdir()
+    task_file = tmp_path / f"task_{flag}.yaml"
+    task_file.write_text("x", encoding="utf-8")
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        initial_prompt="p",
+        sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(regrade_trusts_agent_env=flag)),
+        agent={"type": "claude-code"},
+        success_criteria=[FileExistsCriterion(description="c", path="o.txt")],
+    )
+    rt = MagicMock()
+    rt.task = task
+    rt.task_file = task_file
+    rt.run_dir = tmp_path / f"run_{flag}"
+
+    captured: dict = {}
+
+    class _SpySandbox:
+        def __init__(self, cfg, task_id, task_dir):
+            pass
+
+        def setup(self, target_dir, *, regrade=False, trust_agent_env=False):
+            captured["target_dir"] = target_dir
+            captured["regrade"] = regrade
+            captured["trust_agent_env"] = trust_agent_env
+            # Abort regrade_on_host cheaply once the setup args are captured: the
+            # guard catches this, degrades (mocked no-op), and re-raises.
+            raise RuntimeError("stop after setup")
+
+    result = MagicMock()
+    result.sandbox_path = str(artifacts)
+    # A regradable status that clears the early gating/status guards so we reach setup().
+    result.final_status = FinalStatus.SUCCESS
+
+    # regrade_on_host does `from ..sandbox import Sandbox` at call time, so patch the
+    # source module attribute (not docker_runner's namespace).
+    monkeypatch.setattr(sandbox_mod, "Sandbox", _SpySandbox)
+    monkeypatch.setattr(dr, "_resolve_artifacts_dir", lambda *a, **k: artifacts)
+
+    async def _noop_degrade(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(dr, "_degrade_regrade_to_error", _noop_degrade)
+
+    with pytest.raises(RuntimeError, match="stop after setup"):
+        asyncio.run(dr.regrade_on_host(result, rt))
+    return captured
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_regrade_flag_threads_from_docker_config(monkeypatch, tmp_path, flag: bool) -> None:
+    """regrade_on_host reads rt.task.sandbox.docker.regrade_trusts_agent_env and
+    forwards it to Sandbox.setup(regrade=True, trust_agent_env=...). Guards the wiring
+    so a future refactor cannot silently drop the signal."""
+    captured = _capture_regrade_setup_args(monkeypatch, tmp_path, flag)
+    assert captured.get("regrade") is True
+    assert captured.get("trust_agent_env") is flag
+
+
+def test_regrade_text_grader_still_grades(tmp_path) -> None:
+    """Non-regression: an ordinary host grader (a trusted python3 inspecting a
+    copied-out JSON artifact) still returns exit 0 under default untrusted regrade."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "out.json").write_text('{"ok": true}', encoding="utf-8")
+    sandbox = _regrade_sandbox(artifacts, tmp_path, with_python=False)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        code, out, _err = sandbox.run_command(
+            "python3 -c \"import json; d=json.load(open('out.json')); print(d['ok'])\""
+        )
+        assert code == 0
+        assert out.strip() == "True"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_grader_not_hijacked_by_cwd_planted_module(tmp_path) -> None:
+    """HEADLINE: an agent-planted module in the artifacts cwd does NOT hijack the
+    host re-grade's trusted interpreter. run_command runs with cwd=artifacts, so
+    without PYTHONSAFEPATH a planted `artifacts/json.py` shadows stdlib `json` for
+    the canonical `python3 -c "import json; ..."` grader — running agent code as the
+    operator AND forging the grade. FAILS pre-fix."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sentinel = tmp_path / "CWD_HIJACK_RAN"
+    (artifacts / "json.py").write_text(
+        f"open(r'{sentinel}', 'w').write('x')\ndef load(fp):\n    return {{'ok': True}}\n",
+        encoding="utf-8",
+    )
+    (artifacts / "out.json").write_text('{"ok": false}', encoding="utf-8")
+    sandbox = _regrade_sandbox(artifacts, tmp_path, with_python=False)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        code, out, _err = sandbox.run_command("python3 -c \"import json; print(json.load(open('out.json'))['ok'])\"")
+        assert code == 0
+        assert not sentinel.exists(), "agent-planted cwd module ran in the host re-grade"
+        assert out.strip() == "False", "planted json.py forged the grade (cwd import hijack)"
+    finally:
+        sandbox.cleanup()

@@ -105,6 +105,109 @@ def _grant_read_traverse(root: Path) -> None:
 MAX_SEED_BYTES = 512 * 1024 * 1024  # 512 MiB
 
 
+# Environment variables that must NEVER reach a host-side (untrusted) regrade
+# grader. Matched case-insensitively on the KEY. We DENYLIST secrets by pattern
+# rather than ALLOWLIST known-safe vars: an allowlist that omits a locale/proxy/
+# temp var a legit grader needs would silently break it, and there is no closed
+# set of grader-required vars. The keep-set below is applied AFTER the denylist
+# so framework-controlled vars survive even when they match a pattern (e.g.
+# NPM_CONFIG_PREFIX matches the NPM_ prefix but must be kept; NPM_AUTH_TOKEN is
+# dropped). Kept as module constants so a reviewer can eyeball the whole surface.
+# Concrete operator-credential vars that match none of the pattern rules below
+# (no _API_KEY/_TOKEN/_SECRET suffix, no covered prefix, no covered substring).
+_SECRET_EXACT_KEYS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "SSH_AUTH_SOCK",  # forwarded ssh-agent socket
+        "KUBECONFIG",  # path to a file carrying cluster credentials
+        "DOCKER_AUTH",
+        "DOCKER_AUTH_CONFIG",
+        "VAULT_ADDR",  # VAULT_TOKEN is already caught by the _TOKEN suffix
+    }
+)
+_SECRET_KEY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
+_SECRET_KEY_PREFIXES = (
+    "AWS_",
+    "ANTHROPIC_",
+    "UIPATH_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "LITELLM_",
+    "AZURE_",
+    "GOOGLE_",
+    "GCP_",
+    "HF_",
+    "HUGGINGFACE_",
+    "GITHUB_",
+    "GH_",
+    "SLACK_",
+    "NPM_",
+    "TELEMETRY_",
+)
+_SECRET_KEY_SUBSTRINGS = (
+    "BEARER",
+    "CREDENTIAL",
+    "PASSWORD",
+    "PASSWD",
+    "PRIVATE_KEY",
+    "CONNECTION_STRING",
+    # Common inline-credential carriers with no _KEY/_TOKEN/_SECRET suffix.
+    "DATABASE_URL",
+    "REDIS_URL",
+    "DSN",
+    "JWT",  # CI-injected JSON Web Tokens (e.g. CI_JOB_JWT)
+)
+# Framework-controlled vars a grader legitimately needs; force-kept even when a
+# name matches a denylist rule. Exact-key match only — a hypothetical PATH_TOKEN
+# is NOT in this set and is correctly dropped.
+_SECRET_SCRUB_KEEP = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "TASK_DIR",
+        "VIRTUAL_ENV",
+        "PLUGIN_TOOLS_DIR",
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    }
+)
+
+
+def _scrub_operator_secrets(env: dict[str, str]) -> dict[str, str]:
+    """Drop operator credentials from a grader environment (denylist + keep-set).
+
+    Mutates and returns ``env``. A key is dropped when it matches any denylist
+    rule (exact key, suffix, prefix, or substring — all case-insensitive on the
+    key) UNLESS its exact name is in the keep-set (``PATH``/``HOME``/``LANG``/
+    ``LC_*``/``TASK_DIR``/…), which is applied last so framework vars survive a
+    coincidental pattern match. Pure dict filter: never raises on an odd/missing
+    var. See ``_SECRET_*`` module constants for the full surface.
+    """
+
+    def _is_secret(key: str) -> bool:
+        upper = key.upper()
+        # Keep-set is matched case-insensitively so it stays symmetric with the
+        # case-insensitive denylist below (a lower-case NPM_CONFIG_PREFIX must
+        # still be rescued from the NPM_ prefix rule).
+        if upper in _SECRET_SCRUB_KEEP or upper.startswith("LC_"):
+            return False
+        if upper in _SECRET_EXACT_KEYS:
+            return True
+        if any(upper.endswith(suf) for suf in _SECRET_KEY_SUFFIXES):
+            return True
+        if any(upper.startswith(pre) for pre in _SECRET_KEY_PREFIXES):
+            return True
+        return any(sub in upper for sub in _SECRET_KEY_SUBSTRINGS)
+
+    for key in [k for k in env if _is_secret(k)]:
+        del env[key]
+    return env
+
+
 class Sandbox:
     """Manages sandboxed execution environments for agent tasks.
 
@@ -128,6 +231,14 @@ class Sandbox:
         self.task_dir = task_dir
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
+        # Untrusted-artifacts grader mode. Set True only on the regrade branch of
+        # _setup_tempdir: this sandbox grades agent-produced artifacts host-side,
+        # so _build_run_command_env must run graders under a trusted interpreter
+        # (no agent .venv/node_modules/.bin on PATH) with operator credentials
+        # scrubbed. _trust_agent_env is the per-task opt-in that overrides that
+        # lockdown for venv-dependent graders (e.g. `uv run uipath eval`).
+        self._untrusted_grader_env: bool = False
+        self._trust_agent_env: bool = False
         self._cleanup_on_exit = True
         self.installed_tool_versions: dict[str, str] = {}
         self._command_base_path: str | None = None
@@ -151,7 +262,7 @@ class Sandbox:
         """
         return not self._cleanup_on_exit
 
-    def setup(self, target_dir: Path | None = None, *, regrade: bool = False) -> Path:
+    def setup(self, target_dir: Path | None = None, *, regrade: bool = False, trust_agent_env: bool = False) -> Path:
         """Set up the sandbox environment.
 
         The sandbox is a plain temporary directory on the host -- there is no
@@ -165,9 +276,17 @@ class Sandbox:
                 grade-only pass over its existing contents: skip template
                 materialization and venv/package install (re-running them would
                 clobber the agent's produced files with pristine starter content).
-                An existing ``.venv`` is still detected so graders resolve against
-                it. Used by the docker GRADE-OUTSIDE host re-grade, which wraps the
-                agent's copied-out artifacts. Requires ``target_dir``.
+                Used by the docker GRADE-OUTSIDE host re-grade, which grades the
+                agent's copied-out artifacts host-side. In this mode the grader env
+                is locked down (trusted interpreter, agent dirs off PATH, operator
+                credentials scrubbed) unless ``trust_agent_env`` is set. Requires
+                ``target_dir``.
+            trust_agent_env: Only meaningful with ``regrade=True`` (ignored
+                otherwise). When True, the host re-grade trusts the agent-built
+                environment: the agent's ``.venv`` is detected and put on the
+                grader PATH, ``node_modules/.bin`` is prepended, and the inherited
+                operator env is NOT scrubbed. A per-task TRUST ESCALATION for
+                venv-dependent graders (``uv run uipath eval``).
 
         Returns:
             Path to the sandbox directory
@@ -179,7 +298,7 @@ class Sandbox:
         if regrade and target_dir is None:
             raise ValueError("Sandbox.setup(regrade=True) requires target_dir (the dir to wrap).")
         if self.config.driver == "tempdir":
-            return self._setup_tempdir(target_dir=target_dir, regrade=regrade)
+            return self._setup_tempdir(target_dir=target_dir, regrade=regrade, trust_agent_env=trust_agent_env)
         if self.config.driver == "docker":
             # Docker isolation is dispatched at the orchestrator-entry boundary
             # (coder_eval.isolation.docker_runner). Inside the container, the
@@ -191,7 +310,9 @@ class Sandbox:
             )
         raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
 
-    def _setup_tempdir(self, target_dir: Path | None = None, *, regrade: bool = False) -> Path:
+    def _setup_tempdir(
+        self, target_dir: Path | None = None, *, regrade: bool = False, trust_agent_env: bool = False
+    ) -> Path:
         """Set up a sandbox directory.
 
         Args:
@@ -199,6 +320,8 @@ class Sandbox:
                         Sets _cleanup_on_exit=False so cleanup() preserves the directory.
             regrade: Wrap an existing populated target_dir without re-materializing
                      templates/venv (see :meth:`setup`).
+            trust_agent_env: Per-task opt-in that keeps the agent-built env for the
+                     regrade grader (see :meth:`setup`); ignored unless ``regrade``.
 
         Returns:
             Path to the sandbox directory
@@ -213,12 +336,20 @@ class Sandbox:
                 # re-run _setup_template / venv-create / package-install: the
                 # agent already ran here (in-container) and its edits must survive
                 # — re-materializing would overwrite them with pristine starter
-                # content and corrupt the grade. Only detect an existing venv (so
-                # graders resolve $VENV/bin) and prepare the mock PATH / plugin
-                # pins, which are cheap, non-destructive, and grader-relevant.
-                existing_venv = self.sandbox_dir / ".venv"
-                if self.config.python and existing_venv.is_dir():
-                    self.venv_dir = existing_venv
+                # content and corrupt the grade. Only prepare the mock PATH /
+                # plugin pins, which are cheap, non-destructive, and grader-relevant.
+                #
+                # The wrapped dir holds AGENT-PRODUCED artifacts, so the grader env
+                # is untrusted: _build_run_command_env runs graders under a trusted
+                # interpreter with operator credentials scrubbed. The agent's .venv
+                # is detected (and put on the grader PATH) ONLY under the explicit
+                # per-task opt-in, for venv-dependent graders (`uv run uipath eval`).
+                self._untrusted_grader_env = True
+                self._trust_agent_env = trust_agent_env
+                if trust_agent_env:
+                    existing_venv = self.sandbox_dir / ".venv"
+                    if self.config.python and existing_venv.is_dir():
+                        self.venv_dir = existing_venv
                 self._prepare_mock_path_dirs()
                 self._check_parent_node_modules_contamination()
                 self._refresh_plugin_tools_dir()
@@ -1083,8 +1214,25 @@ class Sandbox:
            ``$HOME/node_modules`` where concurrent sandboxes would shadow
            each other.
         7. Expose ``TASK_DIR`` for criterion scripts.
+
+        UNTRUSTED regrade mode (``_untrusted_grader_env`` and not
+        ``_trust_agent_env``): the wrapped dir holds agent-produced artifacts, so
+        the agent-controlled PATH levers are dropped — no ``.venv/bin``, no
+        ``<sandbox>/node_modules/.bin``, no ``command_base_path`` — leaving the
+        parent process PATH (system + framework) so ``python3``/``node``/bare
+        tools resolve to a TRUSTED interpreter, never an agent-planted one. Because
+        ``run_command`` runs with cwd = the agent artifacts dir, ``PYTHONSAFEPATH``
+        is set (and ``PYTHONPATH``/``PYTHONSTARTUP``/``PYTHONHOME`` dropped) so the
+        trusted interpreter cannot be hijacked by an agent-planted module on the
+        implicit cwd ``sys.path`` entry. Operator credentials are stripped from the
+        inherited env via :func:`_scrub_operator_secrets`. The framework-controlled vars
+        (``NODE_PATH``/``NPM_CONFIG_PREFIX``/``PLUGIN_TOOLS_DIR``/``TASK_DIR``) are
+        set exactly as in the trusted body. The opt-in (``_trust_agent_env``)
+        restores the trusted body verbatim for venv-dependent graders.
         """
         assert self.sandbox_dir is not None
+        if self._untrusted_grader_env and not self._trust_agent_env:
+            return self._build_untrusted_grader_env()
         env = os.environ.copy()
         if self._command_base_path:
             env["PATH"] = f"{self._command_base_path}{os.pathsep}{env['PATH']}"
@@ -1100,6 +1248,41 @@ class Sandbox:
         env["NPM_CONFIG_PREFIX"] = str(self.sandbox_dir / ".npm-prefix")
         # Pin UiPath CLI plugin discovery so the criterion subprocess uses the
         # same @uipath tools the agent authored against (defers to an external pin).
+        if self._plugin_tools_dir and "PLUGIN_TOOLS_DIR" not in env:
+            env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
+        if self.task_dir:
+            env["TASK_DIR"] = str(self.task_dir)
+        return env
+
+    def _build_untrusted_grader_env(self) -> dict[str, str]:
+        """Grader env for the host-side regrade of agent-produced artifacts.
+
+        Trusted PATH (parent process, agent dirs NOT prepended) + operator
+        credentials scrubbed. See :meth:`_build_run_command_env` for the rationale;
+        the framework-controlled vars are set identically to the trusted body.
+        """
+        assert self.sandbox_dir is not None
+        env = _scrub_operator_secrets(os.environ.copy())
+        # Deliberately do NOT prepend _command_base_path, the agent .venv scripts
+        # dir (None here anyway — venv detection is skipped), or the agent-writable
+        # <sandbox>/node_modules/.bin. The PATH is the scrubbed parent PATH.
+        #
+        # PATH is necessary but NOT sufficient to reach a trusted interpreter:
+        # run_command executes with cwd = the agent-produced artifacts dir, and
+        # CPython otherwise puts that cwd on sys.path[0]. So a bare `python3` (now
+        # trusted, off the operator PATH) would still IMPORT an agent-planted
+        # module from the cwd — e.g. an `artifacts/json.py` shadowing stdlib `json`
+        # for the canonical `python3 -c "import json; ..."` grader — running
+        # arbitrary agent code as the operator and forging the grade. PYTHONSAFEPATH
+        # (3.11+) drops the implicit cwd from sys.path; we also strip the
+        # agent-inheritable path/startup injectors so neither PATH-adjacent lever
+        # can re-open the same hole. (These are Python-runtime controls, distinct
+        # from the credential denylist above.)
+        env["PYTHONSAFEPATH"] = "1"
+        for injector in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"):
+            env.pop(injector, None)
+        env["NODE_PATH"] = ""
+        env["NPM_CONFIG_PREFIX"] = str(self.sandbox_dir / ".npm-prefix")
         if self._plugin_tools_dir and "PLUGIN_TOOLS_DIR" not in env:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         if self.task_dir:
