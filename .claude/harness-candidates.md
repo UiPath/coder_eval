@@ -137,6 +137,17 @@ standing one up for three call sites fails the KISS/YAGNI gate. Deferring rather
 than dropping; promote if a fourth TS-side invariant appears, and stand up the
 harness once for all of them.
 
+> **Update (PR #94 review round 2).** The *execution* half of this gap is closed:
+> `evalboard/` is now gated by the `evalboard` job in `.github/workflows/pr-checks.yml`
+> and reachable locally via `make evalboard-verify`, so the vitest suite (including
+> the pricing drift guard) is enforcement rather than documentation. What remains
+> deferred below is the *static-analysis* half — eslint has still not been stood up.
+> The review that prompted this round names four more candidate TS rules (raw
+> `status === "SUCCESS"` outside `lib/status.ts`; DOM-global shadowing in props;
+> inline copies of the tag predicate; per-run tooltip copy reused on aggregate
+> surfaces), which meets the "fourth invariant" promotion bar stated above —
+> **stand up eslint next time `evalboard/` is touched substantively.**
+
 - [ ] **"Every consumer of `RunOverviewTask.matureSkipped` must decide explicitly
   whether a carry-forward row counts."** Four consumers now, and they deliberately
   DISAGREE: `lib/trends.ts` and `app/runs/[id]/run-view.tsx` count a mature skip as
@@ -147,15 +158,15 @@ harness once for all of them.
   for now by unit tests that assert the exclusion from BOTH numerator and denominator
   (`lib/__tests__/overview.test.ts` → `describe("buildTagTaskRows")`).
 
-- [ ] **`taskCarriesRepoTag` is the single repo-provenance tag predicate — but one
-  duplicate survives.** `app/runs/[id]/run-view.tsx:283` still inlines its exact body
-  (`(tag) => t.tags.includes(tag) || t.skill === tag`). NOT adopted deliberately:
-  `run-view.tsx` is `"use client"` and `lib/overview.ts` imports `next/cache` plus the
-  blob readers, so importing the predicate there would drag server-only code into the
-  client bundle. Fixing it properly means extracting the predicate into a
-  dependency-free module (e.g. `lib/tags.ts`) — worth doing next time either file is
-  touched, not worth a standalone change. A lint rule ("no inline `tags.includes(x) ||
-  skill === x`") would catch future copies.
+- [x] ~~**`taskCarriesRepoTag` is the single repo-provenance tag predicate — but one
+  duplicate survives.**~~ **RESOLVED in PR #94 review round 2.** The predicate moved to
+  a dependency-free `lib/tags.ts` (structurally typed on `{skill, tags}` so
+  `RunOverviewTask`, `TaskResultSummary` and `TaskTrend` all satisfy it), re-exported
+  from `lib/overview.ts` for existing callers. Both inline copies now import it:
+  `app/runs/[id]/run-view.tsx` (the `"use client"` one that could not before) and
+  `lib/trends.ts::trendMatchesTag` (a third copy the original deferral missed).
+  Still worth a lint rule ("no inline `tags.includes(x) || skill === x`") to catch
+  future copies — folded into the eslint promotion noted above.
 
 - [ ] **The de-tag rule fails CLOSED on a newest run that loads fine but stamps no
   `tags`** (`lib/overview.ts::buildTagTaskRows`): every tagged task would read as

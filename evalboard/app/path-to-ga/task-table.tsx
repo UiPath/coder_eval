@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { TagTaskRow } from "@/lib/overview";
 import { fmtRunDate, humanizeTaskId } from "@/lib/format";
 import { passClass } from "@/lib/pass-rate";
-import { MATURE_TOOLTIP, MaturePill, StatusPill } from "@/lib/pills";
+import { matureAggregateTooltip, MaturePill, StatusPill } from "@/lib/pills";
 import { TableScroll } from "../_components/scroll-table";
 import { type Window } from "@/lib/reviews-types";
 
@@ -22,7 +22,9 @@ import { type Window } from "@/lib/reviews-types";
 // shared helper — the column shapes differ, so it would be a wrapper around a
 // ternary.
 function passRateTooltip(r: TagTaskRow): string {
-    const executed = r.appearances - r.matureSkips;
+    // Read off the row, never re-derived: if the exclusion set ever widens the
+    // caption must move with the percentage it describes.
+    const executed = r.executed;
     if (executed === 0) {
         return (
             `Not executed once in this window — all ${r.appearances} appearance` +
@@ -38,15 +40,19 @@ function passRateTooltip(r: TagTaskRow): string {
             : ".")
     );
 }
+
+// `windowLabel`, not `window`: a prop named `window` shadows the DOM global
+// inside the component body, and sibling components in this tree genuinely use
+// that global (app/_components/scroll-table.tsx, app/_components/search-box.tsx).
 export function TagTaskTable({
     rows,
     tag,
-    window,
+    windowLabel,
     harness,
 }: {
     rows: TagTaskRow[];
     tag: string;
-    window: Window;
+    windowLabel: Window;
     harness: string | null;
 }) {
     return (
@@ -56,13 +62,14 @@ export function TagTaskTable({
                 {/* Unscoped, a task's appearances span harnesses, so its rate
                     pools regimes that aren't strictly comparable — and the row
                     then mixes scopes: Appearances/Pass rate are pooled, while
-                    Last seen and the two Latest columns describe ONE run (and
+                    Last appearance and the two Latest columns describe ONE run (and
                     maturity is per-harness pipeline state, so a Mature pill can
                     legitimately sit beside a middling pooled rate). Say both,
                     rather than let either read as one harness's. */}
                 {!harness && (
                     <span className="text-xs text-gray-500">
-                        pooled across harnesses · Last seen and Latest describe a
+                        pooled across harnesses · Last appearance and Latest
+                        describe a
                         single run · pick one above to separate them
                     </span>
                 )}
@@ -77,7 +84,7 @@ export function TagTaskTable({
                                 Appearances
                             </th>
                             <th className="py-3 px-4 font-medium text-right">
-                                Last seen
+                                Last appearance
                             </th>
                             <th className="py-3 px-4 font-medium text-right">
                                 Pass rate
@@ -115,7 +122,10 @@ export function TagTaskTable({
                                     {r.matureSkips > 0 && (
                                         <span
                                             className="text-gray-500"
-                                            title={MATURE_TOOLTIP}
+                                            title={matureAggregateTooltip(
+                                                r.matureSkips,
+                                                r.appearances,
+                                            )}
                                         >
                                             {" "}
                                             ({r.matureSkips} mature)
@@ -127,7 +137,7 @@ export function TagTaskTable({
                                     highlight would mislead. */}
                                 <td
                                     className="py-3 px-4 text-right tabular-nums text-gray-500"
-                                    title={`Newest run in the window that carried this task under ${tag}`}
+                                    title={`Newest run in the window that carried this task under ${tag}. It may be a mature carry-forward, so this is when the task last APPEARED, not necessarily when it last executed — see the Latest status cell.`}
                                 >
                                     {fmtRunDate(r.latestRunId)}
                                 </td>
@@ -174,7 +184,8 @@ export function TagTaskTable({
                                     colSpan={7}
                                     className="py-6 px-4 text-center text-sm text-gray-500"
                                 >
-                                    No tasks tagged {tag} in the last {window}.
+                                    No tasks tagged {tag} in the last{" "}
+                                    {windowLabel}.
                                 </td>
                             </tr>
                         )}

@@ -48,7 +48,12 @@ export const PRICING: Record<string, Pricing> = {
     "claude-3-opus-20240229": p(15, 75, 18.75, 1.5),
     "claude-3-sonnet-20240229": p(3, 15, 3.75, 0.3),
     "claude-3-haiku-20240307": p(0.25, 1.25, 0.3, 0.03),
-    // OpenAI (CodexAgent).
+    // OpenAI (CodexAgent). cacheWrite == input on every entry below is
+    // DELIBERATE, not a copy-paste slip: OpenAI bills no separate cache-write
+    // fee, so the fresh prompt slice is plain input. It is also inert — the
+    // Codex agent records cache_creation_tokens as 0 (codex_agent.py), so this
+    // rate always multiplies zero. Rationale mirrored from pricing.py, which
+    // states it once for the whole block.
     "gpt-5-codex": p(1.25, 10, 1.25, 0.125),
     "gpt-5": p(1.25, 10, 1.25, 0.125),
     "gpt-5.1-codex-max": p(1.25, 10, 1.25, 0.125),
@@ -59,9 +64,10 @@ export const PRICING: Record<string, Pricing> = {
     "gpt-5.2-codex": p(1.75, 14, 1.75, 0.175),
     "gpt-5.4": p(2.5, 15, 2.5, 0.25),
     "gpt-5.5": p(5, 30, 5, 0.5),
+    // Terra and Luna repriced 2026-07-30 (-20% / -80%); post-cut rates.
     "gpt-5.6-sol": p(5, 30, 5, 0.5),
-    "gpt-5.6-terra": p(2.5, 15, 2.5, 0.25),
-    "gpt-5.6-luna": p(1, 6, 1, 0.1),
+    "gpt-5.6-terra": p(2, 12, 2, 0.2),
+    "gpt-5.6-luna": p(0.2, 1.2, 0.2, 0.02),
     // Google Gemini (AntigravityAgent). Gemini bills no separate cache-write
     // fee (cache_write == input, effectively unused); cache_read is the cached-
     // input rate. Pro's >200K-token tier is higher — this flat rate reads low

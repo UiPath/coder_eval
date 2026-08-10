@@ -12,6 +12,7 @@ function row(overrides: Partial<TagTaskRow> = {}): TagTaskRow {
         skill: "uipath-maestro-flow",
         appearances: 20,
         matureSkips: 0,
+        executed: 20,
         passRate: 90,
         latestStatus: "SUCCESS",
         latestScore: 1.0,
@@ -29,7 +30,7 @@ function renderTable(
         <TagTaskTable
             rows={rows}
             tag="path-to-ga"
-            window="30d"
+            windowLabel="30d"
             harness={harness}
         />,
     );
@@ -90,7 +91,27 @@ describe("TagTaskTable", () => {
         expect(screen.getAllByText("—")).toHaveLength(2);
     });
 
-    test("Last seen shows the date half of the latest run id", () => {
+    test("the pass-rate tooltip names the row's own executed denominator", () => {
+        // Reads `executed` off the row rather than re-deriving it, so the
+        // caption and the percentage can't describe different rules. The row
+        // below is deliberately inconsistent (executed=5 against 24-3=21) —
+        // only a tooltip sourced from the field can report 5.
+        renderTable([row({ appearances: 24, matureSkips: 3, executed: 5 })]);
+        expect(screen.getByText("90%").closest("td")).toHaveAttribute(
+            "title",
+            expect.stringContaining("Measured over 5 executed appearances"),
+        );
+    });
+
+    test("the mature annotation speaks in the window's voice, not one run's", () => {
+        renderTable([row({ appearances: 24, matureSkips: 3 })]);
+        const title = screen.getByText("(3 mature)").getAttribute("title");
+        expect(title).toContain("3 of these 24 appearances");
+        // The per-run string would say "this run" on a page that renders none.
+        expect(title).not.toContain("this run");
+    });
+
+    test("Last appearance shows the date half of the latest run id", () => {
         renderTable([row({ latestRunId: "2026-07-16_04-24-15" })]);
         expect(screen.getByText("2026-07-16")).toBeInTheDocument();
     });

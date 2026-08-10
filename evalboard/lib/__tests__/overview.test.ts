@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+    avgRunSuccessRate,
     buildAdhocRows,
     buildTagTaskRows,
     collectPipelineRuns,
@@ -612,6 +613,68 @@ describe("buildTagTaskRows", () => {
         expect(rows[0].passRate).toBeCloseTo(66.6667, 3);
     });
 
+    test("passRate is a measured 0 — not null — when every executed run failed", () => {
+        // The boundary that separates "no data" from "the worst task on the GA
+        // board". Both render through the same `passRate != null` ternary, so
+        // gating on `executedPasses > 0` instead of `executed > 0` would dash
+        // out the one row that most needs to read red.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], status: "FAILURE" }),
+                ]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], status: "FAILURE" }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].passRate).toBe(0);
+        expect(rows[0].matureSkips).toBe(0);
+        expect(rows[0].executed).toBe(2);
+    });
+
+    test("executed is the passRate denominator, carried on the row", () => {
+        // The table's tooltip names the sample size from this field instead of
+        // re-deriving it, so the caption cannot describe a different rule than
+        // the percentage beside it.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+                perRun("r3", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].appearances).toBe(3);
+        expect(rows[0].executed).toBe(1);
+        expect(rows[0].passRate).toBe(100);
+    });
+
+    test("a non-SUCCESS terminal status is not a pass", () => {
+        // Pins the pass predicate to lib/status.ts::isPassStatus rather than a
+        // raw literal: ERROR and TIMEOUT are executed appearances that failed,
+        // so they belong in the denominator and out of the numerator.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], status: "ERROR" }),
+                ]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], status: "TIMEOUT" }),
+                ]),
+                perRun("r3", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows[0].executed).toBe(3);
+        expect(rows[0].passRate).toBeCloseTo(33.3333, 3);
+    });
+
     test("passRate is null when every tagged appearance was a mature skip", () => {
         // Nothing was measured, so the page must show "—" rather than a
         // measured-looking 100% (or a divide-by-zero NaN).
@@ -788,6 +851,34 @@ describe("buildTagTaskRows", () => {
         // (1) — the semantics the interface comment promises.
         expect(rows[0].appearances).toBe(2);
         expect(rows[0].matureSkips).toBe(1);
+    });
+});
+
+// The Path-to-GA headline tile. Hoisted out of the page shell so the
+// null-successRate rule is assertable without rendering an async server
+// component.
+describe("avgRunSuccessRate", () => {
+    test("averages over the runs that report a rate", () => {
+        expect(
+            avgRunSuccessRate([{ successRate: 100 }, { successRate: 50 }]),
+        ).toBe(75);
+    });
+
+    test("a run with no measurable rate is excluded, not counted as 0", () => {
+        // Dividing by the full run count instead would report 50% here and drag
+        // the headline down every time a run.json fails to load.
+        expect(
+            avgRunSuccessRate([{ successRate: 100 }, { successRate: null }]),
+        ).toBe(100);
+    });
+
+    test("null when nothing in scope reports a rate", () => {
+        expect(avgRunSuccessRate([])).toBeNull();
+        expect(avgRunSuccessRate([{ successRate: null }])).toBeNull();
+    });
+
+    test("0 is a measured rate, not an absence", () => {
+        expect(avgRunSuccessRate([{ successRate: 0 }])).toBe(0);
     });
 });
 

@@ -1,4 +1,5 @@
 import {
+    avgRunSuccessRate,
     getOverview,
     getTagTaskBreakdown,
     listRecentHarnesses,
@@ -38,11 +39,7 @@ export default async function PathToGaPage({
     ]);
 
     const runsInWindow = overview.runs.length;
-    const avgPassRate =
-        runsInWindow > 0
-            ? overview.runs.reduce((sum, r) => sum + (r.successRate ?? 0), 0) /
-              runsInWindow
-            : null;
+    const avgPassRate = avgRunSuccessRate(overview.runs);
 
     return (
         <div className="space-y-6">
@@ -127,7 +124,7 @@ export default async function PathToGaPage({
             <TagTaskTable
                 rows={taskRows}
                 tag={TAG}
-                window={WINDOW}
+                windowLabel={WINDOW}
                 harness={harness}
             />
         </div>
