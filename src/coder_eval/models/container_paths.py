@@ -31,7 +31,6 @@ AGENT_USERNAME = "agent"
 AGENT_HOME = "/home/agent"
 
 CONTAINER_DROP_SHIM = "/usr/local/bin/coder_eval_drop_privilege.sh"
-CONTAINER_CLAUDE_SHIM = "/usr/local/bin/coder_eval_claude_agent.sh"
 
 # Paths a task's WORKDIR must never collide with: the container root and every
 # framework-owned public or private mount. Consumed by SandboxConfig's

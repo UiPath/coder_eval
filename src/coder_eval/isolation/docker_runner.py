@@ -700,18 +700,6 @@ class DockerRunner:
 
         if not self._docker_config.agent_isolation:
             return
-        agent_type = str(self.rt.task.agent.type) if self.rt.task.agent and self.rt.task.agent.type else ""
-        supported_agents = {
-            AgentKind.CLAUDE_CODE.value,
-            AgentKind.CODEX.value,
-            AgentKind.ANTIGRAVITY.value,
-            AgentKind.NONE.value,
-        }
-        if agent_type not in supported_agents:
-            raise DockerRunError(
-                f"docker.agent_isolation has no verified UID-drop launch seam for agent type {agent_type!r}"
-            )
-
         # These criterion implementations can execute another agent or arbitrary
         # task-authored commands in the privileged harness. If that execution
         # imports candidate-controlled code, it can act as a confused deputy and
@@ -1357,10 +1345,9 @@ class DockerRunner:
         # so the in-container Orchestrator writes task.json/task.log/etc.
         # directly to the host filesystem via bind-mount.
         argv += ["-v", f"{output_dir}:{CONTAINER_OUTPUT_DIR}"]
-        # Mount the original task dir at the SAME host path so the
-        # in-container Orchestrator can set TASK_DIR (used by run_command
-        # criteria via `$TASK_DIR/foo.json`) to a path that resolves
-        # identically inside and outside the container.
+        # Mount the original task dir at the protected container task path so
+        # the in-container orchestrator can resolve staged task inputs without
+        # exposing the host path to the agent identity.
         host_task_dir: Path | None = None
         if self.rt.task_file:
             host_task_dir = self.rt.task_file.parent.resolve()

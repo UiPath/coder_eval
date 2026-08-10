@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.agents.codex_agent import CodexAgent
+from coder_eval.isolation.agent_worker import build_agent_worker_environment
 from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner, _preflight_agent_isolation_image
 from coder_eval.models import (
     AGENT_GID,
@@ -21,9 +21,7 @@ from coder_eval.models import (
     RunCommandCriterion,
     SandboxConfig,
     TaskDefinition,
-    parse_agent_config,
 )
-from coder_eval.utils import scrub_agent_env_overrides
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,25 +51,26 @@ def test_agent_launcher_targets_only_agent_identity() -> None:
     assert "--regid=agent" in script
 
 
-def test_agent_environment_scrubs_only_present_harness_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_worker_environment_scrubs_harness_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SKILLS_REPO_PATH", "/private/skills")
     monkeypatch.setenv("TASK_DIR", "/private/task")
     monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
+    monkeypatch.setenv("CODER_EVAL_IN_CONTAINER", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "needed-by-agent")
-    # Keep the exact-equality assertion below valid on a host that exports it.
-    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
 
-    overrides = scrub_agent_env_overrides()
+    worker_env = build_agent_worker_environment()
 
-    assert overrides == {
-        "SKILLS_REPO_PATH": "",
-        "TASK_DIR": "",
-        "CODER_EVAL_AGENT_ISOLATION": "",
-    }
-    assert "ANTHROPIC_API_KEY" not in overrides
+    assert "SKILLS_REPO_PATH" not in worker_env
+    assert "TASK_DIR" not in worker_env
+    assert "CODER_EVAL_AGENT_ISOLATION" not in worker_env
+    assert worker_env["CODER_EVAL_IN_CONTAINER"] == "1"
+    assert worker_env["ANTHROPIC_API_KEY"] == "needed-by-agent"
+    assert worker_env["HOME"] == AGENT_HOME
+    assert worker_env["PYTHONNOUSERSITE"] == "1"
+    assert worker_env["PYTHONSAFEPATH"] == "1"
 
 
-def test_agent_environment_scrubs_inherited_bedrock_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_worker_environment_scrubs_inherited_bedrock_credential(monkeypatch: pytest.MonkeyPatch) -> None:
     """The evaluated agent must not inherit the evaluator's Bedrock token.
 
     The UID barrier blocks filesystem access to grading material but cannot hide a
@@ -83,30 +82,14 @@ def test_agent_environment_scrubs_inherited_bedrock_credential(monkeypatch: pyte
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "evaluator-only-secret")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-    overrides = scrub_agent_env_overrides()
+    worker_env = build_agent_worker_environment()
 
-    assert overrides["AWS_BEARER_TOKEN_BEDROCK"] == ""
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in worker_env
     # The region is not a credential and stays inherited.
-    assert "AWS_REGION" not in overrides
-
-
-def test_isolated_codex_profiles_never_restore_root_harness_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", "/root")
-    monkeypatch.setenv("ZDOTDIR", "/root/private-zdot")
-    monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
-    monkeypatch.setattr(CodexAgent, "_login_shell_profiles_supported", staticmethod(lambda: True))
-    agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
-    agent._env_path_prepend = ["/work/agent/cli_mocks"]
-
-    agent._setup_login_shell_home()
-    try:
-        assert agent._login_shell_home is not None
-        for profile in (".bash_profile", ".profile", ".zshenv", ".zprofile", ".zshrc"):
-            content = (agent._login_shell_home / profile).read_text(encoding="utf-8")
-            assert f"export HOME={AGENT_HOME}" in content
-            assert "/root" not in content
-    finally:
-        agent._cleanup_login_shell_home()
+    assert worker_env["AWS_REGION"] == "us-east-1"
+    assert worker_env["USER"] == "agent"
+    assert worker_env["LOGNAME"] == "agent"
+    assert worker_env["ZDOTDIR"] == AGENT_HOME
 
 
 def test_agent_teardown_rescans_until_uid_has_no_processes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,3 +142,13 @@ def test_isolation_rejects_dynamic_privileged_criterion(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="dynamic criteria"):
         runner._validate_agent_isolation_compatibility()
+
+
+def test_isolation_does_not_hardcode_agent_kinds(tmp_path: Path) -> None:
+    task = MagicMock()
+    task.agent.type = "third-party-agent"
+    task.success_criteria = []
+    task.sandbox.docker = DockerDriverConfig(agent_isolation=True)
+    rt = MagicMock(task=task, task_file=tmp_path / "task.yaml", run_dir=tmp_path / "run")
+
+    DockerRunner(rt)._validate_agent_isolation_compatibility()

@@ -37,10 +37,7 @@ from coder_eval.errors import (
     format_timeout_reason,
 )
 from coder_eval.formatting import format_messages, format_payload
-from coder_eval.isolation.agent_identity import agent_isolation_enabled
 from coder_eval.models import (
-    AGENT_HOME,
-    CONTAINER_CLAUDE_SHIM,
     AgentKind,
     ApiRoute,
     BedrockRoute,
@@ -73,7 +70,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import dump_dataclass, process_plugins, scrub_agent_env_overrides
+from coder_eval.utils import dump_dataclass, process_plugins
 
 
 logger = logging.getLogger(__name__)
@@ -768,11 +765,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
         """
-        base_env: dict[str, str] = scrub_agent_env_overrides()
+        base_env: dict[str, str] = {}
         if path := os.environ.get("PATH"):
             base_env["PATH"] = path
-        if agent_isolation_enabled():
-            base_env["HOME"] = AGENT_HOME
 
         if path_prepend:
             prefix = os.pathsep.join(path_prepend)
@@ -1204,10 +1199,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             if isinstance(self.config.claude_settings, dict)
             else self.config.claude_settings,
             mcp_servers=self._extra_mcp_servers,
-            # The SDK accepts a single CLI executable path. The baked wrapper
-            # invokes the real Claude binary through the same setpriv policy as
-            # the other backends (UID/GID drop, no capabilities, no_new_privs).
-            cli_path=CONTAINER_CLAUDE_SHIM if agent_isolation_enabled() else None,
             **self.config.sdk_options,
         )
 

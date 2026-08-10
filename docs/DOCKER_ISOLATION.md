@@ -36,11 +36,11 @@ Both build `coder-eval-agent:<pkg-version>` and tag it `:latest`.
 
 ## Agent/grader identity boundary
 
-`sandbox.docker.agent_isolation` defaults to `true`. The container harness and grader remain root, while every evaluated Claude, Codex, or Antigravity subprocess runs as `agent:agent` (`2000:2000`).
+`sandbox.docker.agent_isolation` defaults to `true`. The container harness and grader remain root, while the complete lifecycle of the registry-selected agent runs in a stateful worker as `agent:agent` (`2000:2000`). This applies equally to the built-in agents and to third-party `AgentRegistry` plugins installed in the run image; there is no built-in-kind allowlist.
 
 The agent launcher clears inheritable, ambient, and bounding capabilities and sets `no_new_privs`. Generated work is placed in `/work/agent`. Hidden task data, results, raw task/plugin/reference/template sources, and grader inputs live below root-only `/opt/coder-eval/grader`. Raw source bind mounts remain read-only and are never chmod/chowned; only disposable staging copies and the generated workspace are changed.
 
-Older/custom images must declare `org.coder-eval.agent-isolation=uid-gid-v1`. A protected run rejects an image without that label before making an LLM call. Images derived with `FROM coder-eval-agent:<current-version>` inherit it. Runtime-kit injection into an unrelated base does not yet provide the required Linux users and `setpriv` launchers, so it is not compatible with protected mode.
+Older/custom images must declare `org.coder-eval.agent-isolation=uid-gid-v1`. A protected run rejects an image without that label before making an LLM call. Images derived with `FROM coder-eval-agent:<current-version>` inherit it. Runtime-kit injection into an unrelated base does not yet provide the required Linux user and `setpriv` launcher, so it is not compatible with protected mode.
 
 ## Running a task in Docker
 
@@ -321,7 +321,7 @@ The host's run dir is bind-mounted read-write at `/opt/coder-eval/grader/output`
 
 The host's `DockerRunner` rewrites host paths to protected container paths, renders `docker run`, and tails container stdout into `docker.log`. Inputs land at `/opt/coder-eval/grader/input`, output at `/opt/coder-eval/grader/output`, the raw task directory at `/opt/coder-eval/grader/task_dir`, and the agent workspace at `/work/agent`.
 
-Inside the container, the root entrypoint verifies the protected parent. The standard Orchestrator prepares the workspace as root, grants only that generated tree to UID 2000, and launches the selected agent through the shared privilege-drop policy. The host reads the final result from the protected output mount and feeds the existing aggregation pipeline.
+Inside the container, the root entrypoint verifies the protected parent. The standard Orchestrator prepares the workspace as root, grants only that generated tree to UID 2000, and launches one stateful agent worker through the shared privilege-drop policy. The worker loads the same registry, constructs the selected agent, and owns `start` / `communicate` / `stop` plus all descendants. Stream events and typed turn results cross back to the root orchestrator over a framed protocol; no agent implementation is instantiated in the privileged process. The host reads the final result from the protected output mount and feeds the existing aggregation pipeline.
 
 Protected runs use Docker's init reaper and default to a 512-process limit when `limits.max_pids` is not specified. An explicit `max_pids` value takes precedence. Before trusted post-run/finalization begins, the harness stops the SDK, repeatedly kills every remaining UID-2000 process, and fails closed if that UID cannot be emptied.
 

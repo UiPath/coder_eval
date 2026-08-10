@@ -52,19 +52,13 @@ ARG CLAUDE_CODE_VERSION=2.1.177
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && npm config set prefix /usr/local \
     && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
-# Every built-in agent backend routes its SDK-owned subprocess through the
-# same setpriv policy. Claude's SDK accepts only one executable path, so it
-# uses the small backend-specific wrapper below; Codex and Antigravity invoke
-# the generic launcher directly.
+# The trusted harness uses this launcher for one stateful worker containing
+# the complete registry-selected Agent lifecycle. Every worker descendant
+# inherits the same UID/GID, empty capability sets, and no-new-privileges bit.
 COPY docker/coder_eval_drop_privilege.sh /usr/local/bin/coder_eval_drop_privilege.sh
-COPY docker/coder_eval_claude_agent.sh /usr/local/bin/coder_eval_claude_agent.sh
-RUN chmod 0555 \
-        /usr/local/bin/coder_eval_drop_privilege.sh \
-        /usr/local/bin/coder_eval_claude_agent.sh \
-    && test "$(command -v claude)" = "/usr/local/bin/claude"
+RUN chmod 0555 /usr/local/bin/coder_eval_drop_privilege.sh
 
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
@@ -102,8 +96,10 @@ ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex
 RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS}" && \
     uv export --frozen --extra codex --extra antigravity ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
 
-# Sanity check: the in-container entrypoint subcommand must be wired up.
-RUN coder-eval _run-task-internal --help > /dev/null
+# Sanity check the public container entrypoint and the worker module that the
+# isolation proxy launches directly.
+RUN coder-eval _run-task-internal --help > /dev/null \
+    && python -I -m coder_eval.isolation.agent_worker < /dev/null
 
 # Stamp the image with the installed coder_eval version so the host can do
 # a pre-flight version assertion against `docker image inspect` BEFORE

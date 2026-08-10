@@ -363,6 +363,23 @@ async def test_orchestrator_create_agent(tmp_path):
     assert agent.config.type == "claude-code"
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_creates_registry_agnostic_worker_proxy_when_isolated(tmp_path, monkeypatch):
+    """Isolation wraps the registry selection instead of branching per agent kind."""
+
+    from coder_eval.isolation.agent_worker import IsolatedAgentProxy
+
+    task, _ = load_task(Path("tasks/hello_date.yaml"))
+    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="test-variant")
+    orchestrator.route = DirectRoute()
+    monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
+
+    agent = await orchestrator._create_agent()
+
+    assert isinstance(agent, IsolatedAgentProxy)
+    assert agent.agent_kind == "claude-code"
+
+
 # ============================================================================
 # Batch Orchestration Tests (Phase 1)
 # ============================================================================

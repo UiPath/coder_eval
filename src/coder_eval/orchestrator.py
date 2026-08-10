@@ -1311,6 +1311,17 @@ class Orchestrator:
                 "x-ce-task-id": self._log_task_id,
                 "x-ce-attempt": self._cost_attempt_nonce,
             }
+        from coder_eval.isolation.agent_identity import agent_isolation_enabled
+
+        if agent_isolation_enabled():
+            from coder_eval.isolation.agent_worker import IsolatedAgentProxy
+
+            return IsolatedAgentProxy(
+                str(self.task.agent.type),
+                self.task.agent,
+                route=self.route,
+                constructor_kwargs=kwargs,
+            )
         return create_agent(self.task.agent.type, self.task.agent, route=self.route, **kwargs)
 
     async def _communicate_with_retry(
