@@ -824,11 +824,27 @@ class TestAutoMountRejectsGraderDirOverlap:
         with pytest.raises(DockerRunError, match="grader dir"):
             self._argv(runner, tmp_path)
 
-    def test_template_source_inside_task_dir_is_rejected(self, tmp_path):
-        """A subdir of the task dir is still contained by the grader dir → reject."""
+    def test_template_source_inside_task_dir_is_allowed_when_clean(self, tmp_path):
+        """A clean subdir of the task dir (its subtree holds no grader) is mounted
+        alone — the parent's sibling check_*.py is not in the -v subtree — so it is
+        allowed even though a grader lives at the task-dir root."""
         task_dir = tmp_path / "taskdir"
         sub = task_dir / "templates"
         sub.mkdir(parents=True)
+        (task_dir / "check_grade.py").write_text("assert False\n", encoding="utf-8")
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, template_path=str(sub), task_file=task_file)
+        argv = self._argv(runner, tmp_path)  # must not raise
+        mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+        assert any(str(sub.resolve()) in m for m in mounts)
+
+    def test_template_source_inside_task_dir_with_grader_is_rejected(self, tmp_path):
+        """A subdir whose OWN subtree holds a check_*.py still re-exposes a grader → reject."""
+        task_dir = tmp_path / "taskdir"
+        sub = task_dir / "templates"
+        sub.mkdir(parents=True)
+        (sub / "check_y.py").write_text("assert False\n", encoding="utf-8")
         task_file = task_dir / "task.yaml"
         task_file.write_text("x", encoding="utf-8")
         runner = self._make_runner(tmp_path, template_path=str(sub), task_file=task_file)
@@ -895,10 +911,26 @@ class TestExtraMountsRejectGraderDirOverlap:
         with pytest.raises(DockerRunError, match="grader dir"):
             self._argv(runner, tmp_path)
 
-    def test_extra_mount_inside_task_dir_is_rejected(self, tmp_path):
+    def test_extra_mount_inside_task_dir_is_allowed_when_clean(self, tmp_path):
+        """A clean subdir of the task dir is mounted alone → allowed even with a
+        grader at the task-dir root (the sibling check_*.py is not in the subtree)."""
         task_dir = tmp_path / "taskdir"
         sub = task_dir / "sub"
         sub.mkdir(parents=True)
+        (task_dir / "check_grade.py").write_text("assert False\n", encoding="utf-8")
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+        runner = self._make_runner(tmp_path, extra_mounts=[f"{sub}:/mnt/x:ro"], task_file=task_file)
+        argv = self._argv(runner, tmp_path)  # must not raise
+        mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+        assert any(str(sub.resolve()) in m for m in mounts)
+
+    def test_extra_mount_inside_task_dir_with_grader_is_rejected(self, tmp_path):
+        """A subdir whose OWN subtree holds a check_*.py still re-exposes a grader → reject."""
+        task_dir = tmp_path / "taskdir"
+        sub = task_dir / "sub"
+        sub.mkdir(parents=True)
+        (sub / "check_y.py").write_text("assert False\n", encoding="utf-8")
         task_file = task_dir / "task.yaml"
         task_file.write_text("x", encoding="utf-8")
         runner = self._make_runner(tmp_path, extra_mounts=[f"{sub}:/mnt/x:ro"], task_file=task_file)

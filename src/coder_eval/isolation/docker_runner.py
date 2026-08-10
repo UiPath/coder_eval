@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -48,7 +49,7 @@ from coder_eval.utils import get_default_docker_image_tag
 
 
 if TYPE_CHECKING:
-    from coder_eval.models import PreRunCommand, ResolvedTask
+    from coder_eval.models import PreRunCommand, ReferenceSource, ResolvedTask
     from coder_eval.streaming.callbacks import StreamCallback
 
 
@@ -375,18 +376,52 @@ def _extra_mount_source(normalized: str) -> Path:
     return Path(normalized.split(":", 1)[0]).resolve()
 
 
-def _overlaps_grader_dir(target: Path, grader_dir: Path | None) -> bool:
-    """True if ``target`` equals, contains, or is contained by the host grader dir.
+def _overlaps_grader_dir(target: Path, grader_dir: Path | None, grader_artifacts: Iterable[Path] | None = None) -> bool:
+    """True if mounting ``target`` would re-expose a host grader into the container.
 
     The host grader dir holds ``check_*.py`` + reference + the raw ``task.yaml``
-    (full, unstripped ``success_criteria``). Any mount whose source overlaps it
-    re-exposes the graders into the agent container — exactly the leak
-    GRADE-OUTSIDE closes. A sibling ``templates/`` dir is unaffected (neither
-    contains the other). Shared by ``_auto_mount`` and the ``extra_mounts`` loop.
+    (full, unstripped ``success_criteria``). Mounting the grader dir itself, or a
+    PARENT of it, materializes the graders in the container → block. A subdir
+    INSIDE the grader dir is mounted alone (``-v target:target:ro`` never exposes
+    the parent's sibling ``check_*.py``), so it is allowed UNLESS the subtree
+    itself holds a grader artifact — a ``check_*.py`` or a path used as the task's
+    ``reference``. ``grader_artifacts`` is the resolved artifact set; with none
+    known a clean descendant is allowed. Shared by ``_auto_mount`` and the
+    ``extra_mounts`` loop.
+
+    An artifact overlaps ``target`` three ways: the mount IS the artifact
+    (``a == target``), the mount is an ANCESTOR of the artifact so mounting it
+    materializes the artifact (``target in a.parents``), or — when the artifact is
+    a *directory* (a ``reference.directory``) — the mount is a DESCENDANT of it, so
+    mounting the subdir re-exposes part of the reference tree (``a in
+    target.parents``). ``check_*.py`` / ``reference.file`` are files with no
+    children, so the descendant arm is inert for them.
     """
     if grader_dir is None:
         return False
-    return target == grader_dir or grader_dir in target.parents or target in grader_dir.parents
+    if target == grader_dir or target in grader_dir.parents:
+        return True
+    if grader_dir in target.parents:
+        return any(a == target or target in a.parents or a in target.parents for a in (grader_artifacts or []))
+    return False
+
+
+def _grader_artifacts(grader_dir: Path | None, reference: ReferenceSource | None) -> list[Path]:
+    """The concrete grader artifacts inside ``grader_dir`` — every ``check_*.py``
+    plus the task's resolved ``reference`` path (``file``/``directory``; inline
+    ``code`` has no path). All resolved to absolute paths so the content-test in
+    ``_overlaps_grader_dir`` compares absolute-vs-absolute. Empty when
+    ``grader_dir`` is ``None`` (library/test paths without a ``task_file``).
+    """
+    if grader_dir is None:
+        return []
+    artifacts = sorted(grader_dir.rglob("check_*.py"))
+    if reference is not None:
+        if reference.file:
+            artifacts.append((grader_dir / reference.file).resolve())
+        elif reference.directory:
+            artifacts.append((grader_dir / reference.directory).resolve())
+    return artifacts
 
 
 class DockerRunError(RuntimeError):
@@ -1520,6 +1555,11 @@ class DockerRunner:
         # graders into the agent container — exactly the leak GRADE-OUTSIDE closes.
         # None only on library/test paths that build a runner without a task_file.
         grader_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
+        # The concrete grader artifacts inside grader_dir (check_*.py + the task's
+        # resolved reference path). A mount source that is a CHILD of grader_dir is
+        # blocked only if its own subtree materializes one of these; a clean child
+        # is fine. Computed once, threaded to both overlap-guard call sites below.
+        grader_artifacts = _grader_artifacts(grader_dir, self.rt.task.reference)
 
         def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
             if not raw_path:
@@ -1529,11 +1569,12 @@ class DockerRunner:
             # the file; container-side reads still resolve at the same path.
             target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
             # Hard-reject an auto-mount that would re-expose the host grader dir.
-            if _overlaps_grader_dir(target, grader_dir):
+            if _overlaps_grader_dir(target, grader_dir, grader_artifacts):
                 raise DockerRunError(
                     f"Auto-mount source {target} overlaps the host grader dir {grader_dir} "
-                    + "(check_*.py / reference / unstripped criteria live there). Point "
-                    + "template_sources[].path / system_prompt_file at a directory OUTSIDE the task dir."
+                    + "(it is the task dir, an ancestor of it, or a child subtree that itself holds "
+                    + "a check_*.py / reference). Point template_sources[].path / system_prompt_file "
+                    + "at a directory that is not the task dir and does not contain graders."
                 )
             if target in mounted or not target.is_dir():
                 return
@@ -1572,11 +1613,12 @@ class DockerRunner:
             # the SAME grader-dir overlap guard here — otherwise `extra_mounts:
             # ["<taskdir>:/mnt:ro"]` would re-expose check_*.py / reference /
             # unstripped criteria that GRADE-OUTSIDE deliberately keeps host-side.
-            if _overlaps_grader_dir(_extra_mount_source(normalized), grader_dir):
+            if _overlaps_grader_dir(_extra_mount_source(normalized), grader_dir, grader_artifacts):
                 raise DockerRunError(
                     f"extra_mounts source {_extra_mount_source(normalized)} overlaps the host grader dir "
-                    + f"{grader_dir} (check_*.py / reference / unstripped criteria live there). "
-                    + "Mount a directory OUTSIDE the task dir."
+                    + f"{grader_dir} (it is the task dir, an ancestor of it, or a child subtree that "
+                    + "itself holds a check_*.py / reference). Mount a directory that is not the task "
+                    + "dir and does not contain graders."
                 )
             argv += ["-v", normalized]
 

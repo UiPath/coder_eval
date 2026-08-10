@@ -29,8 +29,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.isolation.docker_runner import DockerRunner
-from coder_eval.models import AGENT_HIDDEN_TASK_FIELDS
+from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner, _overlaps_grader_dir
+from coder_eval.models import (
+    AGENT_HIDDEN_TASK_FIELDS,
+    FileExistsCriterion,
+    SandboxConfig,
+    TaskDefinition,
+    TemplateDirSource,
+)
 from coder_eval.orchestration.task_loader import load_task
 
 
@@ -183,3 +189,154 @@ def test_detector_b_zero_grading_material_in_agent_mount(tmp_path) -> None:
     # so this is a real strip, not a vacuous "staged nothing".
     assert task.reference is not None and task.reference.code == "REFERENCE-SOLUTION-SENTINEL"
     assert len(task.success_criteria) == 1
+
+
+class TestOverlapsGraderDir:
+    """The grade-outside overlap guard is a CONTENT test for the descendant case: a
+    child subtree of the grader dir is blocked only if it itself holds a grader
+    artifact (check_*.py or the task's reference); a clean child is allowed. The
+    task-dir-itself and ancestor cases block unconditionally."""
+
+    def test_clean_child_is_allowed(self, tmp_path):
+        """A clean child beside a root check_*.py must NOT overlap."""
+        taskdir = tmp_path / "taskdir"
+        fixtures = taskdir / "fixtures"
+        fixtures.mkdir(parents=True)
+        assert _overlaps_grader_dir(fixtures, taskdir, [taskdir / "check_grade.py"]) is False
+
+    def test_task_dir_itself_always_blocks(self, tmp_path):
+        """The grader dir itself blocks regardless of the artifact set."""
+        taskdir = tmp_path / "taskdir"
+        taskdir.mkdir()
+        assert _overlaps_grader_dir(taskdir, taskdir, [taskdir / "check_grade.py"]) is True
+        assert _overlaps_grader_dir(taskdir, taskdir, []) is True
+
+    def test_ancestor_always_blocks(self, tmp_path):
+        """A parent of the grader dir contains it → block."""
+        taskdir = tmp_path / "parent" / "taskdir"
+        taskdir.mkdir(parents=True)
+        assert _overlaps_grader_dir(taskdir.parent, taskdir, []) is True
+
+    def test_grader_containing_child_via_check_script_blocks(self, tmp_path):
+        """A child whose subtree holds a check_*.py → block."""
+        taskdir = tmp_path / "taskdir"
+        graders = taskdir / "graders"
+        graders.mkdir(parents=True)
+        assert _overlaps_grader_dir(graders, taskdir, [graders / "check_x.py"]) is True
+
+    def test_grader_containing_child_via_reference_blocks(self, tmp_path):
+        """A child whose subtree holds the resolved reference path → block."""
+        taskdir = tmp_path / "taskdir"
+        refdir = taskdir / "solution"
+        refdir.mkdir(parents=True)
+        assert _overlaps_grader_dir(refdir, taskdir, [(refdir / "answer.py").resolve()]) is True
+
+    def test_reference_directory_itself_blocks(self, tmp_path):
+        """Mounting the resolved reference DIRECTORY itself → block (the a == target arm)."""
+        taskdir = tmp_path / "taskdir"
+        refdir = taskdir / "solution"
+        refdir.mkdir(parents=True)
+        assert _overlaps_grader_dir(refdir.resolve(), taskdir, [refdir.resolve()]) is True
+
+    def test_subdir_of_reference_directory_blocks(self, tmp_path):
+        """A child that is a SUBDIR of the reference directory re-exposes the golden
+        solution → block. The content test is directional: an artifact that is a
+        DIRECTORY must protect its whole subtree, not just itself and its ancestors."""
+        taskdir = tmp_path / "taskdir"
+        refdir = taskdir / "solution"
+        sub = refdir / "src"
+        sub.mkdir(parents=True)
+        assert _overlaps_grader_dir(sub.resolve(), taskdir, [refdir.resolve()]) is True
+
+    def test_none_grader_dir_never_overlaps(self, tmp_path):
+        """grader_dir is None (library/test path without a task_file) → never overlaps."""
+        assert _overlaps_grader_dir(tmp_path / "anything", None) is False
+
+
+class TestArgvGraderDirLeakDetector:
+    """Argv-level proof that a CLEAN child mount does not materialize the graders,
+    and that a grader-containing child is still hard-rejected. Runs under
+    ``make test-docker-detectors`` (daemon-less, no model)."""
+
+    def _make_runner(
+        self, tmp_path: Path, *, template_path: str, task_file: Path, reference_directory: str | None = None
+    ) -> DockerRunner:
+        from coder_eval.models import ReferenceSource
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            sandbox=SandboxConfig(template_sources=[TemplateDirSource(path=template_path)]),
+            agent={"type": "claude-code"},
+            reference=ReferenceSource(directory=reference_directory) if reference_directory else None,
+            success_criteria=[FileExistsCriterion(description="c", path="o.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = task_file
+        return DockerRunner(rt)
+
+    def _argv(self, runner: DockerRunner, tmp_path: Path) -> list[str]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True)
+        return runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+
+    @staticmethod
+    def _mount_sources(argv: list[str]) -> list[str]:
+        """The host SOURCE component (leading path before the first POSIX ``:``) of every -v."""
+        specs = [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+        return [spec.split(":", 1)[0] for spec in specs]
+
+    def test_clean_child_mounted_graders_absent(self, tmp_path):
+        """A clean fixtures/ child beside a root check_grade.py is mounted, and no
+        -v source is the grader dir or a check_*.py."""
+        taskdir = tmp_path / "taskdir"
+        fixtures = taskdir / "fixtures"
+        fixtures.mkdir(parents=True)
+        (taskdir / "check_grade.py").write_text("assert False\n", encoding="utf-8")
+        (fixtures / "seed.txt").write_text("benign\n", encoding="utf-8")
+        task_file = taskdir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+
+        runner = self._make_runner(tmp_path, template_path=str(fixtures), task_file=task_file)
+        argv = self._argv(runner, tmp_path)  # must NOT raise
+
+        sources = self._mount_sources(argv)
+        assert str(fixtures.resolve()) in sources  # the clean child IS mounted
+        assert str(taskdir.resolve()) not in sources  # the grader dir is NOT a mount source
+        assert all("check_grade.py" not in s for s in sources)  # no grader script mounted
+
+    def test_grader_containing_child_is_rejected(self, tmp_path):
+        """A child whose subtree holds a check_*.py still hard-rejects."""
+        taskdir = tmp_path / "taskdir"
+        graders = taskdir / "graders"
+        graders.mkdir(parents=True)
+        (graders / "check_x.py").write_text("assert False\n", encoding="utf-8")
+        task_file = taskdir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+
+        runner = self._make_runner(tmp_path, template_path=str(graders), task_file=task_file)
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
+
+    def test_subdir_of_reference_directory_is_rejected(self, tmp_path):
+        """A template source that is a SUBDIR of the task's reference.directory
+        would mount part of the golden solution into the agent → hard-reject.
+        The content test protects a reference DIRECTORY's whole subtree."""
+        taskdir = tmp_path / "taskdir"
+        refdir = taskdir / "solution"
+        sub = refdir / "src"
+        sub.mkdir(parents=True)
+        (sub / "answer.py").write_text("GOLDEN\n", encoding="utf-8")
+        task_file = taskdir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+
+        runner = self._make_runner(
+            tmp_path, template_path=str(sub), task_file=task_file, reference_directory="solution"
+        )
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
