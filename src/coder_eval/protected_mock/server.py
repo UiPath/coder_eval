@@ -31,6 +31,7 @@ class CommandResponse:
 class ToolState:
     responses: dict[tuple[str, ...], CommandResponse]
     normalized_responses: dict[tuple[str, ...], CommandResponse]
+    subset_responses: list[tuple[tuple[str, ...], CommandResponse]]
     default: CommandResponse
     remaining: int
     passthrough_prefixes: tuple[tuple[str, ...], ...]
@@ -42,13 +43,17 @@ PASSTHROUGH_TIMEOUT_SECONDS = 60
 _NOISE_VALUE_FLAGS = frozenset({"--output"})
 
 
-def _normalized_argv(argv: list[str]) -> tuple[str, ...]:
-    """Canonical finite-command key: flag form/order agnostic, never subset matching."""
+def _expand_argv_tokens(argv: list[str]) -> list[str]:
+    """Flag-form-agnostic token stream: ``--flag=value`` split, noise flags dropped."""
 
     expanded: list[str] = []
     for raw in argv:
         if raw.startswith("-") and "=" in raw:
             flag, value = raw.split("=", 1)
+            if flag in _NOISE_VALUE_FLAGS:
+                # Inline form is dropped whole (value included, even an empty
+                # one) so a bare noise flag never re-enters the skip logic below.
+                continue
             expanded.append(flag)
             if value:
                 expanded.append(value)
@@ -56,16 +61,24 @@ def _normalized_argv(argv: list[str]) -> tuple[str, ...]:
             expanded.append(raw)
 
     cleaned: list[str] = []
-    skip_next = False
-    for token in expanded:
-        if skip_next:
-            skip_next = False
-            continue
+    index = 0
+    while index < len(expanded):
+        token = expanded[index]
+        index += 1
         if token in _NOISE_VALUE_FLAGS:
-            skip_next = True
+            # Split form: swallow the following token only when it is actually a
+            # value, so a trailing noise flag cannot eat the next flag.
+            if index < len(expanded) and not expanded[index].startswith("-"):
+                index += 1
             continue
         cleaned.append(token)
-    return tuple(sorted(cleaned))
+    return cleaned
+
+
+def _normalized_argv(argv: list[str]) -> tuple[str, ...]:
+    """Canonical finite-command key: flag form/order agnostic, never subset matching."""
+
+    return tuple(sorted(_expand_argv_tokens(argv)))
 
 
 def _response(raw: object, *, context: str) -> CommandResponse:
@@ -98,16 +111,26 @@ def _load_tool(
         raise ValueError(f"fixture {fixture_path} responses must be a list")
     responses: dict[tuple[str, ...], CommandResponse] = {}
     normalized_responses: dict[tuple[str, ...], CommandResponse] = {}
+    # Ordered on purpose: subset rules are scanned in fixture-file order and the
+    # first match wins, so duplicates are legal (an earlier rule shadows a later
+    # one) -- the duplicate-key error applies to the finite match modes only.
+    subset_responses: list[tuple[tuple[str, ...], CommandResponse]] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             raise ValueError(f"fixture {fixture_path} response {index} must be an object")
         argv = entry.get("argv")
         if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
             raise ValueError(f"fixture {fixture_path} response {index}.argv must be a string list")
-        key = tuple(argv)
         match_mode = entry.get("match_mode", "exact")
-        if match_mode not in {"exact", "normalized"}:
-            raise ValueError(f"fixture {fixture_path} response {index}.match_mode must be exact or normalized")
+        if match_mode not in {"exact", "normalized", "subset"}:
+            raise ValueError(f"fixture {fixture_path} response {index}.match_mode must be exact, normalized, or subset")
+        if match_mode == "subset":
+            rule_tokens = tuple(_expand_argv_tokens(argv))
+            if not argv or not rule_tokens:
+                raise ValueError(f"fixture {fixture_path} response {index}.argv must be non-empty for subset matching")
+            subset_responses.append((rule_tokens, _response(entry, context=f"response {index}")))
+            continue
+        key = tuple(argv)
         destination = responses if match_mode == "exact" else normalized_responses
         command_key = key if match_mode == "exact" else _normalized_argv(argv)
         if command_key in destination:
@@ -126,6 +149,7 @@ def _load_tool(
     return ToolState(
         responses=responses,
         normalized_responses=normalized_responses,
+        subset_responses=subset_responses,
         default=default,
         remaining=max_requests,
         passthrough_prefixes=tuple(tuple(prefix) for prefix in passthrough_prefixes),
@@ -185,6 +209,15 @@ class ProtectedMockServer(socketserver.ThreadingMixIn, _UnixStreamServer):
         response = state.responses.get(tuple(argv))
         if response is None:
             response = state.normalized_responses.get(_normalized_argv(argv))
+        if response is None and state.subset_responses:
+            # Finite matches take precedence; subset rules scan in fixture-file
+            # order and the first whose tokens all appear in the invocation's
+            # normalized token set wins.
+            invocation_tokens = set(_expand_argv_tokens(argv))
+            for rule_tokens, candidate in state.subset_responses:
+                if all(token in invocation_tokens for token in rule_tokens):
+                    response = candidate
+                    break
         if response is not None:
             return response
         if any(tuple(argv[: len(prefix)]) == prefix for prefix in state.passthrough_prefixes):
