@@ -752,6 +752,18 @@ class Sandbox:
 
         self.venv_dir = self.sandbox_dir / ".venv"
 
+        # A prior in-place run (docker DIRECT_WRITE reuses the bind-mounted output
+        # dir) can leave a stale ``.venv`` behind. Its ``bin/python`` resolves to
+        # the same interpreter uv is about to use, so ``uv venv`` refuses with
+        # "... are the same file" (exit 2) and setup fails. Remove any pre-existing
+        # ``.venv`` first so venv creation is idempotent across re-runs. (Regrade
+        # mode reuses an existing venv and never calls this method, so the agent's
+        # own produced venv is never touched here.)
+        if self.venv_dir.is_symlink():
+            self.venv_dir.unlink(missing_ok=True)
+        elif self.venv_dir.exists():
+            shutil.rmtree(self.venv_dir, ignore_errors=True)
+
         # Use uv to create virtual environment (faster than venv)
         try:
             # Check if uv is available

@@ -97,6 +97,36 @@ def test_sandbox_without_python_config():
         sandbox.cleanup()
 
 
+def test_setup_virtualenv_recreates_stale_venv(tmp_path):
+    """A reused (docker DIRECT_WRITE) target dir with a stale ``.venv`` must not
+    break venv setup. The stale ``.venv/bin/python`` resolves to the same
+    interpreter uv is about to use, which makes ``uv venv`` refuse with
+    "... are the same file" (exit 2); setup must remove the stale venv and
+    recreate a working one instead of erroring.
+    """
+    target = tmp_path / "ws"
+    (target / ".venv" / ("Scripts" if os.name == "nt" else "bin")).mkdir(parents=True)
+    stale_python = (
+        target / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+    )
+    # Reproduce the failing condition: bin/python resolves to the live interpreter.
+    try:
+        stale_python.symlink_to(sys.executable)
+    except (OSError, NotImplementedError):
+        stale_python.write_text("stale", encoding="utf-8")  # symlinks unavailable (e.g. Windows CI)
+    (target / ".venv" / "pyvenv.cfg").write_text("stale-marker", encoding="utf-8")
+
+    config = SandboxConfig(driver="tempdir")
+    sandbox = Sandbox(config, task_id="stale_venv")
+    # Must not raise despite the pre-existing .venv (this is the regression).
+    sandbox.setup(target_dir=target)
+    scripts = "Scripts" if os.name == "nt" else "bin"
+    python_name = "python.exe" if os.name == "nt" else "python"
+    assert (target / ".venv" / scripts / python_name).exists()
+    # The venv was recreated, not merged onto the stale one.
+    assert (target / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8") != "stale-marker"
+
+
 def test_sandbox_run_command():
     """Test running commands in the sandbox."""
     config = SandboxConfig(driver="tempdir")
