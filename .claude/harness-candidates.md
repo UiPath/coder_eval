@@ -127,3 +127,62 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   that environment injects the criterion. Until then CE030 stays scoped to the four
   top-level models; the `command_pattern`/`exclude_pattern` contract this PR changed is
   documented in the Field descriptions and TASK_DEFINITION_GUIDE regardless.
+
+## From the evalboard Path-to-GA de-tag / mature-passes fix (4e5bbc4…dd5f7e9) — TS-side guards deferred
+
+Context: the CExxx harness is a **Python** AST runner over `src/coder_eval/`, so none
+of the invariants below are mechanizable in it. Each would need a TypeScript lint
+harness (eslint config + custom rules) that `evalboard/` does not have today —
+standing one up for three call sites fails the KISS/YAGNI gate. Deferring rather
+than dropping; promote if a fourth TS-side invariant appears, and stand up the
+harness once for all of them.
+
+> **Update (PR #94 review round 2).** The *execution* half of this gap is closed:
+> `evalboard/` is now gated by the `evalboard` job in `.github/workflows/pr-checks.yml`
+> and reachable locally via `make evalboard-verify`, so the vitest suite (including
+> the pricing drift guard) is enforcement rather than documentation. What remains
+> deferred below is the *static-analysis* half — eslint has still not been stood up.
+> The review that prompted this round names four more candidate TS rules (raw
+> `status === "SUCCESS"` outside `lib/status.ts`; DOM-global shadowing in props;
+> inline copies of the tag predicate; per-run tooltip copy reused on aggregate
+> surfaces), which meets the "fourth invariant" promotion bar stated above —
+> **stand up eslint next time `evalboard/` is touched substantively.**
+
+- [ ] **"Every consumer of `RunOverviewTask.matureSkipped` must decide explicitly
+  whether a carry-forward row counts."** Four consumers now, and they deliberately
+  DISAGREE: `lib/trends.ts` and `app/runs/[id]/run-view.tsx` count a mature skip as
+  a pass; `lib/overview.ts::buildTagTaskRows` excludes it from both terms
+  (`/path-to-ga` is a GA-readiness page). A new consumer silently inheriting either
+  convention is a real hazard. Guard shape: flag a file that reads `.matureSkipped`
+  without a nearby comment naming its convention — weak, hence the deferral. Closed
+  for now by unit tests that assert the exclusion from BOTH numerator and denominator
+  (`lib/__tests__/overview.test.ts` → `describe("buildTagTaskRows")`).
+
+- [x] ~~**`taskCarriesRepoTag` is the single repo-provenance tag predicate — but one
+  duplicate survives.**~~ **RESOLVED in PR #94 review round 2.** The predicate moved to
+  a dependency-free `lib/tags.ts` (structurally typed on `{skill, tags}` so
+  `RunOverviewTask`, `TaskResultSummary` and `TaskTrend` all satisfy it), re-exported
+  from `lib/overview.ts` for existing callers. Both inline copies now import it:
+  `app/runs/[id]/run-view.tsx` (the `"use client"` one that could not before) and
+  `lib/trends.ts::trendMatchesTag` (a third copy the original deferral missed).
+  Still worth a lint rule ("no inline `tags.includes(x) || skill === x`") to catch
+  future copies — folded into the eslint promotion noted above.
+
+- [ ] **The de-tag rule fails CLOSED on a newest run that loads fine but stamps no
+  `tags`** (`lib/overview.ts::buildTagTaskRows`): every tagged task would read as
+  de-tagged and the table would empty, rendering an empty state indistinguishable from
+  a genuine full de-tagging. Its sibling failure mode (`overview == null`, a transient
+  blob read failure) IS guarded, with exactly this rationale. Currently unreachable —
+  0 of ~116k date-shaped non-ad-hoc task rows in `runs-remote/` lack `tags`, and the
+  six zero-tag runs found are all ad-hoc (filtered upstream by id shape + `meta.adhoc`)
+  — so the barrier is two upstream filters rather than a check at the seam. Left
+  unguarded on purpose: a `if (taggedInRun.size === 0) skip the de-tag signal` guard
+  would also mask a real, total de-tagging. Revisit if the pipeline ever stops
+  stamping tags, or if a non-ad-hoc run legitimately carries zero tagged rows.
+
+- [ ] **Discriminating-test discipline for predicate narrowings.** Two tests in this
+  change passed for the wrong reason — a downstream rule (the de-tag drop) masked the
+  mutation they claimed to catch — and the plan leaned on a `grep` acceptance criterion
+  that CI never runs. Both were found by mutation-testing the suite and fixed. No
+  mechanizable guard; the durable lesson is: when a test names a narrowing, construct
+  the fixture so the row SURVIVES every other rule, or the assertion proves nothing.
