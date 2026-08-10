@@ -19,6 +19,14 @@ from coder_eval.models.agent_config import (
 
 # Container paths (leaf constants; re-exported so consumers obey CE001)
 from coder_eval.models.container_paths import (
+    AGENT_GID,
+    AGENT_HOME,
+    AGENT_UID,
+    AGENT_USERNAME,
+    CONTAINER_AGENT_WORK_DIR,
+    CONTAINER_CLAUDE_SHIM,
+    CONTAINER_DROP_SHIM,
+    CONTAINER_GRADER_DIR,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
     CONTAINER_TASK_DIR,
@@ -265,6 +273,14 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TemplateSource",
     # Sandbox
     "DockerBuildConfig",
+    "AGENT_GID",
+    "AGENT_HOME",
+    "AGENT_UID",
+    "AGENT_USERNAME",
+    "CONTAINER_AGENT_WORK_DIR",
+    "CONTAINER_CLAUDE_SHIM",
+    "CONTAINER_DROP_SHIM",
+    "CONTAINER_GRADER_DIR",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
     "CONTAINER_TASK_DIR",

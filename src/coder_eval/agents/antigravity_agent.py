@@ -22,6 +22,9 @@ import asyncio
 import contextlib
 import logging
 import os
+import shlex
+import shutil
+import tempfile
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack
@@ -39,7 +42,10 @@ from coder_eval.errors import (
     TurnTimeoutError,
     truncate_crash_message,
 )
+from coder_eval.isolation.agent_identity import agent_isolation_enabled
 from coder_eval.models import (
+    AGENT_HOME,
+    CONTAINER_DROP_SHIM,
     AgentKind,
     AntigravityAgentConfig,
     ApiRoute,
@@ -66,7 +72,11 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import expand_env_vars
+from coder_eval.utils import (
+    AGENT_ENV_SCRUB_PREFIXES,
+    AGENT_ENV_SCRUB_VARS,
+    expand_env_vars,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -215,6 +225,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         # Absolute dirs to prepend to PATH so sandbox mock CLIs shadow real ones
         # for the harness's run_command tool — applied at spawn (see start()).
         self._env_path_prepend: list[str] = []
+        self._drop_shim_dir: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -222,6 +233,22 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     def _effective_model(self) -> str:
         """Resolve the model: task ``agent.model`` > ``ANTIGRAVITY_MODEL`` > default."""
         return self.config.model or settings.antigravity_model or _DEFAULT_MODEL
+
+    def _stage_localharness_drop_shim(self) -> Path:
+        """Shadow localharness with a wrapper around the shared setpriv policy."""
+
+        real = shutil.which("localharness")
+        if real is None:
+            raise RuntimeError("agent isolation is enabled but localharness is not available on PATH")
+        shim_dir = Path(tempfile.mkdtemp(prefix="antigravity-drop-"))
+        wrapper = shim_dir / "localharness"
+        wrapper.write_text(
+            f'#!/usr/bin/env bash\nexec {CONTAINER_DROP_SHIM} {shlex.quote(real)} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o555)
+        self._drop_shim_dir = shim_dir
+        return shim_dir
 
     def _resolve_skills_paths(self, plugin_tools_dir: str | None) -> list[str]:
         """Resolve skill search-path roots for the harness's native ``skills_paths``.
@@ -316,6 +343,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
+        if agent_isolation_enabled():
+            self._env_path_prepend.insert(0, str(self._stage_localharness_drop_shim()))
         self._state = AgentState.WORKING
 
         try:
@@ -391,20 +420,33 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         PATH window, or its harness would inherit another task's mock dirs.
         """
         async with _harness_spawn_lock():
-            if not self._env_path_prepend:
-                yield
-                return
+            scrubbed = {
+                name: os.environ.pop(name)
+                for name in list(os.environ)
+                if name in AGENT_ENV_SCRUB_VARS or name.startswith(AGENT_ENV_SCRUB_PREFIXES)
+            }
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
-            original = os.environ.get(path_key)
-            os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original or ""])
-            self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
+            original_path = os.environ.get(path_key)
+            original_home = os.environ.get("HOME")
+            if self._env_path_prepend:
+                os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original_path or ""])
+                self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
+            if agent_isolation_enabled():
+                os.environ["HOME"] = AGENT_HOME
             try:
                 yield
             finally:
-                if original is None:
-                    os.environ.pop(path_key, None)
-                else:
-                    os.environ[path_key] = original
+                os.environ.update(scrubbed)
+                if self._env_path_prepend:
+                    if original_path is None:
+                        os.environ.pop(path_key, None)
+                    else:
+                        os.environ[path_key] = original_path
+                if agent_isolation_enabled():
+                    if original_home is None:
+                        os.environ.pop("HOME", None)
+                    else:
+                        os.environ["HOME"] = original_home
 
     async def communicate(
         self,
@@ -579,6 +621,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         if stack is not None:
             with contextlib.suppress(Exception):
                 await stack.aclose()
+        shim_dir, self._drop_shim_dir = self._drop_shim_dir, None
+        if shim_dir is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(shutil.rmtree, shim_dir, ignore_errors=True)
 
 
 class _AntigravityTurnState:

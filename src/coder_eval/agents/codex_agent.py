@@ -25,7 +25,10 @@ from coder_eval.errors import (
     TurnTimeoutError,
     truncate_crash_message,
 )
+from coder_eval.isolation.agent_identity import agent_isolation_enabled, grant_agent_workspace
 from coder_eval.models import (
+    AGENT_HOME,
+    CONTAINER_DROP_SHIM,
     AgentKind,
     ApiRoute,
     AssistantMessage,
@@ -52,7 +55,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import expand_env_vars
+from coder_eval.utils import expand_env_vars, scrub_agent_env_overrides
 
 
 logger = logging.getLogger(__name__)
@@ -660,6 +663,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
         self._login_shell_home: Path | None = None
+        self._runtime_codex_home: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -689,6 +693,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
         self._setup_login_shell_home()
+        if agent_isolation_enabled():
+            if self._login_shell_home is None:
+                self._login_shell_home = Path(tempfile.mkdtemp(prefix="coder-eval-codex-home-"))
+            self._runtime_codex_home = Path(AGENT_HOME) / ".codex"
+            await asyncio.to_thread(self._runtime_codex_home.mkdir, parents=True, exist_ok=True)
+            grant_agent_workspace(self._login_shell_home)
+            grant_agent_workspace(self._runtime_codex_home)
         self._state = AgentState.WORKING
 
         try:
@@ -696,7 +707,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
             # Build CodexConfig with environment variables for custom API configuration
             env_override = self._build_codex_env()
-            config = CodexConfig(env=env_override) if env_override else None
+            launch_args_override = self._drop_privilege_launch_args()
+            if env_override is not None or launch_args_override is not None:
+                config = CodexConfig(env=env_override, launch_args_override=launch_args_override)
+            else:
+                config = None
 
             # Initialize the Codex client (context manager compatible). Close any
             # prior client first: start() is driven through execute_with_retry, so
@@ -1077,6 +1092,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         return self.config.model or settings.codex_model
 
+    @staticmethod
+    def _drop_privilege_launch_args() -> tuple[str, ...] | None:
+        """Replace the SDK app-server argv with the shared UID-drop launcher."""
+
+        if not agent_isolation_enabled():
+            return None
+        from codex_cli_bin import bundled_codex_path
+
+        return (CONTAINER_DROP_SHIM, str(bundled_codex_path()), "app-server", "--listen", "stdio://")
+
     def _build_codex_env(self) -> dict[str, str] | None:
         """Build the environment passed to the Codex app-server.
 
@@ -1091,7 +1116,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         (and normalizes the PATH key case-insensitively), so a full PATH value
         here safely replaces the inherited one.
         """
-        env: dict[str, str] = {}
+        env: dict[str, str] = scrub_agent_env_overrides()
         api_key = os.getenv("CODEX_API_KEY")
         if api_key:
             env["CODEX_API_KEY"] = api_key
@@ -1113,6 +1138,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # not exist (unset, it materializes the ~/.codex default itself) —
             # hosts that auth via CODEX_API_KEY never ran `codex login`, so
             # the dir may not exist yet. Create it before pinning.
+            codex_home = self._codex_home()
+            codex_home.mkdir(parents=True, exist_ok=True)
+            env["CODEX_HOME"] = str(codex_home)
+        elif agent_isolation_enabled():
+            env["HOME"] = AGENT_HOME
+            env["ZDOTDIR"] = AGENT_HOME
             codex_home = self._codex_home()
             codex_home.mkdir(parents=True, exist_ok=True)
             env["CODEX_HOME"] = str(codex_home)
@@ -1157,10 +1188,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._cleanup_login_shell_home()
         if not (self._env_path_prepend and self._login_shell_profiles_supported()):
             return
-        original_home = os.environ.get("HOME", "")
+        # The harness remains root in protected Docker runs. Its HOME and
+        # ZDOTDIR are private grader state and must never be restored by an
+        # agent login shell. Use the dedicated agent home as both the runtime
+        # home and the only profile source in that mode.
+        original_home = AGENT_HOME if agent_isolation_enabled() else os.environ.get("HOME", "")
         # Where the user's REAL zsh dotfiles live: their own ZDOTDIR when set,
         # else their home (zsh's fallback).
-        original_zdotdir = os.environ.get("ZDOTDIR", "") or original_home
+        original_zdotdir = AGENT_HOME if agent_isolation_enabled() else os.environ.get("ZDOTDIR", "") or original_home
         # The profile only ever executes under a POSIX shell, so the PATH
         # separator is ':' regardless of the host building it.
         quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
@@ -1766,9 +1801,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # Best-effort: a recovery hiccup must never fail the turn.
                 self._log.debug("CodexAgent: sub-agent recovery failed for %s: %s", thread_id, exc)
 
-    @staticmethod
-    def _codex_home() -> Path:
+    def _codex_home(self) -> Path:
         """Codex data directory (rollouts live under ``<home>/sessions``)."""
+        if self._runtime_codex_home is not None:
+            return self._runtime_codex_home
         return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
     async def _await_rollout_file(self, home: Path, thread_id: str, *, attempts: int = 20) -> Path | None:

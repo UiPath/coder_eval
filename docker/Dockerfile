@@ -17,13 +17,31 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 # System deps: git for repo-source templates; curl/ca-certs for HTTPS;
-# build-essential because some Python deps (pylint plugins) compile.
+# build-essential because some Python deps (pylint plugins) compile; util-linux
+# provides setpriv for the agent UID/GID boundary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
         build-essential \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
+
+# The harness remains root. Only the evaluated agent is dropped to this
+# identity, and it receives no group access to the harness's files.
+ARG AGENT_UID=2000
+ARG AGENT_GID=2000
+RUN groupadd --gid ${AGENT_GID} agent \
+    && useradd --uid ${AGENT_UID} --gid ${AGENT_GID} \
+        --create-home --home-dir /home/agent --shell /usr/sbin/nologin agent \
+    && install -d -o agent -g agent -m 0700 /work/agent /home/agent \
+    && install -d -o root -g root -m 0700 \
+        /opt/coder-eval/grader \
+        /opt/coder-eval/grader/input \
+        /opt/coder-eval/grader/output \
+        /opt/coder-eval/grader/task_dir \
+        /opt/coder-eval/grader/references \
+        /opt/coder-eval/grader/templates
 
 # Node LTS + the Claude Code CLI, pinned. The agent binary is a dominant
 # non-model driver of eval results, so it travels with the coder_eval release
@@ -34,7 +52,19 @@ ARG CLAUDE_CODE_VERSION=2.1.177
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
+    && npm config set prefix /usr/local \
     && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+# Every built-in agent backend routes its SDK-owned subprocess through the
+# same setpriv policy. Claude's SDK accepts only one executable path, so it
+# uses the small backend-specific wrapper below; Codex and Antigravity invoke
+# the generic launcher directly.
+COPY docker/coder_eval_drop_privilege.sh /usr/local/bin/coder_eval_drop_privilege.sh
+COPY docker/coder_eval_claude_agent.sh /usr/local/bin/coder_eval_claude_agent.sh
+RUN chmod 0555 \
+        /usr/local/bin/coder_eval_drop_privilege.sh \
+        /usr/local/bin/coder_eval_claude_agent.sh \
+    && test "$(command -v claude)" = "/usr/local/bin/claude"
 
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
@@ -81,6 +111,7 @@ RUN coder-eval _run-task-internal --help > /dev/null
 # AFTER the (billed) run completes via the version field in task.json.
 ARG CODER_EVAL_VERSION=unknown
 LABEL org.coder-eval.version="${CODER_EVAL_VERSION}"
+LABEL org.coder-eval.agent-isolation="uid-gid-v1"
 # Stamp the pinned agent binary too, so the host can assert it via
 # `docker image inspect` before a (billed) run — same rationale as above.
 LABEL org.coder-eval.claude-code-version="${CLAUDE_CODE_VERSION}"

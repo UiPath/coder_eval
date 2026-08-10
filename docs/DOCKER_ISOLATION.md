@@ -29,10 +29,18 @@ make docker-image-full
 
 Both build `coder-eval-agent:<pkg-version>` and tag it `:latest`.
 
-- **`make docker-image`** installs the core package plus **both built-in agents** — claude-code (baked above) and Codex (`--extra codex`, public PyPI). It needs **no credentials** and covers the common case: claude-code or Codex tasks scored with `run_command` / `file_contains` (incl. converted skillsbench tasks). `llm_judge` / `agent_judge` work here too (they route through the run's Anthropic/Bedrock backend).
+- **`make docker-image`** installs the core package plus the built-in agents. It needs **no credentials** and carries the `uid-gid-v1` isolation capability used by secure Docker runs. Static file/transcript criteria and `llm_judge` work in protected mode. Privileged dynamic criteria (`run_command`, `uipath_eval`, and `agent_judge`) currently fail closed; see [compatibility limits](#limitations).
 - **`make docker-image-full`** additionally installs the `uipath` extra. The `uipath` SDK resolves from **public PyPI** (per `uv.lock`), so the build needs **no credentials**. Use this only for tasks that shell out to the in-host `uipath` CLI. (Codex is already in the default image — no extra needed.)
 
-> **Codex sandbox under Docker.** Codex's Landlock-backed `read-only` / `workspace-write` sandboxes can't initialize inside the eval container — their writes/execs fail silently and the agent produces no artifacts (a `score=0` FAILURE with no loud error). The docker runner sets `CODER_EVAL_IN_CONTAINER=1`, and the Codex agent honors it by falling back to `full-access`: the container itself is the trust boundary. Host runs (tempdir) are unaffected — Landlock works there and the marker is unset. So Codex tasks run under `--driver docker` with their natural `acceptEdits` permission mode; no need to set `bypassPermissions` by hand.
+> **Codex sandbox under Docker.** Codex's Landlock-backed `read-only` / `workspace-write` sandboxes can't initialize inside the eval container. The runner therefore uses Codex `full-access` inside the agent's own security domain. The boundary is the dedicated Linux agent UID, cleared capabilities, `no_new_privs`, and the protected harness paths—not Landlock and not a root agent process.
+
+## Agent/grader identity boundary
+
+`sandbox.docker.agent_isolation` defaults to `true`. The container harness and grader remain root, while every evaluated Claude, Codex, or Antigravity subprocess runs as `agent:agent` (`2000:2000`).
+
+The agent launcher clears inheritable, ambient, and bounding capabilities and sets `no_new_privs`. Generated work is placed in `/work/agent`. Hidden task data, results, raw task/plugin/reference/template sources, and grader inputs live below root-only `/opt/coder-eval/grader`. Raw source bind mounts remain read-only and are never chmod/chowned; only disposable staging copies and the generated workspace are changed.
+
+Older/custom images must declare `org.coder-eval.agent-isolation=uid-gid-v1`. A protected run rejects an image without that label before making an LLM call. Images derived with `FROM coder-eval-agent:<current-version>` inherit it. Runtime-kit injection into an unrelated base does not yet provide the required Linux users and `setpriv` launchers, so it is not compatible with protected mode.
 
 ## Running a task in Docker
 
@@ -130,6 +138,14 @@ sandbox:
 
 ### Tasks that bring their own base image: the runtime kit (`coder-eval-runtime`)
 
+> **Protected-mode compatibility:** the current runtime kit does not install the
+> dedicated identities, `setpriv` launchers, protected directory layout, or the
+> `org.coder-eval.agent-isolation=uid-gid-v1` capability label. Because
+> `agent_isolation` defaults to `true`, an inject-mode image fails closed at
+> preflight. For now, extend `coder-eval-agent:<version>` for protected runs.
+> Setting `agent_isolation: false` permits legacy runtime-kit migration but does
+> not provide the boundary described on this page.
+
 The `FROM coder-eval-agent` contract above means a task is **rebased** onto the
 Debian framework image. That breaks tasks whose Dockerfile was written for a
 different base image (e.g. a Fedora recipe using `dnf`, which doesn't exist on Debian). To keep the task's own base image and build successfully, coder-eval's runtime need to be copied into the task's image. Use `make coder-eval-runtime` first to make the runtime available for copying.
@@ -163,7 +179,7 @@ individual targets when you only need one.
 FROM coder-eval-agent:latest          # inherit runtime + entrypoint
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils
 RUN pip install --no-cache-dir PyMuPDF==1.24.10
-COPY input/ /root/input/
+COPY input/ /work/agent/input/
 ```
 
 Behavior:
@@ -263,20 +279,19 @@ sandbox:
     env_passthrough: ["MY_CUSTOM_TOKEN", "ANTHROPIC_API_KEY"]
 ```
 
-### `HOME` is forwarded by default
+### Agent HOME and Claude state
 
-The default `env_passthrough` includes `HOME` so the in-container `~/.claude` lookup resolves at the same path as on the host (the mount lands at `$HOME/.claude` symmetrically). Practical contract:
+In protected mode, the host `HOME` value is not forwarded to the evaluated subprocess. The agent uses `/home/agent`:
 
-- `Path.home()` inside the container returns the host's `HOME` value (e.g. `/Users/you` on macOS). The directory exists in the container because Docker auto-creates it as the mount parent for `~/.claude`.
-- `~/.claude` is **not** the host's real dir — the runner makes a throwaway *lean copy* in a tmp dir per task and mounts that copy **read-write** at `$HOME/.claude`. The copy keeps the small set the container needs (auth via `.credentials.json`, `settings.json`, `plugins/`) and **drops heavy or transient per-session state** — `security/` (often hundreds of MB), `projects/`, `cache/`, `file-history/`, `backups/`, `downloads/`, `sessions/`, `telemetry/`, `shell-snapshots/`, `todos/`, `session-env/`, plus the volatile churn dirs the live CLI rewrites. The skip set is a denylist; the authoritative list is `CLAUDE_COPY_IGNORE` in `src/coder_eval/isolation/docker_runner.py` (a test asserts this doc and that constant agree, so the list never silently drifts). The container may write anywhere under `~/.claude`; those writes hit the copy and are discarded when the task ends — the host's real `~/.claude` is never modified. Note the copy includes the OAuth token (`.credentials.json`) and is mounted read-**write**, so the in-container agent can read and tamper with the token *copy* — contained, since the copy is discarded at task end and the host's real dir is untouched. Opt out entirely with `CODER_EVAL_NO_CLAUDE_MOUNT=1`.
-- Writes under `$HOME` outside the `~/.claude` mount land in the container's ephemeral rootfs overlay. Don't expect them to persist or to be visible to the host.
-- If a tool *detects platform* from `HOME` (e.g. "starts with `/Users/` → macOS"), it will draw the wrong conclusion. Vanishingly rare in practice.
+- `~/.claude` is **not** the host's real directory. The runner makes a throwaway *lean copy* and mounts it read-write at `/home/agent/.claude`. The copy keeps the small authentication/settings/plugin set and **drops heavy or transient per-session state** — `security/`, `projects/`, `cache/`, `file-history/`, `backups/`, `downloads/`, `sessions/`, `telemetry/`, `shell-snapshots/`, `todos/`, `session-env/`, plus volatile CLI churn directories. The authoritative skip set is `CLAUDE_COPY_IGNORE` in `docker_runner.py`. Writes affect only the disposable copy. Opt out with `CODER_EVAL_NO_CLAUDE_MOUNT=1`.
+- Other writes below `/home/agent` or `/work/agent` are ephemeral until the harness captures the workspace into the protected output mount.
+- Harness-only variables such as `SKILLS_REPO_PATH`, `TASK_DIR`, and `CODER_EVAL_*` are removed from agent SDK environments. Required model API credentials remain available.
 
-Remove `HOME` from `env_passthrough` if you don't want this behavior — the container's image-default `HOME=/root` will win, but then the host's OAuth dir is no longer reachable.
+When `agent_isolation: false` is explicitly selected for migration, the legacy host-HOME behavior may still apply. That mode is not a security boundary.
 
 ## Run directory safety (`--run-dir`)
 
-The host's run dir is bind-mounted **read-write** into the container at the same absolute path (so `task.json` and artifacts land directly on the host filesystem). This makes `--run-dir` load-bearing for isolation:
+The host's run dir is bind-mounted read-write at `/opt/coder-eval/grader/output`, below a root-only parent. The agent cannot traverse it; the harness captures `/work/agent` there after the agent lifecycle. This still makes `--run-dir` load-bearing for host safety:
 
 - **Do not** point `--run-dir` at a symlink. Docker resolves the source of a bind mount; following a symlink would silently grant the container RW access to a different host location.
 - **Do not** point `--run-dir` at a sensitive parent (e.g. `$HOME` directly, `/etc`, a repo root). Use a dedicated `runs/` subtree.
@@ -286,24 +301,28 @@ The host's run dir is bind-mounted **read-write** into the container at the same
 
 | Layer | Location |
 |---|---|
-| Agent process (Claude Code SDK) | inside container |
-| Sandbox + per-row criterion checking | inside container |
+| Agent process and descendants | container, UID/GID `2000:2000`, `/work/agent` |
+| Harness + supported criterion checking | container, root, `/opt/coder-eval/grader` |
 | **`task.json` serialization** | **container → host bind mount** |
 | Per-criterion `aggregate()` (P/R/F1, suite thresholds) | host |
 | Reports, run summary, experiment rollups | host |
 
-`task.json` is the only artifact crossing the boundary. Aggregation reads it via the existing host pipeline unchanged.
+`task.json`, logs, and captured workspace artifacts cross through the protected output bind mount. Aggregation reads `task.json` through the existing host pipeline unchanged.
 
 ## Limitations
 
-- **Relative template paths**: `template_sources[].path` is resolved to a host absolute path *before* staging, so it won't exist inside the container unless you also forward the parent dir via `sandbox.docker.extra_mounts`.
+- **Dynamic privileged graders**: `run_command`, `uipath_eval`, and `agent_judge` are rejected in protected mode until a separate minimal-input grader sandbox exists. This prevents candidate-controlled code from turning a privileged grader into a confused deputy. Migrate to static built-in criteria or explicitly disable isolation only for a trusted transitional run.
+- **Custom work directories and extra mounts**: protected mode currently rejects `docker.working_dir` and `docker.extra_mounts` because their agent/private audience is ambiguous. Use the generated `/work/agent` workspace and `template_sources`.
+- **Runtime-kit injection**: not yet compatible with protected mode. Extend the current framework image instead.
 - **No container reuse across tasks**: each task = one fresh container. Adds ~1–3 s startup overhead per task; negligible vs. LLM latency.
 - **macOS Keychain auth**: not reachable from the container; set `ANTHROPIC_API_KEY` (direct) or Bedrock credentials instead.
 
 ## Architecture
 
-The host's `DockerRunner` (`coder_eval/isolation/docker_runner.py`) renders the `docker run` argv, bind-mounts task inputs at `/work/input`, allocates an output dir at `/work/output`, and tails container stdout into `docker.log` in the task's run dir.
+The host's `DockerRunner` rewrites host paths to protected container paths, renders `docker run`, and tails container stdout into `docker.log`. Inputs land at `/opt/coder-eval/grader/input`, output at `/opt/coder-eval/grader/output`, the raw task directory at `/opt/coder-eval/grader/task_dir`, and the agent workspace at `/work/agent`.
 
-Inside the container, the entrypoint invokes `coder-eval _run-task-internal` (hidden subcommand), which loads the staged YAML + context, runs the standard in-process Orchestrator (driver auto-coerced back to `tempdir`), and writes `task.json` to the output mount. Host reads it and feeds the existing aggregation pipeline.
+Inside the container, the root entrypoint verifies the protected parent. The standard Orchestrator prepares the workspace as root, grants only that generated tree to UID 2000, and launches the selected agent through the shared privilege-drop policy. The host reads the final result from the protected output mount and feeds the existing aggregation pipeline.
+
+Protected runs use Docker's init reaper and default to a 512-process limit when `limits.max_pids` is not specified. An explicit `max_pids` value takes precedence. Before trusted post-run/finalization begins, the harness stops the SDK, repeatedly kills every remaining UID-2000 process, and fails closed if that UID cannot be emptied.
 
 A `result_kind` discriminator on `CriterionResult` ensures `ClassificationCriterionResult` subclasses survive the JSON round-trip — without it, host-side aggregation would silently lose `observed_label`/`expected_label`.

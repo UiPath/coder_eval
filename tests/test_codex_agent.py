@@ -18,6 +18,7 @@ from coder_eval.agents.codex_agent import (
     CodexAgent,
 )
 from coder_eval.models import AgentConfig, AgentKind, parse_agent_config
+from coder_eval.utils import AGENT_ENV_SCRUB_VARS
 
 
 class TestCodexAgentInitialization:
@@ -127,6 +128,21 @@ class TestSandboxAlwaysFullAccess:
 
 class TestCodexEnvironmentConfiguration:
     """Test _build_codex_env: only CODEX_API_KEY travels via env."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_scrub_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep ambient evaluator credentials out of the exact-equality assertions.
+
+        ``_build_codex_env`` starts from ``scrub_agent_env_overrides()``, so any
+        scrubbed name that the host happens to export (a developer's or CI's
+        ``AWS_BEARER_TOKEN_BEDROCK``, say) shows up as an extra masking entry and
+        breaks assertions that are only about what codex itself contributes. The
+        masking behavior has its own coverage in
+        ``tests/test_docker_identity_isolation.py``.
+        """
+
+        for name in AGENT_ENV_SCRUB_VARS:
+            monkeypatch.delenv(name, raising=False)
 
     def test_build_codex_env_returns_none_without_key(self, monkeypatch):
         """No CODEX_API_KEY -> None (base URL alone is not enough)."""

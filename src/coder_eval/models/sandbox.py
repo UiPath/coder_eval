@@ -195,6 +195,14 @@ class DockerDriverConfig(BaseModel):
         default="bridge",
         description="Container network. 'bridge' for tasks needing LLM/pkg access; 'none' for fully sealed runs.",
     )
+    agent_isolation: bool = Field(
+        default=True,
+        description=(
+            "Run the evaluated agent under the image's dedicated unprivileged UID/GID and expose local plugins "
+            "only through manifest-verified bundles. Enabled by default. Set false only for temporary migration "
+            "of a trusted task; false is not a secure evaluation boundary."
+        ),
+    )
     working_dir: str | None = Field(
         default=None,
         description=(

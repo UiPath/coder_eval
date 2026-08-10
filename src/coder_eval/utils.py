@@ -86,6 +86,36 @@ def process_plugins(
     return processed
 
 
+AGENT_ENV_SCRUB_VARS: tuple[str, ...] = (
+    "SKILLS_REPO_PATH",
+    "TASK_DIR",
+    # The evaluator's Bedrock credential. No agent needs to INHERIT it: the Claude
+    # backend sets it explicitly from a resolved BedrockRoute (and blanks it on the
+    # LiteLLM route), Codex authenticates via CODEX_API_KEY, and Antigravity does not
+    # use Bedrock. Left inherited it reaches the dropped agent process, where it is
+    # readable through that process's own environment -- the UID barrier stops
+    # filesystem access to grading material but cannot hide an agent's own env.
+    # Scrubbing it also stops an inherited token from silently steering a DirectRoute
+    # run onto Bedrock (the CLI auto-selects on `process.env.AWS_BEARER_TOKEN_BEDROCK`).
+    "AWS_BEARER_TOKEN_BEDROCK",
+)
+AGENT_ENV_SCRUB_PREFIXES: tuple[str, ...] = ("CODER_EVAL_",)
+
+
+def scrub_agent_env_overrides() -> dict[str, str]:
+    """Mask harness-only variables in SDK subprocess environments.
+
+    Claude and Codex merge their explicit environment over ``os.environ``;
+    empty-string overrides are therefore the only concurrency-safe removal
+    mechanism. Antigravity has no environment seam and removes the same names
+    during its serialized spawn window.
+    """
+
+    return {
+        name: "" for name in os.environ if name in AGENT_ENV_SCRUB_VARS or name.startswith(AGENT_ENV_SCRUB_PREFIXES)
+    }
+
+
 SKIP = object()  # Sentinel marking values that serialize_value should drop from the result.
 
 

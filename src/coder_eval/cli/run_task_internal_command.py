@@ -1,9 +1,10 @@
 """Internal CLI subcommand executed inside the Docker container.
 
 Not part of the public CLI surface -- the host's :class:`DockerRunner`
-invokes it via ``docker run``. It loads the staged task + context from
-``/work/input``, runs one full evaluation cycle in-process (driver=tempdir),
-and writes ``task.json`` + ``task.html`` to ``/work/output``.
+invokes it via ``docker run``. It loads the staged task + context from the
+root-only grader input directory, runs one full evaluation cycle in-process
+(driver=tempdir), and writes ``task.json`` + ``task.html`` to the root-only
+grader output directory.
 
 The container always exits 0 once ``task.json`` is written, even if the
 task itself failed -- criterion failures are signaled via the final_status
@@ -29,6 +30,8 @@ from coder_eval.isolation.docker_runner import (
 )
 from coder_eval.logging_config import setup_logging
 from coder_eval.models import (
+    AGENT_HOME,
+    CONTAINER_GRADER_DIR,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
     CONTAINER_TASK_DIR,
@@ -81,6 +84,27 @@ def run_task_internal_command(
     # agent's per-tool-call DEBUG records.
     log_level = "DEBUG" if verbose else settings.log_level
     setup_logging(level=log_level)
+
+    from coder_eval.isolation.agent_identity import (
+        agent_isolation_enabled,
+        grant_agent_workspace,
+        require_isolation_runtime,
+    )
+
+    if agent_isolation_enabled():
+        require_isolation_runtime()
+        grader_root = Path(CONTAINER_GRADER_DIR)
+        grader_stat = grader_root.stat()
+        if grader_stat.st_uid != 0 or grader_stat.st_mode & 0o077:
+            raise RuntimeError(
+                f"protected grader root must be root-owned mode 0700: {grader_root} "
+                + f"(uid={grader_stat.st_uid}, mode={oct(grader_stat.st_mode & 0o777)})"
+            )
+        claude_state = Path(AGENT_HOME) / ".claude"
+        if claude_state.exists():
+            # This is the disposable host-side copy mounted for the run, never
+            # the user's real ~/.claude directory.
+            grant_agent_workspace(claude_state)
 
     # Start the host-heartbeat watchdog: if the host process dies
     # ungracefully (SIGKILL, Claude-Code Escape, crash) before it can
