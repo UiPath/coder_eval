@@ -1,4 +1,4 @@
-"""CE032 — the plugin's bundled criteria reference is generated from the models.
+"""CE033 — the plugin's bundled criteria reference is generated from the models.
 
 An installed Claude Code plugin is copied to ``~/.claude/plugins/cache/`` without
 its parent directories, so a skill cannot read ``docs/TASK_DEFINITION_GUIDE.md``
@@ -11,9 +11,9 @@ plugin user.
 So the copy is not written by hand. The ``SuccessCriterion`` discriminated union
 in ``coder_eval.models`` is the single source of truth; ``render_criteria()``
 renders ``plugins/coder-eval/reference/criteria.md`` from it, ``make
-plugin-reference`` calls ``write()``, and CE032 (``check()``) re-renders and diffs
+plugin-reference`` calls ``write()``, and CE033 (``check()``) re-renders and diffs
 against disk. There is deliberately **no ``--check`` mode and no arg parser** —
-CE032 *is* the checker; a second entry point would be untested duplication.
+CE033 *is* the checker; a second entry point would be untested duplication.
 
 Two rendering rules keep this small and are load-bearing:
 
@@ -38,7 +38,7 @@ Two rendering rules keep this small and are load-bearing:
 
 Like CE026-CE031 this is not a ``BaseRule`` in the AST runner; it reasons over
 Markdown and pydantic metadata, and is wired as
-``tests/test_custom_lint.py::TestCE032PluginReferenceParity``.
+``tests/test_custom_lint.py::TestCE033PluginReferenceParity``.
 """
 
 from __future__ import annotations

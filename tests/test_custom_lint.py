@@ -1624,8 +1624,8 @@ class TestPluginArtifacts:
 
 
 @pytest.mark.lint
-class TestCE032PluginReferenceParity:
-    """CE032 — the plugin's bundled criteria reference is generated from the models.
+class TestCE033PluginReferenceParity:
+    """CE033 — the plugin's bundled criteria reference is generated from the models.
 
     An installed plugin is copied to ~/.claude/plugins/cache/ without its parent
     directories, so its skills cannot read docs/TASK_DEFINITION_GUIDE.md at

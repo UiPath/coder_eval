@@ -68,7 +68,7 @@ Match a single label written by the agent to a file against ground truth.
 
 | Field | What it is |
 | --- | --- |
-| `path` | Path to the file (relative to sandbox) containing the agent's predicted label |
+| `path` | Path to the file (relative to sandbox) containing the agent's predicted label; may be a glob matching exactly one file |
 | `expected_label` | Ground-truth label for this row |
 | `allowed_labels` | Canonical label set. File content not in this set is treated as '(other)'. |
 
@@ -77,6 +77,24 @@ Optional:
 | Field | What it is |
 | --- | --- |
 | `case_sensitive` | When False (default), matching is case-insensitive and labels are canonicalised. |
+
+### `cli_called`
+
+Check whether a CLI invocation matching a structured pattern was recorded.
+
+Optional:
+
+| Field | What it is |
+| --- | --- |
+| `log` | Path to the JSON Lines invocation log, relative to the sandbox working directory. Defaults to 'cli_mocks/calls.jsonl', where SandboxConfig.record_cli writes, so a task using generated recorders never repeats it |
+| `verb` | Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's non-flag arguments. Order matters, so 'labellings confirm' never matches 'labellings unconfirm' |
+| `tool` | Match only records whose 'tool' equals this (e.g. 'uip'). None matches any tool |
+| `positional` | Non-flag arguments that must follow the verb, in order |
+| `flags` | Flag name (without leading dashes) to predicate. A bare scalar means 'equals'. Flags not listed here are ignored, so an extra --output json never breaks a match |
+| `value_flags` | Flag names (no leading dashes) that consume a following token as their value. Keys of `flags` are value-bearing already; everything else is a switch whose following token stays positional. Declare a flag here when its value would otherwise be read as a positional, e.g. [folder] for `--folder F proj-1`. Defaults to [output] |
+| `min_count` | Minimum matching invocations. Combine min_count: 0 with max_count: 0 for must-NOT-match. Scoring is BINARY (in vs out of bounds), unlike command_executed's fractional field of the same name |
+| `max_count` | Maximum number of matching invocations. None means no upper bound; 0 forbids the call |
+| `ignore_flags` | Flag names dropped before matching. Defaults to ['output'] so grading never depends on --output json, which is outcome-invisible. An ignored flag that takes a value must also appear in value_flags. Pass [] to disable |
 
 ### `command_executed`
 
@@ -87,11 +105,11 @@ Optional:
 | Field | What it is |
 | --- | --- |
 | `tool_name` | Tool name filter (e.g., 'Bash'). None = any tool. |
-| `command_pattern` | Regex to match command parameters. None = any command. |
+| `command_pattern` | Regex to match command parameters. None = any command. For a Bash command the pattern is matched against the raw command text OR its shell-normalized form — `shlex`-resolved quoting with a `bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not hand-encode shell quoting/escaping (`'single'`, `"double"`, bare). |
 | `min_count` | Minimum matching commands required. ``0`` allows the criterion to pass when no commands match (combine with ``max_count: 0`` to express ``must NOT match``). |
 | `max_count` | Optional maximum matching commands allowed (inclusive). ``None`` means no upper bound — the current default. When set, the criterion passes iff ``min_count <= match_count <= max_count``. |
 | `require_success` | If True, only count successful commands. |
-| `exclude_pattern` | Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. |
+| `exclude_pattern` | Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. Like command_pattern, this is matched against the raw Bash command OR its shell-normalized form, so it also excludes quote-obfuscated variants of the same call. |
 
 ### `commands_efficiency`
 
@@ -107,7 +125,7 @@ Unified file check: existence + string includes/excludes + regex patterns.
 
 | Field | What it is |
 | --- | --- |
-| `path` | Path to the file to check (relative to sandbox root) |
+| `path` | Path to the file to check (relative to sandbox root); may be a glob matching exactly one file |
 
 Optional:
 
@@ -123,7 +141,7 @@ Check if a file contains specific strings.
 
 | Field | What it is |
 | --- | --- |
-| `path` | Path to the file to check |
+| `path` | Path to the file to check; may be a glob matching exactly one file |
 | `includes` | List of strings that must be present in the file |
 
 Optional:
@@ -138,7 +156,7 @@ Check if a file exists at the specified path.
 
 | Field | What it is |
 | --- | --- |
-| `path` | Path to the file that must exist |
+| `path` | Path to the file that must exist; a glob pattern passes when it matches at least one file |
 
 ### `file_matches_regex`
 
@@ -146,7 +164,7 @@ Check if file content matches a regex pattern.
 
 | Field | What it is |
 | --- | --- |
-| `path` | Path to the file to check |
+| `path` | Path to the file to check; may be a glob matching exactly one file |
 | `pattern` | Regex pattern that must match somewhere in the file |
 
 Optional:
@@ -162,13 +180,13 @@ Validate a JSON file: existence, parseability, schema conformance, and JMESPath 
 
 | Field | What it is |
 | --- | --- |
-| `path` | Path to the JSON file (relative to sandbox root) |
+| `path` | Path to the JSON file (relative to sandbox root); may be a glob matching exactly one file |
 
 Optional:
 
 | Field | What it is |
 | --- | --- |
-| `json_schema` | Path to JSON Schema file (relative to sandbox root) |
+| `json_schema` | Path to JSON Schema file (relative to sandbox root); may be a glob matching exactly one file |
 | `assertions` | JMESPath assertions to evaluate against the parsed JSON |
 
 ### `llm_judge`
@@ -203,7 +221,7 @@ Compare agent code against reference solution.
 
 | Field | What it is |
 | --- | --- |
-| `agent_file` | Path to agent's generated file (relative to sandbox root) |
+| `agent_file` | Path to agent's generated file (relative to sandbox root); may be a glob matching exactly one file |
 
 Optional:
 
