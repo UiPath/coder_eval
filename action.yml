@@ -1,4 +1,12 @@
-name: coder-eval
+# `name` is the GitHub Marketplace listing title and must be globally unique
+# across Marketplace actions, users, AND organizations. `coder-eval` is taken by
+# an unrelated squatted org (github.com/coder-eval), so the listing uses the
+# underscored repo name instead. This value is display-only: consumers reference
+# the action by repo path (`uses: UiPath/coder_eval@v0`), never by this name.
+name: coder_eval
+# Matches the authorship the project already declares in pyproject.toml
+# (`authors = [{ name = "UiPath", ... }]`) and NOTICE (`© 2026 UiPath`).
+author: UiPath
 description: Run coder-eval evaluation tasks as a CI gate, with JUnit XML output and a job-summary report.
 branding:
   icon: check-circle
@@ -33,7 +41,7 @@ inputs:
   version:
     description: coder-eval version to install from PyPI, or "local" to install from the action checkout
     required: false
-    default: "0.9.1"   # <-- kept in sync with releases by release.yml
+    default: "0.9.5"   # <-- kept in sync with releases by release.yml
   run-dir:
     description: Run directory (--run-dir)
     required: false

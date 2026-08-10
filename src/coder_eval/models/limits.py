@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 from pydantic import BaseModel, ConfigDict, Field
+
+
+DEFAULT_STOP_EARLY_GATE_THRESHOLD: Final[float] = 1.0
+"""Default ``stop_early_gate_threshold``: reproduces strict-AND gating exactly.
+
+Single-sourced here so the field default below, the watcher's ``for_task``
+fallback, and the orchestrator's finalize fallback can never drift apart.
+"""
 
 
 class RunLimits(BaseModel):
@@ -87,17 +97,60 @@ class RunLimits(BaseModel):
             "existing behavior (Claude reports real cache-creation writes here)."
         ),
     )
-    stop_early: bool = Field(
-        default=False,
+    stop_early: bool | None = Field(
+        default=None,
         description=(
-            "Opt-in master switch for early-stop-on-criterion. When True, the run ends early "
-            "once the armed criteria (those with stop_when set, incl. per-instance 'auto') "
-            "are decided mid-run: pass-stop when every pass-armed criterion live-passes, "
-            "fail-stop on the first fail-armed live-fail (deferred while any pass-armed "
-            "criterion is undecided, so a misfire never truncates the recall signal) - so a "
-            "raised max_turns is not wasted once the measured signal has happened. Default "
-            "False keeps behavior identical. Requires a Claude single-shot task with at least "
-            "one observable armed criterion; every unsupported combination is rejected at "
-            "resolution time."
+            "Run-level early-stop KILL SWITCH — there is no run-level master arm. Arming is "
+            "per-criterion: a live-observable criterion's stop_early: block alone activates "
+            "the run's early-stop watcher. None (default): armed criteria decide; the run may "
+            "end early once they resolve mid-run (pass-stop when the on_pass=stop subset's "
+            "weighted score is GUARANTEED to reach stop_early_gate_threshold regardless of "
+            "any criterion still undecided, fail-stop when the armed set's weighted score is "
+            "GUARANTEED to never reach it — deferred while any pass-capable armed criterion "
+            "is undecided, so a misfire never truncates the recall signal; a decide_within "
+            "timeout latches an effective fail that feeds the same fail-stop rule). False: "
+            "force-disarm every criterion's block for this run — the one-line experiment/"
+            "variant override that turns a smoke flavor back into an authoritative, "
+            "non-truncated run. True is rejected at resolution time (the master arm was "
+            "removed; put a stop_early: block on the criterion instead). An armed run "
+            "requires a single-shot task on a cooperative-stop agent; every unsupported "
+            "combination is rejected at resolution time."
         ),
     )
+    stop_early_gate_threshold: float = Field(
+        default=DEFAULT_STOP_EARLY_GATE_THRESHOLD,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum weighted score (Σ weight_i·score_i / Σ weight_i, over the ARMED subset "
+            "only) required for an EARLY-STOPPED run to gate as a pass (a run that completes "
+            "naturally gates strict-AND over the full criteria set, armed or not). Also the bound "
+            "early-stop's trigger checks against: a fail-stop fires once no combination of "
+            "still-undecided armed criteria could raise the weighted score to this "
+            "threshold (a decide_within timeout counts as a fail here); a pass-stop "
+            "fires once the on_pass=stop subset is already guaranteed to meet it regardless "
+            "of what's still undecided. Default 1.0 reproduces strict-AND behavior exactly "
+            "(a weighted score of 1.0 requires every armed criterion to have actually "
+            "passed) - lowering it lets a low-weight armed criterion's failure (or timeout) "
+            "be absorbed without truncating the run, at the cost of the gate/trigger "
+            "becoming a genuine weighted average rather than a strict AND."
+        ),
+    )
+
+    # NOTE: stop_early_gate_threshold <= 0.0 on an ARMED task is a degenerate,
+    # gate-neutralizing config (a threshold of 0 trivially passes the armed
+    # gate regardless of whether anything decided) and is rejected — but NOT
+    # here, and neither is stop_early: True (the removed master arm). Whether a
+    # task is armed lives on the criteria, which RunLimits cannot see, and
+    # RunLimits is field-merged across 5 layers, so a model-level validator has
+    # no visibility into which layer produced the merged value and cannot
+    # distinguish a real mistake from a value merged forward from a sibling
+    # layer (e.g. a task-level threshold inherited by a variant that only
+    # toggles the kill switch). Both checks live in
+    # orchestration/early_stop.py::validate_early_stop instead, where they
+    # raise EarlyStopConfigError and get the same hard-stop CLI treatment
+    # (flips the plan exit code, aborts run) as every other early-stop
+    # guardrail — a plain pydantic ValueError here would instead land in
+    # plan_command's generic per-variant "resolution failed" branch, which
+    # prints red text but does NOT flip the exit code by design (unlike
+    # EarlyStopConfigError), so a model-level raise would silently pass CI.

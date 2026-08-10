@@ -15,6 +15,7 @@ import {
     type ArtifactRef,
     clearRunCacheDir,
     extractComponentShas,
+    tallyModels,
     extractRunConfig,
     findMatureSourceRuns,
     isExcludedArtifact,
@@ -344,6 +345,89 @@ describe("extractComponentShas", () => {
             tool_plugins: { "maestro-tool": "1.2.0-alpha.20260604.7394" },
         });
         expect(out.map((c) => c.name)).toEqual(["cli", "maestro-tool"]);
+    });
+
+    // The framework is pinned and consumed by released version (env_info
+    // `coder_eval`), not by checkout — so the chip must be that version and link
+    // to its release, rather than a git SHA pointing at a tree.
+    test("coder_eval reports its released version, linked to the release", () => {
+        const out = extractComponentShas({
+            ...baseEnv,
+            coder_eval: "0.9.1",
+        });
+        const framework = out.find((c) => c.name === "coder_eval");
+        expect(framework?.sha).toBe("0.9.1");
+        expect(framework?.url).toBe(
+            "https://github.com/UiPath/coder_eval/releases/tag/v0.9.1",
+        );
+    });
+
+    test("the version wins over a git_commit present in the same run", () => {
+        // Both keys are captured on every run; the SHA must not shadow the
+        // version just because it comes first in env_info.
+        const out = extractComponentShas({
+            git_commit: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            coder_eval: "0.10.0",
+        });
+        expect(out.find((c) => c.name === "coder_eval")?.sha).toBe("0.10.0");
+    });
+
+    test("falls back to the git SHA when no version was captured", () => {
+        // Legacy runs, and editable checkouts between releases, have only the
+        // SHA — better a tree link than no chip at all.
+        const out = extractComponentShas(baseEnv);
+        const framework = out.find((c) => c.name === "coder_eval");
+        expect(framework?.sha).toBe(baseEnv.git_commit);
+        expect(framework?.url).toBe(
+            `https://github.com/UiPath/coder_eval/tree/${baseEnv.git_commit}`,
+        );
+    });
+
+    test("an 'unknown' version still falls through to the SHA", () => {
+        const out = extractComponentShas({
+            ...baseEnv,
+            coder_eval: "unknown",
+        });
+        expect(out.find((c) => c.name === "coder_eval")?.sha).toBe(
+            baseEnv.git_commit,
+        );
+    });
+});
+
+// The run header claims a single harness and model for the whole run; tallyModels
+// is what keeps that claim honest when an A/B experiment fans variants across
+// models inside one run.
+describe("tallyModels", () => {
+    const row = (model: string | null) => ({
+        task_id: "t",
+        model_used: model,
+    });
+
+    test("returns the most common model and the distinct count", () => {
+        const out = tallyModels([
+            row("claude-sonnet-5"),
+            row("claude-sonnet-5"),
+            row("claude-opus-5"),
+        ]);
+        expect(out).toEqual({ dominant: "claude-sonnet-5", distinct: 2 });
+    });
+
+    test("a single-model run reports distinct 1", () => {
+        expect(tallyModels([row("claude-sonnet-5"), row("claude-sonnet-5")]))
+            .toEqual({ dominant: "claude-sonnet-5", distinct: 1 });
+    });
+
+    test("ignores rows with no model rather than counting them as one", () => {
+        const out = tallyModels([row(null), row("codex-mini"), row(null)]);
+        expect(out).toEqual({ dominant: "codex-mini", distinct: 1 });
+    });
+
+    test("an empty or model-less run reports nothing to display", () => {
+        expect(tallyModels([])).toEqual({ dominant: null, distinct: 0 });
+        expect(tallyModels([row(null)])).toEqual({
+            dominant: null,
+            distinct: 0,
+        });
     });
 });
 

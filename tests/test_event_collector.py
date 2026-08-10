@@ -196,10 +196,13 @@ class TestFullFieldParity:
     """
 
     # TurnRecord fields NOT carried verbatim from AgentEndEvent:
-    #   commands     -> reduced from the ToolEnd stream
-    #   token_usage  -> derived from end.usage.tokens
-    #   timestamp    -> record's own creation stamp, not an event field
-    _DERIVED: ClassVar[set[str]] = {"commands", "token_usage", "timestamp"}
+    #   commands            -> reduced from the ToolEnd stream
+    #   token_usage         -> derived from end.usage.tokens
+    #   timestamp           -> record's own creation stamp, not an event field
+    #   provider_call_costs -> joined in post-run by the orchestrator from the
+    #                          LiteLLM proxy cost log (litellm_cost.apply_actual_cost),
+    #                          not emitted by the agent/EventCollector.
+    _DERIVED: ClassVar[set[str]] = {"commands", "token_usage", "timestamp", "provider_call_costs"}
 
     def _full_agent_end(self) -> AgentEndEvent:
         """An AgentEndEvent with every verbatim field set to a non-default sentinel."""

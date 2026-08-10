@@ -32,19 +32,24 @@ from coder_eval.models.criteria import (
     AgentJudgeCriterion,
     BaseSuccessCriterion,
     ClassificationMatchCriterion,
+    CliCalledCriterion,
     CommandExecutedCriterion,
     CommandsEfficiencyCriterion,
     FileCheckCriterion,
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
+    FlagMatch,
     JMESPathAssertion,
     JsonCheckCriterion,
+    LivePolarity,
+    LiveSuccessCriterion,
     LLMJudgeCriterion,
     ReferenceComparisonCriterion,
     RegexPattern,
     RunCommandCriterion,
     SkillTriggeredCriterion,
+    StopEarlyPolicy,
     SuccessCriterion,
     UiPathEvalCriterion,
 )
@@ -77,7 +82,7 @@ from coder_eval.models.judge import JudgeVerdict
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 
 # Limits
-from coder_eval.models.limits import RunLimits
+from coder_eval.models.limits import DEFAULT_STOP_EARLY_GATE_THRESHOLD, RunLimits
 
 # Merge strategy
 from coder_eval.models.merge_strategy import (
@@ -150,10 +155,13 @@ from coder_eval.models.routing import (
 
 # Sandbox
 from coder_eval.models.sandbox import (
+    RECORD_CLI_DIR,
+    RECORD_CLI_LOG,
     DockerBuildConfig,
     DockerDriverConfig,
     NodeEnvConfig,
     PythonEnvConfig,
+    RecordedCli,
     ResourceLimits,
     SandboxConfig,
     validate_template_sources_list,
@@ -177,6 +185,7 @@ from coder_eval.models.telemetry import (
     CommandStatistics,
     CommandTelemetry,
     ContentBlock,
+    ProviderCallCost,
     ReconciliationMessage,
     SlowestCommandInfo,
     TokenUsage,
@@ -226,11 +235,16 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "FileMatchesRegexCriterion",
     "ReferenceComparisonCriterion",
     "CommandExecutedCriterion",
+    "CliCalledCriterion",
+    "FlagMatch",
     "CommandsEfficiencyCriterion",
     "UiPathEvalCriterion",
     "LLMJudgeCriterion",
     "AgentJudgeCriterion",
     "SkillTriggeredCriterion",
+    "StopEarlyPolicy",
+    "LiveSuccessCriterion",
+    "LivePolarity",
     "SuccessCriterion",
     # Routing
     "ROUTE_NAMES",
@@ -260,6 +274,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "NodeEnvConfig",
     "PythonEnvConfig",
     "SandboxConfig",
+    "RecordedCli",
+    "RECORD_CLI_DIR",
+    "RECORD_CLI_LOG",
     "ResourceLimits",
     "validate_template_sources_list",
     # Telemetry
@@ -267,6 +284,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CommandTelemetry",
     "CommandStatistics",
     "ContentBlock",
+    "ProviderCallCost",
     "ReconciliationMessage",
     "SlowestCommandInfo",
     "TokenUsage",
@@ -307,6 +325,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "simulator_cost_usd",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
+    "DEFAULT_STOP_EARLY_GATE_THRESHOLD",
     # Judge
     "JudgeVerdict",
     # Limits

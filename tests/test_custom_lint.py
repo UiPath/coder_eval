@@ -532,67 +532,110 @@ class TestCE024DiscriminatedUnions:
 
 @pytest.mark.lint
 class TestCE025LiveVerdictConsistency:
-    """CE025 flags criteria whose `live_stop_polarities` and `live_verdict` disagree."""
+    """CE025: a criterion type's ``LiveSuccessCriterion`` subclassing (models/criteria.py)
+    and its checker's ``live_verdict`` override (criteria/) must agree.
 
-    _POLARITIES_NONEMPTY = '    live_stop_polarities: ClassVar[frozenset[str]] = frozenset({"pass", "fail"})\n'
-    _POLARITIES_EMPTY = "    live_stop_polarities: ClassVar[frozenset[str]] = frozenset()\n"
-    _POLARITIES_PLAIN = '    live_stop_polarities = frozenset({"pass"})\n'
-    _POLARITIES_NONLITERAL = "    live_stop_polarities: ClassVar[frozenset[str]] = frozenset(_SOME_SET)\n"
-    _LIVE_VERDICT = '    def live_verdict(self, criterion, turn_records):\n        return "undecided"\n'
+    Whole-tree / registry-based (like CE027-31), not a per-file AST rule: the
+    invariant spans two separate class hierarchies (the criterion model in
+    ``models/criteria.py`` and its checker in ``criteria/``) linked only via the
+    shared ``type`` discriminator string through ``CriterionRegistry``, so it
+    cannot be checked by looking at one file's AST in isolation.
+
+    A criterion model that is a ``LiveSuccessCriterion`` subclass without a
+    ``live_verdict`` override on its checker arms a criterion whose base
+    ``live_verdict`` always returns ``"undecided"`` (a silent dead arm); a
+    checker overriding ``live_verdict`` whose criterion model is NOT a
+    ``LiveSuccessCriterion`` writes decision logic the arming path
+    (``validate_early_stop`` gates on ``isinstance(c, LiveSuccessCriterion)``)
+    can never reach.
+    """
 
     @staticmethod
-    def _cls(*members: str) -> str:
-        body = "".join(members) if members else "    pass\n"
-        return "from typing import ClassVar\nclass FakeChecker:\n" + body
+    def _type_to_model() -> dict[str, type]:
+        from typing import Annotated, get_args, get_origin
+
+        from coder_eval.models import SuccessCriterion
+
+        assert get_origin(SuccessCriterion) is Annotated
+        inner, *_ = get_args(SuccessCriterion)
+        return {model.model_fields["type"].default: model for model in get_args(inner)}
 
     @staticmethod
-    def _run(src: str, *, path: str = "src/coder_eval/criteria/fake_checker.py"):
-        import ast
+    def _find_violations(pairs: dict[str, tuple[type, type]]) -> list[str]:
+        """Shared checker-vs-model pairing logic, driven by an explicit
+        ``{criterion_type: (checker_cls, model_cls)}`` mapping so both the real
+        registry and synthetic fixtures can exercise it identically."""
+        from coder_eval.criteria.base import BaseCriterion
+        from coder_eval.models import LiveSuccessCriterion
 
-        from tests.lint.rules.ce025_live_verdict_consistency import LiveVerdictConsistency
+        violations = []
+        for criterion_type, (checker_cls, model) in pairs.items():
+            overrides_live_verdict = checker_cls.live_verdict is not BaseCriterion.live_verdict
+            is_live_model = issubclass(model, LiveSuccessCriterion)
+            if is_live_model and not overrides_live_verdict:
+                violations.append(
+                    f"{model.__name__} ({criterion_type!r}) is a LiveSuccessCriterion but its checker "
+                    f"{checker_cls.__name__} does not override live_verdict — a dead arm."
+                )
+            elif overrides_live_verdict and not is_live_model:
+                violations.append(
+                    f"{checker_cls.__name__} ({criterion_type!r}) overrides live_verdict but its criterion "
+                    f"model {model.__name__} is not a LiveSuccessCriterion — unreachable decision logic."
+                )
+        return violations
 
-        return LiveVerdictConsistency(path).check(ast.parse(src))
+    def test_real_criteria_tree_is_clean(self) -> None:
+        from coder_eval.criteria import CriterionRegistry, init_criteria
 
-    def test_flags_polarities_without_live_verdict(self):
-        assert self._run(self._cls(self._POLARITIES_NONEMPTY))
+        init_criteria(validate=False)
+        pairs = {
+            criterion_type: (CriterionRegistry.get_checker(criterion_type), model)
+            for criterion_type, model in self._type_to_model().items()
+        }
+        assert not self._find_violations(pairs)
 
-    def test_flags_live_verdict_without_polarities(self):
-        assert self._run(self._cls(self._LIVE_VERDICT))
+    def test_detects_live_model_with_no_live_verdict_override(self) -> None:
+        # A LiveSuccessCriterion subclass whose checker does NOT override
+        # live_verdict — the dead-arm branch.
+        from coder_eval.criteria.base import BaseCriterion
+        from coder_eval.models import LiveSuccessCriterion
 
-    def test_flags_live_verdict_with_empty_polarities(self):
-        assert self._run(self._cls(self._POLARITIES_EMPTY, self._LIVE_VERDICT))
+        class _FakeLiveModel(LiveSuccessCriterion):
+            def live_decidable_polarities(self):
+                return frozenset({"pass"})
 
-    def test_allows_polarities_with_live_verdict(self):
-        assert not self._run(self._cls(self._POLARITIES_NONEMPTY, self._LIVE_VERDICT))
+        class _FakeCheckerNoOverride(BaseCriterion):
+            criterion_type = "fake_live_no_override"
 
-    def test_allows_neither_declared(self):
-        # A plain checker (e.g. file_exists) that arms nothing declares neither member.
-        assert not self._run(self._cls("    path: str\n"))
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                raise NotImplementedError
 
-    def test_allows_empty_polarities_without_live_verdict(self):
-        assert not self._run(self._cls(self._POLARITIES_EMPTY))
+        violations = self._find_violations({"fake_live_no_override": (_FakeCheckerNoOverride, _FakeLiveModel)})
+        assert violations
+        assert "dead arm" in violations[0]
 
-    def test_detects_plain_assign_polarities(self):
-        # Non-empty `live_stop_polarities` via a plain (non-annotated) assignment still arms.
-        assert self._run(self._cls(self._POLARITIES_PLAIN))
+    def test_detects_live_verdict_override_on_non_live_model(self) -> None:
+        # A checker overriding live_verdict whose criterion model is a plain
+        # BaseSuccessCriterion, not LiveSuccessCriterion — the unreachable
+        # decision-logic branch.
+        from coder_eval.criteria.base import BaseCriterion, LiveVerdict
+        from coder_eval.models import BaseSuccessCriterion
 
-    def test_non_literal_arg_treated_nonempty(self):
-        # A computed frozenset() argument is conservatively non-empty → live_verdict required.
-        assert self._run(self._cls(self._POLARITIES_NONLITERAL))
-        assert not self._run(self._cls(self._POLARITIES_NONLITERAL, self._LIVE_VERDICT))
+        class _FakeNonLiveModel(BaseSuccessCriterion):
+            type: str = "fake_non_live_override"
 
-    def test_scope_exemptions(self):
-        # base.py legitimately pairs the empty default with the default live_verdict; and
-        # files outside criteria/ are out of scope entirely.
-        offending = self._cls(self._LIVE_VERDICT)
-        assert not self._run(offending, path="src/coder_eval/criteria/base.py")
-        assert not self._run(offending, path="src/coder_eval/orchestration/x.py")
+        class _FakeCheckerOverrides(BaseCriterion):
+            criterion_type = "fake_non_live_override"
 
-    def test_real_criteria_tree_is_clean(self):
-        from tests.lint.rules.ce025_live_verdict_consistency import LiveVerdictConsistency
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                raise NotImplementedError
 
-        criteria_dir = SRC / "coder_eval" / "criteria"
-        assert not check_paths([criteria_dir], rules=[LiveVerdictConsistency])
+            def live_verdict(self, criterion, turn_records) -> LiveVerdict:
+                return "undecided"
+
+        violations = self._find_violations({"fake_non_live_override": (_FakeCheckerOverrides, _FakeNonLiveModel)})
+        assert violations
+        assert "unreachable" in violations[0]
 
 
 @pytest.mark.lint
@@ -1165,3 +1208,166 @@ class TestCE031DeadConfigFields:
         consumed = consumed_attr_names(self.SRC)
         for name in ("n_trials", "max_usd", "stratify_field"):
             assert name in consumed, f"expected {name!r} to be read as an attribute in src/"
+
+
+@pytest.mark.lint
+class TestCE026ActionDocSurfaces:
+    """CE026 — the Action's onboarding surfaces must be truthful and self-sufficient.
+
+    The motivating bug: docs/CI_GATE.md said "there is nothing to install" above a
+    copy-pasteable `uses:` step with no agent runtime, while the correcting
+    prerequisite note sat 11 lines below and the tutorial's sibling snippet *did*
+    show the steps. An integrator who copied it got a run that dies on a missing
+    `claude` binary. Reasons over Markdown + YAML, so it lives here rather than in
+    the AST-only runner (precedent: CE027-CE031).
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+    ACTION_YML = REPO_ROOT / "action.yml"
+    PR_CHECKS = REPO_ROOT / ".github" / "workflows" / "pr-checks.yml"
+
+    def test_primary_action_snippets_show_agent_runtime_prereqs(self):
+        from tests.lint.action_docs import default_doc_paths, find_missing_prereqs
+
+        findings = find_missing_prereqs(default_doc_paths(self.REPO_ROOT))
+        assert not findings, (
+            "\nAction quickstart snippet(s) that a reader can copy but that omit the agent-runtime "
+            "prerequisite steps:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_no_unqualified_zero_install_claims_near_action_snippets(self):
+        from tests.lint.action_docs import default_doc_paths, find_unscoped_absolute_claims
+
+        findings = find_unscoped_absolute_claims(default_doc_paths(self.REPO_ROOT))
+        assert not findings, (
+            "\nUnqualified zero-install absolute(s) beside an Action snippet — scope the claim to the "
+            "channel it is about:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_marketplace_links_match_the_action_listing_name(self):
+        from tests.lint.action_docs import action_listing_name, default_doc_paths, find_slug_mismatches
+
+        listing = action_listing_name(self.ACTION_YML)
+        findings = find_slug_mismatches(default_doc_paths(self.REPO_ROOT), listing)
+        assert not findings, (
+            f"\nMarketplace link/badge(s) inconsistent with action.yml `name: {listing}` — a rename "
+            "404s every one of them:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_required_prereqs_match_the_dogfood_job(self):
+        # The constant is pinned to the executable reference: the dogfood job proves
+        # in CI that these steps are what a fresh runner needs before `uses: ./`.
+        from tests.lint.action_docs import DOGFOOD_JOB, REQUIRED_PREREQ_TOKENS, dogfood_prereq_tokens
+
+        tokens = dogfood_prereq_tokens(self.PR_CHECKS)
+        for required in REQUIRED_PREREQ_TOKENS:
+            assert any(required in token for token in tokens), (
+                f"{required!r} is documented as a prerequisite but the {DOGFOOD_JOB} job no longer "
+                f"runs it before `uses: ./` (job steps: {sorted(tokens)}). Update "
+                "REQUIRED_PREREQ_TOKENS and the doc snippets together."
+            )
+
+    def test_catches_a_snippet_missing_prereqs(self, tmp_path: Path):
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "# Gate\n\n```yaml\n- uses: UiPath/coder_eval@v0\n  with:\n    tasks: t.yaml\n```\n",
+            encoding="utf-8",
+        )
+        findings = find_missing_prereqs([page])
+        assert len(findings) == 1
+        assert "actions/setup-node" in findings[0].message
+
+    def test_only_the_first_action_block_is_checked(self, tmp_path: Path):
+        # Later single-input illustrations must stay quiet, or the rule becomes a nuisance.
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "```yaml\n"
+            "- uses: actions/setup-node@v4\n"
+            "- run: npm install -g @anthropic-ai/claude-code\n"
+            "- uses: UiPath/coder_eval@v0\n"
+            "```\n\n"
+            "Score floor:\n\n"
+            '```yaml\n- uses: UiPath/coder_eval@v0\n  with:\n    minimum-task-score: "0.8"\n```\n',
+            encoding="utf-8",
+        )
+        assert find_missing_prereqs([page]) == []
+
+    def test_prereq_skip_marker_opts_out(self, tmp_path: Path):
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "<!-- lint-skip: action-prereq: illustrative fragment -->\n```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        assert find_missing_prereqs([page]) == []
+
+    def test_page_without_the_action_is_ignored(self, tmp_path: Path):
+        from tests.lint.action_docs import find_missing_prereqs
+
+        page = tmp_path / "page.md"
+        page.write_text("```yaml\n- uses: actions/checkout@v6\n```\n", encoding="utf-8")
+        assert find_missing_prereqs([page]) == []
+
+    def test_catches_the_nothing_to_install_regression(self, tmp_path: Path):
+        # The exact sentence this rule exists for.
+        from tests.lint.action_docs import find_unscoped_absolute_claims
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "you reference it by repo path — there is nothing to install:\n\n"
+            "```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        findings = find_unscoped_absolute_claims([page])
+        assert len(findings) == 1
+        assert "nothing to install" in findings[0].message
+
+    def test_scoped_claim_is_allowed(self, tmp_path: Path):
+        from tests.lint.action_docs import find_unscoped_absolute_claims
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "you reference it by repo path — there is no Marketplace install step:\n\n"
+            "```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        assert find_unscoped_absolute_claims([page]) == []
+
+    def test_claim_far_from_a_snippet_is_ignored(self, tmp_path: Path):
+        from tests.lint.action_docs import find_unscoped_absolute_claims
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "there is nothing to install\n" + "\n" * 40 + "```yaml\n- uses: UiPath/coder_eval@v0\n```\n",
+            encoding="utf-8",
+        )
+        assert find_unscoped_absolute_claims([page]) == []
+
+    def test_catches_a_renamed_listing(self, tmp_path: Path):
+        from tests.lint.action_docs import find_slug_mismatches
+
+        page = tmp_path / "page.md"
+        page.write_text("[coder_eval](https://github.com/marketplace/actions/coder_eval)\n", encoding="utf-8")
+        assert find_slug_mismatches([page], "coder_eval") == []
+        assert len(find_slug_mismatches([page], "coder eval x")) == 1
+
+    def test_shields_label_must_decode_to_the_listing_name(self, tmp_path: Path):
+        from tests.lint.action_docs import decode_shields_label, find_slug_mismatches
+
+        # A single `_` renders as a space, which is why the badge needs the doubled form.
+        assert decode_shields_label("coder__eval") == "coder_eval"
+        assert decode_shields_label("coder_eval") == "coder eval"
+
+        page = tmp_path / "page.md"
+        page.write_text(
+            "[![m](https://img.shields.io/badge/marketplace-coder_eval-2ea44f.svg)](https://x)\n",
+            encoding="utf-8",
+        )
+        findings = find_slug_mismatches([page], "coder_eval")
+        assert len(findings) == 1
+        assert "displays as 'coder eval'" in findings[0].message

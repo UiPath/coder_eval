@@ -6,6 +6,7 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { humanizeTaskId } from "@/lib/format";
+import { passBarClass, passClassRatio } from "@/lib/pass-rate";
 import { HarnessSelector } from "@/app/_components/harness-selector";
 import { harnessShortLabel } from "@/app/_components/harness-badge";
 import {
@@ -425,14 +426,14 @@ export function WatchlistView({
                                     >
                                         {r.skill}
                                     </Link>
-                                    <span className="flex-1 min-w-[70px] h-[7px] rounded bg-red-50 overflow-hidden">
+                                    <span className="flex-1 min-w-[70px] h-[7px] rounded bg-gray-100 overflow-hidden">
                                         <i
-                                            className="block h-full bg-green-600"
+                                            className={`block h-full ${passBarClass(r.passRate * 100)}`}
                                             style={{ width: pct(r.passRate) }}
                                         />
                                     </span>
                                     <span
-                                        className={`ml-auto font-bold ${r.passRate < 0.5 ? "text-red-700" : r.passRate < 0.9 ? "text-amber-700" : "text-green-700"}`}
+                                        className={`ml-auto font-bold ${passClassRatio(r.passRate)}`}
                                     >
                                         {pct(r.passRate)}
                                     </span>

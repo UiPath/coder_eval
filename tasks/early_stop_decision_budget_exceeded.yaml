@@ -1,0 +1,43 @@
+task_id: "early_stop_decision_budget_exceeded"
+description: >
+  Decision-step timeout (GitHub issue #61, item 3): the armed command_executed
+  criterion sets stop_early.decide_within: 3 — if the agent hasn't run the script
+  within its first 3 tool calls, EarlyStopWatcher latches an effective FAIL
+  for it (reported as reason=decision_budget_exceeded) and, since that fail
+  drops the armed ceiling below the default gate threshold of 1.0, the run
+  fail-stops immediately instead of burning the rest of run_limits.max_turns.
+  The timeout gates through the same weighted armed gate as a native
+  live-fail — no special force-fail path. Note the block's on_pass stays
+  'continue', so a live PASS never stops the run
+  (if the agent runs the script within budget, the run simply continues to
+  natural completion). This is a NON-CI example task (deliberately untagged
+  for smoke-pass/smoke-fail): the agent's actual exploration behavior is not
+  deterministic enough for a live-agent CI assertion — run it manually with
+  `coder-eval run` to observe the mechanism.
+tags: [early-stop, decision-budget]
+
+initial_prompt: >
+  Before doing anything else, spend at least 5 tool calls exploring the
+  repository (ls, find, read a few files) before creating app.py. Then create
+  a Python file named app.py that prints 'Hello, Claude!' and run it with:
+  python app.py
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash", "Glob"]
+
+run_limits:
+  max_turns: 20
+
+success_criteria:
+  - type: "command_executed"
+    description: "Agent ran the script within its decision budget"
+    tool_name: "Bash"
+    command_pattern: "python app\\.py"
+    min_count: 1
+    stop_early:
+      decide_within: 3
+  - type: "file_exists"
+    path: "app.py"
+    description: "app.py must exist (advisory — not armed, only gates a full run)"

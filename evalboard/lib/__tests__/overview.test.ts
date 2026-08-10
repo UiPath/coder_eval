@@ -1,8 +1,14 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+    avgRunSuccessRate,
     buildAdhocRows,
+    buildTagTaskRows,
     collectPipelineRuns,
+    projectRunRow,
+    scopeRunTasks,
     summarizeListing,
+    taskCarriesRepoTag,
+    taskMatchesTag,
     turnBudgetRateForTasks,
     type PerRun,
     type RunListingRow,
@@ -297,6 +303,20 @@ describe("collectPipelineRuns", () => {
         warn.mockRestore();
     });
 
+    test("probeAll reaches a match sitting past the scan cap", async () => {
+        // The paged run table derives "Show more" from finding one extra row, so
+        // a scan that gave up at the cap would report "no more" and strand every
+        // older matching run. Only r1 matches, 30 ids deep — well past
+        // limit x HARNESS_SCAN_FACTOR.
+        const ids = Array.from({ length: 30 }, (_, i) => `r${30 - i}`);
+        const load = vi.fn(async (id: string) => run(id));
+        const isMatch = (r: PerRun) => r.id === "r1";
+
+        expect(await collectPipelineRuns(ids, 1, load, isMatch)).toEqual([]);
+        const out = await collectPipelineRuns(ids, 1, load, isMatch, true);
+        expect(out.map((r) => r.id)).toEqual(["r1"]);
+    });
+
     test("limit=0 and empty ids short-circuit without loading", async () => {
         const load = vi.fn(async (id: string) => run(id));
         expect(await collectPipelineRuns(["r1"], 0, load)).toEqual([]);
@@ -472,5 +492,565 @@ describe("buildAdhocRows", () => {
         expect(row.title).toBe("My run");
         expect(row.tasksSucceeded).toBe(1);
         expect(row.tasksRun).toBe(2);
+    });
+});
+
+// buildTagTaskRows drives /path-to-ga. Two behaviours are asserted here that no
+// other test covers: a task de-tagged upstream (present in a newer run WITHOUT
+// the tag) must disappear, and a mature carry-forward must leave both the
+// numerator AND the denominator of passRate — the page-local divergence from
+// trends.ts, which counts a carry-forward as a pass.
+describe("buildTagTaskRows", () => {
+    const TAG = "path-to-ga";
+
+    function perRun(id: string, tasks: RunOverviewTask[]): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                tasks,
+                totalCostUsd: null,
+                taskDurationSeconds: null,
+                componentShas: [],
+            },
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+        };
+    }
+
+    test("keeps a task still tagged in the newest run", () => {
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        expect(rows[0].appearances).toBe(2);
+        expect(rows[0].latestRunId).toBe("r2");
+    });
+
+    test("drops a task present-but-untagged in a newer run (the de-tag bug)", () => {
+        // Models ipe-drive-to-slack: tagged in r1, still running in the newer r2
+        // but with the tag removed from its YAML. That is proof of de-tagging, so
+        // the row must vanish rather than linger until r1 ages out of the window.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "detagged", tags: [TAG] })]),
+                perRun("r2", [task({ taskId: "detagged", tags: ["other"] })]),
+            ],
+            TAG,
+        );
+        expect(rows).toEqual([]);
+    });
+
+    test("keeps a task that simply stopped appearing, dated to its newest tagged run", () => {
+        // Retired / renamed / skip:true is unknowable from run data, so the row
+        // stays and latestRunId is what the page renders as "Last seen".
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "gone", tags: [TAG] })]),
+                perRun("r2", [task({ taskId: "other", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["gone", "other"]);
+        expect(rows[0].latestRunId).toBe("r1");
+    });
+
+    test("one untagged replicate in the newest run is not a de-tag", () => {
+        // A replicated task has several rows per run; the de-tag check collapses
+        // with any-row semantics, so a single untagged replicate cannot drop it.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG] }),
+                    task({ taskId: "a", tags: [] }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        // Only the tagged row accumulates.
+        expect(rows[0].appearances).toBe(1);
+    });
+
+    test("matureSkips counts carry-forwards; appearances still includes them", () => {
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].appearances).toBe(2);
+        expect(rows[0].matureSkips).toBe(1);
+    });
+
+    test("passRate excludes mature skips from both numerator and denominator", () => {
+        // 4 appearances, 1 mature skip, 2 executed passes out of 3 executed rows
+        // → 66.67%. The old mature-inclusive rule would have said 75% (3/4).
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], status: "FAILURE" }),
+                ]),
+                perRun("r3", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r4", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].appearances).toBe(4);
+        expect(rows[0].matureSkips).toBe(1);
+        expect(rows[0].passRate).toBeCloseTo(66.6667, 3);
+    });
+
+    test("passRate is a measured 0 — not null — when every executed run failed", () => {
+        // The boundary that separates "no data" from "the worst task on the GA
+        // board". Both render through the same `passRate != null` ternary, so
+        // gating on `executedPasses > 0` instead of `executed > 0` would dash
+        // out the one row that most needs to read red.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], status: "FAILURE" }),
+                ]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], status: "FAILURE" }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].passRate).toBe(0);
+        expect(rows[0].matureSkips).toBe(0);
+        expect(rows[0].executed).toBe(2);
+    });
+
+    test("executed is the passRate denominator, carried on the row", () => {
+        // The table's tooltip names the sample size from this field instead of
+        // re-deriving it, so the caption cannot describe a different rule than
+        // the percentage beside it.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+                perRun("r3", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].appearances).toBe(3);
+        expect(rows[0].executed).toBe(1);
+        expect(rows[0].passRate).toBe(100);
+    });
+
+    test("a non-SUCCESS terminal status is not a pass", () => {
+        // Pins the pass predicate to lib/status.ts::isPassStatus rather than a
+        // raw literal: ERROR and TIMEOUT are executed appearances that failed,
+        // so they belong in the denominator and out of the numerator.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], status: "ERROR" }),
+                ]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], status: "TIMEOUT" }),
+                ]),
+                perRun("r3", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows[0].executed).toBe(3);
+        expect(rows[0].passRate).toBeCloseTo(33.3333, 3);
+    });
+
+    test("passRate is null when every tagged appearance was a mature skip", () => {
+        // Nothing was measured, so the page must show "—" rather than a
+        // measured-looking 100% (or a divide-by-zero NaN).
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].matureSkips).toBe(2);
+        expect(rows[0].passRate).toBeNull();
+        // Producer invariant the table's rendering relies on: latest* is read
+        // off one of the counted appearances, so "nothing executed" necessarily
+        // means the latest appearance was a skip. The table dashes BOTH cells on
+        // the strength of this — it can never show a measured-looking score
+        // beside an unmeasured rate.
+        expect(rows[0].latestMatureSkipped).toBe(true);
+    });
+
+    test("latestMatureSkipped reflects the newest tagged appearance", () => {
+        const skippedLatest = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [TAG] })]),
+                perRun("r2", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(skippedLatest[0].latestMatureSkipped).toBe(true);
+
+        const executedLatest = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "a", tags: [TAG], matureSkipped: true }),
+                ]),
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(executedLatest[0].latestMatureSkipped).toBe(false);
+    });
+
+    test("a tag matched via skill is never dropped", () => {
+        // taskCarriesRepoTag's first clause: every run containing the task
+        // matches, so `tagged` is always true. Using a raw tags.includes() here
+        // would wrongly drop every skill-tag row.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", skill: TAG })]),
+                perRun("r2", [task({ taskId: "a", skill: TAG })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+    });
+
+    test("a task carrying the tag only as a review tag does not appear", () => {
+        // Review tags are a post-hoc, effectively disjoint namespace; this page
+        // reports repo-declared tags only.
+        const r = perRun("r1", [task({ taskId: "a", tags: [] })]);
+        const rows = buildTagTaskRows(
+            [{ ...r, reviewTagsByTask: { a: [TAG] } }],
+            TAG,
+        );
+        expect(rows).toEqual([]);
+    });
+
+    test("a review-tagged older appearance is not folded into a kept row", () => {
+        // Discriminates the accumulate path specifically: the row IS kept (its
+        // newest run carries the repo tag), so only `appearances` reveals which
+        // predicate accumulated. Widening the accumulate path back to
+        // taskMatchesTag would count r1's review-tag-only row too and report 2.
+        const older = perRun("r1", [task({ taskId: "a", tags: [] })]);
+        const rows = buildTagTaskRows(
+            [
+                { ...older, reviewTagsByTask: { a: [TAG] } },
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].appearances).toBe(1);
+    });
+
+    test("a task that only recently GAINED the tag is kept", () => {
+        // Mirror image of the de-tag case, and the reason the newest-appearance
+        // rule is first-write-wins rather than "tagged in every appearance": a
+        // task tagged on day 20 of a 30-day window is present-but-untagged in the
+        // older runs, and must not read as de-tagged.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [task({ taskId: "a", tags: [] })]),
+                perRun("r2", [task({ taskId: "a", tags: [TAG] })]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        expect(rows[0].appearances).toBe(1);
+        expect(rows[0].latestRunId).toBe("r2");
+    });
+
+    test("a newest run with a null overview neither adds nor drops anything", () => {
+        // A transient blob failure on the newest run must not read as a de-tag of
+        // every row.
+        const broken: PerRun = {
+            id: "r9",
+            overview: null,
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+        };
+        const rows = buildTagTaskRows(
+            [broken, perRun("r1", [task({ taskId: "a", tags: [TAG] })])],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a"]);
+        expect(rows[0].appearances).toBe(1);
+        expect(rows[0].latestRunId).toBe("r1");
+    });
+
+    test("empty input returns an empty list", () => {
+        expect(buildTagTaskRows([], TAG)).toEqual([]);
+    });
+
+    test("rows come back sorted by taskId", () => {
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({ taskId: "c", tags: [TAG] }),
+                    task({ taskId: "a", tags: [TAG] }),
+                    task({ taskId: "b", tags: [TAG] }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows.map((r) => r.taskId)).toEqual(["a", "b", "c"]);
+    });
+
+    test("all three latest* fields come off the same row on replicate disagreement", () => {
+        // The newest run has an executed replicate and a carried-forward one.
+        // First-row-wins decides, and the Mature pill must never sit beside a
+        // measured score from the other replicate.
+        const rows = buildTagTaskRows(
+            [
+                perRun("r1", [
+                    task({
+                        taskId: "a",
+                        tags: [TAG],
+                        matureSkipped: true,
+                        status: "SUCCESS",
+                        weightedScore: 1.0,
+                    }),
+                    task({
+                        taskId: "a",
+                        tags: [TAG],
+                        status: "FAILURE",
+                        weightedScore: 0.25,
+                    }),
+                ]),
+            ],
+            TAG,
+        );
+        expect(rows[0].latestMatureSkipped).toBe(true);
+        expect(rows[0].latestStatus).toBe("SUCCESS");
+        expect(rows[0].latestScore).toBe(1.0);
+        // Both replicates are tagged, so `appearances` counts ROWS (2), not runs
+        // (1) — the semantics the interface comment promises.
+        expect(rows[0].appearances).toBe(2);
+        expect(rows[0].matureSkips).toBe(1);
+    });
+});
+
+// The Path-to-GA headline tile. Hoisted out of the page shell so the
+// null-successRate rule is assertable without rendering an async server
+// component.
+describe("avgRunSuccessRate", () => {
+    test("averages over the runs that report a rate", () => {
+        expect(
+            avgRunSuccessRate([{ successRate: 100 }, { successRate: 50 }]),
+        ).toBe(75);
+    });
+
+    test("a run with no measurable rate is excluded, not counted as 0", () => {
+        // Dividing by the full run count instead would report 50% here and drag
+        // the headline down every time a run.json fails to load.
+        expect(
+            avgRunSuccessRate([{ successRate: 100 }, { successRate: null }]),
+        ).toBe(100);
+    });
+
+    test("null when nothing in scope reports a rate", () => {
+        expect(avgRunSuccessRate([])).toBeNull();
+        expect(avgRunSuccessRate([{ successRate: null }])).toBeNull();
+    });
+
+    test("0 is a measured rate, not an absence", () => {
+        expect(avgRunSuccessRate([{ successRate: 0 }])).toBe(0);
+    });
+});
+
+// taskMatchesTag was rebuilt on top of the extracted taskCarriesRepoTag so
+// buildTagTaskRows could reuse the repo-provenance half. scopeRunTasks and the
+// front-page rails still go through taskMatchesTag and legitimately filter on
+// review tags, so the extraction has to be behaviour-preserving.
+describe("taskCarriesRepoTag / taskMatchesTag", () => {
+    test("taskCarriesRepoTag matches skill and YAML tags, not review tags", () => {
+        expect(taskCarriesRepoTag(task({ skill: "x" }), "x")).toBe(true);
+        expect(taskCarriesRepoTag(task({ tags: ["x"] }), "x")).toBe(true);
+        expect(taskCarriesRepoTag(task({ tags: ["y"] }), "x")).toBe(false);
+    });
+
+    test("taskMatchesTag still matches via skill, tags, or a review tag", () => {
+        expect(taskMatchesTag(task({ skill: "x" }), {}, "x")).toBe(true);
+        expect(taskMatchesTag(task({ tags: ["x"] }), {}, "x")).toBe(true);
+        expect(
+            taskMatchesTag(task({ taskId: "t" }), { t: ["x"] }, "x"),
+        ).toBe(true);
+        expect(taskMatchesTag(task({ taskId: "t", tags: ["y"] }), {}, "x")).toBe(
+            false,
+        );
+    });
+});
+
+// projectRunRow is the single definition of "does this run count, and with which
+// tasks" — the summary tiles (getWindowRollup) and the paged run table
+// (getRunListing) both go through it. They used to be one loop; if they ever
+// disagreed, the tiles would describe a different set of runs than the table
+// below them with nothing failing.
+describe("projectRunRow", () => {
+    function run(id: string, tasks: RunOverviewTask[], extra?: Partial<PerRun>): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                tasks,
+                totalCostUsd: 10,
+                taskDurationSeconds: 100,
+                componentShas: [],
+            },
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+            ...extra,
+        };
+    }
+
+    test("unfiltered, reports whole-run totals", () => {
+        const row = projectRunRow(
+            run("r", [
+                task({ taskId: "a", status: "SUCCESS" }),
+                task({ taskId: "b", status: "FAILURE" }),
+            ]),
+            null,
+            null,
+        );
+        expect(row).toMatchObject({
+            id: "r",
+            tasksSucceeded: 1,
+            tasksRun: 2,
+            totalCostUsd: 10,
+            taskDurationSeconds: 100,
+        });
+    });
+
+    test("drops a run with no task matching the tag", () => {
+        const row = projectRunRow(
+            run("r", [task({ taskId: "a", tags: ["smoke"] })]),
+            "path-to-ga",
+            null,
+        );
+        expect(row).toBeNull();
+    });
+
+    test("scopes cost and duration to the matching tasks", () => {
+        // The row's numbers have to describe the filtered slice, not the run —
+        // otherwise filtering to one tag still shows the whole run's spend.
+        const row = projectRunRow(
+            run("r", [
+                task({
+                    taskId: "a",
+                    tags: ["keep"],
+                    totalCostUsd: 3,
+                    durationSeconds: 30,
+                }),
+                task({ taskId: "b", totalCostUsd: 99, durationSeconds: 999 }),
+            ]),
+            "keep",
+            null,
+        );
+        expect(row).toMatchObject({
+            tasksRun: 1,
+            totalCostUsd: 3,
+            taskDurationSeconds: 30,
+        });
+    });
+
+    test("nulls a scoped duration when any matching task lacks one", () => {
+        // A partial sum understates the slice, which reads as a fast run rather
+        // than an unmeasured one.
+        const row = projectRunRow(
+            run("r", [
+                task({ taskId: "a", tags: ["keep"], durationSeconds: 30 }),
+                task({ taskId: "b", tags: ["keep"], durationSeconds: null }),
+            ]),
+            "keep",
+            null,
+        );
+        expect(row?.taskDurationSeconds).toBeNull();
+    });
+
+    test("a query matching only the run id keeps the whole-run slice", () => {
+        // Pinning a run by pasting a date fragment must not show 0 tasks just
+        // because no task name contains the date.
+        const row = projectRunRow(
+            run("2026-07-30_04-38-11", [task({ taskId: "a" })]),
+            null,
+            "07-30",
+        );
+        expect(row).toMatchObject({ tasksRun: 1 });
+    });
+
+    test("returns null for a run whose run.json could not be read", () => {
+        const r = run("r", []);
+        expect(projectRunRow({ ...r, overview: null }, null, null)).toBeNull();
+    });
+
+    test("carries the harness through for the table's badge column", () => {
+        const r = run("r", [task({ taskId: "a" })]);
+        const withHarness = {
+            ...r,
+            overview: { ...r.overview!, harness: "codex" },
+        };
+        expect(projectRunRow(withHarness, null, null)?.harness).toBe("codex");
+    });
+
+    // getOverview reads the task LIST out of the same call (for the turn-budget
+    // rate), while the table only ever sees the counts. If the two disagreed
+    // about which tasks are in scope, the charts and the tiles would describe
+    // different runs with nothing on the page to show it.
+    describe("scopeRunTasks, the seam both share", () => {
+        test("hands back the matching tasks themselves, not just a count", () => {
+            const scoped = scopeRunTasks(
+                run("r", [
+                    task({ taskId: "keep-me", tags: ["keep"] }),
+                    task({ taskId: "drop-me" }),
+                ]),
+                "keep",
+                null,
+            );
+            expect(scoped?.tasks.map((t) => t.taskId)).toEqual(["keep-me"]);
+        });
+
+        test("agrees with projectRunRow on which runs are in scope", () => {
+            const r = run("r", [task({ taskId: "a", tags: ["other"] })]);
+            expect(scopeRunTasks(r, "keep", null)).toBeNull();
+            expect(projectRunRow(r, "keep", null)).toBeNull();
+        });
+
+        test("the run-id fallback widens back to every task", () => {
+            const scoped = scopeRunTasks(
+                run("2026-07-30_04-38-11", [
+                    task({ taskId: "a" }),
+                    task({ taskId: "b" }),
+                ]),
+                null,
+                "07-30",
+            );
+            expect(scoped?.tasks).toHaveLength(2);
+        });
     });
 });

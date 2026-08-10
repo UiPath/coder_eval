@@ -148,9 +148,10 @@ simulator force `[]` for the same reason.)
 ## Early stop
 
 Claude Code supports the cooperative early-stop seam, as do the
-[Codex](CODEX.md) and [Antigravity](ANTIGRAVITY.md) agents. With
-`run_limits.stop_early: true`, a single-shot run ends cleanly at the next
-tool-call boundary once its **armed** criteria (`stop_when: pass|fail|decided`) are
+[Codex](CODEX.md) and [Antigravity](ANTIGRAVITY.md) agents. When a criterion
+carries a `stop_early:` block, a single-shot run ends cleanly at the next
+tool-call boundary once its **armed** criteria (those carrying a
+`stop_early:` block) are
 decided — so a raised `max_turns` isn't wasted on a smoke run. Early stop errors at
 resolution for any agent that does not declare `supports_cooperative_stop`. See the
 [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) for the full contract.

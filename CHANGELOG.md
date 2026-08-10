@@ -2,6 +2,337 @@
 
 <!-- version list -->
 
+## v0.9.5 (2026-08-05)
+
+### Bug Fixes
+
+- **command-executed**: Keep whole argv-joined payload in shell unwrap
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **command-executed**: Match patterns against shell-normalized commands
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **command-executed**: Narrow command param to str before shell-normalizing
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **command-executed**: Recognize shell wrappers by predicate, not allowlist
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **criteria**: Add present predicate so asserting a switch cannot weaken a guard
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **criteria**: Make cli_called guards fail loud instead of vacuously passing
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **criteria**: Stop ignore_flags re-opening the guard false-PASS
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **early-stop**: Address PR review — trajectory parity, reason determinism, doc restore
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+- **lint**: Derive CE030 criteria from the source union literal, not runtime
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **lint**: Enumerate in-tree criteria by module attribute, not the union
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **lint**: Scope CE030 criterion parity to in-tree criteria only
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **reports**: Explicit return on every early_stop_gate_note path (CodeQL py/mixed-returns)
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+- **reports**: Pre-initialize the gate note so CodeQL sees it bound on every path
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+### Chores
+
+- **deps-dev**: Bump postcss from 8.5.18 to 8.5.23 in /evalboard
+  ([#75](https://github.com/UiPath/coder_eval/pull/75),
+  [`cdced15`](https://github.com/UiPath/coder_eval/commit/cdced152dea732096dcff939c45e7d7c927c2a5a))
+
+### Documentation
+
+- Surface the Marketplace listing and make the Action quickstarts self-sufficient
+  ([#80](https://github.com/UiPath/coder_eval/pull/80),
+  [`401245a`](https://github.com/UiPath/coder_eval/commit/401245ad14055c1da5d7b594e506686c59cedce7))
+
+- **command-executed**: Document shell-normalization contract + gate it (CE030)
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+### Features
+
+- **criteria**: Add cli_called for structured invocation matching
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **criteria**: Match a flag across spellings with FlagMatch.aliases
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **early-stop**: Per-criterion arming via stop_early blocks on live criteria
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+### Refactoring
+
+- **command-executed**: Total _match_haystacks, shared window, memoized
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+
+## v0.9.4 (2026-08-04)
+
+### Bug Fixes
+
+- **litellm**: Pin litellm[proxy]==1.95.0 + fastapi==0.140.0 for proxy startup
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+- **litellm**: Pin proxy deps (litellm 1.95.0 + fastapi 0.140.0) to fix startup crash
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+### Chores
+
+- **action**: Rename Marketplace listing to coder_eval, add author
+  ([`a9c274d`](https://github.com/UiPath/coder_eval/commit/a9c274d918114df5229b20e9c65a4ce620b9f9ed))
+
+### Documentation
+
+- **litellm**: Surface the proxy dep-pin override vars in start script
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+### Refactoring
+
+- **litellm**: Address PR review — pin SSOT guard, rename, doc ripple
+  ([#76](https://github.com/UiPath/coder_eval/pull/76),
+  [`f2f8580`](https://github.com/UiPath/coder_eval/commit/f2f85807cff3376b7201d5d5b2f9e1c4874220d9))
+
+
+## v0.9.3 (2026-08-04)
+
+### Bug Fixes
+
+- **early-stop**: Address PR review — polarity-blind budget, pass_threshold displacement,
+  gate-semantic split ([#74](https://github.com/UiPath/coder_eval/pull/74),
+  [`800ac77`](https://github.com/UiPath/coder_eval/commit/800ac7730e53a0ce9e9128b42ea91f0030d01f89))
+
+### Chores
+
+- **deps**: Bump aiohttp 3.14.1→3.14.3, cryptography 49.0.0→50.0.0
+  ([#74](https://github.com/UiPath/coder_eval/pull/74),
+  [`800ac77`](https://github.com/UiPath/coder_eval/commit/800ac7730e53a0ce9e9128b42ea91f0030d01f89))
+
+### Features
+
+- **early-stop**: Weighted ceiling/floor bounds + decision-step budget
+  ([#74](https://github.com/UiPath/coder_eval/pull/74),
+  [`800ac77`](https://github.com/UiPath/coder_eval/commit/800ac7730e53a0ce9e9128b42ea91f0030d01f89))
+
+
+## v0.9.2 (2026-07-31)
+
+### Bug Fixes
+
+- **cost**: A task timeout with no preserved turn is unrecorded spend, not free
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **cost**: Book spend on the error and timeout paths, flag what is unpriced
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **cost**: Flag every hard-killed task as a cost floor, not just the empty ones
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **evalboard**: Honest scoped counts, and one definition of a run's scope
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+- **litellm**: Gate cost_log_tags on agent capability, not route (fixes non-Claude crash)
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Make the orphaned-spend warning actually fire
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Per-attempt cost-log scoping + single run-id accessor + no-match warning
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Pin each open-weight model to a vetted provider set (no silent fallback)
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Proxy-authoritative token buckets + all-priced gate + transactional join
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Sanitize cost headers, reject non-finite cost, drop debug scaffolding
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **orchestrator**: Recover the in-flight turn's spend on a hard kill
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **pricing**: Add the claude-opus-5 rate so killed turns stop booking zero
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **pricing**: Add the five unpriced codex tiers still on OpenAI's rate card
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **pricing**: Correct every wrong rate-card entry and close the alias gaps
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **pricing**: Refresh the rate card and correct gemini-3-flash-preview
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **reports**: Count errors as misses and stop losing cost on error paths
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **reports**: Count errors as misses in one canonical pass rate
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+### Code Style
+
+- **evalboard**: Drop the swatch dots and the scope caption from the header
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+### Documentation
+
+- **cost**: Describe the per-turn backfill as the net it is
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **cost**: Describe the unpriced-crash mechanism accurately and keep comments framework-general
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **litellm**: Correct the cost contract after cutting per-message distribution
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Document LITELLM_COST_LOG wiring + correct the reconciliation-cost contract
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+### Features
+
+- **cost**: Publish one accurate total on every reporting surface
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **docker**: Bind-mount the LiteLLM cost log so --driver docker joins actual cost
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **evalboard**: Compare every harness on the overview, and scope the whole page to one
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+- **evalboard**: Compare harnesses on the overview, and identify each run
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+- **evalboard**: Lift the harness scope to the page header, in vendor colors
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+- **evalboard**: Make each turn's provider-call table a collapsed dropdown
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **evalboard**: Mark a partly-priced run total as a floor, not the bill
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **evalboard**: One set of pass-rate cutoffs, and a run table that pages through all history
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+- **evalboard**: Per-call cost/cache table from provider_call_costs (replaces inline)
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **evalboard**: Read the canonical pass rate and surface incomplete cost
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **evalboard**: Say which harness, model, and framework version a run used
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+- **litellm**: Actual per-call cost + cache accounting for the open-weight backend
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+### Refactoring
+
+- **cost**: Correct the simulator-cost bound and drop the unread variant error share
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **cost**: Cut the commentary and drop unreachable rate-card keys
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **cost**: Define the unpriced-row test once, and only for new runs
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **cost**: Total_cost_usd means the whole bill everywhere
+  ([#63](https://github.com/UiPath/coder_eval/pull/63),
+  [`93c7fc0`](https://github.com/UiPath/coder_eval/commit/93c7fc086bbefe74e25625dd8b77106bef736c09))
+
+- **evalboard**: Call the UiPath harness Delegate
+  ([#69](https://github.com/UiPath/coder_eval/pull/69),
+  [`0bdac0b`](https://github.com/UiPath/coder_eval/commit/0bdac0b2bab0d9f2937a2ddc5e54b26d110a56d1))
+
+- **litellm**: Cut per-message distribution; turn-level join + per-call audit record
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Drop the provider field/column — unavailable on the streaming path
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+- **litellm**: Stream the cost log + de-duplicate the OpenRouter config comment
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+### Testing
+
+- **litellm**: Cover config shape, join ordering, and defensive cost branches
+  ([#66](https://github.com/UiPath/coder_eval/pull/66),
+  [`4131a2a`](https://github.com/UiPath/coder_eval/commit/4131a2a2983c347023927c66c04756595c3dbceb))
+
+
 ## v0.9.1 (2026-07-29)
 
 ### Features

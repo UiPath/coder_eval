@@ -23,6 +23,7 @@ import {
     CriteriaSection,
     FlowDebugSection,
     LogTailSection,
+    ProviderCallTableSection,
     ToolTimelineSection,
 } from "./_sections";
 
@@ -301,6 +302,7 @@ export default async function TaskPage({
                     recordedCostUsd={task.totalCostUsd}
                 />
             )}
+            <ProviderCallTableSection providerCalls={task.providerCalls} />
             {(task.toolCalls.length > 0 || task.finalAssistantText) && (
                 <ToolTimelineSection
                     toolCalls={task.toolCalls}

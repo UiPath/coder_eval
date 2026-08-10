@@ -15,12 +15,18 @@ import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./review
 import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
-import { DEFAULT_HARNESS, KNOWN_HARNESSES, normalizeHarness } from "./harness";
+import { DEFAULT_HARNESS, normalizeHarness, orderHarnesses } from "./harness";
+import { isPassStatus } from "./status";
+import { taskCarriesRepoTag } from "./tags";
 import type { Window } from "./reviews-types";
 
 export interface RunPoint {
     runId: string;
     timestamp: number; // ms since epoch (UTC); used as the chart x-coordinate
+    // The harness this run ran on, normalized (legacy runs fold to claude-code).
+    // Every run belongs to exactly one harness, so the charts split the points
+    // into one series per harness and color each by identity.
+    harness: string;
     successRate: number | null;
     // % of budgeted tasks whose visible turns stayed within 1.5× their
     // expected_turns budget. Only tasks carrying a positive expected_turns
@@ -80,8 +86,17 @@ export interface TagCount {
 
 export interface OverviewData {
     runs: RunPoint[]; // one point per run, no daily aggregation
+    // The harnesses actually present in `runs`, in stable display order. Drives
+    // the chart's series list and legend, so a harness with no runs in the
+    // window contributes no empty line.
+    harnesses: string[];
     windowStart: number; // ms — chart x-domain start
     windowEnd: number; // ms — chart x-domain end
+    // The summary tiles' rollup, folded over the same runs `runs` plots so the
+    // two can't disagree. Independent of the run table's pagination, which reads
+    // back past this window (see getRunListing).
+    totals: RunListingTotals;
+    runCount: number; // matched pipeline runs in the window
     skills: TagCount[];
     taskTags: TagCount[];
     reviewTags: TagCount[];
@@ -150,11 +165,14 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
 
 export interface RunListing {
     rows: RunListingRow[]; // after filter + limit, newest first
-    totalInWindow: number;
-    matchedCount: number; // post-filter, pre-limit
-    // Rollup across all matched runs (pre-limit) — powers the front-page
-    // window summary; independent of the `rows` limit.
-    totals: RunListingTotals;
+    // Every pipeline run in the store, not just the ones loaded for this page.
+    // Free to compute (it's the id count), so the table can say "20 of 94"
+    // without reading 94 run.json files.
+    totalCandidates: number;
+    // Another page exists behind `rows`. Derived from over-fetching by one
+    // rather than from a total match count: counting matches would mean loading
+    // every run in history on every render.
+    hasMore: boolean;
 }
 
 const FETCH_CONCURRENCY = 16;
@@ -294,13 +312,7 @@ async function listRecentHarnessesInner(): Promise<string[]> {
     for (const r of perRun) {
         if (r.overview) seen.add(normalizeHarness(r.overview.harness));
     }
-    // Known harnesses first (stable display order), then any newcomers
-    // (alphabetical) so the list is deterministic but self-extending.
-    const known = KNOWN_HARNESSES.filter((h) => seen.has(h));
-    const extras = [...seen]
-        .filter((h) => !(KNOWN_HARNESSES as readonly string[]).includes(h))
-        .sort();
-    const ordered = [...known, ...extras];
+    const ordered = orderHarnesses(seen);
     // Never hand back an empty list — the default must always be selectable.
     return ordered.length > 0 ? ordered : [DEFAULT_HARNESS];
 }
@@ -357,9 +369,16 @@ export async function collectPipelineRuns(
     // Optional extra predicate (AND-ed with usability) — e.g. a harness filter.
     // When set, the scan reaches further back since matches are sparser.
     isMatch?: (r: PerRun) => boolean,
+    // Probe every candidate instead of stopping at a multiple of `limit`. A
+    // capped scan can't tell "no older match exists" from "stopped looking", so
+    // the paged run table — whose "Show more" link comes from finding one extra
+    // row — has to probe fully or it silently hides older matching runs.
+    probeAll = false,
 ): Promise<PerRun[]> {
     const scanFactor = isMatch ? HARNESS_SCAN_FACTOR : RECENT_SCAN_FACTOR;
-    const maxScan = Math.min(ids.length, limit * scanFactor);
+    const maxScan = probeAll
+        ? ids.length
+        : Math.min(ids.length, limit * scanFactor);
     const usable = isMatch
         ? (r: PerRun) => isUsablePipelineRun(r) && isMatch(r)
         : isUsablePipelineRun;
@@ -498,13 +517,18 @@ function loadWindowData(window: Window): Promise<PerRun[]> {
     return loadWindowDataInner(window);
 }
 
+// Repo-provenance half of taskMatchesTag. Defined in the dependency-free
+// lib/tags.ts (this module is server-only — it imports next/cache — so a
+// "use client" component could not adopt a copy living here) and re-exported
+// for the existing callers.
+export { taskCarriesRepoTag };
+
 export function taskMatchesTag(
     task: RunOverviewTask,
     reviewTagsByTask: Record<string, string[]>,
     tag: string,
 ): boolean {
-    if (task.skill === tag) return true;
-    if (task.tags.includes(tag)) return true;
+    if (taskCarriesRepoTag(task, tag)) return true;
     const rt = reviewTagsByTask[task.taskId];
     return rt ? rt.includes(tag) : false;
 }
@@ -549,39 +573,34 @@ export async function getOverview(
     );
     const needle = q?.trim().toLowerCase() || null;
 
-    // ---- Per-run chart points ----
-    // One point per run plotted at its own timestamp, no daily averaging.
-    // When tag or q is active, scope each run's rate to only matching tasks.
+    // ---- Per-run chart points + the window rollup ----
+    // One chart point per run plotted at its own timestamp, no daily averaging,
+    // and one rollup row per run for the summary tiles. Both come out of the
+    // same scopeRunTasks call in the same loop, so the tiles can never describe
+    // a different set of runs than the charts plot.
     const runPoints: RunPoint[] = [];
+    const rows: RunListingRow[] = [];
+    const seenHarnesses = new Set<string>();
 
-    for (const { id, overview, reviewTagsByTask } of perRun) {
+    for (const r of perRun) {
+        const { id, overview } = r;
         if (!overview || overview.tasks.length === 0) continue;
         const date = parseRunIdDate(id);
         if (!date) continue;
+        const scoped = scopeRunTasks(r, tag, needle);
+        if (!scoped || scoped.tasks.length === 0) continue;
 
-        let matching = overview.tasks;
-        if (tag) {
-            matching = matching.filter((t) =>
-                taskMatchesTag(t, reviewTagsByTask, tag),
-            );
-        }
-        if (needle) {
-            matching = matching.filter((t) =>
-                taskMatchesQuery(t, reviewTagsByTask, needle),
-            );
-        }
-        if (matching.length === 0) continue;
+        const row = rowFromScoped(id, scoped, overview.harness);
+        rows.push(row);
 
-        const succeeded = matching.filter(
-            (t) => t.status === "SUCCESS",
-        ).length;
-        const rate = (succeeded / matching.length) * 100;
-
+        const runHarness = normalizeHarness(overview.harness);
+        seenHarnesses.add(runHarness);
         runPoints.push({
             runId: id,
             timestamp: date.getTime(),
-            successRate: rate,
-            turnBudgetRate: turnBudgetRateForTasks(matching),
+            harness: runHarness,
+            successRate: (row.tasksSucceeded / row.tasksRun) * 100,
+            turnBudgetRate: turnBudgetRateForTasks(scoped.tasks),
         });
     }
     runPoints.sort((a, b) => a.timestamp - b.timestamp);
@@ -597,8 +616,11 @@ export async function getOverview(
 
     return {
         runs: runPoints,
+        harnesses: orderHarnesses(seenHarnesses),
         windowStart,
         windowEnd,
+        totals: summarizeListing(rows),
+        runCount: rows.length,
         skills,
         taskTags,
         reviewTags,
@@ -609,18 +631,172 @@ export async function getOverview(
 export interface TagTaskRow {
     taskId: string;
     skill: string | null;
-    // How many runs in the window carried this task under the tag.
+    // Tagged task ROWS in the window, not distinct runs: a replicated task
+    // contributes one per replicate. Unchanged from the previous behaviour
+    // (the column header stays "Appearances") — the de-tag check below is the
+    // only place that collapses to one sample per run. Includes rows the
+    // nightly skipped as mature and carried forward.
     appearances: number;
-    passRate: number; // 0-100 across those appearances
+    // Of `appearances`, how many were mature carry-forwards (not executed).
+    matureSkips: number;
+    // `appearances - matureSkips`: the denominator behind passRate, carried on
+    // the row rather than re-derived by the renderer so the percentage and the
+    // caption that names its sample size can never describe different rules.
+    executed: number;
+    // 0-100 over EXECUTED appearances only (appearances - matureSkips).
+    // null when nothing in the window actually ran, so the UI shows "—"
+    // rather than a measured-looking 0% or 100%.
+    passRate: number | null;
     latestStatus: string | null;
     latestScore: number | null;
     latestRunId: string;
+    // True when the newest tagged ROW — the same row latestStatus and
+    // latestScore come from — was a mature carry-forward, so those two are
+    // inherited, not measured.
+    latestMatureSkipped: boolean;
 }
 
-// Per-task breakdown for a single tag, windowed like getOverview but grouped
-// by task instead of by run. One row per distinct task_id carrying the tag
-// anywhere in the window; "latest" fields come from the newest run the task
-// appeared in (runs are walked newest-first, so the first occurrence wins).
+// Per-task breakdown for a single tag, windowed like getOverview but grouped by
+// task instead of by run. Pure over the PerRun[] it is handed (the caller does
+// the fetching and the adhoc/harness filtering), so it unit-tests without
+// touching the blob store — mirrors lib/trends.ts::aggregate.
+//
+// DE-TAGGING. A run.json task row carries `tags` as a historical stamp written
+// at execution time; the board never consults the skills repo. So a task
+// de-tagged upstream keeps rendering for as long as a run that predates the
+// removal stays in the window. The rule here: a task is dropped when it appears
+// in a NEWER run in the window whose rows for it do not carry the tag — that is
+// proof the tag was removed, not a heuristic. A task that merely stopped
+// appearing (retired, renamed, `skip: true`) is unknowable and therefore KEPT,
+// with `latestRunId` doubling as "last seen" so its age is visible.
+//
+// The signal comes from taskCarriesRepoTag, NOT taskMatchesTag: review tags
+// (review_index.json) are post-hoc annotations from a separate namespace, so an
+// as-yet-unreviewed newest run — the normal case — would otherwise read as a
+// de-tag. The same predicate is used to accumulate, so the narrowing is
+// symmetric: a task pulled onto this page only by a review tag does not appear.
+//
+// The "did any row carry the tag this run" collapse is required because a
+// replicated task has several rows per run, and one untagged replicate must not
+// read as a de-tag.
+//
+// MATURITY — a DELIBERATE, page-local divergence. lib/trends.ts::aggregate (and
+// app/runs/[id]/run-view.tsx) count a mature carry-forward as a pass and exclude
+// it only from the cost/duration averages. Here it is excluded from BOTH the
+// numerator and the denominator of `passRate`, because /path-to-ga is a
+// GA-readiness page and must report MEASURED passes. That difference is
+// intentional — do not "harmonise" this with trends.ts.
+//
+// CROSS-REPO CONTRACT: `matureSkipped` is stamped into run.json by the external
+// nightly eval_runner, not by anything in src/coder_eval. If the producer renames
+// or drops the field every carry-forward silently reads as an executed pass again
+// — the rate inflates, the "(N mature)" annotations and Mature pills vanish, and
+// nothing errors. It is the one input here this repo cannot type-check.
+export function buildTagTaskRows(perRun: PerRun[], tag: string): TagTaskRow[] {
+    // Run ids are date-shaped, so a lexical sort is chronological — the same
+    // assumption lib/trends.ts::aggregate and the previous implementation
+    // already make.
+    const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
+
+    interface Acc {
+        skill: string | null;
+        appearances: number;
+        matureSkips: number;
+        executedPasses: number;
+        latestRunId: string;
+        latestStatus: string | null;
+        latestScore: number | null;
+        latestMatureSkipped: boolean;
+    }
+    const byTask = new Map<string, Acc>();
+    // taskId -> did its NEWEST appearance in the window carry the tag. First
+    // write wins because the walk is newest-first, so a task that only gained
+    // the tag recently reads as tagged (and one that lost it reads as untagged)
+    // regardless of what the older runs say.
+    const newestTagged = new Map<string, boolean>();
+
+    for (const { id, overview } of sorted) {
+        // A run whose run.json failed to load (loadPerRunForId downgrades to a
+        // null overview) must contribute neither an appearance nor a de-tag
+        // signal — otherwise a transient blob failure on the newest run would
+        // drop every row.
+        if (!overview) continue;
+
+        // Two passes over the run's rows, not one: `taggedInRun` must be
+        // complete before any verdict is recorded, because a replicated task
+        // has several rows per run and one untagged replicate must not read as
+        // a de-tag. The `newestTagged.has` guard below is what collapses those
+        // replicate rows to a single first-write-wins verdict.
+        const taggedInRun = new Set<string>();
+        for (const t of overview.tasks) {
+            if (taskCarriesRepoTag(t, tag)) taggedInRun.add(t.taskId);
+        }
+        for (const t of overview.tasks) {
+            if (!newestTagged.has(t.taskId)) {
+                newestTagged.set(t.taskId, taggedInRun.has(t.taskId));
+            }
+        }
+
+        for (const t of overview.tasks) {
+            if (!taskCarriesRepoTag(t, tag)) continue;
+            let entry = byTask.get(t.taskId);
+            if (!entry) {
+                // All three latest* fields come off ONE row — the first tagged
+                // row of the newest-first walk — so the Mature pill and the
+                // dashed-out score always describe the same sample.
+                entry = {
+                    skill: t.skill,
+                    appearances: 0,
+                    matureSkips: 0,
+                    executedPasses: 0,
+                    latestRunId: id,
+                    latestStatus: t.status,
+                    latestScore: t.weightedScore,
+                    latestMatureSkipped: t.matureSkipped ?? false,
+                };
+                byTask.set(t.taskId, entry);
+            }
+            entry.appearances += 1;
+            if (t.matureSkipped) {
+                entry.matureSkips += 1;
+            } else if (isPassStatus(t.status)) {
+                // lib/status.ts, not a raw "SUCCESS" literal: `status` is an
+                // untyped string, and this page's pass rate must move with
+                // every other surface if the passing set ever widens.
+                entry.executedPasses += 1;
+            }
+        }
+    }
+
+    const rows: TagTaskRow[] = [];
+    for (const [taskId, e] of byTask) {
+        // Provably de-tagged: the task is still running, and its newest run does
+        // not carry the tag. (A task in byTask always has a newestTagged entry —
+        // both are written from the same non-null-overview iteration — so the
+        // `?? true` only satisfies Map.get's `| undefined`; it is not a real
+        // "unknown ⇒ keep" case.)
+        if (!(newestTagged.get(taskId) ?? true)) continue;
+        const executed = e.appearances - e.matureSkips;
+        rows.push({
+            taskId,
+            skill: e.skill,
+            appearances: e.appearances,
+            matureSkips: e.matureSkips,
+            executed,
+            passRate: executed > 0 ? (e.executedPasses / executed) * 100 : null,
+            latestStatus: e.latestStatus,
+            latestScore: e.latestScore,
+            latestRunId: e.latestRunId,
+            latestMatureSkipped: e.latestMatureSkipped,
+        });
+    }
+    return rows.sort((a, b) => a.taskId.localeCompare(b.taskId));
+}
+
+// IO wrapper around buildTagTaskRows: fetch the window, drop ad-hoc runs and
+// (optionally) scope to one harness, then aggregate. Harness scoping happens
+// HERE, before the pure function sees the runs, so a newer run on a different
+// harness cannot de-tag a row in a harness-scoped view.
 export async function getTagTaskBreakdown(
     window: Window,
     tag: string,
@@ -632,139 +808,166 @@ export async function getTagTaskBreakdown(
             (harness == null ||
                 normalizeHarness(r.overview?.harness) === harness),
     );
-    const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
-
-    interface Acc {
-        skill: string | null;
-        statuses: (string | null)[];
-        latestRunId: string;
-        latestStatus: string | null;
-        latestScore: number | null;
-    }
-    const byTask = new Map<string, Acc>();
-
-    for (const { id, overview, reviewTagsByTask } of sorted) {
-        if (!overview) continue;
-        for (const t of overview.tasks) {
-            if (!taskMatchesTag(t, reviewTagsByTask, tag)) continue;
-            let entry = byTask.get(t.taskId);
-            if (!entry) {
-                entry = {
-                    skill: t.skill,
-                    statuses: [],
-                    latestRunId: id,
-                    latestStatus: t.status,
-                    latestScore: t.weightedScore,
-                };
-                byTask.set(t.taskId, entry);
-            }
-            entry.statuses.push(t.status);
-        }
-    }
-
-    const rows: TagTaskRow[] = [];
-    for (const [taskId, e] of byTask) {
-        const appearances = e.statuses.length;
-        const passed = e.statuses.filter((s) => s === "SUCCESS").length;
-        rows.push({
-            taskId,
-            skill: e.skill,
-            appearances,
-            passRate: appearances ? (passed / appearances) * 100 : 0,
-            latestStatus: e.latestStatus,
-            latestScore: e.latestScore,
-            latestRunId: e.latestRunId,
-        });
-    }
-    return rows.sort((a, b) => a.taskId.localeCompare(b.taskId));
+    return buildTagTaskRows(perRun, tag);
 }
 
-export async function getRunListing(
-    window: Window,
+// Mean of the per-run success rates, over the runs that HAVE one. A run whose
+// successRate is null has no measurable outcome (no tasks, or a run.json that
+// failed to load) — folding it in as 0 would drag the headline tile down and
+// make "no data" indistinguishable from "everything failed". null when no run
+// in scope reports a rate at all.
+export function avgRunSuccessRate(
+    runs: readonly { successRate: number | null }[],
+): number | null {
+    const rates = runs
+        .map((r) => r.successRate)
+        .filter((r): r is number => r != null);
+    if (rates.length === 0) return null;
+    return rates.reduce((sum, r) => sum + r, 0) / rates.length;
+}
+
+// The slice of a run that the active tag/q filter selects: which tasks count,
+// and the cost/duration summed over exactly those. null means the run has
+// nothing matching and drops out entirely.
+//
+// This is the ONE definition of "does this run count, and over which tasks",
+// shared by the chart points, the summary tiles, and the run table. Each used to
+// carry its own copy, and a disagreement between them would have been invisible
+// on the page.
+export interface ScopedRun {
+    tasks: RunOverviewTask[];
+    totalCostUsd: number | null;
+    taskDurationSeconds: number | null;
+}
+
+export function scopeRunTasks(
+    { id, overview, reviewTagsByTask }: PerRun,
     tag: string | null,
-    q: string | null,
-    limit: number | null, // null = unlimited
-): Promise<RunListing> {
-    // Exclude ad-hoc runs from the main listing — they appear in their own
-    // section (getAdhocRunListing). totalInWindow therefore counts only
-    // pipeline runs, matching the chart above it.
-    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
-    // Run IDs are timestamped — newest first by lexical compare.
-    const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
-    const totalInWindow = sorted.length;
+    needle: string | null,
+): ScopedRun | null {
+    if (!overview) return null;
+    const wholeRun: ScopedRun = {
+        tasks: overview.tasks,
+        totalCostUsd: overview.totalCostUsd,
+        taskDurationSeconds: overview.taskDurationSeconds,
+    };
+    if (tag == null && needle == null) return wholeRun;
 
-    const needle = q?.trim().toLowerCase() || null;
-    const needsFilter = tag != null || needle != null;
-
-    const matched: RunListingRow[] = [];
-    for (const { id, overview, reviewTagsByTask } of sorted) {
-        if (!overview) continue;
-
-        // Default to the whole-run slice; narrow to matching tasks if a
-        // filter is active AND any task matches. When `q` matches only the
-        // run ID (date-fragment "pin a run" use case), we keep the whole-run
-        // slice so the row shows real totals rather than 0/—/—.
-        let scopedTasks = overview.tasks;
-        let scopedCost = overview.totalCostUsd;
-        let scopedDur = overview.taskDurationSeconds;
-
-        if (needsFilter) {
-            const matching = overview.tasks.filter((t) => {
-                const passesTag =
-                    tag == null || taskMatchesTag(t, reviewTagsByTask, tag);
-                const passesQ =
-                    needle == null ||
-                    taskMatchesQuery(t, reviewTagsByTask, needle);
-                return passesTag && passesQ;
-            });
-            const idMatchesQ =
-                needle != null && id.toLowerCase().includes(needle);
-            if (matching.length === 0 && !idMatchesQ) continue;
-
-            if (matching.length > 0) {
-                // Scope cost/duration to matching tasks. Cost sums any task
-                // with a recorded value; duration is only meaningful when
-                // every matching task has a duration recorded (otherwise the
-                // partial sum would understate the slice — mirrors
-                // readRunOverview's whole-run rule).
-                let costSum = 0;
-                let costHasAny = false;
-                let durSum = 0;
-                let durAllPresent = true;
-                for (const t of matching) {
-                    if (t.totalCostUsd != null) {
-                        costSum += t.totalCostUsd;
-                        costHasAny = true;
-                    }
-                    if (t.durationSeconds != null) {
-                        durSum += t.durationSeconds;
-                    } else {
-                        durAllPresent = false;
-                    }
-                }
-                scopedTasks = matching;
-                scopedCost = costHasAny ? costSum : null;
-                scopedDur = durAllPresent ? durSum : null;
-            }
-        }
-
-        matched.push({
-            id,
-            tasksSucceeded: scopedTasks.filter((t) => t.status === "SUCCESS")
-                .length,
-            tasksRun: scopedTasks.length,
-            totalCostUsd: scopedCost,
-            taskDurationSeconds: scopedDur,
-            harness: overview.harness ?? null,
-        });
+    const matching = overview.tasks.filter((t) => {
+        const passesTag =
+            tag == null || taskMatchesTag(t, reviewTagsByTask, tag);
+        const passesQ =
+            needle == null || taskMatchesQuery(t, reviewTagsByTask, needle);
+        return passesTag && passesQ;
+    });
+    if (matching.length === 0) {
+        // A `q` that matches only the run ID is the date-fragment "pin a run"
+        // case: keep the whole-run slice so the row shows real totals rather
+        // than 0/—/—. Anything else has nothing to show.
+        const idMatchesQ = needle != null && id.toLowerCase().includes(needle);
+        return idMatchesQ ? wholeRun : null;
     }
 
-    const rows = limit == null ? matched : matched.slice(0, limit);
+    // Cost sums any matching task that recorded one; duration is only meaningful
+    // when every matching task has one (otherwise the partial sum would
+    // understate the slice — mirrors readRunOverview's whole-run rule).
+    let costSum = 0;
+    let costHasAny = false;
+    let durSum = 0;
+    let durAllPresent = true;
+    for (const t of matching) {
+        if (t.totalCostUsd != null) {
+            costSum += t.totalCostUsd;
+            costHasAny = true;
+        }
+        if (t.durationSeconds != null) {
+            durSum += t.durationSeconds;
+        } else {
+            durAllPresent = false;
+        }
+    }
     return {
-        rows,
-        totalInWindow,
-        matchedCount: matched.length,
-        totals: summarizeListing(matched),
+        tasks: matching,
+        totalCostUsd: costHasAny ? costSum : null,
+        taskDurationSeconds: durAllPresent ? durSum : null,
+    };
+}
+
+function rowFromScoped(
+    id: string,
+    scoped: ScopedRun,
+    harness: string | null | undefined,
+): RunListingRow {
+    return {
+        id,
+        tasksSucceeded: scoped.tasks.filter((t) => t.status === "SUCCESS")
+            .length,
+        tasksRun: scoped.tasks.length,
+        totalCostUsd: scoped.totalCostUsd,
+        taskDurationSeconds: scoped.taskDurationSeconds,
+        harness: harness ?? null,
+    };
+}
+
+// One loaded run as a table row, or null when the filter excludes it. Exported
+// for unit testing.
+export function projectRunRow(
+    run: PerRun,
+    tag: string | null,
+    needle: string | null,
+): RunListingRow | null {
+    const scoped = scopeRunTasks(run, tag, needle);
+    return scoped ? rowFromScoped(run.id, scoped, run.overview?.harness) : null;
+}
+
+// The run table. Unlike getOverview's window rollup, this is NOT date-bounded:
+// it pages back through the whole store, a screenful at a time, so history older
+// than the charts' window is still reachable without a time-window control.
+//
+// Rows are loaded lazily because a run.json is multi-MB — reading all of history
+// to count matches would cost hundreds of MB of parsing per render. So the depth
+// of the read is the depth of the page: `hasMore` comes from over-fetching a
+// single row rather than from a total, and the only free count (every pipeline
+// candidate in the store) is reported separately as `totalCandidates`.
+export async function getRunListing(
+    tag: string | null,
+    q: string | null,
+    limit: number,
+    // When set, scope the listing to one harness — applied at the same seam as
+    // the chart's scope in getOverview, so the tiles, the charts, and the table
+    // always describe the same set of runs. null = all harnesses.
+    harness: string | null = null,
+): Promise<RunListing> {
+    // Ad-hoc ids aren't date-shaped, so this drops them (they have their own
+    // section) without loading anything. Newest-first: ids are timestamps.
+    const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) != null);
+    const needle = q?.trim().toLowerCase() || null;
+    const hasFilter = tag != null || needle != null || harness != null;
+    const isMatch = hasFilter
+        ? (r: PerRun) =>
+              (harness == null ||
+                  normalizeHarness(r.overview?.harness) === harness) &&
+              projectRunRow(r, tag, needle) != null
+        : undefined;
+
+    // Over-fetch by one: if the extra row materializes, another page exists.
+    // probeAll, because a scan that gave up at a cap would report `hasMore:
+    // false` and strand every older matching run behind a link that vanished.
+    const loaded = await collectPipelineRuns(
+        ids,
+        limit + 1,
+        cachedLoadPerRun,
+        isMatch,
+        true,
+    );
+    const rows = loaded
+        .map((r) => projectRunRow(r, tag, needle))
+        .filter((row): row is RunListingRow => row != null);
+
+    return {
+        rows: rows.slice(0, limit),
+        totalCandidates: ids.length,
+        hasMore: rows.length > limit,
     };
 }
 

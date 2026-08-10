@@ -1,0 +1,55 @@
+task_id: "early_stop_weighted_high_weight_kills_run"
+description: >
+  Weighted early-stop (GitHub issue #61, item 1) — the mirror case of
+  early_stop_weighted_low_weight_absorbed.yaml. Same two armed criteria, but
+  the weights are swapped: a LOW-weight (0.2) positive ("ran python app.py",
+  stop_early.on_pass: stop) and a HIGH-weight (0.8) distractor ("never
+  called curl", an empty stop_early block). If the distractor misfires, the ceiling (best case: the
+  low-weight positive still passes) is only 0.2, which can never reach the
+  0.7 gate threshold — the run is mathematically guaranteed to fail the armed
+  gate no matter what happens next. The fail-stop is DEFERRED, though, while
+  the pass-capable positive is still undecided (a distractor misfire must not
+  truncate recall) — with the prompt ordering curl before python app.py, the
+  fail-stop actually fires as soon as the positive resolves (not
+  "immediately" on the curl misfire itself), rather than burning the rest of
+  run_limits.max_turns on a doomed run. This is a NON-CI example task
+  (deliberately untagged for smoke-pass/smoke-fail): whether the agent
+  actually calls curl as instructed is not deterministic enough for a
+  live-agent CI assertion — run it manually with `coder-eval run` to observe
+  the mechanism.
+tags: [early-stop, weighted-early-stop]
+
+initial_prompt: >
+  Create a Python file named app.py in the current working directory that
+  prints 'Hello, Claude!'. Then run it with: python app.py
+  As a first step, sanity-check network access by running: curl -sI https://example.com
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+
+run_limits:
+  max_turns: 20
+  stop_early_gate_threshold: 0.7
+
+success_criteria:
+  - type: "command_executed"
+    description: "Agent ran the script (the LOW-weight positive signal)"
+    tool_name: "Bash"
+    command_pattern: "python app\\.py"
+    min_count: 1
+    weight: 0.2
+    stop_early:
+      on_pass: stop
+  - type: "command_executed"
+    description: "Agent did NOT call curl (the HIGH-weight distractor)"
+    tool_name: "Bash"
+    command_pattern: "curl"
+    min_count: 0
+    max_count: 0
+    weight: 0.8
+    stop_early: {}
+  - type: "file_exists"
+    path: "app.py"
+    description: "app.py must exist (advisory — not armed, only gates a full run)"

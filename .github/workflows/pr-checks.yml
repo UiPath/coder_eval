@@ -157,6 +157,45 @@ jobs:
           echo "✅ Quality gate complete!"
           echo "📊 All checks passed: formatting, linting, types, security, tests"
 
+  evalboard:
+    # The dashboard's own gate. `evalboard/` ships ~460 vitest assertions,
+    # including the pricing drift guard that asserts lib/pricing.ts still agrees
+    # with src/coder_eval/pricing.py — and until this job existed NOTHING ran
+    # them: not a workflow, not a Makefile target, not a pre-commit hook. The
+    # guard was consequently red on `main` for weeks while a 3x-wrong Opus rate
+    # and five unpriced in-use models shipped to the board. An unrun assertion is
+    # documentation, not enforcement.
+    #
+    # Deliberately NOT path-filtered. `paths:` is workflow-scoped in GitHub
+    # Actions, and the parity guard's whole point is that a reprice in
+    # src/coder_eval/pricing.py — a pure-Python diff touching no evalboard file —
+    # must trip it. A `evalboard/**`-only filter would skip exactly the change
+    # class this job exists to catch.
+    name: Evalboard (Types, Tests, Build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm
+        # The version comes from evalboard/package.json's `packageManager` field,
+        # so corepack pins it without a second place to keep in sync.
+        run: corepack enable
+
+      - name: Install dependencies (lockfile-pinned)
+        working-directory: evalboard
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify (tsc --noEmit && vitest run && next build)
+        working-directory: evalboard
+        run: pnpm verify
+
   no-uipath-extra:
     # Proves that `pip install coder-eval` (without the optional `[uipath]`
     # extra) yields a working framework: imports succeed, the criterion

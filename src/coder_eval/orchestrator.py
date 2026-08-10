@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -27,7 +28,9 @@ from .errors import (
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
+from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
+    DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ROUTE_NAMES,
     AgentKind,
     ApiRoute,
@@ -53,7 +56,7 @@ from .models import (
     resolve_evaluation_route,
     resolve_route,
 )
-from .orchestration.early_stop import EarlyStopWatcher, validate_early_stop
+from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
@@ -344,6 +347,12 @@ class Orchestrator:
         """
         self.task = task
         self.run_dir = run_dir
+        # Per-attempt nonce for the LiteLLM cost-log join. The proxy log is
+        # append-only and the run_id is a deterministic hash of run_dir, so a
+        # re-run into the same --run-dir would otherwise re-match (and double-count)
+        # a prior attempt's rows. A fresh nonce per Orchestrator (one per process
+        # invocation) scopes the join to THIS attempt's records.
+        self._cost_attempt_nonce = uuid.uuid4().hex
         self.preservation_mode = preservation_mode
         self.workspace_dir = workspace_dir
         self.task_file = task_file
@@ -381,8 +390,9 @@ class Orchestrator:
         # Reference solution cache (loaded on-demand)
         self._reference_code: str | None = None
 
-        # Early-stop watcher (created in _setup only when run_limits.stop_early is
-        # armed; None otherwise, so the default path is entirely unaffected).
+        # Early-stop watcher (created in _setup only when a criterion carries a
+        # stop_early: block and the kill switch is not thrown; None otherwise,
+        # so the default path is entirely unaffected).
         self._early_stop_watcher: EarlyStopWatcher | None = None
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
@@ -700,6 +710,11 @@ class Orchestrator:
         if not self.result.model_used and self.task.agent is not None and self.task.agent.model:
             self.result.model_used = self.task.agent.model
 
+        # Open-weight (LiteLLM) backend: replace per-turn cost with the ACTUAL
+        # per-call OpenRouter cost captured proxy-side. Runs BEFORE aggregation so
+        # the run total re-derives from the corrected per-turn costs.
+        self._join_litellm_actual_cost()
+
         # Aggregate token usage
         self._aggregate_token_usage()
 
@@ -892,6 +907,50 @@ class Orchestrator:
             )
             self._expected_turns_warning_emitted = True
 
+    @property
+    def _cost_correlation_run_id(self) -> str:
+        """The LiteLLM cost-log correlation run id — a stable hash of the run dir.
+
+        Single accessor used by BOTH the stamp site (``_create_agent``, into
+        ``x-ce-run-id``) and the join site (``_join_litellm_actual_cost``); keeping
+        the derivation in one place means the two can't drift and silently revert
+        every turn to static pricing.
+        """
+        return hash_identifier(self.run_dir.as_posix())
+
+    def _join_litellm_actual_cost(self) -> None:
+        """Override per-turn cost with the proxy-captured ACTUAL per-call OpenRouter
+        cost (and attach the per-call cache breakdown) for the open-weight backend.
+
+        No-op unless the agent ran on a ``LiteLLMRoute`` AND ``LITELLM_COST_LOG`` is
+        configured. Never fatal: a failure, or an empty/mismatched log, leaves each
+        turn's static rate-card estimate in place (the whole-turn fallback).
+        """
+        if not (isinstance(self.route, LiteLLMRoute) and settings.litellm_cost_log and self.result is not None):
+            return
+        try:
+            applied = apply_actual_cost(
+                self.result,
+                run_id=self._cost_correlation_run_id,
+                task_id=self._log_task_id,
+                attempt=self._cost_attempt_nonce,
+                records=load_cost_records(settings.litellm_cost_log),
+            )
+            if applied:
+                logger.info("LiteLLM actual-cost join: real per-call cost applied to %d turn(s)", applied)
+            else:
+                # Tags were stamped but nothing matched (file absent, proxy never
+                # wrote, wrong path, or a run/task/attempt mismatch). The run stays
+                # on the static rate card — warn so it isn't mistaken for the real bill.
+                logger.warning(
+                    "LiteLLM actual-cost join found no matching records in %s (run=%s task=%s); cost stays static",
+                    settings.litellm_cost_log,
+                    self._cost_correlation_run_id,
+                    self._log_task_id,
+                )
+        except Exception:
+            logger.warning("LiteLLM actual-cost join failed; keeping static pricing", exc_info=True)
+
     def _aggregate_token_usage(self) -> None:
         """Aggregate token usage from turns, storing on self.result.
 
@@ -927,14 +986,15 @@ class Orchestrator:
         """
         # Defensive early-stop guardrails for the library-use and in-container
         # paths (the CLI already validated during resolution). No-op unless
-        # run_limits.stop_early is armed.
+        # some criterion carries a stop_early: block.
         validate_early_stop(self.task)
 
-        # Build the early-stop watcher once, up front, when armed. This sits BEFORE
-        # the evaluate-only early return below, so an armed evaluate-only re-grade
-        # builds an inert (never-fed) watcher — harmless, and keeps a single
-        # creation point.
-        if self.task.run_limits is not None and self.task.run_limits.stop_early:
+        # Build the early-stop watcher once, up front, when armed (>= 1 criterion
+        # with a stop_early: block and the run_limits.stop_early kill switch not
+        # thrown). This sits BEFORE the evaluate-only early return below, so an
+        # armed evaluate-only re-grade builds an inert (never-fed) watcher —
+        # harmless, and keeps a single creation point.
+        if early_stop_active(self.task):
             self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
 
         if self.sandbox is not None:
@@ -1206,7 +1266,7 @@ class Orchestrator:
             ValueError: If agent type is not supported
             TypeError: If config doesn't match agent's expected type
         """
-        from coder_eval.agents import create_agent
+        from coder_eval.agents import AgentRegistry, create_agent
         from coder_eval.plugins import ensure_plugins_loaded
 
         # Safety net for the production agent-construction path: create_agent no
@@ -1215,7 +1275,30 @@ class Orchestrator:
         ensure_plugins_loaded()
         assert self.task.agent is not None
         assert self.task.agent.type is not None
-        return create_agent(self.task.agent.type, self.task.agent, route=self.route)
+        # LiteLLM (open-weight) route only: give the agent correlation headers so a
+        # proxy-side cost-logging callback can attribute each call's real cost +
+        # cache buckets back to this task-run. x-ce-run-id is a stable per-task-run
+        # key (the join, in _finalize_result, recomputes it identically); x-ce-task-id
+        # is the human-readable canonical id.
+        #
+        # Gate on AGENT CAPABILITY, not the route: the route is settings-derived and
+        # independent of agent type, but only agents whose __init__ accepts the kwarg
+        # (supports_cost_log_tags) may receive it — otherwise the agent-agnostic
+        # factory would forward it into NoOp/Codex/Antigravity/plugin constructors
+        # that don't declare it and crash with TypeError under API_BACKEND=litellm.
+        kwargs: dict[str, Any] = {}
+        registration = AgentRegistry.get(self.task.agent.type)
+        if (
+            isinstance(self.route, LiteLLMRoute)
+            and registration is not None
+            and registration.agent_class.supports_cost_log_tags
+        ):
+            kwargs["cost_log_tags"] = {
+                "x-ce-run-id": self._cost_correlation_run_id,
+                "x-ce-task-id": self._log_task_id,
+                "x-ce-attempt": self._cost_attempt_nonce,
+            }
+        return create_agent(self.task.agent.type, self.task.agent, route=self.route, **kwargs)
 
     async def _communicate_with_retry(
         self,
@@ -1487,18 +1570,43 @@ class Orchestrator:
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
+        # Gate selection is FIRED-ONLY: the weighted armed gate applies iff the
+        # watcher actually cut the run (early_stop is not None) — on a truncated
+        # trajectory the unarmed criteria never had the chance to be satisfied,
+        # so they stay advisory. A run that completed naturally (armed or not,
+        # watcher never fired or disarmed fail-open) has a full trajectory and
+        # gates strict-AND over every gating criterion, exactly like an unarmed
+        # run — arming a criterion (e.g. adding a decide_within fail-fast
+        # timeout) must never change the verdict of a run it didn't cut.
         if self.result.early_stop is not None:
-            # Early-stopped run: only the armed subset gates final_status; the rest
-            # are advisory (recorded, never decisive) so a smoke flavor is not
-            # dragged to FAILURE by criteria whose work it deliberately skipped.
-            all_passed = self.result.armed_criteria_passed(self.task.success_criteria)
-            armed_count = sum(1 for c in self.task.success_criteria if c.stop_when is not None)
+            # One gate for every early-stopped run, no per-reason branches: a
+            # decision-budget stop is just a fail-stop whose deciding criterion
+            # timed out (the watcher only fires once the weighted ceiling
+            # proves the armed gate cannot pass). The ceiling is an upper bound
+            # on the authoritative armed score only because the watcher reduces
+            # the SAME trajectory the checker scores — it records UNRESOLVED
+            # tool ends exactly like the agent's EventCollector does (see
+            # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
+            # correct whether the watcher fired on a pass, a fail, or a timeout.
+            gate_threshold = (
+                self.task.run_limits.stop_early_gate_threshold
+                if self.task.run_limits is not None
+                else DEFAULT_STOP_EARLY_GATE_THRESHOLD
+            )
+            all_passed = self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
+            armed_count = sum(1 for c in self.task.success_criteria if c.is_stop_armed)
             logger.info(
-                "Early-stopped run: gating on %d armed criteria (%d advisory, not gated).",
+                "Early-stopped run (%s): gating on %d armed criteria (%d advisory, not gated).",
+                self.result.early_stop.reason.value,
                 armed_count,
                 total_count - armed_count,
             )
         else:
+            if self._early_stop_watcher is not None:
+                if self._early_stop_watcher.disarmed:
+                    logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
+                else:
+                    logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
             all_passed = self.result.all_criteria_passed(self.task.success_criteria)
 
         # Reuse the model method for weighted score (single source of truth)

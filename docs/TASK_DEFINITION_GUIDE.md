@@ -17,6 +17,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Agent Configuration](#agent-configuration)
 - [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
+  - [Recording CLI Invocations](#recording-cli-invocations)
 - [Template Sources](#template-sources)
 - [Success Criteria](#success-criteria)
   - [Continuous Scoring](#continuous-scoring)
@@ -29,6 +30,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
   - [file_matches_regex](#file_matches_regex)
   - [reference_comparison](#reference_comparison)
   - [command_executed](#command_executed)
+  - [cli_called](#cli_called)
   - [uipath_eval](#uipath_eval)
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
@@ -244,8 +246,8 @@ run_limits:
   max_total_tokens: 200000            # cumulative input + output
   max_usd: 2.50                       # cumulative cost
 
-  # Early stop
-  stop_early: true                    # end once the armed criteria are decided
+  # Early stop (kill switch only — arming lives on the criteria)
+  stop_early: false                   # force-disarm every criterion's stop_early: block
 ```
 
 | Field | Default | Constraint | Description |
@@ -260,7 +262,8 @@ run_limits:
 | `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. Requires per-turn SDK cost reporting. |
 | `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
-| `stop_early` | `false` | — | Opt-in master switch for early-stop-on-criterion. See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution on an armed task) | Minimum weighted score over the armed subset required for an **early-stopped** run to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
 a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
@@ -326,71 +329,153 @@ default) to exclude a task from the metric entirely.
 
 ### `stop_early` (opt-in early stop)
 
-`run_limits.stop_early` (default `false`) ends a single-shot run **early** once
-the run's **armed** criteria are decided — so you can raise `max_turns` for the
-full-run flavor without paying for turns the smoke flavor doesn't need. A
-criterion is *armed* by giving it a `stop_when` (see the criterion-fields table);
-`stop_early` is the master switch that turns arming on for the run.
+Early stop ends a single-shot run **early** once the run's **armed** criteria
+decide the outcome — so you can raise `max_turns` for the full-run flavor
+without paying for turns the smoke flavor doesn't need. A criterion is *armed*
+by attaching a **`stop_early:` block** to it — the block's presence IS the
+arming, and it alone activates the run's watcher; there is **no run-level
+master switch**. (Live-observable criteria only: the block field exists only on
+`skill_triggered` / `command_executed`, so arming anything else is a schema
+error, not a runtime surprise.) `run_limits.stop_early: false` is the run-level
+**kill switch** that force-disarms every block — the one-line experiment/CLI
+override that turns a smoke flavor back into an authoritative full run;
+`run_limits.stop_early: true` (the removed master arm) is rejected at
+resolution.
+
+Arming carries one **implicit** trigger — a definitive *effective* fail (a
+native live-fail, or the `decide_within` timeout expiring) may end the run
+under the weighted ceiling rule — plus two knobs inside the block:
+
+| Block | Meaning |
+|-------|---------|
+| `stop_early: {}` | armed: fail-stop on a native live-fail (the idiomatic distractor arming) |
+| `stop_early: {on_pass: stop}` | …plus pass-stop the moment the criterion live-passes |
+| `stop_early: {decide_within: N}` | …plus an *effective* fail if still **undecided** after N tool-call steps (reported as `decision_budget_exceeded`) |
 
 ```yaml
 run_limits:
   max_turns: 30
-  stop_early: true            # opt in; default false leaves behavior unchanged
 success_criteria:
   - type: skill_triggered
     skill_name: date-teller
     expected_skill: date-teller
-    stop_when: auto           # arm whichever polarity this instance can decide
-  - type: file_exists         # not armed → advisory on an early-stopped run
+    stop_early:
+      decide_within: 5        # not loaded within 5 steps → effective fail → stop
+  - type: file_exists         # no block → unarmed (advisory on an early-stopped run)
     path: report.md
 ```
 
+The two intents compose cleanly: `decide_within` with the default
+`on_pass: continue` means *"fail fast if the signal doesn't arrive in time,
+but if it does arrive, keep running"* (a live PASS never stops the run — it
+only **latches**, so the criterion is not re-checked). Set `on_pass: stop`
+when the signal arriving makes the rest of the run redundant and you want to
+bank the saved turns.
+
 Semantics:
 
-- **Opt-in, per run.** With `stop_early: false` (the default) the run behaves
-  exactly as before — `stop_when` is inert and every criterion gates normally.
-- **Polarity.** `stop_when: pass` stops the moment all **pass-armed** criteria are
-  decided in the pass direction; `stop_when: fail` stops on a definitive
-  wrong-signal fail; `stop_when: decided` stops on either (the criterion instance
-  must be able to decide **both**). `stop_when: auto` arms whichever polarities
-  **this instance** can decide — use it when the decidable polarity is
-  instance-dependent, e.g. a `skill_triggered` activation suite where a positive
-  row (`skill_name == expected_skill`) can only live-pass and a distractor can only
-  live-fail, so one static value on a dataset-fanned criterion (whose
-  positive/distractor role flips per row) cannot fit every row. A **pass-stop**
-  needs every pass-armed criterion to pass — fail-armed distractors are not
-  required to, and a row with **zero** pass-armed criteria (e.g. a negative row)
-  never pass-stops; a **fail-stop** fires on the first fail-armed criterion that
-  live-fails, but is **deferred while any pass-armed criterion is still
-  undecided** — a distractor misfire on an early tool call must not cut a
-  positive row before its expected signal can appear (that would freeze a
-  would-be true positive as a false negative and deflate suite recall). The
-  misfire is latched, so the deferred fail-stop fires the moment every
-  pass-armed criterion decides; if none ever decides, the run simply continues
-  to the cap. Only criteria that can decide from a partial trajectory (currently
-  `skill_triggered`, `command_executed`) may be armed — arming any other criterion
-  is a hard error at resolution (plan *and* run), never a silent no-op.
-  Decidability can also depend on a criterion's own fields: `command_executed` can
-  live-**pass** only with `max_count` unset and `min_count > 0`, and live-**fail**
-  only with `max_count` set (which includes the `min_count: 0, max_count: 0`
-  "must-NOT-run" form). Arming a polarity the configured criterion can never reach
-  (e.g. `stop_when: pass` alongside a `max_count`, or `auto` on an instance that
-  can decide neither) is likewise a hard error at resolution, not a silent full
-  run.
-- **Verdict.** An early-stopped run is gated on the **armed subset only**; the
-  non-armed criteria become **advisory** and are clearly marked (report badge +
-  per-criterion note + `stopped_early` row). A run that completes naturally is
-  gated on the **full** set, as always. This is what lets one file serve both a
-  `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`) —
+- **Opt-in, per criterion.** With no `stop_early:` block anywhere the run
+  behaves exactly as before — there is no watcher at all. The
+  `run_limits.stop_early: false` kill switch force-disarms an armed task for
+  one run (e.g. an experiment's `e2e` variant, or
+  `-D run_limits.stop_early=false` from the CLI) without touching the
+  criteria.
+- **Inert-by-design triggers (dataset fan-out).** A trigger whose polarity this
+  *instance* can never decide is silently inert, not an error: a positive
+  `skill_triggered` row (`skill_name == expected_skill`) can only live-pass, so
+  the implicit fail trigger does nothing on it; a distractor row can only
+  live-fail, so `on_pass: stop` and `decide_within` do nothing on it. That is
+  what lets **one** dataset-fanned YAML line — same block on every row — serve
+  both positive rows (pass/timeout live) and distractor rows (fail live)
+  without per-row conditionals. Decidability can also depend on a criterion's own
+  fields: `command_executed` can live-**pass** only with `max_count` unset and
+  `min_count > 0`, and live-**fail** only with `max_count` set (which includes
+  the `min_count: 0, max_count: 0` "must-NOT-run" form).
+- **Verdict latching.** Once an armed criterion decides (pass or fail), its
+  live verdict is latched and never re-computed — the observable criteria are
+  monotonic (an engaged skill stays engaged), so re-polling is pure waste.
+- **Fail-stop rule (weighted ceiling).** A fail-stop candidate is any armed
+  criterion whose *effective* verdict is fail — a native live-fail (the
+  implicit trigger every armed criterion carries), or an expired
+  `decide_within` timeout. The stop fires
+  only once the armed set's **ceiling** (best case: every still-undecided or
+  already-passed criterion ends up scoring 1.0, every failed one scores 0) can
+  no longer reach `stop_early_gate_threshold` — the gate is mathematically
+  guaranteed to fail regardless of how the trajectory continues. It is also
+  **deferred while any pass-capable armed criterion is still undecided** — a
+  distractor misfire on an early tool call must not cut a positive row before
+  its expected signal can appear (that would freeze a would-be true positive as
+  a false negative and deflate suite recall). The misfire is latched, so the
+  deferred fail-stop fires the moment every pass-capable criterion decides; if
+  none ever decides, the run simply continues to the cap.
+- **Pass-stop rule (weighted floor).** A pass-stop fires once the
+  `on_pass: stop` subset's **floor** (worst case: every still-undecided member
+  scores 0) already meets the threshold. Distractors are excluded from this
+  bound (they can never live-pass); a task with **zero** `on_pass: stop`
+  criteria never pass-stops. Like the fail-stop, it is **deferred while any
+  pass-capable armed criterion outside the `on_pass: stop` subset is still
+  undecided** (subset members are already priced into the floor) — otherwise
+  an early pass would truncate a sibling `on_pass: continue` criterion's
+  expected signal out of the trajectory and freeze it as an unearned fail on
+  the armed gate. This deferral is what lets `on_pass: stop` and a sibling's
+  `decide_within` compose safely on the same task.
+- **Verdict (fired-only gating).** A run the watcher actually **cut short** is
+  gated on the **armed subset only** — on a truncated trajectory the unarmed
+  criteria never had the chance to be satisfied, so they become **advisory**
+  and are clearly marked (report badge + per-criterion note + `stopped_early`
+  row). A run that **completes naturally** — armed or not — has a full
+  trajectory and gates strict-AND over the **full** set, as always: adding a
+  block (e.g. a `decide_within` fail-fast timeout) never changes the verdict
+  of a run it didn't cut. Precisely: the gate keys on the watcher having
+  **fired** (`result.early_stop is not None`), not on confirmed truncation —
+  an agent that ignores `should_stop`, or a stop that fires on the run's
+  final message, still gates armed-only. This is what lets one file serve both a `smoke`
+  flavor (blocks armed) and an `e2e` flavor (`stop_early: false` kill switch) —
   see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md). Verdict parity between the flavors
   is one-sided: a **fail-stop** is verdict-preserving (the deferral above
-  guarantees every pass-armed signal was allowed to resolve first), but a
+  guarantees every pass-capable signal was allowed to resolve first), but a
   **pass-stop** cuts the run once the positives are decided, so a distractor that
   would misfire on a *later* tool call is not observed (the frozen row scores as a
   clean pass) — the smoke flavor trades some precision completeness for budget, so
-  authoritative precision/recall belongs on the `stop_early: false` run.
+  authoritative precision/recall belongs on the kill-switched
+  (`run_limits.stop_early: false`) run. The same one-sidedness applies to an armed
+  criterion that is fail-only-decidable but still needs evidence to *pass* — e.g.
+  `command_executed` with `min_count: 1` **and** `max_count` set: the pass-stop
+  deferral holds only for pass-capable siblings, so an `on_pass: stop` sibling can
+  cut the run before the minimum count is reached and the armed gate scores that
+  criterion 0. Score such combinations authoritatively on the kill-switched run.
 - **Fail-safe.** A live-verdict bug **fails open** to a full run (logged loudly) —
   it can never silently disable a criterion or cause a false early stop.
+- **Weighting.** `run_limits.stop_early_gate_threshold` (default `1.0`) is the
+  minimum weighted score (`Σ weight·score / Σ weight`, over the armed subset)
+  required to gate as a pass — both for the post-hoc verdict and for the live
+  stop rules above. At the default `1.0` the bounds collapse to strict rules
+  exactly (any single armed criterion's effective fail already drops the
+  ceiling below 1.0, and the floor only reaches 1.0 once every `on_pass: stop`
+  criterion has actually passed) — lowering it lets a low-weight armed
+  criterion's failure **or timeout** be absorbed without truncating the run,
+  at the cost of the gate becoming a genuine weighted average rather than a
+  strict AND. **The armed weighted gate applies only to a run the watcher
+  actually cut** (fired-only gating, see *Verdict* above); a run that
+  completes naturally gates on the full-set `all_criteria_passed` regardless
+  of arming. Each armed criterion's own `pass_threshold`
+  still decides whether it individually passed (converted to a binary 1.0/0.0
+  before weighting) — only the combination rule (weighted average vs strict
+  AND) changes, which is what makes the `gate_threshold=1.0` default an exact
+  equivalence with the strict `all(...)` rule.
+- **Decision-step timeout.** `stop_early: {decide_within: N}`. If the
+  criterion is still **undecided**
+  after N tool-call steps, the watcher latches an **effective fail** for it and
+  the normal fail-stop ceiling rule applies — reported as
+  `reason: decision_budget_exceeded` so an analysis can tell a timeout from a
+  native misfire, but gated identically (a low-weight criterion's timeout that
+  cannot doom the gate is absorbed, and the run continues). The timeout is
+  checked after the criterion's own verdict each round, so one that decides on
+  that very step is never penalized. `None` (default) = no timeout; the run
+  relies solely on `run_limits.max_turns`. The step count is **cumulative
+  across every retry attempt** of the turn — including an attempt that crashed
+  or timed out before this criterion's own investigation even began — so size
+  the budget with that headroom in mind.
 
 Observability (every early-stopped run is flagged everywhere so analysis never
 compares a truncated run against a full one):
@@ -429,6 +514,33 @@ sandbox:
 Under `driver: tempdir` only `timeout` is enforced — the agent can consume
 arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
 container limits above to actually bind.
+
+### Recording CLI Invocations
+
+`record_cli` shadows executables with generated recording shims, so a task can assert on **what the agent actually ran** without hand-writing a mock:
+
+```yaml
+sandbox:
+  record_cli:
+    - tool: uip
+      exit_code: 1
+      stderr: "uip: not connected to a tenant in this sandbox.\n"
+    - tool: curl                   # so a disobedient agent cannot reach the network
+```
+
+Each shim records the invocation, writes the configured `stdout`/`stderr`, and exits with `exit_code` — which **defaults to 1**, so a bare `- tool: curl` makes the shadowed tool look like it failed. Set `exit_code: 0` when the agent should see success. Values outside 0-255 are rejected, since `sys.exit` truncates mod 256.
+
+`tool` must be a bare executable name, and a small reserved set (`python`, `python3`, `env`, `sh`, `bash`, `node`, `git`, `uv`, `cmd`) is refused: shadowing those breaks the harness itself rather than the tool under test — the shim's own interpreter, or the shell that `run_command` criteria use.
+
+The sandbox writes the shims into `cli_mocks/` and PATH-prepends that directory, then appends one JSON record per invocation to `cli_mocks/calls.jsonl` — the log [`cli_called`](#cli_called) reads by default. Nothing else to wire: no `mock_path_dirs`, no `template_sources`, no `log:` on the criterion.
+
+Notes:
+
+- **A `.cmd` twin** is generated beside each shim so a bare `uip` also resolves through Windows PATHEXT lookup.
+- **The log is seeded empty**, so a correct run that legitimately calls nothing still satisfies a `max_count: 0` guard — while a *missing* log (mock never ran, or wrote elsewhere) still fails.
+- **stdin is never read** by the shim: reading it would block whenever the sandbox leaves stdin attached to an open pipe, hanging the task.
+- **Collisions are rejected.** If a `mock_path_dirs` entry already provides an executable of the same name, setup raises rather than letting directory order decide which one runs.
+- **It stubs a tool; it does not proxy one, and it does not serve per-invocation responses.** Recording a *real* executable on the way through, or returning different output per invocation, stays a hand-written mock under `mock_path_dirs` — both depend on state the harness cannot guarantee (the tool being installed, PATH order, live credentials, a fixture set).
 
 ## Template Sources
 
@@ -535,17 +647,17 @@ All criteria share these fields:
 | `description` | — | Human-readable description (required) |
 | `weight` | 1.0 | Relative importance for weighted score. `0` = **informational**: excluded from both the score and the pass/fail gate |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
-| `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`/`auto`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). `auto` arms whichever polarity this instance can decide (for dataset-fanned criteria whose positive/distractor role flips per row). See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_early` | `null` | **Only on live-observable criteria** (`skill_triggered`, `command_executed`). Presence arms the criterion for early stop (no run-level switch needed): an effective fail may end the run (weighted ceiling rule, recall deferral). Keys: `on_pass: stop\|continue` (default `continue`), `decide_within: N` (timeout → effective fail, reported as `decision_budget_exceeded`). Inert triggers by design on instances that can't decide their polarity (dataset fan-out support). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
-- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `classification_match`, `skill_triggered`
+- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `cli_called`, `classification_match`, `skill_triggered`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
 - **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`
 
 **Task success:** all *gating* criteria must score >= their `pass_threshold`. A
 criterion with `weight: 0` is informational — it is still checked, stored, and
 rendered in reports, but it neither contributes to the score nor fails the task.
-(A `weight: 0` criterion may not set `stop_when` or `suite_thresholds`: arming a
+(A `weight: 0` criterion may not set a `stop_early` block or `suite_thresholds`: arming a
 non-gating criterion for the early-stop or suite gate would let an
 "informational" check flip a run to failure.)
 
@@ -733,6 +845,7 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_exit_code` | 0 | Expected exit code |
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
+| `score_from_stdout` | `false` | Read a float score (0.0–1.0) from the first stdout line (remaining lines become details); a non-zero exit code or a parse failure scores 0.0. Mutually exclusive with `expected_stdout`. |
 
 ### `file_matches_regex`
 
@@ -760,6 +873,12 @@ Compares agent's code with a reference solution using similarity scoring. **Cont
   weight: 2.0
 ```
 
+| Field | Default | Description |
+|-------|---------|-------------|
+| `agent_file` | *required* | Path to the agent's generated file (relative to the sandbox root). |
+| `comparison_method` | `"ast"` | `ast` (structure), `token` (text), or `complexity` (metrics). |
+| `similarity_threshold` | 0.8 | Minimum similarity score to pass (0.0–1.0). |
+
 **Comparison methods:**
 - `ast` — Abstract Syntax Tree similarity (structure-based)
 - `token` — Token-based similarity (implementation details)
@@ -778,7 +897,127 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
   description: "Agent must use curl to fetch weather"
 ```
 
+| Field | Default | Description |
+|-------|---------|-------------|
+| `tool_name` | `null` | Tool-name filter (e.g. `Bash`); `null` counts any tool. |
+| `command_pattern` | `null` | Regex to match the command; `null` matches any command. Matched with shell normalization (see below). |
+| `min_count` | 1 | Minimum matching commands required. `0` permits zero matches — combine with `max_count: 0` to assert a command must **NOT** run. |
+| `max_count` | `null` | Optional inclusive upper bound. When set, the criterion passes iff `min_count <= matches <= max_count`. |
+| `require_success` | `false` | Only count commands that completed successfully. |
+| `exclude_pattern` | `null` | Regex that must NOT match; a command matching both `command_pattern` and `exclude_pattern` is skipped. Also matched with shell normalization (see below). |
+
+**Shell normalization.** For a Bash command, both `command_pattern` and `exclude_pattern` are matched against the raw command text **and** its shell-normalized form — the `bash`/`sh`/`zsh -lc "..."` wrapper stripped and shell quoting resolved with `shlex` — and a hit on *either* form counts. So a pattern like `curated_channels` matches whether the agent wrote the argument bare, `'single'`-quoted, `"double"`-quoted, or `\"escaped\"`; you do **not** hand-encode shell quoting. Because the same haystacks also feed `exclude_pattern` and the `max_count` gate, normalization is **not** purely additive: a quote-obfuscated call can now be caught by an exclusion or a `max_count: 0` gate that the raw text alone would have missed — and, conversely, an unedited `exclude_pattern` may now exclude a call it previously let through. Cross-repo suites that hand-encoded quote tolerance in their patterns should re-baseline.
+
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
+
+### `cli_called`
+
+Checks whether a CLI invocation matching a **structured** pattern was recorded, by reading a JSON Lines invocation log the sandbox produced. **Binary scoring.**
+
+Use this instead of `command_executed` or `file_matches_regex` when a test shadows a CLI with a recording mock and needs to assert on *what was actually executed*, field by field.
+
+```yaml
+- type: "cli_called"
+  description: "Switched the project to the capable model"
+  log: "mocks/calls.jsonl"            # Invocation log; omit it to use the record_cli default
+  verb: "ixp projects configure-model" # Ordered prefix of the non-flag arguments
+  positional: ["my_invoices-ixp"]      # Non-flag arguments following the verb, in order
+  flags:
+    model: "gemini_2_5_pro"            # Bare scalar == {equals: ...}
+  tool: "uip"                          # Optional: match only records with this tool
+  min_count: 1                         # Minimum matching invocations (default: 1)
+  max_count: null                      # Maximum; null = unbounded, 0 = forbidden
+  ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
+```
+
+`log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
+
+**Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
+
+```json
+{"ts": 1785416844.987, "tool": "uip", "argv": ["ixp", "projects", "get", "proj-1"], "exit": 1}
+```
+
+**Flag predicates.** Each entry under `flags:` takes **exactly one** of:
+
+| Predicate | Matches when the flag value… |
+|-----------|------------------------------|
+| `equals` | equals the string exactly (the bare-scalar shorthand) |
+| `contains` | contains the substring |
+| `matches_regex` | matches the regex — scoped to one value, not the whole line |
+| `any_of` | equals one of the listed strings |
+| `present: true` | the flag was passed, whatever its value — the right predicate for a boolean switch |
+| `absent: true` | the flag was **not** passed at all |
+
+`matches_regex` also accepts `flags:` (the `re` module's integers, e.g. `2` = `IGNORECASE`, `8` = `MULTILINE`, `16` = `DOTALL`), mirroring [`file_matches_regex`](#file_matches_regex). Setting `flags` next to any other predicate is rejected rather than silently ignored.
+
+Flags the criterion does not mention are ignored, so an extra `--output json` never breaks a match. Repeated flags (`--fields a --fields b`) are satisfied by any one value. A predicate on a flag also listed in `ignore_flags` is rejected at load time — the flag is dropped before predicates run, so it could never be evaluated.
+
+**Which flags carry a value is declared, not guessed.** A flag consumes the following token only if it appears in `flags:`, in `value_flags:`, or in `ignore_flags:`. Everything else is a switch, and the token after it stays positional:
+
+```yaml
+# `uip ixp fields delete --yes proj-1`
+- type: "cli_called"
+  description: "Did not delete proj-1"
+  verb: "ixp fields delete"
+  positional: ["proj-1"]        # --yes is a switch, so proj-1 stays positional
+  min_count: 0
+  max_count: 0                  # correctly FAILS -- the log proves the delete happened
+
+# `uip ixp projects list --folder Finance proj-1`
+- type: "cli_called"
+  description: "Listed proj-1"
+  verb: "ixp projects list"
+  positional: ["proj-1"]
+  value_flags: ["folder"]       # without this, "Finance" would count as a positional
+```
+
+Defaulting to "switch" is deliberate: `--yes` / `--force` / `-y` before the target is how destructive CLIs are invoked, so guessing that the flag swallows its neighbour is precisely how a `max_count: 0` guard ends up passing on the call it exists to forbid. The equals form (`--offset=-1`) is unambiguous and always binds directly, and a declared value flag binds even a dash-leading value (`--limit -1`).
+
+`ignore_flags` drops a flag from matching but does **not** make it value-bearing — an ignored flag that takes a value must also appear in `value_flags` (as `output` does by default). Otherwise `ignore_flags: ["verbose"]` on `delete --verbose proj-1` would let `--verbose` eat `proj-1`.
+
+**Clustered short flags are split, and declarations win.** `-rf` matches predicates on `r` and `f` — so a `-yf` cannot escape an `aliases: ["y"]` guard. If your CLI has a genuine multi-character short flag, naming it (in `flags`, `value_flags`, or `ignore_flags`) keeps it whole; and `-fvalue` binds when `f` is value-bearing. A bare negative number stays positional (`seek -1`), unless you declare a flag by that name (`head -1`).
+
+**Negative guards want the FEWEST facets that capture the forbidden act.** This is the opposite of a positive assertion, and it is easy to get backwards. `max_count: 0` passes when *nothing matches*, so every facet you add is another way for the real invocation to slip past the pattern and report a false PASS.
+
+In the delete example above, it is tempting to also assert `--yes`. Don't:
+
+- `--yes` is not the forbidden thing — the deletion is. The CLI *requires* a confirmation flag, so asserting it adds no discriminating power.
+- It adds escape routes: `-y` instead of `--yes` (a different flag name) no longer matches, and the guard passes on a delete that did happen.
+
+Use `present: true` — not `equals: ""` — when you do need to assert a switch. `present` needs no value, so it never makes the flag value-bearing; `equals: ""` depends on how the mock happens to record a switch and breaks if the CLI spells it `--force true`.
+
+**Short and long spellings are one flag via `aliases`.** A predicate matches a flag *name*, so `--yes` and `-y` are otherwise unrelated flags:
+
+```yaml
+flags:
+  yes:
+    present: true
+    aliases: ["y"]        # values gathered across --yes AND -y
+```
+
+`present` holds if any listed name appeared, `absent` only if none did, and a value predicate matches if any value under any name satisfies it — so `-f f-002` binds like `--fields f-002`. Splitting the spellings into one criterion each works for a *guard* (both forbidden, and criteria are ANDed) but cannot express "either spelling" positively, and makes `absent` flag **every** invocation, because whichever spelling was not used is always absent. A flag may belong to only one predicate: an alias that is also another key, or that appears in `ignore_flags`, is rejected at load time.
+
+The mirror rule for positive assertions: add every facet that distinguishes the right call from a near-miss, because there a missing facet makes the assertion *too easy* to satisfy.
+
+**Unusable records fail the criterion.** A line that is not JSON, not an object, or whose `argv` is not a list of strings scores 0.0 with an error, on the same footing as a missing log — a record that cannot be read might *be* the invocation a negative guard forbids.
+
+**One predicate per flag** — so a conjunction on a single flag ("contains *both* A and B") is not expressible directly. Two ways to write it:
+
+```yaml
+# 1. One matches_regex spanning both. DOTALL (16) is usually needed: a payload
+#    built with a heredoc contains newlines, and without it `.` stops at the first.
+flags:
+  updates:
+    matches_regex: '"name": "Invoice Number".*Do NOT use the Purchase Order'
+    flags: 16
+
+# 2. Or two criteria over the same log, which scores and reports each part separately.
+```
+
+**Negative guards.** Set `min_count: 0` and `max_count: 0` to assert a call did **not** happen. A missing log file *fails* rather than counting as zero matches — otherwise a mock writing to the wrong path would make every negative guard pass vacuously.
+
+**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`.
 
 ### `commands_efficiency`
 
@@ -856,6 +1095,8 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
 | `max_tokens` | `2000` | Maximum tokens in the judge's response |
 | `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
+| `capture_transcript` | `true` | Persist a `JudgeTranscript` (raw verdict + rendered prompts + token usage) to a sibling `judge-<idx>.yaml`. Set `false` to drop it when on-disk size matters (e.g. 1000-row datasets); the `findings` on the result persist regardless. |
+| `max_transcript_chars` | `100000` | Aggregate cap on captured transcript text (verdict + prompt + system, split 60/30/10). Exceeding it marks the transcript `truncated=True`. |
 
 **Transport selection.** The judge call is routed by the active `API_BACKEND`:
 
@@ -929,6 +1170,8 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `max_turns` | `50` | Judge's inner-loop turn limit |
 | `turn_timeout` | `300` | Wall-clock timeout (seconds) |
 | `agent` | hardened judge defaults | Nested `AgentConfig` — `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `ignore_patterns`, `sdk_options`. A partial block (e.g. only `model:`) still applies the judge security defaults for missing fields, and the security floor (`.claude` / `.mcp.json` / `_reference` ignore patterns, `setting_sources=[]`) is always enforced. |
+| `capture_transcript` | `true` | Persist a `JudgeTranscript` (tool calls + token usage + raw verdict + rendered prompts) to a sibling `judge-<idx>.yaml`. Set `false` to drop the trajectory log when on-disk size matters; the `findings` on the result persist regardless. |
+| `max_transcript_chars` | `100000` | Aggregate cap on captured transcript text (verdict + prompt + system + tool detail/result-preview lines, split 60/30/10 with tool calls prioritized). Exceeding it marks the transcript `truncated=True`. |
 
 **Security**
 
