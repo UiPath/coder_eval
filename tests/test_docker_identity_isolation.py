@@ -5,17 +5,22 @@ from __future__ import annotations
 import signal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from coder_eval.agents.codex_agent import CodexAgent
-from coder_eval.isolation.docker_runner import DockerRunError, _preflight_agent_isolation_image
+from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner, _preflight_agent_isolation_image
 from coder_eval.models import (
     AGENT_GID,
     AGENT_HOME,
     AGENT_UID,
     AgentKind,
+    ClaudeCodeAgentConfig,
     DockerDriverConfig,
+    RunCommandCriterion,
+    SandboxConfig,
+    TaskDefinition,
     parse_agent_config,
 )
 from coder_eval.utils import scrub_agent_env_overrides
@@ -138,3 +143,19 @@ def test_isolation_image_label_preflight_accepts_only_declared_capability(monkey
     )
     with pytest.raises(DockerRunError, match="does not declare"):
         _preflight_agent_isolation_image("image:old")
+
+
+def test_isolation_rejects_dynamic_privileged_criterion(tmp_path: Path) -> None:
+    task = TaskDefinition(
+        task_id="unsafe-grader",
+        description="test",
+        initial_prompt="work",
+        agent=ClaudeCodeAgentConfig(type=AgentKind.CLAUDE_CODE),
+        sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(agent_isolation=True)),
+        success_criteria=[RunCommandCriterion(description="unsafe", command="python check.py")],
+    )
+    rt = MagicMock(task=task, task_file=tmp_path / "task.yaml", run_dir=tmp_path / "run")
+    runner = DockerRunner(rt)
+
+    with pytest.raises(RuntimeError, match="dynamic criteria"):
+        runner._validate_agent_isolation_compatibility()

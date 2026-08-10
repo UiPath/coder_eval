@@ -27,11 +27,9 @@ import yaml
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
     AGENT_HOME,
-    CONTAINER_AGENT_SKILLS_DIR,
     CONTAINER_AGENT_WORK_DIR,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
-    CONTAINER_PRIVATE_PLUGIN_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
@@ -42,7 +40,6 @@ from coder_eval.models import (
     PreservationMode,
     ResourceLimits,
 )
-from coder_eval.plugin_bundle import stage_bundle
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -520,13 +517,10 @@ class DockerRunner:
         # _build_argv mounts read-write. None when there is no ~/.claude to
         # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
         self._claude_mount_src: Path | None = None
-        # Prepared before argv rendering. Agent-visible plugin mounts contain
-        # only manifest-verified projections; raw sources are mounted under the
+        # Prepared before argv rendering. Raw sources are mounted under the
         # root-only grader parent at unrelated container paths.
-        self._agent_plugin_mounts: list[tuple[Path, str]] = []
         self._private_source_mounts: list[tuple[Path, str]] = []
         self._host_to_private_paths: dict[str, str] = {}
-        self._host_plugin_to_agent_paths: dict[str, str] = {}
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -674,7 +668,7 @@ class DockerRunner:
         task_yaml_in = input_dir / "task.yaml"
         task_payload = self.rt.task.model_dump(mode="json")
         if self._docker_config.agent_isolation:
-            await asyncio.to_thread(self._prepare_isolated_sources, input_dir.parent)
+            await asyncio.to_thread(self._prepare_isolated_sources)
             task_payload = self._rewrite_task_paths(task_payload)
 
         def _dump_task_yaml() -> str:
@@ -736,18 +730,16 @@ class DockerRunner:
                 + f"sandbox: {unsupported_criteria}. Use static/built-in criteria or explicitly disable isolation."
             )
 
-    def _prepare_isolated_sources(self, staging: Path) -> None:
-        """Prepare public plugin bundles and private raw-source mount mappings.
+    def _prepare_isolated_sources(self) -> None:
+        """Prepare private raw-source mount mappings.
 
         This method never changes ownership or permissions on a source checkout.
         Raw sources remain read-only and are mounted only below the image's
         root-owned ``/opt/coder-eval/grader`` directory.
         """
 
-        self._agent_plugin_mounts = []
         self._private_source_mounts = []
         self._host_to_private_paths = {}
-        self._host_plugin_to_agent_paths = {}
 
         task_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
         if task_dir is not None:
@@ -757,31 +749,6 @@ class DockerRunner:
             raise DockerRunError(
                 "docker.agent_isolation requires system_prompt_file to be resolved to inline system_prompt "
                 + "before container staging"
-            )
-
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        bundle_root = staging / "agent-skills"
-        for index, plugin in enumerate(plugins):
-            raw = plugin.get("path") if isinstance(plugin, dict) else None
-            if not raw:
-                continue
-            source = Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
-            if not source.is_dir():
-                raise DockerRunError(f"agent plugin source does not exist or is not a directory: {source}")
-
-            bundle_source = bundle_root / f"plugin-{index}"
-            manifest = stage_bundle(source, bundle_source)
-            public_target = f"{CONTAINER_AGENT_SKILLS_DIR}/plugin-{index}"
-            private_target = f"{CONTAINER_PRIVATE_PLUGIN_DIR}/plugin-{index}"
-            self._agent_plugin_mounts.append((bundle_source, public_target))
-            self._register_private_mount(source, private_target)
-            self._host_plugin_to_agent_paths[str(source)] = public_target
-            logger.info(
-                "Prepared agent-visible plugin bundle %s -> %s (%d files, digest %s)",
-                source,
-                public_target,
-                len(manifest.files),
-                manifest.digest[:12],
             )
 
         from coder_eval.models import TemplateDirSource
@@ -842,23 +809,6 @@ class DockerRunner:
         rewritten = rewrite(payload)
         if not isinstance(rewritten, dict):
             raise DockerRunError("internal error rewriting staged task paths")
-
-        # The harness and criteria use private paths, but plugin discovery must
-        # point at the public projections. Override these fields after the broad
-        # path rewrite so no raw plugin path can survive serialization.
-        agent = rewritten.get("agent")
-        if isinstance(agent, dict):
-            staged_plugins = agent.get("plugins")
-            original_plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-            if isinstance(staged_plugins, list):
-                for original, staged in zip(original_plugins, staged_plugins, strict=False):
-                    raw = original.get("path") if isinstance(original, dict) else None
-                    if not raw or not isinstance(staged, dict):
-                        continue
-                    resolved = str(Path(os.path.expandvars(os.path.expanduser(raw))).resolve())
-                    public_target = self._host_plugin_to_agent_paths.get(resolved)
-                    if public_target is not None:
-                        staged["path"] = public_target
         return rewritten
 
     async def _stream_container_output(self, proc: asyncio.subprocess.Process, log_fh: TextIO) -> int:
@@ -1428,8 +1378,6 @@ class DockerRunner:
             claude_target = Path(AGENT_HOME) / ".claude" if cfg.agent_isolation else host_claude_dir
             argv += ["-v", f"{self._claude_mount_src}:{claude_target}"]
 
-        for source, target in self._agent_plugin_mounts:
-            argv += ["-v", f"{source.resolve()}:{target}:ro"]
         for source, target in self._private_source_mounts:
             argv += ["-v", f"{source.resolve()}:{target}:ro"]
 
@@ -1473,9 +1421,8 @@ class DockerRunner:
             argv.extend(["-v", f"{target}:{target}:ro"])
 
         plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        if not cfg.agent_isolation:
-            for plugin in plugins:
-                _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+        for plugin in plugins:
+            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
 
         from coder_eval.models import TemplateDirSource
 

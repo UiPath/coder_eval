@@ -35,13 +35,11 @@ RUN groupadd --gid ${AGENT_GID} agent \
     && useradd --uid ${AGENT_UID} --gid ${AGENT_GID} \
         --create-home --home-dir /home/agent --shell /usr/sbin/nologin agent \
     && install -d -o agent -g agent -m 0700 /work/agent /home/agent \
-    && install -d -o root -g root -m 0755 /opt/coder-eval/agent-skills \
     && install -d -o root -g root -m 0700 \
         /opt/coder-eval/grader \
         /opt/coder-eval/grader/input \
         /opt/coder-eval/grader/output \
         /opt/coder-eval/grader/task_dir \
-        /opt/coder-eval/grader/plugins \
         /opt/coder-eval/grader/references \
         /opt/coder-eval/grader/templates
 

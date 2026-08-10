@@ -24,11 +24,6 @@ CONTAINER_GRADER_DIR = "/opt/coder-eval/grader"
 CONTAINER_INPUT_DIR = f"{CONTAINER_GRADER_DIR}/input"
 CONTAINER_OUTPUT_DIR = f"{CONTAINER_GRADER_DIR}/output"
 CONTAINER_TASK_DIR = f"{CONTAINER_GRADER_DIR}/task_dir"
-CONTAINER_PRIVATE_PLUGIN_DIR = f"{CONTAINER_GRADER_DIR}/plugins"
-
-# Manifest-verified skill projections are the only plugin trees exposed to the
-# evaluated agent.
-CONTAINER_AGENT_SKILLS_DIR = "/opt/coder-eval/agent-skills"
 
 AGENT_UID = 2000
 AGENT_GID = 2000
@@ -50,7 +45,5 @@ RESERVED_CONTAINER_DIRS = frozenset(
         CONTAINER_INPUT_DIR,
         CONTAINER_OUTPUT_DIR,
         CONTAINER_TASK_DIR,
-        CONTAINER_PRIVATE_PLUGIN_DIR,
-        CONTAINER_AGENT_SKILLS_DIR,
     }
 )
