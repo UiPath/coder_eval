@@ -46,8 +46,8 @@ jobs:
     # version-bump push.
     if: "!contains(github.event.head_commit.message, 'chore(release):')"
     timeout-minutes: 30
-    env:
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: "openai-codex-cli-bin,openai-codex"
+    # No SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS on purpose: nothing installs on the
+    # host here, and the Docker build doesn't inherit job env (it uses its own ARG).
 
     steps:
       - name: Checkout code

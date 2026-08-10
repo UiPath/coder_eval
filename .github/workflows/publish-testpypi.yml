@@ -36,6 +36,9 @@ jobs:
     name: Build and publish to TestPyPI
     runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
+    env:
+      # `uv build` resolves build deps under the pool's safe-chain gate.
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }}
     environment:
       name: testpypi
       url: https://test.pypi.org/project/coder-eval/
