@@ -186,3 +186,23 @@ harness once for all of them.
   that CI never runs. Both were found by mutation-testing the suite and fixed. No
   mechanizable guard; the durable lesson is: when a test names a narrowing, construct
   the fixture so the row SURVIVES every other rule, or the assertion proves nothing.
+
+- [ ] **CE034 — runner-label registry + dogfood runner parity** over
+  `.github/workflows/*.yml`. Two clauses: (a) every label a job can land on must appear
+  in `.github/actionlint.yaml`'s `self-hosted-runner.labels` or a stock GitHub-hosted
+  allowlist — including *both* branches of an expression-valued `runs-on:`, which
+  actionlint treats as opaque; (b) `action-dogfood`'s label must equal the one the
+  consumer snippet in `docs/tutorials/02-ci-pipeline.md` advertises. Nothing guards
+  either today: actionlint is not wired into `make verify` or pre-commit (grep: the
+  config file is its only mention), and CE026 parses that job's prerequisite *steps*
+  but never its `runs-on:`. Why it matters: an undeclared label is not a runtime error,
+  the job queues until GitHub cancels it hours later — indistinguishable from a pool
+  outage; and a repo-wide `runs-on:` migration has twice swept up `action-dogfood`
+  (#306, then 027121e in this PR), which exists precisely to prove the published Action
+  works on the image external integrators use. Implemented and verified once (both
+  clauses caught their regression class on the real tree) but reverted as out of
+  proportion to a 16-line runner migration — ~240 lines including tests. Note when
+  writing it: discriminate labels from expression operands structurally, on the
+  preceding `&&`/`||`, NOT on the string's shape — a "contains 'ubuntu'" heuristic
+  silently fails on `uipath-ubunut-latest`, the exact transposition typo the rule is
+  for. Caught in the multi-model review of PR #86.

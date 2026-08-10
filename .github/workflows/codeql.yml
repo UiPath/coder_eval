@@ -16,7 +16,7 @@ permissions:
 jobs:
   analyze:
     name: Analyze Python code
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 15
     permissions:
       security-events: write

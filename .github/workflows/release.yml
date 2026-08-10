@@ -49,21 +49,22 @@ permissions:
 jobs:
   release:
     name: Bump version and publish
-    # GitHub-hosted so cutting a release does not depend on the self-hosted
-    # `uipath-ubuntu-latest` pool. semantic-release, uv, twine, and the docker
-    # buildx -> GHCR push all run fine here.
-    runs-on: ubuntu-latest
+    # KNOWINGLY reverses PR #6, which moved this job to a GitHub-hosted runner because
+    # "cutting a release was blocked whenever that pool was unavailable". The pool's
+    # availability is what changed; the accepted trade-off is that the release path has
+    # no GitHub-hosted fallback again. Both jobs here are `workflow_dispatch`-only, so
+    # no PR check exercises them -- dry-run publish-testpypi.yml after editing this file.
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 15
     outputs:
       # Exposed so the downstream publish-pypi job gates on a version having been
       # produced (real release on main, or a stamped prerelease on a branch).
       version: ${{ steps.ver.outputs.version }}
     env:
-      # The self-hosted `uipath-ubuntu-latest` runners enforce a minimum
-      # package-age safe-chain check on uv installs; on GitHub-hosted runners
-      # this is a no-op. Kept (matching pr-checks.yml) so parity is preserved
-      # if the job ever moves back to the self-hosted pool.
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: "openai-codex-cli-bin,openai-codex"
+      # Load-bearing on the release path: the pool enforces a package-age safe-chain
+      # check on uv installs. Same expression as pr-checks.yml (see the comment there),
+      # so a package can't pass PR CI and then fail the release install.
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }}
 
     steps:
       # Only a real release (main) needs the app token: semantic-release pushes the
@@ -409,14 +410,14 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:buildcache
 
   # Publish the wheel+sdist to public PyPI. This runs as its own job so OIDC
-  # Trusted Publishing is scoped to a dedicated, environment-gated context on
-  # GitHub-hosted runners -- no PyPI token/secret is stored. Gated on the
-  # release job having actually cut a version.
+  # Trusted Publishing is scoped to a dedicated, environment-gated context --
+  # no PyPI token/secret is stored. Gated on the release job having actually
+  # cut a version.
   publish-pypi:
     name: Publish to PyPI
     needs: release
     if: needs.release.outputs.version != ''
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
     environment:
       name: pypi
