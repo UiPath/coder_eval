@@ -9,15 +9,10 @@ if [[ $# -eq 0 ]]; then
     exit 64
 fi
 
-GROUP_ARGS=(--clear-groups)
-if [[ "${CODER_EVAL_AGENT_ALLOW_RPC:-}" == "1" ]]; then
-    GROUP_ARGS=(--groups=uip-rpc)
-fi
-
 exec setpriv \
     --reuid=agent \
     --regid=agent \
-    "${GROUP_ARGS[@]}" \
+    --clear-groups \
     --inh-caps=-all \
     --ambient-caps=-all \
     --bounding-set=-all \

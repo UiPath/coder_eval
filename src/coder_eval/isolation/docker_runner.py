@@ -527,7 +527,6 @@ class DockerRunner:
         self._private_source_mounts: list[tuple[Path, str]] = []
         self._host_to_private_paths: dict[str, str] = {}
         self._host_plugin_to_agent_paths: dict[str, str] = {}
-        self._mock_fixture_mount: Path | None = None
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -589,8 +588,6 @@ class DockerRunner:
                     + "stage the required input through template_sources or disable isolation explicitly"
                 )
             self._workspace_dir = CONTAINER_AGENT_WORK_DIR
-        elif self.rt.task.sandbox.protected_mocks:
-            raise DockerRunError("sandbox.protected_mocks requires docker.agent_isolation: true")
 
         # Stage only the inputs (task YAML + context). The *output* dir is
         # the host's run_dir itself, bind-mounted at the same path inside
@@ -700,9 +697,6 @@ class DockerRunner:
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
-                "protected_mock_config": (
-                    "/opt/coder-eval/mock/fixtures/mock-config.json" if self._mock_fixture_mount else None
-                ),
             }
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
@@ -754,7 +748,6 @@ class DockerRunner:
         self._private_source_mounts = []
         self._host_to_private_paths = {}
         self._host_plugin_to_agent_paths = {}
-        self._mock_fixture_mount = None
 
         task_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
         if task_dir is not None:
@@ -814,35 +807,6 @@ class DockerRunner:
                 self._register_external_private_path(
                     reference_file.parent, "/opt/coder-eval/grader/references/file-parent"
                 )
-
-        protected_mocks = self.rt.task.sandbox.protected_mocks or []
-        if protected_mocks:
-            mock_root = staging / "protected-mock-fixtures"
-            mock_root.mkdir(parents=True, exist_ok=True)
-            tools: list[dict[str, object]] = []
-            for index, spec in enumerate(protected_mocks):
-                source = Path(spec.fixture).resolve()
-                if not source.is_file():
-                    raise DockerRunError(f"protected mock fixture does not exist: {source}")
-                filename = f"fixture-{index}.json"
-                destination = mock_root / filename
-                shutil.copy2(source, destination)
-                destination.chmod(0o444)
-                container_fixture = f"/opt/coder-eval/mock/fixtures/{filename}"
-                self._host_to_private_paths[str(source)] = container_fixture
-                tools.append(
-                    {
-                        "tool": spec.tool,
-                        "fixture": container_fixture,
-                        "max_requests": spec.max_requests,
-                        "passthrough_argv_prefixes": spec.passthrough_argv_prefixes,
-                    }
-                )
-            config_path = mock_root / "mock-config.json"
-            config_path.write_text(json.dumps({"version": 1, "tools": tools}), encoding="utf-8")
-            config_path.chmod(0o444)
-            mock_root.chmod(0o555)
-            self._mock_fixture_mount = mock_root
 
     def _register_external_private_path(self, source: Path, target: str) -> None:
         source = source.resolve()
@@ -1428,8 +1392,6 @@ class DockerRunner:
         argv += ["--env", "CODER_EVAL_IN_CONTAINER=1"]
         if cfg.agent_isolation:
             argv += ["--env", "CODER_EVAL_AGENT_ISOLATION=1"]
-            if self.rt.task.sandbox.protected_mocks:
-                argv += ["--env", "CODER_EVAL_AGENT_ALLOW_RPC=1"]
 
         # Hard-disable telemetry INSIDE the container. The app ships a baked-in
         # default connection string, so without this the in-container orchestrator
@@ -1470,8 +1432,6 @@ class DockerRunner:
             argv += ["-v", f"{source.resolve()}:{target}:ro"]
         for source, target in self._private_source_mounts:
             argv += ["-v", f"{source.resolve()}:{target}:ro"]
-        if self._mock_fixture_mount is not None:
-            argv += ["-v", f"{self._mock_fixture_mount.resolve()}:/opt/coder-eval/mock/fixtures:ro"]
 
         # Auto-mount host paths the task references so they resolve inside
         # the container at the *same* path they have on the host.

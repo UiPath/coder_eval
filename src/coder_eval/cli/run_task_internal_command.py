@@ -182,8 +182,6 @@ def run_task_internal_command(
     # Absent -> None -> standard run_dir/artifacts workspace.
     workspace_dir_raw = context.get("workspace_dir")
     workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
-    protected_mock_config_raw = context.get("protected_mock_config")
-    protected_mock_config = Path(protected_mock_config_raw) if protected_mock_config_raw else None
     config_lineage = {k: ConfigLineageEntry.model_validate(v) for k, v in (context.get("config_lineage") or {}).items()}
     # Prefer the host's raw source_yaml so task.json's audit trail matches
     # the in-process driver. Fall back to the staged (post-override) YAML
@@ -232,8 +230,5 @@ def run_task_internal_command(
 
     orchestrator.stream_callback = StdoutNDJsonCallback()
 
-    from coder_eval.protected_mock.runtime import running_mock_server
-
-    with running_mock_server(protected_mock_config):
-        asyncio.run(orchestrator.run())
+    asyncio.run(orchestrator.run())
     # Orchestrator.run() writes task.json to run_dir (== output_dir). Done.

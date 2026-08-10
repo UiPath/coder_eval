@@ -61,7 +61,6 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
         task = TaskDefinition(**task_data)
         # Resolve relative template paths
         task = resolve_template_paths(task, task_file.parent)
-        task = resolve_protected_mock_paths(task, task_file.parent)
         task = resolve_initial_prompt_file(task, task_file.parent)
         task = resolve_system_prompt_files(task, task_file.parent)
         task = resolve_dockerfile_path(task, task_file.parent)
@@ -138,19 +137,6 @@ def resolve_template_paths(task: TaskDefinition, base_dir: Path) -> TaskDefiniti
     if task.sandbox.template_sources:
         resolve_template_source_paths(task.sandbox.template_sources, base_dir)
 
-    return task
-
-
-def resolve_protected_mock_paths(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
-    """Resolve and validate protected mock fixtures relative to the task YAML."""
-
-    for mock in task.sandbox.protected_mocks or []:
-        fixture = Path(os.path.expandvars(mock.fixture))
-        if not fixture.is_absolute():
-            fixture = (base_dir / fixture).resolve()
-        if not fixture.is_file():
-            raise FileNotFoundError(f"Protected mock fixture not found: {fixture}")
-        mock.fixture = str(fixture)
     return task
 
 

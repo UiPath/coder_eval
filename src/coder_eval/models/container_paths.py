@@ -34,11 +34,6 @@ AGENT_UID = 2000
 AGENT_GID = 2000
 AGENT_USERNAME = "agent"
 AGENT_HOME = "/home/agent"
-MOCKD_UID = 2100
-MOCKD_GID = 2100
-MOCKD_USERNAME = "mockd"
-MOCK_RPC_GID = 2200
-MOCK_RPC_GROUP = "uip-rpc"
 
 CONTAINER_DROP_SHIM = "/usr/local/bin/coder_eval_drop_privilege.sh"
 CONTAINER_CLAUDE_SHIM = "/usr/local/bin/coder_eval_claude_agent.sh"
