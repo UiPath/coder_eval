@@ -44,9 +44,20 @@ function parsePythonTable(): Record<
 describe("pricing.ts ↔ pricing.py parity", () => {
     const py = parsePythonTable();
 
-    test("parses a non-trivial Python table", () => {
-        // Guard against a regex/path regression silently passing the test.
-        expect(Object.keys(py).length).toBeGreaterThan(10);
+    test("parses every ModelPricing row in the Python table", () => {
+        // A "> 10" floor is not enough: the guard NARROWS silently if the regex
+        // stops matching some rows (a `ruff format` reflow onto several lines, a
+        // switch to keyword args), and a narrowed guard stops reporting exactly
+        // the class of omission this file exists to catch. Count the constructor
+        // calls in the source and require the parse to have found all of them.
+        const declared = (
+            readFileSync(PY_PATH, "utf8").match(/^\s*"[^"]+":\s*ModelPricing\(/gm) ?? []
+        ).length;
+        expect(declared).toBeGreaterThan(10);
+        expect(
+            Object.keys(py).length,
+            "ROW_RE missed a pricing.py row — the parity guard is narrower than it looks",
+        ).toBe(declared);
     });
 
     test("every model in lib/pricing.ts exists in pricing.py", () => {
@@ -71,20 +82,24 @@ describe("pricing.ts ↔ pricing.py parity", () => {
     });
 
     // Python-priced models we deliberately do NOT mirror to the frontend: heavy
-    // frontier Claude/GPT variants the evalboard never runs, so pricing them here
-    // adds nothing. Kept explicit (not a blanket "ignore extras") so a NEW model
-    // added to pricing.py that ISN'T here and ISN'T in PRICING breaks the build —
-    // catching a real litellm-relevant omission (e.g. the Bedrock open-weight ids
-    // that previously rendered "—" for cost).
+    // frontier variants no harness runs, so pricing them here adds nothing. Kept
+    // explicit (not a blanket "ignore extras") so a NEW model added to pricing.py
+    // that ISN'T here and ISN'T in PRICING breaks the build — catching a real
+    // litellm-relevant omission (e.g. the Bedrock open-weight ids that previously
+    // rendered "—" for cost).
+    //
+    // KEEP THIS SET HONEST. It silences the drift guard, so a stale entry hides a
+    // live bug rather than a non-issue: `claude-sonnet-5`, `gpt-5.6-sol`,
+    // `gpt-5.6-terra` and `gpt-5.6-luna` sat here under "the evalboard never runs
+    // them" while appearing ~32k / ~2k / ~17k / ~2k times in `runs-remote/`, so
+    // every one of those runs rendered "—" for cost with nothing failing. Before
+    // adding an id, grep the corpus for it — absence from run data is the ONLY
+    // justification, and it expires the moment a harness adopts the model.
     const DELIBERATELY_UNMIRRORED = new Set([
-        "claude-sonnet-5",
         "gpt-5.4-mini",
         "gpt-5.4-nano",
         "gpt-5.4-pro",
         "gpt-5.5-pro",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
         // OpenRouter open-weight models: priced in pricing.py only for the Python
         // max_usd static fallback. The evalboard deliberately does NOT statically
         // price them — OpenRouter routes per-request, so it shows the captured
@@ -93,6 +108,18 @@ describe("pricing.ts ↔ pricing.py parity", () => {
         "z-ai/glm-5.2",
         "deepseek/deepseek-v4-pro",
     ]);
+
+    test("every DELIBERATELY_UNMIRRORED id still exists in pricing.py", () => {
+        // Stale-membership guard. An exemption silences the drift guard for one
+        // id forever; once the id leaves pricing.py the entry silences nothing
+        // and only survives to be copied. Making that a build failure is what
+        // forces the set to be re-read rather than appended to.
+        const stale = [...DELIBERATELY_UNMIRRORED].filter((m) => !(m in py));
+        expect(
+            stale,
+            `exempted from the mirror but no longer priced in pricing.py — drop them from DELIBERATELY_UNMIRRORED: ${stale.join(", ")}`,
+        ).toEqual([]);
+    });
 
     test("every pricing.py model is mirrored in pricing.ts or explicitly unmirrored", () => {
         const missing = Object.keys(py).filter((m) => !(m in PRICING) && !DELIBERATELY_UNMIRRORED.has(m));

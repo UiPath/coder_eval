@@ -17,6 +17,15 @@ export function fmtRunTime(id: string): string {
     return `${d} · ${t.replace(/-/g, ":")}`;
 }
 
+// Date-only form of fmtRunTime, for columns that need to answer "how old is
+// this" rather than "which run exactly". Non-date-shaped ids pass through
+// (reusing fmtRunTime's guard rather than a bare split, which would hand back
+// "codex" for an ad-hoc id).
+export function fmtRunDate(id: string): string {
+    if (!DAILY_RUN_ID_RE.test(id)) return id;
+    return id.split("_")[0];
+}
+
 // Format a run.json ISO timestamp (`start_time`, "YYYY-MM-DDTHH:MM:SS[.ffffff]")
 // into the same "YYYY-MM-DD · HH:MM:SS" shape fmtRunTime renders for date-shaped
 // run ids — so an ad-hoc run, whose id carries no date, shows a comparable

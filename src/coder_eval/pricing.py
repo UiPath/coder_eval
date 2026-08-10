@@ -3,7 +3,8 @@
 Anthropic/OpenAI/Google built-in rates; plugins contribute additional rates via
 ``register_pricing()``. Prices are per million tokens (MTok).
 Sources: https://claude.com/pricing#api, https://developers.openai.com/api/docs/pricing,
-https://ai.google.dev/gemini-api/docs/pricing (all verified 2026-07-29).
+https://ai.google.dev/gemini-api/docs/pricing (all verified 2026-07-29;
+the GPT-5.6 rows re-verified 2026-08-09 after the 2026-07-30 Terra/Luna cut).
 """
 
 from collections.abc import Iterable
@@ -20,7 +21,7 @@ class ModelPricing:
     cache_read_per_mtok: float  # prompt caching read
 
 
-# Official vendor rate cards, verified 2026-07-29.
+# Official vendor rate cards, verified 2026-07-29 (GPT-5.6 rows: 2026-08-09).
 # Key: CLI model name (before gateway mapping)
 _PRICING: dict[str, ModelPricing] = {
     "claude-fable-5": ModelPricing(10.0, 50.0, 12.50, 1.0),
@@ -79,9 +80,14 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5.4-mini": ModelPricing(0.75, 4.5, 0.75, 0.075),
     "gpt-5.4-nano": ModelPricing(0.20, 1.25, 0.20, 0.02),
     # GPT-5.6: sol flagship / terra balanced (Codex default) / luna economy.
+    # Terra and Luna were REPRICED on 2026-07-30 (-20% and -80%); these are the
+    # post-cut rates. The pre-cut $2.50/$15 and $1.00/$6 are what a historical run
+    # was actually billed, but this table is a single current-rate card with no
+    # notion of an effective date — so old runs re-price low, the same tradeoff
+    # the Sonnet promo comment above already accepts.
     "gpt-5.6-sol": ModelPricing(5.0, 30.0, 5.0, 0.50),
-    "gpt-5.6-terra": ModelPricing(2.5, 15.0, 2.5, 0.25),
-    "gpt-5.6-luna": ModelPricing(1.0, 6.0, 1.0, 0.10),
+    "gpt-5.6-terra": ModelPricing(2.0, 12.0, 2.0, 0.20),
+    "gpt-5.6-luna": ModelPricing(0.20, 1.20, 0.20, 0.02),
     # Google Gemini (AntigravityAgent, via the Gemini Developer API), keyed on the
     # literal ids the ListModels endpoint returns. No cache-write fee, so
     # cache_write == input (unused: the agent maps cache_creation_tokens to 0).

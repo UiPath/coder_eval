@@ -11,6 +11,7 @@ import {
     type TagCount,
 } from "./overview";
 import { DEFAULT_HARNESS } from "./harness";
+import { taskCarriesRepoTag } from "./tags";
 import type { ComponentSha } from "./runs";
 
 export const TRENDS_RECENT_RUN_COUNT = 10;
@@ -254,9 +255,16 @@ export function aggregateTaskTrends(
 // Predicate matching getOverview's tag scoping logic, but operating on the
 // aggregated TaskTrend (we don't keep per-run reviewTagsByTask around after
 // aggregation; dominantFailureTags is the equivalent task-level signal).
+//
+// NOTE — divergence from /path-to-ga, which answers the same question under
+// stricter rules. `trend.tags` is a UNION over the window, so a task de-tagged
+// upstream keeps matching here until every run that predates the removal ages
+// out; lib/overview.ts::buildTagTaskRows instead drops a task proven de-tagged
+// by a newer run. Likewise `passRate` below counts mature carry-forwards as
+// passes, which that page excludes. Both are deliberate: this is the general
+// browsing surface, that one is a GA-readiness report.
 export function trendMatchesTag(trend: TaskTrend, tag: string): boolean {
-    if (trend.skill === tag) return true;
-    if (trend.tags.includes(tag)) return true;
+    if (taskCarriesRepoTag(trend, tag)) return true;
     return trend.dominantFailureTags.some((t) => t.tag === tag);
 }
 
