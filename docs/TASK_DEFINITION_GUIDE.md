@@ -673,7 +673,7 @@ score mattered.
 
 ### Glob patterns in `path`
 
-Every path-based criterion (`file_exists`, `file_contains`, `file_matches_regex`, `file_check`, `json_check`, `import_check`) accepts a glob in `path`. Use one when the prompt does not pin where the file lands — a scaffolding tool that creates a wrapper directory the agent names itself, for example.
+Every sandbox-relative path field accepts a glob — `path` on `file_exists`, `file_contains`, `file_matches_regex`, `file_check`, `json_check` and `classification_match`, `json_schema` on `json_check`, and `agent_file` on `reference_comparison`. Use one when the prompt does not pin where the file lands — a scaffolding tool that creates a wrapper directory the agent names itself, for example.
 
 ```yaml
 - type: "file_contains"
@@ -684,12 +684,16 @@ Every path-based criterion (`file_exists`, `file_contains`, `file_matches_regex`
 
 Rules:
 
-- A `path` with no `*`, `?`, or `[` behaves exactly as before.
+- **A path that exists is never treated as a pattern.** A literal `path` behaves exactly as before, including one containing `*`, `?`, or `[` — a real file named `report[2024].json` is graded as itself, not as a character class that would match `report2.json`. Globbing only kicks in when the literal path does not exist.
+- **Glob matches skip ignored directories.** Expansion runs over the live sandbox root, which also holds harness-created content the agent never wrote (`.venv` for any task with a `python:` block, `node_modules`, `dist`, `build`, `__pycache__`, …), so matches are filtered through the same [`ignore_patterns`](#sandbox-configuration) set used for template copying. A segment your pattern names *literally* is an opt-in and survives, so `dist/**/*.js` still grades `dist`; to un-ignore a directory a wildcard has to discover, use the negation escape hatch — `ignore_patterns: ["!dist"]`.
 - Matches are sorted, and directories are skipped.
 - `file_exists` passes when the glob matches **at least one** file.
-- Content checks require the glob to match **exactly one** file. An ambiguous glob scores 0.0 and reports every match rather than silently grading one of them — narrow the pattern.
+- Content checks require the glob to match **exactly one** file. An ambiguous glob scores 0.0 and reports the matches (first 10, then `+N more`) rather than silently grading one of them — narrow the pattern.
+- When a glob resolves, the file that was actually graded is echoed in the criterion's `details` as `resolved: <path>`.
 
-Prefer a glob over a hardcoded path whose leading directory the task prompt never specifies: a correct artifact in an unexpected directory otherwise scores 0.0 on the path alone.
+Prefer a glob over a hardcoded path whose leading directory the task prompt never specifies: a correct artifact in an unexpected directory otherwise scores 0.0 on the path alone. Glob away only the segment the prompt leaves free, though — if the free part is an unknown wrapper directory, `**/<Name>.flow` stays unique where a blanket `**/*.flow` turns exactly-one into a hard 0.0 the moment a second flow file exists.
+
+> **Dataset note:** `${row.<field>}` substitution runs over `success_criteria` string leaves, so a row value containing `*`, `?`, or `[` lands inside `path`. Literal-first resolution means such a path still grades the real file when it exists; it falls back to glob expansion only when it does not.
 
 ### `file_exists`
 

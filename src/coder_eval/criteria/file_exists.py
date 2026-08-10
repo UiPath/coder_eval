@@ -37,9 +37,14 @@ class FileExistsChecker(BaseCriterion[FileExistsCriterion]):
         exists = sandbox.file_exists(criterion.path)
         score = 1.0 if exists else 0.0
 
+        details = f"File '{criterion.path}' {'exists' if exists else 'does not exist'}"
+        resolved = sandbox.resolved_path_label(criterion.path)
+        if resolved:
+            details += f" (resolved: {resolved})"
+
         return CriterionResult(
             criterion_type=criterion.type,
             description=criterion.description,
             score=score,
-            details=f"File '{criterion.path}' {'exists' if exists else 'does not exist'}",
+            details=details,
         )

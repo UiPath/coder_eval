@@ -78,6 +78,10 @@ class FileMatchesRegexChecker(BaseCriterion[FileMatchesRegexCriterion]):
                 matched_text = match.group()[:100]
                 details = f"Pattern '{criterion.pattern}' found but should not be present (matched: '{matched_text}')"
 
+        resolved = sandbox.resolved_path_label(criterion.path)
+        if resolved:
+            details += f" (resolved: {resolved})"
+
         return CriterionResult(
             criterion_type=criterion.type,
             description=criterion.description,

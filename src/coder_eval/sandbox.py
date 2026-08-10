@@ -66,6 +66,27 @@ _WORKSPACE_CAPTURE_IGNORE = (
     ".wget-hsts",
 )
 
+# Characters that make a criterion `path` eligible for glob expansion. Eligible,
+# not automatic: `Sandbox.resolve_files` tries the literal path first.
+_GLOB_METACHARACTERS = "*?["
+
+# Cap on how many matches an ambiguity error enumerates. The message is
+# persisted to task.json and injected into judge prompts, so an unbounded
+# listing over a wide pattern is a real payload.
+_MAX_LISTED_MATCHES = 10
+
+
+def _is_glob(path: str) -> bool:
+    """Return whether ``path`` contains a glob metacharacter."""
+    return any(c in path for c in _GLOB_METACHARACTERS)
+
+
+def _format_matches(matches: list[Path], root: Path) -> str:
+    """Render matches as sandbox-relative paths, truncated to a bounded list."""
+    listed = ", ".join(str(p.relative_to(root)) for p in matches[:_MAX_LISTED_MATCHES])
+    remaining = len(matches) - _MAX_LISTED_MATCHES
+    return f"{listed}, +{remaining} more" if remaining > 0 else listed
+
 
 def _grant_read_traverse(root: Path) -> None:
     """Recursively apply ``chmod a+rX`` semantics under ``root``.
@@ -1096,13 +1117,24 @@ class Sandbox:
     def resolve_files(self, path: str) -> list[Path]:
         """Resolve a criterion ``path`` to the sandbox files it addresses.
 
-        A plain path resolves to itself. A path containing a glob
-        metacharacter (``*``, ``?``, ``[``) is expanded against the sandbox
-        root, so a criterion can address a file whose exact location the task
-        prompt does not pin — e.g. ``**/*.flow`` matches a scaffolded wrapper
-        directory the agent was free to name. Matches are sorted so grading is
-        deterministic, and directories are dropped so a glob cannot resolve to
-        something unreadable.
+        A path that names an existing file or directory resolves to itself,
+        **even when it contains a glob metacharacter** — a real file called
+        ``report[2024].json`` is graded as itself rather than reinterpreted as
+        a character class that would silently match ``report2.json``. Only when
+        the literal does not exist is a path containing ``*``, ``?`` or ``[``
+        expanded against the sandbox root, so a criterion can address a file
+        whose exact location the task prompt does not pin — e.g. ``**/*.flow``
+        matches a scaffolded wrapper directory the agent was free to name.
+
+        Glob matches are filtered through the sandbox's ignore patterns
+        (``.venv``, ``node_modules``, ``dist``, … — see
+        :func:`~coder_eval.resources.get_ignore_patterns`), because the sandbox
+        root holds harness-created content the agent never authored and
+        grading off it is neither fair nor deterministic. Only path segments
+        the glob *discovered* are filtered: a segment the pattern names
+        literally (``dist/**/*.js``) is an explicit opt-in and survives.
+        Matches are sorted so grading is deterministic, and directories are
+        dropped so a glob cannot resolve to something unreadable.
 
         Args:
             path: Relative path or glob pattern
@@ -1113,11 +1145,50 @@ class Sandbox:
         if not self.sandbox_dir:
             return []
 
-        if not any(c in path for c in "*?["):
-            candidate = self.sandbox_dir / path
-            return [candidate] if candidate.exists() else []
+        # Literal first: an existing path is never reinterpreted as a pattern.
+        candidate = self.sandbox_dir / path
+        if candidate.exists():
+            return [candidate]
 
-        return sorted(p for p in self.sandbox_dir.glob(path) if p.is_file())
+        if not _is_glob(path):
+            return []
+
+        patterns = get_ignore_patterns(self.config.ignore_patterns)
+        pinned = {segment for segment in path.split("/") if segment and not _is_glob(segment)}
+
+        matches: list[Path] = []
+        for match in self.sandbox_dir.glob(path):
+            if not match.is_file():
+                continue
+            discovered = [part for part in match.relative_to(self.sandbox_dir).parts if part not in pinned]
+            if discovered and should_ignore_path(Path(*discovered), patterns):
+                continue
+            matches.append(match)
+
+        return sorted(matches)
+
+    def resolved_path_label(self, path: str) -> str | None:
+        """Sandbox-relative path a glob resolved to, for grading transparency.
+
+        With exactly-one-match semantics on content reads, *which* file was
+        graded is most of the signal. Returns ``None`` for a literal path
+        (nothing was inferred) and for a pattern that did not resolve to
+        exactly one file.
+
+        Args:
+            path: Relative path or glob pattern
+
+        Returns:
+            Sandbox-relative path of the single match, or ``None``
+        """
+        if not self.sandbox_dir or not _is_glob(path):
+            return None
+
+        matches = self.resolve_files(path)
+        if len(matches) != 1:
+            return None
+
+        return str(matches[0].relative_to(self.sandbox_dir))
 
     def get_file_content(self, path: str) -> str:
         """Read the content of a file in the sandbox.
@@ -1141,9 +1212,9 @@ class Sandbox:
         if not matches:
             raise FileNotFoundError(f"No file matches '{path}' in the sandbox")
         if len(matches) > 1:
-            listed = ", ".join(str(p.relative_to(self.sandbox_dir)) for p in matches)
             raise ValueError(
-                f"Pattern '{path}' matches {len(matches)} files — refusing to guess which to grade: {listed}"
+                f"Pattern '{path}' matches {len(matches)} files — refusing to guess which to grade: "
+                + _format_matches(matches, self.sandbox_dir)
             )
 
         return matches[0].read_text(encoding="utf-8")

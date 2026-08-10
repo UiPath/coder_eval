@@ -1371,3 +1371,43 @@ class TestCE026ActionDocSurfaces:
         findings = find_slug_mismatches([page], "coder_eval")
         assert len(findings) == 1
         assert "displays as 'coder eval'" in findings[0].message
+
+
+@pytest.mark.lint
+class TestCE032CriteriaPathSeam:
+    """CE032 fires on a criterion checker joining a path onto sandbox_dir."""
+
+    CRITERION_FILE = "/repo/src/coder_eval/criteria/file_check.py"
+
+    @staticmethod
+    def _run(src: str, filepath: str):
+        import ast
+
+        from tests.lint.rules.ce032_criteria_path_seam import CriteriaPathSeam
+
+        return CriteriaPathSeam(filepath).check(ast.parse(src))
+
+    def test_flags_direct_join(self):
+        violations = self._run("agent_path = sandbox.sandbox_dir / criterion.agent_file", self.CRITERION_FILE)
+        assert len(violations) == 1
+        assert "bypassing the path seam" in violations[0].message
+
+    def test_flags_join_with_literal(self):
+        assert self._run("p = self.sandbox.sandbox_dir / 'solution.py'", self.CRITERION_FILE)
+
+    def test_allows_reading_the_root_without_joining(self):
+        assert not self._run("if not sandbox.sandbox_dir:\n    return None", self.CRITERION_FILE)
+
+    def test_allows_the_seam(self):
+        assert not self._run("content = sandbox.get_file_content(criterion.path)", self.CRITERION_FILE)
+
+    def test_scoped_to_the_criteria_package(self):
+        # Sandbox itself, and non-criteria consumers, legitimately join onto the root.
+        assert not self._run(
+            "target = self.sandbox_dir / path",
+            "/repo/src/coder_eval/sandbox.py",
+        )
+        assert not self._run(
+            "target = sandbox.sandbox_dir / path",
+            "/repo/src/coder_eval/orchestrator.py",
+        )

@@ -71,6 +71,9 @@ class FileContainsChecker(BaseCriterion[FileContainsCriterion]):
 
         # Build details
         details_parts = []
+        resolved = sandbox.resolved_path_label(criterion.path)
+        if resolved:
+            details_parts.append(f"Resolved: {resolved}")
         details_parts.append(f"Includes: {includes_found}/{includes_total} found")
         if criterion.excludes:
             excludes_absent = len(criterion.excludes) - sum(1 for exc in criterion.excludes if exc in content)

@@ -779,8 +779,13 @@ class JsonCheckCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["json_check"] = "json_check"
-    path: str = Field(description="Path to the JSON file (relative to sandbox root)")
-    json_schema: str | None = Field(default=None, description="Path to JSON Schema file (relative to sandbox root)")
+    path: str = Field(
+        description="Path to the JSON file (relative to sandbox root); may be a glob matching exactly one file"
+    )
+    json_schema: str | None = Field(
+        default=None,
+        description="Path to JSON Schema file (relative to sandbox root); may be a glob matching exactly one file",
+    )
     assertions: list[JMESPathAssertion] = Field(
         default_factory=list, description="JMESPath assertions to evaluate against the parsed JSON"
     )
@@ -845,7 +850,9 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     type: Literal["reference_comparison"] = "reference_comparison"
 
     # Required fields
-    agent_file: str = Field(description="Path to agent's generated file (relative to sandbox root)")
+    agent_file: str = Field(
+        description="Path to agent's generated file (relative to sandbox root); may be a glob matching exactly one file"
+    )
 
     comparison_method: Literal["ast", "token", "complexity"] = Field(
         default="ast",
@@ -1037,7 +1044,12 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["classification_match"] = "classification_match"
-    path: str = Field(description="Path to the file (relative to sandbox) containing the agent's predicted label")
+    path: str = Field(
+        description=(
+            "Path to the file (relative to sandbox) containing the agent's predicted label; "
+            "may be a glob matching exactly one file"
+        )
+    )
     expected_label: str = Field(description="Ground-truth label for this row")
     allowed_labels: list[str] = Field(
         min_length=1,
