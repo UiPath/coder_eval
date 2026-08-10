@@ -23,18 +23,33 @@ Inspect the target path:
 
 **Task scope (single)**: read `task.json`.
 
-**Task scope (aggregate replicates)**: read every `??/task.json` and merge — per-replicate arrays for `final_status`, `weighted_score`, `iteration_count`, `duration_seconds`, `total_cost_usd`; union of `success_criteria_results` keyed by criterion `description`. Drive recommendations from the aggregate ("3/5 replicates failed criterion X"), not cherry-picked replicates.
+**Task scope (aggregate replicates)**: read every `??/task.json` and merge — per-replicate arrays for `final_status`, `weighted_score`, `iteration_count`, `duration_seconds`, `total_token_usage.total_cost_usd`; union of `success_criteria_results` keyed by criterion `description`. Drive recommendations from the aggregate ("3/5 replicates failed criterion X"), not cherry-picked replicates.
 
-**Variant / run scope, > 20 tasks**: do NOT read the full `task.json` files — the `turns` arrays are large and only useful per-task. Use `jq` (or `python3` if missing) to extract a compact summary per task:
+**Variant / run scope, > 20 tasks**: do NOT read the full `task.json` files — the `iterations` arrays are large and only useful per-task. Use `jq` (or `python3` if missing) to extract a compact summary per task:
 
 ```
-{task_id, final_status, weighted_score, duration_seconds, total_cost_usd,
- total_tokens, assistant_turn_count, max_turns, max_turns_exhausted,
- iteration_count, model_used, criteria_count, all_criteria_perfect,
- failed_criteria: [{type, description, score, error_excerpt}]}
+{
+  task_id, final_status, weighted_score, duration_seconds,
+  iteration_count, model_used, max_turns_exhausted,
+  total_cost_usd:  .total_token_usage.total_cost_usd,
+  total_tokens:    (.total_token_usage.input_tokens + .total_token_usage.output_tokens),
+  assistant_turns: .total_assistant_turns,
+  max_turns:       .task_config.resolved.run_limits.max_turns,
+  criteria_count:  (.success_criteria_results | length),
+  all_criteria_perfect:
+    (.success_criteria_results | length > 0 and all(.[]; .score == 1.0)),
+  failed_criteria: [
+    .success_criteria_results[]
+    | select(.score < .pass_threshold)
+    | {criterion_type, description, score,
+       error_excerpt: ((.error // .details // "")[0:200])}
+  ]
+}
 ```
 
-`error_excerpt` = first ~200 chars of each failing criterion's `error` / `output` / `Instructions` field. This is what enables clustering in Step 3.
+Those paths are the real `task.json` shape. `jq` returns `null` for a key that does not exist rather than failing, so a mistyped path yields a table of nulls that reads like a run with no data. There is no top-level `turns`, `total_tokens`, `total_cost_usd`, `max_turns` or `criteria_count`: turn records live under `iterations`, token and cost figures under `total_token_usage`, the turn cap under `task_config.resolved.run_limits`, and a criterion's type is `criterion_type`. A criterion passes when `score >= pass_threshold` — there is no `passed` boolean.
+
+`error_excerpt` = first ~200 chars of each failing criterion's `error`, falling back to `details`. Those are the only two free-text fields a criterion result carries: `error` holds an exception, `details` the checker's own diagnostic, so a criterion that simply did not match has `error: null` and all its signal in `details`. This is what enables clustering in Step 3.
 
 **Variant / run scope, ≤ 20 tasks**: read all `??/task.json` files directly.
 

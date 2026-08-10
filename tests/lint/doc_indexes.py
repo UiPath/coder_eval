@@ -25,12 +25,13 @@ over Markdown/YAML and is wired as
 
 from __future__ import annotations
 
-import difflib
 import re
 from pathlib import Path
 from typing import NamedTuple
 
 import yaml
+
+from tests.lint.generated import diff_all, write_all
 
 
 # --- Markers (already present in the target files; write() fills between them) ---
@@ -252,29 +253,12 @@ def _rendered_files(repo_root: Path) -> dict[Path, str]:
 
 def write(repo_root: Path) -> list[Path]:
     """Regenerate all three index surfaces in place. Returns the files touched."""
-    written: list[Path] = []
-    for path, text in _rendered_files(repo_root).items():
-        if path.read_text(encoding="utf-8") != text:
-            path.write_text(text, encoding="utf-8")
-        written.append(path)
-    return written
+    return write_all(_rendered_files(repo_root))
 
 
 def check(repo_root: Path) -> dict[str, str]:
     """Unified diff per file whose generated content differs from disk (empty = clean)."""
-    findings: dict[str, str] = {}
-    for path, text in _rendered_files(repo_root).items():
-        current = path.read_text(encoding="utf-8")
-        if current != text:
-            diff = difflib.unified_diff(
-                current.splitlines(),
-                text.splitlines(),
-                fromfile=f"{path} (on disk)",
-                tofile=f"{path} (generated)",
-                lineterm="",
-            )
-            findings[str(path)] = "\n".join(diff)
-    return findings
+    return diff_all(_rendered_files(repo_root))
 
 
 if __name__ == "__main__":

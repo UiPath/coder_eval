@@ -10,6 +10,7 @@ Run just these tests:
     make lint
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -2257,3 +2258,164 @@ class TestCE034ArmedPositiveRequiresSuccess:
             ],
         )
         assert self._offenders(task) == []
+
+
+# The two surfaces that teach an agent to read a run record by hand. Both tell it to
+# build a compact per-task summary with `jq`, so both hardcode a `task.json` field
+# vocabulary that nothing otherwise ties to the models.
+RUN_RECORD_CONSUMERS = (
+    "plugins/coder-eval/skills/analyze/SKILL.md",
+    ".claude/commands/coder-eval-run-analysis.md",
+)
+
+# Words that are jq syntax or builtins rather than record fields.
+# fmt: off
+_JQ_WORDS = frozenset([
+    "and", "or", "not", "if", "then", "elif", "else", "end", "null", "true", "false",
+    "length", "all", "any", "select", "map", "keys", "add", "empty", "type", "tostring",
+    "tonumber", "join", "split", "sort", "sort_by", "group_by", "unique", "min", "max",
+    "reduce", "foreach", "try", "catch", "def", "as", "import", "include", "limit",
+    "first", "last", "range", "floor", "ceil", "has", "in", "with_entries", "to_entries",
+    "from_entries", "flatten", "contains", "startswith", "endswith", "test", "capture",
+])
+# fmt: on
+
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A dot NOT preceded by an identifier char opens a new path, so this captures the HEAD
+# of each chain only: `.total_token_usage.input_tokens` yields `total_token_usage`.
+_PATH_HEAD = re.compile(r"(?<![A-Za-z0-9_)\]])\.([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _record_fields_referenced(block: str) -> set[str]:
+    """Names the block reads off a run record: bare jq shorthand keys + path heads."""
+    names = set()
+    for m in _IDENT.finditer(block):
+        before, after = block[: m.start()], block[m.end() :].lstrip()
+        if before.endswith(".") or before[-1:].isalnum() or before[-1:] == "_":
+            continue  # a chain segment, handled by _PATH_HEAD
+        if after.startswith((":", "(")) or m.group() in _JQ_WORDS:
+            # `name:` is an OUTPUT key being computed (`total_cost_usd: .total_token_usage…`),
+            # not a lookup — only bare `{task_id, final_status}` shorthand pulls a field through.
+            continue
+        names.add(m.group())
+    return names | {m.group(1) for m in _PATH_HEAD.finditer(block) if m.group(1) not in _JQ_WORDS}
+
+
+@pytest.mark.lint
+class TestRunRecordFieldVocabulary:
+    """Every task.json field the run-analysis surfaces name must exist on the models.
+
+    `jq` returns `null` for a key that does not exist instead of failing, so a wrong
+    field name does not surface as an error — it produces a table of nulls that reads
+    like a run with nothing in it. Both surfaces shipped six such names at once
+    (`turns`, `total_tokens`, `assistant_turn_count`, `max_turns`, `criteria_count`,
+    `all_criteria_perfect`), and the failure is worst exactly where the instruction
+    applies: the >20-task path, where the agent is explicitly told NOT to fall back to
+    reading whole files.
+
+    Scoped deliberately: only the fenced blocks that mention `success_criteria_results`
+    (the summary-extraction programs), and only the HEAD of each dotted path. Deeper
+    segments are not checked because `task_config` is a free-form dict, so
+    `.task_config.resolved.run_limits.max_turns` is unverifiable from the schema. The
+    allowed set unions the run-level and criterion-level models rather than tracking
+    which scope each expression sits in — a weakening that still catches every name
+    above, since none of them exists on either model.
+    """
+
+    @staticmethod
+    def _known_fields() -> set[str]:
+        from coder_eval.models import ClassificationCriterionResult, CriterionResult, EvaluationResult
+
+        return {
+            name
+            for model in (EvaluationResult, CriterionResult, ClassificationCriterionResult)
+            for name in model.model_json_schema(mode="serialization").get("properties", {})
+        }
+
+    @staticmethod
+    def _summary_blocks(text: str) -> list[str]:
+        blocks, current, inside = [], [], False
+        for line in text.splitlines():
+            if line.strip().startswith("```"):
+                if inside:
+                    blocks.append("\n".join(current))
+                current, inside = [], not inside
+                continue
+            if inside:
+                current.append(line)
+        return [b for b in blocks if "success_criteria_results" in b]
+
+    @pytest.mark.parametrize("relpath", RUN_RECORD_CONSUMERS)
+    def test_documented_task_json_fields_exist_on_the_models(self, relpath: str):
+        doc = Path(__file__).parent.parent / relpath
+        blocks = self._summary_blocks(doc.read_text(encoding="utf-8"))
+        assert blocks, (
+            f"{relpath}: no fenced block mentioning `success_criteria_results` — either the "
+            "summary-extraction program was removed or renamed, and this guard is now inert"
+        )
+        known = self._known_fields()
+        for block in blocks:
+            unknown = sorted(_record_fields_referenced(block) - known)
+            assert not unknown, (
+                f"{relpath}: {unknown} are read off a run record but exist on neither "
+                "EvaluationResult nor CriterionResult. jq yields null for a missing key, so this "
+                "ships as a summary full of nulls rather than an error. Check the real field name "
+                "(turn records are `iterations`; tokens and cost live under `total_token_usage`; "
+                "the turn cap under `task_config.resolved.run_limits`; a criterion's type is "
+                "`criterion_type` and it passes when `score >= pass_threshold`)."
+            )
+
+    def test_catches_the_vocabulary_that_actually_shipped(self):
+        # Mutation guard: the exact block both files carried before this was fixed.
+        original = """
+        {task_id, final_status, weighted_score, duration_seconds, total_cost_usd,
+         total_tokens, assistant_turn_count, max_turns, max_turns_exhausted,
+         iteration_count, model_used, criteria_count, all_criteria_perfect,
+         failed_criteria: [{type, description, score, error_excerpt}]}
+        """
+        caught = _record_fields_referenced(original) - self._known_fields()
+        assert {"total_tokens", "assistant_turn_count", "criteria_count", "all_criteria_perfect"} <= caught
+
+
+@pytest.mark.lint
+class TestGeneratedSurfaceEngine:
+    """The write/diff engine both generated-surface checkers (CE028, CE033) route through.
+
+    Extracted from two near-verbatim copies. The copies had diverged in exactly one
+    respect — only the plugin-reference one created a missing target (and its parents),
+    because it was the only surface whose file might not exist yet. The shared engine
+    keeps that more general behaviour, so these tests pin it for both callers.
+    """
+
+    def test_write_all_creates_missing_targets_including_parents(self, tmp_path: Path):
+        from tests.lint.generated import write_all
+
+        target = tmp_path / "nested" / "deeper" / "out.md"
+        assert write_all({target: "body\n"}) == [target]
+        assert target.read_text(encoding="utf-8") == "body\n"
+
+    def test_write_all_leaves_an_already_current_file_untouched(self, tmp_path: Path):
+        from tests.lint.generated import write_all
+
+        target = tmp_path / "out.md"
+        write_all({target: "body\n"})
+        before = target.stat().st_mtime_ns
+        assert write_all({target: "body\n"}) == [target]
+        assert target.stat().st_mtime_ns == before, "an unchanged file must not be rewritten"
+
+    def test_diff_all_is_empty_when_disk_matches(self, tmp_path: Path):
+        from tests.lint.generated import diff_all
+
+        target = tmp_path / "out.md"
+        target.write_text("body\n", encoding="utf-8")
+        assert diff_all({target: "body\n"}) == {}
+
+    def test_diff_all_reports_a_missing_file_as_full_drift(self, tmp_path: Path):
+        from tests.lint.generated import diff_all
+
+        # A generated file that was never written is drift, not a crash — the diff has to
+        # render rather than raise, or `make lint` fails with a traceback instead of a fix.
+        target = tmp_path / "out.md"
+        findings = diff_all({target: "body\n"})
+        assert list(findings) == [str(target)]
+        assert "+body" in findings[str(target)]

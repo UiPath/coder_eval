@@ -244,3 +244,25 @@ harness once for all of them.
   correct prose. Needs a fixed vocabulary of claim tags shared between the two
   files to become mechanical, which is a design change rather than a 30-minute
   rule — caught in the 2026-08-04 plugin-audit-p0-p1 implementation run.
+
+## From the PR #82 review follow-up (2026-08-10)
+
+- [ ] **CE035 — documented `coder-eval` invocations must be executable as written.**
+  `init/SKILL.md` told the agent to run `coder-eval plan <task-directory>` and
+  "iterate until it exits 0", which the CLI rejects outright (`plan` takes files;
+  a directory argument exits 1 with a hint) — an unreachable loop condition
+  shipped in a skill. A rule would scan inline-code spans and fenced `bash` blocks
+  across `README.md`, `docs/**/*.md` and `plugins/**/*.md`, assert the subcommand
+  exists in the Typer app, and — the harder half — that the *argument shape* is
+  one the command accepts. The subcommand check is cheap and would not have caught
+  this; the argument-shape check is what matters and needs either a real
+  invocation (see the live-smoke candidate below) or a per-command arity model
+  that duplicates the CLI signature. Deferred on that split — caught in the PR #82
+  review, fixed by hand in `init/SKILL.md`.
+
+- [ ] **Documented-CLI live smoke.** The behavioural counterpart to CE035: in a
+  `-m live`/`-m slow` test, materialize a fixture repo with one task YAML and
+  execute every fenced `coder-eval …` command extracted from the shipped skills
+  and docs, asserting exit 0 (or an explicitly-expected non-zero). This is the
+  only form that proves argument shape rather than command existence. Not
+  statically reachable, hence separate from CE035 — proposed in the PR #82 review.

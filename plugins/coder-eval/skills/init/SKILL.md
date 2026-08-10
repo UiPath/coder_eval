@@ -84,12 +84,16 @@ not.
 
 ## Step 5 — Validate
 
-Run `coder-eval plan <task-directory>` and iterate until it exits 0. This validates
-the task schema through the real models, so a field name you guessed wrong surfaces
-here.
+Run `coder-eval plan <task-directory>/*.yaml` and iterate until it exits 0. This
+validates the task schema through the real models, so a field name you guessed wrong
+surfaces here. `plan` takes task *files*: a bare directory argument is rejected
+outright (`Expected a YAML task file but got a directory`), so pass the glob — or run
+`coder-eval plan` with no argument, which discovers `tasks/` recursively.
 
 An empty or task-less directory does not produce a meaningful success — if `plan`
-reports no tasks, treat that as a failure to scaffold, not a pass.
+reports no tasks, treat that as a failure to scaffold, not a pass. Note that the
+bare-directory error is a different outcome: that one means you passed the wrong
+argument shape, not that the scaffold is empty.
 
 ## Step 6 — Report
 
