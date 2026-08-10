@@ -27,21 +27,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# The harness remains root. Only the evaluated agent is dropped to this
-# identity, and it receives no group access to the harness's files.
+# The harness remains root. Only the evaluated agent and the protected mock
+# daemon are dropped to these identities. The shared group grants access to the
+# RPC socket only; neither user receives group access to the other's files.
 ARG AGENT_UID=2000
 ARG AGENT_GID=2000
-RUN groupadd --gid ${AGENT_GID} agent \
-    && useradd --uid ${AGENT_UID} --gid ${AGENT_GID} \
+ARG MOCKD_UID=2100
+ARG MOCKD_GID=2100
+ARG MOCK_RPC_GID=2200
+RUN groupadd --gid ${MOCK_RPC_GID} uip-rpc \
+    && groupadd --gid ${AGENT_GID} agent \
+    && useradd --uid ${AGENT_UID} --gid ${AGENT_GID} --groups uip-rpc \
         --create-home --home-dir /home/agent --shell /usr/sbin/nologin agent \
+    && groupadd --gid ${MOCKD_GID} mockd \
+    && useradd --uid ${MOCKD_UID} --gid ${MOCKD_GID} --groups uip-rpc \
+        --create-home --home-dir /home/mockd --shell /usr/sbin/nologin mockd \
     && install -d -o agent -g agent -m 0700 /work/agent /home/agent \
+    && install -d -o root -g root -m 0755 /opt/coder-eval/agent-skills \
     && install -d -o root -g root -m 0700 \
         /opt/coder-eval/grader \
         /opt/coder-eval/grader/input \
         /opt/coder-eval/grader/output \
         /opt/coder-eval/grader/task_dir \
+        /opt/coder-eval/grader/plugins \
         /opt/coder-eval/grader/references \
-        /opt/coder-eval/grader/templates
+        /opt/coder-eval/grader/templates \
+    && install -d -o mockd -g mockd -m 0500 \
+        /opt/coder-eval/mock \
+        /opt/coder-eval/mock/server \
+        /opt/coder-eval/mock/fixtures \
+    && install -d -o mockd -g uip-rpc -m 0750 /run/coder-eval
 
 # Node LTS + the Claude Code CLI, pinned. The agent binary is a dominant
 # non-model driver of eval results, so it travels with the coder_eval release
@@ -61,9 +76,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # the generic launcher directly.
 COPY docker/coder_eval_drop_privilege.sh /usr/local/bin/coder_eval_drop_privilege.sh
 COPY docker/coder_eval_claude_agent.sh /usr/local/bin/coder_eval_claude_agent.sh
+COPY docker/coder_eval_mock_client /usr/local/bin/coder_eval_mock_client
+COPY docker/coder_eval_mockd.sh /usr/local/bin/coder_eval_mockd.sh
 RUN chmod 0555 \
         /usr/local/bin/coder_eval_drop_privilege.sh \
         /usr/local/bin/coder_eval_claude_agent.sh \
+        /usr/local/bin/coder_eval_mock_client \
+        /usr/local/bin/coder_eval_mockd.sh \
     && test "$(command -v claude)" = "/usr/local/bin/claude"
 
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path

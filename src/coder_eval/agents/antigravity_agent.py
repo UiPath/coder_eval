@@ -73,6 +73,7 @@ from coder_eval.streaming.events import (
     TurnStartEvent,
 )
 from coder_eval.utils import (
+    AGENT_ENV_PASSTHROUGH_VARS,
     AGENT_ENV_SCRUB_PREFIXES,
     AGENT_ENV_SCRUB_VARS,
     expand_env_vars,
@@ -423,7 +424,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             scrubbed = {
                 name: os.environ.pop(name)
                 for name in list(os.environ)
-                if name in AGENT_ENV_SCRUB_VARS or name.startswith(AGENT_ENV_SCRUB_PREFIXES)
+                if name in AGENT_ENV_SCRUB_VARS
+                or (name.startswith(AGENT_ENV_SCRUB_PREFIXES) and name not in AGENT_ENV_PASSTHROUGH_VARS)
             }
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
             original_path = os.environ.get(path_key)

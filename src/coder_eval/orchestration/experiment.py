@@ -43,6 +43,7 @@ from .task_loader import (
     expand_dataset,
     load_task,
     resolve_agent_system_prompt,
+    resolve_protected_mock_paths,
     resolve_template_source_paths,
     resolve_variant_initial_prompt_file,
 )
@@ -531,6 +532,8 @@ def resolve_task_files(
     # Resolve relative template_sources paths
     if task.sandbox.template_sources:
         resolve_template_source_paths(task.sandbox.template_sources, exp_dir)
+    if task.sandbox.protected_mocks:
+        resolve_protected_mock_paths(task, exp_dir)
 
 
 def resolve_all_tasks(

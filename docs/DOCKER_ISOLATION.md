@@ -36,9 +36,11 @@ Both build `coder-eval-agent:<pkg-version>` and tag it `:latest`.
 
 ## Agent/grader identity boundary
 
-`sandbox.docker.agent_isolation` defaults to `true`. The container harness and grader remain root, while every evaluated Claude, Codex, or Antigravity subprocess runs as `agent:agent` (`2000:2000`).
+`sandbox.docker.agent_isolation` defaults to `true`. The container harness and grader remain root, while every evaluated Claude, Codex, or Antigravity subprocess runs as `agent:agent` (`2000:2000`). The mock fixture service runs separately as `mockd:mockd` (`2100:2100`). A supplemental `uip-rpc` group grants the agent access only to the Unix socket.
 
 The agent launcher clears inheritable, ambient, and bounding capabilities and sets `no_new_privs`. Generated work is placed in `/work/agent`. Hidden task data, results, raw task/plugin/reference/template sources, and grader inputs live below root-only `/opt/coder-eval/grader`. Raw source bind mounts remain read-only and are never chmod/chowned; only disposable staging copies and the generated workspace are changed.
+
+Local plugins are projected on the host into manifest-verified bundles containing only supported discovery subtrees. Absolute, escaping, broken, and excluded-target symlinks fail closed. The complete repository is mounted only at a root-inaccessible grader path; the agent sees the sanitized bundle under `/opt/coder-eval/agent-skills`.
 
 Older/custom images must declare `org.coder-eval.agent-isolation=uid-gid-v1`. A protected run rejects an image without that label before making an LLM call. Images derived with `FROM coder-eval-agent:<current-version>` inherit it. Runtime-kit injection into an unrelated base does not yet provide the required Linux users and `setpriv` launchers, so it is not compatible with protected mode.
 
@@ -303,6 +305,7 @@ The host's run dir is bind-mounted read-write at `/opt/coder-eval/grader/output`
 |---|---|
 | Agent process and descendants | container, UID/GID `2000:2000`, `/work/agent` |
 | Harness + supported criterion checking | container, root, `/opt/coder-eval/grader` |
+| Protected fixture service | container, UID/GID `2100:2100`, exact-command Unix RPC |
 | **`task.json` serialization** | **container → host bind mount** |
 | Per-criterion `aggregate()` (P/R/F1, suite thresholds) | host |
 | Reports, run summary, experiment rollups | host |
@@ -319,9 +322,9 @@ The host's run dir is bind-mounted read-write at `/opt/coder-eval/grader/output`
 
 ## Architecture
 
-The host's `DockerRunner` rewrites host paths to protected container paths, renders `docker run`, and tails container stdout into `docker.log`. Inputs land at `/opt/coder-eval/grader/input`, output at `/opt/coder-eval/grader/output`, the raw task directory at `/opt/coder-eval/grader/task_dir`, and the agent workspace at `/work/agent`.
+The host's `DockerRunner` builds sanitized plugin bundles, rewrites host paths to protected container paths, renders `docker run`, and tails container stdout into `docker.log`. Inputs land at `/opt/coder-eval/grader/input`, output at `/opt/coder-eval/grader/output`, the raw task directory at `/opt/coder-eval/grader/task_dir`, and the agent workspace at `/work/agent`.
 
-Inside the container, the root entrypoint verifies the protected parent. The standard Orchestrator prepares the workspace as root, grants only that generated tree to UID 2000, and launches the selected agent through the shared privilege-drop policy. The host reads the final result from the protected output mount and feeds the existing aggregation pipeline.
+Inside the container, the root entrypoint verifies the protected parent and starts optional `mockd`. The standard Orchestrator prepares the workspace as root, grants only that generated tree to UID 2000, and launches the selected agent through the shared privilege-drop policy. The host reads the final result from the protected output mount and feeds the existing aggregation pipeline.
 
 Protected runs use Docker's init reaper and default to a 512-process limit when `limits.max_pids` is not specified. An explicit `max_pids` value takes precedence. Before trusted post-run/finalization begins, the harness stops the SDK, repeatedly kills every remaining UID-2000 process, and fails closed if that UID cannot be emptied.
 

@@ -4,6 +4,7 @@ import fnmatch
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -210,6 +211,7 @@ class Sandbox:
             # Generate recording shims for `record_cli` tools (before the +x pass
             # below, which also covers them)
             self._generate_cli_recorders()
+            self._generate_protected_mock_clients()
 
             # Mark mock binaries executable so the agent's PATH can shadow real CLIs
             self._prepare_mock_path_dirs()
@@ -458,7 +460,7 @@ class Sandbox:
         # generate a shim whose name a user mock dir already provides, so this
         # order can never silently shadow a task's own mock — it only fixes which
         # directory wins for names the harness itself owns.
-        if self.config.record_cli:
+        if self.config.record_cli or self.config.protected_mocks:
             generated = self._resolve_within_sandbox(RECORD_CLI_DIR, field="record_cli directory")
             if generated.is_dir():
                 resolved.append(generated)
@@ -557,6 +559,41 @@ class Sandbox:
         logger.info(
             f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/: "
             + ", ".join(f"{s.tool}(exit {s.exit_code})" for s in self.config.record_cli)
+        )
+
+    def _generate_protected_mock_clients(self) -> None:
+        """Generate data-free wrappers for fixture-backed mockd tools."""
+
+        if not self.config.protected_mocks:
+            return
+        assert self.sandbox_dir is not None, "Sandbox directory not initialized"
+
+        from coder_eval.protected_mock.protocol import CLIENT_EXECUTABLE
+
+        client_dir = self._resolve_within_sandbox(RECORD_CLI_DIR, field="protected mock client directory")
+        client_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self.sandbox_dir / RECORD_CLI_LOG
+        log_path.touch(exist_ok=True)
+
+        for spec in self.config.protected_mocks:
+            wrapper = client_dir / spec.tool
+            if wrapper.exists():
+                raise RuntimeError(
+                    f"protected mock client would overwrite {wrapper}; remove the colliding record_cli or mock"
+                )
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                + f"CODER_EVAL_MOCK_CALL_LOG={shlex.quote(str(log_path))} "
+                + f'exec {shlex.quote(CLIENT_EXECUTABLE)} {shlex.quote(spec.tool)} "$@"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            wrapper.chmod(0o555)
+
+        logger.info(
+            "Generated protected mock client(s) in %s: %s",
+            RECORD_CLI_DIR,
+            ", ".join(spec.tool for spec in self.config.protected_mocks),
         )
 
     def _apply_starter_files_source(self, source: StarterFilesSource) -> None:

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /usr/local/bin/python -m coder_eval.protected_mock.client "$@"
