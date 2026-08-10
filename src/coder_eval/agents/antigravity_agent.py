@@ -348,7 +348,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # Autonomous execution: approve every tool call (incl. run_command),
                 # which the default LocalAgentConfig policy would otherwise deny.
                 policies=[policy.allow_all()],
-                system_instructions=self.config.system_prompt or None,
+                # Forward verbatim (None stays None): an explicit "" is a
+                # configured-but-empty prompt and must be forwarded, matching
+                # the `is not None` semantics in the Claude Code / Codex agents.
+                system_instructions=self.config.system_prompt,
                 # Skill discovery: hand the harness the search-path roots that parent
                 # the UiPath skill dirs. Unlike Codex (which symlinks into
                 # .agents/skills/), Antigravity takes skill search paths natively.

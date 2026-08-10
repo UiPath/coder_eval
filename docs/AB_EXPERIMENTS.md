@@ -133,8 +133,8 @@ From `ExperimentVariant` (`coder_eval/models/experiment.py`):
 
 The `agent` dict is the lever for most A/B tests. Anything on `AgentConfig` is
 fair game: `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`,
-`plugins`, `system_prompt` / `system_prompt_file`, `setting_sources`,
-`claude_settings`, `sdk_options`.
+`plugins`, `system_prompt` / `system_prompt_file`, `system_prompt_mode`
+(append-vs-replace arms), `setting_sources`, `claude_settings`, `sdk_options`.
 
 > **Path-resolution gotcha.** Relative file paths in variant config resolve
 > against _different_ base directories depending on the field:

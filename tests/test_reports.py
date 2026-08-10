@@ -904,6 +904,84 @@ def test_generate_markdown_sdk_options_defaults_hidden():
     assert "**System Prompt**" not in report_md
 
 
+def test_agent_settings_rows_system_prompt_preset_shapes():
+    """Feed a REAL dump_dataclass(ClaudeAgentOptions) — the shape a Claude Code run
+    actually persists into sdk_options — not a hand-built dict: append-mode runs
+    carry a SystemPromptPreset dict, and the report must render the appended
+    prompt text (never the dict repr), omit the row for a bare preset, and
+    surface the regime for a replace-mode plain string."""
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk.types import SystemPromptPreset
+
+    from coder_eval.reports import collect_agent_settings_rows
+    from coder_eval.utils import dump_dataclass
+
+    appended = SystemPromptPreset(
+        type="preset", preset="claude_code", exclude_dynamic_sections=True, append="Be terse."
+    )
+    rows = dict(collect_agent_settings_rows(dump_dataclass(ClaudeAgentOptions(system_prompt=appended)), is_sdk=True))
+    assert rows["System Prompt"] == "Be terse."
+    assert "System Prompt Mode" not in rows
+
+    bare = SystemPromptPreset(type="preset", preset="claude_code", exclude_dynamic_sections=True)
+    rows = dict(collect_agent_settings_rows(dump_dataclass(ClaudeAgentOptions(system_prompt=bare)), is_sdk=True))
+    assert "System Prompt" not in rows
+
+    rows = dict(collect_agent_settings_rows(dump_dataclass(ClaudeAgentOptions(system_prompt="Grader.")), is_sdk=True))
+    assert rows["System Prompt"] == "Grader."
+    assert rows["System Prompt Mode"] == "replace"
+
+
+def test_generate_markdown_system_prompt_preset_not_dict_repr():
+    """End-to-end: a preset-shaped sdk_options.system_prompt renders as prompt text
+    in the Markdown report, and a bare preset (no configured prompt) keeps the
+    System Prompt row absent — the pre-preset behavior for unset prompts."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                30.0,
+                iteration_count=1,
+                sdk_options={
+                    "permission_mode": "bypassPermissions",
+                    "allowed_tools": [],
+                    "system_prompt": {
+                        "type": "preset",
+                        "preset": "claude_code",
+                        "exclude_dynamic_sections": True,
+                        "append": "You are a careful engineer.",
+                    },
+                },
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "**System Prompt**: You are a careful engineer." in report_md
+    assert "{'type': 'preset'" not in report_md
+
+    # Bare preset == no configured prompt: the row stays absent.
+    summary.task_results[0]["sdk_options"]["system_prompt"] = {
+        "type": "preset",
+        "preset": "claude_code",
+        "exclude_dynamic_sections": True,
+    }
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "**System Prompt**" not in report_md
+
+
 def test_generate_markdown_no_agent_settings():
     """Test that Agent Settings section is omitted when no task has agent_config."""
     summary = RunSummary(

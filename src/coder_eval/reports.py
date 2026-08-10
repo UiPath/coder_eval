@@ -57,6 +57,24 @@ def resolve_agent_settings(task_dicts: list[dict[str, Any]]) -> tuple[dict[str, 
     return None, False
 
 
+def _unwrap_system_prompt(value: Any) -> tuple[str | None, str | None]:
+    """Reduce a persisted ``sdk_options.system_prompt`` value to (text, mode).
+
+    Claude Code append-mode runs persist a ``SystemPromptPreset`` dict
+    (``{'type': 'preset', 'preset': 'claude_code', ..., 'append': <text>}``);
+    replace-mode runs persist a plain string. Returns the configured prompt
+    text (None when nothing was configured — a bare preset dict carries no
+    custom prompt and gets no row) and the regime worth surfacing ('replace'
+    for a plain string; None for the default append regime).
+    """
+    if isinstance(value, dict):
+        append = value.get("append")
+        return (str(append) if append is not None else None), None
+    if isinstance(value, str):
+        return value, "replace"
+    return None, None
+
+
 def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -> list[tuple[str, str]]:
     """Extract ordered label/value pairs from an agent settings dict.
 
@@ -87,11 +105,14 @@ def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -
         betas = settings_source.get("betas")
         if betas:
             rows.append(("Betas", ", ".join(betas)))
-        if settings_source.get("system_prompt") is not None:
-            prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
+        prompt_text, prompt_mode = _unwrap_system_prompt(settings_source.get("system_prompt"))
+        if prompt_text is not None:
+            prompt_str = prompt_text.replace("\n", " ")
             if len(prompt_str) > SYSTEM_PROMPT_PREVIEW_CHARS:
                 prompt_str = prompt_str[:SYSTEM_PROMPT_PREVIEW_CHARS] + "..."
             rows.append(("System Prompt", prompt_str))
+        if prompt_mode is not None:
+            rows.append(("System Prompt Mode", prompt_mode))
 
     plugins = settings_source.get("plugins")
     if isinstance(plugins, list):

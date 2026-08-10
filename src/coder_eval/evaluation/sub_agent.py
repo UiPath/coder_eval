@@ -87,6 +87,17 @@ class SubAgentRunner:
                 "SubAgentRunner requires agent_config.setting_sources=[] so the SDK does not "
                 + "load .claude/settings.json or .mcp.json from the sub-agent's working directory."
             )
+        # A sub-agent's system_prompt is its entire identity (judge instructions,
+        # simulator persona) — the claude_code coding-agent preset must never
+        # prefix it. Same fail-loud contract as setting_sources above: callers
+        # own their config, so a misconfigured one raises instead of being
+        # silently mutated.
+        if agent_config.system_prompt is not None and agent_config.system_prompt_mode != "replace":
+            raise ValueError(
+                "SubAgentRunner requires agent_config.system_prompt_mode='replace' when a "
+                + "system_prompt is set: the sub-agent prompt is its entire identity and must "
+                + "not be appended to the claude_code coding-agent preset."
+            )
         assert sandbox.sandbox_dir is not None, "sandbox not initialized"
         self._sandbox = sandbox
         self._agent_config = agent_config

@@ -151,7 +151,8 @@ class BaseAgentConfig(BaseModel):
     system_prompt: str | None = Field(
         default=None,
         description=(
-            "Custom system prompt, appended to the agent's default system prompt — never a replacement. "
+            "Custom system prompt. Built-in agents layer it on top of their default system prompt "
+            "rather than replacing it; Claude Code can opt out via system_prompt_mode: replace. "
             "Each agent's doc page (docs/agents/) states the exact mechanism. "
             "Supports inline text or multi-line YAML strings. "
             "Mutually exclusive with system_prompt_file."
@@ -253,6 +254,23 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
                     f"sdk_options key {key!r} is framework-managed; set it as a top-level AgentConfig field instead"
                 )
         return v
+
+    @model_validator(mode="after")
+    def check_replace_mode_has_prompt(self) -> Self:
+        """Reject ``system_prompt_mode: replace`` with no prompt to replace with.
+
+        Without a configured prompt the options builder would fall back to the
+        claude_code preset (the append regime) while run.json's
+        ``system_prompt_semantics`` marker could label the run 'replace' —
+        silently mis-bucketing trend dashboards. ``system_prompt_file`` counts:
+        the task loader inlines it into ``system_prompt`` at resolution time.
+        """
+        if self.system_prompt_mode == "replace" and self.system_prompt is None and self.system_prompt_file is None:
+            raise ValueError(
+                "system_prompt_mode='replace' requires system_prompt (or system_prompt_file) to be set — "
+                + "there is no prompt to replace the Claude Code default with"
+            )
+        return self
 
 
 class CodexAgentConfig(BaseAgentConfig):

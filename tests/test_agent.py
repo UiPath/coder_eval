@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from claude_agent_sdk import ProcessError
+from claude_agent_sdk import ClaudeAgentOptions, ProcessError
 
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
@@ -181,11 +181,11 @@ async def _capture_sdk_options(
     *,
     env_path_prepend: list[str] | None = None,
     max_turns: int | None = None,
-) -> "list":
+) -> list[ClaudeAgentOptions]:
     """Run one communicate() turn with a mocked query() and return captured options list."""
     import tempfile
 
-    captured_options: list = []
+    captured_options: list[ClaudeAgentOptions] = []
 
     class ResultMessage:
         def __init__(self, session_id: str = "s-1") -> None:
@@ -377,12 +377,15 @@ async def test_claude_settings_none_default():
     assert captured_options[0].settings is None
 
 
-def _transport_command(options) -> list[str]:
+def _transport_command(options: ClaudeAgentOptions) -> list[str]:
     """Render captured ClaudeAgentOptions into the actual CLI argv.
 
-    The dict-shape assertions pin the values we set; this pins the SDK contract
-    (which flag the transport emits) — the surface the original replace-vs-append
-    bug lived on — and survives an SDK TypedDict reshape.
+    The dict-shape assertions pin the values we set; this pins the argv half of
+    the SDK contract (which flag the transport emits) — the surface the original
+    replace-vs-append bug lived on — and survives an SDK TypedDict reshape.
+    Note ``exclude_dynamic_sections`` never reaches argv: the SDK sends it as a
+    control-protocol ``excludeDynamicSections`` initialize field, which this
+    helper cannot see.
     """
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
@@ -438,7 +441,12 @@ async def test_system_prompt_empty_string_appends_empty():
 
     captured_options = await _capture_sdk_options(agent)
 
-    assert captured_options[0].system_prompt["append"] == ""
+    assert captured_options[0].system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "exclude_dynamic_sections": True,
+        "append": "",
+    }
 
 
 @pytest.mark.asyncio
@@ -469,6 +477,23 @@ def test_environment_info_reports_system_prompt_semantics():
         parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="grader", system_prompt_mode="replace")
     )
     assert judge_like.get_environment_info() == {"system_prompt_semantics": "replace"}
+
+
+def test_system_prompt_mode_replace_requires_prompt():
+    """The fourth cell of the mode x prompt matrix: 'replace' with no prompt is
+    rejected at config validation — otherwise the options builder would fall
+    back to the preset (append regime) while run.json recorded 'replace'."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError, match="system_prompt_mode='replace' requires"):
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_mode="replace")
+
+    # system_prompt_file satisfies the requirement: task_loader inlines it into
+    # system_prompt at resolution time.
+    config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE, system_prompt_file="prompt.md", system_prompt_mode="replace"
+    )
+    assert config.system_prompt_mode == "replace"
 
 
 @pytest.mark.asyncio

@@ -937,12 +937,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Codex routing so runs are auditable/comparable.
 
-        Only emits when a custom endpoint is configured (CODEX_BASE_URL). On a
-        custom endpoint the model is an operator-chosen alias (a deployment name
-        on Azure), so two operators' ``gpt-5-codex`` deployments are otherwise
-        indistinguishable in run artifacts. The host (not the full URL) is
-        recorded to avoid leaking any embedded credentials; the API key is never
-        recorded.
+        Always emits ``system_prompt_semantics``. The routing keys
+        (``codex_base_url_host`` / ``codex_wire_api`` / ``codex_api_version`` /
+        ``codex_model_is_deployment``) are added only when a custom endpoint is
+        configured (CODEX_BASE_URL): on a custom endpoint the model is an
+        operator-chosen alias (a deployment name on Azure), so two operators'
+        ``gpt-5-codex`` deployments are otherwise indistinguishable in run
+        artifacts. The host (not the full URL) is recorded to avoid leaking any
+        embedded credentials; the API key is never recorded.
         """
         # system_prompt_semantics: Codex appends system_prompt as
         # developer_instructions on top of its base prompt. Runs from before this

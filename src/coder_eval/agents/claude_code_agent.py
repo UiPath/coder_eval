@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -1189,7 +1189,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # system_prompt_mode="replace" (judge sub-agents) opts out of the preset:
         # the configured prompt IS the entire system prompt.
         system_prompt: str | SystemPromptPreset
-        if self.config.system_prompt_mode == "replace" and self.config.system_prompt is not None:
+        if self._effective_prompt_mode() == "replace":
+            assert self.config.system_prompt is not None  # guaranteed by _effective_prompt_mode
             system_prompt = self.config.system_prompt
         else:
             system_prompt = SystemPromptPreset(type="preset", preset="claude_code", exclude_dynamic_sections=True)
@@ -1239,6 +1240,19 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         return options, transport, effective_model
 
+    def _effective_prompt_mode(self) -> Literal["append", "replace"]:
+        """The system-prompt regime that actually goes on the wire.
+
+        Single source of truth for both the options builder and the
+        ``system_prompt_semantics`` run-record marker, so the persisted regime
+        can never disagree with what was sent. ``replace`` requires a configured
+        prompt (the config validator rejects the pair at load, but a mutated or
+        hand-built config falls back to the preset here — fail open to append).
+        """
+        if self.config.system_prompt_mode == "replace" and self.config.system_prompt is not None:
+            return "replace"
+        return "append"
+
     def get_environment_info(self) -> dict[str, Any]:
         """Record which system-prompt regime built this run's prompts.
 
@@ -1248,7 +1262,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         this marker existed used replace-on-set / empty-on-unset semantics —
         trend dashboards must not pool scores across that boundary.
         """
-        return {"system_prompt_semantics": self.config.system_prompt_mode}
+        return {"system_prompt_semantics": self._effective_prompt_mode()}
 
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""
