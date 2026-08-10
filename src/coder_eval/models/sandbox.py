@@ -293,6 +293,16 @@ class DockerDriverConfig(BaseModel):
         default_factory=list,
         description="Extra `-v src:dst[:ro]` mount specs forwarded to `docker run`. Validated for basic syntax.",
     )
+    isolated_paths: list[str] = MergeField(
+        strategy="replace",
+        default_factory=list,
+        description=(
+            "Host paths that must not be reachable by the evaluated agent. The run fails at startup if any "
+            "declared path would become agent-visible -- through an agent-readable mount or through a "
+            "sanitized plugin bundle projection. Entries expand `~` and `$VAR`; a path that does not exist "
+            "on the host has nothing to expose and passes. Requires agent_isolation."
+        ),
+    )
 
     @field_validator("working_dir")
     @classmethod
@@ -565,4 +575,12 @@ class SandboxConfig(BaseModel):
             overlap = sorted(recorded & set(tools))
             if overlap:
                 raise ValueError(f"protected_mocks and record_cli cannot both provide: {overlap}")
+        if self.docker.isolated_paths:
+            if self.driver != "docker":
+                raise ValueError("sandbox.docker.isolated_paths requires driver: docker")
+            if not self.docker.agent_isolation:
+                raise ValueError(
+                    "sandbox.docker.isolated_paths requires docker.agent_isolation: true -- the declaration "
+                    + "cannot be enforced without the agent identity boundary"
+                )
         return self

@@ -42,6 +42,8 @@ The agent launcher clears inheritable, ambient, and bounding capabilities and se
 
 Local plugins are projected on the host into manifest-verified bundles containing only supported discovery subtrees. Absolute, escaping, broken, and excluded-target symlinks fail closed. The complete repository is mounted only at a root-inaccessible grader path; the agent sees the sanitized bundle under `/opt/coder-eval/agent-skills`.
 
+`sandbox.docker.isolated_paths` lets a task or experiment declare host paths that must stay outside everything the agent can read, typically a suite's fixture tree beside the skill under test. The declaration mounts nothing: before the container starts, the runner checks each declared path against every agent-visible mount source and against the manifests of the sanitized plugin bundles, and fails the run if either would carry content from under it. Sources mounted below the root-only grader parent are exempt, since that placement is exactly what keeps them private. Requires `agent_isolation`.
+
 Older/custom images must declare `org.coder-eval.agent-isolation=uid-gid-v1`. A protected run rejects an image without that label before making an LLM call. Images derived with `FROM coder-eval-agent:<current-version>` inherit it. Runtime-kit injection into an unrelated base does not yet provide the required Linux users and `setpriv` launchers, so it is not compatible with protected mode.
 
 ## Running a task in Docker

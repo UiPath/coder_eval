@@ -587,6 +587,20 @@ Malformed responses, oversized output, request-budget exhaustion, and service st
 
 `passthrough_argv_prefixes` is for deliberately public live operations such as `uip docsai ask`. `mockd` invokes the real tool only when argv begins with one of these typed prefixes, caches the response in memory for the run, and never reveals the executable path to the agent. Do not use a broad prefix such as `[or]` or `[auth]`. `protected_mocks` and `record_cli` cannot claim the same tool name.
 
+### Declaring Paths That Must Stay Private
+
+`isolated_paths` declares host paths the evaluated agent must not be able to read. It mounts nothing; it is a contract the runner checks before any container starts, so a suite states the boundary it depends on instead of trusting an implementation detail. Entries expand `~` and `$VAR`, need not exist on disk, and require the Docker driver with its default `agent_isolation`:
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    isolated_paths:
+      - "$SKILLS_REPO_PATH/tests"     # fixtures the graded skill must not read
+```
+
+The run fails at startup if a declared path overlaps an agent-readable mount, or if the sanitized plugin bundle would project a file from under it. Raw task, reference, template, and plugin sources mounted below the root-only grader parent are exempt: keeping them there is how a declared path stays private.
+
 ## Template Sources
 
 Tasks can start with preset files instead of an empty sandbox. Multiple sources are applied sequentially (last wins for conflicts).

@@ -42,7 +42,7 @@ from coder_eval.models import (
     PreservationMode,
     ResourceLimits,
 )
-from coder_eval.plugin_bundle import stage_bundle
+from coder_eval.plugin_bundle import BundleManifest, stage_bundle
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -524,6 +524,9 @@ class DockerRunner:
         # only manifest-verified projections; raw sources are mounted under the
         # root-only grader parent at unrelated container paths.
         self._agent_plugin_mounts: list[tuple[Path, str]] = []
+        # (plugin source, manifest of what its bundle projects) pairs, consulted by
+        # the sandbox.docker.isolated_paths guard.
+        self._plugin_bundle_manifests: list[tuple[Path, BundleManifest]] = []
         self._private_source_mounts: list[tuple[Path, str]] = []
         self._host_to_private_paths: dict[str, str] = {}
         self._host_plugin_to_agent_paths: dict[str, str] = {}
@@ -625,6 +628,11 @@ class DockerRunner:
             # under `staging` and records it on self._claude_mount_src for
             # _build_argv to mount. Cleaned up with `staging` in the finally.
             await asyncio.to_thread(self._prepare_host_mounts, staging)
+            # Every agent-visible mount source is known by now (bundles from
+            # _prepare_isolated_sources, the ~/.claude copy from
+            # _prepare_host_mounts), so the declaration can be proven before any
+            # container starts.
+            await asyncio.to_thread(self._enforce_isolated_paths)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
             # Prime the heartbeat before the container starts so the
@@ -751,6 +759,7 @@ class DockerRunner:
         """
 
         self._agent_plugin_mounts = []
+        self._plugin_bundle_manifests = []
         self._private_source_mounts = []
         self._host_to_private_paths = {}
         self._host_plugin_to_agent_paths = {}
@@ -781,6 +790,7 @@ class DockerRunner:
             public_target = f"{CONTAINER_AGENT_SKILLS_DIR}/plugin-{index}"
             private_target = f"{CONTAINER_PRIVATE_PLUGIN_DIR}/plugin-{index}"
             self._agent_plugin_mounts.append((bundle_source, public_target))
+            self._plugin_bundle_manifests.append((source, manifest))
             self._register_private_mount(source, private_target)
             self._host_plugin_to_agent_paths[str(source)] = public_target
             logger.info(
@@ -843,6 +853,54 @@ class DockerRunner:
             config_path.chmod(0o444)
             mock_root.chmod(0o555)
             self._mock_fixture_mount = mock_root
+
+    def _agent_visible_mount_sources(self) -> list[tuple[str, Path]]:
+        """Host paths whose content the evaluated agent can read inside the container.
+
+        Every other mount the runner renders lands below the root-only grader
+        parent (or the mockd fixture parent), so it is outside this set by
+        construction. Returns ``(label, host source)`` pairs; the label names the
+        agent-visible destination for the error message.
+        """
+
+        sources = [(f"plugin bundle mount {target}", source.resolve()) for source, target in self._agent_plugin_mounts]
+        if self._claude_mount_src is not None:
+            agent_claude = f"{AGENT_HOME}/.claude"
+            sources.append((f"agent home mount {agent_claude}", (Path.home() / ".claude").resolve()))
+        return sources
+
+    def _enforce_isolated_paths(self) -> None:
+        """Fail closed when a declared isolated path would become agent-visible.
+
+        ``sandbox.docker.isolated_paths`` is a declaration, not a mount
+        instruction: the runner proves that no agent-visible surface carries
+        content from a declared path, either as an agent-readable mount or as a
+        sanitized plugin bundle projection. Private grader mounts are exempt --
+        keeping a raw source below the root-only parent is the isolation working
+        as intended. A declared path that does not exist on the host has nothing
+        to expose, so it resolves non-strictly and passes.
+        """
+
+        declarations = self._docker_config.isolated_paths
+        if not declarations:
+            return
+        visible = self._agent_visible_mount_sources()
+        for raw in declarations:
+            declared = Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+            for label, source in visible:
+                if declared == source or declared in source.parents or source in declared.parents:
+                    raise DockerRunError(
+                        f"docker.isolated_paths entry {raw!r} resolves to {declared}, which overlaps the "
+                        + f"agent-visible {label} (host source {source})"
+                    )
+            for source, manifest in self._plugin_bundle_manifests:
+                for relative in (*manifest.files, *manifest.symlinks):
+                    entry = source / relative
+                    if entry == declared or declared in entry.parents:
+                        raise DockerRunError(
+                            f"docker.isolated_paths entry {raw!r} resolves to {declared}, which the sanitized "
+                            + f"plugin bundle for {source} projects to the agent as {relative}"
+                        )
 
     def _register_external_private_path(self, source: Path, target: str) -> None:
         source = source.resolve()
