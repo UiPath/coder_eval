@@ -150,14 +150,18 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
     )
 
     offset = 0
-    if criterion.verb is not None:
-        verb_tokens = criterion.verb.split()
-        # ORDERED prefix, not a token subset: `labellings confirm` must never be
-        # satisfied by `labellings unconfirm`, and a project name that happens to
-        # equal a subcommand must not stand in for the subcommand.
-        if positional[: len(verb_tokens)] != verb_tokens:
+    spellings = criterion.verb_spellings
+    if spellings:
+        # ORDERED prefix compared token by token — not a subset, and not a string
+        # startswith: `labellings confirm` must never be satisfied by
+        # `labellings unconfirm`, nor `projects list` by `projects lists`.
+        matched = next((tokens for tokens in spellings if positional[: len(tokens)] == tokens), None)
+        if matched is None:
             return False
-        offset = len(verb_tokens)
+        # Offset comes from the candidate that matched, since spellings may differ in
+        # length. Validation rejects one spelling being a prefix of another, so at
+        # most one can match and this cannot depend on list order.
+        offset = len(matched)
 
     if criterion.positional is not None:
         expected = criterion.positional
@@ -279,7 +283,9 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         if criterion.tool is not None:
             facets.append(f"tool={criterion.tool!r}")
         if criterion.verb is not None:
-            facets.append(f"verb={criterion.verb!r}")
+            # ' | ' rather than repr of the list: a bare list reads as "the verb is
+            # these tokens". A single verb renders exactly as it did before.
+            facets.append(f"verb={' | '.join(' '.join(t) for t in criterion.verb_spellings)!r}")
         if criterion.positional is not None:
             facets.append(f"positional={criterion.positional!r}")
         if criterion.flags:

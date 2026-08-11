@@ -741,3 +741,124 @@ class TestModelValidation:
     def test_unknown_field_rejected(self):
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             CliCalledCriterion(description="d", log=LOG, verb="v", pattern="oops")
+
+
+class TestVerbAlternation:
+    """A verb the tool spells several ways, e.g. the old regex's `(list|get)`.
+
+    Without alternation the only way to accept two verbs was to truncate to their
+    common prefix, which leaves the following tokens unconstrained — safe for a
+    max_count 0 guard, but on a positive assertion it credits `projects delete` as
+    readily as `projects get`.
+    """
+
+    @pytest.mark.parametrize("subcommand", ["list", "get"])
+    def test_any_listed_spelling_matches(self, sandbox_with_log, subcommand):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", subcommand, "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb=["ixp projects list", "ixp projects get"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_an_unlisted_sibling_does_not_match(self, sandbox_with_log):
+        """The point of the feature: `delete` is not silently admitted."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb=["ixp projects list", "ixp projects get"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    def test_spelling_is_compared_token_by_token(self, sandbox_with_log):
+        """`projects list` must not match `projects lists` or `projects list-models`.
+
+        The match is an ordered prefix over TOKENS, not a string startswith, so a
+        typo'd or longer-named sibling shares no token with the verb.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(
+            sandbox_dir,
+            [
+                _call(["ixp", "projects", "lists"]),
+                _call(["ixp", "projects", "list-models"]),
+            ],
+        )
+        criterion = CliCalledCriterion(description="listed", log=LOG, verb=["ixp projects list"])
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    @pytest.mark.parametrize("subcommand", ["publish", "unpublish"])
+    def test_negative_guard_fires_on_every_listed_spelling(self, sandbox_with_log, subcommand):
+        """The inverse: a max_count 0 guard must fail on ANY listed verb.
+
+        A change that only widened what scores 1.0 would leave the positive tests
+        green while the guard quietly stopped firing.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", subcommand, "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="did not change published state",
+            log=LOG,
+            verb=["ixp projects publish", "ixp projects unpublish"],
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    def test_positional_offset_follows_the_matched_spelling(self, sandbox_with_log):
+        """Spellings of differing length each measure `positional` from their own end."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="deleted from the right project",
+            log=LOG,
+            verb=["ixp fields remove", "ixp fields delete"],
+            positional=["proj-1"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_failure_detail_renders_the_alternatives(self, sandbox_with_log):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb=["ixp projects list", "ixp projects get"],
+        )
+        result = SuccessChecker(sandbox).check(criterion)
+        assert "ixp projects list | ixp projects get" in (result.details or "")
+
+    def test_single_verb_detail_is_unchanged(self, sandbox_with_log):
+        """A plain string verb renders exactly as it did before this feature."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(description="read", log=LOG, verb="ixp projects get")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert "verb='ixp projects get'" in (result.details or "")
+
+
+class TestVerbAlternationValidation:
+    def test_empty_list_rejected(self):
+        """`verb: []` is falsy, so it would slip past the at-least-one-facet check."""
+        with pytest.raises(ValidationError, match="must not be empty"):
+            CliCalledCriterion(description="d", log=LOG, verb=[], positional=["proj-1"])
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_entry_rejected(self, blank):
+        with pytest.raises(ValidationError, match="must not be blank"):
+            CliCalledCriterion(description="d", log=LOG, verb=["ixp projects get", blank])
+
+    def test_spelling_that_is_a_prefix_of_another_rejected(self):
+        """Both match while consuming different token counts, so the `positional`
+        offset would depend on list order."""
+        with pytest.raises(ValidationError, match="is a prefix of"):
+            CliCalledCriterion(description="d", log=LOG, verb=["ixp projects", "ixp projects list"])
+
+    def test_duplicate_spellings_rejected(self):
+        """A duplicate is a prefix of itself, caught by the same rule."""
+        with pytest.raises(ValidationError, match="is a prefix of"):
+            CliCalledCriterion(description="d", log=LOG, verb=["ixp projects get", "ixp projects get"])

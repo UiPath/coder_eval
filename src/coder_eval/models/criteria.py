@@ -576,13 +576,17 @@ class CliCalledCriterion(BaseSuccessCriterion):
             "generated recorders never repeats it"
         ),
     )
-    verb: str | None = Field(
+    verb: str | list[str] | None = Field(
         default=None,
-        min_length=1,
         description=(
             "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's "
-            "non-flag arguments. Order matters, so 'labellings confirm' never matches "
-            "'labellings unconfirm'"
+            "non-flag arguments, compared token by token (so 'projects list' never matches "
+            "'projects lists'). Order matters, so 'labellings confirm' never matches "
+            "'labellings unconfirm'. A LIST matches if ANY entry does, for a verb the tool spells "
+            "several ways. Prefer listing full verbs over truncating one to cover several: a short "
+            "verb leaves the following tokens unconstrained, which is safe for a max_count 0 guard "
+            "(it fires on more) but NOT for a positive assertion, where 'projects' would credit "
+            "'projects delete' as readily as 'projects get'"
         ),
     )
     tool: str | None = Field(
@@ -632,6 +636,18 @@ class CliCalledCriterion(BaseSuccessCriterion):
         ),
     )
 
+    @property
+    def verb_spellings(self) -> list[list[str]]:
+        """Each accepted verb as its token list; empty when there is no verb constraint.
+
+        One place splits the field, so the validator and the checker cannot disagree
+        about what a spelling is.
+        """
+        if self.verb is None:
+            return []
+        spellings = [self.verb] if isinstance(self.verb, str) else self.verb
+        return [spelling.split() for spelling in spellings]
+
     @model_validator(mode="after")
     def _validate_bounds(self) -> CliCalledCriterion:
         # min_count 0 with no upper bound is satisfied by every possible log, so
@@ -645,11 +661,37 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if self.max_count is not None and self.max_count < self.min_count:
             msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
             raise ValueError(msg)
-        # min_length=1 counts characters, so "   " passes it — and `"   ".split()`
-        # is `[]`, an empty prefix that matches every record.
-        if self.verb is not None and not self.verb.strip():
-            msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
-            raise ValueError(msg)
+        if self.verb is not None:
+            spellings = [self.verb] if isinstance(self.verb, str) else self.verb
+            # `verb: []` is falsy, so the "at least one facet" check below would let
+            # it through whenever positional/flags/tool is set — as "no verb
+            # constraint", quietly matching more than the author wrote.
+            if not spellings:
+                msg = "cli_called verb list must not be empty: drop the field to match any verb"
+                raise ValueError(msg)
+            # A character count would pass "   ", and `"   ".split()` is `[]` — an
+            # empty prefix that matches every record.
+            if any(not spelling.strip() for spelling in spellings):
+                msg = (
+                    "cli_called verb must not be blank: a blank verb is an empty prefix and matches "
+                    "every record"
+                )
+                raise ValueError(msg)
+            # One candidate being a prefix of another makes the match ambiguous: both
+            # accept the same argv but consume a different number of tokens, so the
+            # offset `positional` is measured from would depend on candidate order.
+            # Identical entries land here too, a prefix of itself.
+            token_lists = [spelling.split() for spelling in spellings]
+            for outer, shorter in enumerate(token_lists):
+                for inner, longer in enumerate(token_lists):
+                    if outer != inner and longer[: len(shorter)] == shorter:
+                        msg = (
+                            f"cli_called verb {' '.join(shorter)!r} is a prefix of "
+                            f"{' '.join(longer)!r}; both would match the same invocation while "
+                            "consuming a different number of tokens, making the `positional` offset "
+                            "ambiguous. List only the verbs you mean, or keep the shorter one alone."
+                        )
+                        raise ValueError(msg)
         # Falsiness-symmetric on purpose: `verb: ""` used to slip past an `is None`
         # check here and then match EVERY record (empty prefix), silently scoring 1.0.
         if not self.verb and not self.positional and not self.flags and not self.tool:
