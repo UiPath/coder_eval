@@ -1,0 +1,44 @@
+#!/bin/sh
+# Mock `uip` for the IXP version-guard smoke (no real backend). Records the full argv, then
+# returns canned JSON for the two labellings subcommands the version guard exercises.
+# get-predictions advertises ModelVersion 7; per Critical Rule 19 the skill must pass that
+# same version back on confirm via -m/--model-version.
+echo "uip $*" >> uip_calls.log
+
+case " $* " in
+  *" get-predictions "*)
+    cat <<'JSON'
+{
+  "Status": "Success",
+  "Data": {
+    "ProjectName": "Invoices",
+    "TotalDocuments": 1,
+    "DocumentsWithPredictions": 1,
+    "Predictions": [
+      {
+        "DocumentId": "src-design.doc-1",
+        "ModelVersion": 7,
+        "Labels": [
+          {
+            "Name": "Invoice",
+            "Occurrence": 0,
+            "Fields": [
+              { "FieldId": "a7c3e9105f2b4d86", "FieldName": "InvoiceTotal", "FormattedValue": "42.00" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON
+    ;;
+  *" confirm "*)
+    cat <<'JSON'
+{ "Status": "Success", "Data": { "PredictionsConfirmed": 1, "Unmatched": [], "ModelVersion": 7 } }
+JSON
+    ;;
+  *)
+    echo '{ "Status": "Success", "Data": {} }'
+    ;;
+esac

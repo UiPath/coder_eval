@@ -1,0 +1,46 @@
+task_id: uipath-ixp-confirm-with-reviewed-version
+description: >
+  Smoke: with the uipath-ixp skill loaded, the agent captures the ModelVersion returned by
+  get-predictions and passes it to `labellings confirm` via -m/--model-version (Critical Rule 19,
+  skills PR #2548). The `uip` CLI is mocked, so nothing hits a real IXP backend.
+tags: [smoke, ixp, uipcli, version-guard]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Glob", "Grep"]
+  max_turns: 15
+
+sandbox:
+  driver: tempdir
+  python: null   # no venv; the agent just shells out to the mock `uip`
+  template_sources:
+    - type: template_dir
+      path: "../../../../skills/skills/uipath-ixp"   # SKILL.md + references/ into the working dir
+    - type: template_dir
+      path: "./mock-cli-bins"                        # mocks/uip
+  mock_path_dirs:
+    - "mocks"   # mocks/uip is chmod +x and PATH-prepended, shadowing any real `uip`
+
+initial_prompt: |
+  You have the uipath-ixp skill available in the current directory — read SKILL.md and follow it.
+
+  In IXP project "Invoices", the model's predictions for document "src-design.doc-1" have already
+  been reviewed and are all correct. Confirm every predicted field on that document.
+
+success_criteria:
+  - type: command_executed
+    description: "Agent read the predictions — the only source of the model version."
+    tool_name: "Bash"
+    command_pattern: 'uip\s+ixp\s+labellings\s+get-predictions'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "confirm carries the reviewed model version (-m/--model-version 7 from get-predictions) — Rule 19."
+    tool_name: "Bash"
+    command_pattern: 'uip\s+ixp\s+labellings\s+confirm[\s\S]*?(-m|--model-version)[=\s]+7\b'
+    min_count: 1
+    weight: 2.0
+    pass_threshold: 1.0
