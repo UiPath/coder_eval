@@ -9,7 +9,7 @@ runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json, task.log, artifacts/}
 ```
 
 - `<NN>` — zero-padded replicate index (e.g. `00`, `01`).
-- `task.json` — the persisted per-replicate result (the consumer contract; carries the large `turns` array).
+- `task.json` — the persisted per-replicate result (the consumer contract; carries the large `iterations` array — still accepted under its former name `turns` when reading, but not what current runs write).
 - `task.json.malformed` — present only on the docker degrade path: when an existing `task.json` fails to parse (schema skew from a stale `:latest` image, or a truncated/torn write), the docker runner moves the unparseable original aside to this sidecar and writes a synthetic `final_status=ERROR` `task.json` in its place. Diagnostic-only; `rglob("task.json")` consumers do not match it.
 - `task.log` — the human-readable task log; `artifacts/` — files the agent produced.
 

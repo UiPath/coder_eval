@@ -67,14 +67,31 @@ summary per task with `jq` (or `python3` if `jq` is missing):
 }
 ```
 
-Those paths are the real `task.json` shape — verify against one file before fanning out.
-`jq` returns `null` for a key that does not exist rather than failing, so a mistyped path
-yields a table of nulls that reads like a run with no data instead of an error. There is
-no top-level `turns`, `total_tokens`, `total_cost_usd`, `max_turns` or `criteria_count`:
-turn records live under `iterations`, token and cost figures under `total_token_usage`,
-the turn cap under `task_config.resolved.run_limits`, and a criterion's type is
-`criterion_type`. A criterion passes when `score >= pass_threshold` — there is no
-`passed` boolean.
+Those paths are what current runs write — and **verifying against one file before fanning
+out means running `jq 'keys' <one task.json>` and reading the result**, not assuming.
+`jq` returns `null` for a key that does not exist rather than failing, so a mistyped or
+stale path yields a table of nulls that reads like a run with no data instead of an
+error.
+
+There is no top-level `total_tokens`, `total_cost_usd`, `max_turns` or `criteria_count`
+in any generation: token and cost figures live under `total_token_usage`, and a
+criterion's type is `criterion_type`. A criterion passes when `score >= pass_threshold` —
+there is no `passed` boolean.
+
+Two names *did* change between generations, which is what the `keys` check is for:
+
+| Current runs | Older runs | Where |
+| --- | --- | --- |
+| `iterations` | `turns` | top-level record key |
+| `task_config.resolved.run_limits.max_turns` | `task_config.resolved.max_iterations` | inside the free-form `task_config` dict |
+
+Extract whichever the file actually has. The loader still accepts the older top-level
+name when reading, so an old run is not broken — but current runs do not write it, and
+guessing either way costs you the whole column. If **neither** spelling is present the
+record is truncated or synthetic (the docker degrade path writes a `final_status=ERROR`
+`task.json`, for one): report that file as unusable rather than emitting a row of nulls
+for it. Note that `iterations` present but empty is a legitimate zero-turn record and not
+the same thing — test `has("iterations")`, never truthiness.
 
 `error_excerpt` = the first ~200 characters of each failing criterion's `error`, falling
 back to `details`. Those are the only two free-text fields a criterion result carries,

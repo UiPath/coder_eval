@@ -2341,6 +2341,29 @@ _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # of each chain only: `.total_token_usage.input_tokens` yields `total_token_usage`.
 _PATH_HEAD = re.compile(r"(?<![A-Za-z0-9_)\]])\.([A-Za-z_][A-Za-z0-9_]*)")
 
+# `analyze` carries a `| Current runs | Older runs | Where |` table, because a run written
+# before the rename spells two of these differently. The third cell is load-bearing: only
+# a TOP-LEVEL key is a model field with a `validation_alias`, so only those rows can be
+# checked against the schema. `max_iterations` is a key inside the free-form `task_config`
+# dict and appears in no `AliasChoices` at all — a guard that swept the whole table would
+# be unsatisfiable against the very prose it guards, and would get "fixed" by deleting the
+# row. Keeping the scoping visible in the shipped table rather than hidden in this file is
+# the point: an author adding a row has to say which kind of key it is.
+_TOP_LEVEL_CELL = "top-level record key"
+
+
+def _legacy_top_level_keys(text: str) -> set[str]:
+    """Legacy TOP-LEVEL record keys the two-generation table names, backticks stripped."""
+    keys: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) == 3 and cells[2] == _TOP_LEVEL_CELL:
+            keys.add(cells[1].strip("`"))
+    return keys
+
 
 def _record_fields_referenced(block: str) -> set[str]:
     """Names the block reads off a run record: bare jq shorthand keys + path heads."""
@@ -2419,6 +2442,57 @@ class TestRunRecordFieldVocabulary:
                 "(turn records are `iterations`; tokens and cost live under `total_token_usage`; "
                 "the turn cap under `task_config.resolved.run_limits`; a criterion's type is "
                 "`criterion_type` and it passes when `score >= pass_threshold`)."
+            )
+
+    def test_legacy_keys_named_by_analyze_are_real_model_aliases(self):
+        # The skill now tells the agent that older runs spell two keys differently, which
+        # is the opposite failure from the one above: not a name that never existed, but a
+        # name that existed and was renamed. A wrong legacy name is just as silent — jq
+        # yields null for it too — so every legacy TOP-LEVEL key the skill names must be a
+        # name the loader genuinely still accepts. Derived from `AliasChoices` on the model,
+        # so a third generation is one model edit and this guard follows it.
+        from pydantic import AliasChoices
+
+        from coder_eval.models import EvaluationResult
+
+        accepted = {
+            choice
+            for info in EvaluationResult.model_fields.values()
+            if isinstance(info.validation_alias, AliasChoices)
+            for choice in info.validation_alias.choices
+            if isinstance(choice, str)
+        }
+        skill = PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md"
+        named = _legacy_top_level_keys(skill.read_text(encoding="utf-8"))
+        assert named, (
+            f"{skill}: no `| … | … | {_TOP_LEVEL_CELL} |` row — either the two-generation "
+            "table was removed or its third cell was reworded, and this guard is now inert"
+        )
+        unknown = sorted(named - accepted)
+        assert not unknown, (
+            f"{skill} presents {unknown} as legacy top-level key(s), but the loader accepts "
+            f"only {sorted(accepted)} (read off EvaluationResult's validation_alias). An "
+            "invented legacy name reads back as null exactly like a current one would."
+        )
+
+    def test_analyze_does_not_deny_the_legacy_key_absolutely(self):
+        # The skill used to say flatly "There is no top-level `turns`", which is true of
+        # current runs and false of anything written before the rename — so an agent
+        # reading a real older run was told its correct extraction was wrong. The four
+        # OTHER names in that sentence were never top-level in any generation and were
+        # denied on purpose; rewriting the sentence must not take them with it.
+        text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "There is no top-level `turns`" not in text, (
+            "analyze denies the legacy `turns` key absolutely again — it is what runs "
+            "written before the rename actually carry. Make it conditional on the file."
+        )
+        assert "`iterations`" in text, "analyze no longer names `iterations` as the current key"
+        denial = text.partition("There is no top-level")[2].partition(".")[0]
+        assert denial, "analyze lost the never-top-level denial sentence entirely"
+        for name in ("`total_tokens`", "`total_cost_usd`", "`max_turns`", "`criteria_count`"):
+            assert name in denial, (
+                f"analyze stopped denying a top-level {name}, which is absent in EVERY "
+                "generation — collateral damage from making the `turns` clause conditional"
             )
 
     def test_catches_the_vocabulary_that_actually_shipped(self):
