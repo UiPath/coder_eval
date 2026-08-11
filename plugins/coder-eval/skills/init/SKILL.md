@@ -24,7 +24,29 @@ afterwards. Never install unprompted, and do not continue if the user declines.
 That reference also covers the other half of the version check — whether this project
 pins a coder-eval version, and what to do when the installed one does not match it.
 
-## Step 2 — Scan for what is testable
+## Step 2 — Check whether this repository is already configured
+
+This skill scaffolds a first suite. Run against a repository that already has one, it
+would write a "first task" beside an existing tree and report success — so find out
+before writing anything.
+
+Locate the eval tree per `${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`. **If the
+repository already has tasks, report the inventory and stop**: how many task files and
+where, how many run directories, and whether there are experiments. Then point the user
+at the skills that act on what exists —
+
+- `/coder-eval:lint-tasks` to review the tasks already there;
+- `/coder-eval:analyze` to read a finished run.
+
+Only scaffold if the repository has none, or if the user explicitly asks for more after
+seeing the inventory. **Never overwrite an existing task file**, whatever they ask for;
+add alongside it.
+
+A repository with tasks but no experiments is **partially** configured, not empty.
+Report that as it is and offer the missing piece — do not scaffold a first task as
+though there were nothing there.
+
+## Step 3 — Scan for what is testable
 
 Look for these, in priority order, and **report what you found before writing
 anything**:
@@ -48,16 +70,13 @@ smallest useful thing instead — a task that runs a script or test command the 
 already has and checks its output — rather than scaffolding an empty suite that proves
 nothing.
 
-## Step 3 — Scaffold one real task
+## Step 4 — Scaffold one real task
 
-Work out where tasks should live by following
-`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`. If the repository already has a task
-tree, write into it; if it has none, propose a location and ask.
+Write into the tree step 2 resolved. If the repository has none, propose a location and
+ask. Step 2's never-overwrite rule still applies here — it is the one place that rule
+lives.
 
-If that directory already exists and holds YAML files with a `task_id:` key, **never
-overwrite them**. Report what is already there and add alongside it.
-
-Write one task derived from what step 2 found:
+Write one task derived from what step 3 found:
 
 - **A CLI** — a task whose prompt asks for something the CLI does, with criteria that
   check the resulting file's *content*, not just that a file appeared.
@@ -78,7 +97,7 @@ is worth getting right rather than fixing later. For criterion types and their f
 Use `/coder-eval:task` if the user wants more tasks after this one; it is the same
 authoring loop with a natural-language brief.
 
-## Step 4 — Environment variables
+## Step 5 — Environment variables
 
 Write the variables the chosen agent needs (e.g. `ANTHROPIC_API_KEY` for the default
 `claude-code` agent) to **`.env.example`** — create it or append to it.
@@ -87,7 +106,7 @@ Never write `.env`: it may already hold real secrets. If `.env` does not exist, 
 whether it is gitignored before suggesting the user create one, and say so if it is
 not.
 
-## Step 5 — Validate
+## Step 6 — Validate
 
 Run `coder-eval plan <task-directory>/*.yaml` and iterate until it exits 0. This
 validates the task schema through the real models, so a field name you guessed wrong
@@ -101,13 +120,13 @@ reports no tasks, treat that as a failure to scaffold, not a pass. Note that the
 bare-directory error is a different outcome: that one means you passed the wrong
 argument shape, not that the scaffold is empty.
 
-## Step 6 — Report
+## Step 7 — Report
 
 Tell the user:
 
 - what you found in the scan, and what you chose to evaluate first;
 - the exact command to run it: `coder-eval run <path>`, plus a note that it costs real
-  tokens and needs the credentials from step 4;
+  tokens and needs the credentials from step 5;
 - that `/coder-eval:skill-check` is the next step if the repo ships skills;
 - that `/coder-eval:analyze` reads the run directory afterwards, and `/coder-eval:ci`
   turns the suite into a GitHub Actions gate.

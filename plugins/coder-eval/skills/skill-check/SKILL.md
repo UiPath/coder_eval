@@ -68,7 +68,35 @@ afterwards. Never install unprompted, and do not continue if the user declines.
 That reference also covers the other half of the version check — whether this project
 pins a coder-eval version, and what to do when the installed one does not match it.
 
-## Step 3 — Design the rows
+## Step 3 — Check what already covers this skill
+
+Before designing anything, look at what the repository already has. Locate the task tree
+per `${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md` and glob it for a task carrying a
+`skill_triggered` criterion.
+
+**If an existing suite already names this skill**, report its coverage — how many
+positive and distractor rows, which `suite_thresholds` it gates on — and **offer to
+extend it** by appending rows to its dataset, rather than scaffolding a parallel suite.
+Two suites for one skill drift apart and the user pays for both on every run. Scaffold
+only when nothing covers this skill, or when the user chooses to after seeing what is
+there.
+
+Two things worth reporting rather than silently working around:
+
+- **An existing suite with no distractor rows.** Precision is 1.0 by definition, so half
+  its result is meaningless. Offer to add distractors — a real improvement over both
+  scaffolding a rival suite and saying nothing.
+- **A neighbouring suite that names a *different* skill.** That is not coverage. Go ahead
+  and scaffold, and say why the neighbour did not count.
+
+**Then check where `agent.plugins` should come from.** If an experiment the task will
+resolve against already supplies that block, **inherit it and do not write one** — a task
+that redeclares what the experiment provides drifts from it, with nothing to catch the
+divergence. Write the template's own block only when nothing already exposes the skill to
+the sandbox. If several experiments exist and it is unclear which one this task resolves
+against, ask rather than guess.
+
+## Step 4 — Design the rows
 
 This step is the whole experiment. The rest is mechanics.
 
@@ -111,7 +139,7 @@ before writing the suite.
 is 1.0 by definition and half the result is meaningless. Say why and ask for the
 adjacent cases instead.
 
-## Step 4 — Write the suite
+## Step 5 — Write the suite
 
 Copy the two template files into the user's task tree, located by following
 `${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md` (if the repository has none, propose a
@@ -127,12 +155,16 @@ relative to the task file):
 - `skill_name` → the **bare** skill name
 - each positive row's `expected_skill` → the same bare name; distractor rows keep `""`;
   a sibling-owned row's `expected_skill` → that **sibling's** bare name
-- every row's `prompt` → the requests designed in step 3, one JSON object per line
+- every row's `prompt` → the requests designed in step 4, one JSON object per line
 
 **Then make the skill reachable, which is the step that decides whether the suite measures
 anything.** The task runs in a fresh sandbox that contains none of the user's files, so the
 agent is offered no skills unless the task says where they live. That is the `agent.plugins`
-block in the template: `path` is the directory **containing** the skill's own directory —
+block in the template — and it is the template's job only **when nothing already exposes the
+skill**: if step 3 found an experiment supplying that block, inherit it and delete the
+template's copy rather than writing a second declaration.
+
+Otherwise, fill it in: `path` is the directory **containing** the skill's own directory —
 for `.claude/skills/pdf-forms/SKILL.md` that is `.claude/skills`. Tell the user to export it
 before running, and to use the same variable in CI:
 
@@ -153,13 +185,13 @@ like a broken skill.
 For criterion fields beyond this template, read
 `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md`.
 
-## Step 5 — Validate before spending anything
+## Step 6 — Validate before spending anything
 
 `coder-eval plan <path-to-activation.yaml>` must exit 0. It is a schema check only —
 it does not read the dataset file — so also confirm the JSONL sits next to the YAML
 and has one object per line.
 
-## Step 6 — Run
+## Step 7 — Run
 
 Every row is a full agent run: **N rows means N runs and real token cost**. State the
 row count and the agent/model that will be used, then ask before starting.
@@ -172,7 +204,7 @@ The criterion is agent-agnostic — it detects Claude engaging the skill via the
 tool, and any agent without that tool (Codex, for instance) by reading the skill's
 files off disk — so the same suite works whichever agent the task resolves to.
 
-## Step 7 — Report and interpret
+## Step 8 — Report and interpret
 
 Present recall, precision, F1 and the confusion matrix, then say what they mean:
 

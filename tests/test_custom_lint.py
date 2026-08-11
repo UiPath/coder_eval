@@ -1629,6 +1629,69 @@ class TestPluginArtifacts:
                 "point at the reference instead"
             )
 
+    def test_skill_check_detects_before_scaffolding(self):
+        # Scaffolding a second activation suite beside one that already covers the same
+        # skill is worse than doing nothing: two suites drift, and the user pays for both
+        # on every run. The existence check therefore has to happen BEFORE row design,
+        # which is where the token spend is committed.
+        text = " ".join((PLUGIN_ROOT / "skills" / "skill-check" / "SKILL.md").read_text(encoding="utf-8").split())
+        check = text.find("existing suite")
+        assert check != -1 and "skill_triggered" in text, (
+            "skill-check names no `existing suite` check — it will scaffold a parallel suite "
+            "over one that already covers the skill"
+        )
+        assert "extend" in text[check : check + 600], (
+            "skill-check finds an existing suite but does not offer to EXTEND it — reporting "
+            "coverage and then scaffolding anyway is the same duplication with extra steps"
+        )
+        design = text.find("Design the rows")
+        assert design != -1, "skill-check's row-design step was renamed — re-anchor this guard"
+        assert check < design, (
+            "the existing-suite check must come before row design — that is the step which "
+            "commits the token spend this check exists to avoid"
+        )
+
+    def test_skill_check_defers_to_an_experiment_supplied_plugins_block(self):
+        # A task that redeclares what the experiment layer already provides drifts from it
+        # silently — the same reason `task` tells authors to omit `agent:` entirely.
+        text = " ".join((PLUGIN_ROOT / "skills" / "skill-check" / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "experiment" in text and "agent.plugins" in text, (
+            "skill-check no longer mentions an experiment-supplied `agent.plugins` block"
+        )
+        assert "inherit it" in text, (
+            "skill-check does not tell the agent to INHERIT an experiment-supplied "
+            "`agent.plugins` rather than writing its own — a task that redeclares what the "
+            "experiment provides drifts from it with nothing to catch the divergence"
+        )
+
+    def test_init_stops_when_the_repo_is_already_configured(self):
+        # `init` is a scaffolder pointed at repositories that have nothing. Run against one
+        # that already has a suite, it wrote a "first task" beside an existing tree and
+        # reported success — so the inventory has to be able to END the skill, not just
+        # precede it.
+        text = " ".join((PLUGIN_ROOT / "skills" / "init" / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "already configured" in text or "already has" in text, (
+            "init no longer recognizes an already-configured repository"
+        )
+        assert "stop" in text, "init's inventory step no longer stops — it only reports"
+        for redirect in ("/coder-eval:lint-tasks", "/coder-eval:analyze"):
+            assert redirect in text, (
+                f"init reports an existing suite but does not point at {redirect} — the user "
+                "is told what they have and given nothing to do with it"
+            )
+
+    def test_lint_tasks_scale_guidance_stays_read_only(self):
+        # The durable half of the scale guard. `lint-tasks` has no `Bash`, so it cannot run
+        # `git diff` to find a changed set however sensible that would be — it has to ASK
+        # for one. Prose drifts; the read-only contract must not. (The frontmatter tool set
+        # itself is already covered by `test_lint_tasks_skill_is_read_only`.)
+        text = (PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md").read_text(encoding="utf-8")
+        for command in ("git diff", "git status"):
+            assert command not in text, (
+                f"lint-tasks names `{command}`, which it has no `Bash` to run — at scale it "
+                "must ask the user for the changed set instead of proposing a command"
+            )
+
     def test_cli_setup_declares_pin_resolution(self):
         # A repository that already uses coder-eval usually pins the version, and the
         # damage from ignoring that pin is asymmetric: validating with a newer CLI

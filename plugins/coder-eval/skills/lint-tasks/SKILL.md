@@ -27,6 +27,15 @@ Only task YAML counts. A file with no `task_id:` is not a task — skip experime
 definitions, dataset row files, helper configuration and check scripts, and say which you
 skipped if it is not obvious.
 
+**Above roughly 50 tasks, offer to narrow before starting.** Reviewing every task means
+reading every task, so cost scales per task and a large suite is a large bill. Say how
+many you resolved and offer three ways to cut it: a subdirectory, a tighter glob, or a
+set of changed files — **which the user has to give you**, since this skill reads and
+greps but runs nothing, so it cannot work out what changed on its own. The threshold is
+guidance and the count is whatever step 1 *resolved*, however it was specified — an
+explicit glob that matches 200 tasks gets the same offer as an empty argument. Never
+refuse outright: if the user wants all of them, review all of them.
+
 **Zero matches is an error, not a clean pass.** Say what you globbed and where; do not
 report `OK` for an empty set.
 
