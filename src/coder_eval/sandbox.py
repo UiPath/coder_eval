@@ -177,6 +177,17 @@ _GRADER_ENV_ALLOWLIST = frozenset(
         "PLUGIN_TOOLS_DIR",
         "NODE_PATH",
         "NPM_CONFIG_PREFIX",
+        # Windows: non-secret system vars a subprocess/interpreter needs to even
+        # start — cmd.exe (shell=True runs via COMSPEC), Python init/DLL loading
+        # (SYSTEMROOT), and executable resolution (PATHEXT). Matched case-insensitively
+        # on the upper-cased key, so Windows' native `SystemRoot`/`ComSpec` casing is
+        # covered. Unset on POSIX, so listing them is a no-op there. Without these the
+        # fail-closed scrub can't launch python/cmd on a Windows host re-grade.
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
     }
 )
 

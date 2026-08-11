@@ -1646,6 +1646,11 @@ def test_scrub_operator_secrets_unit():
         "NODE_EXTRA_CA_CERTS": "/etc/ssl/corp-ca.pem",
         "REQUESTS_CA_BUNDLE": "/etc/ssl/cert.pem",
         "CURL_CA_BUNDLE": "/etc/ssl/cert.pem",
+        # Windows subprocess essentials (non-secret system vars); kept so a Windows
+        # host re-grade can launch cmd.exe / python. No-op on POSIX.
+        "SYSTEMROOT": r"C:\Windows",
+        "COMSPEC": r"C:\Windows\System32\cmd.exe",
+        "PATHEXT": ".COM;.EXE;.BAT",
         "TASK_DIR": "/task",
         "PLUGIN_TOOLS_DIR": "/plugins",
         "NODE_PATH": "",
@@ -1696,6 +1701,9 @@ def test_scrub_operator_secrets_unit():
         "NODE_EXTRA_CA_CERTS",
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
+        "SYSTEMROOT",
+        "COMSPEC",
+        "PATHEXT",
         "TASK_DIR",
         "PLUGIN_TOOLS_DIR",
         "NODE_PATH",
