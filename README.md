@@ -271,9 +271,9 @@ Tasks can omit the `agent` section entirely — defaults resolve from the experi
 layer (`experiments/default.yaml`). For the full schema and every criterion type,
 see the [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md).
 
-> **Tip:** In Claude Code, use `/coder-eval-task-create` to scaffold a task from a
-> natural-language description, and `/coder-eval-run-analysis runs/latest` to get
-> improvement suggestions from a completed run.
+> **Tip:** With the [Claude Code plugin](docs/PLUGIN.md) installed, use
+> `/coder-eval:task` to scaffold a task from a natural-language description, and
+> `/coder-eval:analyze runs/latest` to get improvement suggestions from a completed run.
 
 ## Development
 

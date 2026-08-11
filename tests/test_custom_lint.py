@@ -2260,13 +2260,12 @@ class TestCE034ArmedPositiveRequiresSuccess:
         assert self._offenders(task) == []
 
 
-# The two surfaces that teach an agent to read a run record by hand. Both tell it to
-# build a compact per-task summary with `jq`, so both hardcode a `task.json` field
-# vocabulary that nothing otherwise ties to the models.
-RUN_RECORD_CONSUMERS = (
-    "plugins/coder-eval/skills/analyze/SKILL.md",
-    ".claude/commands/coder-eval-run-analysis.md",
-)
+# Every surface that teaches an agent to read a run record by hand. Each tells it to
+# build a compact per-task summary with `jq`, so each hardcodes a `task.json` field
+# vocabulary that nothing otherwise ties to the models. A tuple, not a single path:
+# this list held two entries until the repo-local `coder-eval-run-analysis` twin was
+# retired in favour of the shipped skill, and a second consumer would drift the same way.
+RUN_RECORD_CONSUMERS = ("plugins/coder-eval/skills/analyze/SKILL.md",)
 
 # Words that are jq syntax or builtins rather than record fields.
 # fmt: off

@@ -4,7 +4,6 @@
 
 - `/coder-eval:task` — applies it to work it just wrote.
 - `/coder-eval:lint-tasks` — applies it to task files already on disk.
-- this repository's own `coder-eval-task-create` contributor command.
 
 It declares **checks only** — how to rank or report what you find is the reviewing skill's
 business, not this file's.
