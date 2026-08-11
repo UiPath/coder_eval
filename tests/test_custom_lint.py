@@ -1629,6 +1629,45 @@ class TestPluginArtifacts:
                 "point at the reference instead"
             )
 
+    def test_cli_setup_declares_pin_resolution(self):
+        # A repository that already uses coder-eval usually pins the version, and the
+        # damage from ignoring that pin is asymmetric: validating with a newer CLI
+        # produces schema errors indistinguishable from real ones, and "fixing" them
+        # edits the repo's tasks into a shape its own pinned CLI rejects. Asserted on a
+        # concrete heading plus the stop rule rather than on the token `pin`, which
+        # appeared nowhere in this file before the section landed — so any passing
+        # mention would have satisfied a looser test and guarded nothing.
+        text = " ".join((PLUGIN_ROOT / "reference" / "cli-setup.md").read_text(encoding="utf-8").split())
+        assert "## Version pin" in text, (
+            "reference/cli-setup.md lost its `## Version pin` section — the CLI-driving "
+            "skills would go back to validating a pinned repository with whatever binary "
+            "happens to be on PATH"
+        )
+        assert "If the resolved version differs from the pin, stop and say so." in text, (
+            "cli-setup.md no longer states the stop rule for a pin mismatch — resolving the "
+            "pin is only useful if a mismatch halts the skill instead of being reported and "
+            "then ignored"
+        )
+
+    def test_cli_setup_conditions_the_upgrade_suggestion_on_a_pin(self):
+        # "Version skew" used to terminate in "suggest upgrading", full stop. Against a
+        # pinned repository that is the single most destructive thing these skills could
+        # recommend, so the upgrade advice must now sit BEHIND the pin question.
+        section = (
+            (PLUGIN_ROOT / "reference" / "cli-setup.md").read_text(encoding="utf-8").partition("## Version skew")[2]
+        )
+        assert section.strip(), "reference/cli-setup.md lost its `## Version skew` section"
+        upgrade = section.find("upgrade coder-eval")
+        assert upgrade != -1, "the `Version skew` section no longer names the upgrade command at all"
+        assert "pin" in section[:upgrade], (
+            "`Version skew` suggests upgrading before it has asked whether the project pins "
+            "a version — upgrading past a pin is a repo-breaking action, not a fix"
+        )
+        assert "match the pin" in " ".join(section.split()), (
+            "`Version skew` no longer says what to do when a pin DOES exist — the branch "
+            "that makes the upgrade advice conditional rather than merely delayed"
+        )
+
     def test_repo_layout_is_bundled_and_read_by_its_readers(self):
         # Sibling of the cli-setup guard above, for the third shared reference. "Where does
         # this repository keep its tasks and runs?" is a question five skills ask and a sixth

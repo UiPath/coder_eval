@@ -65,6 +65,9 @@ If it is missing, follow `${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md`: offer t
 install, **ask before running it**, and confirm with `coder-eval --version`
 afterwards. Never install unprompted, and do not continue if the user declines.
 
+That reference also covers the other half of the version check — whether this project
+pins a coder-eval version, and what to do when the installed one does not match it.
+
 ## Step 3 — Design the rows
 
 This step is the whole experiment. The rest is mechanics.

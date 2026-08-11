@@ -23,6 +23,9 @@ If it is missing, follow `${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md`: offer t
 **ask before running it**, and confirm with `coder-eval --version` afterwards. Never install
 unprompted, and do not write any task files if the user declines.
 
+That reference also covers the other half of the version check — whether this project pins a
+coder-eval version, and what to do when the installed one does not match it.
+
 Then establish:
 
 - **What is being tested** — which tool, SDK, CLI, skill, or capability?
