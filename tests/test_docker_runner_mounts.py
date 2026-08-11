@@ -880,13 +880,14 @@ class TestExtraMountsRejectGraderDirOverlap:
     overlap guard — otherwise `extra_mounts: ["<taskdir>:/mnt:ro"]` re-exposes
     check_*.py / reference / unstripped criteria that GRADE-OUTSIDE keeps host-side."""
 
-    def _make_runner(self, tmp_path: Path, *, extra_mounts: list[str], task_file: Path):
+    def _make_runner(self, tmp_path: Path, *, extra_mounts: list[str], task_file: Path, reference=None):
         task = TaskDefinition(
             task_id="t",
             description="d",
             initial_prompt="p",
             sandbox=SandboxConfig(docker={"extra_mounts": extra_mounts}),
             agent={"type": "claude-code"},
+            reference=reference,
             success_criteria=[FileExistsCriterion(description="c", path="o.txt")],
         )
         rt = MagicMock()
@@ -948,6 +949,31 @@ class TestExtraMountsRejectGraderDirOverlap:
         argv = self._argv(runner, tmp_path)  # must not raise
         mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
         assert any(str(outside.resolve()) in m for m in mounts)
+
+    def test_extra_mount_ancestor_of_out_of_tree_reference_is_rejected(self, tmp_path):
+        """An out-of-tree reference (reference.file "../shared/answer.py") resolves to a
+        sibling of the grader dir; an extra_mount of that sibling dir is an ANCESTOR of
+        the golden reference → re-exposes it → hard-reject. FAILS on pre-fix code (the
+        sibling mount hits no overlap arm → not blocked → mounted)."""
+        from coder_eval.models import ReferenceSource
+
+        suite = tmp_path / "suite"
+        grader_dir = suite / "task"  # holds task.yaml → this is the grader dir
+        shared = suite / "shared"  # sibling of grader_dir, ancestor of the reference
+        grader_dir.mkdir(parents=True)
+        shared.mkdir()
+        (shared / "answer.py").write_text("GOLDEN\n", encoding="utf-8")
+        task_file = grader_dir / "task.yaml"
+        task_file.write_text("x", encoding="utf-8")
+
+        runner = self._make_runner(
+            tmp_path,
+            extra_mounts=[f"{shared}:/mnt/x:ro"],
+            task_file=task_file,
+            reference=ReferenceSource(file="../shared/answer.py"),
+        )
+        with pytest.raises(DockerRunError, match="grader dir"):
+            self._argv(runner, tmp_path)
 
 
 class TestUipathHomeRWCopyMount:

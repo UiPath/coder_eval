@@ -396,14 +396,21 @@ def _overlaps_grader_dir(target: Path, grader_dir: Path | None, grader_artifacts
     mounting the subdir re-exposes part of the reference tree (``a in
     target.parents``). ``check_*.py`` / ``reference.file`` are files with no
     children, so the descendant arm is inert for them.
+
+    The artifact test is UNCONDITIONAL — it runs for ANY target, not only
+    descendants of ``grader_dir``. A ``reference`` resolved OUTSIDE the task dir
+    (e.g. ``reference.file "../shared/answer.py"``) lands at an absolute path that
+    is neither the grader dir, nor an ancestor of it, nor a descendant of it; a
+    SIBLING mount that is an ancestor of that external reference would re-expose
+    the golden solution, so ``target`` is tested against every resolved artifact
+    directly. The two leading arms still short-circuit, so already-blocked cases
+    (grader dir itself / an ancestor) remain a strict superset.
     """
     if grader_dir is None:
         return False
     if target == grader_dir or target in grader_dir.parents:
         return True
-    if grader_dir in target.parents:
-        return any(a == target or target in a.parents or a in target.parents for a in (grader_artifacts or []))
-    return False
+    return any(a == target or target in a.parents or a in target.parents for a in (grader_artifacts or []))
 
 
 def _grader_artifacts(grader_dir: Path | None, reference: ReferenceSource | None) -> list[Path]:

@@ -1387,6 +1387,52 @@ def test_regrade_untrusted_env_keeps_task_dir_and_path(tmp_path):
         sandbox.cleanup()
 
 
+def test_regrade_untrusted_env_pops_virtual_env(monkeypatch, tmp_path):
+    """VIRTUAL_ENV from the parent env is dropped under default untrusted regrade (F6).
+
+    The untrusted grader PATH prepends no venv scripts dir, so a dangling VIRTUAL_ENV
+    pointer would be inconsistent. It is excluded from the allowlist. FAILS on pre-fix
+    code, where VIRTUAL_ENV was in the keep-set and survived.
+    """
+    monkeypatch.setenv("VIRTUAL_ENV", "/host/venv")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="venvpop", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        env = sandbox._build_run_command_env()
+        assert "VIRTUAL_ENV" not in env, "VIRTUAL_ENV survived into the untrusted grader env"
+    finally:
+        sandbox.cleanup()
+
+
+def test_regrade_untrusted_env_keeps_safe_set(monkeypatch, tmp_path):
+    """Grader-needed safe-set vars survive the allowlist (graders still work): the
+    framework TASK_DIR, a non-empty PATH, and monkeypatched LANG / HTTP_PROXY."""
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy:8080")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="safeset", task_dir=tmp_path)
+    try:
+        sandbox.setup(artifacts, regrade=True)
+        env = sandbox._build_run_command_env()
+        assert env.get("TASK_DIR") == str(tmp_path)
+        assert env.get("PATH")
+        assert env.get("LANG") == "en_US.UTF-8"
+        assert env.get("HTTP_PROXY") == "http://proxy:8080"
+    finally:
+        sandbox.cleanup()
+
+
+def test_untrusted_grader_env_docstring_documents_node_gap():
+    """F2 (document-only): the residual Node cwd-require gap is named in the docstring,
+    pointing future node graders at the regrade_trusts_agent_env opt-in."""
+    doc = Sandbox._build_untrusted_grader_env.__doc__ or ""
+    assert "Node" in doc
+    assert "regrade_trusts_agent_env" in doc
+
+
 def test_regrade_untrusted_skips_agent_venv_on_path(tmp_path):
     """A planted agent .venv/bin/python3 is NOT executed under default untrusted regrade.
 
@@ -1498,6 +1544,9 @@ def test_regrade_opt_in_restores_agent_env(monkeypatch, tmp_path):
         env = sandbox._build_run_command_env()
         # Opt-in is an explicit trust escalation: secrets are NOT scrubbed.
         assert env.get("MY_API_KEY") == "present"
+        # The opt-in re-pins VIRTUAL_ENV from the agent .venv (F6 non-regression):
+        # the untrusted path drops VIRTUAL_ENV, but the trusted opt-in body sets it.
+        assert env.get("VIRTUAL_ENV") == str(sandbox.venv_dir)
         # The agent .venv bin is on PATH, so `python3` resolves to the planted shim.
         code, _out, _err = sandbox.run_command('python3 -c "pass"')
         assert code == 0
@@ -1538,93 +1587,119 @@ def test_normal_setup_env_unchanged(monkeypatch, tmp_path):
 
 
 def test_scrub_operator_secrets_unit():
-    """Direct unit test of _scrub_operator_secrets over each denylist rule and keep-set."""
+    """Direct unit test of _scrub_operator_secrets: fail-closed allowlist (safe-set).
+
+    A key survives ONLY if its upper-cased name is in _GRADER_ENV_ALLOWLIST or starts
+    with LC_. Every other var — including credential name shapes the old denylist did
+    NOT match (SESSIONTOKEN, APIKEY, bare AUTH, MYAPP_COOKIE, SNOWFLAKE_ACCOUNT,
+    CLIENT_ID, …) and benign-but-not-safe vars (EDITOR) — is dropped for free.
+    """
     from coder_eval.sandbox import _scrub_operator_secrets
 
     env = {
-        # --- dropped: denylist rules ---
-        "ANTHROPIC_API_KEY": "x",  # exact
-        "MY_API_KEY": "x",  # suffix _API_KEY
-        "SOME_TOKEN": "x",  # suffix _TOKEN
-        "APP_SECRET": "x",  # suffix _SECRET
-        "AWS_SECRET_ACCESS_KEY": "x",  # prefix AWS_ (and suffix)
-        "UIPATH_ACCESS_TOKEN": "x",  # prefix UIPATH_
-        "OPENAI_ORG": "x",  # prefix OPENAI_
-        "OPENROUTER_KEY": "x",  # prefix OPENROUTER_
-        "AWS_BEARER_TOKEN_BEDROCK": "x",  # substring BEARER
-        "DB_CREDENTIALS": "x",  # substring CREDENTIAL
-        # --- broadened denylist (plan-owner decision) ---
-        "LITELLM_MASTER_KEY": "x",  # prefix LITELLM_ + suffix _KEY
-        "TELEMETRY_CONNECTION_STRING": "x",  # prefix TELEMETRY_ + substring CONNECTION_STRING
-        "NPM_AUTH_TOKEN": "x",  # prefix NPM_ + suffix _TOKEN
-        "GH_PASSWORD": "x",  # prefix GH_ + substring PASSWORD
-        "MY_PRIVATE_KEY": "x",  # substring PRIVATE_KEY
-        # --- inline-credential carriers (no _KEY/_TOKEN/_SECRET suffix) ---
+        # --- dropped: old denylist entries (still dropped) ---
+        "ANTHROPIC_API_KEY": "x",
+        "AWS_BEARER_TOKEN_BEDROCK": "x",
         "DATABASE_URL": "postgres://u:p@h/db",
-        "REDIS_URL": "redis://u:p@h",
-        "SENTRY_DSN": "https://k@sentry/1",
-        # --- concrete operator secrets matching no pattern rule (exact keys) ---
-        "SSH_AUTH_SOCK": "/run/ssh",
-        "KUBECONFIG": "/home/u/.kube/config",
-        "DOCKER_AUTH": "x",
-        "VAULT_ADDR": "https://vault",
-        "CI_JOB_JWT": "x",  # substring JWT
-        # --- kept: keep-set exact names win even on a pattern match ---
+        "CI_JOB_JWT": "x",
+        # --- dropped: F1 survivors the old denylist MISSED (now fall out for free) ---
+        "SESSIONTOKEN": "x",  # no underscore → no _TOKEN suffix under old rules
+        "SESSION_TOKEN": "x",
+        "APIKEY": "x",  # no underscore → no _API_KEY/_KEY suffix under old rules
+        "AUTH": "x",  # bare AUTH
+        "TWILIO_AUTH": "x",
+        "MYAPP_COOKIE": "x",
+        "SNOWFLAKE_ACCOUNT": "x",
+        "CLIENT_ID": "x",
+        "USER_ACCESS_TOKEN": "x",
+        "APP_ACCESS_KEY": "x",
+        "MY_OAUTH": "x",
+        "OKTA_SESSION": "x",
+        "SVC_APITOKEN": "x",
+        # --- dropped: F6 (VIRTUAL_ENV no longer in the safe-set) ---
+        "VIRTUAL_ENV": "/venv",
+        # --- dropped: benign-but-not-safe (proves fail-closed) ---
+        "EDITOR": "vim",
+        "XDG_SESSION_TYPE": "wayland",
+        # --- dropped: PWD (misleading on the untrusted path — grader cwd is the
+        #     artifacts dir, not the operator's inherited $PWD) ---
+        "PWD": "/work",
+        # --- kept: the safe-set ---
         "PATH": "/usr/bin",
         "HOME": "/home/u",
+        "USER": "u",
+        "LOGNAME": "u",
+        "SHELL": "/bin/bash",
         "LANG": "en_US.UTF-8",
-        "LC_ALL": "C",  # LC_* prefix keep
-        "TASK_DIR": "/task",
-        "VIRTUAL_ENV": "/venv",
-        "PLUGIN_TOOLS_DIR": "/plugins",
-        "NODE_PATH": "",
-        "NPM_CONFIG_PREFIX": "/npm",  # matches NPM_ prefix but kept
+        "LC_ALL": "C",  # LC_ prefix keep
+        "TERM": "xterm",
+        "TZ": "UTC",
         "TMPDIR": "/tmp",
         "TMP": "/tmp",
         "TEMP": "/tmp",
-        # --- kept: no rule matches ---
-        "EDITOR": "vim",
+        "HTTP_PROXY": "http://p",
+        "http_proxy": "http://p",  # lower-case → case-insensitive keep
+        "NO_PROXY": "localhost",
+        # CA-bundle vars: non-secret TLS trust paths a Node/uv/curl grader needs.
+        "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+        "SSL_CERT_DIR": "/etc/ssl/certs",
+        "NODE_EXTRA_CA_CERTS": "/etc/ssl/corp-ca.pem",
+        "REQUESTS_CA_BUNDLE": "/etc/ssl/cert.pem",
+        "CURL_CA_BUNDLE": "/etc/ssl/cert.pem",
+        "TASK_DIR": "/task",
+        "PLUGIN_TOOLS_DIR": "/plugins",
+        "NODE_PATH": "",
+        "NPM_CONFIG_PREFIX": "/npm",
     }
     out = _scrub_operator_secrets(dict(env))
     dropped = {
         "ANTHROPIC_API_KEY",
-        "MY_API_KEY",
-        "SOME_TOKEN",
-        "APP_SECRET",
-        "AWS_SECRET_ACCESS_KEY",
-        "UIPATH_ACCESS_TOKEN",
-        "OPENAI_ORG",
-        "OPENROUTER_KEY",
         "AWS_BEARER_TOKEN_BEDROCK",
-        "DB_CREDENTIALS",
-        "LITELLM_MASTER_KEY",
-        "TELEMETRY_CONNECTION_STRING",
-        "NPM_AUTH_TOKEN",
-        "GH_PASSWORD",
-        "MY_PRIVATE_KEY",
         "DATABASE_URL",
-        "REDIS_URL",
-        "SENTRY_DSN",
-        "SSH_AUTH_SOCK",
-        "KUBECONFIG",
-        "DOCKER_AUTH",
-        "VAULT_ADDR",
         "CI_JOB_JWT",
+        "SESSIONTOKEN",
+        "SESSION_TOKEN",
+        "APIKEY",
+        "AUTH",
+        "TWILIO_AUTH",
+        "MYAPP_COOKIE",
+        "SNOWFLAKE_ACCOUNT",
+        "CLIENT_ID",
+        "USER_ACCESS_TOKEN",
+        "APP_ACCESS_KEY",
+        "MY_OAUTH",
+        "OKTA_SESSION",
+        "SVC_APITOKEN",
+        "VIRTUAL_ENV",
+        "EDITOR",
+        "XDG_SESSION_TYPE",
+        "PWD",
     }
     kept = {
         "PATH",
         "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
         "LANG",
         "LC_ALL",
-        "TASK_DIR",
-        "VIRTUAL_ENV",
-        "PLUGIN_TOOLS_DIR",
-        "NODE_PATH",
-        "NPM_CONFIG_PREFIX",
+        "TERM",
+        "TZ",
         "TMPDIR",
         "TMP",
         "TEMP",
-        "EDITOR",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "TASK_DIR",
+        "PLUGIN_TOOLS_DIR",
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
     }
     assert dropped.isdisjoint(out.keys()), f"leaked: {dropped & out.keys()}"
     assert kept <= out.keys(), f"wrongly dropped: {kept - out.keys()}"

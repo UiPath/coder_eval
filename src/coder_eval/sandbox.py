@@ -105,105 +105,76 @@ def _grant_read_traverse(root: Path) -> None:
 MAX_SEED_BYTES = 512 * 1024 * 1024  # 512 MiB
 
 
-# Environment variables that must NEVER reach a host-side (untrusted) regrade
-# grader. Matched case-insensitively on the KEY. We DENYLIST secrets by pattern
-# rather than ALLOWLIST known-safe vars: an allowlist that omits a locale/proxy/
-# temp var a legit grader needs would silently break it, and there is no closed
-# set of grader-required vars. The keep-set below is applied AFTER the denylist
-# so framework-controlled vars survive even when they match a pattern (e.g.
-# NPM_CONFIG_PREFIX matches the NPM_ prefix but must be kept; NPM_AUTH_TOKEN is
-# dropped). Kept as module constants so a reviewer can eyeball the whole surface.
-# Concrete operator-credential vars that match none of the pattern rules below
-# (no _API_KEY/_TOKEN/_SECRET suffix, no covered prefix, no covered substring).
-_SECRET_EXACT_KEYS = frozenset(
+# The ONLY environment variables allowed through to a host-side (untrusted)
+# regrade grader. FAIL-CLOSED allowlist: every name NOT listed here (or matched
+# by the LC_ prefix rule in _scrub_operator_secrets) is dropped, so any operator
+# credential — standard or not — never reaches a grader whose cwd is the agent
+# artifacts dir. Chosen over a denylist because it needs no maintenance as new
+# credential name shapes appear (SESSIONTOKEN, APIKEY, bare AUTH, TWILIO_AUTH,
+# MYAPP_COOKIE, SNOWFLAKE_ACCOUNT, CLIENT_ID, … all fall out for free), and is
+# short enough to eyeball. A grader that genuinely needs a var outside this set
+# uses the per-task sandbox.docker.regrade_trusts_agent_env opt-in (an explicit
+# trust escalation), which bypasses the scrub entirely. VIRTUAL_ENV is
+# deliberately EXCLUDED: the untrusted grader PATH prepends no venv scripts dir,
+# so a dangling VIRTUAL_ENV pointer would be inconsistent (the opt-in path
+# re-pins it from self.venv_dir).
+_GRADER_ENV_ALLOWLIST = frozenset(
     {
-        "ANTHROPIC_API_KEY",
-        "SSH_AUTH_SOCK",  # forwarded ssh-agent socket
-        "KUBECONFIG",  # path to a file carrying cluster credentials
-        "DOCKER_AUTH",
-        "DOCKER_AUTH_CONFIG",
-        "VAULT_ADDR",  # VAULT_TOKEN is already caught by the _TOKEN suffix
-    }
-)
-_SECRET_KEY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
-_SECRET_KEY_PREFIXES = (
-    "AWS_",
-    "ANTHROPIC_",
-    "UIPATH_",
-    "OPENAI_",
-    "OPENROUTER_",
-    "LITELLM_",
-    "AZURE_",
-    "GOOGLE_",
-    "GCP_",
-    "HF_",
-    "HUGGINGFACE_",
-    "GITHUB_",
-    "GH_",
-    "SLACK_",
-    "NPM_",
-    "TELEMETRY_",
-)
-_SECRET_KEY_SUBSTRINGS = (
-    "BEARER",
-    "CREDENTIAL",
-    "PASSWORD",
-    "PASSWD",
-    "PRIVATE_KEY",
-    "CONNECTION_STRING",
-    # Common inline-credential carriers with no _KEY/_TOKEN/_SECRET suffix.
-    "DATABASE_URL",
-    "REDIS_URL",
-    "DSN",
-    "JWT",  # CI-injected JSON Web Tokens (e.g. CI_JOB_JWT)
-)
-# Framework-controlled vars a grader legitimately needs; force-kept even when a
-# name matches a denylist rule. Exact-key match only — a hypothetical PATH_TOKEN
-# is NOT in this set and is correctly dropped.
-_SECRET_SCRUB_KEEP = frozenset(
-    {
+        # Process / shell basics graders assume.
         "PATH",
         "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        # PWD is deliberately NOT here: on the untrusted path the grader's cwd is
+        # the agent artifacts dir, but an inherited PWD would point at the
+        # operator's original cwd — misleading. Graders read os.getcwd(), not $PWD.
+        # Locale / terminal / timezone (LANG + LC_* handled; TERM/TZ explicit).
         "LANG",
-        "TASK_DIR",
-        "VIRTUAL_ENV",
-        "PLUGIN_TOOLS_DIR",
-        "NODE_PATH",
-        "NPM_CONFIG_PREFIX",
+        "TERM",
+        "TZ",
+        # Temp dirs.
         "TMPDIR",
         "TMP",
         "TEMP",
+        # Proxies (upper-case; lower-case variants handled case-insensitively).
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        # TLS trust material: PATHS to PUBLIC CA certs, never secrets. A host
+        # grader that shells out over TLS (e.g. the UiPath suites' `uip maestro
+        # flow validate`, a Node CLI) in a corporate-CA environment needs these;
+        # dropping them silently breaks the handshake. Paired with the proxy vars
+        # above — a proxy without its CA bundle is a half-measure.
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        # Framework-set vars the grader path needs (see _build_run_command_env).
+        "TASK_DIR",
+        "PLUGIN_TOOLS_DIR",
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
     }
 )
 
 
 def _scrub_operator_secrets(env: dict[str, str]) -> dict[str, str]:
-    """Drop operator credentials from a grader environment (denylist + keep-set).
+    """Reduce a grader environment to a fail-closed safe-set (allowlist).
 
-    Mutates and returns ``env``. A key is dropped when it matches any denylist
-    rule (exact key, suffix, prefix, or substring — all case-insensitive on the
-    key) UNLESS its exact name is in the keep-set (``PATH``/``HOME``/``LANG``/
-    ``LC_*``/``TASK_DIR``/…), which is applied last so framework vars survive a
-    coincidental pattern match. Pure dict filter: never raises on an odd/missing
-    var. See ``_SECRET_*`` module constants for the full surface.
+    Mutates and returns ``env`` keeping ONLY keys whose upper-cased name is in
+    ``_GRADER_ENV_ALLOWLIST`` or starts with ``LC_`` (locale). Every other var —
+    including all operator credentials, standard or not — is dropped. Pure dict
+    filter: never raises. The ``regrade_trusts_agent_env`` opt-in bypasses this
+    entirely for graders that need the full inherited env.
     """
 
-    def _is_secret(key: str) -> bool:
+    def _keep(key: str) -> bool:
         upper = key.upper()
-        # Keep-set is matched case-insensitively so it stays symmetric with the
-        # case-insensitive denylist below (a lower-case NPM_CONFIG_PREFIX must
-        # still be rescued from the NPM_ prefix rule).
-        if upper in _SECRET_SCRUB_KEEP or upper.startswith("LC_"):
-            return False
-        if upper in _SECRET_EXACT_KEYS:
-            return True
-        if any(upper.endswith(suf) for suf in _SECRET_KEY_SUFFIXES):
-            return True
-        if any(upper.startswith(pre) for pre in _SECRET_KEY_PREFIXES):
-            return True
-        return any(sub in upper for sub in _SECRET_KEY_SUBSTRINGS)
+        return upper in _GRADER_ENV_ALLOWLIST or upper.startswith("LC_")
 
-    for key in [k for k in env if _is_secret(k)]:
+    for key in [k for k in env if not _keep(k)]:
         del env[key]
     return env
 
@@ -1260,6 +1231,17 @@ class Sandbox:
         Trusted PATH (parent process, agent dirs NOT prepended) + operator
         credentials scrubbed. See :meth:`_build_run_command_env` for the rationale;
         the framework-controlled vars are set identically to the trusted body.
+
+        Residual Node gap (documented, intentionally not fixed here): PYTHONSAFEPATH
+        closes the Python cwd-import hijack, but Node has no equivalent env flag — a
+        ``node`` grader run with cwd = the agent artifacts dir would resolve a
+        cwd-relative ``require('./x')`` / bare ``require('x')`` (walking a cwd-local
+        ``node_modules``) to agent-written files. NO in-suite grader invokes ``node``
+        (every grader is ``python3 $TASK_DIR/check_*.py``), so this path is unreachable
+        today. If a future host-side grader needs Node, route it through the
+        ``sandbox.docker.regrade_trusts_agent_env`` opt-in (an explicit trust
+        escalation) or re-open this with a ``--require`` preload shim that rejects
+        cwd-relative requires.
         """
         assert self.sandbox_dir is not None
         env = _scrub_operator_secrets(os.environ.copy())
@@ -1277,7 +1259,7 @@ class Sandbox:
         # (3.11+) drops the implicit cwd from sys.path; we also strip the
         # agent-inheritable path/startup injectors so neither PATH-adjacent lever
         # can re-open the same hole. (These are Python-runtime controls, distinct
-        # from the credential denylist above.)
+        # from the credential allowlist above.)
         env["PYTHONSAFEPATH"] = "1"
         for injector in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"):
             env.pop(injector, None)

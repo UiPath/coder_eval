@@ -274,6 +274,41 @@ class TestOverlapsGraderDir:
         """grader_dir is None (library/test path without a task_file) → never overlaps."""
         assert _overlaps_grader_dir(tmp_path / "anything", None) is False
 
+    def test_out_of_tree_reference_sibling_mount_blocks(self, tmp_path):
+        """An out-of-tree reference (e.g. reference.file "../shared/answer.py") resolves
+        OUTSIDE the grader dir; a SIBLING mount that is an ANCESTOR of it must still be
+        blocked — the artifact check is unconditional, not descendant-of-grader-dir only.
+        FAILS on pre-fix code (the sibling hits no arm → returns False → mounted)."""
+        suite = tmp_path / "suite"
+        grader_dir = suite / "task"
+        shared = suite / "shared"  # sibling of grader_dir
+        grader_dir.mkdir(parents=True)
+        shared.mkdir()
+        reference = (shared / "answer.py").resolve()
+        assert _overlaps_grader_dir(shared, grader_dir, [reference]) is True
+
+    def test_out_of_tree_reference_mount_is_reference_blocks(self, tmp_path):
+        """The mount IS the external reference file → block (the a == target arm)."""
+        suite = tmp_path / "suite"
+        grader_dir = suite / "task"
+        shared = suite / "shared"
+        grader_dir.mkdir(parents=True)
+        shared.mkdir()
+        reference = (shared / "answer.py").resolve()
+        assert _overlaps_grader_dir(reference, grader_dir, [reference]) is True
+
+    def test_unrelated_sibling_mount_not_over_blocked(self, tmp_path):
+        """A sibling mount unrelated to any artifact stays allowed (no over-blocking)."""
+        suite = tmp_path / "suite"
+        grader_dir = suite / "task"
+        unrelated = suite / "unrelated"  # sibling, but not an artifact ancestor/descendant
+        shared = suite / "shared"
+        grader_dir.mkdir(parents=True)
+        unrelated.mkdir()
+        shared.mkdir()
+        reference = (shared / "answer.py").resolve()
+        assert _overlaps_grader_dir(unrelated, grader_dir, [reference]) is False
+
 
 class TestArgvGraderDirLeakDetector:
     """Argv-level proof that a CLEAN child mount does not materialize the graders,

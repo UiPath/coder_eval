@@ -170,13 +170,28 @@ async def run_batch(
                     # copied-out artifacts on the host, where the full unstripped
                     # rt.task lives, via the evaluate-only re-grade path. No-ops
                     # for ungraded tasks or terminal agent-side failures.
-                    result = await regrade_on_host(result, rt)
+                    regrade_error: BaseException | None = None
+                    try:
+                        result = await regrade_on_host(result, rt)
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except Exception as exc:
+                        # regrade_on_host already stamped `result` ERROR and
+                        # re-persisted to disk (_degrade_regrade_to_error) before
+                        # raising. Capture the error, but do NOT skip host-side
+                        # post_run teardown below: a pre_run-provisioned cloud
+                        # resource must be torn down even when grading blew up
+                        # (parity with the DockerRunner pre_run-abort teardown
+                        # path). Surface the error after teardown.
+                        regrade_error = exc
                     # The in-container _finalize_result can't emit task telemetry
                     # (connection-string env vars aren't forwarded into the
                     # container), so emit the Task.End event host-side here
                     # — keeping docker runs at parity with the in-process path.
                     # Emit AFTER the host re-grade so the telemetry status/score
                     # reflect the authoritative host grade, not the container's.
+                    # Runs regardless of the re-grade outcome (the ERROR result is
+                    # authoritative on the raise path).
                     from ..orchestrator import build_task_event
                     from ..telemetry import track_event
 
@@ -185,10 +200,15 @@ async def run_batch(
                     # HARNESS-OUTSIDE: post_run teardown runs HOST-side, LAST —
                     # after the container exits and after the grade. It is NOT
                     # gated behind regrade_on_host's short-circuits (no gating
-                    # criteria; terminal agent-side failure): cloud teardown must
-                    # happen regardless of grade or resources orphan. Best-effort
-                    # + non-fatal; skipped with a warning when no artifacts dir.
+                    # criteria; terminal agent-side failure) NOR skipped when the
+                    # re-grade raised: cloud teardown must happen regardless of
+                    # grade or resources orphan. Best-effort + non-fatal; skipped
+                    # with a warning when no artifacts dir.
                     await run_post_run_on_host(result, rt)
+                    if regrade_error is not None:
+                        # Re-raise after teardown so the batch except-path records
+                        # the task as ERROR (a teardown failure never masks this).
+                        raise regrade_error
                 else:
                     orchestrator = Orchestrator(
                         task=rt.task,
