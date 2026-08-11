@@ -673,7 +673,9 @@ class DockerRunner:
 
     def _stage_public_inputs(self, staging: Path, payload: dict[str, object]) -> None:
         """Copy declared public external inputs and rewrite the agent-side paths."""
-        patterns = self._docker_config.agent_input_patterns
+        # The explicit allowlist is introduced by the follow-up public-input
+        # branch. Keep this isolation branch runnable on its own.
+        patterns = getattr(self._docker_config, "agent_input_patterns", [])
         public_root = staging / "public"
         self._public_inputs_dir = None
 
