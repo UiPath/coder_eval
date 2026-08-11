@@ -1629,6 +1629,61 @@ class TestPluginArtifacts:
                 "point at the reference instead"
             )
 
+    def test_task_skill_declares_repo_convention_precedence(self):
+        # The bundled rubric is a floor, not a house style. A repository that already
+        # authors tasks has its own conventions, and a skill that quietly overrides them
+        # with the plugin's defaults produces work its maintainers have to undo — so the
+        # precedence has to be stated, and the conventions adopted have to be reported
+        # (otherwise "I followed the repo" is unfalsifiable).
+        text = " ".join((PLUGIN_ROOT / "skills" / "task" / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "the repo wins" in text or "the repository wins" in text, (
+            "task no longer says repo-local convention beats the bundled rubric — it will "
+            "impose the plugin's defaults on a repository that already declared its own"
+        )
+        assert "conventions you adopted" in text or "conventions adopted" in text, (
+            "task does not report WHICH conventions it adopted — an unreported precedence "
+            "rule cannot be checked by the person reading the result"
+        )
+        rubric = " ".join((PLUGIN_ROOT / "reference" / "task-rubric.md").read_text(encoding="utf-8").split())
+        assert "the repo wins" in rubric or "the repository wins" in rubric, (
+            "reference/task-rubric.md does not carry the same precedence line — the rubric "
+            "is read at review time too, and must not contradict the authoring skill"
+        )
+
+    def test_ci_skill_covers_experiments_and_pins(self):
+        # Two silent-wrong-answer bugs in an emitted workflow. Omitting the experiment
+        # drops the `agent:` config it supplies, so the gate measures something other than
+        # what the suite measures locally; and a `version:` input that ignores the repo's
+        # pin runs the gate on a different CLI than the repo is authored against.
+        text = " ".join((PLUGIN_ROOT / "skills" / "ci" / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "extra-args" in text and "experiment" in text, (
+            "the ci skill does not say how to pass an experiment through to the run — a "
+            "suite that resolves through one silently measures something else without it"
+        )
+        assert "pin" in text, (
+            "the ci skill no longer conditions the `version:` input on whether the repository pins a coder-eval version"
+        )
+
+    def test_ci_skill_does_not_recommend_a_recursive_task_glob(self):
+        # `action.yml` expands the `tasks:` input unquoted (`args+=($CE_TASKS)`) with
+        # globstar OFF, so `a/**/*.yaml` degrades to `a/*/*.yaml` and silently drops every
+        # top-level task — a depth-dependent "measured the wrong set" bug. nullglob is off
+        # too, so an unmatched depth pattern reaches the CLI literally and exits 1. Both
+        # reproduced by hand. The snippet must therefore show neither `**` in its tasks
+        # value nor a fixed ladder of depths.
+        skill = PLUGIN_ROOT / "skills" / "ci" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+        offenders = [line.strip() for line in text.splitlines() if re.search(r"^\s*tasks:.*\*\*", line)]
+        assert not offenders, (
+            f"{skill} puts a recursive `**` glob in a `tasks:` input value ({offenders}) — the "
+            "action word-splits and pathname-expands that value with globstar off, so it "
+            "silently drops every task above the deepest matching level"
+        )
+        assert "globstar" in text, (
+            "the ci skill emits explicit globs but no longer says WHY — without the reason, "
+            "the next reader simplifies them back to `**` and loses the top-level tasks"
+        )
+
     def test_skill_check_detects_before_scaffolding(self):
         # Scaffolding a second activation suite beside one that already covers the same
         # skill is worse than doing nothing: two suites drift, and the user pays for both

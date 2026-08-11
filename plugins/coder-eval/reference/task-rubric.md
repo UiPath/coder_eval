@@ -8,6 +8,10 @@
 It declares **checks only** — how to rank or report what you find is the reviewing skill's
 business, not this file's.
 
+These are checks of **last resort**: where the repository declares its own convention, the
+repo wins, and this file's job is to catch what no local rule covers. The exception is
+soundness — a convention cannot make a criterion that cannot fail acceptable.
+
 A task is an instrument. These checks ask whether the instrument measures what its
 description claims, or whether it measures nothing and reports a number anyway.
 

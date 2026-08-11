@@ -38,10 +38,25 @@ State any assumptions you make rather than silently picking.
 ## Step 2 — Look at what already exists
 
 Find the repository's task tree by following
-`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`, and say what you resolved. Read a
-couple of the existing tasks and follow their conventions: naming, tags, criteria style.
-If a task already covers this ground, say so and offer to modify it instead of adding a
+`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`, and say what you resolved. If a task
+already covers this ground, say so and offer to modify it instead of adding a
 near-duplicate.
+
+**Repo-local convention beats anything bundled with this plugin — where the two
+disagree, the repo wins.** Before writing, read what the repository declares about task
+authoring: its own contributor or convention documents, a task template if it ships one,
+and a few neighbouring tasks. Adopt what you find — naming, tags, thresholds, weights,
+where files go — and **say in your report which conventions you adopted**, so the choice
+is visible rather than implied.
+
+Two limits on that:
+
+- **A repository that declares nothing** leaves the bundled rubric as the whole answer.
+  Precedence is about deferring to a local rule that exists, not about doing nothing
+  until one does.
+- **Precedence covers style, not soundness.** If a local convention would produce a
+  criterion that cannot fail, the rubric's correctness checks still bite — follow the
+  convention where you can, say plainly where you did not and why.
 
 ## Step 3 — Design the task
 

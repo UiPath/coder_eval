@@ -79,10 +79,64 @@ jobs:
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-The `tasks:` value above is a placeholder for whatever step 1 discovered — substitute the
-real paths rather than shipping this one. Adjust `model:` and the cron to the repository
-too. Pin the action at `@v0` (the moving major tag) and do **not** pass a `version:`
-input — the action's own default tracks the matching coder-eval release.
+Adjust `model:` and the cron to the repository. Pin the action at `@v0`, the moving major
+tag. Then work through the four things the snippet cannot guess.
+
+### `tasks:` — from discovery, and never with `**`
+
+The value above is a placeholder for whatever step 1 discovered. Substituting it is not
+just a rename, because **the action expands this input unquoted with `globstar` off**:
+bash word-splits *and* pathname-expands it before coder-eval ever sees it.
+
+- **A recursive `**` glob silently loses tasks.** With `globstar` off, `a/**/*.yaml`
+  degrades to `a/*/*.yaml` — so a tree with `a/top.yaml` and `a/sub/deep.yaml` runs
+  `deep.yaml` only, and the gate passes while never testing `top.yaml`. Nothing reports
+  this. Do not write `**` here, and keep this paragraph next to whatever you do write, or
+  the next reader will "simplify" it back.
+- **An unmatched glob is worse than a missing one.** `nullglob` is off too, so a pattern
+  matching nothing reaches the CLI as a literal string and hard-fails the whole run
+  (`Error: Task file not found: …`, exit 1).
+
+So emit **explicit per-depth globs, or an explicit file list** — and emit only the depths
+that actually match when you write the workflow. Check first; a fixed ladder of depths
+breaks any repository that does not happen to have tasks at every level.
+
+```yaml
+tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
+```
+
+### `version:` — conditional on the repository's pin
+
+If the repository pins a coder-eval version, **pass it** and say why: the gate should run
+the CLI the repo is authored against, not whichever release the action defaults to. If
+there is no pin, omit the input and let the action's default track the matching release.
+`${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md` covers how to find a pin — and passing one
+explicitly is right even when it happens to match today's default, because it is
+self-documenting.
+
+### The experiment, if the suite runs through one
+
+If the repository's suite resolves through an experiment, the workflow must pass it via
+`extra-args`:
+
+```yaml
+extra-args: "-e tests/experiments/default.yaml"
+```
+
+This is load-bearing rather than tidy: an experiment usually supplies `agent:` config, so
+omitting it silently changes what the run measures — the gate and the local run stop
+being the same test. If the repository has **several** experiments, ask which one the
+gate should use; a CI gate quietly running the wrong experiment is precisely the failure
+this exists to prevent.
+
+`extra-args` is a trusted input that is split on whitespace, so a path containing a space
+is unsafe there. Choose paths without spaces rather than discovering this in CI.
+
+### Environment
+
+If the resolved experiment or the tasks interpolate environment variables, pass them
+through the action's `env:` input alongside the credentials. Missing ones do not fail
+loudly — the run just measures the wrong thing.
 
 ## Step 4 — Credentials
 

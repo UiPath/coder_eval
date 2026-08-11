@@ -147,6 +147,32 @@ it also works as a CI gate: run it on a schedule and a skill that quietly stops
 triggering — because the model changed, or someone reworded the description —
 fails a build instead of surprising a user.
 
+## Adopting this where coder-eval already exists
+
+The skills are written for a repository that already has a suite, not only for an empty
+one. Three things follow from that, and they are worth knowing before you install:
+
+- **They discover; they do not assume.** Nothing looks for `tasks/` or `runs/latest` by
+  name. A skill globs for YAML carrying a `task_id:` key and for `run.json`, reports the
+  tree it resolved, and asks when a monorepo offers more than one. Call your eval tree
+  `evals/`, or nest the whole thing under `tests/`, and the skills follow it.
+- **They will not scaffold over what you have.** `init` run against a configured
+  repository reports the inventory and stops, pointing at `lint-tasks` and `analyze`
+  instead. `skill-check` looks for a suite that already covers the skill and offers to
+  extend it rather than writing a second one. And where your repository pins a
+  coder-eval version, the CLI-driving skills resolve that pin first and stop on a
+  mismatch rather than validating with the wrong binary — a schema error from a
+  mismatched CLI is indistinguishable from a real one.
+- **Your own tooling stays authoritative.** If you already have slash commands or a CI
+  workflow covering the same ground, these skills are additive. The naming keeps them
+  apart: plugin skills are always namespaced `/coder-eval:<name>`, while a repo-local
+  command in your own `.claude/commands/` keeps whatever name you gave it. Where both
+  exist, prefer yours — it knows things the plugin cannot.
+
+`task` applies the same rule to authoring: it reads whatever your repository declares
+about writing tasks and follows it, and reports which conventions it adopted. The bundled
+rubric is a check of last resort, for what no local rule covers.
+
 ## What ships with the plugin
 
 An installed plugin is copied to `~/.claude/plugins/cache/` without its parent

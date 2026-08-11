@@ -266,3 +266,26 @@ harness once for all of them.
   and docs, asserting exit 0 (or an explicitly-expected non-zero). This is the
   only form that proves argument shape rather than command existence. Not
   statically reachable, hence separate from CE035 — proposed in the PR #82 review.
+
+## From the 2026-08-11 plugin generic-adopter run
+
+- [ ] **`working-directory` input on `action.yml`.** A repository whose eval tree is
+  nested (`tests/tasks/…`) has no way to tell the composite action to run from that
+  subdirectory, so every path in every input has to be spelled from the repo root. The
+  fix is a new input, and that is why it is deferred rather than cheap: `action.yml`'s
+  inputs are a **published API** — CE026 clause 4 asserts every `with:` key across four
+  onboarding surfaces is a real input, so adding one means updating those surfaces (the
+  `ci` skill among them, whose output lands in other people's repositories), and it
+  carries action tag/release implications. Out of scope for the plan that surfaced it,
+  which worked around it in the `ci` skill's prose instead.
+
+- [ ] **`shopt -s globstar` (or quoting `$CE_TASKS`) in `action.yml`'s run step.** The
+  real fix for a degradation the `ci` skill currently works around in prose:
+  `args+=($CE_TASKS)` is deliberately unquoted so a caller can pass several patterns, but
+  with `globstar` off `a/**/*.yaml` expands to `a/*/*.yaml` and **silently drops every
+  top-level task** — reproduced with `a/top.yaml` + `a/sub/deep.yaml`, which yields
+  `deep.yaml` alone. `nullglob` is off too, so an unmatched pattern reaches the CLI
+  literally and exits 1 (`Error: Task file not found: …`). One line in the action fixes
+  the first half; the second half is arguably correct-as-is (failing loudly beats
+  silently running nothing). Deferred alongside `working-directory` because both change
+  the action's observable contract and belong in one considered change.
