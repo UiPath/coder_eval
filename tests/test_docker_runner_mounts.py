@@ -25,6 +25,7 @@ from coder_eval.isolation.docker_runner import (
     CLAUDE_COPY_MAX_ATTEMPTS,
     CONTAINER_ENTRYPOINT,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_REFERENCE_DIR,
     DockerRunError,
     DockerRunner,
     _copy_claude_home,
@@ -32,7 +33,7 @@ from coder_eval.isolation.docker_runner import (
     _sanitize_container_name_component,
     _validate_extra_mount,
 )
-from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
+from coder_eval.models import FileExistsCriterion, ReferenceSource, SandboxConfig, TaskDefinition
 
 
 # DockerRunner targets Linux containers from POSIX hosts. On Windows the test
@@ -675,3 +676,126 @@ class TestWorkspaceDir:
     def test_container_paths_reexported_from_docker_runner(self):
         # Existing importers read CONTAINER_OUTPUT_DIR from docker_runner; keep that working.
         assert CONTAINER_OUTPUT_DIR == "/work/output"
+
+
+class TestReferenceMountAntiCheat:
+    """The reference must reach the harness but never the agent under evaluation."""
+
+    def _make_runner(self, tmp_path: Path, *, reference: str | None) -> DockerRunner:
+        task = TaskDefinition(
+            task_id="test",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="test criterion", path="test.txt")],
+            reference=ReferenceSource(directory=reference) if reference else None,
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = tmp_path / "task.yaml"
+        rt.task_file.write_text("# task", encoding="utf-8")
+        return DockerRunner(rt)
+
+    def _argv(self, runner: DockerRunner, tmp_path: Path, *, prepare: bool = True) -> list[str]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True)
+        if prepare:
+            staging = tmp_path / "staging"
+            staging.mkdir(exist_ok=True)
+            runner._prepare_reference_mount(staging)
+        return runner._build_argv(input_dir, output_dir, container_name="test-container")
+
+    @staticmethod
+    def _mounts(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+
+    @staticmethod
+    def _tmpfs(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "--tmpfs"]
+
+    def _reference_mount(self, argv: list[str]) -> str | None:
+        for spec in self._mounts(argv):
+            if CONTAINER_REFERENCE_DIR in spec:
+                return spec
+        return None
+
+    def test_dac_capabilities_are_dropped(self, tmp_path):
+        """Without this, the mode-000 window is a no-op against container root.
+
+        Verified empirically: a `chmod 000` directory stays readable by root in a
+        default container, and becomes Permission denied once these caps are gone.
+        """
+        argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
+
+        dropped = {argv[i + 1] for i, a in enumerate(argv) if a == "--cap-drop"}
+        assert "DAC_OVERRIDE" in dropped
+        assert "DAC_READ_SEARCH" in dropped
+
+    def test_reference_mount_is_writable(self, tmp_path):
+        """REGRESSION GUARD for a real leak found by tasks/anti_cheat_reference.
+
+        The in-container orchestrator holds THIS path at mode 000 for every agent
+        turn, and `chmod` on a `:ro` bind mount fails with EROFS. Mounting it
+        read-only leaves /work/references readable to the agent for the entire
+        run -- the agent simply `cat`s the solution.
+        """
+        (tmp_path / "reference").mkdir()
+        argv = self._argv(self._make_runner(tmp_path, reference="reference"), tmp_path)
+
+        spec = self._reference_mount(argv)
+        assert spec is not None
+        assert spec.endswith(f":{CONTAINER_REFERENCE_DIR}"), f"must not be read-only: {spec}"
+        assert not spec.endswith(":ro")
+
+    def test_reference_mount_source_is_a_copy_not_the_checkout(self, tmp_path):
+        """The container chmods this path, so it must not be the user's tree."""
+        reference = tmp_path / "reference"
+        reference.mkdir()
+        (reference / "solution.py").write_text("SECRET", encoding="utf-8")
+        argv = self._argv(self._make_runner(tmp_path, reference="reference"), tmp_path)
+
+        spec = self._reference_mount(argv)
+        assert spec is not None
+        source = Path(spec.rsplit(":", 1)[0])
+        assert source != reference.resolve()
+        assert (source / "solution.py").read_text(encoding="utf-8") == "SECRET"
+
+    def test_reference_inside_task_dir_is_masked_by_tmpfs(self, tmp_path):
+        """The task dir is bind-mounted at its host path, so without a mask the
+        agent could read the solution straight out of $TASK_DIR."""
+        (tmp_path / "reference").mkdir()
+        argv = self._argv(self._make_runner(tmp_path, reference="reference"), tmp_path)
+
+        assert f"{(tmp_path / 'reference').resolve()}:ro" in self._tmpfs(argv)
+
+    def test_reference_outside_task_dir_is_not_masked(self, tmp_path):
+        """A reference that escapes the task dir isn't reachable via $TASK_DIR,
+        so there is nothing to mask — masking it would be a pointless mount."""
+        outside = tmp_path.parent / f"outside_ref_{tmp_path.name}"
+        outside.mkdir(exist_ok=True)
+        try:
+            argv = self._argv(self._make_runner(tmp_path, reference=f"../{outside.name}"), tmp_path)
+            assert self._reference_mount(argv) is not None
+            assert not self._tmpfs(argv)
+        finally:
+            outside.rmdir()
+
+    def test_no_reference_emits_no_reference_mount(self, tmp_path):
+        argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
+
+        assert CONTAINER_REFERENCE_DIR not in " ".join(argv)
+        assert not self._tmpfs(argv)
+
+    def test_missing_reference_dir_warns_and_skips_the_mount(self, tmp_path, caplog):
+        """Host-side argv building must not be what fails the run; the
+        in-container orchestrator raises with better attribution."""
+        runner = self._make_runner(tmp_path, reference="absent")
+
+        with caplog.at_level("WARNING"):
+            argv = self._argv(runner, tmp_path)
+
+        assert CONTAINER_REFERENCE_DIR not in " ".join(argv)
+        assert "does not resolve to a directory" in caplog.text

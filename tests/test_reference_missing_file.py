@@ -1,7 +1,7 @@
-"""Tests for reference file loading error handling.
+"""Tests for reference directory resolution and staging."""
 
-Tests ensure clear FileNotFoundError for missing reference files.
-"""
+import os
+import stat
 
 import pytest
 
@@ -12,172 +12,124 @@ from coder_eval.models import (
     TaskDefinition,
     parse_agent_config,
 )
-from coder_eval.orchestration.evaluation import load_reference_code
+from coder_eval.orchestration.evaluation import resolve_reference_dir, stage_reference_dir
 
 
-def test_load_reference_missing_file_raises(tmp_path):
-    """Test that missing reference file raises FileNotFoundError with task context.
+def _task(reference=None):
+    return TaskDefinition(
+        task_id="test",
+        description="Test task",
+        initial_prompt="Do something",
+        agent=parse_agent_config(type="claude-code"),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(path="test.py", description="exists")],
+        reference=reference,
+    )
 
-    Hypothesis: Missing reference files should raise clear errors.
-    Expected: FileNotFoundError with file path and task file in message.
 
-    Context: Lines 552-553 in orchestrator.py check ref_path.exists().
-    """
-    # Create task file path (doesn't need to exist, just for reference)
+def test_resolve_missing_directory_raises(tmp_path):
+    """A typo'd reference path must fail loudly, not silently grade without it."""
     task_file = tmp_path / "task.yaml"
+    task_file.write_text("# task", encoding="utf-8")
+    task = _task(ReferenceSource(directory="does_not_exist/"))
 
-    # Create task with reference to non-existent file
-    task = TaskDefinition(
-        task_id="test_task",
-        description="Test task",
-        initial_prompt="Test",
-        agent=parse_agent_config(type="claude-code"),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
-        reference=ReferenceSource(file="missing_reference.py"),  # File doesn't exist
-    )
-
-    # Attempt to load reference - should raise FileNotFoundError
-    with pytest.raises(FileNotFoundError) as exc_info:
-        load_reference_code(task, task_file, cached_reference=None)
-
-    # Verify error message contains both file path and task file
-    error_msg = str(exc_info.value)
-    assert "missing_reference.py" in error_msg
-    assert "task.yaml" in error_msg or str(task_file) in error_msg
+    with pytest.raises(FileNotFoundError, match="Reference directory not found"):
+        resolve_reference_dir(task, task_file)
 
 
-def test_load_reference_inline_code_works(tmp_path):
-    """Test that inline reference code loads successfully.
-
-    Hypothesis: Inline code should not require file I/O.
-    Expected: Reference code returned directly from task definition.
-    """
+def test_resolve_rejects_a_file(tmp_path):
+    """`reference.directory` pointing at a FILE is the classic migration mistake."""
     task_file = tmp_path / "task.yaml"
+    task_file.write_text("# task", encoding="utf-8")
+    (tmp_path / "solution.py").write_text("x = 1", encoding="utf-8")
+    task = _task(ReferenceSource(directory="solution.py"))
 
-    # Create task with inline reference code
-    task = TaskDefinition(
-        task_id="test_task",
-        description="Test task",
-        initial_prompt="Test",
-        agent=parse_agent_config(type="claude-code"),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
-        reference=ReferenceSource(code="def solution():\n    return 42"),
-    )
-
-    # Load reference - should succeed
-    ref_code, _ = load_reference_code(task, task_file, cached_reference=None)
-
-    assert ref_code == "def solution():\n    return 42"
+    with pytest.raises(FileNotFoundError, match="must name a directory"):
+        resolve_reference_dir(task, task_file)
 
 
-def test_load_reference_existing_file_works(tmp_path):
-    """Test that existing reference file loads successfully.
-
-    Hypothesis: Valid file paths should load file content.
-    Expected: File content returned.
-    """
-    # Create task file
+def test_resolve_existing_directory(tmp_path):
     task_file = tmp_path / "task.yaml"
+    task_file.write_text("# task", encoding="utf-8")
+    ref = tmp_path / "reference"
+    ref.mkdir()
+    (ref / "solution.py").write_text("x = 1", encoding="utf-8")
 
-    # Create reference file next to task file
-    ref_file = tmp_path / "reference_solution.py"
-    ref_file.write_text("def solution():\n    return 'success'")
-
-    # Create task with reference to existing file
-    task = TaskDefinition(
-        task_id="test_task",
-        description="Test task",
-        initial_prompt="Test",
-        agent=parse_agent_config(type="claude-code"),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
-        reference=ReferenceSource(file="reference_solution.py"),
-    )
-
-    # Load reference - should succeed
-    ref_code, _ = load_reference_code(task, task_file, cached_reference=None)
-
-    assert ref_code == "def solution():\n    return 'success'"
+    resolved = resolve_reference_dir(_task(ReferenceSource(directory="reference")), task_file)
+    assert resolved == ref.resolve()
 
 
-def test_load_reference_caches_result(tmp_path):
-    """Test that reference code is cached after first load.
-
-    Hypothesis: Multiple calls should not re-read file.
-    Expected: Same result returned without additional file I/O.
-    """
+def test_resolve_no_reference_returns_none(tmp_path):
     task_file = tmp_path / "task.yaml"
-    ref_file = tmp_path / "reference.py"
-    ref_file.write_text("original content")
-
-    task = TaskDefinition(
-        task_id="test_task",
-        description="Test task",
-        initial_prompt="Test",
-        agent=parse_agent_config(type="claude-code"),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
-        reference=ReferenceSource(file="reference.py"),
-    )
-
-    # First load
-    ref_code_1, cached = load_reference_code(task, task_file, cached_reference=None)
-    assert ref_code_1 == "original content"
-
-    # Modify file on disk
-    ref_file.write_text("modified content")
-
-    # Second load - should return cached value
-    ref_code_2, _ = load_reference_code(task, task_file, cached_reference=cached)
-    assert ref_code_2 == "original content"  # Still returns cached value
+    task_file.write_text("# task", encoding="utf-8")
+    assert resolve_reference_dir(_task(None), task_file) is None
 
 
-def test_load_reference_no_reference_returns_none(tmp_path):
-    """Test that task without reference returns None.
-
-    Hypothesis: Optional reference field should be handled gracefully.
-    Expected: None returned when reference not defined.
-    """
-    task_file = tmp_path / "task.yaml"
-
-    # Create task without reference
-    task = TaskDefinition(
-        task_id="test_task",
-        description="Test task",
-        initial_prompt="Test",
-        agent=parse_agent_config(type="claude-code"),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
-        reference=None,
-    )
-
-    # Load reference - should return None
-    ref_code, _ = load_reference_code(task, task_file, cached_reference=None)
-
-    assert ref_code is None
-
-
-def test_load_reference_without_task_file_raises(tmp_path):
-    """Test that reference file loading without task_file raises ValueError.
-
-    Hypothesis: File paths need task_file for resolution.
-    Expected: ValueError when task_file is None.
-
-    Context: Lines 549-550 in orchestrator.py check task_file exists.
-    """
-    # Create task with file reference
-    task = TaskDefinition(
-        task_id="test_task",
-        description="Test task",
-        initial_prompt="Test",
-        agent=parse_agent_config(type="claude-code"),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
-        reference=ReferenceSource(file="reference.py"),
-    )
-
-    # Attempt to load reference - should raise ValueError
+def test_resolve_without_task_file_raises():
+    task = _task(ReferenceSource(directory="reference/"))
     with pytest.raises(ValueError, match="task_file not set"):
-        load_reference_code(task, task_file=None, cached_reference=None)
+        resolve_reference_dir(task, None)
+
+
+def test_stage_copies_contents(tmp_path):
+    source = tmp_path / "reference"
+    (source / "nested").mkdir(parents=True)
+    (source / "solution.py").write_text("x = 1", encoding="utf-8")
+    (source / "nested" / "helper.py").write_text("y = 2", encoding="utf-8")
+
+    staged = stage_reference_dir(source, tmp_path / "staged" / "reference")
+
+    assert (staged / "solution.py").read_text(encoding="utf-8") == "x = 1"
+    assert (staged / "nested" / "helper.py").read_text(encoding="utf-8") == "y = 2"
+
+
+def test_stage_does_not_follow_symlinks(tmp_path):
+    """A reference shipping `creds -> ~/.aws/credentials` must not pull host files
+    into a directory a judge sub-agent can read."""
+    secret = tmp_path / "host_secret.txt"
+    secret.write_text("SECRET", encoding="utf-8")
+    source = tmp_path / "reference"
+    source.mkdir()
+    (source / "solution.py").write_text("x = 1", encoding="utf-8")
+    (source / "creds").symlink_to(secret)
+
+    staged = stage_reference_dir(source, tmp_path / "staged" / "reference")
+
+    assert (staged / "solution.py").exists()
+    assert not (staged / "creds").exists()
+
+
+def test_stage_clears_a_reused_destination(tmp_path):
+    """A reused --run-dir must not blend a previous run's reference into this one."""
+    source = tmp_path / "reference"
+    source.mkdir()
+    (source / "new.py").write_text("new", encoding="utf-8")
+
+    destination = tmp_path / "staged" / "reference"
+    destination.mkdir(parents=True)
+    (destination / "stale.py").write_text("stale", encoding="utf-8")
+
+    staged = stage_reference_dir(source, destination)
+
+    assert (staged / "new.py").exists()
+    assert not (staged / "stale.py").exists()
+
+
+def test_stage_result_is_writable_so_it_can_be_chmodded(tmp_path):
+    """The anti-cheat window chmods the staged copy, so it must not be read-only.
+
+    Under driver: docker the source is a `:ro` bind mount whose mode cannot be
+    changed (EROFS) — staging through a writable copy is what makes the mode-000
+    window possible at all.
+    """
+    source = tmp_path / "reference"
+    source.mkdir()
+    (source / "solution.py").write_text("x = 1", encoding="utf-8")
+
+    staged = stage_reference_dir(source, tmp_path / "staged" / "reference")
+    original = stat.S_IMODE(staged.stat().st_mode)
+    os.chmod(staged, 0o000)
+    try:
+        assert stat.S_IMODE(staged.stat().st_mode) == 0o000
+    finally:
+        os.chmod(staged, original)

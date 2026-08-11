@@ -13,20 +13,26 @@ but retrieval/truncation/degradation logic is SSOT here.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from coder_eval.evaluation.summaries import summarize_commands
-from coder_eval.models import JudgeTranscript, JudgeTranscriptToolCall
+from coder_eval.models import REFERENCE_DIR_TOKEN, TASK_DIR_TOKEN, JudgeTranscript, JudgeTranscriptToolCall
 
 
-# Paths in `llm_judge.files` / `agent_judge.files` that begin with this token are
-# resolved against the task YAML's parent directory and read from the host
-# filesystem instead of the sandbox. Mirrors the existing TASK_DIR env var that
-# `run_command` exposes — judges and shell criteria use the same token.
-TASK_DIR_TOKEN = "$TASK_DIR"
+# Paths in `llm_judge.files` / `agent_judge.files` that begin with one of these
+# tokens are resolved against a host directory and read from the host filesystem
+# instead of the sandbox: `$TASK_DIR` against the task YAML's parent directory,
+# `$REFERENCE_DIR` against the per-run staged copy of `task.reference.directory`.
+# Both mirror the same-named env vars `run_command` exposes, so judges and shell
+# criteria address the same places by the same name.
+#
+# `$REFERENCE_DIR` is how a task attaches *specific* grading assets from the
+# reference (`$REFERENCE_DIR/rubric.md`) instead of the whole tree, and it is
+# readable here because judges run outside the agent's turn — the directory sits
+# at mode 000 for the whole of `agent.communicate`.
 
 
 if TYPE_CHECKING:
@@ -49,30 +55,34 @@ DIALOG_HEADER = (
 )
 
 
-def _resolve_task_dir_path(path: str, task_dir: Path | None) -> Path | None:
-    """Resolve a ``$TASK_DIR/...`` reference against the task YAML's directory.
+def _resolve_host_path(path: str, task_dir: Path | None, reference_dir: Path | None) -> Path | None:
+    """Resolve a ``$TASK_DIR/...`` or ``$REFERENCE_DIR/...`` reference to a host path.
 
-    Returns the resolved host ``Path`` for paths that begin with the
-    ``$TASK_DIR`` token, or ``None`` for paths that should fall through to
-    sandbox-relative lookup.
+    Returns the resolved host ``Path`` for paths that begin with a known token,
+    or ``None`` for paths that should fall through to sandbox-relative lookup.
 
-    The resolved path is allowed to traverse outside ``task_dir`` (e.g.
+    ``$REFERENCE_DIR`` is checked before ``$TASK_DIR`` only for readability;
+    the tokens share no prefix so the order is not load-bearing.
+
+    The resolved path is allowed to traverse outside its base (e.g.
     ``$TASK_DIR/../shared/rubric.md`` is intentional — task YAMLs commonly
     share grading assets one level up). The task YAML is already a trusted
     artifact: it can run arbitrary shell commands via ``run_command``, so
     file reads under the same trust boundary need no extra confinement.
     """
-    # Match only the bare token or the token followed by a path separator, so
-    # unrelated identifiers like `$TASK_DIRECTORY` fall through to sandbox lookup.
-    if path != TASK_DIR_TOKEN and not (path.startswith(TASK_DIR_TOKEN) and path[len(TASK_DIR_TOKEN)] in "/\\"):
-        return None
-    if task_dir is None:
-        # Token was used but the runner has no task_dir context — surface as
-        # missing-file rather than silently falling back to sandbox lookup.
-        logger.debug("judge_context: %s used but task_dir is None; returning a non-existent path", path)
-        return Path(path)  # caller will see is_file() == False and record as missing
-    rest = path[len(TASK_DIR_TOKEN) :].lstrip("/\\")
-    return (task_dir / rest).resolve() if rest else task_dir.resolve()
+    for token, base in ((REFERENCE_DIR_TOKEN, reference_dir), (TASK_DIR_TOKEN, task_dir)):
+        # Match only the bare token or the token followed by a path separator, so
+        # unrelated identifiers like `$TASK_DIRECTORY` fall through to sandbox lookup.
+        if path != token and not (path.startswith(token) and path[len(token)] in "/\\"):
+            continue
+        if base is None:
+            # Token was used but the runner has no directory for it — surface as
+            # missing-file rather than silently falling back to sandbox lookup.
+            logger.debug("judge_context: %s used but its base directory is None; returning a non-existent path", path)
+            return Path(path)  # caller will see is_file() == False and record as missing
+        rest = path[len(token) :].lstrip("/\\")
+        return (base / rest).resolve() if rest else base.resolve()
+    return None
 
 
 def truncate(text: str, limit: int) -> str:
@@ -125,15 +135,17 @@ _MAX_REFERENCE_FILES = 200
 _MAX_REFERENCE_BYTES = 2 * 1024 * 1024  # 2 MB total content cap
 
 
-def collect_reference_secrets(reference_dir: Path) -> list[str]:
-    """Read every file under ``reference_dir`` and return their contents.
+def iter_reference_files(reference_dir: Path) -> Iterator[tuple[Path, str]]:
+    """Yield ``(path, text)`` for every readable text file under ``reference_dir``.
 
-    Used by ``agent_judge`` to build the secret set for ``scrub_reference``
-    when the reference is a directory: a misbehaving judge that echoes any
-    file's content into its findings/transcript should have it redacted
-    before persistence. Binary files and unreadable files are skipped
-    silently — they're not realistic leak vectors and reading them would
-    raise UnicodeDecodeError.
+    The single walk behind both reference consumers: ``collect_reference_secrets``
+    (scrub keys) and ``render_reference_dir`` (judge prompt content). Sharing it
+    means the budget and symlink rules can't diverge between "what we show the
+    judge" and "what we redact from the judge's output" — a divergence there
+    would leak reference content into a persisted transcript.
+
+    Binary and unreadable files are skipped silently — they're not realistic
+    leak vectors and reading them would raise UnicodeDecodeError.
 
     Symlinks are NOT followed: a reference bundle that ships
     ``secrets -> /etc/passwd`` would otherwise read the host file into the
@@ -141,25 +153,34 @@ def collect_reference_secrets(reference_dir: Path) -> list[str]:
     root would loop ``rglob`` forever.
 
     File count and total content are capped (``_MAX_REFERENCE_FILES`` /
-    ``_MAX_REFERENCE_BYTES``) — when either trips we log + stop. Remaining
-    files are left unscrubbed; the cap is sized well above any realistic
-    reference skeleton, so this only fires for misconfigured trees.
+    ``_MAX_REFERENCE_BYTES``) — when either trips we log + stop. The cap is
+    sized well above any realistic reference skeleton, so this only fires for
+    misconfigured trees.
 
-    Returns an empty list when the directory is missing or empty.
+    Yields nothing when the directory is missing or empty. A reference
+    directory sitting at mode 000 (i.e. this was called during an agent turn,
+    which should never happen) also yields nothing rather than raising.
     """
     if not reference_dir.is_dir():
-        return []
-    secrets: list[str] = []
+        return
+    emitted = 0
     total_bytes = 0
-    for path in reference_dir.rglob("*"):
-        if len(secrets) >= _MAX_REFERENCE_FILES:
+    # Sorted for deterministic prompt content across runs — an unsorted rglob
+    # would reorder the judge's context between platforms and perturb grading.
+    try:
+        candidates = sorted(reference_dir.rglob("*"))
+    except OSError as e:
+        logger.warning("iter_reference_files: cannot walk reference directory %s: %s", reference_dir, e)
+        return
+    for path in candidates:
+        if emitted >= _MAX_REFERENCE_FILES:
             logger.warning(
-                "collect_reference_secrets: reference directory %s exceeds file count budget "
-                + "(>%d files) — remaining files left unscrubbed",
+                "iter_reference_files: reference directory %s exceeds file count budget "
+                + "(>%d files) — remaining files skipped",
                 reference_dir,
                 _MAX_REFERENCE_FILES,
             )
-            break
+            return
         # ``is_symlink()`` is checked BEFORE ``is_file()`` so symlinked regular
         # files are skipped too — we want a single uniform "no symlinks" rule.
         if path.is_symlink():
@@ -179,22 +200,53 @@ def collect_reference_secrets(reference_dir: Path) -> list[str]:
         remaining = _MAX_REFERENCE_BYTES - total_bytes
         if file_size > remaining:
             logger.warning(
-                "collect_reference_secrets: reference directory %s exceeds byte budget "
+                "iter_reference_files: reference directory %s exceeds byte budget "
                 + "(file %s is %d bytes, remaining %d) — stopping",
                 reference_dir,
                 path,
                 file_size,
                 remaining,
             )
-            break
+            return
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
         if text:
-            secrets.append(text)
+            emitted += 1
             total_bytes += file_size
-    return secrets
+            yield path, text
+
+
+def collect_reference_secrets(reference_dir: Path) -> list[str]:
+    """Return the contents of every file under ``reference_dir`` as scrub keys.
+
+    Used to build the secret set for ``scrub_reference``: a misbehaving judge
+    that echoes reference content into its findings/transcript should have it
+    redacted before persistence.
+    """
+    return [text for _path, text in iter_reference_files(reference_dir)]
+
+
+def render_reference_dir(reference_dir: Path, max_file_chars: int) -> str | None:
+    """Render a reference directory as one text block for an ``llm_judge`` prompt.
+
+    Each file becomes a ``--- <relative path> ---`` header followed by its
+    (truncated) content, so the judge can tell files apart. Returns ``None``
+    when the directory yields no readable text — the caller then treats the
+    reference as absent rather than attaching an empty block.
+
+    ``agent_judge`` does NOT use this: it mounts the directory at ``_reference/``
+    and lets the judge Glob/Read it directly.
+    """
+    blocks: list[str] = []
+    for path, text in iter_reference_files(reference_dir):
+        try:
+            label = path.relative_to(reference_dir).as_posix()
+        except ValueError:  # pragma: no cover - rglob results are always relative
+            label = path.name
+        blocks.append(f"--- {label} ---\n{truncate(text, max_file_chars)}")
+    return "\n\n".join(blocks) if blocks else None
 
 
 @dataclass
@@ -255,25 +307,25 @@ class JudgeContextBuilder:
     def build(
         self,
         sandbox: Sandbox,
-        reference_code: str | None,
+        reference_dir: Path | None,
         turn_records: list[TurnRecord] | None,
     ) -> JudgeContext:
         ctx = JudgeContext()
-        self._collect_files(sandbox, ctx)
-        self._collect_reference(reference_code, ctx)
+        self._collect_files(sandbox, reference_dir, ctx)
+        self._collect_reference(reference_dir, ctx)
         self._collect_trajectory(turn_records, ctx)
         return ctx
 
-    def _collect_files(self, sandbox: Sandbox, ctx: JudgeContext) -> None:
+    def _collect_files(self, sandbox: Sandbox, reference_dir: Path | None, ctx: JudgeContext) -> None:
         for path in self.files:
-            host_path = _resolve_task_dir_path(path, sandbox.task_dir)
+            host_path = _resolve_host_path(path, sandbox.task_dir, reference_dir)
             if host_path is not None:
                 self._collect_host_file(path, host_path, ctx)
                 continue
             self._collect_sandbox_file(path, sandbox, ctx)
 
     def _collect_host_file(self, original_path: str, host_path: Path, ctx: JudgeContext) -> None:
-        """Read a `$TASK_DIR/...` reference from the host filesystem."""
+        """Read a `$TASK_DIR/...` or `$REFERENCE_DIR/...` reference from the host filesystem."""
         if not host_path.is_file():
             ctx.missing_files.append(original_path)
             ctx.files.append(FileBlock(path=original_path, content=None))
@@ -301,12 +353,14 @@ class JudgeContextBuilder:
             return
         ctx.files.append(FileBlock(path=path, content=truncate(content, self.max_file_chars)))
 
-    def _collect_reference(self, reference_code: str | None, ctx: JudgeContext) -> None:
+    def _collect_reference(self, reference_dir: Path | None, ctx: JudgeContext) -> None:
         if not self.include_reference:
             return
-        if reference_code:
-            ctx.reference = reference_code
-            return
+        if reference_dir is not None:
+            rendered = render_reference_dir(reference_dir, self.max_file_chars)
+            if rendered:
+                ctx.reference = rendered
+                return
         # Silent omission matches legacy behavior — some tasks deliberately run without a reference.
         logger.debug("judge_context: include_reference=True but reference not set")
 

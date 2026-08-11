@@ -1,4 +1,4 @@
-"""Tests for evaluator reference code support."""
+"""Tests for evaluator reference-directory support."""
 
 import pytest
 
@@ -10,142 +10,154 @@ from coder_eval.models import (
 from coder_eval.sandbox import Sandbox
 
 
+@pytest.fixture
+def sandbox():
+    config = SandboxConfig(driver="tempdir", python=None)
+    sb = Sandbox(config, "test")
+    sb.setup()
+    yield sb
+    sb.cleanup(preserve=False)
+
+
+def _reference_dir(tmp_path, **files: str):
+    ref = tmp_path / "ref"
+    ref.mkdir(exist_ok=True)
+    for name, content in files.items():
+        (ref / name.replace("__", "/")).write_text(content, encoding="utf-8")
+    return ref
+
+
 class TestSuccessCheckerReference:
-    """Tests for SuccessChecker with reference code."""
+    """Tests for SuccessChecker with a reference directory."""
 
-    def test_check_all_accepts_reference_code(self, tmp_path):
-        """check_all accepts reference_code parameter."""
-        config = SandboxConfig(driver="tempdir", python=None)
-        sandbox = Sandbox(config, "test")
-        sandbox.setup()
-
+    def test_check_all_accepts_reference_dir(self, sandbox, tmp_path):
         checker = SuccessChecker(sandbox)
-        reference_code = "def foo(): pass"
-
-        # Should not raise
-        results = checker.check_all([], reference_code=reference_code)
+        results = checker.check_all([], reference_dir=_reference_dir(tmp_path))
         assert results == []
-
-        sandbox.cleanup(preserve=False)
 
     @pytest.mark.asyncio
-    async def test_check_all_async_persists_reference_code_and_dir(self, tmp_path):
+    async def test_check_all_async_persists_reference_dir(self, sandbox, tmp_path):
         """check_all_async — the orchestrator's actual entry point — must persist
-        reference_code/reference_dir the same way the sync check_all does, so a
-        later check()/check_all() call on the same checker without an explicit
+        reference_dir the same way the sync check_all does, so a later
+        check()/check_all() call on the same checker without an explicit
         reference still sees it."""
-        config = SandboxConfig(driver="tempdir", python=None)
-        sandbox = Sandbox(config, "test")
-        sandbox.setup()
-
         checker = SuccessChecker(sandbox)
-        reference_code = "def foo(): pass"
-        reference_dir = tmp_path / "ref"
-        reference_dir.mkdir()
+        reference_dir = _reference_dir(tmp_path)
 
-        results = await checker.check_all_async([], reference_code=reference_code, reference_dir=reference_dir)
+        results = await checker.check_all_async([], reference_dir=reference_dir)
         assert results == []
-        assert checker._reference_code == reference_code
         assert checker._reference_dir == reference_dir
 
-        sandbox.cleanup(preserve=False)
-
-    def test_reference_comparison_without_reference(self, tmp_path):
-        """reference_comparison fails without reference code."""
-        config = SandboxConfig(driver="tempdir", python=None)
-        sandbox = Sandbox(config, "test")
-        sandbox.setup()
-
-        # Create a dummy file
+    def test_reference_comparison_without_reference_dir(self, sandbox):
+        """reference_comparison scores 0 when no reference directory is set."""
         (sandbox.sandbox_dir / "solution.py").write_text("def foo(): pass")
 
         criterion = ReferenceComparisonCriterion(
             description="Compare against reference",
             agent_file="solution.py",
+            reference_file="solution.py",
         )
 
-        checker = SuccessChecker(sandbox)
-        # Don't provide reference_code
-        result = checker.check(criterion)
+        result = SuccessChecker(sandbox).check(criterion)
 
         assert result.score == 0.0
-        assert "No reference code provided" in result.error
+        assert "No reference directory provided" in result.error
 
-        sandbox.cleanup(preserve=False)
-
-    def test_reference_comparison_with_reference(self, tmp_path):
-        """reference_comparison succeeds with reference code."""
-        config = SandboxConfig(driver="tempdir", python=None)
-        sandbox = Sandbox(config, "test")
-        sandbox.setup()
-
-        # Create agent file with similar code
-        reference_code = "def hello():\n    return 'world'"
-        agent_code = "def hello():\n    return 'world'"
-        (sandbox.sandbox_dir / "solution.py").write_text(agent_code)
+    def test_reference_comparison_with_reference(self, sandbox, tmp_path):
+        code = "def hello():\n    return 'world'"
+        (sandbox.sandbox_dir / "solution.py").write_text(code)
 
         criterion = ReferenceComparisonCriterion(
             description="Compare against reference",
             agent_file="solution.py",
+            reference_file="solution.py",
             comparison_method="token",
         )
 
-        checker = SuccessChecker(sandbox)
-        # Provide reference_code via check_all
-        checker._reference_code = reference_code
-        result = checker.check(criterion)
+        result = SuccessChecker(sandbox).check(
+            criterion, reference_dir=_reference_dir(tmp_path, **{"solution.py": code})
+        )
 
         # Identical code should score 1.0
         assert result.score == 1.0
         assert result.error is None
 
-        sandbox.cleanup(preserve=False)
-
-    def test_reference_comparison_agent_file_missing(self, tmp_path):
-        """reference_comparison fails when agent file doesn't exist."""
-        config = SandboxConfig(driver="tempdir", python=None)
-        sandbox = Sandbox(config, "test")
-        sandbox.setup()
-
-        reference_code = "def foo(): pass"
-
-        criterion = ReferenceComparisonCriterion(
-            description="Compare against reference",
-            agent_file="nonexistent.py",
-        )
-
-        checker = SuccessChecker(sandbox)
-        checker._reference_code = reference_code
-        result = checker.check(criterion)
-
-        assert result.score == 0.0
-        assert "Agent file not found" in result.error
-
-        sandbox.cleanup(preserve=False)
-
-    def test_reference_comparison_ast_method(self, tmp_path):
-        """reference_comparison with ast method."""
-        config = SandboxConfig(driver="tempdir", python=None)
-        sandbox = Sandbox(config, "test")
-        sandbox.setup()
-
-        reference_code = "def foo():\n    return 42"
-        # Slightly different but structurally similar
-        agent_code = "def foo():\n    return 42"
-        (sandbox.sandbox_dir / "solution.py").write_text(agent_code)
+    def test_reference_comparison_reads_a_nested_reference_file(self, sandbox, tmp_path):
+        """reference_file is a path INSIDE the reference dir, not just a basename."""
+        code = "def hello():\n    return 'world'"
+        (sandbox.sandbox_dir / "solution.py").write_text(code)
+        ref = _reference_dir(tmp_path)
+        (ref / "src").mkdir()
+        (ref / "src" / "solution.py").write_text(code, encoding="utf-8")
 
         criterion = ReferenceComparisonCriterion(
             description="Compare against reference",
             agent_file="solution.py",
+            reference_file="src/solution.py",
+            comparison_method="token",
+        )
+
+        result = SuccessChecker(sandbox).check(criterion, reference_dir=ref)
+        assert result.score == 1.0
+
+    def test_reference_comparison_rejects_traversal_out_of_reference_dir(self, sandbox, tmp_path):
+        """`reference_file` names a file of the solution; escaping is always a bug."""
+        (sandbox.sandbox_dir / "solution.py").write_text("def foo(): pass")
+        (tmp_path / "outside.py").write_text("def foo(): pass", encoding="utf-8")
+
+        criterion = ReferenceComparisonCriterion(
+            description="Compare against reference",
+            agent_file="solution.py",
+            reference_file="../outside.py",
+        )
+
+        result = SuccessChecker(sandbox).check(criterion, reference_dir=_reference_dir(tmp_path))
+
+        assert result.score == 0.0
+        assert "escapes the reference directory" in result.error
+
+    def test_reference_comparison_missing_reference_file(self, sandbox, tmp_path):
+        (sandbox.sandbox_dir / "solution.py").write_text("def foo(): pass")
+
+        criterion = ReferenceComparisonCriterion(
+            description="Compare against reference",
+            agent_file="solution.py",
+            reference_file="absent.py",
+        )
+
+        result = SuccessChecker(sandbox).check(criterion, reference_dir=_reference_dir(tmp_path))
+
+        assert result.score == 0.0
+        assert "Failed to read reference file" in result.error
+
+    def test_reference_comparison_agent_file_missing(self, sandbox, tmp_path):
+        criterion = ReferenceComparisonCriterion(
+            description="Compare against reference",
+            agent_file="nonexistent.py",
+            reference_file="solution.py",
+        )
+
+        result = SuccessChecker(sandbox).check(
+            criterion, reference_dir=_reference_dir(tmp_path, **{"solution.py": "def foo(): pass"})
+        )
+
+        assert result.score == 0.0
+        assert "Agent file not found" in result.error
+
+    def test_reference_comparison_ast_method(self, sandbox, tmp_path):
+        code = "def foo():\n    return 42"
+        (sandbox.sandbox_dir / "solution.py").write_text(code)
+
+        criterion = ReferenceComparisonCriterion(
+            description="Compare against reference",
+            agent_file="solution.py",
+            reference_file="solution.py",
             comparison_method="ast",
         )
 
-        checker = SuccessChecker(sandbox)
-        checker._reference_code = reference_code
-        result = checker.check(criterion)
+        result = SuccessChecker(sandbox).check(
+            criterion, reference_dir=_reference_dir(tmp_path, **{"solution.py": code})
+        )
 
-        # Should succeed with high similarity
         assert result.score > 0.8
         assert "ast" in result.details
-
-        sandbox.cleanup(preserve=False)

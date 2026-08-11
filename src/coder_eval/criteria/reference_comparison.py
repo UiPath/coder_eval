@@ -26,31 +26,63 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
         self,
         criterion: ReferenceComparisonCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: CheckContext | None = None,
     ) -> CriterionResult:
-        """Compare agent code against reference solution.
+        """Compare agent code against one file inside the reference directory.
 
-        Uses the reference code passed to check_all() and compares it with
-        the agent's generated file using the specified comparison method.
+        The reference is always a directory (``task.reference.directory``);
+        ``criterion.reference_file`` names the single file within it to compare
+        against, mirroring how judges address reference assets with
+        ``$REFERENCE_DIR/<path>``.
 
         Args:
             criterion: Reference comparison criterion
             sandbox: Sandbox instance for file access
-            reference_code: Reference solution code for comparison
+            turn_records: Unused for this criterion
+            context: Carries ``reference_dir`` (the per-run staged reference copy)
 
         Returns:
             Result with similarity score [0.0, 1.0]
         """
-        # Check that reference code was provided
+        reference_dir = context.reference_dir if context else None
+        if reference_dir is None:
+            return CriterionResult(
+                criterion_type="reference_comparison",
+                description=criterion.description,
+                score=0.0,
+                error="No reference directory provided (task.reference not set)",
+            )
+
+        # Confined to the reference dir on purpose: unlike a judge's `files:`
+        # entry (author-written, trusted, and deliberately allowed to escape via
+        # `$REFERENCE_DIR/../shared/...`), this field names one file *of the
+        # solution being compared against*, so traversal out of the staged copy
+        # is always a mistake.
+        ref_path = (reference_dir / criterion.reference_file).resolve()
+        if not ref_path.is_relative_to(reference_dir.resolve()):
+            return CriterionResult(
+                criterion_type="reference_comparison",
+                description=criterion.description,
+                score=0.0,
+                error=f"reference_file escapes the reference directory: {criterion.reference_file}",
+            )
+        try:
+            reference_code = ref_path.read_text(encoding="utf-8")
+        except OSError as e:
+            return CriterionResult(
+                criterion_type="reference_comparison",
+                description=criterion.description,
+                score=0.0,
+                error=f"Failed to read reference file {criterion.reference_file}: {e}",
+            )
         if not reference_code:
             return CriterionResult(
                 criterion_type="reference_comparison",
                 description=criterion.description,
                 score=0.0,
-                error="No reference code provided (task.reference not set)",
+                error=f"Reference file is empty: {criterion.reference_file}",
             )
 
         # Check sandbox is initialized

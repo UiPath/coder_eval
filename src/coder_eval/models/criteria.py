@@ -827,18 +827,20 @@ class FileCheckCriterion(BaseSuccessCriterion):
 
 
 class ReferenceComparisonCriterion(BaseSuccessCriterion):
-    """Compare agent code against reference solution.
+    """Compare agent code against one file of the reference solution.
 
-    Uses the top-level `reference` block from TaskDefinition.
-    The reference code is loaded by the orchestrator and passed to the success checker.
+    Requires the top-level `reference` block on TaskDefinition. `reference_file`
+    names the file to compare against *inside* `reference.directory` — the same
+    place judges address as `$REFERENCE_DIR/<path>`.
 
-    Pure data model - checking logic in SuccessChecker._check_reference_comparison()
+    Pure data model - checking logic in ReferenceComparisonChecker.
 
     Example YAML:
         success_criteria:
           - type: "reference_comparison"
             description: "Code structure matches reference"
             agent_file: "solution.py"
+            reference_file: "solution.py"
             comparison_method: "ast"
             similarity_threshold: 0.8
             weight: 1.0
@@ -852,6 +854,14 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     # Required fields
     agent_file: str = Field(
         description="Path to agent's generated file (relative to sandbox root); may be a glob matching exactly one file"
+    )
+
+    reference_file: str = Field(
+        description=(
+            "Path to the reference file to compare against, relative to the task's "
+            "reference.directory (i.e. $REFERENCE_DIR/<this path>). Must stay inside "
+            "that directory."
+        )
     )
 
     comparison_method: Literal["ast", "token", "complexity"] = Field(
@@ -1177,10 +1187,11 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     include_reference: bool = Field(
         default=True,
         description=(
-            "When true (default) and task.reference is set, include the reference solution in "
-            "the judge prompt. Silently omitted if no reference is configured. Never shown to "
-            "the agent. Set to false if you want the reference to drive a non-judge consumer "
-            "(e.g. ``reference_comparison``) without showing it to the LLM grader."
+            "When true (default) and task.reference is set, inline the WHOLE reference "
+            "directory into the judge prompt (one labelled block per file). Silently omitted "
+            "if no reference is configured. Never shown to the agent. Set to false to attach "
+            "only specific assets via ``$REFERENCE_DIR/<path>`` entries in ``files``, or to "
+            "let the reference drive ``reference_comparison`` without showing it to the grader."
         ),
     )
     include_agent_output: bool = Field(
@@ -1341,12 +1352,12 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     include_reference: bool = Field(
         default=True,
         description=(
-            "When true (default) and task.reference is set, mount the reference for the judge. "
-            "For ``code`` / ``file`` references, the content is inlined into the prompt. For "
-            "``directory`` references, the tree is copied into ``_reference/`` in the judge's "
-            "working dir for Read/Glob browsing. Silently omitted if no reference is configured. "
-            "Set to false if a reference is configured for ``reference_comparison`` only and "
-            "should NOT be visible to the LLM grader."
+            "When true (default) and task.reference is set, copy the reference tree into "
+            "``_reference/`` in the judge's working dir for Read/Glob browsing. It is MOUNTED, "
+            "not inlined into the prompt — use ``$REFERENCE_DIR/<path>`` entries in ``files`` "
+            "to pre-attach specific assets as text. Silently omitted if no reference is "
+            "configured. Set to false if a reference is configured for ``reference_comparison`` "
+            "only and should NOT be visible to the judge."
         ),
     )
     include_agent_output: bool = Field(

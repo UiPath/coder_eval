@@ -304,6 +304,23 @@ The host's run dir is bind-mounted **read-write** into the container at the same
 
 The host's `DockerRunner` (`coder_eval/isolation/docker_runner.py`) renders the `docker run` argv, bind-mounts task inputs at `/work/input`, allocates an output dir at `/work/output`, and tails container stdout into `docker.log` in the task's run dir.
 
+If the task declares a `reference:` block, a throwaway **copy** of its directory is bind-mounted **read-write** at `/work/references`, and an empty tmpfs is layered over its original location inside the task-directory mount so the agent cannot reach the solution through `$TASK_DIR`. The mount is read-write on purpose — a `:ro` bind mount cannot be chmod'd (EROFS), and the orchestrator holds this path at mode `000` for the duration of each agent turn. The container also runs with `--cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH --cap-drop FOWNER --cap-drop CHOWN`.
+
+> **What this does and does not guarantee.** The mode-000 window stops an agent
+> that *passively reads* the reference — `ls`, `cat`, `grep` all fail. It does
+> **not** contain an agent that deliberately restores the mode: `chmod(2)` is
+> gated on *owner-or-`CAP_FOWNER`*, and the container runs as root, which owns
+> the bind-mounted copy. Verified: `chmod 755 /work/references` succeeds from
+> inside the container and the solution is then readable. The container drops
+> `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER` and `CHOWN`, which closes this
+> where the mount preserves a non-root owner, but not where the mount reports
+> the container's own uid (Docker Desktop). **Closing it fully requires running
+> the agent as a non-root uid that does not own the reference** — tracked as
+> follow-up. Treat the current control as raising the cost of accidental
+> leakage, not as a boundary against an adversarial agent.
+
+See [Reference Solutions](TASK_DEFINITION_GUIDE.md#reference-solutions).
+
 Inside the container, the entrypoint invokes `coder-eval _run-task-internal` (hidden subcommand), which loads the staged YAML + context, runs the standard in-process Orchestrator (driver auto-coerced back to `tempdir`), and writes `task.json` to the output mount. Host reads it and feeds the existing aggregation pipeline.
 
 A `result_kind` discriminator on `CriterionResult` ensures `ClassificationCriterionResult` subclasses survive the JSON round-trip — without it, host-side aggregation would silently lose `observed_label`/`expected_label`.

@@ -2335,7 +2335,7 @@ async def _run_wiring(
     agent = _ScriptedAgent(events, turn)
     orch.agent = agent  # type: ignore[assignment]
 
-    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+    with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
         success = await orch._evaluation_loop()
     assert orch.result is not None
     return orch.result, agent, success
@@ -2458,7 +2458,7 @@ class TestOrchestratorEarlyStopWiring:
         agent = _ScriptedAgent(events, turn)
         orch.agent = agent  # type: ignore[assignment]
 
-        with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+        with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
             success = await orch._evaluation_loop()
 
         assert orch.result.early_stop is not None

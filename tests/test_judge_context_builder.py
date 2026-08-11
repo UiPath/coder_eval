@@ -217,9 +217,28 @@ def test_builder_no_truncation_at_exact_boundary(sandbox: Sandbox, tmp_path: Pat
 # --- reference ---
 
 
-def test_builder_reference_included(sandbox: Sandbox) -> None:
-    ctx = _make_builder(include_reference=True).build(sandbox, "REF_CODE", None)
-    assert ctx.reference == "REF_CODE"
+def test_builder_reference_included(sandbox: Sandbox, tmp_path: Path) -> None:
+    """The whole reference directory is rendered as one labelled-per-file block."""
+    ref = tmp_path / "ref"
+    (ref / "pkg").mkdir(parents=True)
+    (ref / "solution.py").write_text("REF_CODE", encoding="utf-8")
+    (ref / "pkg" / "helper.py").write_text("HELPER_CODE", encoding="utf-8")
+
+    ctx = _make_builder(include_reference=True).build(sandbox, ref, None)
+
+    assert ctx.reference is not None
+    assert "--- solution.py ---" in ctx.reference
+    assert "REF_CODE" in ctx.reference
+    # Nested files are labelled by their path relative to the reference root.
+    assert "--- pkg/helper.py ---" in ctx.reference
+    assert "HELPER_CODE" in ctx.reference
+
+
+def test_builder_reference_included_empty_dir_is_treated_as_absent(sandbox: Sandbox, tmp_path: Path) -> None:
+    """An empty reference dir must not attach an empty REFERENCE SOLUTION block."""
+    ref = tmp_path / "empty_ref"
+    ref.mkdir()
+    assert _make_builder(include_reference=True).build(sandbox, ref, None).reference is None
 
 
 def test_builder_reference_requested_but_missing(sandbox: Sandbox) -> None:
@@ -228,9 +247,11 @@ def test_builder_reference_requested_but_missing(sandbox: Sandbox) -> None:
     assert ctx.degraded_notes == []  # silent, per legacy behavior
 
 
-def test_builder_reference_not_requested(sandbox: Sandbox) -> None:
-    ctx = _make_builder(include_reference=False).build(sandbox, "REF_CODE", None)
-    assert ctx.reference is None
+def test_builder_reference_not_requested(sandbox: Sandbox, tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "solution.py").write_text("REF_CODE", encoding="utf-8")
+    assert _make_builder(include_reference=False).build(sandbox, ref, None).reference is None
 
 
 # --- agent output ---
@@ -621,5 +642,5 @@ def test_collect_host_file_reads_utf8(tmp_path: Path) -> None:
     sb.sandbox_dir = sb_dir
 
     builder = _make_builder(files=["$TASK_DIR/rubric.md"], include_reference=False, max_file_chars=200)
-    ctx = builder.build(sb, reference_code=None, turn_records=None)
+    ctx = builder.build(sb, reference_dir=None, turn_records=None)
     assert ctx.files[0].content == "Café — rationale\nμ test"

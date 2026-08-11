@@ -1,5 +1,6 @@
 """Sandbox manager for isolated execution environments."""
 
+import contextlib
 import fnmatch
 import json
 import logging
@@ -8,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 from .invocation_log import render_recorder
@@ -19,6 +22,7 @@ from .models import (
     StarterFilesSource,
     TemplateDirSource,
 )
+from .orchestration.permissions import RESTRICTED_MODE, set_permissions
 from .resources import get_ignore_patterns, should_ignore_path
 
 
@@ -140,6 +144,10 @@ class Sandbox:
         self.config = config
         self.task_id = task_id
         self.task_dir = task_dir
+        # Per-run staged copy of task.reference.directory. Assigned by the
+        # orchestrator after _stage_reference (the sandbox is constructed first),
+        # and surfaced to run_command criteria as the REFERENCE_DIR env var.
+        self.reference_dir: Path | None = None
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
@@ -148,6 +156,49 @@ class Sandbox:
         # Cached canonical `node_modules/@uipath`; pins UiPath CLI plugin discovery
         # via PLUGIN_TOOLS_DIR to bypass CWD-walk contamination.
         self._plugin_tools_dir: str | None = None
+
+    @property
+    def enforces_permission_windows(self) -> bool:
+        """Whether a chmod window is a real, safe control in this sandbox.
+
+        True only inside a ``driver: docker`` container, where the filesystem is
+        private to this one task: chmod-ing the reference and task directories
+        there affects nothing else, and the container drops ``DAC_OVERRIDE`` /
+        ``DAC_READ_SEARCH`` so the mode actually binds against its root user.
+
+        On the host (``driver: tempdir``) it is a deliberate no-op. Parallel
+        tasks in one batch share the checked-out ``tasks/<name>/`` tree, so
+        chmod-ing it is a cross-task side effect on the user's own working copy
+        for no isolation benefit -- there is no boundary to enforce when the
+        agent is just another process with the same uid.
+
+        NOTE the predicate is the ``CODER_EVAL_IN_CONTAINER`` env var, NOT
+        ``config.driver``. The in-container entry point rewrites
+        ``driver: docker`` to ``tempdir`` before constructing the Orchestrator
+        (nested docker is impossible in the image), so keying on the driver
+        would read "tempdir" inside the container and silently disable the
+        anti-cheat window on exactly the path that needs it.
+        """
+        return os.environ.get("CODER_EVAL_IN_CONTAINER") == "1"
+
+    def set_permissions(
+        self,
+        paths: Iterable[Path | None],
+        *,
+        mode: int = RESTRICTED_MODE,
+    ) -> AbstractAsyncContextManager[None]:
+        """Chmod ``paths`` to ``mode`` for the block, if this sandbox enforces that.
+
+        The driver-aware wrapper around
+        :func:`coder_eval.orchestration.permissions.set_permissions`: a no-op
+        context manager when :attr:`enforces_permission_windows` is False, so
+        callers can wrap unconditionally without branching on the driver.
+
+        Windows stack -- see the underlying function for the nesting contract.
+        """
+        if not self.enforces_permission_windows:
+            return contextlib.nullcontext()
+        return set_permissions(paths, mode=mode)
 
     @property
     def _venv_scripts_dir(self) -> Path | None:
@@ -967,6 +1018,7 @@ class Sandbox:
            ``$HOME/node_modules`` where concurrent sandboxes would shadow
            each other.
         7. Expose ``TASK_DIR`` for criterion scripts.
+        8. Expose ``REFERENCE_DIR`` (staged reference copy) for criterion scripts.
         """
         assert self.sandbox_dir is not None
         env = os.environ.copy()
@@ -988,6 +1040,13 @@ class Sandbox:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         if self.task_dir:
             env["TASK_DIR"] = str(self.task_dir)
+        # 8. Expose ``REFERENCE_DIR`` (the per-run staged copy of the reference
+        #    solution) for criterion scripts. Set by the orchestrator once the
+        #    reference is staged; absent for tasks with no `reference:` block.
+        #    Safe to expose here because `run_command` criteria execute AFTER the
+        #    agent's turn, outside the mode-000 anti-cheat window.
+        if self.reference_dir:
+            env["REFERENCE_DIR"] = str(self.reference_dir)
         return env
 
     def _check_parent_node_modules_contamination(self) -> list[Path]:

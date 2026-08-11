@@ -101,7 +101,6 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         self,
         criterion: AgentJudgeCriterion,
         sandbox: Sandbox,
-        reference_code: str | None = None,
         *,
         turn_records: list[TurnRecord] | None = None,
         context: CheckContext | None = None,
@@ -139,10 +138,17 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         # can ``Read`` anything else even when files are pre-attached.
         # .build() does synchronous file I/O — offload to a worker thread so it
         # doesn't stall the event loop (see llm_judge.py's identical comment).
+        #
+        # ``include_reference=False`` is passed to the BUILDER on purpose, even when
+        # the criterion opted in: agent_judge attaches the reference by MOUNTING it at
+        # ``_reference/`` (below) for the judge to Glob/Read, so also inlining the whole
+        # tree into the prompt would duplicate it and blow the context budget on large
+        # references. ``$REFERENCE_DIR/...`` entries in ``files:`` still resolve — that
+        # is the supported way to pre-attach specific reference assets here.
         judge_ctx = await asyncio.to_thread(
             JudgeContextBuilder(
                 files=criterion.files,
-                include_reference=criterion.include_reference,
+                include_reference=False,
                 include_agent_output=criterion.include_agent_output,
                 include_tool_calls=criterion.include_tool_calls,
                 include_dialog=criterion.include_dialog,
@@ -150,7 +156,13 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
                 max_file_chars=criterion.max_file_chars,
             ).build,
             sandbox,
-            reference_code,
+            # Passed UNCONDITIONALLY: the builder uses this to resolve
+            # `$REFERENCE_DIR/...` entries in `files:`, which are documented as
+            # working regardless of include_reference. Gating it here made such an
+            # entry silently render "<file not found>". Whether the WHOLE tree is
+            # attached is controlled by include_reference=False above (inlining)
+            # and ref_dir_for_runner below (the _reference/ mount).
+            reference_dir,
             turn_records,
         )
 
@@ -219,16 +231,12 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
                 token_usage=None,
             )
 
-        # Build the scrub set: reference_code (if any) plus every file's content
-        # under reference_dir (if any). Either is honored only when the criterion
-        # opted into seeing the reference; otherwise no scrub key is needed because
-        # the judge never saw the material.
+        # Build the scrub set from every file's content under reference_dir, honored
+        # only when the criterion opted into seeing the reference; otherwise no scrub
+        # key is needed because the judge never saw the material.
         scrub_secrets: list[str] = []
-        if criterion.include_reference:
-            if reference_code:
-                scrub_secrets.append(reference_code)
-            if reference_dir is not None:
-                scrub_secrets.extend(collect_reference_secrets(reference_dir))
+        if criterion.include_reference and reference_dir is not None:
+            scrub_secrets.extend(collect_reference_secrets(reference_dir))
 
         return _build_result(
             criterion,

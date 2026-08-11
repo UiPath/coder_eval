@@ -1,11 +1,40 @@
 """Path utilities for run directory management."""
 
 import platform
+import shutil
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 
 TASK_LOG_FILENAME = "task.log"
+
+
+def ignore_patterns_and_symlinks(patterns: list[str]) -> Callable[[str, list[str]], set[str]]:
+    """``copytree`` ``ignore`` callable that drops pattern matches AND every symlink.
+
+    Symlinks in a copied tree — whether malicious or accidental — are rejected
+    rather than dereferenced into the destination, which would leak host files
+    (e.g. a ``creds -> /root/.aws/credentials`` plant) into a judge workspace or
+    a staged reference directory.
+
+    Shared by ``evaluation.sub_agent`` (sandbox → judge workspace copies) and
+    ``orchestration.evaluation`` (reference → per-run staged copy) so the
+    no-symlinks rule cannot drift between the two.
+    """
+    pattern_ignore = shutil.ignore_patterns(*patterns)
+
+    def _ignore(src: str, names: list[str]) -> set[str]:
+        ignored = set(pattern_ignore(src, names))
+        src_path = Path(src)
+        for name in names:
+            if name in ignored:
+                continue
+            if (src_path / name).is_symlink():
+                ignored.add(name)
+        return ignored
+
+    return _ignore
 
 
 def task_log_path(run_dir: Path) -> Path:

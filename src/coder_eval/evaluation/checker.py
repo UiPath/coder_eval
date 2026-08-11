@@ -84,12 +84,9 @@ class SuccessChecker:
         """
         self.sandbox = sandbox
         self._checker_instances: dict[str, BaseCriterion[Any]] = {}
-        # Cached reference code - automatically set by check()/check_all() when provided
-        # Used by subsequent check() calls that don't explicitly pass reference_code
-        self._reference_code: str | None = None
-        # Cached reference directory path (resolved). Set by check()/check_all() when provided.
-        # Mutually exclusive with self._reference_code at the task level — task.reference
-        # is exactly one of code/file/directory.
+        # Cached reference directory (the per-run staged copy of
+        # task.reference.directory). Set by check()/check_all() when provided and
+        # reused by subsequent calls that don't pass it explicitly.
         self._reference_dir: Path | None = None
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
@@ -101,30 +98,25 @@ class SuccessChecker:
 
     def _resolve_refs(
         self,
-        reference_code: str | None,
         turn_records: TurnRecords | None,
         reference_dir: Path | None,
-    ) -> tuple[str | None, TurnRecords | None, Path | None]:
-        """Persist reference_code / reference_dir / turn_records for subsequent calls
-        that don't pass them explicitly (backward compat), and resolve the effective
-        values for THIS call. Shared by ``check`` / ``check_all`` / ``check_all_async``
-        so the persist-then-resolve preamble lives in exactly one place.
+    ) -> tuple[TurnRecords | None, Path | None]:
+        """Persist reference_dir / turn_records for subsequent calls that don't pass
+        them explicitly, and resolve the effective values for THIS call. Shared by
+        ``check`` / ``check_all`` / ``check_all_async`` so the persist-then-resolve
+        preamble lives in exactly one place.
         """
-        if reference_code is not None:
-            self._reference_code = reference_code
         if reference_dir is not None:
             self._reference_dir = reference_dir
         if turn_records is not None:
             self._turn_records = turn_records
-        ref_code = reference_code if reference_code is not None else self._reference_code
         ref_dir = reference_dir if reference_dir is not None else self._reference_dir
         records = turn_records if turn_records is not None else self._turn_records
-        return ref_code, records, ref_dir
+        return records, ref_dir
 
     def check(
         self,
         criterion: SuccessCriterion,
-        reference_code: str | None = None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriterionResult:
@@ -132,8 +124,6 @@ class SuccessChecker:
 
         Args:
             criterion: Criterion definition
-            reference_code: Optional reference code (string form: from
-                ``task.reference.code`` or ``task.reference.file``).
             turn_records: Optional turn records for command inspection
             reference_dir: Optional resolved path to a reference directory
                 (from ``task.reference.directory``). Only consumed by
@@ -142,13 +132,12 @@ class SuccessChecker:
         Returns:
             CriterionResult with score
         """
-        ref_code, records, ref_dir = self._resolve_refs(reference_code, turn_records, reference_dir)
-        return self._check_single(criterion, ref_code, records, ref_dir)
+        records, ref_dir = self._resolve_refs(turn_records, reference_dir)
+        return self._check_single(criterion, records, ref_dir)
 
     def check_all(
         self,
         criteria: SuccessCriteria,
-        reference_code: str | None = None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriteriaResults:
@@ -156,7 +145,6 @@ class SuccessChecker:
 
         Args:
             criteria: List of criterion definitions
-            reference_code: Optional reference code (string form).
             turn_records: Optional turn records for command inspection
             reference_dir: Optional resolved path to a reference directory.
                 Only consumed by ``agent_judge``; non-judge criteria ignore it.
@@ -164,13 +152,12 @@ class SuccessChecker:
         Returns:
             List of criterion results with scores
         """
-        ref_code, records, ref_dir = self._resolve_refs(reference_code, turn_records, reference_dir)
-        return self._check_all_sync(criteria, ref_code, records, ref_dir)
+        records, ref_dir = self._resolve_refs(turn_records, reference_dir)
+        return self._check_all_sync(criteria, records, ref_dir)
 
     async def check_all_async(
         self,
         criteria: SuccessCriteria,
-        reference_code: str | None = None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriteriaResults:
@@ -199,7 +186,6 @@ class SuccessChecker:
 
         Args:
             criteria: List of criterion definitions.
-            reference_code: Optional reference code (string form).
             turn_records: Optional turn records for command inspection.
             reference_dir: Optional resolved path to a reference directory.
                 Only consumed by ``agent_judge``; non-judge criteria ignore it.
@@ -207,14 +193,14 @@ class SuccessChecker:
         Returns:
             List of criterion results with scores, in the same order as ``criteria``.
         """
-        ref_code, records, ref_dir = self._resolve_refs(reference_code, turn_records, reference_dir)
+        records, ref_dir = self._resolve_refs(turn_records, reference_dir)
 
         results: list[CriterionResult] = []
         for criterion in criteria:
             if self._is_native_async(criterion.type):
-                results.append(await self._check_single_async(criterion, ref_code, records, ref_dir))
+                results.append(await self._check_single_async(criterion, records, ref_dir))
             else:
-                results.append(await asyncio.to_thread(self._check_single, criterion, ref_code, records, ref_dir))
+                results.append(await asyncio.to_thread(self._check_single, criterion, records, ref_dir))
         return results
 
     def _is_native_async(self, criterion_type: str) -> bool:
@@ -246,11 +232,10 @@ class SuccessChecker:
     def _check_all_sync(
         self,
         criteria: SuccessCriteria,
-        reference_code: str | None,
         turn_records: TurnRecords | None,
         reference_dir: Path | None,
     ) -> CriteriaResults:
-        return [self._check_single(criterion, reference_code, turn_records, reference_dir) for criterion in criteria]
+        return [self._check_single(criterion, turn_records, reference_dir) for criterion in criteria]
 
     def _get_checker_instance(self, criterion_type: str) -> BaseCriterion[Any]:
         """Get or create a checker instance (V3: cached).
@@ -331,7 +316,6 @@ class SuccessChecker:
     def _check_single(
         self,
         criterion: SuccessCriterion,
-        reference_code: str | None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriterionResult:
@@ -339,7 +323,6 @@ class SuccessChecker:
 
         Args:
             criterion: Criterion definition (discriminated union)
-            reference_code: Optional reference code (string form)
             turn_records: Optional turn records for command inspection
             reference_dir: Optional resolved path to a reference directory.
 
@@ -353,7 +336,6 @@ class SuccessChecker:
             result = checker.check(
                 criterion,
                 self.sandbox,
-                reference_code,
                 turn_records=turn_records,
                 context=context,
             )
@@ -369,7 +351,6 @@ class SuccessChecker:
     async def _check_single_async(
         self,
         criterion: SuccessCriterion,
-        reference_code: str | None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriterionResult:
@@ -385,7 +366,6 @@ class SuccessChecker:
             result = await checker.check_async(
                 criterion,
                 self.sandbox,
-                reference_code,
                 turn_records=turn_records,
                 context=context,
             )

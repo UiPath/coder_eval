@@ -28,6 +28,7 @@ from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_REFERENCE_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
@@ -37,6 +38,7 @@ from coder_eval.models import (
     PreservationMode,
     ResourceLimits,
 )
+from coder_eval.path_utils import ignore_patterns_and_symlinks
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -482,6 +484,10 @@ class DockerRunner:
         # _build_argv mounts read-write. None when there is no ~/.claude to
         # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
         self._claude_mount_src: Path | None = None
+        # Set by _prepare_host_mounts: a throwaway copy of the reference
+        # directory, mounted read-WRITE at CONTAINER_REFERENCE_DIR. It must be a
+        # copy, and it must be writable -- see _prepare_host_mounts.
+        self._reference_mount_src: Path | None = None
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -562,6 +568,7 @@ class DockerRunner:
             # under `staging` and records it on self._claude_mount_src for
             # _build_argv to mount. Cleaned up with `staging` in the finally.
             await asyncio.to_thread(self._prepare_host_mounts, staging)
+            await asyncio.to_thread(self._prepare_reference_mount, staging)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
             # Prime the heartbeat before the container starts so the
@@ -934,6 +941,29 @@ class DockerRunner:
         _copy_claude_home(host_claude_dir, claude_copy)
         self._claude_mount_src = claude_copy
 
+    def _prepare_reference_mount(self, staging: Path) -> None:
+        """Copy the reference solution under ``staging`` for a read-WRITE mount.
+
+        Both properties are load-bearing for the anti-cheat window:
+
+        * **A copy**, so the container can chmod it without touching the user's
+          checked-out ``tasks/`` tree.
+        * **Writable**, because the in-container orchestrator holds this exact
+          directory at mode 000 for the duration of every agent turn, and
+          ``chmod`` on a ``:ro`` bind mount fails with EROFS. Mounting the real
+          reference read-only instead leaves ``/work/references`` readable to the
+          agent for the whole run -- which is precisely the leak
+          ``tasks/anti_cheat_reference`` exists to catch.
+
+        Lives under ``staging``, which ``run()`` removes in its ``finally``.
+        """
+        source = self._resolve_host_reference_dir()
+        if source is None:
+            return
+        reference_copy = staging / "reference"
+        shutil.copytree(source, reference_copy, ignore=ignore_patterns_and_symlinks([".git"]))
+        self._reference_mount_src = reference_copy
+
     def _build_image(self) -> str:
         """Resolve the image to run, building from a Dockerfile when configured.
 
@@ -1067,6 +1097,51 @@ class DockerRunner:
                 + "task-specific layers on top. See docs/DOCKER_ISOLATION.md."
             )
 
+    def _resolve_host_reference_dir(self) -> Path | None:
+        """Host path of ``task.reference.directory``, or None when unset/missing.
+
+        Resolution matches ``orchestration.evaluation.resolve_reference_dir``
+        (relative to the task YAML), but a missing directory is a WARNING here
+        rather than an error: the host-side argv builder must not be the thing
+        that fails the run. The in-container orchestrator resolves the same path
+        against the ``/work/references`` mount and raises there, so the operator
+        still gets a hard, well-attributed failure.
+        """
+        reference = self.rt.task.reference
+        if reference is None or not self.rt.task_file:
+            return None
+        candidate = (self.rt.task_file.parent / reference.directory).resolve()
+        if not candidate.is_dir():
+            logger.warning(
+                "reference.directory %r does not resolve to a directory (%s); " + "skipping the %s mount",
+                reference.directory,
+                candidate,
+                CONTAINER_REFERENCE_DIR,
+            )
+            return None
+        return candidate
+
+    def _reference_mount_args(self, host_task_dir: Path | None) -> list[str]:
+        """Mount args that expose the reference to the harness but not to the agent.
+
+        See the call site in ``_build_argv`` for the full rationale. Returns an
+        empty list when the task declares no reference.
+        """
+        if self._reference_mount_src is None:
+            return []
+        # Read-WRITE, and of a COPY: the in-container orchestrator chmods this
+        # path to 000 for every agent turn, which a `:ro` mount would reject with
+        # EROFS. See _prepare_reference_mount.
+        args = ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
+        host_reference_dir = self._resolve_host_reference_dir()
+        if (
+            host_reference_dir is not None
+            and host_task_dir is not None
+            and host_reference_dir.is_relative_to(host_task_dir)
+        ):
+            args += ["--tmpfs", f"{host_reference_dir}:ro"]
+        return args
+
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
@@ -1087,6 +1162,34 @@ class DockerRunner:
         # fine -- the run command (`--output`/`--task-dir`, appended after the
         # image) is passed explicitly below and is forwarded to the entrypoint.
         argv += ["--entrypoint", CONTAINER_ENTRYPOINT]
+
+        # ANTI-CHEAT (load-bearing, not hardening boilerplate). The container runs
+        # as root, and root bypasses ordinary file permissions via CAP_DAC_OVERRIDE
+        # / CAP_DAC_READ_SEARCH. Without dropping both, the mode-000 window that
+        # orchestration/permissions.py puts around every agent turn is a NO-OP on
+        # native Linux -- verified: a `chmod 000` dir is still readable by root in a
+        # default container, and Permission denied once these two caps are dropped.
+        # (It appears to work on macOS Docker Desktop even without this, because
+        # virtiofs enforces host-side; that is a platform accident, not the rule.)
+        # Nothing in a sandbox legitimately needs to override discretionary access
+        # control, so dropping these costs the task nothing.
+        # FOWNER/CHOWN matter as much as the DAC pair: chmod(2) is gated on
+        # owner-OR-CAP_FOWNER, so a root agent that can chmod simply restores the
+        # mode and reads the reference anyway. Dropping them closes that on hosts
+        # where the bind mount preserves a non-root owner (native Linux, i.e. CI).
+        # KNOWN GAP: where the mount reports the container's own uid as owner
+        # (Docker Desktop's virtiofs), the owner check passes with no capability
+        # at all and the restore still succeeds — see docs/DOCKER_ISOLATION.md.
+        argv += [
+            "--cap-drop",
+            "DAC_OVERRIDE",
+            "--cap-drop",
+            "DAC_READ_SEARCH",
+            "--cap-drop",
+            "FOWNER",
+            "--cap-drop",
+            "CHOWN",
+        ]
 
         if cfg.network == "none":
             argv += ["--network", "none"]
@@ -1174,6 +1277,22 @@ class DockerRunner:
         if self.rt.task_file:
             host_task_dir = self.rt.task_file.parent.resolve()
             argv += ["-v", f"{host_task_dir}:{host_task_dir}:ro"]
+
+        # ANTI-CHEAT: the reference solution normally lives INSIDE the task dir,
+        # so the symmetric mount above would hand the agent the answer via
+        # `$TASK_DIR/<reference dir>`. Two things close that:
+        #
+        #  1. An empty tmpfs is layered over the reference's path inside the
+        #     task-dir mount, masking it. The agent sees an empty directory there.
+        #  2. The real reference is mounted read-only at /work/references, from
+        #     which the in-container orchestrator stages a private, chmod-able
+        #     copy (a `:ro` mount cannot be chmod'd -- EROFS -- so the anti-cheat
+        #     window needs a writable copy).
+        #
+        # Ordering matters: docker applies mounts by target-path depth, so the
+        # tmpfs at the deeper path wins over the task-dir bind regardless of argv
+        # order, but we emit it after for readability.
+        argv += self._reference_mount_args(host_task_dir)
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1244,14 +1363,11 @@ class DockerRunner:
         if agent_cfg and agent_cfg.system_prompt_file:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
-        # reference.file / reference.directory: if a task ships absolute
-        # paths (or relative paths that escape the task_dir mount via
-        # ``..``), they must be mounted explicitly. Relative paths under
-        # task_dir are already covered by the symmetric task_dir mount.
-        reference = self.rt.task.reference
-        if reference is not None:
-            _auto_mount(reference.file, dir_only=False)
-            _auto_mount(reference.directory)
+        # NOTE: task.reference.directory is deliberately NOT auto-mounted at its
+        # host path here. It gets a single dedicated read-only mount at
+        # CONTAINER_REFERENCE_DIR (above), and mounting it at its host path too
+        # would re-expose it to the agent through $TASK_DIR — the exact hole the
+        # tmpfs mask above closes.
         for mount in cfg.extra_mounts:
             normalized = _validate_extra_mount(mount)
             argv += ["-v", normalized]

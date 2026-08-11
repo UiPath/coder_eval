@@ -231,7 +231,7 @@ class TestSingleShotEnforcement:
         orch.success_checker = mock_checker
 
         with (
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             contextlib.suppress(BudgetExceededError),
         ):
             await orch._evaluation_loop()
@@ -375,7 +375,7 @@ class TestSimulationBudgetAbort:
 
         with (
             patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             pytest.raises(BudgetExceededError),
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
@@ -481,7 +481,7 @@ class TestExpectedTurnsSingleShot:
         orch.success_checker = mock_checker
 
         with (
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             caplog.at_level(logging.WARNING),
         ):
             all_passed = await orch._evaluation_loop()
@@ -537,7 +537,7 @@ class TestExpectedTurnsSimulation:
 
         with (
             patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             caplog.at_level(logging.WARNING),
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
@@ -588,7 +588,7 @@ class TestExpectedTurnsSimulation:
 
         with (
             patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             caplog.at_level(logging.WARNING),
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")

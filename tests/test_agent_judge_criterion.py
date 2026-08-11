@@ -15,6 +15,7 @@ into the runner's ``VerdictCapture``, simulating what the real
 from __future__ import annotations
 
 import json as _json
+import tempfile
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -38,6 +39,17 @@ from coder_eval.sandbox import Sandbox
 
 # ClaudeCodeAgent is now imported inside SubAgentRunner; tests patch the runner's binding.
 _AGENT_PATCH_PATH = "coder_eval.evaluation.sub_agent.ClaudeCodeAgent"
+
+
+def _ref_dir(content: str) -> Path:
+    """A throwaway reference directory containing `content` as its single file.
+
+    The reference is a directory now, so the leak-canary tests seed the sentinel
+    into a file inside one instead of passing a bare string.
+    """
+    d = Path(tempfile.mkdtemp(prefix="test_ref_"))
+    (d / "solution.py").write_text(content, encoding="utf-8")
+    return d
 
 
 def _make_turn(agent_output: str, duration: float = 1.5) -> TurnRecord:
@@ -494,7 +506,7 @@ def test_agent_judge_parse_error_scrubs_reference_from_error_field(sandbox: Sand
     mock_agent = _make_mock_agent(f'{{"score": "{sentinel}", "rationale": "ok"}}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     for field_value in (result.details, result.error):
@@ -520,7 +532,7 @@ def test_agent_judge_parse_error_details_scrubs_before_truncating(sandbox: Sandb
     mock_agent = _make_mock_agent(f"{sentinel} — informal review, no JSON here")
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     # No portion of the reference body (e.g. any 100-char run of 'Z') should survive
@@ -546,11 +558,14 @@ def test_agent_judge_include_reference_scrubbed_from_details(sandbox: Sandbox, d
     mock_agent = _make_mock_agent(f'{{"score": 0.7, "rationale": "matches {sentinel}"}}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     user_msg = mock_agent.communicate.call_args.args[0]
-    assert sentinel in user_msg
+    # Mounted at _reference/, not inlined — so the body isn't in the prompt, but the
+    # judge can Read it there and echo it back, which is what `details` must scrub.
+    assert sentinel not in user_msg
+    assert "_reference/" in user_msg
     assert sentinel not in (result.details or "")
 
 
@@ -561,7 +576,9 @@ def test_agent_judge_include_reference_false_omits_reference(sandbox: Sandbox, d
     criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=False)
     mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
-        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion, reference_code=sentinel)
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
+            criterion, reference_dir=_ref_dir(sentinel)
+        )
     user_msg = mock_agent.communicate.call_args.args[0]
     assert sentinel not in user_msg
 
@@ -780,7 +797,7 @@ def test_agent_judge_scrubs_reference_from_transcript(sandbox: Sandbox, direct_r
     mock_agent = _make_mock_agent(verdict)
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     transcript = getattr(result, "transcript", None)
@@ -918,13 +935,18 @@ def test_agent_judge_prompt_capture_scrubs_reference(sandbox: Sandbox, direct_ro
     mock_agent = _make_mock_agent('{"score": 0.7, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     transcript = getattr(result, "transcript", None)
     assert transcript is not None
     user_msg: str = mock_agent.communicate.call_args.args[0]
-    assert sentinel in user_msg
+    # agent_judge MOUNTS the reference at _reference/ rather than inlining it, so the
+    # body never enters the prompt in the first place; the envelope only points at the
+    # mount. The scrub still has to hold for the persisted transcript, because the
+    # judge can Read the mount and echo it back.
+    assert sentinel not in user_msg
+    assert "_reference/" in user_msg
     assert sentinel not in transcript.judge_prompt
     assert sentinel not in transcript.judge_system_prompt
 

@@ -21,9 +21,12 @@ from coder_eval.models.agent_config import (
 from coder_eval.models.container_paths import (
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_REFERENCE_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
+    REFERENCE_DIR_TOKEN,
     RESERVED_CONTAINER_DIRS,
+    TASK_DIR_TOKEN,
 )
 
 # Enums
@@ -267,7 +270,10 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DockerBuildConfig",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
+    "CONTAINER_REFERENCE_DIR",
     "CONTAINER_TASK_DIR",
+    "REFERENCE_DIR_TOKEN",
+    "TASK_DIR_TOKEN",
     "CONTAINER_WORK_DIR",
     "RESERVED_CONTAINER_DIRS",
     "DockerDriverConfig",

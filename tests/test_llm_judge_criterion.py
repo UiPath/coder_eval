@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,17 @@ from coder_eval.models import (
     TurnRecord,
 )
 from coder_eval.sandbox import Sandbox
+
+
+def _ref_dir(content: str) -> Path:
+    """A throwaway reference directory containing `content` as its single file.
+
+    The reference is a directory now, so the leak-canary tests seed the sentinel
+    into a file inside one instead of passing a bare string.
+    """
+    d = Path(tempfile.mkdtemp(prefix="test_ref_"))
+    (d / "solution.py").write_text(content, encoding="utf-8")
+    return d
 
 
 def _make_judge_response(content: str) -> dict:
@@ -242,7 +254,7 @@ def test_judge_include_reference_true_keeps_reference_in_prompt_only(sandbox: Sa
         "coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)
     ) as m_anthropic:
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     user_msg = m_anthropic.call_args.kwargs["user"]
@@ -261,7 +273,7 @@ def test_judge_include_reference_true_no_reference_set(sandbox: Sandbox) -> None
     with patch(
         "coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)
     ) as m_anthropic:
-        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion, reference_code=None)
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion, reference_dir=None)
 
     user_msg = m_anthropic.call_args.kwargs["user"]
     assert "REFERENCE SOLUTION" not in user_msg
@@ -277,7 +289,9 @@ def test_judge_include_reference_false_omits_reference(sandbox: Sandbox) -> None
     with patch(
         "coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)
     ) as m_anthropic:
-        SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion, reference_code=sentinel)
+        SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
+            criterion, reference_dir=_ref_dir(sentinel)
+        )
 
     user_msg = m_anthropic.call_args.kwargs["user"]
     assert sentinel not in user_msg
@@ -491,7 +505,7 @@ def test_judge_reference_not_in_details(sandbox: Sandbox) -> None:
     resp = _make_judge_response('{"score": 0.9, "rationale": "great"}')
     with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     # Explicit leak check across every field CriterionResult exposes.
@@ -511,7 +525,7 @@ def test_judge_parse_error_scrubs_reference_from_error_field(sandbox: Sandbox) -
     resp = _make_judge_response(f'{{"score": "{sentinel}", "rationale": "ok"}}')
     with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     for field_value in (result.details, result.error):
@@ -526,7 +540,7 @@ def test_judge_reference_not_leaked_on_parse_failure(sandbox: Sandbox) -> None:
     resp = _make_judge_response(f"Sorry, here is what you gave me: {sentinel}. no json")
     with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     assert result.score == 0.0
@@ -810,7 +824,7 @@ def test_judge_scrubs_reference_from_findings(sandbox: Sandbox) -> None:
     resp = _make_judge_response(raw)
     with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     for finding in getattr(result, "findings", []) or []:
@@ -896,7 +910,7 @@ def test_judge_prompt_capture_scrubs_reference(sandbox: Sandbox) -> None:
         "coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)
     ) as m_anthropic:
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
-            criterion, reference_code=sentinel
+            criterion, reference_dir=_ref_dir(sentinel)
         )
 
     transcript = getattr(result, "transcript", None)

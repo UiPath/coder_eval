@@ -12,6 +12,7 @@ from coder_eval.evaluation.judge_context import (
     JudgeContext,
     JudgeContextBuilder,
     build_judge_transcript,
+    collect_reference_secrets,
     format_details,
     scrub_reference,
 )
@@ -63,13 +64,13 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         self,
         criterion: LLMJudgeCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: "list[TurnRecord] | None" = None,
         context: CheckContext | None = None,
     ) -> CriterionResult:
         ctx = context or CheckContext()
         route = ctx.route
+        reference_dir = ctx.reference_dir
 
         # Master enablement gate. Skipped criteria don't make an LLM call and don't
         # affect cost; weighted score includes them as 1.0 so they don't penalize.
@@ -97,7 +98,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 max_file_chars=criterion.max_file_chars,
             ).build,
             sandbox,
-            reference_code,
+            reference_dir,
             turn_records,
         )
 
@@ -121,7 +122,16 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 ),
             )
 
-        scrub_key = reference_code if criterion.include_reference else None
+        # Scrub keys are the per-FILE contents of the reference directory, not the
+        # single rendered block: the model is far more likely to echo one file back
+        # than to reproduce the whole concatenation verbatim, and a whole-block key
+        # would never match. Only built when the criterion actually saw the
+        # reference — there is nothing to redact otherwise.
+        scrub_key = (
+            collect_reference_secrets(reference_dir)
+            if criterion.include_reference and reference_dir is not None
+            else None
+        )
 
         # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
         # from the usage the backend reported in its response.

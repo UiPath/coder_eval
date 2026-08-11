@@ -107,8 +107,8 @@ def handle_criterion_errors(  # noqa: UP047
     This is the CENTRALIZED error handling that was in evaluator.py.
 
     Typed with ``ParamSpec``/``Concatenate`` rather than ``Callable[..., ...]``
-    so the decorated method's parameter list (sandbox, reference_code,
-    turn_records, context) stays visible to callers instead of erasing to
+    so the decorated method's parameter list (sandbox, turn_records,
+    context) stays visible to callers instead of erasing to
     ``(...) -> CriterionResult``.
     """
 
@@ -204,7 +204,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
                 self,
                 criterion: FileExistsCriterion,
                 sandbox: Sandbox,
-                reference_code: str | None = None,
             ) -> CriterionResult:
                 # Implementation here
                 pass
@@ -279,7 +278,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
     ) -> CriterionResult:
@@ -291,7 +289,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         Args:
             criterion: The specific criterion definition (Pydantic model)
             sandbox: Sandbox instance for file access and command execution
-            reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
             context: Optional :class:`CheckContext` carrying the live run state
                 (``route`` / ``reference_dir``) that judge criteria
@@ -304,7 +301,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         return self._check_impl(
             criterion,
             sandbox,
-            reference_code,
             turn_records=turn_records,
             context=context,
         )
@@ -313,7 +309,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
@@ -328,7 +323,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         Args:
             criterion: The specific criterion definition (Pydantic model)
             sandbox: Sandbox instance for file access and command execution
-            reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
             context: Optional :class:`CheckContext` (route / reference_dir).
                 Consumed by ``llm_judge`` / ``agent_judge``; ignored by
@@ -359,7 +353,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             self._check_impl_async(
                 criterion,
                 sandbox,
-                reference_code,
                 turn_records=turn_records,
                 context=context,
             )
@@ -371,7 +364,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
     ) -> CriterionResult:
@@ -381,7 +373,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         return await self._check_impl_async(
             criterion,
             sandbox,
-            reference_code,
             turn_records=turn_records,
             context=context,
         )
@@ -390,7 +381,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
@@ -410,7 +400,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             self._check_impl,
             criterion,
             sandbox,
-            reference_code,
             turn_records=turn_records,
             context=context,
         )
