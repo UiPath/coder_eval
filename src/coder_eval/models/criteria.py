@@ -595,7 +595,21 @@ class CliCalledCriterion(BaseSuccessCriterion):
     )
     positional: list[str] | None = Field(
         default=None,
-        description="Non-flag arguments that must follow the verb, in order",
+        description=(
+            "Non-flag arguments that must follow the verb, in order. A PREFIX of what followed: "
+            "trailing arguments beyond these are unconstrained unless exact_positional is set"
+        ),
+    )
+    exact_positional: bool = Field(
+        default=False,
+        description=(
+            "Require the non-flag arguments after the verb to be EXACTLY `positional`, with nothing "
+            "trailing. Without it `verb: 'projects list'` also matches `projects list dummy`. Set it "
+            "with `positional: []` to assert the verb took no arguments at all. Note the asymmetry "
+            "runs opposite to a short verb's: tightening suits a positive assertion, but on a "
+            "max_count 0 guard it makes the forbidden call EASIER to slip past, since one stray "
+            "argument stops the match"
+        ),
     )
     flags: dict[str, FlagMatch] | None = Field(
         default=None,
@@ -692,6 +706,16 @@ class CliCalledCriterion(BaseSuccessCriterion):
                             "ambiguous. List only the verbs you mean, or keep the shorter one alone."
                         )
                         raise ValueError(msg)
+        # `positional: []` alone asserts nothing (an empty slice equals an empty
+        # expectation), so an author writing it to mean "took no arguments" gets a
+        # silent no-op. exact_positional is what gives it meaning, and requiring the
+        # pair keeps "exactly nothing" distinct from "unset".
+        if self.exact_positional and self.positional is None:
+            msg = (
+                "cli_called exact_positional requires positional to be set. Use `positional: []` to "
+                "assert the verb took no arguments."
+            )
+            raise ValueError(msg)
         # Falsiness-symmetric on purpose: `verb: ""` used to slip past an `is None`
         # check here and then match EVERY record (empty prefix), silently scoring 1.0.
         if not self.verb and not self.positional and not self.flags and not self.tool:
