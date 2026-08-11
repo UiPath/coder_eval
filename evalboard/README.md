@@ -24,6 +24,24 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
   daily success-rate chart and tag rails for filtering.
 - `/trends` — per-task pass rate and avg duration/cost/turns across the
   last 10 runs, with a tag filter and expandable per-task history.
+- `/path-to-ga` — GA-readiness report for the tasks tagged `path-to-ga`.
+  Its task table deliberately answers under **stricter rules than every other
+  surface**, and both differences are load-bearing:
+  1. **De-tagged tasks are dropped.** A `run.json` tag is a historical stamp, so
+     elsewhere (including `/trends`) a task de-tagged upstream lingers until the
+     last run that predates the removal ages out. Here a task is dropped once a
+     *newer* run in the window carries it without the tag — proof of removal.
+     A task that merely stopped appearing is unknowable, so it is kept and dated.
+  2. **Mature carry-forwards are not passes.** Elsewhere a skipped-but-carried-
+     forward row counts as a pass; here it is excluded from both the numerator
+     and the denominator, so the rate reports only measured runs (`—` when
+     nothing executed).
+  The headline tile and chart above the table keep the ordinary mature-blind,
+  union-over-window semantics — they feed the front page — which is why they read
+  higher than the table, and why the page says so in prose.
+- `/watchlist` — what needs attention, ranked over the recent-runs window: tasks
+  and skills scored on failures, regressions and turn-budget pressure
+  (`lib/watchlist.ts`).
 - `/runs/latest` — shortcut that redirects to the newest run id.
 - `/runs/<run-id>` — run summary (pass rate, cost, duration) + one row per task.
   A "Download run (.zip)" button bundles the whole run folder.

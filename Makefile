@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docs-indexes docker-image docker-image-full coder-eval-runtime docker-images test-docker-detectors
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra evalboard-verify clean run lint docs-indexes docker-image docker-image-full coder-eval-runtime docker-images test-docker-detectors
 
 # Single source of the installed coder-eval version (used to tag the docker
 # images). Referenced lazily inside the docker recipes, so it doesn't run on
@@ -55,6 +55,14 @@ verify:  ## Run all verification steps (CI equivalent)
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r src/ -ll --format json -o bandit-report.json
 	uv run pytest tests/ -n auto -m "not live and not lint" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+
+evalboard-verify:  ## Run the evalboard (Next.js dashboard) checks: tsc + vitest + next build
+	# The JS half of the repo. Not folded into `make verify` because it needs a
+	# Node/pnpm toolchain a Python-only contributor may not have — but it IS
+	# gated in CI by the `evalboard` job, so a red run here is a red PR.
+	# Includes the pricing drift guard: a reprice in src/coder_eval/pricing.py
+	# without the matching edit to evalboard/lib/pricing.ts fails right here.
+	cd evalboard && pnpm install --frozen-lockfile && pnpm verify
 
 verify-noextra:  ## Verify the framework works without the optional [uipath] extra
 	# Build a throwaway venv that has ONLY the [dev] extra (no [uipath]); confirms

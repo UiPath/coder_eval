@@ -199,7 +199,13 @@ make typecheck   # pyright
 make test        # pytest
 make lint        # custom architectural lint rules (CE001+)
 make verify      # All of the above + coverage check (CI equivalent)
+
+# The JS half (evalboard/). Separate because it needs a Node/pnpm toolchain,
+# but gated in CI by the `evalboard` job just like the Python side.
+make evalboard-verify   # tsc --noEmit + vitest + next build
 ```
+
+Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is a hand-copied mirror, and `evalboard/lib/__tests__/pricing-parity.test.ts` fails the build on drift in either direction.
 
 When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001+ pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested. (Doc-surface / whole-tree rules that reason over Markdown/YAML or the entire `src/` tree rather than one `.py` AST at a time — CE026–CE031 — are not `BaseRule`s in the runner; they are wired as dedicated `@pytest.mark.lint` test classes. CE031 guards against dead config: a behavior-driving field on `SimulationConfig`/`RunLimits`/`Dataset` that no code reads by name. CE026 keeps the GitHub Action's three onboarding surfaces honest: a page's *first* Action snippet must show the agent-runtime prerequisite steps (pinned to the `action-dogfood` job that proves them in CI), a zero-install absolute next to such a snippet must name the channel it means, and every `github.com/marketplace/actions/<slug>` link plus the shields badge label must match `action.yml`'s `name:`.)
 

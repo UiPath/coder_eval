@@ -1,0 +1,11 @@
+# Declares this repo's custom runner labels so actionlint stops reporting them as
+# unknown. Advisory only: nothing in `make verify` runs actionlint, so this file helps
+# a local run or an editor integration and is not a gate.
+#
+# These are UiPath's centralized managed GitHub pool labels. Jobs that deliberately
+# stay on stock `ubuntu-latest` say why at their own `runs-on:`.
+self-hosted-runner:
+  labels:
+    - uipath-ubuntu-latest
+    - uipath-ubuntu-24.04
+    - uipath-windows-latest

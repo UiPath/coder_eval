@@ -91,18 +91,24 @@ class JsonCheckChecker(BaseCriterion[JsonCheckCriterion]):
 
         has_schema = criterion.json_schema is not None
         has_assertions = len(criterion.assertions) > 0
+        resolved = sandbox.resolved_path_label(criterion.path)
 
         # 3. Pure validity check
         if not has_schema and not has_assertions:
+            details = f"'{criterion.path}' is valid JSON"
+            if resolved:
+                details += f" (resolved: {resolved})"
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
                 score=1.0,
-                details=f"'{criterion.path}' is valid JSON",
+                details=details,
             )
 
         scores: list[float] = []
         details_parts: list[str] = []
+        if resolved:
+            details_parts.append(f"Resolved: {resolved}")
 
         # 4. Schema validation (gates assertions — if schema fails, skip assertions)
         if has_schema:
