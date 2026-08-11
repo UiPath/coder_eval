@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, TextIO
 
 import yaml
 
+from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
     CONTAINER_INPUT_DIR,
@@ -37,6 +39,8 @@ from coder_eval.models import (
     PreservationMode,
     ResourceLimits,
 )
+from coder_eval.orchestration.evaluation import load_reference
+from coder_eval.sandbox import Sandbox
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -58,6 +62,7 @@ logger = logging.getLogger(__name__)
 # `docker run --entrypoint` (the image bakes no ENTRYPOINT). MUST equal the
 # `COPY` destination in docker/Dockerfile -- a drift guard test enforces that.
 CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
+CONTAINER_PUBLIC_INPUT_DIR = "/work/public"
 
 # Docker Desktop's stable alias for the host, from inside a bridge-network
 # container. Auto-resolves on macOS/Windows; on Linux it must be published
@@ -485,6 +490,7 @@ class DockerRunner:
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
+        self._public_inputs_dir: Path | None = None
 
     @property
     def _docker_config(self) -> DockerDriverConfig:
@@ -598,14 +604,18 @@ class DockerRunner:
                 if proc.returncode is None:
                     await self._kill_container(proc, container_name)
 
-            return await self._parse_result_or_raise(output_dir, returncode, log_path)
+            result = await self._parse_result_or_raise(output_dir, returncode, log_path)
+            return await self._grade_captured_workspace(result, output_dir)
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)
 
     async def _stage_inputs(self, input_dir: Path) -> None:
-        """Serialise the post-override TaskDefinition + lineage/variant context into the
-        staging ``input_dir`` (``task.yaml`` + ``context.json``). Pure I/O off the event
-        loop; no control-flow change.
+        """Stage the agent-safe view of a task.
+
+        The container executes untrusted agent code.  It must receive the task prompt and
+        runtime configuration, but never the answer key or commands used to assess that
+        answer.  Keep those fields on the host-owned ``ResolvedTask`` for the post-run
+        grader; serialise only the public projection here.
         """
         # Always serialise the *post-override* TaskDefinition. We can't use
         # rt.source_yaml because that's the raw on-disk text -- _apply_cli_overrides
@@ -613,8 +623,30 @@ class DockerRunner:
         # container needs to see those mutations.
         task_yaml_in = input_dir / "task.yaml"
 
+        # Do this on the JSON-shaped dump instead of mutating ``rt.task``: the host
+        # retains the complete definition for grading after the agent exits.
+        agent_task_payload = self.rt.task.model_dump(mode="json")
+        # TaskDefinition requires one criterion.  This neutral marker keeps the
+        # agent-side task valid without revealing a real grading condition.
+        agent_task_payload["success_criteria"] = [
+            {
+                "type": "file_exists",
+                "description": "Agent workspace is available",
+                "path": ".",
+            }
+        ]
+        agent_task_payload["reference"] = None
+        agent_task_payload["pre_run"] = []
+        agent_task_payload["post_run"] = []
+        # These fields are evaluator metadata, not runtime instructions.  In
+        # particular, descriptions often name a reference answer or verifier.
+        agent_task_payload["description"] = "Agent task"
+        agent_task_payload["tags"] = []
+        agent_task_payload["expected_commands"] = None
+        await asyncio.to_thread(self._stage_public_inputs, input_dir.parent, agent_task_payload)
+
         def _dump_task_yaml() -> str:
-            return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
+            return yaml.safe_dump(agent_task_payload, sort_keys=False)
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
@@ -629,13 +661,114 @@ class DockerRunner:
                 "replicate_index": self.rt.replicate_index,
                 "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
                 "preservation_mode": self.preservation_mode.value,
-                "source_yaml": self.rt.source_yaml,
+                # ``source_yaml`` is the original, unredacted file and can contain
+                # criteria/reference paths.  It is an audit field for the host report,
+                # not an agent input.
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
             }
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+
+    def _stage_public_inputs(self, staging: Path, payload: dict[str, object]) -> None:
+        """Copy declared public external inputs and rewrite the agent-side paths."""
+        patterns = self._docker_config.agent_input_patterns
+        public_root = staging / "public"
+        self._public_inputs_dir = None
+
+        def resolve_source(raw_path: object) -> Path:
+            # Skills experiments use POSIX-style ``$NAME`` interpolation even
+            # when the host is Windows, where os.path.expandvars only expands
+            # ``%NAME%``. Support both forms before resolving the source.
+            expanded = re.sub(
+                r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                lambda match: os.environ.get(match.group(1) or match.group(2), match.group(0)),
+                os.path.expandvars(str(raw_path)),
+            )
+            return Path(os.path.expanduser(expanded)).resolve()
+
+        def stage(source: Path, destination: Path) -> None:
+            destination.mkdir(parents=True, exist_ok=True)
+            for candidate in source.rglob("*"):
+                relative = candidate.relative_to(source).as_posix()
+                if not any(fnmatch.fnmatch(relative, pattern) for pattern in patterns):
+                    continue
+                target = destination / relative
+                if candidate.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif candidate.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(candidate, target)
+
+        agent = payload.get("agent")
+        if isinstance(agent, dict):
+            plugins = agent.get("plugins")
+            if isinstance(plugins, list):
+                for index, plugin in enumerate(plugins):
+                    if not isinstance(plugin, dict) or not plugin.get("path"):
+                        continue
+                    source = resolve_source(plugin["path"])
+                    if not source.is_dir():
+                        raise DockerRunError(f"agent plugin source is not a directory: {source}")
+                    destination = public_root / "plugins" / str(index)
+                    stage(source, destination)
+                    plugin["path"] = f"{CONTAINER_PUBLIC_INPUT_DIR}/plugins/{index}"
+
+        sandbox = payload.get("sandbox")
+        if isinstance(sandbox, dict):
+            sources = sandbox.get("template_sources")
+            if isinstance(sources, list):
+                for index, source_config in enumerate(sources):
+                    if not isinstance(source_config, dict) or source_config.get("type") != "template_dir":
+                        continue
+                    source = resolve_source(source_config["path"])
+                    if not source.is_dir():
+                        raise DockerRunError(f"template source is not a directory: {source}")
+                    destination = public_root / "templates" / str(index)
+                    stage(source, destination)
+                    source_config["path"] = f"{CONTAINER_PUBLIC_INPUT_DIR}/templates/{index}"
+
+        if public_root.exists():
+            self._public_inputs_dir = public_root
+
+    async def _grade_captured_workspace(self, result: EvaluationResult, output_dir: Path) -> EvaluationResult:
+        """Run trusted grading on the host after the untrusted container exits.
+
+        The agent has already stopped by this point, so criteria and references can
+        stay host-only.
+        """
+        artifact_dir = output_dir / "artifacts" / self.rt.task.task_id
+        sandbox_config = self.rt.task.sandbox.model_copy(update={"driver": "tempdir"})
+        grader_sandbox = Sandbox(
+            sandbox_config,
+            task_id=self.rt.task.task_id,
+            task_dir=self.rt.task_file.parent.resolve() if self.rt.task_file else None,
+        )
+        grader_sandbox.sandbox_dir = artifact_dir
+        checker = SuccessChecker(grader_sandbox)
+        reference_code, reference_dir, _ = load_reference(
+            task=self.rt.task,
+            task_file=self.rt.task_file,
+            cached_reference=None,
+        )
+        criteria_results = await checker.check_all_async(
+            self.rt.task.success_criteria,
+            reference_code=reference_code,
+            reference_dir=reference_dir,
+            turn_records=result.iterations,
+        )
+        result.success_criteria_results = criteria_results
+        result.calculate_weighted_score(self.rt.task.success_criteria)
+        result.final_status = (
+            FinalStatus.SUCCESS if result.all_criteria_passed(self.rt.task.success_criteria) else FinalStatus.FAILURE
+        )
+        await asyncio.to_thread(
+            (output_dir / "task.json").write_text,
+            result.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        return result
 
     async def _stream_container_output(self, proc: asyncio.subprocess.Process, log_fh: TextIO) -> int:
         """Stream the container's stdout, returning its exit code.
@@ -1162,18 +1295,17 @@ class DockerRunner:
         argv += ["--env", "TELEMETRY_ENABLED=false"]
 
         argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}:ro"]
+        if self._public_inputs_dir is not None:
+            argv += ["-v", f"{self._public_inputs_dir.resolve()}:{CONTAINER_PUBLIC_INPUT_DIR}:ro"]
         # Mount the host run_dir to the container's standard output location
         # so the in-container Orchestrator writes task.json/task.log/etc.
         # directly to the host filesystem via bind-mount.
         argv += ["-v", f"{output_dir}:{CONTAINER_OUTPUT_DIR}"]
-        # Mount the original task dir at the SAME host path so the
-        # in-container Orchestrator can set TASK_DIR (used by run_command
-        # criteria via `$TASK_DIR/foo.json`) to a path that resolves
-        # identically inside and outside the container.
+        # Do not mount the source task directory.  It commonly contains the
+        # private reference answer, verifier scripts, and fixture data next to
+        # task.yaml.  The in-container task is the sanitized staged copy above;
+        # grading commands run host-side after the agent workspace is captured.
         host_task_dir: Path | None = None
-        if self.rt.task_file:
-            host_task_dir = self.rt.task_file.parent.resolve()
-            argv += ["-v", f"{host_task_dir}:{host_task_dir}:ro"]
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1184,7 +1316,13 @@ class DockerRunner:
         # doesn't exist or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT=1).
         if self._claude_mount_src is not None:
             host_claude_dir = Path.home() / ".claude"
-            argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
+            # A Windows host home path is not a valid destination inside a
+            # Linux Docker/Podman container. Keep symmetric paths on POSIX;
+            # otherwise use the image's standard root home.
+            container_claude_dir = host_claude_dir if os.name != "nt" else "/root/.claude"
+            argv += ["-v", f"{self._claude_mount_src}:{container_claude_dir}"]
+            if os.name == "nt":
+                argv += ["--env", "HOME=/root"]
 
         # Auto-mount host paths the task references so they resolve inside
         # the container at the *same* path they have on the host.
@@ -1193,9 +1331,8 @@ class DockerRunner:
         #   - Template directories (`sandbox.template_sources[].path` for
         #     TemplateDirSource entries -- already absolute after
         #     resolve_template_paths runs on the host).
-        # Reference files (`task.reference.file`) and `run_command`
-        # criteria that use `$TASK_DIR/...` are covered by the symmetric
-        # task_dir mount above. ``mounted`` dedupes overlapping entries.
+        # ``mounted`` dedupes overlapping entries.  Reference files and grader
+        # commands are deliberately excluded: they are private grader inputs.
         mounted: set[Path] = set()
         # Auto-mount sources that look like credential / secret dirs get a
         # loud warning. Task YAMLs typically come from in-house suite authors,
@@ -1225,16 +1362,8 @@ class DockerRunner:
             mounted.add(target)
             argv.extend(["-v", f"{target}:{target}:ro"])
 
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
-
-        from coder_eval.models import TemplateDirSource
-
-        sandbox_cfg = self.rt.task.sandbox
-        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
-            if isinstance(source, TemplateDirSource):
-                _auto_mount(source.path)
+        # Plugin and template paths are staged into CONTAINER_PUBLIC_INPUT_DIR
+        # above.  Never mount their original host directories here.
 
         # Defensive: system_prompt_file is normally inlined into
         # system_prompt by load_task / experiment resolution, but a variant
@@ -1244,14 +1373,6 @@ class DockerRunner:
         if agent_cfg and agent_cfg.system_prompt_file:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
-        # reference.file / reference.directory: if a task ships absolute
-        # paths (or relative paths that escape the task_dir mount via
-        # ``..``), they must be mounted explicitly. Relative paths under
-        # task_dir are already covered by the symmetric task_dir mount.
-        reference = self.rt.task.reference
-        if reference is not None:
-            _auto_mount(reference.file, dir_only=False)
-            _auto_mount(reference.directory)
         for mount in cfg.extra_mounts:
             normalized = _validate_extra_mount(mount)
             argv += ["-v", normalized]

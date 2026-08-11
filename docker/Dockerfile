@@ -92,4 +92,7 @@ WORKDIR /work
 # /usr/local/bin/coder_eval_entrypoint.sh`, which makes the in-container
 # orchestrator launch robust to whatever a task image's Dockerfile declares.
 COPY docker/coder_eval_entrypoint.sh /usr/local/bin/coder_eval_entrypoint.sh
-RUN chmod +x /usr/local/bin/coder_eval_entrypoint.sh
+# Windows checkouts can supply CRLF shell scripts; normalize in the Linux image
+# so the Docker/Podman entrypoint remains executable locally.
+RUN sed -i 's/\r$//' /usr/local/bin/coder_eval_entrypoint.sh \
+    && chmod +x /usr/local/bin/coder_eval_entrypoint.sh
