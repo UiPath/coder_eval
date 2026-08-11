@@ -285,6 +285,22 @@ class DockerDriverConfig(BaseModel):
         default_factory=list,
         description="Extra `-v src:dst[:ro]` mount specs forwarded to `docker run`. Validated for basic syntax.",
     )
+    agent_input_patterns: list[str] = MergeField(
+        strategy="replace",
+        default_factory=list,
+        description=(
+            "Relative glob patterns copied from each local plugin or template source into the agent container. "
+            "Only these staged copies are mounted; an empty list permits no external source files."
+        ),
+    )
+
+    @field_validator("agent_input_patterns")
+    @classmethod
+    def _validate_agent_input_patterns(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            if not pattern or pattern.startswith(("/", "\\")) or ".." in pattern.replace("\\", "/").split("/"):
+                raise ValueError("agent_input_patterns entries must be non-empty relative paths without '..'")
+        return patterns
 
     @field_validator("working_dir")
     @classmethod
