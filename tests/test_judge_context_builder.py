@@ -644,3 +644,94 @@ def test_collect_host_file_reads_utf8(tmp_path: Path) -> None:
     builder = _make_builder(files=["$TASK_DIR/rubric.md"], include_reference=False, max_file_chars=200)
     ctx = builder.build(sb, reference_dir=None, turn_records=None)
     assert ctx.files[0].content == "Café — rationale\nμ test"
+
+
+# --- $REFERENCE_DIR token ---
+
+
+def test_reference_dir_token_resolves_from_the_staged_copy(sandbox: Sandbox, tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "rubric.md").write_text("RUBRIC BODY", encoding="utf-8")
+
+    ctx = _make_builder(files=["$REFERENCE_DIR/rubric.md"]).build(sandbox, ref, None)
+
+    assert ctx.files[0].content == "RUBRIC BODY"
+    assert ctx.missing_files == []
+
+
+def test_reference_dir_token_missing_file_is_tracked(sandbox: Sandbox, tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+
+    ctx = _make_builder(files=["$REFERENCE_DIR/absent.md"]).build(sandbox, ref, None)
+
+    assert ctx.missing_files == ["$REFERENCE_DIR/absent.md"]
+    assert ctx.files[0].content is None
+
+
+def test_reference_dir_token_with_no_reference_is_tracked_as_missing(sandbox: Sandbox) -> None:
+    """Rather than silently falling through to a sandbox-relative lookup."""
+    ctx = _make_builder(files=["$REFERENCE_DIR/rubric.md"]).build(sandbox, None, None)
+
+    assert ctx.missing_files == ["$REFERENCE_DIR/rubric.md"]
+
+
+def test_bare_reference_dir_token_resolves_to_the_directory(sandbox: Sandbox, tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+
+    ctx = _make_builder(files=["$REFERENCE_DIR"]).build(sandbox, ref, None)
+
+    # A directory is not a file, so it records as missing rather than exploding.
+    assert ctx.missing_files == ["$REFERENCE_DIR"]
+
+
+def test_reference_directory_lookalike_falls_through_to_sandbox(sandbox: Sandbox, tmp_path: Path) -> None:
+    """`$REFERENCE_DIRECTORY` must NOT match `$REFERENCE_DIR` — the separator
+    requirement in `path_uses_token` is what keeps the two apart."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "x.md").write_text("SHOULD NOT BE READ", encoding="utf-8")
+
+    ctx = _make_builder(files=["$REFERENCE_DIRECTORY/x.md"]).build(sandbox, ref, None)
+
+    assert ctx.missing_files == ["$REFERENCE_DIRECTORY/x.md"]
+    assert ctx.files[0].content is None
+
+
+def test_task_directory_lookalike_falls_through_to_sandbox(sandbox: Sandbox) -> None:
+    ctx = _make_builder(files=["$TASK_DIRECTORY/x.md"]).build(sandbox, None, None)
+
+    assert ctx.missing_files == ["$TASK_DIRECTORY/x.md"]
+
+
+def test_render_reference_dir_orders_files_deterministically(tmp_path: Path) -> None:
+    """Judge prompts must not reorder across platforms — that perturbs grading."""
+    from coder_eval.evaluation.judge_context import render_reference_dir
+
+    ref = tmp_path / "ref"
+    (ref / "pkg").mkdir(parents=True)
+    for name in ("z.py", "a.py", "m.py"):
+        (ref / name).write_text(f"# {name}", encoding="utf-8")
+    (ref / "pkg" / "b.py").write_text("# nested", encoding="utf-8")
+
+    rendered = render_reference_dir(ref, 10_000)
+
+    assert rendered is not None
+    headers = [ln for ln in rendered.splitlines() if ln.startswith("--- ")]
+    assert headers == sorted(headers)
+
+
+def test_render_reference_dir_truncates_each_file(tmp_path: Path) -> None:
+    from coder_eval.evaluation.judge_context import render_reference_dir
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "big.py").write_text("X" * 5_000, encoding="utf-8")
+
+    rendered = render_reference_dir(ref, 100)
+
+    assert rendered is not None
+    assert "--- big.py ---" in rendered
+    assert "... (truncated" in rendered

@@ -1179,7 +1179,7 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
         default_factory=list,
         description=(
             "Paths whose contents are shown to the judge. Plain entries are sandbox-relative; "
-            "entries prefixed with '$TASK_DIR/' are read from the host filesystem relative to "
+            "entries prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host filesystem relative to "
             "the task YAML's parent directory (useful for shared rubrics outside the sandbox). "
             "Missing files are rendered as '<file not found>' so the rubric can penalize them."
         ),
@@ -1342,7 +1342,7 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         default_factory=list,
         description=(
             "Paths whose contents are pre-attached to the judge prompt. Plain entries are "
-            "sandbox-relative; entries prefixed with '$TASK_DIR/' are read from the host "
+            "sandbox-relative; entries prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host "
             "filesystem relative to the task YAML's parent directory (useful for shared rubrics "
             "outside the sandbox). Missing files are rendered as '<file not found>' so the "
             "rubric can penalize them. Empty by default — without entries, the judge inspects "

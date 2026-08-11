@@ -1,5 +1,6 @@
 """Tests for task tagging and tag-based filtering."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -135,3 +136,54 @@ class TestYamlTasksHaveTags:
                 data = yaml.safe_load(f)
             task = TaskDefinition(**data)
             assert task.tags, f"{task_file.name} should have at least one tag"
+
+
+class TestCiSmokePassContract:
+    """The CI smoke-pass bucket hardcodes a count and a non-recursive glob.
+
+    Both fail SILENTLY OPEN: a `smoke-pass` task added in a subdirectory is not
+    matched by `tasks/*.yaml`, the hardcoded expectation still matches what did
+    run, and CI stays green while the task never executes.
+    """
+
+    WORKFLOW = Path(".github/workflows/pr-checks.yml")
+
+    def _smoke_pass_tasks(self) -> dict[Path, int]:
+        """Map each smoke-pass task file to the number of sub-tasks it expands to."""
+        found: dict[Path, int] = {}
+        for task_file in sorted(Path("tasks").rglob("*.yaml")):
+            with open(task_file) as f:
+                task = TaskDefinition(**yaml.safe_load(f))
+            if "smoke-pass" not in task.tags:
+                continue
+            rows = len(task.dataset.rows) if (task.dataset and task.dataset.rows) else 1
+            found[task_file] = rows
+        return found
+
+    def test_expected_count_matches_the_tagged_task_set(self):
+        if not self.WORKFLOW.exists():
+            pytest.skip("workflow not present")
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        expected = int(re.search(r'EXPECTED_SMOKE_PASS_RUN:\s*"(\d+)"', text).group(1))
+        succeeded = int(re.search(r'EXPECTED_SMOKE_PASS_SUCCEEDED:\s*"(\d+)"', text).group(1))
+        actual = sum(self._smoke_pass_tasks().values())
+
+        assert actual == expected, (
+            f"EXPECTED_SMOKE_PASS_RUN is {expected} but {actual} smoke-pass sub-tasks exist. "
+            "Update .github/workflows/pr-checks.yml when adding/removing a smoke-pass task."
+        )
+        assert succeeded == expected
+
+    def test_every_smoke_pass_task_is_matched_by_the_ci_globs(self):
+        if not self.WORKFLOW.exists():
+            pytest.skip("workflow not present")
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        step = text.split("Run smoke-pass bucket", 1)[1].split("- name:", 1)[0]
+        globs = re.findall(r"(tasks/[^\s\\]*\.yaml)", step)
+        assert globs, "could not find the smoke-pass globs in the workflow"
+
+        for task_file in self._smoke_pass_tasks():
+            assert any(task_file.match(g) for g in globs), (
+                f"{task_file} is tagged smoke-pass but no CI glob matches it "
+                f"(globs: {globs}) — it would silently never run."
+            )

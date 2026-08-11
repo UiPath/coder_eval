@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from coder_eval.evaluation.summaries import summarize_commands
-from coder_eval.models import REFERENCE_DIR_TOKEN, TASK_DIR_TOKEN, JudgeTranscript, JudgeTranscriptToolCall
+from coder_eval.models import (
+    REFERENCE_DIR_TOKEN,
+    TASK_DIR_TOKEN,
+    JudgeTranscript,
+    JudgeTranscriptToolCall,
+    path_uses_token,
+)
 
 
 # Paths in `llm_judge.files` / `agent_judge.files` that begin with one of these
@@ -71,9 +77,7 @@ def _resolve_host_path(path: str, task_dir: Path | None, reference_dir: Path | N
     file reads under the same trust boundary need no extra confinement.
     """
     for token, base in ((REFERENCE_DIR_TOKEN, reference_dir), (TASK_DIR_TOKEN, task_dir)):
-        # Match only the bare token or the token followed by a path separator, so
-        # unrelated identifiers like `$TASK_DIRECTORY` fall through to sandbox lookup.
-        if path != token and not (path.startswith(token) and path[len(token)] in "/\\"):
+        if not path_uses_token(path, token):
             continue
         if base is None:
             # Token was used but the runner has no directory for it — surface as
@@ -218,14 +222,35 @@ def iter_reference_files(reference_dir: Path) -> Iterator[tuple[Path, str]]:
             yield path, text
 
 
-def collect_reference_secrets(reference_dir: Path) -> list[str]:
+def collect_reference_secrets(reference_dir: Path, max_file_chars: int | None = None) -> list[str]:
     """Return the contents of every file under ``reference_dir`` as scrub keys.
 
     Used to build the secret set for ``scrub_reference``: a misbehaving judge
     that echoes reference content into its findings/transcript should have it
     redacted before persistence.
+
+    ``max_file_chars`` MUST be passed whenever the judge saw the reference via
+    ``render_reference_dir``, which truncates each file to that limit.
+    ``scrub_reference`` redacts by exact substring, so a key built from the
+    untruncated text never matches what the judge was actually shown — any
+    reference file longer than the limit would then be echoed verbatim into
+    ``CriterionResult.details`` / the persisted judge transcript. Both the full
+    and truncated forms are emitted, so either shape is redacted.
     """
-    return [text for _path, text in iter_reference_files(reference_dir)]
+    keys: list[str] = []
+    for _path, text in iter_reference_files(reference_dir):
+        keys.append(text)
+        if max_file_chars is not None:
+            truncated = truncate(text, max_file_chars)
+            if truncated != text:
+                keys.append(truncated)
+    return keys
+
+
+# Total budget for the rendered reference block. `max_file_chars` bounds each
+# file, but a tree of many small files could still blow the judge's context —
+# which surfaces as a failed judge call scored 0.0, not as graceful degradation.
+_MAX_RENDERED_REFERENCE_CHARS = 200_000
 
 
 def render_reference_dir(reference_dir: Path, max_file_chars: int) -> str | None:
@@ -240,13 +265,33 @@ def render_reference_dir(reference_dir: Path, max_file_chars: int) -> str | None
     and lets the judge Glob/Read it directly.
     """
     blocks: list[str] = []
+    used = 0
+    dropped = 0
     for path, text in iter_reference_files(reference_dir):
         try:
             label = path.relative_to(reference_dir).as_posix()
         except ValueError:  # pragma: no cover - rglob results are always relative
             label = path.name
-        blocks.append(f"--- {label} ---\n{truncate(text, max_file_chars)}")
-    return "\n\n".join(blocks) if blocks else None
+        block = f"--- {label} ---\n{truncate(text, max_file_chars)}"
+        # Drop trailing files rather than truncating mid-block, mirroring how the
+        # trajectory degrades, and tell the judge explicitly so it doesn't read
+        # the omission as "the reference doesn't implement that".
+        if used + len(block) > _MAX_RENDERED_REFERENCE_CHARS and blocks:
+            dropped += 1
+            continue
+        blocks.append(block)
+        used += len(block)
+    if not blocks:
+        return None
+    if dropped:
+        logger.warning(
+            "render_reference_dir: %s exceeds the %d-char prompt budget — %d file(s) omitted",
+            reference_dir,
+            _MAX_RENDERED_REFERENCE_CHARS,
+            dropped,
+        )
+        blocks.append(f"--- ({dropped} further reference file(s) omitted: prompt budget) ---")
+    return "\n\n".join(blocks)
 
 
 @dataclass

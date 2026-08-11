@@ -128,7 +128,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         # would never match. Only built when the criterion actually saw the
         # reference — there is nothing to redact otherwise.
         scrub_key = (
-            collect_reference_secrets(reference_dir)
+            collect_reference_secrets(reference_dir, criterion.max_file_chars)
             if criterion.include_reference and reference_dir is not None
             else None
         )

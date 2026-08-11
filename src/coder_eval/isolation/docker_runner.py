@@ -488,6 +488,9 @@ class DockerRunner:
         # directory, mounted read-WRITE at CONTAINER_REFERENCE_DIR. It must be a
         # copy, and it must be writable -- see _prepare_host_mounts.
         self._reference_mount_src: Path | None = None
+        # Host path the copy came from, cached by _prepare_reference_mount so the
+        # argv builder doesn't re-stat it (and re-emit its warning).
+        self._reference_source_dir: Path | None = None
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -963,6 +966,7 @@ class DockerRunner:
         reference_copy = staging / "reference"
         shutil.copytree(source, reference_copy, ignore=ignore_patterns_and_symlinks([".git"]))
         self._reference_mount_src = reference_copy
+        self._reference_source_dir = source
 
     def _build_image(self) -> str:
         """Resolve the image to run, building from a Dockerfile when configured.
@@ -1133,7 +1137,7 @@ class DockerRunner:
         # path to 000 for every agent turn, which a `:ro` mount would reject with
         # EROFS. See _prepare_reference_mount.
         args = ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
-        host_reference_dir = self._resolve_host_reference_dir()
+        host_reference_dir = self._reference_source_dir
         if (
             host_reference_dir is not None
             and host_task_dir is not None
@@ -1166,7 +1170,7 @@ class DockerRunner:
         # ANTI-CHEAT (load-bearing, not hardening boilerplate). The container runs
         # as root, and root bypasses ordinary file permissions via CAP_DAC_OVERRIDE
         # / CAP_DAC_READ_SEARCH. Without dropping both, the mode-000 window that
-        # orchestration/permissions.py puts around every agent turn is a NO-OP on
+        # fs_permissions.py puts around every agent turn is a NO-OP on
         # native Linux -- verified: a `chmod 000` dir is still readable by root in a
         # default container, and Permission denied once these two caps are dropped.
         # (It appears to work on macOS Docker Desktop even without this, because
@@ -1312,9 +1316,10 @@ class DockerRunner:
         #   - Template directories (`sandbox.template_sources[].path` for
         #     TemplateDirSource entries -- already absolute after
         #     resolve_template_paths runs on the host).
-        # Reference files (`task.reference.file`) and `run_command`
-        # criteria that use `$TASK_DIR/...` are covered by the symmetric
-        # task_dir mount above. ``mounted`` dedupes overlapping entries.
+        # `run_command` criteria that use `$TASK_DIR/...` are covered by the
+        # symmetric task_dir mount above. The reference is deliberately NOT here:
+        # it gets its own mount at CONTAINER_REFERENCE_DIR and is masked out of
+        # the task_dir mount (see _reference_mount_args). ``mounted`` dedupes overlapping entries.
         mounted: set[Path] = set()
         # Auto-mount sources that look like credential / secret dirs get a
         # loud warning. Task YAMLs typically come from in-house suite authors,

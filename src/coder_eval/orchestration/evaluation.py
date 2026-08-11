@@ -59,9 +59,21 @@ def resolve_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path 
     # invisible — wrong reference content, wrong reference_comparison scores,
     # wrong judge prompts, no error.
     container_mount = Path(CONTAINER_REFERENCE_DIR)
-    if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1" and container_mount.is_dir():
-        logger.debug("Reference resolved from the container mount at %s", container_mount)
-        return container_mount
+    if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":
+        if container_mount.is_dir():
+            logger.debug("Reference resolved from the container mount at %s", container_mount)
+            return container_mount
+        # Hard fail rather than falling back to task_file.parent. In-container
+        # that fallback resolves to the UN-masked reference under the `:ro`
+        # task-dir bind — which the mode-000 window then cannot chmod (EROFS), so
+        # the run would complete with the solution readable by the agent for the
+        # whole turn, reporting a normal pass/fail. A missing mount means the
+        # host-side wiring is broken; that must be loud, not silently unprotected.
+        raise FileNotFoundError(
+            f"Task declares a reference but {CONTAINER_REFERENCE_DIR} is not mounted in this container. "
+            + "The host-side DockerRunner should have mounted it; refusing to run unprotected. "
+            + "If the coder-eval-agent image predates the reference mount, rebuild it (`make docker-image`)."
+        )
 
     if not task_file:
         raise ValueError("task_file not set, cannot resolve reference directory path")

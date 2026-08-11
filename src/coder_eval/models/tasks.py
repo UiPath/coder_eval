@@ -9,7 +9,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import ResolvedAgentConfig
-from coder_eval.models.container_paths import REFERENCE_DIR_TOKEN
+from coder_eval.models.container_paths import REFERENCE_DIR_TOKEN, path_uses_token
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.limits import RunLimits
@@ -149,7 +149,7 @@ class ReferenceSource(BaseModel):
     The reference is NEVER shown to the agent being evaluated. The whole
     directory is staged into a per-run private copy and kept at mode ``000``
     for the duration of every agent turn (see
-    ``orchestration/permissions.py``), so an agent cannot read the solution
+    ``fs_permissions.py``), so an agent cannot read the solution
     even though it shares a filesystem with the harness.
 
     Criteria address files inside it with the ``$REFERENCE_DIR`` token:
@@ -572,8 +572,13 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         for c in self.success_criteria:
             if c.type == "reference_comparison":
                 offenders.append(f"{c.type} (needs a reference to compare against)")
-            elif any(str(f).startswith(REFERENCE_DIR_TOKEN) for f in getattr(c, "files", []) or []):
+            elif any(path_uses_token(f, REFERENCE_DIR_TOKEN) for f in getattr(c, "files", None) or []):
                 offenders.append(f"{c.type} (files: uses {REFERENCE_DIR_TOKEN})")
+            elif REFERENCE_DIR_TOKEN in (getattr(c, "command", None) or ""):
+                # run_command is the third documented consumer: with no reference
+                # the env var is simply absent, so `diff -r "$REFERENCE_DIR" out/`
+                # expands to an empty argument and misbehaves instead of failing.
+                offenders.append(f"{c.type} (command: uses {REFERENCE_DIR_TOKEN})")
         if offenders:
             raise ValueError(
                 "These criteria consume the reference solution but the task defines no "

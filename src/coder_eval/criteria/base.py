@@ -278,6 +278,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
+        *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
     ) -> CriterionResult:
@@ -364,6 +365,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
+        *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
     ) -> CriterionResult:

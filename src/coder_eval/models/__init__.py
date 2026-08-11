@@ -27,6 +27,7 @@ from coder_eval.models.container_paths import (
     REFERENCE_DIR_TOKEN,
     RESERVED_CONTAINER_DIRS,
     TASK_DIR_TOKEN,
+    path_uses_token,
 )
 
 # Enums
@@ -274,6 +275,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CONTAINER_TASK_DIR",
     "REFERENCE_DIR_TOKEN",
     "TASK_DIR_TOKEN",
+    "path_uses_token",
     "CONTAINER_WORK_DIR",
     "RESERVED_CONTAINER_DIRS",
     "DockerDriverConfig",

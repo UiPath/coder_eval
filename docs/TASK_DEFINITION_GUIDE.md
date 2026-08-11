@@ -1341,6 +1341,11 @@ success_criteria:
 `run_command` criteria get the same directory as the `REFERENCE_DIR` environment
 variable (alongside `TASK_DIR`), so `diff -r "$REFERENCE_DIR" out/` works.
 
+Symlinks inside `reference.directory` are **dropped** when the reference is
+staged (they would otherwise pull host files into a directory a judge sub-agent
+can read). Ship real files — a `reference_file:` or `$REFERENCE_DIR/...` entry
+pointing at a symlink resolves to nothing.
+
 ## Pre-Run Commands
 
 Run shell commands inside the sandbox **after setup completes but before the agent starts**.

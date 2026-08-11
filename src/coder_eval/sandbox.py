@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
+from .fs_permissions import RESTRICTED_MODE, set_permissions
 from .invocation_log import render_recorder
 from .models import (
     RECORD_CLI_DIR,
@@ -22,7 +23,6 @@ from .models import (
     StarterFilesSource,
     TemplateDirSource,
 )
-from .orchestration.permissions import RESTRICTED_MODE, set_permissions
 from .resources import get_ignore_patterns, should_ignore_path
 
 
@@ -190,7 +190,7 @@ class Sandbox:
         """Chmod ``paths`` to ``mode`` for the block, if this sandbox enforces that.
 
         The driver-aware wrapper around
-        :func:`coder_eval.orchestration.permissions.set_permissions`: a no-op
+        :func:`coder_eval.fs_permissions.set_permissions`: a no-op
         context manager when :attr:`enforces_permission_windows` is False, so
         callers can wrap unconditionally without branching on the driver.
 

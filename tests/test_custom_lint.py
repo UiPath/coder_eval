@@ -607,7 +607,7 @@ class TestCE025LiveVerdictConsistency:
         class _FakeCheckerNoOverride(BaseCriterion):
             criterion_type = "fake_live_no_override"
 
-            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
                 raise NotImplementedError
 
         violations = self._find_violations({"fake_live_no_override": (_FakeCheckerNoOverride, _FakeLiveModel)})
@@ -627,7 +627,7 @@ class TestCE025LiveVerdictConsistency:
         class _FakeCheckerOverrides(BaseCriterion):
             criterion_type = "fake_non_live_override"
 
-            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
                 raise NotImplementedError
 
             def live_verdict(self, criterion, turn_records) -> LiveVerdict:

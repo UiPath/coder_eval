@@ -1280,3 +1280,33 @@ def test_capture_to_self_referential_is_noop(tmp_path):
         assert (dest / "f.txt").read_text(encoding="utf-8") == "keep"
     finally:
         sandbox.cleanup()
+
+
+class TestReferenceDirEnv:
+    """`REFERENCE_DIR` is a documented contract for run_command criteria."""
+
+    def _sandbox(self, tmp_path):
+        from coder_eval.models import SandboxConfig
+        from coder_eval.sandbox import Sandbox
+
+        sb = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="t", task_dir=tmp_path)
+        sb.setup()
+        return sb
+
+    def test_exported_when_reference_is_staged(self, tmp_path):
+        sb = self._sandbox(tmp_path)
+        try:
+            staged = tmp_path / "staged_reference"
+            staged.mkdir()
+            sb.reference_dir = staged
+            assert sb._build_run_command_env()["REFERENCE_DIR"] == str(staged)
+        finally:
+            sb.cleanup(preserve=False)
+
+    def test_absent_when_the_task_declares_no_reference(self, tmp_path):
+        sb = self._sandbox(tmp_path)
+        try:
+            assert sb.reference_dir is None
+            assert "REFERENCE_DIR" not in sb._build_run_command_env()
+        finally:
+            sb.cleanup(preserve=False)

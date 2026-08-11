@@ -22,6 +22,21 @@ from __future__ import annotations
 TASK_DIR_TOKEN = "$TASK_DIR"
 REFERENCE_DIR_TOKEN = "$REFERENCE_DIR"
 
+
+def path_uses_token(path: str, token: str) -> bool:
+    """Whether ``path`` addresses ``token`` — the bare token or token + separator.
+
+    The separator requirement is what keeps an unrelated identifier like
+    ``$TASK_DIRECTORY`` from matching ``$TASK_DIR``. Shared by the judge path
+    resolver and TaskDefinition's load-time validator: when the two used
+    different rules, a ``$REFERENCE_DIRECTORY/x`` entry was a sandbox path to one
+    and a reference consumer to the other, hard-failing task load.
+    """
+    if path == token:
+        return True
+    return path.startswith(token) and path[len(token)] in "/\\"
+
+
 CONTAINER_WORK_DIR = "/work"
 CONTAINER_INPUT_DIR = "/work/input"
 CONTAINER_OUTPUT_DIR = "/work/output"
@@ -31,7 +46,7 @@ CONTAINER_TASK_DIR = "/work/task_dir"
 # Exposed to criteria as the ``REFERENCE_DIR`` env var and as the
 # ``$REFERENCE_DIR`` token in judge ``files:`` entries. Kept at mode 000 for the
 # duration of every ``agent.communicate`` call so the agent under evaluation
-# cannot read the solution (see ``orchestration/permissions.py``).
+# cannot read the solution (see ``fs_permissions.py``).
 CONTAINER_REFERENCE_DIR = "/work/references"
 
 # Paths a task's WORKDIR must never collide with: the container root and every

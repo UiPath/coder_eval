@@ -195,9 +195,9 @@ class _PermissionStack:
 
 _registry = _PermissionStack()
 
-# Crash safety. Installed once at import: an interpreter that dies mid-turn must
-# not leave the user's checked-out tasks/ tree unreadable. Signal handlers chain
-# to the previous handler so we don't swallow an operator's Ctrl-C.
+# Crash safety, installed on the first push(): an interpreter that dies mid-turn
+# must not leave the user's checked-out tasks/ tree unreadable. Signal handlers
+# chain to the previous handler so we don't swallow an operator's Ctrl-C.
 _handlers_installed = False
 _handlers_lock = threading.Lock()
 
@@ -216,8 +216,10 @@ def _install_crash_handlers() -> None:
     with _handlers_lock:
         if _handlers_installed:
             return
-        _handlers_installed = True
         _install_locked()
+        # Set only after a successful install, so a failure part-way through is
+        # retried by the next push() rather than latched as "already done".
+        _handlers_installed = True
 
 
 def _install_locked() -> None:

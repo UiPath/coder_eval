@@ -30,11 +30,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Shared with the reference-staging copy in ``orchestration.evaluation`` so the
-# no-symlinks rule can't drift between the two trees a judge can read.
-_ignore_patterns_and_symlinks = ignore_patterns_and_symlinks
-
-
 class SubAgentRunner:
     """Spawn a Claude Code SDK agent in an isolated sandbox copy and return its turn.
 
@@ -86,7 +81,7 @@ class SubAgentRunner:
         # ``_reference`` (defense-in-depth against agent-planted collisions at
         # the mount point), but reusing it here would silently drop a customer
         # subdir of the same name. Symlinks are stripped unconditionally by
-        # ``_ignore_patterns_and_symlinks([])``.
+        # ``ignore_patterns_and_symlinks([])``.
         self._reference_ignore_patterns = reference_ignore_patterns or []
         # Runtime-only in-process MCP server injection (e.g. the judge
         # submit_verdict tool). NOT routed through ``sdk_options`` —
@@ -143,7 +138,7 @@ class SubAgentRunner:
                 src_dir,
                 judge_dir,
                 symlinks=True,
-                ignore=_ignore_patterns_and_symlinks(self._ignore_patterns),
+                ignore=ignore_patterns_and_symlinks(self._ignore_patterns),
                 dirs_exist_ok=True,  # mkdtemp already created the target; allow merging in
             )
 
@@ -179,7 +174,7 @@ class SubAgentRunner:
                     self._reference_dir,
                     ref_dest,
                     symlinks=True,
-                    ignore=_ignore_patterns_and_symlinks(self._reference_ignore_patterns),
+                    ignore=ignore_patterns_and_symlinks(self._reference_ignore_patterns),
                 )
 
             agent = ClaudeCodeAgent(

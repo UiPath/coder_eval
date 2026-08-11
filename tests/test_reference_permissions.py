@@ -2,7 +2,7 @@
 
 The agent under evaluation shares a filesystem with the harness, so without an
 active control it can read the reference solution instead of solving the task.
-``orchestration.permissions.set_permissions`` chmods the reference and task
+``fs_permissions.set_permissions`` chmods the reference and task
 directories to 000 for the duration of every ``agent.communicate`` call.
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.orchestration.permissions import READ_ONLY_MODE, RESTRICTED_MODE, set_permissions
+from coder_eval.fs_permissions import READ_ONLY_MODE, RESTRICTED_MODE, set_permissions
 
 
 def _mode(path: Path) -> int:
@@ -56,10 +56,16 @@ class TestRestrictPermissions:
         """An agent crash or turn timeout must not leave the tree unreadable."""
         original = _mode(guarded_dir)
 
-        with pytest.raises(RuntimeError):
+        # Explicit try/except rather than `pytest.raises`: CodeQL cannot model
+        # pytest.raises as catching, so it reports everything after such a block
+        # as unreachable (alerts 77/80 on the first revision of this file).
+        raised = False
+        try:
             async with set_permissions([guarded_dir]):
                 raise RuntimeError("agent crashed")
-
+        except RuntimeError:
+            raised = True
+        assert raised, "the exception must propagate, not be swallowed by the CM"
         assert _mode(guarded_dir) == original
 
     async def test_restores_on_cancellation(self, guarded_dir):
@@ -75,19 +81,27 @@ class TestRestrictPermissions:
         task = asyncio.create_task(_body())
         await entered.wait()
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        cancelled = False
+        try:
             await task
-
+        except asyncio.CancelledError:
+            cancelled = True
+        assert cancelled, "the task must actually be cancelled"
         assert _mode(guarded_dir) == original
 
     async def test_preserves_a_non_default_original_mode(self, guarded_dir):
-        """Restore the mode we observed, not a hardcoded 0o755."""
-        os.chmod(guarded_dir, 0o750)
+        """Restore the mode we observed, not a hardcoded 0o755.
+
+        0o700 rather than a group-readable mode: it makes the same point (the
+        pre-window mode is captured, not assumed) without tripping the
+        overly-permissive-chmod scanner.
+        """
+        os.chmod(guarded_dir, 0o700)
 
         async with set_permissions([guarded_dir]):
             assert _mode(guarded_dir) == RESTRICTED_MODE
 
-        assert _mode(guarded_dir) == 0o750
+        assert _mode(guarded_dir) == 0o700
 
     async def test_none_entries_and_duplicates_are_tolerated(self, guarded_dir):
         """Callers pass [task_dir, reference_dir] without pre-filtering."""
@@ -101,6 +115,45 @@ class TestRestrictPermissions:
     async def test_missing_path_is_a_no_op(self, tmp_path):
         async with set_permissions([tmp_path / "does_not_exist"]):
             pass  # must not raise
+
+    async def test_chmod_refusal_warns_and_skips_the_matching_pop(self, guarded_dir, monkeypatch, caplog):
+        """The branch whose entire job is to signal "this run is NOT protected".
+
+        A read-only mount or a foreign owner makes chmod fail; the window then
+        does not apply and the run continues unprotected, so the warning is the
+        only signal an operator gets. Exiting must not chmod either — a pop with
+        no matching push would apply a mode nobody asked for.
+        """
+        import coder_eval.fs_permissions as perms
+
+        original = _mode(guarded_dir)
+        calls: list[tuple[str, int]] = []
+
+        def _refuse(path, mode):
+            calls.append((str(path), mode))
+            raise PermissionError(30, "Read-only file system")
+
+        monkeypatch.setattr(perms.os, "chmod", _refuse)
+        with caplog.at_level("WARNING"):
+            async with set_permissions([guarded_dir]):
+                pass
+
+        assert "could not chmod" in caplog.text
+        assert len(calls) == 1, "a refused push must not be followed by a pop"
+        monkeypatch.undo()
+        assert _mode(guarded_dir) == original
+
+    async def test_unresolvable_path_is_warned_not_silently_dropped(self, tmp_path, monkeypatch, caplog):
+        import coder_eval.fs_permissions as perms
+
+        def _boom(self, *a, **k):
+            raise OSError("nope")
+
+        monkeypatch.setattr(perms.Path, "resolve", _boom)
+        with caplog.at_level("WARNING"):
+            async with set_permissions([tmp_path]):
+                pass
+        assert "could not resolve" in caplog.text
 
     async def test_overlapping_windows_of_the_same_mode(self, guarded_dir):
         """Two windows applying the same mode: the inner exit must NOT restore.
@@ -158,9 +211,13 @@ class TestRestrictPermissions:
     async def test_regrant_unwinds_on_exception(self, guarded_dir):
         """A raise inside the re-grant must not leave the path readable."""
         async with set_permissions([guarded_dir], mode=RESTRICTED_MODE):
-            with pytest.raises(RuntimeError):
+            raised = False
+            try:
                 async with set_permissions([guarded_dir], mode=READ_ONLY_MODE):
                     raise RuntimeError("live check blew up")
+            except RuntimeError:
+                raised = True
+            assert raised
             assert _mode(guarded_dir) == RESTRICTED_MODE
 
     async def test_three_deep_stack_unwinds_in_order(self, guarded_dir):
@@ -190,6 +247,30 @@ class TestRestrictPermissions:
 
         release.set()
         await asyncio.gather(*holders)
+        assert _mode(guarded_dir) == original
+
+    async def test_out_of_order_release_of_differing_modes(self, guarded_dir):
+        """Pins the documented single-holder assumption.
+
+        `pop()` discards `applied[-1]` regardless of which window is exiting, so
+        two OVERLAPPING (not nested) windows at different modes released in push
+        order do not restore per-holder. The orchestrator never does this — the
+        window is container-only and one task per container — but the primitive
+        is public, so the behaviour is pinned rather than left to chance.
+        """
+        original = _mode(guarded_dir)
+
+        outer = set_permissions([guarded_dir], mode=RESTRICTED_MODE)
+        inner = set_permissions([guarded_dir], mode=READ_ONLY_MODE)
+        await outer.__aenter__()
+        await inner.__aenter__()
+        assert _mode(guarded_dir) == READ_ONLY_MODE
+
+        # Release in PUSH order (not LIFO): the stack pops the top entry.
+        await outer.__aexit__(None, None, None)
+        assert _mode(guarded_dir) == RESTRICTED_MODE
+        await inner.__aexit__(None, None, None)
+
         assert _mode(guarded_dir) == original
 
     async def test_same_path_via_different_routes_shares_one_entry(self, guarded_dir):
