@@ -505,12 +505,14 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         The full criteria stay on the HOST (which grades the copied-out artifacts
         after the container exits) and never cross the container boundary.
 
-        SCOPE — only ``success_criteria`` and ``reference`` are stripped. Every OTHER
-        field the agent legitimately needs (``initial_prompt``, ``system_prompt``,
-        pre/post commands, ``metadata``) survives verbatim into the agent-readable
-        ``task.yaml``, so a task author MUST NOT hide grading material (expected
-        values, the reference answer, grader oracle hints) in any of those fields —
-        it would leak straight to the agent.
+        SCOPE — the grading-material fields ``success_criteria`` and ``reference``
+        are stripped, plus the host-only ``sandbox.docker.regrade_trusts_agent_env``
+        (dropped, not emptied; see below). Every OTHER field the agent legitimately
+        needs (``initial_prompt``, ``system_prompt``, pre/post commands,
+        ``metadata``) survives verbatim into the agent-readable ``task.yaml``, so a
+        task author MUST NOT hide grading material (expected values, the reference
+        answer, grader oracle hints) in any of those fields — it would leak straight
+        to the agent.
 
         Idempotent on an already-empty task (``success_criteria=[]``,
         ``reference=None``) and safe for a ``type: none`` task (only the two hidden

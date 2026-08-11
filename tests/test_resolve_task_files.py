@@ -333,6 +333,13 @@ class TestAgentSafeDump:
         # The two hidden fields are emptied...
         assert safe["success_criteria"] == []
         assert safe["reference"] is None
+        # ...plus the host-only sandbox.docker.regrade_trusts_agent_env is dropped
+        # (it must not cross the container boundary nor trip extra="forbid" on an
+        # older image — see the dedicated strip test in test_docker_criteria_isolation).
+        # Normalize it out of the full dump so the loop below covers only the
+        # "nothing ELSE was altered" guarantee.
+        assert "regrade_trusts_agent_env" not in (safe.get("sandbox") or {}).get("docker", {})
+        (full.get("sandbox") or {}).get("docker", {}).pop("regrade_trusts_agent_env", None)
         # ...and every OTHER key is byte-identical to the full dump.
         for key in full:
             if key in AGENT_HIDDEN_TASK_FIELDS:
