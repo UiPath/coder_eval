@@ -47,7 +47,9 @@ nothing.
 
 ## Step 3 — Scaffold one real task
 
-Ask where tasks should live if it is not obvious; default to `tasks/`.
+Work out where tasks should live by following
+`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`. If the repository already has a task
+tree, write into it; if it has none, propose a location and ask.
 
 If that directory already exists and holds YAML files with a `task_id:` key, **never
 overwrite them**. Report what is already there and add alongside it.

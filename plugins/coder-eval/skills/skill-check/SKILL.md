@@ -110,8 +110,9 @@ adjacent cases instead.
 
 ## Step 4 — Write the suite
 
-Copy the two template files into the user's task directory (`tasks/` if it exists,
-otherwise ask):
+Copy the two template files into the user's task tree, located by following
+`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md` (if the repository has none, propose a
+location and ask):
 
 - `${CLAUDE_PLUGIN_ROOT}/reference/templates/activation.yaml`
 - `${CLAUDE_PLUGIN_ROOT}/reference/templates/activation-rows.jsonl`

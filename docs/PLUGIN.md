@@ -161,7 +161,12 @@ directories, so every file a skill reads travels with it under `reference/`:
   clean up.
 - `cli-setup.md` — how the CLI-driving skills handle a missing `coder-eval`
   binary: offer the install, ask first, verify it worked.
-- `run-layout.md` — the on-disk run-directory contract `analyze` reads.
+- `run-layout.md` — the on-disk run-directory contract `analyze` reads: what is *inside*
+  a run directory.
+- `repo-layout.md` — how a skill finds *where* your eval tree is, by globbing for
+  `task_id:` files and `run.json` rather than assuming `tasks/` and `runs/`. All six
+  skills read it, which is what lets them work in a repository that names or nests the
+  tree differently.
 - `templates/` — the canonical activation suite `skill-check` copies.
 
 ## Related

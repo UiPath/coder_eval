@@ -19,9 +19,9 @@ The user's request is: `$ARGUMENTS`
 - **A file** → review it.
 - **A glob** → review every match.
 - **A directory** → glob `**/*.yaml` beneath it.
-- **Empty** → find the repository's task directory the way task authoring does: glob for
-  `*.yaml` files containing a `task_id:` key (commonly `tasks/`). Say how many you found and
-  **ask before linting all of them**.
+- **Empty** → find the repository's task tree by following
+  `${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`. Say what you resolved and how many
+  tasks it holds, and **ask before linting all of them**.
 
 Only task YAML counts. A file with no `task_id:` is not a task — skip experiment
 definitions, dataset row files, helper configuration and check scripts, and say which you

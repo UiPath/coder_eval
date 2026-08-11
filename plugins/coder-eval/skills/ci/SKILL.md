@@ -10,8 +10,10 @@ The user's request is: `$ARGUMENTS`
 
 ## Step 1 — Check the repository
 
-Find the task directory (a directory of `*.yaml` files carrying a `task_id:` key) and
-check whether `.github/workflows/` exists.
+Find the repository's task tree by following
+`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`, and check whether `.github/workflows/`
+exists. The paths you resolve here become the workflow's `tasks:` input in step 3 — that
+input is written from discovery, never from a fixed guess.
 
 If there is no `.github/` directory at all, say that this skill targets GitHub Actions
 and stop — do not invent an equivalent for another CI system unless the user asks.
@@ -77,9 +79,10 @@ jobs:
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-Adjust `tasks:`, `model:` and the cron to the repository. Pin the action at `@v0` (the
-moving major tag) and do **not** pass a `version:` input — the action's own default
-tracks the matching coder-eval release.
+The `tasks:` value above is a placeholder for whatever step 1 discovered — substitute the
+real paths rather than shipping this one. Adjust `model:` and the cron to the repository
+too. Pin the action at `@v0` (the moving major tag) and do **not** pass a `version:`
+input — the action's own default tracks the matching coder-eval release.
 
 ## Step 4 — Credentials
 

@@ -1147,6 +1147,26 @@ SKILLS_REQUIRING_THE_CLI = {"init", "skill-check", "task"}
 # dead weight; a reader that stops reading it has silently forked the rubric.
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
+# The skills that must locate a repository's eval tree before they can do anything.
+# All six qualify, and each for its own reason: `analyze` needs the run root, `init`
+# and `skill-check` must know where tasks already live before writing beside them,
+# `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob into
+# the workflow it emits. Every one of them used to carry its own hardcoded guess
+# (`runs/latest`, `tasks/`), which is wrong in any repository that names the tree
+# something else or nests it — so the policy is declared once in
+# reference/repo-layout.md and a reader that stops pointing at it has forked it.
+REPO_LAYOUT_READERS = {"analyze", "ci", "init", "lint-tasks", "skill-check", "task"}
+
+# Ways of naming one repository's layout as the DEFAULT. The bare paths `runs/latest`
+# and `tasks/` are deliberately absent: `analyze` legitimately keeps a sentence about a
+# `latest` symlink resolving, and `ci` has to show *some* glob in its snippet. What may
+# not survive is a skill falling back to those paths when it was given nothing.
+EVAL_ROOT_DEFAULT_PHRASINGS = (
+    "default to `runs/latest`",
+    "default to `tasks/`",
+    "fell back to the default",
+)
+
 # Which skills are explicit-invocation only. Scaffolding a directory (`init`) or
 # writing a CI workflow (`ci`) is never something to do unprompted; the rest are
 # safe for the agent to reach for on its own.
@@ -1608,6 +1628,43 @@ class TestPluginArtifacts:
                 f"{name} restates the install command that reference/cli-setup.md declares — "
                 "point at the reference instead"
             )
+
+    def test_repo_layout_is_bundled_and_read_by_its_readers(self):
+        # Sibling of the cli-setup guard above, for the third shared reference. "Where does
+        # this repository keep its tasks and runs?" is a question five skills ask and a sixth
+        # writes into a CI workflow; inlining the answer six times is how the hardcoded
+        # `tasks/` / `runs/latest` assumptions got there in the first place. Both halves are
+        # asserted: the reference ships, and every skill that needs it points at it.
+        layout = PLUGIN_ROOT / "reference" / "repo-layout.md"
+        assert layout.exists() and layout.read_text(encoding="utf-8").strip(), (
+            f"{layout} must exist and be non-empty — six skills read it at runtime to find the repository's eval tree"
+        )
+        on_disk = {p.parent.name for p in PLUGIN_SKILLS}
+        unknown = sorted(REPO_LAYOUT_READERS - on_disk)
+        assert not unknown, f"REPO_LAYOUT_READERS names skill(s) that do not ship: {unknown}"
+
+        pointer = "${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md"
+        for name in sorted(REPO_LAYOUT_READERS):
+            text = (PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+            assert pointer in text, (
+                f"{name} has to locate the repository's eval tree but no longer points at "
+                f"{pointer} — it has forked the discovery policy, or gone back to assuming a path"
+            )
+
+    @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
+    def test_skills_do_not_hardcode_an_eval_root(self, skill: Path):
+        # The other half of the guard above: pointing at the reference is worthless if the
+        # skill still falls back to one repository's layout when handed nothing. Whitespace-
+        # normalized because these bodies are hard-wrapped prose — the `analyze` sentence this
+        # rule exists for spans two source lines, so a literal match on the raw text would be
+        # green today and stay green if the sentence came back.
+        text = re.sub(r"\s+", " ", skill.read_text(encoding="utf-8"))
+        offenders = [phrase for phrase in EVAL_ROOT_DEFAULT_PHRASINGS if phrase in text]
+        assert not offenders, (
+            f"{skill} still defaults to this repository's layout ({offenders}) — a repository "
+            "that names its eval tree anything else silently gets the wrong path, or none. "
+            "Follow reference/repo-layout.md and discover it instead."
+        )
 
     def test_task_rubric_is_bundled_and_read_by_its_readers(self):
         # Both directions of the shared-SSOT decision: the rubric ships, and every skill

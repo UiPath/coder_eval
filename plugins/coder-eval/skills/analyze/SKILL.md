@@ -6,9 +6,10 @@ allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 # Analyze a coder-eval run
 
 You analyze a coder-eval run and write `analysis.md` into the target directory. The
-target path is `$ARGUMENTS`; when it is empty, default to `runs/latest` and **tell the
-user you fell back to the default**. If `runs/latest` is a symlink, confirm it resolves
-before reading through it.
+target path is `$ARGUMENTS`; when it is empty, resolve the run yourself by following
+`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md` — discover the run root rather than
+assuming one, and **say which run you picked and how**. If you reach it through a
+`latest` symlink, confirm that symlink resolves before reading through it.
 
 **Do all the reasoning yourself in this session — no sub-agents.** Batch your Read
 calls in a single turn and write the report inline.

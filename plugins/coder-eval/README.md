@@ -58,7 +58,10 @@ nor credentials — it only reads files.
   reason?", fixture lifecycle, scope match) that `task` and `lint-tasks` both apply.
 - `cli-setup.md` — the missing-CLI policy the CLI-driving skills follow: offer, ask,
   verify.
-- `run-layout.md` — the on-disk run-directory contract that `analyze` reads.
+- `run-layout.md` — the on-disk run-directory contract that `analyze` reads: what is
+  *inside* a run directory.
+- `repo-layout.md` — how every skill finds *where* your eval tree is: discovered by
+  content (`task_id:` files, `run.json`), never assumed to be `tasks/` and `runs/`.
 - `templates/` — the canonical activation suite `skill-check` copies into your repo.
 
 ## Links

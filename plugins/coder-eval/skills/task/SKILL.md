@@ -34,10 +34,11 @@ State any assumptions you make rather than silently picking.
 
 ## Step 2 — Look at what already exists
 
-Find the repository's task directory by globbing for `*.yaml` files containing a
-`task_id:` key (commonly `tasks/`). Read a couple of the existing tasks and follow
-their conventions: naming, tags, criteria style. If a task already covers this ground,
-say so and offer to modify it instead of adding a near-duplicate.
+Find the repository's task tree by following
+`${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`, and say what you resolved. Read a
+couple of the existing tasks and follow their conventions: naming, tags, criteria style.
+If a task already covers this ground, say so and offer to modify it instead of adding a
+near-duplicate.
 
 ## Step 3 — Design the task
 
