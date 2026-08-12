@@ -28,7 +28,10 @@ Ask, or infer from the request:
 - **On pull request** — gate changes to the tasks or to whatever they exercise.
 - **On a schedule** — the skill-drift case: re-run the suite weekly against the current
   model so a skill that quietly stops triggering surfaces before users hit it. This is
-  the trigger most repositories actually want, and the one they forget.
+  the trigger most repositories actually want, and the one they forget. If the suite is
+  an activation suite, the environment note in step 3 is **not optional** for this
+  trigger — without it the scheduled run reports total drift every week regardless of
+  whether anything drifted.
 - **Both**, which is fine — one workflow, two `on:` keys.
 
 ## Step 3 — Emit the workflow
@@ -135,11 +138,29 @@ this exists to prevent.
 `extra-args` is a trusted input that is split on whitespace, so a path containing a space
 is unsafe there. Choose paths without spaces rather than discovering this in CI.
 
-### Environment
+### Environment — including the skill source, if the suite is an activation suite
 
 If the resolved experiment or the tasks interpolate environment variables, pass them
 through the action's `env:` input alongside the credentials. Missing ones do not fail
 loudly — the run just measures the wrong thing.
+
+One case is common enough to check for by name. An activation suite loads the skill under
+test through `agent.plugins`, whose `path` is an environment variable so the committed
+task stays portable — the suite `/coder-eval:check-skill` writes uses `SKILL_SOURCE_PATH`.
+**Grep the discovered tasks for `$` in an `agent.plugins` path and pass every variable you
+find**, resolved against the checkout:
+
+```yaml
+env: |
+  ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude/skills
+```
+
+Use the directory the repository actually keeps skills in, from step 1, not the path
+above. This is the one omission the scheduled trigger cannot survive: unset, the skill is
+never offered to the sandboxed agent, every positive row scores 0, and the job fails its
+`recall` threshold every week — a permanent red that looks exactly like the drift the
+schedule exists to detect, so the real thing goes unnoticed when it arrives.
 
 ## Step 4 — Credentials
 

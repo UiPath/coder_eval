@@ -42,10 +42,11 @@ Code prompt, not in your shell:
 ```
 
 Verify by typing `/coder-eval:`. You should see six commands: `init`,
-`check-skill`, `task`, `lint-tasks`, `analyze`, `ci`. Five of them drive the same
-`coder-eval` CLI you would type by hand, so what they write is a normal file you
-can commit, diff and run in CI. (`lint-tasks` is the exception: it only reads files
-and reports.)
+`check-skill`, `task`, `lint-tasks`, `analyze`, `ci`. Three of them — `init`,
+`check-skill` and `task` — drive the same `coder-eval` CLI you would type by hand,
+so what they write is a normal file you can commit, diff and run in CI. The other
+three never invoke it: `analyze` reads a finished run directory, `ci` writes a
+workflow, and `lint-tasks` only reads task files and reports.
 
 ## 2. Scaffold a suite
 
