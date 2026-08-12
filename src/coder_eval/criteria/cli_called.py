@@ -281,8 +281,8 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         facets = []
         if criterion.tool is not None:
             facets.append(f"tool={criterion.tool!r}")
-        # Same source as the matcher, so the detail cannot describe a different
-        # constraint than the one applied.
+        # Reading `criterion.verb` here would print no verb at all for a `verb_any_of`
+        # criterion, hiding the constraint that caused the failure.
         if spellings := criterion.verb_spellings:
             facets.append(f"verb={' | '.join(' '.join(t) for t in spellings)!r}")
         if criterion.positional is not None:
