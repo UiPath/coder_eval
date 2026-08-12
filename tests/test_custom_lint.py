@@ -1357,6 +1357,10 @@ class TestPluginArtifacts:
             "activation template": self.TEMPLATES / "activation.yaml",
             "check-skill": PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md",
             "optimize-skill": PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md",
+            "ci": PLUGIN_ROOT / "skills" / "ci" / "SKILL.md",
+            "docs/PLUGIN.md": self.REPO_ROOT / "docs" / "PLUGIN.md",
+            "tutorial 07": self.REPO_ROOT / "docs" / "tutorials" / "07-plugin-in-claude-code.md",
+            "tutorial 08": self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md",
         }
         for name, path in surfaces.items():
             text = path.read_text(encoding="utf-8")
@@ -1364,14 +1368,38 @@ class TestPluginArtifacts:
                 f"{name} no longer says the plugin `path` must be a PLUGIN ROOT — a bare "
                 "directory of skill directories loads nothing and scores recall 0.0"
             )
-            assert "skills/" in text, f"{name} no longer shows the required `<path>/skills/<name>/SKILL.md` layout"
-        # The two skill-facing surfaces must also name the trap by example, since the
-        # wrong form is the intuitive one.
-        for name in ("activation template", "check-skill"):
+            # The required layout, spelled out. `skills/` alone would NOT do: the pre-fix
+            # (wrong) text contained it too, via `.claude/skills/my-skill/SKILL.md`, so an
+            # assertion on the bare token passes on exactly the guidance it must exclude.
+            assert "skills/<name>/SKILL.md" in text or "skills/<skill-name>/SKILL.md" in text, (
+                f"{name} no longer shows the required `<path>/skills/<name>/SKILL.md` layout"
+            )
+
+        # No surface may hand out a SKILL_SOURCE_PATH ending in /skills, nor revive the
+        # "directory containing the skill's directory" rule. Both are the pre-fix form, and
+        # the ci skill's copy of it shipped straight into users' CI workflows.
+        for name, path in surfaces.items():
+            text = path.read_text(encoding="utf-8")
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                if "SKILL_SOURCE_PATH=" in line or "SKILL_SOURCE_PATH=" in line.replace('"', ""):
+                    value = line.split("SKILL_SOURCE_PATH=", 1)[1].strip().strip('"').rstrip("`")
+                    assert not value.endswith("/skills"), (
+                        f"{name}:{line_no} assigns SKILL_SOURCE_PATH a path ending in /skills "
+                        f"({value!r}) — that is one level too deep and loads NOTHING; the "
+                        "plugin root is its parent"
+                    )
+            assert "directory *containing* the skill" not in text, (
+                f"{name} revived the pre-fix rule 'the directory containing the skill's "
+                "directory' — a bare directory of skill directories loads nothing"
+            )
+
+        # The user-facing surfaces must name the trap by example, since the wrong form is
+        # the intuitive one.
+        for name in ("activation template", "check-skill", "ci", "docs/PLUGIN.md", "tutorial 07", "tutorial 08"):
             text = surfaces[name].read_text(encoding="utf-8")
-            assert "not `.claude/skills`" in text or "NOT `.claude/skills`" in text, (
-                f"{name} no longer warns that `.claude/skills` is the WRONG path for "
-                "`.claude/skills/my-skill/SKILL.md` — `.claude` is the plugin root"
+            assert "`.claude/skills`" in text and ".claude" in text, (
+                f"{name} no longer contrasts `.claude` against `.claude/skills` — the wrong "
+                "path is the intuitive one, so naming it is the whole point"
             )
 
     def test_activation_template_makes_the_skill_reachable(self):
@@ -1407,6 +1435,35 @@ class TestPluginArtifacts:
         labels = {row["expected_skill"] for row in rows}
         assert any(label for label in labels), "no positive rows — recall would be undefined"
         assert "" in labels, "no distractor rows — precision is 1.0 by definition and meaningless"
+
+    def test_activation_rows_split_both_polarities_both_sides(self):
+        # `optimize-skill` and the template both require both polarities on BOTH sides of
+        # the split: a holdout of only positives measures recall and calls it a result, and
+        # a tune half with no distractors cannot see a candidate over-claiming. The shipped
+        # template is the worked example everyone copies, so the balance it demonstrates has
+        # to hold — an edit that moved one row could break it silently.
+        import json
+
+        rows = [
+            json.loads(line)
+            for line in (self.TEMPLATES / "activation-rows.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert all(r.get("split") for r in rows), (
+            "every template row must carry a `split` — a PARTLY labelled dataset is the one "
+            "bad state: --split keeps the matching rows and drops the unlabelled ones, "
+            "shrinking the suite the metrics are computed over"
+        )
+        by_split: dict[str, set[bool]] = {}
+        for r in rows:
+            by_split.setdefault(str(r["split"]), set()).add(bool(r["expected_skill"]))
+        assert len(by_split) >= 2, f"template rows collapsed to a single split: {sorted(by_split)}"
+        for split, polarities in sorted(by_split.items()):
+            assert polarities == {True, False}, (
+                f"split {split!r} carries only {'positive' if True in polarities else 'distractor'} "
+                "rows — both splits need positives AND distractors, or one half of the "
+                "tune/holdout comparison measures nothing"
+            )
 
     @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
     def test_skill_md_frontmatter_is_valid(self, skill: Path):

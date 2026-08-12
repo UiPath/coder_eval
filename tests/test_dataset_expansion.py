@@ -418,6 +418,20 @@ class TestExpandDatasetSplit:
         task = TaskDefinition(**_base_task_dict())
         assert expand_dataset(task, tmp_path, split="tune") == [task]
 
+    def test_duplicate_ids_across_splits_are_caught_under_a_filter(self, tmp_path: Path) -> None:
+        # Id uniqueness is a property of the DATASET, not of whichever split you selected.
+        # If the filter ran before the duplicate check, a copy-pasted row landing in the
+        # other split would validate under every --split and only blow up on a full run —
+        # and the documented optimize-skill workflow always passes --split, so it would
+        # never be seen at all.
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": "tune"},
+            {"id": "a", "prompt": "p", "expected": "e", "split": "holdout"},
+        ]
+        task = _make_task_with_dataset(rows=rows)
+        with pytest.raises(ValueError, match="Duplicate dataset row id"):
+            expand_dataset(task, tmp_path, split="tune")
+
     def test_split_field_defaults_to_split(self) -> None:
         task = _make_task_with_dataset(rows=[{"id": "a"}])
         assert task.dataset is not None

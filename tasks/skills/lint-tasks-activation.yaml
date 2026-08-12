@@ -34,7 +34,8 @@ agent:
 # Activation is decided in the first assistant turn: either the skill is engaged or it is
 # not. Without caps the agent spends turns exploring a sandbox that deliberately holds no
 # eval files, and a row that times out is EXCLUDED from the confusion matrix rather than
-# scored — which silently shrinks the suite. Cap tightly: it buys signal, not just cost.
+# scored — shrinking the denominator the metrics are computed over (watch `completion_rate`
+# in the rollup). Cap tightly: it buys signal, not just cost.
 run_limits:
   max_turns: 2
   turn_timeout: 120
@@ -72,10 +73,10 @@ success_criteria:
     skill_name: "analyze"
     expected_skill: "${row.expected_skill}"
 
-  # `init` is disable-model-invocation, so it can never be engaged on its own. Its rows
-  # therefore test whether a MODEL-INVOKABLE sibling wrongly claims setup requests — the
-  # expected reading here is that nothing fires, not that `init` does.
-  - type: "skill_triggered"
-    description: "init (sibling) activation for row ${row.id}"
-    skill_name: "init"
-    expected_skill: "${row.expected_skill}"
+  # NOTE on the two setup rows (`hard-3`, `hard-6`): the skill that owns that work, `init`,
+  # sets `disable-model-invocation: true` and so can never be engaged on its own. Labelling
+  # those rows `expected_skill: "init"` would assert something unsatisfiable by
+  # construction — a criterion that cannot pass, which is exactly what `lint-tasks` flags.
+  # They are labelled `""` instead: the question they actually ask is whether a
+  # MODEL-INVOKABLE sibling wrongly claims setup requests, and `""` encodes that directly,
+  # scoring against every criterion above. (It does: `task` fires on both.)

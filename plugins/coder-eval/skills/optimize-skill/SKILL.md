@@ -77,6 +77,11 @@ Without a holdout, every reported improvement is fitted to the sample you tuned 
 those rows. The holdout is what separates a real gain from that.
 
 - **Rows already labelled** → carry on.
+- **Rows *partly* labelled** → stop and finish the labelling first. This is the dangerous
+  state, because it does not look like one: `--split` keeps the matching rows and silently
+  **drops the unlabelled ones**, so the run succeeds, the report renders, and every metric
+  is computed over a smaller suite than the file suggests. Count the rows the run actually
+  resolved against the rows in the dataset before believing any number.
 - **Rows unlabelled and the suite is big enough to halve** → explain the discipline and
   offer to add `split_field` plus a `tune`/`holdout` label per row, keeping both polarities
   on both sides.
@@ -160,7 +165,7 @@ must contain everything that source contained. **Copy the siblings in unchanged.
 things break if you snapshot only the target skill, and both fail silently at full cost:
 
 - Sibling `skill_triggered` criteria would observe `no` on every row in every arm, because
-  the sibling is not in the sandbox at all. The sibling-precision half of the gate would
+  the sibling is not in the sandbox at all. The sibling half of the gate would
   then "pass" by measuring nothing.
 - The listing the model chooses from would contain one skill instead of the real set.
   Activation is a *competition* between descriptions; a description tested alone is tested
@@ -176,8 +181,8 @@ is mounted by the identical mechanism and the comparison has no confound.
 ## Step 8 — Materialize as an experiment
 
 One variant per candidate, plus `incumbent`. **Reachability uses `agent.plugins`, the same
-mechanism the activation template itself uses** — `path` is the directory *containing* the
-skill's directory, i.e. the round-slug directory, written **absolute**:
+mechanism the activation template itself uses** — `path` is the round-slug directory, which
+is a plugin root holding `skills/`, written **absolute**:
 
 ```yaml
 experiment_id: "optimize-my-skill-round-1"
@@ -200,7 +205,7 @@ variants:
 `experiment_id` is required and must be kebab-case — an experiment without one fails to
 load. Name it for the skill and the round.
 
-Four facts that decide whether this measures anything:
+Five facts that decide whether this measures anything:
 
 - A variant's `plugins` block **replaces** the task's rather than stacking with it. That is
   what makes one-variant-per-candidate work — an arm never mounts two copies of the skill.
@@ -282,9 +287,11 @@ Promote only when all of these hold:
   Read `recall.yes`, not `precision.yes`, and the reason is worth keeping: annexation makes
   the sibling's criterion `expected=yes, observed=no` on that row — a false negative. That
   lowers recall. Precision is `tp/(tp+fp)`, and annexation lowers `tp` while leaving `fp`
-  untouched, so on a suite where the sibling never misfires precision stays pinned at
-  exactly 1.0 no matter how many requests are stolen. Gating on precision here would be
-  gating on a constant.
+  untouched, so on a suite where the sibling never misfires precision reads 1.0 however many
+  requests are stolen — right up until the last one, where `tp` and `fp` are both 0 and the
+  div-by-zero convention drops it to 0.0. Either way it is blind to the thing you are
+  watching for: gating on precision here would be gating on a constant that finally moves
+  only when the sibling has already lost everything.
 - **Print per-invocation F1 and confusion counts for every arm.** The verdict is never
   reported without the numbers behind it.
 
@@ -323,7 +330,7 @@ rather than implying a stronger result than was obtained.
 ## Step 10 — Ledger
 
 Append to `.optimize-skill/<skill>/history.json`: round, candidate slug, hypothesis,
-per-invocation tune F1, holdout F1, the paired-comparison line, sibling precisions, verdict,
+per-invocation tune F1, holdout F1, the paired-comparison line, sibling recalls, verdict,
 and the run ids. Append-only — never rewrite an earlier round. An existing directory means
 read `history.json` first and continue the numbering.
 

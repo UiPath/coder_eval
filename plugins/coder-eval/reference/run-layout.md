@@ -30,9 +30,15 @@ criterion that opted into across-row aggregation, each with:
 
 - `criterion_type`, and `description` (set when a task stacks several criteria of the same
   type, e.g. one `skill_triggered` per skill — that is what distinguishes them);
+- `rows_total` and `rows_excluded` — the denominator and what was dropped from it. A row
+  that errored before criteria ran (a timeout, say) is **excluded** rather than scored, so
+  metrics are computed over `rows_total - rows_excluded`;
 - `metrics` — a **flat** name → float map. Classification-style criteria emit
   `accuracy`, `macro_f1`, and per-label `precision.<label>` / `recall.<label>` /
-  `f1.<label>` (for `skill_triggered` the labels are `yes` / `no`);
+  `f1.<label>` (for `skill_triggered` the labels are `yes` / `no`). It also carries
+  `completion_rate` — the surviving fraction of the denominator above — which is an
+  ordinary metric, so `suite_thresholds: {completion_rate: 1.0}` gates a run whose sample
+  eroded;
 - `details` — `labels`, `per_label`, `confusion`, `total_pairs`;
 - `threshold_checks` + `passed`, from the criterion's `suite_thresholds`.
 

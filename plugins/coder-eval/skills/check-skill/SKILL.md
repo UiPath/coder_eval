@@ -156,6 +156,17 @@ relative to the task file):
 - each positive row's `expected_skill` → the same bare name; distractor rows keep `""`;
   a sibling-owned row's `expected_skill` → that **sibling's** bare name
 - every row's `prompt` → the requests designed in step 4, one JSON object per line
+- **every row's `split`** → `tune` or `holdout`, keeping both polarities on both sides
+
+**Label every row, including any you add.** The template ships `split` on all six rows and
+`dataset.split_field` on the task, which lets `coder-eval run --split tune` select a subset
+and `/coder-eval:optimize-skill` develop against one half while confirming on the other.
+
+A **partly** labelled dataset is the one state to avoid: `--split` keeps the matching rows
+and silently **drops the unlabelled ones**, so the suite shrinks and the aggregate metrics
+your `suite_thresholds` gate on are computed over fewer rows than you think. Either label
+every row or label none — never some. (With no labels anywhere, `--split` leaves the task
+untouched, which is safe.)
 
 **Then make the skill reachable, which is the step that decides whether the suite measures
 anything.** The task runs in a fresh sandbox that contains none of the user's files, so the

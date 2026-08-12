@@ -341,6 +341,26 @@ def _stratified_sample(
     return out
 
 
+def _reject_duplicate_row_ids(rows: list[dict[str, Any]], task: TaskDefinition) -> None:
+    """Raise if two rows share an id, considering the dataset as a whole.
+
+    Called before ``--split`` filtering and sampling narrow the row set: a duplicate id is
+    malformed data regardless of which rows a given invocation happens to select. Rows
+    missing the id field are skipped here — that is reported per-row during expansion,
+    where the row index is known.
+    """
+    assert task.dataset is not None
+    id_field = task.dataset.id_field
+    seen: set[str] = set()
+    for row in rows:
+        if id_field not in row:
+            continue
+        row_id = str(row[id_field])
+        if row_id in seen:
+            raise ValueError(f"Duplicate dataset row id for task '{task.task_id}': {row_id!r}")
+        seen.add(row_id)
+
+
 def _substitute_row_in_str(s: str, row: dict[str, Any]) -> str:
     """Replace ${row.<field>} occurrences in s with scalar values from row."""
 
@@ -433,6 +453,12 @@ def expand_dataset(
     # --split filters BEFORE either sampler below: sampling first would leave an
     # unpredictable (possibly zero) number of rows per split, destroying the
     # tune/holdout comparison the split exists to protect.
+    # Duplicate ids are a property of the DATASET, so check the whole row set BEFORE any
+    # filtering or sampling narrows it. Checking only what survives would let a duplicate
+    # sitting in an unselected split validate under every --split and surface only on a
+    # full run — and the split workflow always passes one.
+    _reject_duplicate_row_ids(rows, task)
+
     if split is not None:
         field = task.dataset.split_field
         # Unlabelled means the key is absent, null, or "" — the same "no value here"
@@ -470,7 +496,6 @@ def expand_dataset(
         rows = _stratified_sample(rows, ds.stratify_field, n_per_stratum, stratum_seed)
 
     id_field = task.dataset.id_field
-    seen_ids: set[str] = set()
     expanded: list[TaskDefinition] = []
 
     for i, row in enumerate(rows):
@@ -482,9 +507,8 @@ def expand_dataset(
                 f"Dataset row id {row_id!r} must match {_ROW_ID_PATTERN.pattern}"
                 + " (letters, digits, underscore, hyphen, dot)"
             )
-        if row_id in seen_ids:
-            raise ValueError(f"Duplicate dataset row id for task '{task.task_id}': {row_id!r}")
-        seen_ids.add(row_id)
+        # Uniqueness is already enforced across the whole dataset by
+        # _reject_duplicate_row_ids, before filtering narrowed `rows`.
 
         data = task.model_dump(exclude_unset=True)
         if isinstance(data.get("initial_prompt"), str):

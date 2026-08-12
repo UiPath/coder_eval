@@ -108,10 +108,13 @@ It then:
 One prerequisite the suite cannot infer: the evaluated agent runs in a fresh
 sandbox holding none of your files, so it is offered no skills unless the task
 says where they live. The template reads that location from an environment
-variable — point it at the directory *containing* the skill's own directory:
+variable, and it must point at a **plugin root** — a directory holding a `skills/`
+subdirectory, so the skill sits at `<path>/skills/<name>/SKILL.md`. For
+`.claude/skills/pdf-forms/SKILL.md` that root is `.claude`, **not** `.claude/skills`;
+pointing one level too deep loads nothing:
 
 ```bash
-export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
+export SKILL_SOURCE_PATH="$(pwd)/.claude"
 ```
 
 Leave it unset and the skill is simply absent, every positive row scores 0, and

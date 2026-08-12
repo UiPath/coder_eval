@@ -8,8 +8,9 @@ walkthrough is a real run against a real skill in this repository, reported with
 it actually produced — including the part where the first attempt measured nothing at all.
 
 **What you will do:** build an activation suite for `lint-tasks`, split it into tune and
-holdout rows, baseline it, read the confusion matrix, and decide. Roughly 45 agent runs on
-Sonnet.
+holdout rows, baseline it, read the confusion matrix, and decide. About 20 agent runs on
+Sonnet if the baseline settles the question, as it does here; several hundred if it does not
+and you run the three A/B stages.
 
 **Prerequisites:** the `coder-eval` CLI, the plugin installed, and credentials for the
 `claude-code` agent. Start with [Your first evaluation](01-first-evaluation.md) if you have
@@ -20,9 +21,9 @@ not run anything yet.
 `lint-tasks` was picked for four reasons, and they are worth stealing as selection criteria:
 
 1. **It is model-invokable.** Its description actually enters the activation decision. A
-   skill with `disable-model-invocation: true` — `init` and `ci` here — can never be
-   optimized this way, because its description never competes for anything. `optimize-skill`
-   hard-stops on exactly that.
+   skill with `disable-model-invocation: true` — here `init`, `ci`, and `optimize-skill`
+   itself — can never be optimized this way, because its description never competes for
+   anything. `optimize-skill` hard-stops on exactly that.
 2. **It has a real boundary dispute with a sibling.** `lint-tasks` reviews existing tasks;
    `task` authors new ones. *"Are my evals any good?"* and *"add a task for X"* genuinely
    misroute between them.
@@ -40,8 +41,23 @@ Do not hand-author it. Run the sibling skill:
 /coder-eval:check-skill lint-tasks
 ```
 
-That produces a task YAML plus a JSONL row file. The suite used here has **21 rows**: 6
-positive, 6 distractor, and 9 sibling-owned rows naming `task`, `analyze` and `init`.
+That produces a task YAML plus a JSONL row file. The suite used here has **21 rows**,
+counted by `expected_skill` — the field that actually decides a row's polarity:
+
+| Kind | `expected_skill` | Total | tune | holdout |
+| --- | --- | --- | --- | --- |
+| Positive | `lint-tasks` | 8 | 5 | 3 |
+| Distractor | `""` | 9 | 6 | 3 |
+| Sibling-owned | `task` | 3 | 2 | 1 |
+| Sibling-owned | `analyze` | 1 | 1 | 0 |
+
+**Label sibling rows by what should *fire*, not by whose territory it is.** Two rows here
+ask for project setup — work that belongs to `init`, which sets
+`disable-model-invocation: true` and therefore *cannot* be engaged by the model. Labelling
+them `expected_skill: "init"` would assert something unsatisfiable by construction: those
+rows could never pass, the suite could never go green, and `init`'s recall would be pinned
+at 0.0 while telling you nothing. They are labelled `""` instead, which asks the question
+that actually has an answer — *does some other skill wrongly claim this?*
 
 **Sizing, and why this suite is at the low end.** `check-skill` asks for 8–12 rows of each
 polarity. A split **halves each side**, so a suite you intend to optimize wants roughly
@@ -97,13 +113,17 @@ export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"   # the plugin root
 
 !!! danger "The first baseline for this tutorial scored recall 0.0"
 
-    Pointed one level too deep, at the bare skills directory. Nothing loaded, no `Skill`
-    tool was ever offered, and every positive row failed:
+    It pointed one level too deep, at the bare skills directory. Nothing loaded, no `Skill`
+    tool was ever offered, and every positive row failed. On an earlier, smaller draft of
+    this suite — 10 tune rows rather than the 14 below — that produced:
 
     ```
     lint-tasks   recall.yes=0.000 precision.yes=0.000 f1.yes=0.000
                  confusion: [('no','no',4), ('yes','no',3)]
     ```
+
+    Note the confusion matrix accounts for only 7 of the 10 rows; the missing 3 are the
+    next section.
 
     A wrong path is only a **warning**, never an error. The run completes, the report
     renders, and the number it produces is indistinguishable from a skill whose description
@@ -126,9 +146,25 @@ that deliberately contains no eval files, and rows time out after five minutes e
 pos-1  ERROR  Agent turn timed out after 300s (iteration 1)
 ```
 
-A timed-out row is **excluded from the confusion matrix**, not scored — so the suite silently
-shrinks and the metrics are computed over fewer rows than you think. In the first baseline 3
-of 10 rows vanished this way.
+A timed-out row is **excluded from the confusion matrix**, not scored — so the metrics are
+computed over fewer rows than the dataset holds. In that first baseline 3 of 10 rows
+vanished this way, which is why its matrix summed to 7.
+
+The rollup does tell you, if you look. `suite.json` carries `rows_total`, `rows_excluded`
+and a `completion_rate` metric, and `suite.md` spells it out:
+
+```
+**Rows**: 14 total — 13 passed, 1 failed, 0 errored
+_Denominator: 14/14 rows (0 excluded)_
+```
+
+Because `completion_rate` is an ordinary metric, you can gate on it and stop trusting
+eroded runs by hand:
+
+```yaml
+suite_thresholds:
+  completion_rate: 1.0
+```
 
 ```yaml
 run_limits:
@@ -159,9 +195,8 @@ Result, 14 tune rows:
 | Skill | recall.yes | precision.yes | f1.yes |
 | --- | --- | --- | --- |
 | `lint-tasks` | 1.000 | 1.000 | **1.000** |
-| `task` | 1.000 | 0.667 | 0.800 |
+| `task` | 1.000 | 1.000 | 1.000 |
 | `analyze` | 0.000 | 0.000 | 0.000 |
-| `init` | 0.000 | 0.000 | 0.000 |
 
 ## Step 6 — Read it, and decide whether to spend anything
 
@@ -173,8 +208,9 @@ Python code"* — the two probes designed to catch it over-claiming.
 **So the optimization loop stops here, and that is the correct outcome.** With F1 already at
 1.0 there are no false negatives or false positives to build a hypothesis from, and the
 promotion gate — `min(candidate F1) > max(incumbent F1)` — cannot be satisfied by any
-candidate. Running the three A/B stages anyway would have cost about 130 further agent runs
-to chase a number that is not reachable.
+candidate. Running the three A/B stages anyway, on this suite with three candidates and two
+survivors, would have cost `(3+1)×14 + 3×(2+1)×14 + 6×7` = **224 further agent runs** to
+chase a number that is not reachable.
 
 The first finding is therefore about the change that prompted this: **the 66-character trim
 was safe.** That is now measured rather than assumed.
@@ -188,17 +224,31 @@ looser gate.
 
 The sibling matrix is the part worth reading, and in a multi-skill plugin it usually is:
 
-- **`task` is annexing setup requests.** *"Set up coder-eval for this repository"* engaged
-  `task`, which authors individual task files, rather than the setup skill. Precision 0.667.
 - **`analyze` under-claims.** *"Look at my evaluation results from last night's run and tell
-  me what regressed"* engaged **nothing at all**. Its description names "why a run failed"
-  but never regression.
-- **`init` never fires, by construction.** It sets `disable-model-invocation: true`, so its
-  rows measure whether a *model-invokable* sibling wrongly claims setup work. One did.
+  me what regressed"* engaged **nothing at all**, in every run. Its description names "why a
+  run failed" but never regression, and nothing else claimed the request either.
 
 This is what sibling-owned rows buy you. A plain distractor would have said only that
 something misfired; these say **where the request went**, which is the difference between
 "this description is vague" and "these two descriptions are fighting."
+
+### The finding that evaporated
+
+An earlier pair of runs showed something else: on both *"Set up coder-eval for this
+repository"* and *"Get evaluations going in this project from scratch"*, the `task` skill
+fired — apparently annexing setup work — dropping its precision to 0.667 on tune and 0.500
+on holdout. It reproduced on **both splits**, which is normally the signal that a finding is
+real.
+
+It did not survive a third run. The table above shows `task` at precision 1.000, on
+byte-identical prompts: `expected_skill` is a dataset label the criterion reads and the
+agent never sees, so nothing about the rows changed between those runs.
+
+**That is the whole reason the promotion gate demands non-overlapping replicate ranges.**
+A single run — or even two agreeing runs — can show a clean, plausible, entirely
+reproducible-looking effect that is just variance. Had this been a candidate description
+rather than an incumbent's quirk, one run would have "proved" an improvement worth shipping.
+Report what replicates; treat anything else as a hypothesis.
 
 ## Step 7 — Confirm on the holdout
 
@@ -213,13 +263,18 @@ coder-eval run tasks/skills/lint-tasks-activation.yaml \
 | Skill | recall.yes | precision.yes | f1.yes |
 | --- | --- | --- | --- |
 | `lint-tasks` | 1.000 | 1.000 | **1.000** |
-| `task` | 1.000 | 0.500 | 0.667 |
+| `task` | 1.000 | 1.000 | 1.000 |
 
 `lint-tasks` reproduces at ceiling on rows it was never checked against, including the
-oblique *"Are my evals any good?"*. And `task`'s annexation **reproduces too** — *"Get
-evaluations going in this project from scratch"* engaged `task` again. A finding that
-appears on both splits is worth acting on; one that appears on neither split twice is
-usually noise.
+oblique *"Are my evals any good?"*. Across every run in this tutorial — two wiring states,
+two splits, three sittings — it never missed a positive and never took a distractor. That is
+about as much as a suite this size can say, and it is enough to conclude the trim did no
+harm.
+
+The holdout has no `analyze`-owned row, so that column is blank here rather than zero;
+`analyze`'s recall gap lives in the tune split alone. Worth fixing in the suite before the
+next round, since a finding you can only observe on the half you tune against is the half
+you cannot confirm.
 
 ## What the three stages would have looked like
 
