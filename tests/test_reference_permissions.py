@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,36 @@ import pytest
 from coder_eval.fs_permissions import READ_ONLY_MODE, RESTRICTED_MODE, set_permissions
 
 
+# These tests drive `chmod` against the HOST filesystem. Windows `chmod` honours
+# only the read-only bit, so mode 000 never takes and every assertion reads back
+# 0o555/0o777.
+#
+# This is NOT a coverage gap for Windows users. The window is enforced only when
+# CODER_EVAL_IN_CONTAINER=1, which only DockerRunner sets — and Docker Desktop on
+# Windows runs LINUX containers (WSL2), so the in-container orchestrator that
+# performs the chmod is on Linux and behaves exactly as these tests assert. A
+# Windows host only ever sees the window under `driver: tempdir`, where it is a
+# deliberate no-op regardless of platform. So there is nothing here for a Windows
+# runner to exercise — the real behaviour is covered by the Linux CI jobs and by
+# `tasks/anti_cheat_reference`, which runs in the container.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="host-side POSIX mode semantics; the window runs in a Linux container on every host OS",
+)
+
+
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+def _skip_if_root() -> None:
+    """Root bypasses DAC entirely, so a denial assertion cannot hold for it.
+
+    `os.geteuid` is POSIX-only; guarded so this stays importable everywhere even
+    though the module as a whole is skipped off POSIX.
+    """
+    if getattr(os, "geteuid", lambda: 1)() == 0:
+        pytest.skip("root bypasses DAC; the docker path drops DAC_* caps instead")
 
 
 @pytest.fixture
@@ -43,8 +72,7 @@ class TestRestrictPermissions:
 
     async def test_contents_unreadable_inside_the_window(self, guarded_dir):
         """The point of the exercise: the solution is not readable during a turn."""
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses DAC; the docker path drops DAC_* caps instead")
+        _skip_if_root()
 
         async with set_permissions([guarded_dir]):
             with pytest.raises(PermissionError):
@@ -190,8 +218,7 @@ class TestRestrictPermissions:
 
     async def test_nested_regrant_actually_permits_reads(self, guarded_dir):
         """The mode is not just bookkeeping — the re-grant really opens the file."""
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses DAC; the docker path drops DAC_* caps instead")
+        _skip_if_root()
 
         async with set_permissions([guarded_dir], mode=RESTRICTED_MODE):
             with pytest.raises(PermissionError):
@@ -381,8 +408,7 @@ class TestOrchestratorWiring:
         cheating agent does — and asserts it is denied, while the same read succeeds
         once the turn is over.
         """
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses DAC; the docker path drops DAC_* caps instead")
+        _skip_if_root()
 
         from unittest.mock import MagicMock
 

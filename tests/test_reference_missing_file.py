@@ -2,6 +2,7 @@
 
 import os
 import stat
+import sys
 
 import pytest
 
@@ -115,6 +116,10 @@ def test_stage_clears_a_reused_destination(tmp_path):
     assert not (staged / "stale.py").exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="host-side POSIX mode semantics; the window runs in a Linux container on every host OS",
+)
 def test_stage_result_is_writable_so_it_can_be_chmodded(tmp_path):
     """The anti-cheat window chmods the staged copy, so it must not be read-only.
 
