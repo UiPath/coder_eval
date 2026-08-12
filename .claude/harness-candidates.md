@@ -455,3 +455,18 @@ with the two `action.yml` items above — one considered change to the action's 
   `final_status`, which does not exist in `run.json` and would have made a new
   assertion dead on arrival. Guard: assert the key set that non-Python consumers
   depend on, mirroring how CE030 pins doc/schema parity.
+## From the split-field / optimize-skill plan (2026-08-12)
+
+- [ ] **A run whose every task is skipped exits 0 — a green run of zero tasks.** When
+  `resolve_all_tasks` demotes every task to `skipped_tasks` (a load failure, `skip: true`,
+  or now a `--split` selector matching no labelled row), the run reports success: nothing
+  failed, so the exit gate in `cli/run_command.py` — which keys only on failed/errored tasks
+  and suite gates — passes. Verified directly: `coder-eval run <suite> --split holdou`
+  prints one yellow "1 task file(s) skipped" line and exits 0. This is pre-existing, but
+  `--split` makes it reachable by a one-character CLI typo rather than a broken file, and
+  the whole point of a holdout confirmation is that you trust its verdict. Not guarded, and
+  not a five-minute fix: making an all-skipped run non-green changes exit semantics for
+  every skipped-task path (including deliberate `skip: true` suites and tag filters that
+  match nothing), so it needs a decision about which of those should be fatal, plus tests
+  per case. A narrower option is to fail only when a CLI *selector* (`--split`, `--tags`)
+  eliminated everything, since that is unambiguously a user error rather than repo state.
