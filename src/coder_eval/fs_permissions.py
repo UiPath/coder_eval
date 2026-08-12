@@ -26,10 +26,37 @@ read a shielded path, and the enclosing 000 is restored when it closes::
             ...                                   # this code can read: 555
         ...                                       # back to 000
 
-(No in-tree caller needs the inner form today -- the early-stop watcher decides
-from the in-memory trajectory, and ``live_verdict`` takes no ``sandbox``
-argument by design. The stack exists so that adding one does not require
-reworking this module.)
+The inner form exists for ONE intended consumer: **live success criteria**.
+Early-stop verdicts are computed while the agent turn is still running -- i.e.
+inside the 000 window -- so a live criterion that needs to consult the reference
+solution has to be able to read it exactly then, while the agent still cannot.
+A flat set/restore cannot express that, and a refcount actively breaks it (it
+treats the inner re-grant as just another holder and leaves 000 in place). That
+is why this is a stack, and why :data:`READ_ONLY_MODE` is public. It is a
+designed seam, not speculative generality.
+
+NOT WIRED UP YET. The remaining work, for whoever picks it up:
+
+* ``EarlyStopWatcher._evaluate_impl`` wraps its verdict loop in a
+  ``READ_ONLY_MODE`` window over the reference. One window per round, around
+  the loop rather than per criterion -- that is the tightest placement, which
+  matters because a chmod is global filesystem state and the agent is running
+  CONCURRENTLY: the re-grant is visible to it too, for as long as it is open.
+* That loop is a ``StreamCallback`` (plain ``def``), so it needs a synchronous
+  twin of :func:`set_permissions` pushing onto this same ``_registry`` -- the
+  stack is already thread-safe, so the twin is small.
+* ``live_verdict`` gains NO parameter. It reads the reference from a per-task
+  accessor instead. That accessor must be a ``ContextVar``, NOT ``os.environ``:
+  ``run_batch -j 8`` runs many orchestrators in one process, so a process-global
+  would leak one task's reference into a sibling's verdict, silently and only
+  under parallelism. (``REFERENCE_DIR`` today is set only in the ``env=`` dict
+  handed to ``run_command`` subprocesses, so it is not readable in-process.)
+
+Scope note: only the REFERENCE is shielded, never the sandbox. A live criterion
+reading the agent's own output files therefore needs no window change at all --
+and should not get one. Reading the static reference mid-turn cannot break the
+``LiveVerdict`` monotonicity contract; reading the half-written sandbox can, and
+is the "end-state peeking" ``live_verdict``'s own docstring rules out.
 
 Two further properties:
 
