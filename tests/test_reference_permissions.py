@@ -124,8 +124,6 @@ class TestRestrictPermissions:
         only signal an operator gets. Exiting must not chmod either — a pop with
         no matching push would apply a mode nobody asked for.
         """
-        import coder_eval.fs_permissions as perms
-
         original = _mode(guarded_dir)
         calls: list[tuple[str, int]] = []
 
@@ -133,7 +131,7 @@ class TestRestrictPermissions:
             calls.append((str(path), mode))
             raise PermissionError(30, "Read-only file system")
 
-        monkeypatch.setattr(perms.os, "chmod", _refuse)
+        monkeypatch.setattr("coder_eval.fs_permissions.os.chmod", _refuse)
         with caplog.at_level("WARNING"):
             async with set_permissions([guarded_dir]):
                 pass
@@ -144,12 +142,10 @@ class TestRestrictPermissions:
         assert _mode(guarded_dir) == original
 
     async def test_unresolvable_path_is_warned_not_silently_dropped(self, tmp_path, monkeypatch, caplog):
-        import coder_eval.fs_permissions as perms
-
         def _boom(self, *a, **k):
             raise OSError("nope")
 
-        monkeypatch.setattr(perms.Path, "resolve", _boom)
+        monkeypatch.setattr("coder_eval.fs_permissions.Path.resolve", _boom)
         with caplog.at_level("WARNING"):
             async with set_permissions([tmp_path]):
                 pass
@@ -271,6 +267,36 @@ class TestRestrictPermissions:
         assert _mode(guarded_dir) == RESTRICTED_MODE
         await inner.__aexit__(None, None, None)
 
+        assert _mode(guarded_dir) == original
+
+    async def test_crash_handlers_install_on_first_push_and_restore(self, guarded_dir, monkeypatch):
+        """The advertised crash-safety property: a killed run must not leave the
+        user's checked-out tree at mode 000. Previously untested."""
+        from coder_eval.fs_permissions import _PermissionStack
+
+        registered: list[object] = []
+        installed_signals: list[int] = []
+        monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", registered.append)
+        monkeypatch.setattr(
+            "coder_eval.fs_permissions.signal.signal",
+            lambda signum, handler: installed_signals.append(signum),
+        )
+
+        registry = _PermissionStack()
+        original = _mode(guarded_dir)
+        assert registry.push(guarded_dir, RESTRICTED_MODE) is True
+
+        assert registered, "atexit restore was not registered on first push"
+        assert installed_signals, "no signal handlers installed on first push"
+
+        # A second push must not re-install.
+        before = len(registered)
+        registry.push(guarded_dir, RESTRICTED_MODE)
+        assert len(registered) == before
+
+        # The registered hook is what runs on a crash — it must restore.
+        assert _mode(guarded_dir) == RESTRICTED_MODE
+        registry.restore_all()
         assert _mode(guarded_dir) == original
 
     async def test_same_path_via_different_routes_shares_one_entry(self, guarded_dir):

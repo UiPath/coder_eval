@@ -103,6 +103,11 @@ class _PermissionStack:
     """
 
     def __init__(self) -> None:
+        # Whether the crash handlers are installed. An instance attribute rather
+        # than a module-level global: the state belongs to the registry whose
+        # entries the handlers restore, and a mutable module global read only by
+        # its own writer reads as dead to static analysis.
+        self._handlers_installed = False
         # RLock, not Lock: restore_all() runs from a signal handler, which can be
         # delivered on the main thread while atexit's restore_all() is already
         # mid-flight. A non-reentrant lock deadlocks the interpreter at exit —
@@ -118,7 +123,7 @@ class _PermissionStack:
         could not be applied at all (missing path, or chmod refused) -- the
         caller then skips the matching pop.
         """
-        _install_crash_handlers()
+        self._ensure_crash_handlers()
         with self._lock:
             existing = self._entries.get(path)
             original = existing[0] if existing is not None else None
@@ -180,6 +185,23 @@ class _PermissionStack:
                     e,
                 )
 
+    def _ensure_crash_handlers(self) -> None:
+        """Install atexit + signal restores once, on the first push().
+
+        Deliberately NOT done at import time: ``sandbox.py`` imports this module,
+        so an import-time install would rewrite SIGINT/SIGTERM disposition for
+        every process that merely imports coder_eval — including library
+        embedders and host runs, where no window is ever opened and this registry
+        stays empty. The whole install runs under the lock so a concurrent caller
+        cannot observe a half-installed state, and the flag is set only after a
+        successful install so a partial failure is retried rather than latched.
+        """
+        with self._lock:
+            if self._handlers_installed:
+                return
+            _install_crash_handlers(self)
+            self._handlers_installed = True
+
     def restore_all(self) -> None:
         """Unwind every outstanding path to its pre-window mode (crash path)."""
         with self._lock:
@@ -195,39 +217,18 @@ class _PermissionStack:
 
 _registry = _PermissionStack()
 
-# Crash safety, installed on the first push(): an interpreter that dies mid-turn
-# must not leave the user's checked-out tasks/ tree unreadable. Signal handlers
-# chain to the previous handler so we don't swallow an operator's Ctrl-C.
-_handlers_installed = False
-_handlers_lock = threading.Lock()
 
+def _install_crash_handlers(registry: _PermissionStack) -> None:
+    """Register the atexit + signal restores for ``registry``.
 
-def _install_crash_handlers() -> None:
-    """Install atexit + signal restores. Idempotent; called on first push().
-
-    Deliberately NOT called at import time: `sandbox.py` imports this module, so
-    an import-time call would rewrite SIGINT/SIGTERM disposition for every
-    process that merely imports coder_eval — including library embedders and
-    host runs, where no window is ever opened and the registry stays empty.
-    The whole install runs under the lock so a concurrent caller cannot observe
-    a half-installed state.
+    Signal handlers chain to the previous disposition so an operator's Ctrl-C is
+    not swallowed. Called once, under the registry's lock.
     """
-    global _handlers_installed
-    with _handlers_lock:
-        if _handlers_installed:
-            return
-        _install_locked()
-        # Set only after a successful install, so a failure part-way through is
-        # retried by the next push() rather than latched as "already done".
-        _handlers_installed = True
-
-
-def _install_locked() -> None:
-    atexit.register(_registry.restore_all)
+    atexit.register(registry.restore_all)
 
     def _make_handler(previous: object) -> object:
         def _handler(sig: int, frame: FrameType | None) -> None:
-            _registry.restore_all()
+            registry.restore_all()
             if callable(previous):
                 previous(sig, frame)
             elif previous == signal.SIG_DFL or previous is None:
