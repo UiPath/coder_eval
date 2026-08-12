@@ -1,5 +1,5 @@
 ---
-description: Generate and run a coder-eval activation suite for a Claude Code skill — does the agent actually engage it when it should, and leave it alone when it shouldn't? Use when the user asks whether a skill triggers, wants to test skill activation, or worries a skill has silently stopped firing.
+description: Generate and run a coder-eval activation suite for a Claude Code skill. Use when the user asks whether a skill triggers, wants to test skill activation, or worries a skill has silently stopped firing.
 allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 ---
 

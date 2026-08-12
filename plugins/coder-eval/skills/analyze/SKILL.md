@@ -1,5 +1,5 @@
 ---
-description: Analyze a finished coder-eval run and write analysis.md — cluster failures into systemic patterns, diagnose prompts, criteria, config, environment and cost, and recommend concrete fixes. Use when the user wants to know why a run failed, what to fix, or what a run says about their tasks.
+description: Analyze a finished coder-eval run and write analysis.md — cluster failures into systemic patterns and recommend fixes. Use when the user wants to know why a run failed, what to fix, or what a run says about their tasks.
 allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 ---
 

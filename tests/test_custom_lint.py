@@ -1183,7 +1183,9 @@ PLUGIN_TEXT_FILES = sorted(
 # `analyze` reads a finished run directory, `ci` only emits a workflow, and `lint-tasks`
 # has no `Bash` at all (the `coder-eval plan` in its report is a suggestion to the user,
 # not a command it runs) — so none of those three needs the CLI.
-SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task"}
+# `optimize-skill` drives the CLI harder than any other skill here — a baseline, a triage
+# stage, three gate invocations and a holdout confirmation, all `coder-eval run`.
+SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task", "optimize-skill"}
 
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
 # dead weight; a reader that stops reading it has silently forked the rubric.
@@ -1209,6 +1211,9 @@ SKILL_NEEDS_EVAL_ROOT_DISCOVERY = {
     "lint-tasks": True,
     "check-skill": True,
     "task": True,
+    # Reads both trees: globs the task tree for an activation suite, then reads that
+    # run's suite.json rollups.
+    "optimize-skill": True,
 }
 
 # Ways of naming one repository's layout as the DEFAULT. The bare paths `runs/latest`
@@ -1231,6 +1236,9 @@ SKILL_DISABLE_MODEL_INVOCATION = {
     "lint-tasks": False,
     "check-skill": False,
     "task": False,
+    # Multi-round and expensive — a baseline plus three A/B stages of full agent runs.
+    # Never something to start because a message mentioned a skill's wording.
+    "optimize-skill": True,
 }
 
 # The surfaces that must name every shipped skill, so a new one cannot ship
@@ -1535,6 +1543,55 @@ class TestPluginArtifacts:
         assert any(c.get("suite_thresholds") for c in template["success_criteria"]), (
             "the shipped activation template lost `suite_thresholds` — the carve-out's third "
             "condition no longer holds, so lint-tasks would flag the suite check-skill writes"
+        )
+
+    def test_optimize_skill_keeps_its_load_bearing_instructions(self):
+        # optimize-skill's correctness lives entirely in its prose: it drives paid runs and
+        # every one of these instructions is something a well-meaning edit would "simplify"
+        # away, leaving a skill that still reads plausibly and measures nothing. Same
+        # deletion-sensor shape as the lint-tasks read-only guard above.
+        text = " ".join((PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8").split())
+
+        # The single most important invariant. Suite rollups pool replicates, so --repeats
+        # writes ONE pooled suite.json and the per-replicate F1 the Stage B gate reads would
+        # not exist. Collapsing three invocations into --repeats 3 is the likeliest edit,
+        # and it fails silently — the gate would compare a number against itself.
+        assert "not** `--repeats 3`" in text or "**not** `--repeats`" in text, (
+            "optimize-skill no longer says Stage B must be THREE SEPARATE INVOCATIONS rather "
+            "than --repeats 3 — suite rollups pool replicates, so --repeats yields one pooled "
+            "suite.json with no per-replicate F1 for the gate to read"
+        )
+        assert "keyed on `(variant, suite)`" in text, (
+            "optimize-skill states the not---repeats rule but no longer says WHY (the rollup "
+            "grouping key) — a rule with no reason attached is the first thing an editor drops"
+        )
+
+        for token, why in (
+            ("--split tune", "the tune split drives proposals and the gate"),
+            ("--split holdout", "the holdout split is what makes a promotion more than a fit"),
+            ("--split holdout --repeats 3", "Stage C's paired comparison needs replicates averaged per row"),
+            ("stop_early", "an armed suite can pass-stop before a sibling misfire is observable"),
+            ("agent.plugins", "reachability wiring — the mechanism, not an invented one"),
+            ("recall 0.0", "the silent failure mode of a wrong plugin path"),
+            ("disable-model-invocation", "the hard stop on a skill whose description never triggers"),
+            ('metrics["f1.yes"]', "F1 is read from the rollup, never recomputed"),
+            ("process working directory", "plugin paths resolve against the process cwd, not the task file's dir"),
+            # Annexation shows up as a sibling FALSE NEGATIVE, so it moves recall, not
+            # precision — on a suite where the sibling never misfires, precision.yes is
+            # pinned at 1.0 and a precision gate would be gating on a constant.
+            ("**`recall.yes`**", "the sibling-regression gate must read recall, not precision"),
+            # Step 7's snapshot must carry the siblings: a variant's plugins block REPLACES
+            # the task's, so the round-slug dir is the arm's only skill source. Snapshot one
+            # skill and every sibling criterion silently observes `no` in every arm.
+            ("copied unchanged", "each arm's snapshot must include the sibling skills, not just the target"),
+        ):
+            assert token in text, f"optimize-skill lost {token!r} — {why}"
+
+        # Its sibling's real name. `/coder-eval:skill-check` is a dangling command, and three
+        # steps plus several edge cases hand control back to check-skill.
+        assert "/coder-eval:check-skill" in text, "optimize-skill lost its pointer to /coder-eval:check-skill"
+        assert "skill-check" not in text.replace("check-skill", ""), (
+            "optimize-skill names `skill-check` — that command does not exist; the sibling is `check-skill`"
         )
 
     def test_skill_listing_budget_is_bounded(self):
@@ -1854,13 +1911,17 @@ class TestPluginArtifacts:
 
     def test_repo_layout_is_bundled_and_read_by_its_readers(self):
         # Sibling of the cli-setup guard above, for the third shared reference. "Where does
-        # this repository keep its tasks and runs?" is a question five skills ask and a sixth
-        # writes into a CI workflow; inlining the answer six times is how the hardcoded
-        # `tasks/` / `runs/latest` assumptions got there in the first place. Both halves are
-        # asserted: the reference ships, and every skill that needs it points at it.
+        # this repository keep its tasks and runs?" is a question every shipped skill asks —
+        # most to read the trees, `ci` to write the resolved glob into a workflow; inlining
+        # the answer once per skill is how the hardcoded `tasks/` / `runs/latest` assumptions
+        # got there in the first place. Both halves are asserted: the reference ships, and
+        # every skill that needs it points at it. (Counts stay out of this comment on
+        # purpose — the mapping below is the source of truth and a seventh skill already
+        # made two hardcoded numbers here stale.)
         layout = PLUGIN_ROOT / "reference" / "repo-layout.md"
         assert layout.exists() and layout.read_text(encoding="utf-8").strip(), (
-            f"{layout} must exist and be non-empty — six skills read it at runtime to find the repository's eval tree"
+            f"{layout} must exist and be non-empty — the shipped skills read it at runtime "
+            "to find the repository's eval tree"
         )
         # Both directions, so neither the mapping nor the tree can drift silently: a
         # declared skill must ship, and a shipped skill must declare its stance.

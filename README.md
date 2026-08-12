@@ -107,9 +107,9 @@ results — runs inside the agent:
 /plugin install coder-eval@coder-eval
 ```
 
-That adds six slash commands: `/coder-eval:init`, `/coder-eval:check-skill`,
-`/coder-eval:task`, `/coder-eval:lint-tasks`, `/coder-eval:analyze` and
-`/coder-eval:ci`. They drive the `coder-eval` CLI, so install it too
+That adds seven slash commands: `/coder-eval:init`, `/coder-eval:check-skill`,
+`/coder-eval:optimize-skill`, `/coder-eval:task`, `/coder-eval:lint-tasks`,
+`/coder-eval:analyze` and `/coder-eval:ci`. They drive the `coder-eval` CLI, so install it too
 (`uv tool install coder-eval`). See [Claude Code Plugin](docs/PLUGIN.md).
 
 ## Use as a GitHub Action
