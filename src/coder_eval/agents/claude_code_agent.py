@@ -27,7 +27,6 @@ from claude_agent_sdk import (
 # CLI). If this import breaks on an SDK upgrade, the threaded watchdog loses
 # its kill target and timeouts will no longer be enforced at the agent layer.
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
-from claude_agent_sdk.types import SystemPromptPreset
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
@@ -75,27 +74,6 @@ from coder_eval.utils import dump_dataclass, process_plugins
 
 
 logger = logging.getLogger(__name__)
-
-
-def _append_system_prompt(system_prompt: str | None) -> SystemPromptPreset:
-    """Map coder_eval's ``agent.system_prompt`` onto the SDK's preset+append form.
-
-    ``system_prompt`` is defined as text APPENDED to the harness's own default agent
-    prompt — the one meaning all three backends can express (Codex takes
-    ``developer_instructions``, Antigravity appends a ``SystemInstructionSection``).
-    See docs/agents/HARNESS_PARITY.md.
-
-    Passing the raw string would select the SDK's ``--system-prompt``, which REPLACES
-    Claude Code's prompt outright, and passing ``None`` is worse still: the SDK emits
-    ``--system-prompt ""``, so an unconfigured run gets NO system prompt at all while
-    Codex and Antigravity keep their full vendor prompts. Both cases are routed
-    through the preset here; omitting the ``append`` key leaves the CLI's default
-    prompt untouched.
-    """
-    preset: SystemPromptPreset = {"type": "preset", "preset": "claude_code"}
-    if system_prompt:
-        preset["append"] = system_prompt
-    return preset
 
 
 # Type guards for SDK message types (using duck typing for robustness)
@@ -1214,7 +1192,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             # summing per-message values undercounts by 10x+. Without this flag
             # StreamEvents are suppressed by the SDK.
             include_partial_messages=True,
-            system_prompt=_append_system_prompt(self.config.system_prompt),
+            system_prompt=self.config.system_prompt,
             setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
             resume=self._session_id,
             settings=json.dumps(self.config.claude_settings)

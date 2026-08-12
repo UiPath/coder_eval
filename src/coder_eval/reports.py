@@ -87,14 +87,8 @@ def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -
         betas = settings_source.get("betas")
         if betas:
             rows.append(("Betas", ", ".join(betas)))
-        # `system_prompt` reaches the SDK as the preset+append form (the appended
-        # text is what the task actually configured; the preset itself is constant),
-        # so report the append payload and render nothing when there is none.
-        raw_prompt = settings_source.get("system_prompt")
-        if isinstance(raw_prompt, dict):
-            raw_prompt = raw_prompt.get("append")
-        if raw_prompt is not None:
-            prompt_str = str(raw_prompt).replace("\n", " ")
+        if settings_source.get("system_prompt") is not None:
+            prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
             if len(prompt_str) > SYSTEM_PROMPT_PREVIEW_CHARS:
                 prompt_str = prompt_str[:SYSTEM_PROMPT_PREVIEW_CHARS] + "..."
             rows.append(("System Prompt", prompt_str))

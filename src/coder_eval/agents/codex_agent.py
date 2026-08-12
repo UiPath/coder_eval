@@ -1332,19 +1332,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
             options["model"] = effective_model
             self._log.debug(f"Codex model pinned to {effective_model}")
 
-        # coder_eval's `system_prompt` is defined as text APPENDED to whatever the
-        # harness's own default agent prompt is (the one semantics all three
-        # backends can express — see docs/agents/HARNESS_PARITY.md). Codex's additive
-        # knob is `developer_instructions`, a developer-role message carried on the
-        # thread. Deliberately NOT `base_instructions`, which REPLACES Codex's entire
-        # built-in agent prompt — a task-level one-liner is not a whole agent prompt,
-        # and substituting one would silently gut the harness.
-        if self.config.system_prompt:
-            options["developer_instructions"] = self.config.system_prompt
-            self._log.debug(
-                "Codex developer_instructions set from agent.system_prompt (%d chars)", len(self.config.system_prompt)
-            )
-
         permission_mode = self.config.permission_mode.value
         approval_mode_str = _CODEX_APPROVAL_MODE
 

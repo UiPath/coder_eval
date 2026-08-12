@@ -447,13 +447,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # human about — there is no human on a headless eval path. Declared as
                 # such in the parity table so it is visible rather than silent.
                 policies=[policy.allow_all()],
-                # coder_eval's `system_prompt` is text APPENDED to the harness's own
-                # default agent prompt (docs/agents/HARNESS_PARITY.md). A plain str
-                # here is exactly that: the SDK wraps it as a
-                # TemplatedSystemInstructions section on top of Antigravity's
-                # defaults. Do NOT switch to types.CustomSystemInstructions — that
-                # replaces every default instruction, including the core safety
-                # mandates, which a task-level one-liner cannot stand in for.
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: hand the harness the search-path roots that parent
                 # the UiPath skill dirs. Unlike Codex (which symlinks into

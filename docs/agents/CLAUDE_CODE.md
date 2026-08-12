@@ -99,7 +99,7 @@ agent:
 | `allowed_tools` | `list[str] \| null` | Tool allowlist. Unset ⇒ all tools allowed. |
 | `disallowed_tools` | `list[str] \| null` | Tool denylist. (`ToolSearch` is always appended for Bedrock parity.) |
 | `plugins` | `list[{type: local, path}]` | Local plugin/skill directories; `$VAR` in `path` is expanded and resolved to an absolute path. |
-| `system_prompt` | `str \| null` | Text **appended** to Claude Code's default system prompt (via `--append-system-prompt`), so the same task file means the same thing on every harness — see [Harness Config Parity](HARNESS_PARITY.md). Mutually exclusive with `system_prompt_file`. |
+| `system_prompt` | `str \| null` | **Replaces** the default system prompt (there is no *append* seam). Mutually exclusive with `system_prompt_file`. |
 | `system_prompt_file` | `str \| null` | Path (relative to the task YAML) loaded into `system_prompt` at resolution. |
 | `setting_sources` | `list["user"\|"project"\|"local"] \| null` | Which host setting sources the SDK reads. Default resolves to `["project"]`. See [Sandbox isolation](#sandbox-isolation). |
 | `claude_settings` | `str \| dict \| null` | Passed to the SDK `--settings`. A dict is JSON-serialized; a str is a settings file path. Use `permissions.deny` to block tools/paths. |

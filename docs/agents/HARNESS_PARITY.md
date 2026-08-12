@@ -26,41 +26,12 @@ a bug, not a shortcut.
 | Field | claude-code | codex | antigravity |
 |---|---|---|---|
 | `model` | honored | honored | honored |
-| `system_prompt` / `system_prompt_file` | honored (`--append-system-prompt`) | honored (`developer_instructions`) | honored (`system_instructions` section) |
 | `allowed_tools` | honored | honored (`enabled_tools`) | honored (`CapabilitiesConfig.enabled_tools`) |
 | `disallowed_tools` | honored | **approximated** — forwarded as `disabled_tools`, not enforced by the SDK | honored (subtracted from the allowlist) |
 | `permission_mode` | honored | **approximated** — every mode runs full-access | **approximated** — every mode runs `policy.allow_all()` |
 | `plugins` | honored | honored (symlinked into `.agents/skills/`) | honored (`skills_paths`) |
 | `run_limits.max_turns` | honored (native SDK turn cap) | honored (visible-turn cap) | honored (visible-turn cap) |
 | `run_limits.stop_early` | honored | honored | honored |
-
-## `system_prompt` means *append*
-
-`agent.system_prompt` is extra text **appended to the harness's own default agent
-prompt**. It does not replace it.
-
-Append is the only semantics all three can express safely. Full replacement is
-expressible too, but a task-level guardrail (`"Do not access files in sibling
-runs/* directories"`) is not a whole agent prompt — substituting one for Codex's
-base instructions or Antigravity's core mandates would gut the harness rather than
-constrain it. So the field is defined as the safe one, and each backend maps it to
-its own additive knob:
-
-| Harness | Additive knob | Replacement knob (deliberately unused) |
-|---|---|---|
-| claude-code | `--append-system-prompt` | `--system-prompt` |
-| codex | `developer_instructions` | `base_instructions` |
-| antigravity | `system_instructions` (str → `TemplatedSystemInstructions`) | `CustomSystemInstructions` |
-
-Write task guardrails here, not a persona.
-
-> **Note on the claude-code change.** This field previously mapped to
-> `--system-prompt`, which *replaced* Claude Code's prompt — and because the SDK
-> emits `--system-prompt ""` for `None`, a run that set nothing got **no** system
-> prompt at all, while Codex and Antigravity kept their full vendor prompts. Both
-> cases now route through the preset, so every harness starts from its own default
-> prompt and adds the task's text on top. Expect claude-code numbers to move
-> against a pre-change baseline.
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 

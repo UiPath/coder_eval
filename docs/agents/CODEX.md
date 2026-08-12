@@ -216,7 +216,6 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 | **Session Resume** | `--resume {session_id}` | Via thread ID |
 | **Permissions** | `permission_mode` honored | `permission_mode` runs full-access on every mode — the sandbox driver is the boundary |
 | **Tool Enforcement** | Not enforced by Coder Eval wrapper | `enabled_tools` honored; `disabled_tools` NOT enforced by the SDK |
-| **System prompt** | `--append-system-prompt` | `developer_instructions` on `thread_start` (also additive) |
 | **`max_turns`** | Native SDK turn cap (assistant messages) | Visible-turn cap (tool calls), enforced on the notification pump |
 | **Early stop** | Supported (cooperative `should_stop`, polled between messages) | Supported — polled after each streamed notification; the in-flight turn is interrupted best-effort |
 
