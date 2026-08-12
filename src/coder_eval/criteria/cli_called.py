@@ -153,12 +153,13 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
     spellings = criterion.verb_spellings
     if spellings:
         # Token-wise, not a subset and not a string startswith: `labellings confirm`
-        # must never be satisfied by `labellings unconfirm`.
+        # must never be satisfied by `labellings unconfirm`. Taking the first match is
+        # safe because validation rejects one spelling prefixing another, so no argv
+        # can match two.
         matched = next((tokens for tokens in spellings if positional[: len(tokens)] == tokens), None)
         if matched is None:
             return False
-        # Spellings may differ in length; validation rules out two matching the same
-        # argv, so this cannot depend on list order.
+        # Measured from the spelling that matched, since spellings can differ in length.
         offset = len(matched)
 
     if criterion.positional is not None:
