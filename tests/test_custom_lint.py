@@ -1147,15 +1147,27 @@ SKILLS_REQUIRING_THE_CLI = {"init", "skill-check", "task"}
 # dead weight; a reader that stops reading it has silently forked the rubric.
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
-# The skills that must locate a repository's eval tree before they can do anything.
-# All six qualify, and each for its own reason: `analyze` needs the run root, `init`
-# and `skill-check` must know where tasks already live before writing beside them,
-# `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob into
-# the workflow it emits. Every one of them used to carry its own hardcoded guess
+# Whether each skill must locate a repository's eval tree before it can do anything.
+# All six currently must, and each for its own reason: `analyze` needs the run store,
+# `init` and `skill-check` must know where tasks already live before writing beside
+# them, `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob
+# into the workflow it emits. Every one of them used to carry its own hardcoded guess
 # (`runs/latest`, `tasks/`), which is wrong in any repository that names the tree
 # something else or nests it — so the policy is declared once in
 # reference/repo-layout.md and a reader that stops pointing at it has forked it.
-REPO_LAYOUT_READERS = {"analyze", "ci", "init", "lint-tasks", "skill-check", "task"}
+#
+# A mapping rather than a set, mirroring SKILL_DISABLE_MODEL_INVOCATION: a SEVENTH skill
+# then has to state whether it needs discovery instead of silently defaulting to "no"
+# and quietly reintroducing a hardcoded path. `False` is a legitimate answer — a skill
+# that touches no task or run tree — but it has to be written down.
+SKILL_NEEDS_EVAL_ROOT_DISCOVERY = {
+    "analyze": True,
+    "ci": True,
+    "init": True,
+    "lint-tasks": True,
+    "skill-check": True,
+    "task": True,
+}
 
 # Ways of naming one repository's layout as the DEFAULT. The bare paths `runs/latest`
 # and `tasks/` are deliberately absent: `analyze` legitimately keeps a sentence about a
@@ -1796,12 +1808,22 @@ class TestPluginArtifacts:
         assert layout.exists() and layout.read_text(encoding="utf-8").strip(), (
             f"{layout} must exist and be non-empty — six skills read it at runtime to find the repository's eval tree"
         )
+        # Both directions, so neither the mapping nor the tree can drift silently: a
+        # declared skill must ship, and a shipped skill must declare its stance.
         on_disk = {p.parent.name for p in PLUGIN_SKILLS}
-        unknown = sorted(REPO_LAYOUT_READERS - on_disk)
-        assert not unknown, f"REPO_LAYOUT_READERS names skill(s) that do not ship: {unknown}"
+        declared = set(SKILL_NEEDS_EVAL_ROOT_DISCOVERY)
+        assert not declared - on_disk, (
+            f"SKILL_NEEDS_EVAL_ROOT_DISCOVERY names skill(s) that do not ship: {sorted(declared - on_disk)}"
+        )
+        assert not on_disk - declared, (
+            f"new skill(s) {sorted(on_disk - declared)} have not declared whether they need eval-root "
+            "discovery — add them to SKILL_NEEDS_EVAL_ROOT_DISCOVERY. `False` is fine for a skill that "
+            "touches no task or run tree, but defaulting to it silently is how a hardcoded `tasks/` "
+            "gets back in."
+        )
 
         pointer = "${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md"
-        for name in sorted(REPO_LAYOUT_READERS):
+        for name in sorted(n for n, needed in SKILL_NEEDS_EVAL_ROOT_DISCOVERY.items() if needed):
             text = (PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
             assert pointer in text, (
                 f"{name} has to locate the repository's eval tree but no longer points at "
