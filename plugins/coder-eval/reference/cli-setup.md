@@ -18,14 +18,19 @@ The check above tells you what is *installed*. In a repository that already uses
 coder-eval that is only half the question: the other half is what the project *expects*,
 and being helpful with the wrong binary there does real damage.
 
-**So look for a pin before running anything else.** Search from the eval root (located
-per `${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`) outward toward the repository root,
-and take the first pin you find:
+**So resolve the pin before running anything else.** Where an eval tree already exists,
+search from the eval root (located per `${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`)
+outward toward the repository root; where there is none yet — a repository being set up
+for the first time still may pin the CLI — search the repository itself. Collect **every**
+pin you find rather than stopping at the first, so a disagreement is discoverable at all:
 
 - a version file, e.g. `.coder-eval-version`;
 - a `coder-eval==` or `coder-eval @` requirement in a `requirements*.txt`, in
   `pyproject.toml`, or in a lock file beside one;
 - a pinned install line in a build file or a CI workflow.
+
+If every pin you found names the same version, that is the pin. If they disagree, report
+all of them and ask — do not pick one.
 
 **Prefer a project-local binary** when the project ships one — a virtualenv under the
 eval root — over whatever is on `PATH`. A repository that carries its own CLI has already

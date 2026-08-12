@@ -10,7 +10,9 @@ skill **discovers** the tree and **reports what it resolved** — it never assum
 - **Tasks** — glob `**/*.yaml` and keep the files carrying a `task_id:` key. That key is
   what makes a file a task. A directory named `tasks/` holding only fixtures is not a task
   tree, and a directory named anything at all holding `task_id:` files is.
-- **Runs** — glob `**/run.json`. Each match is a run root.
+- **Runs** — glob `**/run.json`. Each match is one **run directory**; the directory
+  holding them is the **run store**, and that is what you are discovering. (The two are
+  easy to conflate, and picking `latest` at the wrong level is the failure that follows.)
 - **Experiments** — YAML carrying a `variants:` key, usually a sibling of the task tree.
 
 Prune `node_modules`, `.venv`, `.git`, `dist` and `build` from every glob. This is not
@@ -39,13 +41,18 @@ Then:
 
 ## Runs, and the `latest` pointer
 
-A run root holds one directory per run, named after its run id, which sorts
+A run store holds one directory per run, named after its run id, which sorts
 chronologically. Many repositories also keep a `latest` symlink beside them.
 
-When you need "the most recent run" and were given no path: resolve the run root as
-above, then use `latest` **if that symlink exists and resolves**; otherwise take the
-newest run directory by name. Either way say which one you picked and how. A dangling
-`latest` is a finding worth reporting, not something to read through.
+When you need "the most recent run" and were given no path: resolve the run store as
+above, then use `latest` **only if it resolves to a directory inside that store which
+contains a `run.json`**; otherwise take the newest run directory by name. Either way say
+which one you picked and how.
+
+That containment check is not pedantry. A `latest` symlink is repository content, so it
+can point anywhere — outside the run store, outside the repository — and following one
+blindly would have you reading and quoting files the user never asked about. A `latest`
+that dangles or escapes is a **finding to report**, not a path to read through.
 
 ## Passing paths to the CLI
 

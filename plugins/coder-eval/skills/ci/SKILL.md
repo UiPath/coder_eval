@@ -101,6 +101,9 @@ So emit **explicit per-depth globs, or an explicit file list** — and emit only
 that actually match when you write the workflow. Check first; a fixed ladder of depths
 breaks any repository that does not happen to have tasks at every level.
 
+For a tree that happens to sit two levels deep, that looks like this — the paths are one
+repository's, shown to make the shape concrete, not a value to copy:
+
 ```yaml
 tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
 ```
@@ -117,7 +120,7 @@ self-documenting.
 ### The experiment, if the suite runs through one
 
 If the repository's suite resolves through an experiment, the workflow must pass it via
-`extra-args`:
+`extra-args` — again with the discovered path, not the illustrative one below:
 
 ```yaml
 extra-args: "-e tests/experiments/default.yaml"

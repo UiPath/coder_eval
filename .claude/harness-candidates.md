@@ -289,3 +289,28 @@ harness once for all of them.
   the first half; the second half is arguably correct-as-is (failing loudly beats
   silently running nothing). Deferred alongside `working-directory` because both change
   the action's observable contract and belong in one considered change.
+
+## From the final review of the 2026-08-11 plugin generic-adopter run
+
+Two **pre-existing `action.yml` defects** surfaced by an external reviewer during that
+run's final review. Neither is caused by the change, and `action.yml` was explicitly out
+of that plan's scope, so both are recorded here rather than fixed in passing. They belong
+with the two `action.yml` items above — one considered change to the action's contract.
+
+- [ ] **The score gate silently drops a malformed `weighted_score`.** `action.yml`'s
+  minimum-task-score step filters `task_results` rows down to usable floats; a row whose
+  score is a string, a bool, `NaN`/`inf`, or out of `[0, 1]` is omitted from the
+  comparison rather than failing it. So a `run.json` carrying one corrupt row **and** one
+  valid row above the floor gates **green**, which contradicts the fail-closed intent
+  stated in that step's own comment. The fix is to error on a present-but-invalid score
+  while still skipping `None` (errored tasks are already covered by coder-eval's exit
+  code). Wants a test over a synthetic `run.json` per bad-value class, which is why it is
+  not a five-minute change.
+
+- [ ] **`tasks:` is declared optional but omitting it cannot work.** The input defaults to
+  empty and the run step then appends no path arguments, so `coder-eval run` is invoked
+  bare — and zero-argument discovery resolves against the *installed package's* location,
+  finds nothing, and exits 1. The input is therefore effectively required, and the action
+  advertises otherwise. Either mark it `required: true` (a published-input contract change,
+  see the `working-directory` item) or fail with a clear message instead of an obscure
+  discovery error.

@@ -19,8 +19,11 @@ runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json, task.log, artifacts/}
 - `variant.json` at a variant directory → **variant scope**.
 - `task.json` directly in the path → **task scope** (single replicate); `??/task.json` subdirs without `variant.json` → task scope aggregated over replicates.
 
-**No target given:** do not assume a path. Resolve the repository's run root by discovery
-— a directory holding run directories, each with a `run.json` — then within it use a
-`latest` symlink if one exists and resolves, and otherwise the newest run directory by
-name (run ids sort chronologically). Say which root you resolved, how you resolved it,
-and which run you picked, before reading anything through it.
+**No target given:** do not assume a path. Resolve the repository's **run store** by
+discovery — the directory holding run directories, each with a `run.json` — then within it
+use a `latest` symlink only if it resolves to a directory inside that store carrying a
+`run.json`, and otherwise the newest run directory by name (run ids sort
+chronologically). A `latest` that dangles or points outside the store is a finding to
+report, not a path to read through: it is repository content and can point anywhere. Say
+which store you resolved, how, and which run you picked, before reading anything through
+it.
