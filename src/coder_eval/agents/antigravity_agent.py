@@ -366,6 +366,27 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             self._log.debug("Antigravity skills_paths resolved: %s", roots)
         return roots
 
+    def _stage_isolation_state_dirs(self) -> tuple[str, str]:
+        """Return agent-writable ``(save_dir, app_data_dir)`` for the harness.
+
+        The SDK otherwise creates its trajectory database under
+        ``tempfile.mkdtemp`` and its app-data under ``~/.gemini/antigravity``,
+        both resolved in the root parent process. The localharness child runs
+        as the dropped agent UID and cannot write into a root-owned directory,
+        so it fails at start. Place both below the agent home and grant them to
+        the agent identity so the dropped child owns what it must write.
+        """
+
+        from coder_eval.isolation.agent_identity import grant_agent_workspace
+
+        state_root = Path(AGENT_HOME) / ".antigravity-isolation"
+        save_dir = state_root / "save"
+        app_data_dir = state_root / "app"
+        for directory in (save_dir, app_data_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        grant_agent_workspace(state_root)
+        return str(save_dir), str(app_data_dir)
+
     def _resolve_workspaces(self, skills_paths: list[str]) -> list[str]:
         """Workspace roots for the harness's ``workspace_only`` file-tool policy.
 
@@ -425,9 +446,19 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             # from the environment itself (and raise a clear error if truly unset).
             api_key = os.getenv("GEMINI_API_KEY") or None
             skills_paths = self._resolve_skills_paths(plugin_tools_dir)
+            # Under isolation the harness state directories must be owned by the
+            # dropped agent UID; otherwise the SDK's root-created defaults deny
+            # the child every write. None in the non-isolated path so the SDK
+            # keeps its own defaults.
+            save_dir: str | None = None
+            app_data_dir: str | None = None
+            if agent_isolation_enabled():
+                save_dir, app_data_dir = self._stage_isolation_state_dirs()
             cfg = LocalAgentConfig(
                 model=self._effective_model(),
                 api_key=api_key,
+                save_dir=save_dir,
+                app_data_dir=app_data_dir,
                 # File tools are confined to ``workspaces`` by the auto-prepended
                 # workspace_only policy. Scope to the sandbox workdir (the write
                 # target — process-cwd-independent so concurrent host-mode tasks

@@ -772,3 +772,33 @@ async def test_harness_spawn_guard_leaves_harness_path_alone_without_isolation(m
     async with agent._harness_spawn_guard():
         assert "ANTIGRAVITY_HARNESS_PATH" not in os.environ
     assert "ANTIGRAVITY_HARNESS_PATH" not in os.environ
+
+
+def test_isolation_state_dirs_are_agent_owned_under_agent_home(monkeypatch, tmp_path):
+    """save_dir / app_data_dir are created below the agent home and granted to the agent UID.
+
+    The SDK otherwise resolves both in the root parent (tempfile.mkdtemp and
+    ~/.gemini/antigravity), which the dropped localharness child cannot write.
+    """
+    from coder_eval.agents import antigravity_agent
+    from coder_eval.isolation import agent_identity
+
+    monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
+    # AGENT_HOME is /home/agent on the real image; redirect it to a writable
+    # temp root so the test runs on any host, and stub the chown-based grant
+    # (which requires Linux root) to record its argument.
+    fake_home = tmp_path / "agent-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(antigravity_agent, "AGENT_HOME", str(fake_home))
+    granted: list[str] = []
+    monkeypatch.setattr(agent_identity, "grant_agent_workspace", lambda p: granted.append(str(p)))
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    save_dir, app_data_dir = agent._stage_isolation_state_dirs()
+
+    state_root = fake_home / ".antigravity-isolation"
+    assert save_dir == str(state_root / "save")
+    assert app_data_dir == str(state_root / "app")
+    assert (state_root / "save").is_dir()
+    assert (state_root / "app").is_dir()
+    assert granted == [str(state_root)]
