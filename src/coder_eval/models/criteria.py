@@ -585,7 +585,7 @@ class CliCalledCriterion(BaseSuccessCriterion):
             "'labellings unconfirm'. Prefer the full verb over a short one: the tokens after it are "
             "unconstrained, which is safe for a max_count 0 guard (it fires on more) but NOT for a "
             "positive assertion, where 'projects' credits 'projects delete' as readily as "
-            "'projects get'. For one operation the tool spells several ways, use verb_any_of"
+            "'projects get'. When one operation has several spellings, use verb_any_of"
         ),
     )
     verb_any_of: list[str] | None = Field(
@@ -605,8 +605,9 @@ class CliCalledCriterion(BaseSuccessCriterion):
         default=None,
         description=(
             "Non-flag arguments that must follow the verb, in order. A PREFIX of what followed, so "
-            "arguments beyond these are unconstrained: 'projects list' also matches "
-            "'projects list dummy'. To require a specific tail, name every argument in it"
+            "anything past them is unconstrained: ['proj-1'] also matches 'get proj-1 dummy'. To "
+            "require a specific tail, name every argument in it. Depends on value_flags being "
+            "complete — an undeclared flag's value stays non-flag and shifts these slots"
         ),
     )
     flags: dict[str, FlagMatch] | None = Field(
