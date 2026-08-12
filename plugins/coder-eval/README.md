@@ -27,7 +27,7 @@ once:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-You do not have to do this in advance. `init`, `task` and `skill-check` check
+You do not have to do this in advance. `init`, `task` and `check-skill` check
 `coder-eval --version` before doing any work and, if it is missing, **offer to install it and
 ask first** — they never install unprompted, and they verify it worked before continuing.
 Running a suite also needs credentials for whichever agent the tasks use (e.g.
@@ -39,13 +39,13 @@ nor credentials — it only reads files.
 | Command | What it does |
 | --- | --- |
 | `/coder-eval:init` | Scans the repo for what is worth evaluating (skills, an MCP server, a CLI), then scaffolds a task directory with one real task. |
-| `/coder-eval:skill-check` | Generates and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
+| `/coder-eval:check-skill` | Generates and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
 | `/coder-eval:task` | Turns a natural-language description into a task YAML with the right success criteria. |
 | `/coder-eval:lint-tasks` | Reviews task YAML you already have and reports criteria that cannot fail, prompts that give away the answer, and fixtures with no cleanup. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and reports systemic failure patterns, per-task findings, and concrete fixes. |
 | `/coder-eval:ci` | Emits a GitHub Actions workflow that runs your suite as a CI gate (or on a schedule, to catch skill drift). |
 
-`init` and `ci` are explicit-invocation only. `skill-check`, `task`, `lint-tasks`, and
+`init` and `ci` are explicit-invocation only. `check-skill`, `task`, `lint-tasks`, and
 `analyze` can also be reached by the agent on its own when a request clearly calls for them.
 
 ## Bundled reference
@@ -62,7 +62,7 @@ nor credentials — it only reads files.
   *inside* a run directory.
 - `repo-layout.md` — how every skill finds *where* your eval tree is: discovered by
   content (`task_id:` files, `run.json`), never assumed to be `tasks/` and `runs/`.
-- `templates/` — the canonical activation suite `skill-check` copies into your repo.
+- `templates/` — the canonical activation suite `check-skill` copies into your repo.
 
 ## Links
 

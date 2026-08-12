@@ -209,7 +209,7 @@ jobs:
 
   plugin-validate:
     # Proves the Claude Code plugin marketplace is installable and that the suite
-    # `skill-check` scaffolds is real: the manifests pass strict validation, and the
+    # `check-skill` scaffolds is real: the manifests pass strict validation, and the
     # bundled activation template both schema-validates and expands to one task per
     # dataset row. Needs no credentials — nothing here invokes a model.
     name: Claude Code Plugin (manifests + offline scaffold)

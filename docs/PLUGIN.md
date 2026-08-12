@@ -31,7 +31,7 @@ references, not packages, so the `coder-eval` binary is a separate step:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-You do not have to do it in advance. `init`, `task` and `skill-check` — the three
+You do not have to do it in advance. `init`, `task` and `check-skill` — the three
 skills that shell out to the CLI — check `coder-eval --version` before doing any
 work and, if it is missing, **offer to install it and ask first**. They never
 install unprompted: that writes outside your repository, so it is your call, and
@@ -48,7 +48,7 @@ Running a suite additionally needs credentials for whichever agent the tasks use
 | Command | What it does |
 | --- | --- |
 | `/coder-eval:init` | Scans the repository for what is worth evaluating (Claude Code skills, an MCP server, a CLI), reports the findings, then scaffolds a task directory with one real task. |
-| `/coder-eval:skill-check` | Builds and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
+| `/coder-eval:check-skill` | Builds and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
 | `/coder-eval:task` | Turns a natural-language description into task YAML with criteria that check output *content*, validated through `coder-eval plan`. |
 | `/coder-eval:lint-tasks` | Reviews task YAML that already exists and reports, per task, criteria that cannot fail, prompts that leak the answer, fixtures with no cleanup and near-duplicates — each with a severity and a fix. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and writes `analysis.md`: systemic failure patterns, per-task findings, and concrete fixes. |
@@ -77,12 +77,12 @@ review.
 
 A skill is selected almost entirely from its frontmatter `description`. Whether
 that description wins the requests it should — and loses the ones it shouldn't —
-is invisible until a user complains. `skill-check` turns it into a number.
+is invisible until a user complains. `check-skill` turns it into a number.
 
 Point it at a skill:
 
 ```
-/coder-eval:skill-check .claude/skills/pdf-forms
+/coder-eval:check-skill .claude/skills/pdf-forms
 ```
 
 It then:
@@ -158,7 +158,7 @@ one. Three things follow from that, and they are worth knowing before you instal
   `evals/`, or nest the whole thing under `tests/`, and the skills follow it.
 - **They will not scaffold over what you have.** `init` run against a configured
   repository reports the inventory and stops, pointing at `lint-tasks` and `analyze`
-  instead. `skill-check` looks for a suite that already covers the skill and offers to
+  instead. `check-skill` looks for a suite that already covers the skill and offers to
   extend it rather than writing a second one. And where your repository pins a
   coder-eval version, the CLI-driving skills resolve that pin first and stop on a
   mismatch rather than validating with the wrong binary — a schema error from a
@@ -193,7 +193,7 @@ directories, so every file a skill reads travels with it under `reference/`:
   `task_id:` files and `run.json` rather than assuming `tasks/` and `runs/`. All six
   skills read it, which is what lets them work in a repository that names or nests the
   tree differently.
-- `templates/` — the canonical activation suite `skill-check` copies.
+- `templates/` — the canonical activation suite `check-skill` copies.
 
 ## Related
 

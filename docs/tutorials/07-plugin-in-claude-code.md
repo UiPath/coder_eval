@@ -18,7 +18,7 @@ separately.
 - Claude Code installed and working.
 - The `coder-eval` CLI. **Installing the plugin does not install it** — a plugin
   ships skills, not packages. You can let the skills handle it (`init`, `task` and
-  `skill-check` check for it and offer to install it, asking first), or do it now:
+  `check-skill` check for it and offer to install it, asking first), or do it now:
 
     ```bash
     uv tool install coder-eval    # or: pip install coder-eval
@@ -42,7 +42,7 @@ Code prompt, not in your shell:
 ```
 
 Verify by typing `/coder-eval:`. You should see six commands: `init`,
-`skill-check`, `task`, `lint-tasks`, `analyze`, `ci`. Five of them drive the same
+`check-skill`, `task`, `lint-tasks`, `analyze`, `ci`. Five of them drive the same
 `coder-eval` CLI you would type by hand, so what they write is a normal file you
 can commit, diff and run in CI. (`lint-tasks` is the exception: it only reads files
 and reports.)
@@ -137,7 +137,7 @@ export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
 ```
 
 ```
-/coder-eval:skill-check pdf-forms
+/coder-eval:check-skill pdf-forms
 ```
 
 You get recall, precision and F1 over a labeled suite of requests the skill should

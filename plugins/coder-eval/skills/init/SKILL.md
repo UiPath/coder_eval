@@ -53,7 +53,7 @@ anything**:
 
 1. **Claude Code skills** — glob `.claude/skills/*/SKILL.md` and `**/skills/*/SKILL.md`.
    Skills are the highest-value thing to evaluate, because whether they trigger is
-   invisible until it fails. If you find any, recommend `/coder-eval:skill-check` for
+   invisible until it fails. If you find any, recommend `/coder-eval:check-skill` for
    each of them — that is a purpose-built activation suite, not something to hand-roll
    here.
 2. **An MCP server** — an `.mcp.json`, an `mcpServers` key in `package.json` or
@@ -81,7 +81,7 @@ Write one task derived from what step 3 found:
 - **A CLI** — a task whose prompt asks for something the CLI does, with criteria that
   check the resulting file's *content*, not just that a file appeared.
 - **An MCP server** — a task that exercises one specific tool and verifies its effect.
-- **Skills** — point at `/coder-eval:skill-check` instead; an activation suite is a
+- **Skills** — point at `/coder-eval:check-skill` instead; an activation suite is a
   different shape from a capability task and that skill builds it properly.
 
 Prompts instruct, criteria validate. Do not restate in the prompt what the criteria
@@ -127,6 +127,6 @@ Tell the user:
 - what you found in the scan, and what you chose to evaluate first;
 - the exact command to run it: `coder-eval run <path>`, plus a note that it costs real
   tokens and needs the credentials from step 5;
-- that `/coder-eval:skill-check` is the next step if the repo ships skills;
+- that `/coder-eval:check-skill` is the next step if the repo ships skills;
 - that `/coder-eval:analyze` reads the run directory afterwards, and `/coder-eval:ci`
   turns the suite into a GitHub Actions gate.

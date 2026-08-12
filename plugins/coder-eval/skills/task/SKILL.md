@@ -101,7 +101,7 @@ Pick by what actually needs verifying:
 | A deep, tool-using verdict on the sandbox | `agent_judge` (expensive) |
 | The agent used a specific tool | `command_executed` |
 | Tool-call efficiency against a budget | `commands_efficiency` |
-| The agent engaged a target skill | `skill_triggered` (see `/coder-eval:skill-check`) |
+| The agent engaged a target skill | `skill_triggered` (see `/coder-eval:check-skill`) |
 | A predicted label vs. ground truth | `classification_match` |
 
 Read `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md` for each type's exact fields — it is

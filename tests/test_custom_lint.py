@@ -1141,7 +1141,7 @@ PLUGIN_TEXT_FILES = sorted(
 # `analyze` reads a finished run directory, `ci` only emits a workflow, and `lint-tasks`
 # has no `Bash` at all (the `coder-eval plan` in its report is a suggestion to the user,
 # not a command it runs) — so none of those three needs the CLI.
-SKILLS_REQUIRING_THE_CLI = {"init", "skill-check", "task"}
+SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task"}
 
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
 # dead weight; a reader that stops reading it has silently forked the rubric.
@@ -1149,7 +1149,7 @@ RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
 # Whether each skill must locate a repository's eval tree before it can do anything.
 # All six currently must, and each for its own reason: `analyze` needs the run store,
-# `init` and `skill-check` must know where tasks already live before writing beside
+# `init` and `check-skill` must know where tasks already live before writing beside
 # them, `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob
 # into the workflow it emits. Every one of them used to carry its own hardcoded guess
 # (`runs/latest`, `tasks/`), which is wrong in any repository that names the tree
@@ -1165,7 +1165,7 @@ SKILL_NEEDS_EVAL_ROOT_DISCOVERY = {
     "ci": True,
     "init": True,
     "lint-tasks": True,
-    "skill-check": True,
+    "check-skill": True,
     "task": True,
 }
 
@@ -1187,7 +1187,7 @@ SKILL_DISABLE_MODEL_INVOCATION = {
     "ci": True,
     "init": True,
     "lint-tasks": False,
-    "skill-check": False,
+    "check-skill": False,
     "task": False,
 }
 
@@ -1465,7 +1465,7 @@ class TestPluginArtifacts:
     def test_lint_tasks_does_not_flag_the_shipped_activation_template(self):
         # A prose sensor, guarding against deletion rather than judging quality — but it
         # covers the one interaction where two shipped skills could contradict each other:
-        # the activation suite `skill-check` writes is exactly the shape a naive coverage
+        # the activation suite `check-skill` writes is exactly the shape a naive coverage
         # pass reads as "one criterion, no content check" and flags. The worked example is
         # in the repo (reference/templates/activation.yaml), so the carve-out cannot be
         # written vaguely: it must be structural, since the file may be renamed.
@@ -1475,13 +1475,13 @@ class TestPluginArtifacts:
         for token in ("dataset:", "skill_triggered", "classification_match", "suite_thresholds"):
             assert token in text, (
                 f"lint-tasks must name {token!r} in its activation-suite carve-out — without the "
-                "structural detection it will flag the suites skill-check generates as broken"
+                "structural detection it will flag the suites check-skill generates as broken"
             )
         assert "do not apply" in text, (
             "lint-tasks names the carve-out's conditions but no longer EXEMPTS anything — an "
             "inverted carve-out would keep every token above and still flag activation suites"
         )
-        # The conditions must still describe the template skill-check actually copies, or the
+        # The conditions must still describe the template check-skill actually copies, or the
         # carve-out has quietly stopped covering the one file it exists for.
         template = yaml.safe_load((self.TEMPLATES / "activation.yaml").read_text(encoding="utf-8"))
         assert template.get("dataset"), "the shipped activation template lost its `dataset:` block"
@@ -1492,7 +1492,7 @@ class TestPluginArtifacts:
         )
         assert any(c.get("suite_thresholds") for c in template["success_criteria"]), (
             "the shipped activation template lost `suite_thresholds` — the carve-out's third "
-            "condition no longer holds, so lint-tasks would flag the suite skill-check writes"
+            "condition no longer holds, so lint-tasks would flag the suite check-skill writes"
         )
 
     def test_skill_listing_budget_is_bounded(self):
@@ -1696,37 +1696,37 @@ class TestPluginArtifacts:
             "the next reader simplifies them back to `**` and loses the top-level tasks"
         )
 
-    def test_skill_check_detects_before_scaffolding(self):
+    def test_check_skill_detects_before_scaffolding(self):
         # Scaffolding a second activation suite beside one that already covers the same
         # skill is worse than doing nothing: two suites drift, and the user pays for both
         # on every run. The existence check therefore has to happen BEFORE row design,
         # which is where the token spend is committed.
-        text = " ".join((PLUGIN_ROOT / "skills" / "skill-check" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = " ".join((PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md").read_text(encoding="utf-8").split())
         check = text.find("existing suite")
         assert check != -1 and "skill_triggered" in text, (
-            "skill-check names no `existing suite` check — it will scaffold a parallel suite "
+            "check-skill names no `existing suite` check — it will scaffold a parallel suite "
             "over one that already covers the skill"
         )
         assert "extend" in text[check : check + 600], (
-            "skill-check finds an existing suite but does not offer to EXTEND it — reporting "
+            "check-skill finds an existing suite but does not offer to EXTEND it — reporting "
             "coverage and then scaffolding anyway is the same duplication with extra steps"
         )
         design = text.find("Design the rows")
-        assert design != -1, "skill-check's row-design step was renamed — re-anchor this guard"
+        assert design != -1, "check-skill's row-design step was renamed — re-anchor this guard"
         assert check < design, (
             "the existing-suite check must come before row design — that is the step which "
             "commits the token spend this check exists to avoid"
         )
 
-    def test_skill_check_defers_to_an_experiment_supplied_plugins_block(self):
+    def test_check_skill_defers_to_an_experiment_supplied_plugins_block(self):
         # A task that redeclares what the experiment layer already provides drifts from it
         # silently — the same reason `task` tells authors to omit `agent:` entirely.
-        text = " ".join((PLUGIN_ROOT / "skills" / "skill-check" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = " ".join((PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md").read_text(encoding="utf-8").split())
         assert "experiment" in text and "agent.plugins" in text, (
-            "skill-check no longer mentions an experiment-supplied `agent.plugins` block"
+            "check-skill no longer mentions an experiment-supplied `agent.plugins` block"
         )
         assert "inherit it" in text, (
-            "skill-check does not tell the agent to INHERIT an experiment-supplied "
+            "check-skill does not tell the agent to INHERIT an experiment-supplied "
             "`agent.plugins` rather than writing its own — a task that redeclares what the "
             "experiment provides drifts from it with nothing to catch the divergence"
         )
