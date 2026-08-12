@@ -39,6 +39,11 @@ success_criteria:
     tool_name: "Bash"
     command_pattern: "python app\\.py"
     min_count: 1
+    # Mandatory on an ARMED, pass-capable criterion (CE034). Without it a
+    # `python app.py` that CRASHED — e.g. run before app.py exists — live-PASSES,
+    # fires on_pass=stop, and FIRED-ONLY armed gating then reports SUCCESS while
+    # never consulting the unarmed file_exists below.
+    require_success: true
     weight: 0.8
     stop_early:
       on_pass: stop
@@ -48,6 +53,9 @@ success_criteria:
     command_pattern: "curl"
     min_count: 0
     max_count: 0
+    # Deliberately NOT require_success: this is a negative assertion, and a curl
+    # that failed is still a curl that was called. Requiring success would blind
+    # the criterion to exactly the calls it exists to forbid.
     weight: 0.2
     stop_early: {}
   - type: "file_exists"

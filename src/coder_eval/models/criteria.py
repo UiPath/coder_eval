@@ -1229,7 +1229,12 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
             "prefix is added based on AWS_REGION."
         ),
     )
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for the judge model. 0.0 keeps grading deterministic.",
+    )
     max_tokens: int = Field(
         default=2000,
         gt=0,
