@@ -1684,16 +1684,28 @@ class TestPluginArtifacts:
         # reproduced by hand. The snippet must therefore show neither `**` in its tasks
         # value nor a fixed ladder of depths.
         skill = PLUGIN_ROOT / "skills" / "ci" / "SKILL.md"
-        text = skill.read_text(encoding="utf-8")
-        offenders = [line.strip() for line in text.splitlines() if re.search(r"^\s*tasks:.*\*\*", line)]
-        assert not offenders, (
-            f"{skill} puts a recursive `**` glob in a `tasks:` input value ({offenders}) — the "
-            "action word-splits and pathname-expands that value with globstar off, so it "
-            "silently drops every task above the deepest matching level"
-        )
-        assert "globstar" in text, (
+        assert "globstar" in skill.read_text(encoding="utf-8"), (
             "the ci skill emits explicit globs but no longer says WHY — without the reason, "
             "the next reader simplifies them back to `**` and loses the top-level tasks"
+        )
+
+        # Scoped to every surface CE026 already scans, not just the skill: the `ci` skill was
+        # taught to avoid `**` while five snippets across README.md, docs/CI_GATE.md and the
+        # CI tutorial still showed `tasks: tests/tasks/**/*.yaml`, so the plugin contradicted
+        # the repo's own onboarding docs — and those are the ones integrators copy.
+        from tests.lint.action_docs import default_doc_paths
+
+        offenders = [
+            f"{path}:{n}: {line.strip()}"
+            for path in default_doc_paths(Path(__file__).parent.parent)
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if re.search(r"^\s*tasks:.*\*\*", line)
+        ]
+        assert not offenders, (
+            "recursive `**` glob in a documented `tasks:` input value — the action word-splits "
+            "and pathname-expands that value with globstar off, so it silently drops every task "
+            "above the deepest matching level. Emit explicit per-depth globs or a file "
+            "list:\n\n" + "\n".join(f"  {o}" for o in offenders)
         )
 
     def test_check_skill_detects_before_scaffolding(self):

@@ -127,7 +127,7 @@ task/gate failure:
 
 - uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
-    tasks: tests/tasks/**/*.yaml
+    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
     model: claude-sonnet-5
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
@@ -164,7 +164,7 @@ it can't leak into later steps). Set whatever the run needs, Anthropic or not:
 ```yaml
 - uses: UiPath/coder_eval@v0
   with:
-    tasks: tests/tasks/**/*.yaml
+    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
     minimum-task-score: "0.8"   # fail the build if any task scores below 0.8
     env: |
       API_BACKEND=bedrock
