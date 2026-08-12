@@ -29,7 +29,7 @@ make docker-image-full
 
 Both build `coder-eval-agent:<pkg-version>` and tag it `:latest`.
 
-- **`make docker-image`** installs the core package plus the built-in agents. It needs **no credentials** and carries the `uid-gid-v1` isolation capability used by secure Docker runs. Static file/transcript criteria and `llm_judge` work in protected mode. Privileged dynamic criteria (`run_command`, `uipath_eval`, and `agent_judge`) currently fail closed; see [compatibility limits](#limitations).
+- **`make docker-image`** installs the core package plus the built-in agents. It needs **no credentials** and carries the `uid-gid-v1` isolation capability used by protected Docker runs. All criterion types work in protected mode: static file/transcript criteria and `llm_judge` run as before, and dynamic criteria (`run_command`, `uipath_eval`, `agent_judge`) execute in the grader phase after the agent identity has been stopped; see [limitations](#limitations).
 - **`make docker-image-full`** additionally installs the `uipath` extra. The `uipath` SDK resolves from **public PyPI** (per `uv.lock`), so the build needs **no credentials**. Use this only for tasks that shell out to the in-host `uipath` CLI. (Codex is already in the default image — no extra needed.)
 
 > **Codex sandbox under Docker.** Codex's Landlock-backed `read-only` / `workspace-write` sandboxes can't initialize inside the eval container. The runner therefore uses Codex `full-access` inside the agent's own security domain. The boundary is the dedicated Linux agent UID, cleared capabilities, `no_new_privs`, and the protected harness paths—not Landlock and not a root agent process.
@@ -38,9 +38,11 @@ Both build `coder-eval-agent:<pkg-version>` and tag it `:latest`.
 
 `sandbox.docker.agent_isolation` defaults to `true`. The container harness and grader remain root, while every evaluated Claude, Codex, or Antigravity subprocess runs as `agent:agent` (`2000:2000`).
 
+Isolation is **best-effort**: when a prerequisite is missing, the run downgrades to the normal single-identity container instead of failing. The downgrade conditions are an agent type without a verified UID-drop launch seam, an image without the `uid-gid-v1` capability label, `docker.working_dir`, and `docker.extra_mounts`. A downgraded run logs one WARNING line ("Running WITHOUT agent isolation") naming the reason — check the task log when the boundary matters. `agent_isolation: false` turns isolation off without a warning.
+
 The agent launcher clears inheritable, ambient, and bounding capabilities and sets `no_new_privs`. Generated work is placed in `/work/agent`. Hidden task data, results, raw task/plugin/reference/template sources, and grader inputs live below root-only `/opt/coder-eval/grader`. Raw source bind mounts remain read-only and are never chmod/chowned; only disposable staging copies and the generated workspace are changed.
 
-Older/custom images must declare `org.coder-eval.agent-isolation=uid-gid-v1`. A protected run rejects an image without that label before making an LLM call. Images derived with `FROM coder-eval-agent:<current-version>` inherit it. Runtime-kit injection into an unrelated base does not yet provide the required Linux users and `setpriv` launchers, so it is not compatible with protected mode.
+A protected run requires the image to declare `org.coder-eval.agent-isolation=uid-gid-v1`; an image without that label runs in normal mode with the downgrade warning. Images derived with `FROM coder-eval-agent:<current-version>` inherit the label. Runtime-kit injection into an unrelated base does not yet provide the required Linux users and `setpriv` launchers, so it is not compatible with protected mode.
 
 ## Running a task in Docker
 
@@ -140,11 +142,10 @@ sandbox:
 
 > **Protected-mode compatibility:** the current runtime kit does not install the
 > dedicated identities, `setpriv` launchers, protected directory layout, or the
-> `org.coder-eval.agent-isolation=uid-gid-v1` capability label. Because
-> `agent_isolation` defaults to `true`, an inject-mode image fails closed at
-> preflight. For now, extend `coder-eval-agent:<version>` for protected runs.
-> Setting `agent_isolation: false` permits legacy runtime-kit migration but does
-> not provide the boundary described on this page.
+> `org.coder-eval.agent-isolation=uid-gid-v1` capability label. An inject-mode
+> image therefore runs in normal mode with the downgrade warning. Extend
+> `coder-eval-agent:<version>` instead when the run needs the boundary
+> described on this page.
 
 The `FROM coder-eval-agent` contract above means a task is **rebased** onto the
 Debian framework image. That breaks tasks whose Dockerfile was written for a
@@ -302,7 +303,7 @@ The host's run dir is bind-mounted read-write at `/opt/coder-eval/grader/output`
 | Layer | Location |
 |---|---|
 | Agent process and descendants | container, UID/GID `2000:2000`, `/work/agent` |
-| Harness + supported criterion checking | container, root, `/opt/coder-eval/grader` |
+| Harness + criterion checking (static and dynamic) | container, root, `/opt/coder-eval/grader` |
 | **`task.json` serialization** | **container → host bind mount** |
 | Per-criterion `aggregate()` (P/R/F1, suite thresholds) | host |
 | Reports, run summary, experiment rollups | host |
@@ -311,8 +312,8 @@ The host's run dir is bind-mounted read-write at `/opt/coder-eval/grader/output`
 
 ## Limitations
 
-- **Dynamic privileged graders**: `run_command`, `uipath_eval`, and `agent_judge` are rejected in protected mode until a separate minimal-input grader sandbox exists. This prevents candidate-controlled code from turning a privileged grader into a confused deputy. Migrate to static built-in criteria or explicitly disable isolation only for a trusted transitional run.
-- **Custom work directories and extra mounts**: protected mode currently rejects `docker.working_dir` and `docker.extra_mounts` because their agent/private audience is ambiguous. Use the generated `/work/agent` workspace and `template_sources`.
+- **Dynamic criteria run with grader privileges**: `run_command`, `uipath_eval`, and `agent_judge` execute in the grader phase, as root, after every agent-identity process has been stopped and reaped. The boundary protects grading inputs from the *agent identity during the agent phase*; anything a dynamic criterion invokes (including code the agent wrote) runs with grader privileges and can read the grader mounts. Prefer static built-in criteria where the task allows it.
+- **Custom work directories and extra mounts**: `docker.working_dir` and `docker.extra_mounts` have an ambiguous agent/private audience, so setting either downgrades the run to normal mode. Use the generated `/work/agent` workspace and `template_sources` to keep the boundary.
 - **Runtime-kit injection**: not yet compatible with protected mode. Extend the current framework image instead.
 - **No container reuse across tasks**: each task = one fresh container. Adds ~1–3 s startup overhead per task; negligible vs. LLM latency.
 - **macOS Keychain auth**: not reachable from the container; set `ANTHROPIC_API_KEY` (direct) or Bedrock credentials instead.

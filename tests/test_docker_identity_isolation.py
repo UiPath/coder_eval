@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import signal
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -10,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from coder_eval.agents.codex_agent import CodexAgent
-from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner, _preflight_agent_isolation_image
+from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner, _image_supports_agent_isolation
 from coder_eval.models import (
     AGENT_GID,
     AGENT_HOME,
@@ -130,32 +132,105 @@ def test_agent_teardown_rescans_until_uid_has_no_processes(monkeypatch: pytest.M
     assert signals == [(41, signal.SIGTERM), (42, signal.SIGTERM), (42, expected_kill)]
 
 
-def test_isolation_image_label_preflight_accepts_only_declared_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_isolation_image_capability_check_reports_support_without_failing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "coder_eval.isolation.docker_runner.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(stdout="uid-gid-v1\n"),
     )
-    _preflight_agent_isolation_image("image:good")
+    assert _image_supports_agent_isolation("image:good") is True
 
     monkeypatch.setattr(
         "coder_eval.isolation.docker_runner.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(stdout="\n"),
     )
-    with pytest.raises(DockerRunError, match="does not declare"):
-        _preflight_agent_isolation_image("image:old")
+    assert _image_supports_agent_isolation("image:old") is False
+
+    def _inspect_fails(*args: object, **kwargs: object) -> SimpleNamespace:
+        raise subprocess.CalledProcessError(1, "docker")
+
+    monkeypatch.setattr("coder_eval.isolation.docker_runner.subprocess.run", _inspect_fails)
+    with pytest.raises(DockerRunError, match="cannot verify"):
+        _image_supports_agent_isolation("image:missing")
 
 
-def test_isolation_rejects_dynamic_privileged_criterion(tmp_path: Path) -> None:
+def _make_runner(tmp_path: Path, task: object) -> DockerRunner:
+    return DockerRunner(MagicMock(task=task, task_file=tmp_path / "task.yaml", run_dir=tmp_path / "run"))
+
+
+def test_isolation_stays_active_with_dynamic_criteria(tmp_path: Path) -> None:
+    """run_command / uipath_eval / agent_judge execute in the grader phase and never gate isolation."""
+
     task = TaskDefinition(
-        task_id="unsafe-grader",
+        task_id="dynamic-grader",
         description="test",
         initial_prompt="work",
         agent=ClaudeCodeAgentConfig(type=AgentKind.CLAUDE_CODE),
         sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(agent_isolation=True)),
-        success_criteria=[RunCommandCriterion(description="unsafe", command="python check.py")],
+        success_criteria=[RunCommandCriterion(description="dynamic", command="python check.py")],
     )
-    rt = MagicMock(task=task, task_file=tmp_path / "task.yaml", run_dir=tmp_path / "run")
-    runner = DockerRunner(rt)
+    runner = _make_runner(tmp_path, task)
 
-    with pytest.raises(RuntimeError, match="dynamic criteria"):
-        runner._validate_agent_isolation_compatibility()
+    runner._resolve_agent_isolation()
+
+    assert runner._isolation_active is True
+
+
+def test_isolation_downgrades_for_unsupported_agent_type(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    task = SimpleNamespace(
+        task_id="mystery-agent",
+        agent=SimpleNamespace(type="mystery"),
+        sandbox=SimpleNamespace(docker=SimpleNamespace(agent_isolation=True, working_dir=None, extra_mounts=[])),
+    )
+    runner = _make_runner(tmp_path, task)
+
+    with caplog.at_level(logging.WARNING):
+        runner._resolve_agent_isolation()
+
+    assert runner._isolation_active is False
+    assert "WITHOUT agent isolation" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("docker_kwargs", "reason_fragment"),
+    [
+        ({"working_dir": "/app"}, "working_dir"),
+        ({"extra_mounts": ["/host/data:/data:ro"]}, "extra_mounts"),
+    ],
+)
+def test_isolation_downgrades_for_unsupported_docker_config(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    docker_kwargs: dict[str, object],
+    reason_fragment: str,
+) -> None:
+    task = TaskDefinition(
+        task_id="legacy-config",
+        description="test",
+        initial_prompt="work",
+        agent=ClaudeCodeAgentConfig(type=AgentKind.CLAUDE_CODE),
+        sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(agent_isolation=True, **docker_kwargs)),
+        success_criteria=[RunCommandCriterion(description="dynamic", command="python check.py")],
+    )
+    runner = _make_runner(tmp_path, task)
+
+    with caplog.at_level(logging.WARNING):
+        runner._resolve_agent_isolation()
+
+    assert runner._isolation_active is False
+    assert reason_fragment in caplog.text
+
+
+def test_explicitly_disabled_isolation_stays_disabled(tmp_path: Path) -> None:
+    task = TaskDefinition(
+        task_id="opt-out",
+        description="test",
+        initial_prompt="work",
+        agent=ClaudeCodeAgentConfig(type=AgentKind.CLAUDE_CODE),
+        sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(agent_isolation=False)),
+        success_criteria=[RunCommandCriterion(description="dynamic", command="python check.py")],
+    )
+    runner = _make_runner(tmp_path, task)
+
+    runner._resolve_agent_isolation()
+
+    assert runner._isolation_active is False

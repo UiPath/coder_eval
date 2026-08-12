@@ -260,8 +260,13 @@ def _preflight_image_version(image: str) -> None:
         )
 
 
-def _preflight_agent_isolation_image(image: str) -> None:
-    """Require an image that contains the declared UID/GID launch boundary."""
+def _image_supports_agent_isolation(image: str) -> bool:
+    """Whether the image declares the UID/GID launch boundary capability.
+
+    Raises :class:`DockerRunError` only when the capability cannot be checked
+    at all (image missing, docker broken) -- an unlabeled image is a normal
+    "no support" answer, not an error.
+    """
 
     try:
         result = subprocess.run(
@@ -283,12 +288,7 @@ def _preflight_agent_isolation_image(image: str) -> None:
         raise DockerRunError(
             f"cannot verify UID/GID isolation support for image {image!r}; build or pull the image first"
         ) from exc
-    capability = result.stdout.strip()
-    if capability != "uid-gid-v1":
-        raise DockerRunError(
-            f"image {image!r} does not declare org.coder-eval.agent-isolation=uid-gid-v1; "
-            + "rebuild it from the latest coder-eval-agent image or disable isolation explicitly"
-        )
+    return result.stdout.strip() == "uid-gid-v1"
 
 
 _CONTAINER_NAME_INVALID = re.compile(r"[^a-zA-Z0-9_.-]")
@@ -524,6 +524,12 @@ class DockerRunner:
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
+        # Effective isolation for THIS run. Starts from config; run() downgrades
+        # it to False (with one warning) when a prerequisite is missing -- an
+        # unsupported agent type, an unlabeled image, working_dir, or
+        # extra_mounts. Every isolation-conditional site below keys on this
+        # resolved flag, never on the raw config value.
+        self._isolation_active: bool = self.rt.task.sandbox.docker.agent_isolation
 
     @property
     def _docker_config(self) -> DockerDriverConfig:
@@ -542,7 +548,7 @@ class DockerRunner:
         dispatcher converts that to an ERROR-status EvaluationResult.
         """
         _preflight()
-        self._validate_agent_isolation_compatibility()
+        self._resolve_agent_isolation()
         # Resolve the run image: build from a Dockerfile if configured (which
         # overrides `image`), else use the configured image. The build is
         # side-effecting, so it runs in a worker thread like the other docker
@@ -561,8 +567,8 @@ class DockerRunner:
         # a task-supplied Dockerfile won't carry the org.coder-eval.version label.
         if not self._docker_config.dockerfile_path:
             await asyncio.to_thread(_preflight_image_version, image)
-        if self._docker_config.agent_isolation:
-            await asyncio.to_thread(_preflight_agent_isolation_image, image)
+        if self._isolation_active and not await asyncio.to_thread(_image_supports_agent_isolation, image):
+            self._downgrade_isolation(f"image {image!r} does not declare org.coder-eval.agent-isolation=uid-gid-v1")
         await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
 
         # Docker WORKDIR alignment: resolve the concrete workspace path
@@ -570,17 +576,9 @@ class DockerRunner:
         # /root). Forwarded to the in-container orchestrator via the staged context
         # and rendered as `docker run -w`. None keeps the standard artifacts workspace.
         self._workspace_dir = await asyncio.to_thread(_resolve_workspace_dir, self._docker_config.working_dir, image)
-        if self._docker_config.agent_isolation:
-            if self._workspace_dir is not None:
-                raise DockerRunError(
-                    "docker.agent_isolation does not yet support docker.working_dir; "
-                    + "use the default generated /work/agent workspace or disable isolation explicitly"
-                )
-            if self._docker_config.extra_mounts:
-                raise DockerRunError(
-                    "docker.agent_isolation rejects extra_mounts because their agent/private audience is ambiguous; "
-                    + "stage the required input through template_sources or disable isolation explicitly"
-                )
+        if self._isolation_active:
+            # working_dir triggered a downgrade in _resolve_agent_isolation, so
+            # the resolved workspace here is always the isolation-managed one.
             self._workspace_dir = CONTAINER_AGENT_WORK_DIR
 
         # Stage only the inputs (task YAML + context). The *output* dir is
@@ -667,7 +665,7 @@ class DockerRunner:
         # container needs to see those mutations.
         task_yaml_in = input_dir / "task.yaml"
         task_payload = self.rt.task.model_dump(mode="json")
-        if self._docker_config.agent_isolation:
+        if self._isolation_active:
             await asyncio.to_thread(self._prepare_isolated_sources)
             task_payload = self._rewrite_task_paths(task_payload)
 
@@ -695,10 +693,29 @@ class DockerRunner:
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
 
-    def _validate_agent_isolation_compatibility(self) -> None:
-        """Reject task features whose privileged behavior is not isolated yet."""
+    def _downgrade_isolation(self, reason: str) -> None:
+        """Turn agent isolation off for this run and say so once, loudly."""
 
-        if not self._docker_config.agent_isolation:
+        self._isolation_active = False
+        logger.warning(
+            "Agent isolation is unavailable for task '%s': %s. Running WITHOUT agent isolation "
+            + "(normal single-identity container).",
+            self.rt.task.task_id,
+            reason,
+        )
+
+    def _resolve_agent_isolation(self) -> None:
+        """Downgrade to a normal run when a config prerequisite is missing.
+
+        Isolation is best-effort: a missing prerequisite runs the task in the
+        pre-isolation single-identity container instead of failing the run.
+        Dynamic criteria (``run_command``, ``uipath_eval``, ``agent_judge``)
+        never gate isolation -- they execute in the grader phase, after the
+        agent identity has been stopped and reaped. The image capability label
+        is checked separately in run() once the image is built.
+        """
+
+        if not self._isolation_active:
             return
         agent_type = str(self.rt.task.agent.type) if self.rt.task.agent and self.rt.task.agent.type else ""
         supported_agents = {
@@ -708,27 +725,11 @@ class DockerRunner:
             AgentKind.NONE.value,
         }
         if agent_type not in supported_agents:
-            raise DockerRunError(
-                f"docker.agent_isolation has no verified UID-drop launch seam for agent type {agent_type!r}"
-            )
-
-        # These criterion implementations can execute another agent or arbitrary
-        # task-authored commands in the privileged harness. If that execution
-        # imports candidate-controlled code, it can act as a confused deputy and
-        # publish hidden grader bytes. A separate minimal-input grader sandbox is
-        # required before they can run in protected mode.
-        unsupported_criteria = sorted(
-            {
-                criterion.type
-                for criterion in self.rt.task.success_criteria
-                if criterion.type in {"agent_judge", "run_command", "uipath_eval"}
-            }
-        )
-        if unsupported_criteria:
-            raise DockerRunError(
-                "docker.agent_isolation rejects privileged dynamic criteria until they have a separate grader "
-                + f"sandbox: {unsupported_criteria}. Use static/built-in criteria or explicitly disable isolation."
-            )
+            self._downgrade_isolation(f"no verified UID-drop launch seam for agent type {agent_type!r}")
+        elif self._docker_config.working_dir is not None:
+            self._downgrade_isolation("docker.working_dir has no UID-drop support yet")
+        elif self._docker_config.extra_mounts:
+            self._downgrade_isolation("extra_mounts have an ambiguous agent/private audience")
 
     def _prepare_isolated_sources(self) -> None:
         """Prepare private raw-source mount mappings.
@@ -1276,7 +1277,7 @@ class DockerRunner:
             argv += ["--cpus", str(self._limits.max_cpus)]
         if self._limits.max_pids is not None:
             argv += ["--pids-limit", str(self._limits.max_pids)]
-        elif cfg.agent_isolation:
+        elif self._isolation_active:
             argv += ["--pids-limit", str(DEFAULT_AGENT_ISOLATION_MAX_PIDS)]
 
         # Forward environment variables: explicit allowlist (optionally extended via env_passthrough_extra).
@@ -1294,12 +1295,12 @@ class DockerRunner:
             # rewrite (host alias / absolute mount path), not name-only.
             if env_var in ("LITELLM_BASE_URL", "LITELLM_COST_LOG", "SKILLS_REPO_PATH"):
                 continue
-            if cfg.agent_isolation and env_var == "HOME":
+            if self._isolation_active and env_var == "HOME":
                 continue
             if env_var in os.environ:
                 argv += ["--env", env_var]
 
-        if cfg.agent_isolation and (skills_repo := os.environ.get("SKILLS_REPO_PATH")):
+        if self._isolation_active and (skills_repo := os.environ.get("SKILLS_REPO_PATH")):
             resolved_skills = str(Path(skills_repo).expanduser().resolve())
             private_skills = self._host_to_private_paths.get(resolved_skills)
             if private_skills is not None:
@@ -1340,7 +1341,7 @@ class DockerRunner:
         # sandbox: Codex's Landlock-backed read-only / workspace-write sandboxes
         # can't initialize inside a container and otherwise fail writes silently.
         argv += ["--env", "CODER_EVAL_IN_CONTAINER=1"]
-        if cfg.agent_isolation:
+        if self._isolation_active:
             argv += ["--env", "CODER_EVAL_AGENT_ISOLATION=1"]
 
         # Hard-disable telemetry INSIDE the container. The app ships a baked-in
@@ -1375,7 +1376,7 @@ class DockerRunner:
         # doesn't exist or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT=1).
         if self._claude_mount_src is not None:
             host_claude_dir = Path.home() / ".claude"
-            claude_target = Path(AGENT_HOME) / ".claude" if cfg.agent_isolation else host_claude_dir
+            claude_target = Path(AGENT_HOME) / ".claude" if self._isolation_active else host_claude_dir
             argv += ["-v", f"{self._claude_mount_src}:{claude_target}"]
 
         for source, target in self._private_source_mounts:
@@ -1427,7 +1428,7 @@ class DockerRunner:
         from coder_eval.models import TemplateDirSource
 
         sandbox_cfg = self.rt.task.sandbox
-        if not cfg.agent_isolation:
+        if not self._isolation_active:
             for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
                 if isinstance(source, TemplateDirSource):
                     _auto_mount(source.path)
@@ -1437,7 +1438,7 @@ class DockerRunner:
         # could conceivably inject an absolute path that survives. Cover
         # that path so the in-container Orchestrator can read it.
         agent_cfg = self.rt.task.agent
-        if not cfg.agent_isolation and agent_cfg and agent_cfg.system_prompt_file:
+        if not self._isolation_active and agent_cfg and agent_cfg.system_prompt_file:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
         # reference.file / reference.directory: if a task ships absolute
@@ -1445,7 +1446,7 @@ class DockerRunner:
         # ``..``), they must be mounted explicitly. Relative paths under
         # task_dir are already covered by the symmetric task_dir mount.
         reference = self.rt.task.reference
-        if not cfg.agent_isolation and reference is not None:
+        if not self._isolation_active and reference is not None:
             _auto_mount(reference.file, dir_only=False)
             _auto_mount(reference.directory)
         for mount in cfg.extra_mounts:
@@ -1461,7 +1462,7 @@ class DockerRunner:
             # (assigned above, not task-authored), and that path is deliberately
             # in RESERVED_CONTAINER_DIRS. The assertion guards task/image-supplied
             # values, so exempt exactly the isolation-managed constant.
-            if not (cfg.agent_isolation and self._workspace_dir == CONTAINER_AGENT_WORK_DIR):
+            if not (self._isolation_active and self._workspace_dir == CONTAINER_AGENT_WORK_DIR):
                 _assert_workspace_not_reserved(self._workspace_dir)
             argv += ["-w", self._workspace_dir]
 

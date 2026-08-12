@@ -33,10 +33,9 @@ def _make_runner(run_dir: Path) -> DockerRunner:
         task_id="suri",
         description="t",
         initial_prompt="do",
-        # A concrete agent type is required now that docker.agent_isolation
-        # defaults to true: the isolation gate rejects a type with no verified
-        # UID-drop launch seam before the build runs, and this test covers
-        # build-failure observability rather than that gate.
+        # A concrete agent type keeps docker.agent_isolation (default true)
+        # active instead of downgrading with a warning before the build runs;
+        # this test covers build-failure observability, not that resolution.
         agent={"type": "claude-code"},
         sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(image="x:1", dockerfile_path="/df")),
         success_criteria=[FileExistsCriterion(description="c", path="out.txt")],

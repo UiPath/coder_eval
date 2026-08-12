@@ -198,9 +198,11 @@ class DockerDriverConfig(BaseModel):
     agent_isolation: bool = Field(
         default=True,
         description=(
-            "Run the evaluated agent under the image's dedicated unprivileged UID/GID and expose local plugins "
-            "only through manifest-verified bundles. Enabled by default. Set false only for temporary migration "
-            "of a trusted task; false is not a secure evaluation boundary."
+            "Run the evaluated agent under the image's dedicated unprivileged UID/GID, keeping grading material "
+            "out of reach of the agent identity. Best-effort: when a prerequisite is missing (agent type without "
+            "a UID-drop launch seam, an image without the isolation capability label, working_dir, or "
+            "extra_mounts), the run downgrades to the normal single-identity container with a warning instead of "
+            "failing. Set false to turn isolation off entirely; false is not a secure evaluation boundary."
         ),
     )
     working_dir: str | None = Field(
