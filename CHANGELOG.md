@@ -2,6 +2,80 @@
 
 <!-- version list -->
 
+## v0.9.6 (2026-08-11)
+
+### Bug Fixes
+
+- Code review fixes for evalboard path-to-ga stale tags and mature passes
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- Review round 2 — gate evalboard in CI, correct GPT-5.6 rates
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **ci**: Correct defects in the uipath runner migration
+  ([#86](https://github.com/UiPath/coder_eval/pull/86),
+  [`57556af`](https://github.com/UiPath/coder_eval/commit/57556af6e47bffcd5fbbb708b9f8b399cceea4c7))
+
+- **criteria**: Make glob path resolution literal-first and ignore-filtered
+  ([#65](https://github.com/UiPath/coder_eval/pull/65),
+  [`b3bba2b`](https://github.com/UiPath/coder_eval/commit/b3bba2b6c00e3772351b28bf63d5cde9e97b8e7e))
+
+- **criteria**: Split clustered short flags and keep negative numbers positional
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+- **evalboard**: 1/3 — drop de-tagged tasks and score only executed runs
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **evalboard**: Path-to-GA shows only still-tagged tasks, scored on runs that executed
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **evalboard**: Resync lib/pricing.ts with the authoritative pricing.py table
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **sandbox**: Close the remaining record_cli findings from #73
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+- **sandbox**: Repair record_cli defects found reviewing #73
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+- **sandbox**: Stop the recorder dir defeating the PLUGIN_TOOLS_DIR pin
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+### Chores
+
+- Change to centralized managed GitHub pool ([#86](https://github.com/UiPath/coder_eval/pull/86),
+  [`57556af`](https://github.com/UiPath/coder_eval/commit/57556af6e47bffcd5fbbb708b9f8b399cceea4c7))
+
+### Documentation
+
+- **harness**: Defer four TS-side evalboard invariants from the path-to-ga fix
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+### Features
+
+- **criteria**: Accept glob patterns in criterion path fields
+  ([#65](https://github.com/UiPath/coder_eval/pull/65),
+  [`b3bba2b`](https://github.com/UiPath/coder_eval/commit/b3bba2b6c00e3772351b28bf63d5cde9e97b8e7e))
+
+- **evalboard**: 2/3 — surface last-seen and maturity on the Path-to-GA table
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **sandbox**: Generate CLI recording shims via record_cli
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+
 ## v0.9.5 (2026-08-05)
 
 ### Bug Fixes
