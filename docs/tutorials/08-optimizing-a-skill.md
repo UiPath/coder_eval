@@ -7,6 +7,18 @@ The honest answer is usually "measure first, and often the answer is don't chang
 walkthrough is a real run against a real skill in this repository, reported with the numbers
 it actually produced — including the part where the first attempt measured nothing at all.
 
+!!! note "This is the activation track"
+
+    `/coder-eval:optimize-skill` has two tracks, and this page walks the first:
+    **activation** — the frontmatter `description`, measured with an activation suite, asking
+    *does the skill fire when it should?*
+
+    Its **execution** track improves the skill **body** instead, measured against an outcome
+    suite with real success criteria, asking *having fired, does it do the job?* That is a
+    different instrument for a different failure: `skill_triggered` scores engagement and is
+    completely blind to the quality of the work that follows. If your skill fires reliably
+    and then does the wrong thing, that is the track you want.
+
 **What you will do:** build an activation suite for `lint-tasks`, split it into tune and
 holdout rows, baseline it, read the confusion matrix, and decide whether to spend anything.
 For `lint-tasks` the answer turns out to be no — about 20 agent runs settle it. The suite

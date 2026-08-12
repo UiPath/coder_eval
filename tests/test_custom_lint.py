@@ -1673,8 +1673,39 @@ class TestPluginArtifacts:
             # the task's, so the round-slug dir is the arm's only skill source. Snapshot one
             # skill and every sibling criterion silently observes `no` in every arm.
             ("copied unchanged", "each arm's snapshot must include the sibling skills, not just the target"),
+            # The execution track measures the BODY, and an activation suite cannot grade a
+            # body — skill_triggered scores engagement only. Losing this collapses the two
+            # tracks onto one instrument that answers the wrong question.
+            ("wrong instrument", "the execution track must refuse to reuse an activation suite"),
+            # Inverse of the activation rule, and easy to "correct" into a bug: the body
+            # track NAMES the skill in the prompt to hold activation constant, so what
+            # varies is the body alone.
+            ("Name the skill in the prompt", "the execution track holds activation constant by naming the skill"),
+            # One variable per round. A body edit shipped alongside a description edit is
+            # unattributable, and the description change also moves activation.
+            ("Never run both tracks in one round", "tracks must not be combined in a single measurement"),
+            # A skill that cannot be model-invoked still has an optimizable body — routing
+            # to the execution track rather than stopping is the point of the two-track split.
+            ("route to the execution track", "disable-model-invocation must route to the body track, not hard-stop"),
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
+
+        # The two gates use DIFFERENT machinery, on purpose, and the reason is subtle enough
+        # that a well-meaning edit would unify them. Activation compares F1, which the pooled
+        # suite.json cannot report per replicate -> three invocations. Execution compares
+        # per-row weighted_score, which `paired_comparison` already computes correctly over
+        # replicates -> `--repeats 3` on exactly two variants. Collapsing either into the
+        # other silently swaps the instrument for one that cannot see the metric.
+        assert "primary instrument" in text, (
+            "optimize-skill no longer says the paired comparison is the PRIMARY instrument on "
+            "the execution track — it is only corroboration on the activation track, and the "
+            "difference is what makes each gate valid for its own metric"
+        )
+        assert "deliberate departure" in text, (
+            "optimize-skill no longer flags that the execution gate departs from the "
+            "activation gate on purpose — unlabelled, the two look like an inconsistency to "
+            "be tidied away"
+        )
 
         # Its sibling's real name. `/coder-eval:skill-check` is a dangling command, and three
         # steps plus several edge cases hand control back to check-skill.
