@@ -44,3 +44,10 @@ class TestEnvPassthroughExtra:
         extras = ["TOKEN_A", "TOKEN_B", "TOKEN_C"]
         cfg = DockerDriverConfig(env_passthrough_extra=extras)
         assert cfg.env_passthrough_extra == extras
+
+    def test_default_allowlist_forwards_codex_auth_and_routing(self):
+        """All CODEX_* routing vars forward by default - the Azure-routed endpoint
+        needs CODEX_API_VERSION or the in-container codex binary fails routing."""
+        cfg = DockerDriverConfig()
+        for var in ("CODEX_API_KEY", "CODEX_BASE_URL", "CODEX_MODEL", "CODEX_API_VERSION"):
+            assert var in cfg.env_passthrough

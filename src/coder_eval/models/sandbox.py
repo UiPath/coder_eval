@@ -257,10 +257,13 @@ class DockerDriverConfig(BaseModel):
             # binary falls back to a ChatGPT login that doesn't exist in the
             # container and auth fails. CODEX_API_KEY drives login_api_key;
             # CODEX_BASE_URL routes to a custom endpoint (e.g. gateway);
-            # CODEX_MODEL selects the model when agent.model is unset.
+            # CODEX_MODEL selects the model when agent.model is unset;
+            # CODEX_API_VERSION adds the api-version query the Azure-routed
+            # endpoint requires - without it routing fails before any tool call.
             "CODEX_API_KEY",
             "CODEX_BASE_URL",
             "CODEX_MODEL",
+            "CODEX_API_VERSION",
             # Antigravity agent auth/routing — the google-antigravity local harness
             # authenticates against the Gemini API with GEMINI_API_KEY; without it
             # the in-container harness has no credential and fails. ANTIGRAVITY_MODEL

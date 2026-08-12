@@ -226,6 +226,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         # for the harness's run_command tool — applied at spawn (see start()).
         self._env_path_prepend: list[str] = []
         self._drop_shim_dir: Path | None = None
+        self._drop_shim_wrapper: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -234,12 +235,74 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """Resolve the model: task ``agent.model`` > ``ANTIGRAVITY_MODEL`` > default."""
         return self.config.model or settings.antigravity_model or _DEFAULT_MODEL
 
-    def _stage_localharness_drop_shim(self) -> Path:
-        """Shadow localharness with a wrapper around the shared setpriv policy."""
+    @staticmethod
+    def _resolve_real_localharness() -> str:
+        """Resolve the REAL bundled localharness binary the way the SDK does.
 
-        real = shutil.which("localharness")
-        if real is None:
-            raise RuntimeError("agent isolation is enabled but localharness is not available on PATH")
+        The google-antigravity wheel ships the binary at
+        ``google/antigravity/bin/localharness[.exe]`` and the SDK resolves it via
+        importlib (``ANTIGRAVITY_HARNESS_PATH`` env, then distribution files, then
+        package resources, then PATH last) - so a bare ``shutil.which`` misses the
+        wheel-bundled binary entirely. Prefer the SDK's own resolver so the shim
+        wraps exactly the binary the SDK would launch; if that private symbol moves
+        in an SDK bump, replicate its importlib order rather than silently
+        regressing to a PATH-only lookup.
+        """
+        try:
+            from google.antigravity.connections.local.local_connection import (  # pyright: ignore[reportMissingImports]
+                _get_default_binary_path,
+            )
+        except ImportError:
+            pass
+        else:
+            try:
+                return str(_get_default_binary_path())
+            except Exception as e:
+                raise RuntimeError(
+                    "agent isolation is enabled but the SDK could not resolve the localharness binary"
+                ) from e
+
+        # Fallback: replicate the SDK resolver's importlib.metadata ->
+        # importlib.resources -> shutil.which order (see _get_default_binary_path
+        # in google.antigravity.connections.local.local_connection).
+        import importlib.metadata
+        import importlib.resources
+        import sys
+
+        with contextlib.suppress(importlib.metadata.PackageNotFoundError, ValueError, AttributeError):
+            dist = importlib.metadata.distribution("google-antigravity")
+            for f in dist.files or []:
+                if (
+                    str(f)
+                    .replace("\\", "/")
+                    .endswith(("google/antigravity/bin/localharness", "google/antigravity/bin/localharness.exe"))
+                ):
+                    candidate = os.path.abspath(str(f.locate()))
+                    if os.path.exists(candidate):
+                        return candidate
+        suffix = "bin/localharness.exe" if sys.platform == "win32" else "bin/localharness"
+        with contextlib.suppress(ImportError, AttributeError, KeyError):
+            candidate = str(importlib.resources.files("google.antigravity").joinpath(suffix))
+            if os.path.exists(candidate):
+                return candidate
+        if path := shutil.which("localharness"):
+            return path
+        raise RuntimeError(
+            "agent isolation is enabled but the localharness binary could not be resolved "
+            + "(checked the SDK resolver, the google-antigravity wheel, and PATH)"
+        )
+
+    def _stage_localharness_drop_shim(self) -> Path:
+        """Shadow localharness with a wrapper around the shared setpriv policy.
+
+        The shim dir is also prepended to PATH (belt and suspenders), but PATH
+        alone never intercepts the launch: the SDK checks
+        ``ANTIGRAVITY_HARNESS_PATH`` FIRST and resolves its wheel-bundled binary
+        via importlib BEFORE ever consulting PATH. The load-bearing seam is the
+        env var - ``_harness_spawn_guard`` points it at the staged wrapper
+        (tracked on ``self._drop_shim_wrapper``) for the spawn window.
+        """
+        real = self._resolve_real_localharness()
         shim_dir = Path(tempfile.mkdtemp(prefix="antigravity-drop-"))
         wrapper = shim_dir / "localharness"
         wrapper.write_text(
@@ -248,6 +311,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         )
         wrapper.chmod(0o555)
         self._drop_shim_dir = shim_dir
+        self._drop_shim_wrapper = wrapper
         return shim_dir
 
     def _resolve_skills_paths(self, plugin_tools_dir: str | None) -> list[str]:
@@ -418,6 +482,12 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         never affects the live harness. The lock is taken even when no prepend dirs
         were configured: a no-prepend spawn must still wait out any in-flight mutated-
         PATH window, or its harness would inherit another task's mock dirs.
+
+        Under agent isolation the same transient window also redirects ``HOME`` to
+        ``AGENT_HOME`` and points ``ANTIGRAVITY_HARNESS_PATH`` at the staged setpriv
+        wrapper - the env var the SDK's binary resolver consults FIRST, and the only
+        seam that intercepts the launch (its bundled binary resolves via importlib
+        before PATH is ever consulted). Both are restored in ``finally``.
         """
         async with _harness_spawn_lock():
             # Latch the flag BEFORE the scrub: the pop below removes
@@ -432,11 +502,18 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
             original_path = os.environ.get(path_key)
             original_home = os.environ.get("HOME")
+            original_harness_path = os.environ.get("ANTIGRAVITY_HARNESS_PATH")
+            # The SDK checks ANTIGRAVITY_HARNESS_PATH FIRST and PATH last (the
+            # wheel-bundled binary resolves via importlib before PATH), so the env
+            # var is the only seam that reliably launches the setpriv wrapper.
+            harness_wrapper = self._drop_shim_wrapper if isolation_active else None
             if self._env_path_prepend:
                 os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original_path or ""])
                 self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
             if isolation_active:
                 os.environ["HOME"] = AGENT_HOME
+            if harness_wrapper is not None:
+                os.environ["ANTIGRAVITY_HARNESS_PATH"] = str(harness_wrapper)
             try:
                 yield
             finally:
@@ -451,6 +528,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         os.environ.pop("HOME", None)
                     else:
                         os.environ["HOME"] = original_home
+                if harness_wrapper is not None:
+                    if original_harness_path is None:
+                        os.environ.pop("ANTIGRAVITY_HARNESS_PATH", None)
+                    else:
+                        os.environ["ANTIGRAVITY_HARNESS_PATH"] = original_harness_path
 
     async def communicate(
         self,
@@ -626,6 +708,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             with contextlib.suppress(Exception):
                 await stack.aclose()
         shim_dir, self._drop_shim_dir = self._drop_shim_dir, None
+        self._drop_shim_wrapper = None
         if shim_dir is not None:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(shutil.rmtree, shim_dir, ignore_errors=True)

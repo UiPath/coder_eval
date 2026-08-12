@@ -691,3 +691,84 @@ async def test_start_stores_env_path_prepend(monkeypatch, tmp_path):
     assert captured["path"] == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
     # ...and PATH was restored once the spawn completed.
     assert os.environ["PATH"] == "/parent/bin"
+
+
+# --- agent isolation: localharness drop shim + ANTIGRAVITY_HARNESS_PATH seam ------
+#
+# The SDK resolves its harness binary via ANTIGRAVITY_HARNESS_PATH first, then
+# importlib (the wheel-bundled binary), and shutil.which only LAST - so the shim
+# must resolve the REAL binary through the SDK resolver (a PATH-only lookup misses
+# the bundled binary entirely) and the spawn guard must point the env var, not
+# just PATH, at the setpriv wrapper. These stub the resolver via sys.modules so
+# no google-antigravity install is needed.
+
+
+def test_stage_drop_shim_resolves_via_sdk_resolver_not_path(monkeypatch, tmp_path):
+    """The shim wraps the resolver-resolved binary even when shutil.which finds nothing."""
+    import shlex
+    import shutil
+    import sys
+    from types import ModuleType
+
+    from coder_eval.agents import antigravity_agent
+    from coder_eval.models import CONTAINER_DROP_SHIM
+
+    monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
+    fake_real = tmp_path / "real-localharness"
+    fake_real.write_text("#!/bin/sh\n", encoding="utf-8")
+    local_connection = ModuleType("google.antigravity.connections.local.local_connection")
+    local_connection._get_default_binary_path = lambda: str(fake_real)
+    monkeypatch.setitem(sys.modules, "google.antigravity.connections.local.local_connection", local_connection)
+    # The wheel-bundled binary is NOT on PATH - which() must not be load-bearing.
+    monkeypatch.setattr(antigravity_agent.shutil, "which", lambda *_a, **_k: None)
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    shim_dir = agent._stage_localharness_drop_shim()
+    try:
+        wrapper = shim_dir / "localharness"
+        assert wrapper.is_file()
+        assert os.access(wrapper, os.X_OK)
+        if os.name == "posix":
+            assert wrapper.stat().st_mode & 0o777 == 0o555
+        expected = f'#!/usr/bin/env bash\nexec {CONTAINER_DROP_SHIM} {shlex.quote(str(fake_real))} "$@"\n'
+        assert wrapper.read_text(encoding="utf-8") == expected
+        assert agent._drop_shim_dir == shim_dir
+        assert agent._drop_shim_wrapper == wrapper
+    finally:
+        wrapper.chmod(0o755)  # the 0o555 wrapper is read-only on Windows; unlock for rmtree
+        shutil.rmtree(shim_dir, ignore_errors=True)
+
+
+async def test_harness_spawn_guard_sets_and_restores_antigravity_harness_path(monkeypatch, tmp_path):
+    """Under isolation the guard points ANTIGRAVITY_HARNESS_PATH at the staged wrapper.
+
+    The env var is the load-bearing seam: the SDK checks it FIRST and resolves its
+    bundled binary via importlib before ever consulting PATH, so a PATH-only shadow
+    never intercepts the launch. Prior value restored (or removed) on exit.
+    """
+    monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
+    monkeypatch.setenv("ANTIGRAVITY_HARNESS_PATH", "/prior/harness")
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    wrapper = tmp_path / "localharness"
+    agent._drop_shim_wrapper = wrapper
+
+    async with agent._harness_spawn_guard():
+        assert os.environ["ANTIGRAVITY_HARNESS_PATH"] == str(wrapper)
+    assert os.environ["ANTIGRAVITY_HARNESS_PATH"] == "/prior/harness"
+
+    monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH")
+    async with agent._harness_spawn_guard():
+        assert os.environ["ANTIGRAVITY_HARNESS_PATH"] == str(wrapper)
+    assert "ANTIGRAVITY_HARNESS_PATH" not in os.environ
+
+
+async def test_harness_spawn_guard_leaves_harness_path_alone_without_isolation(monkeypatch, tmp_path):
+    """The non-isolated path keeps relying on the SDK's own default resolution."""
+    monkeypatch.delenv("CODER_EVAL_AGENT_ISOLATION", raising=False)
+    monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent._drop_shim_wrapper = tmp_path / "localharness"  # staged, but isolation is off
+
+    async with agent._harness_spawn_guard():
+        assert "ANTIGRAVITY_HARNESS_PATH" not in os.environ
+    assert "ANTIGRAVITY_HARNESS_PATH" not in os.environ
