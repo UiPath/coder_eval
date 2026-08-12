@@ -743,6 +743,32 @@ class TestModelValidation:
         with pytest.raises(ValidationError, match="positional must not be empty"):
             CliCalledCriterion(description="d", log=LOG, verb="ixp projects list", positional=[])
 
+    def test_an_undeclared_value_flag_before_a_positional_shifts_it(self, sandbox_with_log):
+        """`positional` depends on `value_flags` being complete, ordering-sensitively.
+
+        An undeclared flag is a switch, so its value stays non-flag and takes the slot
+        the criterion named. Deliberate — guessing let `--yes proj-1` swallow the project
+        and pass a delete guard — but it costs a correct run when the flag comes first.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(
+            sandbox_dir,
+            [_call(["ixp", "projects", "get", "--folder", "Finance", "proj-1"])],
+        )
+        undeclared = CliCalledCriterion(
+            description="read the project", log=LOG, verb="ixp projects get", positional=["proj-1"]
+        )
+        declared = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb="ixp projects get",
+            positional=["proj-1"],
+            value_flags=["output", "folder"],
+        )
+        checker = SuccessChecker(sandbox)
+        assert checker.check(undeclared).score == 0.0
+        assert checker.check(declared).score == 1.0
+
     def test_unknown_field_rejected(self):
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             CliCalledCriterion(description="d", log=LOG, verb="v", pattern="oops")

@@ -946,8 +946,7 @@ Do **not** shorten the verb instead. `verb: "ixp projects"` matches all 14 of it
 
 **The argument tail stays open.** `positional` is a prefix too, so `verb: "ixp projects list"` with `positional: ["proj-1"]` also matches `ixp projects list proj-1 dummy`. To require a specific tail, name every argument in it. `positional: []` is rejected — it would assert nothing.
 
-- **Declare value-bearing flags.** An undeclared flag is read as a switch, so its *value* stays among the positionals: `--folder Finance` turns an otherwise exactly-correct invocation into `0.0` unless `folder` appears in `value_flags` or `flags`.
-- **Not on a negative guard.** Tightening suits a positive assertion. Under `max_count: 0` it works the other way — one stray argument stops the match, so the forbidden call slips past.
+**Declare value-bearing flags when you use `positional`.** An undeclared flag is treated as a switch, so its value stays among the non-flag arguments and shifts the ones you named. `get proj-1 --folder Finance` matches `positional: ["proj-1"]`, but `get --folder Finance proj-1` does **not** — `Finance` takes the first slot. Add `folder` to `value_flags` (or name it in `flags`) to fix it. Resolving the ambiguity this way is deliberate: guessing that an unknown flag consumes the next token let `--yes proj-1` bind `yes=proj-1` and swallow the project name, which made a `max_count: 0` delete guard pass on the delete it forbade.
 
 `log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
 
