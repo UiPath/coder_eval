@@ -124,11 +124,38 @@ Load-time errors, with their message shapes:
 | Two rows share an id | `Duplicate dataset row id for task '<task_id>': '<x>'` |
 | Both/neither `rows` and `paths` | `Dataset must specify either 'paths' or 'rows'` / `... only one of ...` |
 | `paths: []` | `Dataset.paths must be a non-empty list` |
+| `--split X` on a labelled dataset with no `X` rows | `Dataset for task '<task_id>' has no rows in split 'X' (split_field='split'); labelled splits present: ['holdout', 'tune']` |
 
-## Sampling a subset
+## Selecting a subset
 
-A full dataset is expensive. Two independent mechanisms cut it down, and **`--sample` wins whenever
-both apply**:
+A full dataset is expensive. Three mechanisms cut it down, in two stages: **`--split` filters
+first**, then **one** of the two samplers runs over what survives, with **`--sample` winning
+whenever both samplers apply**.
+
+**Stage 1 — the filter.** `--split` is not in that win-order; it is orthogonal, and always applies
+first.
+
+**`--split <name>` (CLI only)** — keep only rows whose `dataset.split_field` value (default field:
+`split`) equals `<name>`. Exact string match, no case normalization; non-string values compare via
+`str()`.
+
+Three behaviours are worth knowing before you rely on it:
+
+- **A task whose rows carry no split label at all passes through unfiltered.** `--split` is global to
+  the invocation, so an unlabelled dataset sitting beside a labelled one in the same run must not
+  fail. A row counts as unlabelled when the field is absent, `null`, or `""`.
+- **Partial labelling drops the unlabelled rows.** If only some rows carry a label, `--split tune`
+  keeps just the `tune` rows — the unlabelled ones are excluded rather than folded in. That is the
+  safe direction (an unlabelled row never leaks into a named split), but during an incremental
+  migration it silently *shrinks* the suite, which moves the aggregate metrics `suite_thresholds`
+  gates on. Finish labelling before you compare two runs.
+- **A labelled task with no row in the requested split is skipped, not fatal.** Expansion raises,
+  naming the splits that do exist, and the run records it in `run.json`'s `skipped_tasks` and carries
+  on with whatever else resolved. So a mistyped selector (`--split holdou`) produces a run of **zero
+  tasks that still exits 0** — check the skipped-task count, not just the exit code, when a split run
+  comes back suspiciously clean.
+
+**Stage 2 — the samplers**, over whatever survived the filter:
 
 1. **`--sample N` (CLI only)** — a flat uniform-random N rows over the whole dataset. Fixed seed, so
    the same N rows come back every run: a reproducible, cheap smoke flavor of a big suite. Unlike a
@@ -154,6 +181,32 @@ both apply**:
     identical rows in both arms on separate invocations). Leave it unset for recurring suites where
     coverage over time matters more than run-to-run comparability. Note the contrast with
     `--sample N`, which is fixed-seed and reproducible by default.
+
+### Tune and holdout splits
+
+Label each row with a split and you can develop against one half and confirm on the other, which is
+what keeps a measured improvement from being an artifact of the rows you tuned on:
+
+```jsonl
+{"id": "pos-1", "prompt": "review my task files", "expected_skill": "lint-tasks", "split": "tune"}
+{"id": "pos-2", "prompt": "are my evals any good?", "expected_skill": "lint-tasks", "split": "holdout"}
+```
+
+```bash
+coder-eval run tasks/skills/activation.yaml --split tune      # iterate here
+coder-eval run tasks/skills/activation.yaml --split holdout   # confirm here, once
+```
+
+**The filter runs before either sampler, and that ordering is load-bearing.** Sampling first would
+leave an unpredictable — possibly zero — number of rows per split, so the two arms of the comparison
+would no longer be the same size or the same rows. Filter-then-sample means `--split tune --sample 8`
+is always drawn from the tune rows alone — at most eight of them, and all of them if `tune` holds
+fewer than eight.
+
+Two consequences worth planning for. A split **halves each side of the suite**, so a dataset sized
+for a single one-shot measurement is undersized once split — budget roughly double the rows you
+would otherwise want. And a holdout is only worth what its independence buys: consult it to confirm
+a decision already made on `tune`, not to choose between candidates, or it becomes a second tune set.
 
 ## Suite-level scoring
 

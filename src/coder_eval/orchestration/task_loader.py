@@ -374,6 +374,7 @@ def expand_dataset(
     task_file_dir: Path,
     max_rows: int | None = None,
     sample_per_stratum: int | None = None,
+    split: str | None = None,
 ) -> list[TaskDefinition]:
     """Fan out a task with ``dataset:`` into one TaskDefinition per row.
 
@@ -402,13 +403,24 @@ def expand_dataset(
             Lets a runner cap a stratified dataset without editing the task YAML
             (the nightly activation suite uses this). Ignored when ``max_rows``
             is set. When None, falls back to ``dataset.sample_per_stratum``.
+        split: Optional CLI row filter (``--split``) — keep only rows whose
+            ``dataset.split_field`` value equals this. Applied BEFORE either
+            sampler, so a sampled split still has a predictable size. A row is
+            unlabelled when the field is absent, ``None``, or ``""``. A task
+            whose rows are all unlabelled passes through unfiltered (``--split``
+            is global to the invocation, so an unlabelled task in a multi-task
+            run must not fail); partial labelling keeps the matching rows and
+            drops the unlabelled ones; a *labelled* task with no matching row
+            raises. Note the raise is caught by ``resolve_all_tasks`` into
+            ``skipped_tasks``, so at the run level a mistyped split name is a
+            skipped suite rather than an aborted run.
 
     Returns:
         Expanded list of TaskDefinitions. Length is 1 when dataset is None.
 
     Raises:
-        ValueError: Empty dataset, duplicate row ids, missing id_field, or
-            malformed row id.
+        ValueError: Empty dataset, duplicate row ids, missing id_field,
+            malformed row id, or a labelled dataset with no row in ``split``.
         FileNotFoundError: Dataset path does not exist.
     """
     if task.dataset is None:
@@ -417,6 +429,26 @@ def expand_dataset(
     rows = _load_dataset_rows(task.dataset, task_file_dir)
     if not rows:
         raise ValueError(f"Dataset for task '{task.task_id}' is empty")
+
+    # --split filters BEFORE either sampler below: sampling first would leave an
+    # unpredictable (possibly zero) number of rows per split, destroying the
+    # tune/holdout comparison the split exists to protect.
+    if split is not None:
+        field = task.dataset.split_field
+        # Unlabelled means the key is absent, null, or "" — the same "no value here"
+        # convention _stratified_sample applies to a missing field, extended to the
+        # explicit null a half-labelled JSONL carries. Any other value, including a
+        # falsy 0, is a real label and compares via str() (also as _stratified_sample does).
+        labelled = [r for r in rows if r.get(field) not in (None, "")]
+        if labelled:
+            rows = [r for r in labelled if str(r[field]) == split]
+            if not rows:
+                raise ValueError(
+                    f"Dataset for task '{task.task_id}' has no rows in split {split!r} "
+                    + f"(split_field={field!r}); labelled splits present: "
+                    + f"{sorted({str(r[field]) for r in labelled})}"
+                )
+        # else: no row in this task carries a split label -> --split does not apply here.
 
     # Row selection precedence:
     #   1. CLI --sample (max_rows): flat uniform-random N over the whole dataset.

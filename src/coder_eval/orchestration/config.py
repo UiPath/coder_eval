@@ -86,6 +86,14 @@ class BatchRunConfig(BaseModel):
             "stratified dataset without editing the task YAML. Ignored when max_rows is set."
         ),
     )
+    split: str | None = Field(
+        default=None,
+        description=(
+            "CLI --split: keep only dataset rows whose dataset.split_field value matches. "
+            "Applied before max_rows / sample_per_stratum. Tasks whose rows carry no split "
+            "label are unaffected."
+        ),
+    )
 
     # Replicate count override
     repeats: int | None = Field(

@@ -284,6 +284,146 @@ class TestExpandDatasetStratifiedSample:
         assert ids_flag == ids_yaml
 
 
+class TestExpandDatasetSplit:
+    """CLI --split: keep only rows whose dataset.split_field value matches.
+
+    The filter runs BEFORE either sampler, so a sampled split still has a
+    predictable size — sampling first would leave an unpredictable (possibly
+    zero) number of rows per split and silently destroy the tune/holdout
+    comparison the split exists to protect.
+    """
+
+    @staticmethod
+    def _split_rows() -> list[dict[str, Any]]:
+        return [
+            {"id": "t1", "prompt": "p", "expected": "e", "split": "tune"},
+            {"id": "t2", "prompt": "p", "expected": "e", "split": "tune"},
+            {"id": "t3", "prompt": "p", "expected": "e", "split": "tune"},
+            {"id": "h1", "prompt": "p", "expected": "e", "split": "holdout"},
+            {"id": "h2", "prompt": "p", "expected": "e", "split": "holdout"},
+        ]
+
+    def test_keeps_only_matching_rows(self, tmp_path: Path) -> None:
+        task = _make_task_with_dataset(rows=self._split_rows())
+        expanded = expand_dataset(task, tmp_path, split="tune")
+        assert [t.row_id for t in expanded] == ["t1", "t2", "t3"]
+        # task_id / row_id rewriting is unchanged by the filter.
+        assert [t.task_id for t in expanded] == ["suite/t1", "suite/t2", "suite/t3"]
+        assert all(t.suite_id == "suite" for t in expanded)
+
+    def test_unlabelled_dataset_passes_through(self, tmp_path: Path) -> None:
+        # --split is global to the invocation. A run containing several
+        # dataset-backed tasks would otherwise fail every task that does not use
+        # splits, so a task with NO labelled row at all is left whole.
+        rows = [{"id": f"r{i}", "prompt": "p", "expected": "e"} for i in range(4)]
+        expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="tune")
+        assert [t.row_id for t in expanded] == ["r0", "r1", "r2", "r3"]
+
+    def test_partially_labelled_excludes_unlabelled_rows(self, tmp_path: Path) -> None:
+        # Safe direction: an unlabelled row never leaks into a named split.
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": "tune"},
+            {"id": "b", "prompt": "p", "expected": "e"},
+            {"id": "c", "prompt": "p", "expected": "e", "split": ""},
+        ]
+        expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="tune")
+        assert [t.row_id for t in expanded] == ["a"]
+
+    def test_labelled_but_unmatched_raises_listing_available_splits(self, tmp_path: Path) -> None:
+        task = _make_task_with_dataset(rows=self._split_rows())
+        with pytest.raises(ValueError, match="no rows in split 'Tune'") as exc:
+            expand_dataset(task, tmp_path, split="Tune")
+        # Exact match, no case normalization — the message names what does exist.
+        assert "'holdout', 'tune'" in str(exc.value)
+
+    def test_explicit_null_split_counts_as_unlabelled(self, tmp_path: Path) -> None:
+        # `"split": null` is the natural JSONL shape for "not assigned yet", and it
+        # matches the null -> "" convention row substitution already uses. It must
+        # NOT read as the label "None" (which `str(row.get(field, ""))` would make
+        # truthy), or a half-migrated dataset fails instead of passing through and
+        # the error advertises a phantom split.
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": None},
+            {"id": "b", "prompt": "p", "expected": "e", "split": None},
+        ]
+        expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="tune")
+        assert [t.row_id for t in expanded] == ["a", "b"]
+
+    def test_null_split_rows_are_excluded_from_a_named_split(self, tmp_path: Path) -> None:
+        # The partial-labelling half of the same rule: a null-split row is unlabelled,
+        # so it is dropped from a named split rather than joining a "None" split.
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": "tune"},
+            {"id": "b", "prompt": "p", "expected": "e", "split": None},
+        ]
+        expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="tune")
+        assert [t.row_id for t in expanded] == ["a"]
+
+    def test_zero_is_a_real_split_label(self, tmp_path: Path) -> None:
+        # Guards the null fix against an `or ""` implementation, which would make the
+        # falsy-but-present value 0 unlabelled. Only None/"" mean "no label".
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": 0},
+            {"id": "b", "prompt": "p", "expected": "e", "split": 1},
+        ]
+        assert [t.row_id for t in expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="0")] == ["a"]
+
+    def test_non_string_split_values_compare_by_str(self, tmp_path: Path) -> None:
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": 1},
+            {"id": "b", "prompt": "p", "expected": "e", "split": 2},
+        ]
+        expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="1")
+        assert [t.row_id for t in expanded] == ["a"]
+
+    def test_custom_split_field(self, tmp_path: Path) -> None:
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "fold": "train"},
+            {"id": "b", "prompt": "p", "expected": "e", "fold": "test"},
+        ]
+        task = _make_task_with_dataset(rows=rows, split_field="fold")
+        assert [t.row_id for t in expand_dataset(task, tmp_path, split="test")] == ["b"]
+
+    def test_filter_runs_before_max_rows(self, tmp_path: Path) -> None:
+        # Ordering guard: every sampled row must still carry the requested split.
+        rows = self._split_rows()
+        task = _make_task_with_dataset(rows=rows)
+        expanded = expand_dataset(task, tmp_path, max_rows=2, split="tune")
+        assert len(expanded) == 2
+        assert {t.row_id for t in expanded} <= {"t1", "t2", "t3"}
+
+    def test_filter_runs_before_sample_per_stratum(self, tmp_path: Path) -> None:
+        # Same assertion on the stratified path: strata are computed WITHIN the
+        # filtered set, so a holdout row can never be drawn under --split tune.
+        rows = [
+            {"id": "t1", "prompt": "p", "expected": "e", "split": "tune", "expected_skill": "a"},
+            {"id": "t2", "prompt": "p", "expected": "e", "split": "tune", "expected_skill": "a"},
+            {"id": "t3", "prompt": "p", "expected": "e", "split": "tune", "expected_skill": "b"},
+            {"id": "h1", "prompt": "p", "expected": "e", "split": "holdout", "expected_skill": "a"},
+            {"id": "h2", "prompt": "p", "expected": "e", "split": "holdout", "expected_skill": "b"},
+        ]
+        task = _make_task_with_dataset(rows=rows, sample_per_stratum=1, sample_seed=0)
+        expanded = expand_dataset(task, tmp_path, split="tune")
+        assert len(expanded) == 2  # one per stratum, within tune only
+        assert {t.row_id for t in expanded} <= {"t1", "t2", "t3"}
+
+    def test_split_none_is_byte_identical_to_today(self, tmp_path: Path) -> None:
+        # No-regression guard: with no --split, a dataset carrying mixed split
+        # values expands exactly as it did before the filter existed.
+        task = _make_task_with_dataset(rows=self._split_rows())
+        assert [t.row_id for t in expand_dataset(task, tmp_path)] == ["t1", "t2", "t3", "h1", "h2"]
+        assert [t.row_id for t in expand_dataset(task, tmp_path, split=None)] == ["t1", "t2", "t3", "h1", "h2"]
+
+    def test_task_without_dataset_unaffected(self, tmp_path: Path) -> None:
+        task = TaskDefinition(**_base_task_dict())
+        assert expand_dataset(task, tmp_path, split="tune") == [task]
+
+    def test_split_field_defaults_to_split(self) -> None:
+        task = _make_task_with_dataset(rows=[{"id": "a"}])
+        assert task.dataset is not None
+        assert task.dataset.split_field == "split"
+
+
 class TestExpandDatasetJsonl:
     def test_loads_jsonl(self, tmp_path: Path) -> None:
         ds_path = tmp_path / "rows.jsonl"
@@ -513,6 +653,98 @@ class TestResolveAllTasksIntegration:
         assert len(resolved) == 1
         # --sample is now a random subset (count == max_rows), not a first-N slice.
         assert resolved[0].task.task_id in {"suite/row-a", "suite/row-b"}
+
+    def test_split_applies(self, tmp_path: Path) -> None:
+        # BatchRunConfig.split threads CLI -> config -> expand_dataset with no
+        # merge-layer participation (dataset expansion precedes variant resolution).
+        data = {
+            "task_id": "suite",
+            "description": "Test",
+            "initial_prompt": "Prompt: ${row.prompt}",
+            "sandbox": {"driver": "tempdir"},
+            "success_criteria": [{"type": "file_exists", "path": "out.txt", "description": "File"}],
+            "dataset": {
+                "rows": [
+                    {"id": "row-a", "prompt": "a", "split": "tune"},
+                    {"id": "row-b", "prompt": "b", "split": "holdout"},
+                ]
+            },
+        }
+        task_file = tmp_path / "suite.yaml"
+        task_file.write_text(yaml.safe_dump(data))
+        default_exp, experiment = self._make_experiment(["v1"])
+        config = BatchRunConfig(run_dir=tmp_path / "runs", split="tune")
+
+        resolved, _ = resolve_all_tasks(
+            task_files=[task_file],
+            experiment=experiment,
+            default_experiment=default_exp,
+            config=config,
+        )
+        assert [rt.task.task_id for rt in resolved] == ["suite/row-a"]
+
+    def _write_split_suite(self, tmp_path: Path, task_id: str, splits: list[str | None]) -> Path:
+        rows: list[dict[str, Any]] = []
+        for i, split in enumerate(splits):
+            row: dict[str, Any] = {"id": f"row-{i}", "prompt": str(i)}
+            if split is not None:
+                row["split"] = split
+            rows.append(row)
+        data = {
+            "task_id": task_id,
+            "description": "Test",
+            "initial_prompt": "Prompt: ${row.prompt}",
+            "sandbox": {"driver": "tempdir"},
+            "success_criteria": [{"type": "file_exists", "path": "out.txt", "description": "File"}],
+            "dataset": {"rows": rows},
+        }
+        p = tmp_path / f"{task_id}.yaml"
+        p.write_text(yaml.safe_dump(data))
+        return p
+
+    def test_split_leaves_an_unlabelled_sibling_suite_whole(self, tmp_path: Path) -> None:
+        # The actual reason unlabelled datasets pass through: --split is global to the
+        # invocation, so a run mixing a split-labelled suite with an unlabelled one must
+        # filter the first and leave the second entirely alone. Asserting this at the
+        # resolver (not on one isolated expand_dataset call) is what proves the claim.
+        labelled = self._write_split_suite(tmp_path, "labelled", ["tune", "holdout"])
+        unlabelled = self._write_split_suite(tmp_path, "plain", [None, None, None])
+        default_exp, experiment = self._make_experiment(["v1"])
+
+        resolved, skipped = resolve_all_tasks(
+            task_files=[labelled, unlabelled],
+            experiment=experiment,
+            default_experiment=default_exp,
+            config=BatchRunConfig(run_dir=tmp_path / "runs", split="tune"),
+        )
+        assert not skipped
+        assert sorted(rt.task.task_id for rt in resolved) == [
+            "labelled/row-0",  # the one tune row
+            "plain/row-0",  # unlabelled suite survives whole
+            "plain/row-1",
+            "plain/row-2",
+        ]
+
+    def test_unmatched_split_demotes_the_suite_to_a_skipped_task(self, tmp_path: Path) -> None:
+        # A labelled suite with no row in the requested split raises out of
+        # expand_dataset, but resolve_all_tasks catches ValueError and records a
+        # SkippedTask rather than aborting — so the run reports it in run.json's
+        # skipped_tasks instead of failing. Pinned because the reason string is the
+        # ONLY place a mistyped --split selector surfaces: nothing else distinguishes
+        # it from an empty run.
+        task_file = self._write_split_suite(tmp_path, "labelled", ["tune", "holdout"])
+        default_exp, experiment = self._make_experiment(["v1"])
+
+        resolved, skipped = resolve_all_tasks(
+            task_files=[task_file],
+            experiment=experiment,
+            default_experiment=default_exp,
+            config=BatchRunConfig(run_dir=tmp_path / "runs", split="holdou"),
+        )
+        assert resolved == []
+        assert len(skipped) == 1
+        assert "no rows in split 'holdou'" in skipped[0].reason
+        assert "'holdout', 'tune'" in skipped[0].reason
 
     def test_non_dataset_task_unaffected(self, tmp_path: Path) -> None:
         task_file = self._write_task_yaml(tmp_path, "plain", with_dataset=False)
