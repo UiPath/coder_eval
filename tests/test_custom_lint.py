@@ -1364,9 +1364,7 @@ class TestPluginArtifacts:
                 f"{name} no longer says the plugin `path` must be a PLUGIN ROOT — a bare "
                 "directory of skill directories loads nothing and scores recall 0.0"
             )
-            assert "skills/" in text, (
-                f"{name} no longer shows the required `<path>/skills/<name>/SKILL.md` layout"
-            )
+            assert "skills/" in text, f"{name} no longer shows the required `<path>/skills/<name>/SKILL.md` layout"
         # The two skill-facing surfaces must also name the trap by example, since the
         # wrong form is the intuitive one.
         for name in ("activation template", "check-skill"):
