@@ -198,6 +198,14 @@ invoked as `plugin:skill` — the checker strips the namespace before comparing.
 namespaced value here silently scores zero recall on every row, which reads exactly
 like a broken skill.
 
+**Because matching is by bare name, it cannot survive a name collision.** Two skills called
+`init` — one from a plugin, one built in — are the same string to the criterion, so it will
+credit whichever fires as though it were the one under test. Check the name is unique across
+everything installed before trusting a result (`/context` and `/doctor` list the active set).
+A collision does not error; it measures the wrong skill. If one exists, say so rather than
+reporting the number — renaming the skill, or measuring where the collision is absent, are
+the only honest fixes.
+
 For criterion fields beyond this template, read
 `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md`.
 

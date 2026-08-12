@@ -462,13 +462,30 @@ And be precise about what Stage B proves. The replicate spread measures agent st
 over a **fixed** set of rows. It does not correct for the survivors having been chosen on
 those same rows in Stage A. Stage B bounds run noise; **the holdout is what bounds the fit.**
 
-## One caveat about the sandbox
+## Two caveats about what else is in the sandbox
 
-One distractor row engaged a skill named `review` — not from this plugin at all, but from
-the operator's own installed skills. Activation is a competition for a shared listing
-budget, so whatever else is installed on the machine running the suite is part of the
-experiment. If you need a clean-room measurement, isolate the environment; if you want a
-realistic one, note what was installed alongside your results.
+**The machine's other skills are part of the experiment.** One distractor row engaged a
+skill named `review` — not from this plugin at all, but from the operator's own install.
+Activation is a competition for a shared listing budget, so whatever else is installed
+competes too. If you need a clean-room measurement, isolate the environment; if you want a
+realistic one, record what was installed alongside your results.
+
+**And `skill_name` matching is by bare name, which can collide.** The criterion strips any
+`plugin:` prefix before comparing, so `coder-eval:init` and a differently-owned `init` are
+indistinguishable to it. That is not hypothetical here: Claude Code ships its own unscoped
+`init` skill, and the setup rows in this suite engage *that* one. A criterion written as
+
+```yaml
+- type: "skill_triggered"
+  skill_name: "init"
+```
+
+would have quietly scored a different skill's activation as though it were the plugin's.
+
+Before trusting a `skill_triggered` result, check that the skill's bare name is unique among
+everything installed — `/context` and `/doctor` both list the active set. A colliding name
+does not error; it just measures the wrong thing. Where a collision exists, the honest
+options are to rename the skill, or to measure it somewhere the collision is absent.
 
 ## What to take away
 

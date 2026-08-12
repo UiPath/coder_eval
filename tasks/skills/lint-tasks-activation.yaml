@@ -73,10 +73,17 @@ success_criteria:
     skill_name: "analyze"
     expected_skill: "${row.expected_skill}"
 
-  # NOTE on the two setup rows (`hard-3`, `hard-6`): the skill that owns that work, `init`,
-  # sets `disable-model-invocation: true` and so can never be engaged on its own. Labelling
-  # those rows `expected_skill: "init"` would assert something unsatisfiable by
-  # construction — a criterion that cannot pass, which is exactly what `lint-tasks` flags.
-  # They are labelled `""` instead: the question they actually ask is whether a
-  # MODEL-INVOKABLE sibling wrongly claims setup requests, and `""` encodes that directly,
-  # scoring against every criterion above. (It does: `task` fires on both.)
+  # NOTE on the two setup rows (`hard-3`, `hard-6`) and the absent `init` criterion.
+  # Two independent reasons not to write one:
+  #
+  # 1. coder-eval's `init` sets `disable-model-invocation: true`, so the model will not
+  #    reach for it on its own. `expected_skill: "init"` would assert something the run
+  #    cannot satisfy — a criterion that can never pass, exactly what `lint-tasks` flags.
+  # 2. `skill_name` is matched on the BARE name (the checker strips any `plugin:` prefix),
+  #    and Claude Code ships its own unscoped `init` skill. A bare-name criterion cannot
+  #    tell the two apart, so it would silently score a different skill's activation.
+  #    Observed live: these rows engage that other `init`.
+  #
+  # Labelled `""` instead, which asks the question that has an answer: does a
+  # model-invokable sibling wrongly claim setup requests? It scores against every criterion
+  # above, and `task` does misfire here intermittently.
