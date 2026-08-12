@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import subprocess
 from pathlib import Path
@@ -218,6 +219,197 @@ def test_isolation_downgrades_for_unsupported_docker_config(
 
     assert runner._isolation_active is False
     assert reason_fragment in caplog.text
+
+
+def test_isolation_downgrades_for_unresolved_system_prompt_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    task = TaskDefinition(
+        task_id="stale-prompt-file",
+        description="test",
+        initial_prompt="work",
+        agent=ClaudeCodeAgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file="/abs/prompt.md"),
+        sandbox=SandboxConfig(driver="docker", docker=DockerDriverConfig(agent_isolation=True)),
+        success_criteria=[RunCommandCriterion(description="dynamic", command="python check.py")],
+    )
+    runner = _make_runner(tmp_path, task)
+
+    with caplog.at_level(logging.WARNING):
+        runner._resolve_agent_isolation()
+
+    assert runner._isolation_active is False
+    assert "system_prompt_file" in caplog.text
+
+
+def _make_argv_runner(
+    tmp_path: Path,
+    *,
+    agent_isolation: bool,
+    env_passthrough_extra: list[str] | None = None,
+    template_sources: list[object] | None = None,
+) -> DockerRunner:
+    task = TaskDefinition(
+        task_id="argv-probe",
+        description="test",
+        initial_prompt="work",
+        agent=ClaudeCodeAgentConfig(type=AgentKind.CLAUDE_CODE),
+        sandbox=SandboxConfig(
+            driver="docker",
+            template_sources=template_sources,
+            docker=DockerDriverConfig(
+                agent_isolation=agent_isolation,
+                env_passthrough_extra=env_passthrough_extra or [],
+            ),
+        ),
+        success_criteria=[RunCommandCriterion(description="dynamic", command="python check.py")],
+    )
+    task_dir = tmp_path / "task"
+    task_dir.mkdir(exist_ok=True)
+    rt = MagicMock(task=task, task_file=task_dir / "task.yaml", run_dir=tmp_path / "run")
+    return DockerRunner(rt)
+
+
+def _argv(runner: DockerRunner, tmp_path: Path) -> list[str]:
+    return runner._build_argv(tmp_path / "in", tmp_path / "out", container_name="probe", image="img:1")
+
+
+def test_skills_repo_path_forwards_name_only_without_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A downgraded / non-isolated run forwards the allowlisted var like any other."""
+
+    monkeypatch.setenv("SKILLS_REPO_PATH", str(tmp_path / "skills"))
+    runner = _make_argv_runner(tmp_path, agent_isolation=False, env_passthrough_extra=["SKILLS_REPO_PATH"])
+
+    argv = _argv(runner, tmp_path)
+
+    assert "SKILLS_REPO_PATH" in argv
+    assert not [a for a in argv if a.startswith("SKILLS_REPO_PATH=")]
+
+
+def test_skills_repo_path_forwards_name_only_when_isolated_but_unstaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated run without a staged skills checkout (plugin-path pattern): host value passes through."""
+
+    monkeypatch.setenv("SKILLS_REPO_PATH", str(tmp_path / "skills"))
+    runner = _make_argv_runner(tmp_path, agent_isolation=True, env_passthrough_extra=["SKILLS_REPO_PATH"])
+    runner._prepare_isolated_sources()
+
+    argv = _argv(runner, tmp_path)
+
+    assert "SKILLS_REPO_PATH" in argv
+
+
+def test_skills_repo_path_value_rewritten_when_staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from coder_eval.models import TemplateDirSource
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    monkeypatch.setenv("SKILLS_REPO_PATH", str(skills_dir))
+    runner = _make_argv_runner(
+        tmp_path,
+        agent_isolation=True,
+        env_passthrough_extra=["SKILLS_REPO_PATH"],
+        template_sources=[TemplateDirSource(type="template_dir", path=str(skills_dir))],
+    )
+    runner._prepare_isolated_sources()
+
+    argv = _argv(runner, tmp_path)
+
+    assert "SKILLS_REPO_PATH=/opt/coder-eval/grader/templates/source-0" in argv
+    assert "SKILLS_REPO_PATH" not in argv  # name-only form must not double-forward
+
+
+def test_claude_mount_target_is_posix_under_isolation(tmp_path: Path) -> None:
+    runner = _make_argv_runner(tmp_path, agent_isolation=True)
+    runner._claude_mount_src = tmp_path / "claude-copy"
+
+    argv = _argv(runner, tmp_path)
+
+    claude_mounts = [a for a in argv if a.endswith("/.claude")]
+    assert claude_mounts and claude_mounts[0].endswith(f":{AGENT_HOME}/.claude")
+    assert "\\" not in claude_mounts[0].split(":")[-1]
+
+
+def test_task_dir_mount_stays_symmetric_without_isolation(tmp_path: Path) -> None:
+    runner = _make_argv_runner(tmp_path, agent_isolation=False)
+    host_task_dir = runner.rt.task_file.parent.resolve()
+
+    argv = _argv(runner, tmp_path)
+
+    assert f"{host_task_dir}:{host_task_dir}:ro" in argv
+    assert argv[argv.index("--task-dir") + 1] == str(host_task_dir)
+
+
+def test_task_dir_mount_relocated_under_isolation(tmp_path: Path) -> None:
+    runner = _make_argv_runner(tmp_path, agent_isolation=True)
+    runner._prepare_isolated_sources()
+    host_task_dir = runner.rt.task_file.parent.resolve()
+
+    argv = _argv(runner, tmp_path)
+
+    assert f"{host_task_dir}:/opt/coder-eval/grader/task_dir:ro" in argv
+    assert argv[argv.index("--task-dir") + 1] == "/opt/coder-eval/grader/task_dir"
+
+
+def test_build_sdk_env_isolation_exempt_keeps_evaluator_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+    from coder_eval.models import DirectRoute
+
+    monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
+
+    env_dropped, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute())
+    env_exempt, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), isolation_exempt=True)
+
+    assert env_dropped["HOME"] == AGENT_HOME
+    assert env_exempt.get("HOME") != AGENT_HOME
+
+
+def test_agent_pids_skips_zombie_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from coder_eval.isolation import agent_identity
+
+    class FakeStatus:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            return self._text
+
+    class FakeEntry:
+        def __init__(self, pid: int, uid: int, state: str) -> None:
+            self.name = str(pid)
+            self._status = FakeStatus(f"Name:\tx\nState:\t{state} (state)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+
+        def __truediv__(self, part: str) -> FakeStatus:
+            assert part == "status"
+            return self._status
+
+    class FakeProc:
+        def iterdir(self):
+            yield FakeEntry(41, AGENT_UID, "S")
+            yield FakeEntry(42, AGENT_UID, "Z")
+            yield FakeEntry(43, 0, "S")
+
+    monkeypatch.setattr(agent_identity, "Path", lambda p: FakeProc())
+
+    assert agent_identity._agent_pids() == [41]
+
+
+async def test_harness_spawn_guard_redirects_home_under_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The isolation flag must be latched BEFORE the scrub pops it from os.environ."""
+
+    from coder_eval.agents.antigravity_agent import AntigravityAgent
+
+    monkeypatch.setenv("CODER_EVAL_AGENT_ISOLATION", "1")
+    monkeypatch.setenv("HOME", "/root")
+    agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY))
+    agent._env_path_prepend = []
+
+    async with agent._harness_spawn_guard():
+        assert os.environ["HOME"] == AGENT_HOME
+        assert "CODER_EVAL_AGENT_ISOLATION" not in os.environ
+
+    assert os.environ["HOME"] == "/root"
+    assert os.environ["CODER_EVAL_AGENT_ISOLATION"] == "1"
 
 
 def test_explicitly_disabled_isolation_stays_disabled(tmp_path: Path) -> None:

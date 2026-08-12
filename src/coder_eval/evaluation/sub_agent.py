@@ -203,6 +203,11 @@ class SubAgentRunner:
                 self._agent_config,
                 route=self._route,
                 extra_mcp_servers=self._extra_mcp_servers,
+                # The judge is a trusted grader: it must keep evaluator
+                # privileges (no UID-drop shim, no agent-HOME redirect) so it
+                # can read the root-owned sandbox copy it grades. It runs
+                # after the evaluated agent's identity has been reaped.
+                isolation_exempt=True,
             )
             logger.info(
                 "sub_agent: starting (model=%s, max_turns=%s, allowed_tools=%s)",

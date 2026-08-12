@@ -420,6 +420,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         PATH window, or its harness would inherit another task's mock dirs.
         """
         async with _harness_spawn_lock():
+            # Latch the flag BEFORE the scrub: the pop below removes
+            # CODER_EVAL_AGENT_ISOLATION itself, so a later
+            # agent_isolation_enabled() call would always read False.
+            isolation_active = agent_isolation_enabled()
             scrubbed = {
                 name: os.environ.pop(name)
                 for name in list(os.environ)
@@ -431,7 +435,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             if self._env_path_prepend:
                 os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original_path or ""])
                 self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
-            if agent_isolation_enabled():
+            if isolation_active:
                 os.environ["HOME"] = AGENT_HOME
             try:
                 yield
@@ -442,7 +446,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         os.environ.pop(path_key, None)
                     else:
                         os.environ[path_key] = original_path
-                if agent_isolation_enabled():
+                if isolation_active:
                     if original_home is None:
                         os.environ.pop("HOME", None)
                     else:

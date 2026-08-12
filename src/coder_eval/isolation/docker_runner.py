@@ -730,6 +730,11 @@ class DockerRunner:
             self._downgrade_isolation("docker.working_dir has no UID-drop support yet")
         elif self._docker_config.extra_mounts:
             self._downgrade_isolation("extra_mounts have an ambiguous agent/private audience")
+        elif self.rt.task.agent and self.rt.task.agent.system_prompt_file:
+            # Normally inlined into system_prompt by load_task / experiment
+            # resolution; a surviving path is the defensive case the
+            # non-isolated branch handles by auto-mounting it.
+            self._downgrade_isolation("system_prompt_file was not resolved to inline system_prompt")
 
     def _prepare_isolated_sources(self) -> None:
         """Prepare private raw-source mount mappings.
@@ -745,12 +750,10 @@ class DockerRunner:
         task_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
         if task_dir is not None:
             self._host_to_private_paths[str(task_dir)] = CONTAINER_TASK_DIR
-
-        if self.rt.task.agent and self.rt.task.agent.system_prompt_file:
-            raise DockerRunError(
-                "docker.agent_isolation requires system_prompt_file to be resolved to inline system_prompt "
-                + "before container staging"
-            )
+            # Alias the unresolved textual form too: staged-YAML strings may
+            # carry a symlinked prefix (macOS /tmp -> /private/tmp) that the
+            # resolved key would never match.
+            self._host_to_private_paths.setdefault(str(self.rt.task_file.parent), CONTAINER_TASK_DIR)
 
         from coder_eval.models import TemplateDirSource
 
@@ -758,8 +761,8 @@ class DockerRunner:
         for source in self.rt.task.sandbox.template_sources or []:
             if not isinstance(source, TemplateDirSource):
                 continue
-            host_path = Path(source.path).resolve()
-            if task_dir is not None and (host_path == task_dir or task_dir in host_path.parents):
+            host_path = Path(source.path)
+            if task_dir is not None and (host_path.resolve() == task_dir or task_dir in host_path.resolve().parents):
                 continue
             self._register_private_mount(host_path, f"/opt/coder-eval/grader/templates/source-{template_index}")
             template_index += 1
@@ -771,24 +774,29 @@ class DockerRunner:
                     Path(reference.directory), "/opt/coder-eval/grader/references/directory"
                 )
             if reference.file:
-                reference_file = Path(reference.file).resolve()
                 self._register_external_private_path(
-                    reference_file.parent, "/opt/coder-eval/grader/references/file-parent"
+                    Path(reference.file).parent, "/opt/coder-eval/grader/references/file-parent"
                 )
 
     def _register_external_private_path(self, source: Path, target: str) -> None:
-        source = source.resolve()
         task_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
-        if task_dir is not None and (source == task_dir or task_dir in source.parents):
+        resolved = source.resolve()
+        if task_dir is not None and (resolved == task_dir or task_dir in resolved.parents):
             return
         self._register_private_mount(source, target)
 
     def _register_private_mount(self, source: Path, target: str) -> None:
+        # The rewrite map keys on BOTH the resolved and the raw textual form:
+        # staged-YAML strings usually match the raw form, while the mount and
+        # dedup use the resolved one (symlinked prefixes differ between them).
+        raw_key = str(source)
         source = source.resolve()
         key = str(source)
         if key in self._host_to_private_paths:
             return
         self._host_to_private_paths[key] = target
+        if raw_key != key:
+            self._host_to_private_paths.setdefault(raw_key, target)
         self._private_source_mounts.append((source, target))
 
     def _rewrite_task_paths(self, payload: dict[str, object]) -> dict[str, object]:
@@ -1289,24 +1297,33 @@ class DockerRunner:
         # here exactly like every other allowlisted var. A flag that only mutated in-process
         # Settings would be dropped at the container boundary and the in-container Settings
         # would silently default to DIRECT — downgrading the judge (and agent) route.
+        # SKILLS_REPO_PATH forwards name-only like any other allowlisted var,
+        # EXCEPT when isolation privately staged the checkout (template source):
+        # then the value is rewritten to the staged container path below. In a
+        # downgraded or plugin-path run the host value passes through, so the
+        # in-container orchestrator can expand $SKILLS_REPO_PATH plugin paths
+        # against the auto-mounted host-path plugin dir. The agent subprocess
+        # itself never sees the variable (scrub_agent_env_overrides).
+        skills_repo_private: str | None = None
+        if self._isolation_active and (skills_repo := os.environ.get("SKILLS_REPO_PATH")):
+            resolved_skills = str(Path(skills_repo).expanduser().resolve())
+            skills_repo_private = self._host_to_private_paths.get(resolved_skills)
+
         merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
         for env_var in merged_allowlist:
             # LITELLM_BASE_URL / LITELLM_COST_LOG are forwarded below with a value
             # rewrite (host alias / absolute mount path), not name-only.
-            if env_var in ("LITELLM_BASE_URL", "LITELLM_COST_LOG", "SKILLS_REPO_PATH"):
+            if env_var in ("LITELLM_BASE_URL", "LITELLM_COST_LOG"):
+                continue
+            if env_var == "SKILLS_REPO_PATH" and skills_repo_private is not None:
                 continue
             if self._isolation_active and env_var == "HOME":
                 continue
             if env_var in os.environ:
                 argv += ["--env", env_var]
 
-        if self._isolation_active and (skills_repo := os.environ.get("SKILLS_REPO_PATH")):
-            resolved_skills = str(Path(skills_repo).expanduser().resolve())
-            private_skills = self._host_to_private_paths.get(resolved_skills)
-            if private_skills is not None:
-                argv += ["--env", f"SKILLS_REPO_PATH={private_skills}"]
-            else:
-                logger.debug("Not forwarding unstaged SKILLS_REPO_PATH into protected container: %s", resolved_skills)
+        if skills_repo_private is not None:
+            argv += ["--env", f"SKILLS_REPO_PATH={skills_repo_private}"]
 
         # LITELLM_BASE_URL points at a proxy on the HOST. A bridge-network container
         # can't reach the host's loopback, so rewrite localhost/127.0.0.1 to the
@@ -1365,7 +1382,12 @@ class DockerRunner:
         host_task_dir: Path | None = None
         if self.rt.task_file:
             host_task_dir = self.rt.task_file.parent.resolve()
-            argv += ["-v", f"{host_task_dir}:{CONTAINER_TASK_DIR}:ro"]
+            # Isolated runs relocate the task dir below the root-only grader
+            # tree (the staged YAML is path-rewritten to match). Non-isolated
+            # runs keep the pre-isolation symmetric host-path mount, because
+            # their staged YAML still carries the host paths verbatim.
+            task_dir_target = CONTAINER_TASK_DIR if self._isolation_active else host_task_dir
+            argv += ["-v", f"{host_task_dir}:{task_dir_target}:ro"]
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1376,7 +1398,9 @@ class DockerRunner:
         # doesn't exist or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT=1).
         if self._claude_mount_src is not None:
             host_claude_dir = Path.home() / ".claude"
-            claude_target = Path(AGENT_HOME) / ".claude" if self._isolation_active else host_claude_dir
+            # Container-side path: keep it a plain POSIX string. Path() would
+            # render backslashes on a Windows host and break `docker run -v`.
+            claude_target = f"{AGENT_HOME}/.claude" if self._isolation_active else str(host_claude_dir)
             argv += ["-v", f"{self._claude_mount_src}:{claude_target}"]
 
         for source, target in self._private_source_mounts:
@@ -1473,7 +1497,7 @@ class DockerRunner:
             argv += ["-v"]
         argv += ["--output", str(CONTAINER_OUTPUT_DIR)]
         if host_task_dir is not None:
-            argv += ["--task-dir", str(CONTAINER_TASK_DIR)]
+            argv += ["--task-dir", str(CONTAINER_TASK_DIR if self._isolation_active else host_task_dir)]
         return argv
 
 

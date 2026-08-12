@@ -671,6 +671,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         instance_name: str = "coder",
         extra_mcp_servers: dict[str, Any] | None = None,
         cost_log_tags: dict[str, str] | None = None,
+        isolation_exempt: bool = False,
     ):
         """Initialize the Claude Code agent.
 
@@ -693,9 +694,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 per turn) stamped into ``ANTHROPIC_CUSTOM_HEADERS`` so a proxy-side
                 cost callback can attribute each call's real cost back to this run.
                 None on Direct/Bedrock.
+            isolation_exempt: True only for trusted grader-phase instances
+                (the agent_judge sub-agent). Skips the UID-drop CLI shim and
+                the agent-HOME redirect that the container's isolation env
+                flag otherwise applies, so the judge keeps evaluator
+                privileges over its root-owned sandbox copy. Never expose
+                this to task YAML.
         """
         self.config = config
         self.route = route or DirectRoute()
+        self._isolation_exempt = isolation_exempt
         self._extra_mcp_servers = extra_mcp_servers or {}
         # Correlation headers stamped on every SDK->proxy request (LiteLLM route
         # only), so a proxy-side cost-logging callback can join each call's real
@@ -749,6 +757,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
         cost_log_tags: dict[str, str] | None = None,
+        isolation_exempt: bool = False,
     ) -> tuple[dict[str, str], str | None]:
         """Build SDK environment variables and resolve effective model for the given route.
 
@@ -771,7 +780,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         base_env: dict[str, str] = scrub_agent_env_overrides()
         if path := os.environ.get("PATH"):
             base_env["PATH"] = path
-        if agent_isolation_enabled():
+        if agent_isolation_enabled() and not isolation_exempt:
             base_env["HOME"] = AGENT_HOME
 
         if path_prepend:
@@ -1170,6 +1179,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             path_prepend=self._env_path_prepend,
             plugin_tools_dir=self._plugin_tools_dir,
             cost_log_tags=cost_log_tags,
+            isolation_exempt=self._isolation_exempt,
         )
         effective_model = self._resolve_effective_model(self.config.model, env, route_model)
 
@@ -1207,7 +1217,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             # The SDK accepts a single CLI executable path. The baked wrapper
             # invokes the real Claude binary through the same setpriv policy as
             # the other backends (UID/GID drop, no capabilities, no_new_privs).
-            cli_path=CONTAINER_CLAUDE_SHIM if agent_isolation_enabled() else None,
+            cli_path=(CONTAINER_CLAUDE_SHIM if agent_isolation_enabled() and not self._isolation_exempt else None),
             **self.config.sdk_options,
         )
 

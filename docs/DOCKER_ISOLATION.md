@@ -38,7 +38,9 @@ Both build `coder-eval-agent:<pkg-version>` and tag it `:latest`.
 
 `sandbox.docker.agent_isolation` defaults to `true`. The container harness and grader remain root, while every evaluated Claude, Codex, or Antigravity subprocess runs as `agent:agent` (`2000:2000`).
 
-Isolation is **best-effort**: when a prerequisite is missing, the run downgrades to the normal single-identity container instead of failing. The downgrade conditions are an agent type without a verified UID-drop launch seam, an image without the `uid-gid-v1` capability label, `docker.working_dir`, and `docker.extra_mounts`. A downgraded run logs one WARNING line ("Running WITHOUT agent isolation") naming the reason — check the task log when the boundary matters. `agent_isolation: false` turns isolation off without a warning.
+Isolation is **best-effort**: when a prerequisite is missing, the run downgrades to the normal single-identity container instead of failing. The downgrade conditions are an agent type without a verified UID-drop launch seam, an image without the `uid-gid-v1` capability label, `docker.working_dir`, `docker.extra_mounts`, and an `agent.system_prompt_file` that survived resolution. A downgraded run logs one WARNING line ("Running WITHOUT agent isolation") naming the reason — check the task log when the boundary matters. `agent_isolation: false` turns isolation off without a warning.
+
+The `agent_judge` criterion's sub-agent is a trusted grader, not an evaluated agent: it runs with evaluator privileges (no UID drop) after the evaluated agent's identity has been stopped and reaped.
 
 The agent launcher clears inheritable, ambient, and bounding capabilities and sets `no_new_privs`. Generated work is placed in `/work/agent`. Hidden task data, results, raw task/plugin/reference/template sources, and grader inputs live below root-only `/opt/coder-eval/grader`. Raw source bind mounts remain read-only and are never chmod/chowned; only disposable staging copies and the generated workspace are changed.
 

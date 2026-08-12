@@ -80,6 +80,13 @@ def _agent_pids() -> list[int]:
             uids = [int(value) for value in uid_line.split()[1:]]
         except (OSError, StopIteration, ValueError):
             continue
+        state_line = next((line for line in status_lines if line.startswith("State:")), "")
+        if state_line.split()[1:2] == ["Z"]:
+            # A zombie keeps its Uid: line until reaped, cannot act, and
+            # SIGKILL cannot remove it -- the container's --init reaper (or
+            # the parent) collects it. Counting it would fail finalization
+            # over a process that is already dead.
+            continue
         if AGENT_UID in uids:
             pids.append(int(entry.name))
     return pids
