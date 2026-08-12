@@ -8,9 +8,12 @@ walkthrough is a real run against a real skill in this repository, reported with
 it actually produced — including the part where the first attempt measured nothing at all.
 
 **What you will do:** build an activation suite for `lint-tasks`, split it into tune and
-holdout rows, baseline it, read the confusion matrix, and decide. About 20 agent runs on
-Sonnet if the baseline settles the question, as it does here; several hundred if it does not
-and you run the three A/B stages.
+holdout rows, baseline it, read the confusion matrix, and decide whether to spend anything.
+For `lint-tasks` the answer turns out to be no — about 20 agent runs settle it. The suite
+then points at a sibling that *does* have headroom, `analyze`, and the full three-stage A/B
+runs against that: roughly 290 further runs, ending in a promotion.
+
+All of it on Sonnet. Never Opus for a suite this size.
 
 **Prerequisites:** the `coder-eval` CLI, the plugin installed, and credentials for the
 `claude-code` agent. Start with [Your first evaluation](01-first-evaluation.md) if you have
@@ -236,19 +239,78 @@ something misfired; these say **where the request went**, which is the differenc
 
 An earlier pair of runs showed something else: on both *"Set up coder-eval for this
 repository"* and *"Get evaluations going in this project from scratch"*, the `task` skill
-fired — apparently annexing setup work — dropping its precision to 0.667 on tune and 0.500
-on holdout. It reproduced on **both splits**, which is normally the signal that a finding is
-real.
+fired — apparently annexing setup work — dropping its precision to 0.667 and 0.500. It
+reproduced on **both splits**, which is normally the signal that a finding is real.
 
-It did not survive a third run. The table above shows `task` at precision 1.000, on
-byte-identical prompts: `expected_skill` is a dataset label the criterion reads and the
-agent never sees, so nothing about the rows changed between those runs.
+Running the same tune split three more times settled it. The row fires **two times in
+three**, on byte-identical prompts (`expected_skill` is a dataset label the criterion reads
+and the agent never sees, so nothing about the rows changed):
 
-**That is the whole reason the promotion gate demands non-overlapping replicate ranges.**
-A single run — or even two agreeing runs — can show a clean, plausible, entirely
-reproducible-looking effect that is just variance. Had this been a candidate description
-rather than an incumbent's quirk, one run would have "proved" an improvement worth shipping.
-Report what replicates; treat anything else as a hypothesis.
+```
+hard-3   expected=(distractor)   ['task', 'task', '-']    <-- UNSTABLE
+```
+
+So the effect is real but intermittent, and the two runs that agreed were luck, not
+evidence. **That is the whole reason the promotion gate demands non-overlapping replicate
+ranges.** Had this been a candidate description rather than an incumbent's quirk, those two
+agreeing runs would have "proved" an improvement worth shipping. Report what replicates;
+treat anything else as a hypothesis.
+
+Note what the same three runs said about `analyze`:
+
+```
+an-1     expected=analyze   ['analyze', 'analyze', 'analyze']
+hard-2   expected=analyze   ['-', '-', '-']
+```
+
+Recall **0.500 in all three runs**, precision 1.000 in all three. Perfectly stable, one row
+consistently missed, no over-claiming. That is a hypothesis worth spending on — which is
+where the rest of this tutorial goes.
+
+## Optimizing the skill that actually had headroom
+
+`lint-tasks` had nothing to fix. `analyze` did, so the loop ran for real against it. The
+hypothesis, phrased as a claim about specific rows: **the description never names
+regression or comparison between runs**, so requests about things getting *worse* find
+nothing to match.
+
+Three candidates, one per hypothesis, each differing from the incumbent only in `analyze`'s
+frontmatter `description`, each a full seven-skill snapshot:
+
+| Candidate | Hypothesis |
+| --- | --- |
+| `a-regression` | Name regression directly: *"what regressed or got worse since a previous run"* |
+| `b-results` | Users say "results" and "scores"; the description only says "run" |
+| `c-symptom` | Lead the trigger clause with symptoms rather than the operation |
+
+### Stage A — triage (68 runs)
+
+| Arm | analyze recall | precision | F1 | completion |
+| --- | --- | --- | --- | --- |
+| incumbent | 0.500 | 1.000 | 0.667 | 1.000 |
+| `a-regression` | 0.750 | 1.000 | **0.857** | 1.000 |
+| `c-symptom` | 0.750 | 1.000 | **0.857** | 1.000 |
+| `b-results` | 0.667 | 1.000 | 0.800 | **0.941** |
+
+`b-results` looks competitive and **is not comparable**: it lost a row to an error, so its
+recall was computed over 3 analyze rows instead of 4. Check `completion_rate` before ranking
+anything. The two clean leaders went through to the gate.
+
+### Stage B — the gate (153 runs, three separate invocations)
+
+| Arm | run 1 | run 2 | run 3 | Range |
+| --- | --- | --- | --- | --- |
+| incumbent | 0.667 | *(row excluded)* | 0.667 | [0.667, 0.667] |
+| `c-symptom` | 0.857 | 0.857 | 0.857 | [0.857, 0.857] |
+| **`a-regression`** | **1.000** | **1.000** | **1.000** | **[1.000, 1.000]** |
+
+Both candidates clear `min(candidate) > max(incumbent)` with no overlap, and every arm held
+`lint-tasks` and `task` at recall 1.000 — no sibling regression. `a-regression` wins
+outright: it turns the one consistently-missed row into a consistent hit without touching
+precision.
+
+One incumbent invocation dropped a row and was excluded from the gate rather than averaged
+in. A gate computed over a shifting denominator is not a gate.
 
 ## Step 7 — Confirm on the holdout
 
@@ -271,15 +333,73 @@ two splits, three sittings — it never missed a positive and never took a distr
 about as much as a suite this size can say, and it is enough to conclude the trim did no
 harm.
 
-The holdout has no `analyze`-owned row, so that column is blank here rather than zero;
-`analyze`'s recall gap lives in the tune split alone. Worth fixing in the suite before the
-next round, since a finding you can only observe on the half you tune against is the half
-you cannot confirm.
+### Stage C, and a holdout that could not answer the question
 
-## What the three stages would have looked like
+The winner went to holdout as a **two-variant** experiment at `--repeats 3`, which is the one
+place `--repeats` is correct: `paired_comparison` fires only for exactly two variants and
+averages replicates per row before pairing.
 
-They did not run here, because the incumbent was already perfect. When your baseline *does*
-show failures, the loop continues like this:
+Both arms scored `analyze` F1 **1.000**, and the paired block was a flat tie:
+
+```
+**Paired mean diff (incumbent - a-regression)**: +0.000 [95% CI +0.000, +0.000], p = 1.000
+```
+
+That is not a confirmation. It is an **uninformative holdout**: its `analyze` rows happened
+to be ones the incumbent already caught, because every regression-phrased row had been put
+in the tune half. A holdout can only confirm a fix for a failure mode it actually contains.
+
+The remedy is the one `optimize-skill` prescribes — author **fresh holdout rows** that
+exercise the failure mode, at promotion time, when you know what needs confirming:
+
+```jsonl
+{"id": "an-6", "expected_skill": "analyze", "split": "holdout", "prompt": "Which of my tasks got worse after I switched the model?"}
+{"id": "an-7", "expected_skill": "analyze", "split": "holdout", "prompt": "Something in the suite degraded this week. Find out what."}
+```
+
+Write them as requests a real user would send, and commit to whatever they say — rows
+authored to flatter a candidate confirm nothing.
+
+### And then the infrastructure lied to us
+
+The re-run returned a result that looked publishable and was worthless:
+
+```
+**Paired mean diff (incumbent - a-regression)**: +0.162 [95% CI +0.011, +0.312], d = 0.72, p = 0.038
+```
+
+Read the sign: that says the **incumbent** was better, significantly. It is an artifact.
+`completion_rate` gives it away — `a-regression` lost 11 of 33 rows, the incumbent 6:
+
+```
+a-regression   rows_total=33 rows_excluded=11 completion=0.667
+incumbent      rows_total=33 rows_excluded= 6 completion=0.818
+```
+
+The excluded rows were not timeouts. They carried:
+
+```
+Communication with agent failed: Claude Code returned an error result
+Details: You've hit your org's monthly spend limit
+```
+
+A billing limit reached mid-run removed rows from one arm more than the other, and the
+paired test faithfully reported the resulting difference at *p* = 0.038. **A p-value
+computed over an eroded, asymmetric sample is not evidence of anything.** This is why
+`completion_rate` is a gateable metric and why the first thing to read in a rollup is the
+denominator, not the effect.
+
+So the honest state of this round: **`a-regression` is gated on tune and unconfirmed on
+holdout.** It was promoted anyway, on a deliberate and stated judgement — the tune gate was
+decisive and stable (1.000 across three invocations against a rock-steady 0.667), precision
+never moved off 1.000, no sibling regressed, and the edit is purely additive vocabulary
+aimed at a deterministic miss. That is a defensible call, but it is *weaker* than a
+confirmed one, and writing it down as such is the point.
+
+## The three stages, and when each applies
+
+They did not run for `lint-tasks`, because that incumbent was already perfect. They did run
+for `analyze`, above. In summary:
 
 | Stage | What it does | Replicates |
 | --- | --- | --- |
@@ -313,13 +433,21 @@ realistic one, note what was installed alongside your results.
 
 - **Check that recall is non-zero before you believe any low score.** A misconfigured path
   looks exactly like a bad description and costs the same to produce.
-- **A ceiling baseline means stop.** The most valuable thing this loop does is decline to
-  spend money it cannot convert into information.
-- **Report negative results plainly.** "Three candidates, none separated beyond run-to-run
-  noise" is a real finding. So is "the trim was safe."
-- **In a multi-skill repository, look at the sibling matrix.** That is where the headroom
-  usually is — and a request that goes to the wrong skill tells you more than one that goes
-  nowhere.
+- **Read the denominator before the effect.** `completion_rate` invalidated two separate
+  comparisons here — one candidate ranked on 3 rows instead of 4, and a *p* = 0.038 result
+  that was a billing limit eroding one arm harder than the other. An effect measured over a
+  sample that moved is not an effect.
+- **A ceiling baseline means stop.** `lint-tasks` was perfect, so the loop declined to spend
+  224 runs chasing a number the gate makes unreachable. Then it found the real headroom next
+  door.
+- **Two agreeing runs are not evidence.** The `task` misfire reproduced on both splits and
+  still turned out to be 2-in-3 variance. Only replicates told the difference.
+- **A holdout only confirms failure modes it contains.** The first one here was a flat tie
+  because every regression-phrased row sat in the tune half. Fresh rows, authored to test the
+  hypothesis rather than to flatter the candidate, are the fix.
+- **Say which claims are weaker than others.** `a-regression` shipped gated-but-unconfirmed,
+  and the tutorial says so. A promotion you cannot fully justify is worth making sometimes —
+  it is never worth overstating.
 
 ## Next
 
