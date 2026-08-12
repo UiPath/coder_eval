@@ -11,7 +11,8 @@ it actually produced — including the part where the first attempt measured not
 holdout rows, baseline it, read the confusion matrix, and decide whether to spend anything.
 For `lint-tasks` the answer turns out to be no — about 20 agent runs settle it. The suite
 then points at a sibling that *does* have headroom, `analyze`, and the full three-stage A/B
-runs against that: roughly 290 further runs, ending in a promotion.
+runs against that: roughly 350 further runs, ending in a promotion that survives the
+holdout.
 
 All of it on Sonnet. Never Opus for a suite this size.
 
@@ -386,15 +387,55 @@ Details: You've hit your org's monthly spend limit
 A billing limit reached mid-run removed rows from one arm more than the other, and the
 paired test faithfully reported the resulting difference at *p* = 0.038. **A p-value
 computed over an eroded, asymmetric sample is not evidence of anything.** This is why
-`completion_rate` is a gateable metric and why the first thing to read in a rollup is the
-denominator, not the effect.
+`completion_rate` is a gateable metric, and why the first thing to read in a rollup is the
+denominator, not the effect. The run was discarded, not interpreted.
 
-So the honest state of this round: **`a-regression` is gated on tune and unconfirmed on
-holdout.** It was promoted anyway, on a deliberate and stated judgement — the tune gate was
-decisive and stable (1.000 across three invocations against a rock-steady 0.667), precision
-never moved off 1.000, no sibling regressed, and the edit is purely additive vocabulary
-aimed at a deterministic miss. That is a defensible call, but it is *weaker* than a
-confirmed one, and writing it down as such is the point.
+### Stage C, run properly
+
+With budget restored, the same experiment ran again over the 11-row holdout. Erosion this
+time was one row against `a-regression` and none against the incumbent — near-symmetric, and
+pointing *against* the candidate, so any positive result is conservative:
+
+```
+a-regression   rows_total=33 rows_excluded=1 completion=0.970
+incumbent      rows_total=33 rows_excluded=0 completion=1.000
+```
+
+| Arm | analyze recall | precision | **F1** | siblings |
+| --- | --- | --- | --- | --- |
+| incumbent | 0.833 | 1.000 | **0.909** | `task` precision 0.750 |
+| **`a-regression`** | **1.000** | **1.000** | **1.000** | all 1.000 |
+
+**The direction reproduces on rows the candidate was never tuned against**, which is what
+Stage C is required to show. One row separates them — and it is one of the *fresh* rows
+authored at promotion time:
+
+```
+an-6  "Which of my tasks got worse after I switched the model?"
+        incumbent      ['analyze', '-', '-']              1 of 3
+        a-regression   ['analyze', 'analyze', 'analyze']  3 of 3
+```
+
+Every other holdout row is identical across the arms. The incumbent also shows the
+intermittent `task` misfire on the setup row once more (precision 0.750), consistent with
+the 2-in-3 rate measured earlier.
+
+**And the paired comparison says nothing:**
+
+```
+**Paired mean diff (incumbent - a-regression)**: +0.000 [95% CI -0.088, +0.088], d = 0.00, p = 1.000
+```
+
+That is not a contradiction — it is the documented limit of that block. It pairs per-row
+`weighted_score`, which averages **all three** criteria on every row, so a gain confined to
+one criterion on one row out of eleven is diluted below what 11 pairs can resolve. F1 is the
+promotion metric; the paired block corroborates direction when it can and, at this suite
+size, it cannot. Report both, and do not let a null paired result overturn a metric it was
+never measuring.
+
+**Verdict: promote.** Gated on tune (1.000 vs 0.667, non-overlapping, three invocations),
+confirmed in direction on holdout (1.000 vs 0.909), no sibling regression anywhere, and
+precision never off 1.000 in any run of either stage.
 
 ## The three stages, and when each applies
 
@@ -445,9 +486,10 @@ realistic one, note what was installed alongside your results.
 - **A holdout only confirms failure modes it contains.** The first one here was a flat tie
   because every regression-phrased row sat in the tune half. Fresh rows, authored to test the
   hypothesis rather than to flatter the candidate, are the fix.
-- **Say which claims are weaker than others.** `a-regression` shipped gated-but-unconfirmed,
-  and the tutorial says so. A promotion you cannot fully justify is worth making sometimes —
-  it is never worth overstating.
+- **A holdout confirms direction, not significance.** `a-regression` shipped on F1 1.000 vs
+  0.909 on unseen rows while the paired *t*-test read exactly zero. At eleven pairs, across
+  three criteria, that block cannot resolve a one-criterion gain — which is a fact about the
+  test, not about the change. Report both and say which one you promoted on.
 
 ## Next
 
