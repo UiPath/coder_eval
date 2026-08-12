@@ -98,6 +98,47 @@ def _harness_spawn_lock() -> asyncio.Lock:
 # agentic benchmarks while running faster; ``medium`` thinking is its daily-driver default.
 _DEFAULT_MODEL = "gemini-3.5-flash"
 
+# How often to re-check for progress once an orphaned (backgrounded) tool call is
+# detected. receive_steps() returns instantly empty ONLY when the connection is
+# already idle with nothing queued -- which is exactly the state right after a
+# background job leaves the model idle, so the common re-check is cheap. (It CAN
+# still await indefinitely if called while genuinely non-idle work is in flight;
+# see the poll loop's own comment in communicate() for that case.)
+# Conversation.wait_for_wakeup() is an unimplemented stub on the Local harness
+# connection this agent uses (always returns False, regardless of pending state,
+# confirmed against the installed SDK's source) — so this file drives its own
+# sleep-and-retry poll instead. Not user-configurable: a tuning constant, not a
+# feature.
+_BACKGROUND_POLL_INTERVAL_SECONDS = 5.0
+
+# Bound on retrying a receive_steps() call that hits the SDK's re-entrancy guard
+# (see _drain()'s docstring) -- each retry yields one event-loop turn via
+# asyncio.sleep(0) for the prior drain's already-scheduled generator cleanup to
+# land. Confirmed live against the real SDK's generator-delegation shape that
+# this clears within 2 turns; this constant carries a 2.5x margin, not a
+# separately-tuned budget.
+_RECEIVE_STEPS_REENTRY_RETRIES = 5
+
+# Cap on poll *cycles* per turn -- bounds how many times communicate() will
+# sleep-and-redrain. Wall-clock enforcement of the whole turn is a separate
+# concern, left to the pre-existing ThreadedWatchdog (see communicate()); this
+# cap only matters when a task sets no run_limits.turn_timeout/task_timeout at
+# all, or when a single re-drain returns promptly each cycle.
+# 120 * 5s = 10 minutes: real backgrounded jobs observed in confirmed-broken
+# tasks ran 60-300s, so this carries a ~2x safety margin over the worst one
+# seen while still bounding a truly pathological (never-resolving) orphan to a
+# reasonable cap.
+#
+# Deliberately NOT "break after N consecutive empty polls" instead: the real
+# SDK's receive_steps() returns identically empty whether a backgrounded job is
+# still genuinely running OR will never resolve at all (confirmed live against
+# the installed SDK) -- there is no signal that tells these two cases apart
+# except waiting. A consecutive-empty-count small enough to matter would also
+# abort real slow jobs (the confirmed cases needed up to ~60 consecutive 5s-
+# empty polls before succeeding); one large enough to be safe barely improves
+# over this flat cap. A flat, data-grounded cap is the honest option.
+_MAX_BACKGROUND_POLLS = 120
+
 # Antigravity builtin tool name -> canonical Claude-ish tool name, so cross-agent
 # success criteria (command_executed / commands_efficiency / skill_triggered) and
 # reports key on the SAME tool names the Claude / Codex backends emit. Unmapped
@@ -143,6 +184,7 @@ _ANTIGRAVITY_ARG_RENAME: dict[str, dict[str, str]] = {
 # optional extra; only ``start()`` touches it). Named constants — not bare string
 # literals — so an antigravity StepStatus.ERROR comparison is not mistaken for a
 # coder_eval FinalStatus member-name denylist (lint rule CE018).
+_STATUS_ACTIVE = "ACTIVE"
 _STATUS_DONE = "DONE"
 _STATUS_ERROR = "ERROR"
 _TYPE_THINKING = "THINKING"
@@ -406,6 +448,59 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 else:
                     os.environ[path_key] = original
 
+    async def _drain(
+        self,
+        conversation: Any,
+        state: "_AntigravityTurnState",
+        should_stop: Callable[[], bool] | None,
+    ) -> None:
+        """Consume one ``receive_steps()`` cycle onto ``state``, honoring a
+        cooperative stop mid-stream. Shared by the initial drain and each poll
+        cycle's re-drain in ``communicate`` so this shape lives in one place.
+
+        ``receive_steps()`` is actually TWO nested async generators: the public
+        ``Conversation.receive_steps()`` we call here delegates internally
+        (``async for step in self._connection.receive_steps(): yield step``) to
+        the connection layer, which guards re-entrancy with an ``_is_receiving``
+        flag cleared only in its OWN ``finally``. ``aclosing`` on the outer
+        generator closes IT deterministically, but a ``GeneratorExit`` thrown
+        into a delegating generator does not synchronously propagate into the
+        inner one it was mid-iterating -- confirmed live: the inner ``finally``
+        only ran after the outer's frame was unwound AND the event loop had
+        processed the abandoned inner generator's async-gen finalizer, i.e. on a
+        LATER event-loop turn, not within the ``aclosing`` block itself. So a
+        cooperative-stop ``break`` here can still leave the connection
+        "receiving" for a short, bounded window afterward, and the NEXT
+        ``receive_steps()`` call (the next poll cycle, or the next turn in a
+        multi-turn dialog) can raise ``RuntimeError`` during that window. The
+        retry below -- yielding via ``asyncio.sleep(0)`` and trying again --
+        gives that already-scheduled finalizer a turn to run, mirroring the
+        SDK's OWN handling of this exact ``RuntimeError`` in
+        ``Conversation.send()`` (falls back to ``wait_for_idle()``); retrying
+        the drain itself is preferred here over that fallback since
+        ``wait_for_idle()`` discards any steps already queued, which would
+        silently drop real content instead of just retrying past a transient
+        window.
+        """
+        for attempt in range(_RECEIVE_STEPS_REENTRY_RETRIES):
+            try:
+                async with contextlib.aclosing(conversation.receive_steps()) as steps:
+                    async for step in steps:
+                        state.process_step(step)
+                        if should_stop is not None and should_stop():
+                            state.stopped_early_hit = True
+                            self._log.debug("Cooperative stop requested; ending step loop at this boundary")
+                            break
+                return
+            except RuntimeError:
+                if attempt == _RECEIVE_STEPS_REENTRY_RETRIES - 1:
+                    raise
+                self._log.debug(
+                    "receive_steps() re-entrancy guard still set from a prior drain; retrying (attempt %d)",
+                    attempt + 1,
+                )
+                await asyncio.sleep(0)
+
     async def communicate(
         self,
         user_input: str,
@@ -470,21 +565,67 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             ):
                 emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=model))
                 conversation = self._sdk_agent.conversation
+                poll_count = 0
                 try:
                     await conversation.send(user_input)
                     # The cooperative should_stop poll runs AFTER process_step (the
                     # emission that lets the watcher latch on the deciding tool
                     # call) and BEFORE the next step is pulled — the deciding step
                     # is kept, the next is not. No-op when should_stop is None.
-                    async for step in conversation.receive_steps():
-                        state.process_step(step)
+                    await self._drain(conversation, state, should_stop)
+
+                    # The model may have kicked off a run_command as a background
+                    # task and gone idle without waiting for it — receive_steps()
+                    # then exhausts with that tool call still open (never reached
+                    # DONE/ERROR). Conversation.wait_for_wakeup() is an unimplemented
+                    # stub on this SDK's Local harness (always returns False,
+                    # regardless of pending state — confirmed against the installed
+                    # source and live-tested), so poll for progress ourselves
+                    # instead, gated on that orphaned-tool signal so a normal turn
+                    # (which always closes its tool calls before the stream
+                    # exhausts) takes this branch zero times and finalizes exactly
+                    # as fast as today. No separate in-loop deadline check against
+                    # `timeout`: the ThreadedWatchdog above already enforces it by
+                    # cancelling this whole coroutine, and a second check against
+                    # the SAME value would just race it non-deterministically for
+                    # who fires first. `_MAX_BACKGROUND_POLLS` bounds the number of
+                    # poll *cycles*; the `not state.timeout_hit` check below is a
+                    # fast exit once the watchdog has already decided to fire but
+                    # its cancellation hasn't landed on this coroutine yet (a single
+                    # re-drain can itself await indefinitely while genuinely
+                    # non-idle work is in flight, so true wall-clock safety for an
+                    # unbounded background job still depends on a configured
+                    # `run_limits.turn_timeout`/`task_timeout` reaching the watchdog
+                    # — not on this cap alone).
+                    while (
+                        not state.stopped_early_hit
+                        and not state.timeout_hit
+                        and state.has_orphaned_tool_call()
+                        and poll_count < _MAX_BACKGROUND_POLLS
+                    ):
+                        poll_count += 1
+                        self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
+                        await asyncio.sleep(_BACKGROUND_POLL_INTERVAL_SECONDS)
+                        if state.timeout_hit:
+                            # The watchdog decided to fire during the sleep above; skip
+                            # the re-drain (which could itself await indefinitely on
+                            # genuinely non-idle work) rather than waiting for the
+                            # loop's own head check to catch it next cycle.
+                            break
                         if should_stop is not None and should_stop():
                             state.stopped_early_hit = True
-                            self._log.debug("Cooperative stop requested; ending step loop at this boundary")
                             break
+                        await self._drain(conversation, state, should_stop)
+
+                    if poll_count >= _MAX_BACKGROUND_POLLS and state.has_orphaned_tool_call():
+                        msg = "Poll budget (_MAX_BACKGROUND_POLLS=%d) exhausted with a tool call still ACTIVE."
+                        self._log.warning(msg, _MAX_BACKGROUND_POLLS)
+
                     if state.stopped_early_hit:
                         # Best-effort server-side cancel, mirrors kill(); a raising
-                        # cancel() lands in the guarded handler below.
+                        # cancel() lands in the guarded handler below. Single check
+                        # point covers a stop from either the initial drain or any
+                        # poll cycle, so cancel() fires exactly once either way.
                         with contextlib.suppress(Exception):
                             await conversation.cancel()
                 except asyncio.CancelledError:
@@ -638,6 +779,10 @@ class _AntigravityTurnState:
         # inputs). Used at DONE to distinguish inputs from harness-appended
         # result fields, whatever they're named for that tool.
         self._tool_input_keys: dict[str, set[str]] = {}
+        # Most recently seen StepStatus per tool id, for has_orphaned_tool_call
+        # below — deliberately separate from _closed_tools, which only tracks
+        # the DONE/ERROR terminal states relevant to result reporting.
+        self._tool_last_status: dict[str, Any] = {}
         # Content blocks accumulated since the last per-generation flush.
         self._blocks: list[ContentBlock] = []
 
@@ -654,8 +799,8 @@ class _AntigravityTurnState:
             self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=step.content_delta))
 
         # Tool calls: ToolStart on first sight, ToolEnd when the owning step is DONE.
-        for call in step.tool_calls:
-            self._handle_tool_call(call, step, done, sstatus)
+        for call_index, call in enumerate(step.tool_calls):
+            self._handle_tool_call(call, step, done, sstatus, call_index)
 
         # Capture content blocks on the terminal transition of a step.
         if done:
@@ -671,9 +816,26 @@ class _AntigravityTurnState:
             self.total_usage = self.total_usage + gen
             self._flush_generation(gen, getattr(step.usage_metadata, "thoughts_token_count", 0) or 0)
 
-    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any) -> None:
+    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
         raw_name = _enum_value(call.name)
-        cid = call.id or f"{raw_name}_{self._next_seq}"
+        # call.id is usually present ("a tool call carries a stable id" per this
+        # class's docstring), but the SDK types it as optional. The fallback must
+        # be BOTH stable across a step's own ACTIVE -> DONE re-emissions (same
+        # step_index) -- so an id-less call's DONE step closes the SAME cid its
+        # ACTIVE step opened, rather than minting a fresh id from a counter that
+        # already advanced, which would strand the ACTIVE entry as a permanent,
+        # never-closing "orphan" and stall the poll loop for its full budget --
+        # AND unique across trajectories: the SDK keys its own step tracking on
+        # (trajectory_id, step_index), since a sub-agent trajectory can reuse the
+        # same low step_index values as the main one. Mirrors the SDK's own
+        # `trajectory_id:step_index` id scheme (falling back to bare step_index
+        # when trajectory_id is empty, e.g. no sub-agent involved) rather than
+        # inventing a separate one; call_index further disambiguates multiple
+        # id-less tool calls within the same step, which the SDK's scheme does not.
+        trajectory_id = getattr(step, "trajectory_id", "") or ""
+        step_key = f"{trajectory_id}:{step.step_index}" if trajectory_id else str(step.step_index)
+        cid = call.id or f"{raw_name}_{step_key}_{call_index}"
+        self._tool_last_status[cid] = sstatus
         if cid not in self._seen_tools:
             self._seen_tools.add(cid)
             seq = self._next_seq
@@ -785,6 +947,25 @@ class _AntigravityTurnState:
         with contextlib.suppress(Exception):
             return self._agent._sdk_agent.conversation.last_response  # type: ignore[union-attr]
         return ""
+
+    def has_orphaned_tool_call(self) -> bool:
+        """True if any NOT-YET-CLOSED tool call's most recently seen status is
+        ACTIVE — the structural signature of a backgrounded task the model went
+        idle on without waiting for. See ``communicate``'s poll loop.
+
+        Deliberately an ALLOWLIST on ACTIVE, not a denylist on "not yet closed
+        via _closed_tools" alone: the SDK's StepStatus also has WAITING_FOR_USER
+        (the harness is blocked on a question that will never be answered in
+        this headless eval), CANCELED, and UNKNOWN — none of which _closed_tools
+        ever marks done (that set only tracks DONE/ERROR, the states relevant to
+        result reporting), but none of which the poll loop should ever wait out
+        either, since they will never become DONE on their own. Checking the
+        allowlisted ACTIVE status is what tells these apart from a genuine
+        in-flight background job. The `not in _closed_tools` guard is layered on
+        top (not a substitute) purely as a monotonicity backstop, in case a
+        closed id's last-seen entry were ever left at ACTIVE by a re-emission.
+        """
+        return any(cid not in self._closed_tools and s == _STATUS_ACTIVE for cid, s in self._tool_last_status.items())
 
     def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
         """Close orphaned tools, flush leftover blocks, emit TurnEnd + AgentEnd.

@@ -314,3 +314,49 @@ with the two `action.yml` items above — one considered change to the action's 
   advertises otherwise. Either mark it `required: true` (a published-input contract change,
   see the `working-directory` item) or fail with a clear message instead of an obscure
   discovery error.
+
+## From the coder-eval-code-review of fix/antigravity-wait-for-wakeup (2026-08-12)
+
+- [ ] **A retry/poll loop's continuation state must derive from a stable per-entity
+  key, never a mutable monotonic counter used as an id fallback.** `_AntigravityTurnState._handle_tool_call`
+  minted a synthetic tool-call id from `f"{raw_name}_{self._next_seq}"` when the SDK's
+  `call.id` was falsy; since `_next_seq` advances between a tool call's ACTIVE and DONE
+  emissions, the DONE step computed a *different* fallback id than the ACTIVE step,
+  stranding the ACTIVE entry as a permanent orphan and stalling `communicate()`'s new
+  poll loop for its full `_MAX_BACKGROUND_POLLS` budget on every id-less turn. Fixed by
+  deriving the fallback from `(step.step_index, call_index)` instead (stable across a
+  step's own re-emissions, per this class's own docstring). Not promoted to a CExxx rule:
+  this is the only id-fallback-driving-control-flow site in the codebase today (a
+  single call site, not a recurring class per the existing "single call-site fix, no
+  recurring pattern to guard" convention) — a mechanical AST rule for "no mutable
+  counter in a dict-key fallback" would need real design work to avoid false-positiving
+  on ordinary sequence-numbering counters elsewhere in the file. Caught by two
+  independent reviewers (Opus fallback pair) in this run's final code review.
+
+- [ ] **A `while` loop built around a cooperative-cancellation watchdog should read the
+  watchdog's own "already decided to fire" flag in its condition, not rely solely on a
+  later exception handler to notice.** The antigravity poll loop's condition checked
+  `not state.stopped_early_hit and state.has_orphaned_tool_call() and poll_count < cap`
+  but not `state.timeout_hit`, so if `ThreadedWatchdog`'s background thread set the flag
+  before its `task.cancel()` actually landed on this coroutine, the loop kept
+  sleeping/re-draining for up to the full poll budget before the pre-existing
+  post-loop `if state.timeout_hit:` check ever got a chance to run. Fixed by adding
+  `and not state.timeout_hit` to the condition. Not promoted: `ThreadedWatchdog` +
+  a bespoke poll loop reading its own state flag is a one-off shape unique to this
+  agent; no second instance exists to generalize a rule from. Caught in the same
+  final review as above.
+
+- [ ] **A regression test's fake dependency must model every layer the fix under test
+  actually touches, not just the outermost one.** `_drain()`'s cooperative-stop path
+  wraps a real SDK call (`Conversation.receive_steps()`) that is itself a delegating
+  async generator over an inner, connection-layer generator holding the real
+  re-entrancy guard. The first regression test written for this fix used a
+  single-layer fake (the guard lived on the SAME generator `_drain()` iterated), which
+  passed against an incomplete fix (`contextlib.aclosing` on the outer generator only)
+  that does not work against the real two-layer SDK shape — confirmed live that the
+  inner generator's cleanup is deferred to a LATER event-loop turn, not synchronous
+  with the outer's `aclose()`. Caught by a reviewer re-deriving the real dependency's
+  shape from its installed source, not by the test itself. Not promoted: detecting "a
+  test double is missing a delegation layer the source has" is a semantic match
+  against third-party source, not an AST pattern in our own code — no cheap mechanical
+  check exists. Caught in the round-3 coder-eval-code-review of this same branch.
