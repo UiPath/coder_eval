@@ -1088,8 +1088,6 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
     genuinely in flight -- mirroring the real watchdog, whose ``on_timeout``
     callback and the ``CancelledError`` it triggers are the same causal event,
     not two independently-timed ones."""
-    import asyncio
-
     from coder_eval.agents import antigravity_agent
     from coder_eval.errors import TurnTimeoutError
 
