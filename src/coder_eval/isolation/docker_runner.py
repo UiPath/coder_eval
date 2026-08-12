@@ -752,8 +752,11 @@ class DockerRunner:
             self._host_to_private_paths[str(task_dir)] = CONTAINER_TASK_DIR
             # Alias the unresolved textual form too: staged-YAML strings may
             # carry a symlinked prefix (macOS /tmp -> /private/tmp) that the
-            # resolved key would never match.
-            self._host_to_private_paths.setdefault(str(self.rt.task_file.parent), CONTAINER_TASK_DIR)
+            # resolved key would never match. Only when it is itself an
+            # absolute path (see _register_private_mount for why).
+            raw_task_dir = self.rt.task_file.parent
+            if raw_task_dir.is_absolute():
+                self._host_to_private_paths.setdefault(str(raw_task_dir), CONTAINER_TASK_DIR)
 
         from coder_eval.models import TemplateDirSource
 
@@ -789,13 +792,18 @@ class DockerRunner:
         # The rewrite map keys on BOTH the resolved and the raw textual form:
         # staged-YAML strings usually match the raw form, while the mount and
         # dedup use the resolved one (symlinked prefixes differ between them).
+        # The raw alias is added ONLY when it is itself an absolute path: a
+        # relative form such as "." (a bare-filename reference.file whose
+        # parent is the cwd) would otherwise become a substring-replace key in
+        # _rewrite_task_paths and corrupt every unrelated field (e.g. every
+        # TemplateDirSource.mount_point, which defaults to ".").
         raw_key = str(source)
         source = source.resolve()
         key = str(source)
         if key in self._host_to_private_paths:
             return
         self._host_to_private_paths[key] = target
-        if raw_key != key:
+        if raw_key != key and Path(raw_key).is_absolute():
             self._host_to_private_paths.setdefault(raw_key, target)
         self._private_source_mounts.append((source, target))
 

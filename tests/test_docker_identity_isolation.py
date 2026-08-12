@@ -319,6 +319,43 @@ def test_skills_repo_path_value_rewritten_when_staged(tmp_path: Path, monkeypatc
     assert "SKILLS_REPO_PATH" not in argv  # name-only form must not double-forward
 
 
+def test_rewrite_task_paths_preserves_relative_mount_point(tmp_path: Path) -> None:
+    """A bare-filename reference.file must not turn '.' into a substring-replace key.
+
+    reference.file="RESOLUTION.md" has parent Path("."). Registering its raw
+    textual form as a rewrite key would rewrite every TemplateDirSource
+    mount_point (default ".") to the references path, and the container-side
+    mount_point validator rejects the resulting absolute value.
+    """
+
+    from coder_eval.models import ReferenceSource, TemplateDirSource
+
+    tpl = tmp_path / "tpl"
+    tpl.mkdir()
+    task = TaskDefinition(
+        task_id="bare-reference",
+        description="test",
+        initial_prompt="work",
+        agent=ClaudeCodeAgentConfig(type=AgentKind.CLAUDE_CODE),
+        reference=ReferenceSource(file="RESOLUTION.md"),
+        sandbox=SandboxConfig(
+            driver="docker",
+            template_sources=[TemplateDirSource(type="template_dir", path=str(tpl))],
+            docker=DockerDriverConfig(agent_isolation=True),
+        ),
+        success_criteria=[RunCommandCriterion(description="dynamic", command="python check.py")],
+    )
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    runner = DockerRunner(MagicMock(task=task, task_file=task_dir / "task.yaml", run_dir=tmp_path / "run"))
+    runner._prepare_isolated_sources()
+
+    assert "." not in runner._host_to_private_paths
+    rewritten = runner._rewrite_task_paths(task.model_dump(mode="json"))
+    for source in rewritten["sandbox"]["template_sources"]:
+        assert source["mount_point"] == "."
+
+
 def test_claude_mount_target_is_posix_under_isolation(tmp_path: Path) -> None:
     runner = _make_argv_runner(tmp_path, agent_isolation=True)
     runner._claude_mount_src = tmp_path / "claude-copy"
