@@ -731,8 +731,31 @@ class TestReferenceMountAntiCheat:
         argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
 
         dropped = {argv[i + 1] for i, a in enumerate(argv) if a == "--cap-drop"}
-        assert "DAC_OVERRIDE" in dropped
-        assert "DAC_READ_SEARCH" in dropped
+        # Set EQUALITY, not membership. Membership let two of the four dropped
+        # caps go unasserted, so silently weakening the container's anti-cheat
+        # posture failed no test. It also pins the deliberate NON-drop below.
+        assert dropped == {"DAC_OVERRIDE", "DAC_READ_SEARCH"}
+
+    def test_fowner_and_chown_are_deliberately_kept(self, tmp_path):
+        """Dropping FOWNER would disable the harness's OWN chmod.
+
+        chmod(2) is gated on owner-or-CAP_FOWNER, and the in-container
+        orchestrator that applies the mode-000 window is the same root process
+        with the same capability set as the agent. On native Linux the bind
+        mount preserves the host uid that ran coder-eval, so with FOWNER dropped
+        `chmod 000 /work/references` fails with EPERM and the run completes
+        UNPROTECTED while still looking protected. Verified in a container:
+        root + uid-1000-owned dir + FOWNER dropped -> "Operation not permitted".
+
+        So the drop only ever bites on the hosts where it also disables the
+        control. Closing the re-chmod hole needs a different uid, not a smaller
+        capability set -- see docs/DOCKER_ISOLATION.md.
+        """
+        argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
+
+        dropped = {argv[i + 1] for i, a in enumerate(argv) if a == "--cap-drop"}
+        assert "FOWNER" not in dropped
+        assert "CHOWN" not in dropped
 
     def test_reference_mount_is_writable(self, tmp_path):
         """REGRESSION GUARD for a real leak found by tasks/anti_cheat_reference.

@@ -11,6 +11,7 @@ from .agent import AgentConfigError, AgentCrashError, format_timeout_reason, tru
 from .budget import BudgetExceededError
 from .checker_misuse import CheckerMisuseError
 from .judge import JudgeInfrastructureError
+from .reference import ReferenceTamperedError
 from .timeout import EvaluationTimeoutError, TaskTimeoutError, TurnTimeoutError
 
 
@@ -21,6 +22,7 @@ __all__ = [
     "CheckerMisuseError",
     "EvaluationTimeoutError",
     "JudgeInfrastructureError",
+    "ReferenceTamperedError",
     "TaskTimeoutError",
     "TurnTimeoutError",
     "format_timeout_reason",

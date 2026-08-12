@@ -12,7 +12,6 @@ from coder_eval.evaluation.judge_context import (
     JudgeContext,
     JudgeContextBuilder,
     build_judge_transcript,
-    collect_reference_secrets,
     format_details,
     scrub_reference,
 )
@@ -125,13 +124,15 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         # Scrub keys are the per-FILE contents of the reference directory, not the
         # single rendered block: the model is far more likely to echo one file back
         # than to reproduce the whole concatenation verbatim, and a whole-block key
-        # would never match. Only built when the criterion actually saw the
-        # reference — there is nothing to redact otherwise.
-        scrub_key = (
-            collect_reference_secrets(reference_dir, criterion.max_file_chars)
-            if criterion.include_reference and reference_dir is not None
-            else None
-        )
+        # would never match.
+        #
+        # Taken from the CONTEXT, not recomputed from `criterion.include_reference`:
+        # the builder records every reference-derived byte it actually attached,
+        # which includes `$REFERENCE_DIR/...` entries in `files:` — the documented
+        # way to show a judge one reference asset with include_reference=false.
+        # Gating on the flag left exactly that combination unscrubbed, persisting
+        # the solution verbatim into the archived judge transcript.
+        scrub_key = judge_ctx.reference_secrets or None
 
         # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
         # from the usage the backend reported in its response.

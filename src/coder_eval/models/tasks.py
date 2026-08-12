@@ -9,8 +9,14 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import ResolvedAgentConfig
-from coder_eval.models.container_paths import REFERENCE_DIR_TOKEN, path_uses_token
-from coder_eval.models.criteria import SuccessCriterion
+from coder_eval.models.container_paths import REFERENCE_DIR_TOKEN, command_uses_token, path_uses_token
+from coder_eval.models.criteria import (
+    AgentJudgeCriterion,
+    LLMJudgeCriterion,
+    ReferenceComparisonCriterion,
+    RunCommandCriterion,
+    SuccessCriterion,
+)
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.merge_strategy import MergeField
@@ -570,14 +576,24 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             return self
         offenders: list[str] = []
         for c in self.success_criteria:
-            if c.type == "reference_comparison":
+            # isinstance narrowing, NOT getattr(c, "files"/"command"): with an
+            # untyped string probe, renaming LLMJudgeCriterion.files or
+            # RunCommandCriterion.command turns this load-time guard into a
+            # silent no-op that pyright cannot see. The union members are
+            # imported here already.
+            if isinstance(c, ReferenceComparisonCriterion):
                 offenders.append(f"{c.type} (needs a reference to compare against)")
-            elif any(path_uses_token(f, REFERENCE_DIR_TOKEN) for f in getattr(c, "files", None) or []):
+            elif isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) and any(
+                path_uses_token(f, REFERENCE_DIR_TOKEN) for f in c.files
+            ):
                 offenders.append(f"{c.type} (files: uses {REFERENCE_DIR_TOKEN})")
-            elif REFERENCE_DIR_TOKEN in (getattr(c, "command", None) or ""):
+            elif isinstance(c, RunCommandCriterion) and command_uses_token(c.command, REFERENCE_DIR_TOKEN):
                 # run_command is the third documented consumer: with no reference
                 # the env var is simply absent, so `diff -r "$REFERENCE_DIR" out/`
                 # expands to an empty argument and misbehaves instead of failing.
+                # command_uses_token, not a raw `in`: the brace form
+                # `${REFERENCE_DIR}` is standard shell and slipped straight past
+                # a substring test, while `$REFERENCE_DIRECTORY` false-positived.
                 offenders.append(f"{c.type} (command: uses {REFERENCE_DIR_TOKEN})")
         if offenders:
             raise ValueError(

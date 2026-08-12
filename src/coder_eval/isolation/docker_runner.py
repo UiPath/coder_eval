@@ -38,7 +38,8 @@ from coder_eval.models import (
     PreservationMode,
     ResourceLimits,
 )
-from coder_eval.path_utils import ignore_patterns_and_symlinks
+from coder_eval.orchestration.evaluation import resolve_host_reference_dir
+from coder_eval.path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks, rmtree_restrictive
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -610,7 +611,13 @@ class DockerRunner:
 
             return await self._parse_result_or_raise(output_dir, returncode, log_path)
         finally:
-            await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)
+            # rmtree_restrictive, not rmtree(ignore_errors=True): `staging`
+            # holds the /work/references copy, which the in-container
+            # orchestrator keeps at mode 000 for the whole of every turn. A
+            # container killed mid-turn never restores it, and scandir on a 000
+            # directory raises PermissionError -- which ignore_errors swallows,
+            # orphaning a tempdir that holds the reference solution.
+            await asyncio.to_thread(rmtree_restrictive, staging)
 
     async def _stage_inputs(self, input_dir: Path) -> None:
         """Serialise the post-override TaskDefinition + lineage/variant context into the
@@ -964,7 +971,7 @@ class DockerRunner:
         if source is None:
             return
         reference_copy = staging / "reference"
-        shutil.copytree(source, reference_copy, ignore=ignore_patterns_and_symlinks([".git"]))
+        shutil.copytree(source, reference_copy, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
         self._reference_mount_src = reference_copy
         self._reference_source_dir = source
 
@@ -1104,20 +1111,23 @@ class DockerRunner:
     def _resolve_host_reference_dir(self) -> Path | None:
         """Host path of ``task.reference.directory``, or None when unset/missing.
 
-        Resolution matches ``orchestration.evaluation.resolve_reference_dir``
-        (relative to the task YAML), but a missing directory is a WARNING here
-        rather than an error: the host-side argv builder must not be the thing
-        that fails the run. The in-container orchestrator resolves the same path
-        against the ``/work/references`` mount and raises there, so the operator
-        still gets a hard, well-attributed failure.
+        Resolution goes through the shared
+        ``orchestration.evaluation.resolve_host_reference_dir`` seam so the host
+        mount and the orchestrator's own resolution cannot drift, but a missing
+        directory is a WARNING here rather than an error: the host-side argv
+        builder must not be the thing that fails the run. The in-container
+        orchestrator hard-fails on the absent ``/work/references`` mount, and
+        that error names this warning's cause so the operator is not sent
+        chasing a stale image.
         """
         reference = self.rt.task.reference
-        if reference is None or not self.rt.task_file:
+        candidate = resolve_host_reference_dir(self.rt.task, self.rt.task_file)
+        if reference is None or candidate is None:
             return None
-        candidate = (self.rt.task_file.parent / reference.directory).resolve()
         if not candidate.is_dir():
             logger.warning(
-                "reference.directory %r does not resolve to a directory (%s); " + "skipping the %s mount",
+                "reference.directory %r does not resolve to a directory (%s); skipping the %s mount. "
+                + "The task will fail in-container with a missing-mount error.",
                 reference.directory,
                 candidate,
                 CONTAINER_REFERENCE_DIR,
@@ -1177,22 +1187,27 @@ class DockerRunner:
         # virtiofs enforces host-side; that is a platform accident, not the rule.)
         # Nothing in a sandbox legitimately needs to override discretionary access
         # control, so dropping these costs the task nothing.
-        # FOWNER/CHOWN matter as much as the DAC pair: chmod(2) is gated on
-        # owner-OR-CAP_FOWNER, so a root agent that can chmod simply restores the
-        # mode and reads the reference anyway. Dropping them closes that on hosts
-        # where the bind mount preserves a non-root owner (native Linux, i.e. CI).
-        # KNOWN GAP: where the mount reports the container's own uid as owner
-        # (Docker Desktop's virtiofs), the owner check passes with no capability
-        # at all and the restore still succeeds — see docs/DOCKER_ISOLATION.md.
+        #
+        # FOWNER/CHOWN are deliberately NOT dropped, though an earlier revision
+        # did. chmod(2) is gated on owner-OR-CAP_FOWNER, so dropping FOWNER does
+        # stop a root agent from restoring the mode — but it stops the HARNESS
+        # from applying it in the first place, because the in-container
+        # orchestrator that opens the window is the same root process with the
+        # same capability set. On native Linux the bind mount preserves the host
+        # uid that ran coder-eval, so `chmod 000 /work/references` then fails
+        # with EPERM (verified: container root, uid-1000-owned dir, FOWNER
+        # dropped -> "Operation not permitted") and the run completes UNPROTECTED
+        # while still looking protected. The drop therefore only ever bites on
+        # the hosts where it also disables the control it is meant to enforce.
+        # Keeping the caps means the mode-000 window works on every host; a
+        # deliberate re-chmod by a root agent stays the documented KNOWN GAP,
+        # closed by running the agent as a non-root uid (see
+        # docs/DOCKER_ISOLATION.md).
         argv += [
             "--cap-drop",
             "DAC_OVERRIDE",
             "--cap-drop",
             "DAC_READ_SEARCH",
-            "--cap-drop",
-            "FOWNER",
-            "--cap-drop",
-            "CHOWN",
         ]
 
         if cfg.network == "none":
@@ -1288,10 +1303,11 @@ class DockerRunner:
         #
         #  1. An empty tmpfs is layered over the reference's path inside the
         #     task-dir mount, masking it. The agent sees an empty directory there.
-        #  2. The real reference is mounted read-only at /work/references, from
-        #     which the in-container orchestrator stages a private, chmod-able
-        #     copy (a `:ro` mount cannot be chmod'd -- EROFS -- so the anti-cheat
-        #     window needs a writable copy).
+        #  2. A throwaway COPY of the reference is mounted read-WRITE at
+        #     /work/references, and the in-container orchestrator shields THAT
+        #     path directly rather than re-copying it. Writable is load-bearing,
+        #     not an oversight: the window chmods this exact path to 000 every
+        #     turn, and chmod on a `:ro` bind mount fails with EROFS.
         #
         # Ordering matters: docker applies mounts by target-path depth, so the
         # tmpfs at the deeper path wins over the task-dir bind regardless of argv
@@ -1369,10 +1385,11 @@ class DockerRunner:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
         # NOTE: task.reference.directory is deliberately NOT auto-mounted at its
-        # host path here. It gets a single dedicated read-only mount at
-        # CONTAINER_REFERENCE_DIR (above), and mounting it at its host path too
-        # would re-expose it to the agent through $TASK_DIR — the exact hole the
-        # tmpfs mask above closes.
+        # host path here. A copy of it gets a single dedicated read-write mount
+        # at CONTAINER_REFERENCE_DIR (above; writable so the anti-cheat window
+        # can chmod it), and mounting the original at its host path too would
+        # re-expose it to the agent through $TASK_DIR — the exact hole the tmpfs
+        # mask above closes.
         for mount in cfg.extra_mounts:
             normalized = _validate_extra_mount(mount)
             argv += ["-v", normalized]

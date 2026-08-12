@@ -133,21 +133,33 @@ class Sandbox:
     REMEDIATE_HOME_PLUGINS_ENV = "CODER_EVAL_REMEDIATE_HOME_PLUGINS"
     """Env-var flag gating destructive ``$HOME/node_modules/@uipath`` cleanup."""
 
-    def __init__(self, config: SandboxConfig, task_id: str, task_dir: Path | None = None):
+    def __init__(
+        self,
+        config: SandboxConfig,
+        task_id: str,
+        task_dir: Path | None = None,
+        reference_dir: Path | None = None,
+    ):
         """Initialize the sandbox.
 
         Args:
             config: Sandbox configuration
             task_id: Unique identifier for this task (used in paths)
             task_dir: Directory containing the task YAML file (exposed as TASK_DIR env var in run_command)
+            reference_dir: Per-run staged copy of ``task.reference.directory``
+                (exposed as the REFERENCE_DIR env var in run_command). A
+                constructor argument for the same reason ``task_dir`` is: both
+                feed host-directory env vars seven lines apart in
+                ``_build_run_command_env``, and a construction site that set one
+                but not the other produced a ``$REFERENCE_DIR`` that expanded to
+                nothing and a criterion scored 0.0 with no diagnostic. The
+                orchestrator still re-assigns the attribute after
+                ``_stage_reference``, which runs later than construction.
         """
         self.config = config
         self.task_id = task_id
         self.task_dir = task_dir
-        # Per-run staged copy of task.reference.directory. Assigned by the
-        # orchestrator after _stage_reference (the sandbox is constructed first),
-        # and surfaced to run_command criteria as the REFERENCE_DIR env var.
-        self.reference_dir: Path | None = None
+        self.reference_dir: Path | None = reference_dir
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
@@ -195,10 +207,17 @@ class Sandbox:
         callers can wrap unconditionally without branching on the driver.
 
         Windows stack -- see the underlying function for the nesting contract.
+
+        ``strict=True`` whenever the window IS enforced: a chmod that fails on a
+        path that exists (foreign owner, read-only mount, missing capability)
+        means the agent can read the reference for the whole turn. Left as a
+        warning, that run completes and is scored exactly like a protected one,
+        so a broken anti-cheat control is indistinguishable from a working one
+        in every downstream consumer. Fail the run instead.
         """
         if not self.enforces_permission_windows:
             return contextlib.nullcontext()
-        return set_permissions(paths, mode=mode)
+        return set_permissions(paths, mode=mode, strict=True)
 
     @property
     def _venv_scripts_dir(self) -> Path | None:

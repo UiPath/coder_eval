@@ -50,13 +50,22 @@ class TestReferenceSource:
         A task YAML carried over from the string-reference era must fail loudly:
         silently dropping `code:` would run the judge with no reference at all.
         """
+        # Match a DISTINCTIVE fragment of the migration message, not just the
+        # field name: ``extra="forbid"`` already emits "code -- Extra inputs are
+        # not permitted", so asserting `"code" in ...` stayed green even with the
+        # _reject_removed_string_forms validator deleted -- i.e. the test passed
+        # while the actionable migration guidance it exists for was gone.
+        migration = "was removed — a reference is now always a DIRECTORY"
+        with pytest.raises(ValidationError, match=migration):
+            ReferenceSource(code="print('hello')")  # type: ignore[call-arg]
+
+        with pytest.raises(ValidationError, match=migration):
+            ReferenceSource(file="ref.py")  # type: ignore[call-arg]
+
+        # And the message must point somewhere.
         with pytest.raises(ValidationError) as excinfo:
             ReferenceSource(code="print('hello')")  # type: ignore[call-arg]
-        assert "code" in str(excinfo.value)
-
-        with pytest.raises(ValidationError) as excinfo:
-            ReferenceSource(file="ref.py")  # type: ignore[call-arg]
-        assert "file" in str(excinfo.value)
+        assert "reference: {directory: <dir>}" in str(excinfo.value)
 
     def test_reference_source_forbids_extras(self):
         """A typo like ``directry`` names the misspelled field in the error."""
@@ -124,6 +133,30 @@ class TestTaskDefinition:
                     )
                 ]
             )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'diff -r "$REFERENCE_DIR" out/',
+            'diff -r "${REFERENCE_DIR}" out/',  # brace form: standard shell, missed by a substring test
+            "cat $REFERENCE_DIR/solution.py",
+        ],
+    )
+    def test_run_command_using_reference_dir_without_reference_block_is_rejected(self, command):
+        """With no reference the env var is simply absent, so the command runs
+        with an empty argument and misbehaves instead of failing."""
+        from coder_eval.models import RunCommandCriterion
+
+        with pytest.raises(ValidationError, match="consume the reference solution"):
+            _task(success_criteria=[RunCommandCriterion(description="cmp", command=command)])
+
+    def test_unrelated_variable_with_the_same_prefix_is_not_a_consumer(self):
+        """$REFERENCE_DIRECTORY is a different variable; a raw substring test
+        hard-failed load on it."""
+        from coder_eval.models import RunCommandCriterion
+
+        task = _task(success_criteria=[RunCommandCriterion(description="x", command="echo $REFERENCE_DIRECTORY")])
+        assert task.reference is None
 
     def test_reference_consumer_with_reference_block_is_accepted(self):
         task = _task(

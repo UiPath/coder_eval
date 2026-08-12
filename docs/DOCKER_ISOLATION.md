@@ -304,20 +304,36 @@ The host's run dir is bind-mounted **read-write** into the container at the same
 
 The host's `DockerRunner` (`coder_eval/isolation/docker_runner.py`) renders the `docker run` argv, bind-mounts task inputs at `/work/input`, allocates an output dir at `/work/output`, and tails container stdout into `docker.log` in the task's run dir.
 
-If the task declares a `reference:` block, a throwaway **copy** of its directory is bind-mounted **read-write** at `/work/references`, and an empty tmpfs is layered over its original location inside the task-directory mount so the agent cannot reach the solution through `$TASK_DIR`. The mount is read-write on purpose — a `:ro` bind mount cannot be chmod'd (EROFS), and the orchestrator holds this path at mode `000` for the duration of each agent turn. The container also runs with `--cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH --cap-drop FOWNER --cap-drop CHOWN`.
+If the task declares a `reference:` block, a throwaway **copy** of its directory is bind-mounted **read-write** at `/work/references`, and an empty tmpfs is layered over its original location inside the task-directory mount so the agent cannot reach the solution through `$TASK_DIR`. The mount is read-write on purpose — a `:ro` bind mount cannot be chmod'd (EROFS), and the orchestrator holds this path at mode `000` for the duration of each agent turn. The container also runs with `--cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH` (see the caveat below for why `FOWNER`/`CHOWN` are deliberately kept).
 
 > **What this does and does not guarantee.** The mode-000 window stops an agent
-> that *passively reads* the reference — `ls`, `cat`, `grep` all fail. It does
-> **not** contain an agent that deliberately restores the mode: `chmod(2)` is
-> gated on *owner-or-`CAP_FOWNER`*, and the container runs as root, which owns
-> the bind-mounted copy. Verified: `chmod 755 /work/references` succeeds from
-> inside the container and the solution is then readable. The container drops
-> `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER` and `CHOWN`, which closes this
-> where the mount preserves a non-root owner, but not where the mount reports
-> the container's own uid (Docker Desktop). **Closing it fully requires running
-> the agent as a non-root uid that does not own the reference** — tracked as
-> follow-up. Treat the current control as raising the cost of accidental
-> leakage, not as a boundary against an adversarial agent.
+> that *passively reads* the reference — `ls`, `cat`, `grep` all fail. Two
+> things it does **not** stop:
+>
+> 1. **A deliberate re-chmod.** `chmod(2)` is gated on *owner-or-`CAP_FOWNER`*,
+>    and the container runs as root, which owns the bind-mounted copy. Verified:
+>    `chmod 755 /work/references` succeeds from inside the container and the
+>    solution is then readable. Dropping `FOWNER`/`CHOWN` does **not** fix this
+>    and is deliberately not done — the in-container orchestrator that *applies*
+>    the window is the same root process with the same capabilities, so dropping
+>    `FOWNER` breaks the harness's own `chmod` wherever the bind mount preserves
+>    a non-root owner (native Linux). Verified: container root, uid-1000-owned
+>    directory, `FOWNER` dropped → `chmod: Operation not permitted`. The drop
+>    only bites on the hosts where it also disables the control.
+> 2. **Waiting the window out.** The window spans `agent.communicate`, so
+>    between turns and after the final one the reference is back at its normal
+>    mode, and nothing reaps the agent's child processes at turn end — a
+>    backgrounded read loop started during a turn succeeds once the window
+>    closes.
+>
+> The *write* half of (2) IS closed: the reference tree is hashed at staging
+> time and re-verified before grading, and a mismatch fails the run with
+> `ReferenceTamperedError` rather than scoring `reference_comparison` against a
+> file the agent wrote. **Closing the read half fully requires running the agent
+> as a non-root uid that does not own the reference, and holding the window for
+> the agent's whole lifetime** — tracked as follow-up. Treat the current control
+> as raising the cost of accidental leakage, not as a boundary against an
+> adversarial agent.
 
 See [Reference Solutions](TASK_DEFINITION_GUIDE.md#reference-solutions).
 

@@ -9,9 +9,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import PurePosixPath
 from typing import Annotated, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.enums import AgentKind
@@ -863,6 +864,28 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
             "that directory."
         )
     )
+
+    @field_validator("reference_file")
+    @classmethod
+    def _confined_reference_file(cls, v: str) -> str:
+        """Enforce the "must stay inside that directory" contract at LOAD time.
+
+        Mirrors ``ReferenceSource._non_empty_directory`` on the sibling field.
+        Left to check time, an empty/absolute/``..`` value surfaced as a config
+        error dressed up as an agent failure — the checker raises
+        ``CheckerMisuseError`` for that now, but a schema error at load is
+        earlier still and costs no tokens.
+        """
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("reference_comparison.reference_file must be a non-empty path.")
+        candidate = PurePosixPath(cleaned.replace("\\", "/"))
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(
+                "reference_comparison.reference_file must be RELATIVE to the task's reference.directory "
+                + f"and must not escape it (no leading '/', no '..' component); got {v!r}."
+            )
+        return cleaned
 
     comparison_method: Literal["ast", "token", "complexity"] = Field(
         default="ast",

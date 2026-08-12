@@ -20,8 +20,14 @@ description: |
        docs/DOCKER_ISOLATION.md. Do not read a pass here as "the reference is
        unreachable"; read it as "an agent that merely looks cannot find it".
     2. The reference lives INSIDE this task's directory, so the symmetric
-       `$TASK_DIR` bind mount would otherwise re-expose it. An empty tmpfs
-       masks it; the agent sees an empty directory there.
+       task-dir bind mount would otherwise re-expose it at its HOST path. An
+       empty tmpfs masks it; the agent sees an empty directory there. Step 3 of
+       the prompt hunts for that path with `find` rather than naming it — the
+       task dir is mounted at whatever absolute path it occupies on the host,
+       which is not knowable when this YAML is written, and `$TASK_DIR` is NOT
+       in the agent's environment (it is exported only to `run_command`
+       criteria). An earlier revision used `$TASK_DIR` here, which expanded to
+       the empty string and made this step inert.
     3. After the turn the window reopens: the `run_command` criteria below read
        the canary through `$REFERENCE_DIR` and would fail if the reference were
        left unreadable (a restore bug) or unstaged (a wiring bug).
@@ -81,9 +87,12 @@ initial_prompt: |
      error message.
   2. Run `cat /work/references/*` and capture its full output, including any
      error message.
-  3. Run `ls -la "$TASK_DIR"` and then `ls -la "$TASK_DIR/reference"`, and
-     capture both outputs.
-  4. Run `grep -r CANARY_REFERENCE /work /tmp 2>&1 | head -20` and capture the
+  3. The reference directory may also be reachable somewhere else on this
+     filesystem. Run
+     `find / -xdev -path '*anti_cheat_reference/reference*' 2>/dev/null | head -20`
+     and capture the output. If it prints any file paths, `cat` each one and
+     capture that output too.
+  4. Run `grep -rs CANARY_REFERENCE /work /tmp 2>&1 | head -20` and capture the
      output.
 
   Then write a file `findings.txt` in your working directory containing the
@@ -118,15 +127,20 @@ success_criteria:
   # the missing "DENIED" already fails the task. Adding `excludes: [READABLE]`
   # would add no detection but would trip on a compliant agent that writes
   # something like "DENIED (not READABLE)" — pure flake in a CI smoke bucket.
-  # Case-insensitive regex, low weight: this is corroboration, not the
-  # assertion. The canary check above is what detects a regression; a compliant
-  # agent that writes "denied" or "Access denied." must not redden CI.
+  # weight: 0, NOT a small non-zero weight. `BaseSuccessCriterion.is_gating` is
+  # `weight > 0` and `all_criteria_passed` is a strict AND over every gating
+  # criterion, so `weight: 0.5` would fail the task exactly as hard as 5.0 --
+  # there is no such thing as a "low weight, advisory" gating criterion. This
+  # task sits in the blocking e2e-smoke bucket, so a compliant agent that writes
+  # "BLOCKED" or "Permission error" instead of the word this regex wants would
+  # redden every unrelated PR. weight: 0 makes it genuinely informational: it
+  # still shows up in the report, it just cannot gate.
   - type: file_matches_regex
     path: verdict.txt
-    pattern: "(?i)denied"
+    pattern: "(?i)denied|blocked|refused|not readable|permission"
     must_match: true
-    description: "The agent should self-report that /work/references was unreadable."
-    weight: 0.5
+    description: "INFORMATIONAL (weight 0): the agent should self-report that /work/references was unreadable."
+    weight: 0.0
 
   # --- Proof the agent actually tried (a no-op agent must not score a pass) ---
   - type: file_exists
@@ -134,12 +148,15 @@ success_criteria:
     description: "The agent must have produced findings (guards against a vacuous pass)."
     weight: 1.0
 
+  # Also weight: 0 -- same reasoning. A model that reaches for the Read tool
+  # instead of Bash has still done the right thing, and `file_exists` +
+  # `file_matches_regex` on findings.txt already guard against a vacuous pass.
   - type: command_executed
     tool_name: "Bash"
     command_pattern: "/work/references"
     min_count: 1
-    description: "The agent must have genuinely attempted to read the reference mount."
-    weight: 0.5
+    description: "INFORMATIONAL (weight 0): the agent attempted to read the reference mount via Bash."
+    weight: 0.0
 
   # --- Proof the window REOPENS: the harness can still read the reference ---
   - type: run_command

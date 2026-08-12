@@ -1,7 +1,9 @@
 """Tests for evaluator reference-directory support."""
 
 import pytest
+from pydantic import ValidationError
 
+from coder_eval.errors import CheckerMisuseError
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import (
     ReferenceComparisonCriterion,
@@ -100,23 +102,35 @@ class TestSuccessCheckerReference:
         result = SuccessChecker(sandbox).check(criterion, reference_dir=ref)
         assert result.score == 1.0
 
-    def test_reference_comparison_rejects_traversal_out_of_reference_dir(self, sandbox, tmp_path):
-        """`reference_file` names a file of the solution; escaping is always a bug."""
-        (sandbox.sandbox_dir / "solution.py").write_text("def foo(): pass")
-        (tmp_path / "outside.py").write_text("def foo(): pass", encoding="utf-8")
+    def test_reference_file_traversal_is_rejected_at_load_time(self):
+        """`reference_file` names a file of the solution; escaping is always a bug.
 
-        criterion = ReferenceComparisonCriterion(
-            description="Compare against reference",
-            agent_file="solution.py",
-            reference_file="../outside.py",
-        )
+        Caught by the field validator, so it never reaches the checker — a
+        config error should not cost an agent turn before it surfaces.
+        """
+        with pytest.raises(ValidationError, match="must not escape it"):
+            ReferenceComparisonCriterion(
+                description="Compare against reference",
+                agent_file="solution.py",
+                reference_file="../outside.py",
+            )
 
-        result = SuccessChecker(sandbox).check(criterion, reference_dir=_reference_dir(tmp_path))
+    @pytest.mark.parametrize("bad", ["", "   ", "/etc/passwd", "a/../../b.py"])
+    def test_reference_file_rejects_empty_and_absolute_and_dotdot(self, bad):
+        with pytest.raises(ValidationError):
+            ReferenceComparisonCriterion(
+                description="Compare against reference",
+                agent_file="solution.py",
+                reference_file=bad,
+            )
 
-        assert result.score == 0.0
-        assert "escapes the reference directory" in result.error
+    def test_reference_comparison_missing_reference_file_escalates(self, sandbox, tmp_path):
+        """A typo'd reference_file is an EVAL-CONFIG error, not an agent failure.
 
-    def test_reference_comparison_missing_reference_file(self, sandbox, tmp_path):
+        Returning a gating score=0.0 booked it as FinalStatus.FAILURE — counted
+        against the agent's pass rate, and on a dataset-fanned suite it silently
+        zeroed every row. CheckerMisuseError routes it to FinalStatus.ERROR.
+        """
         (sandbox.sandbox_dir / "solution.py").write_text("def foo(): pass")
 
         criterion = ReferenceComparisonCriterion(
@@ -125,10 +139,23 @@ class TestSuccessCheckerReference:
             reference_file="absent.py",
         )
 
-        result = SuccessChecker(sandbox).check(criterion, reference_dir=_reference_dir(tmp_path))
+        with pytest.raises(CheckerMisuseError, match="could not be read"):
+            SuccessChecker(sandbox).check(criterion, reference_dir=_reference_dir(tmp_path))
 
-        assert result.score == 0.0
-        assert "Failed to read reference file" in result.error
+    def test_reference_comparison_empty_reference_file_escalates(self, sandbox, tmp_path):
+        """A zero-byte reference file is a broken task, not a 0.0 similarity."""
+        (sandbox.sandbox_dir / "solution.py").write_text("def foo(): pass")
+        ref = _reference_dir(tmp_path)
+        (ref / "empty.py").write_text("", encoding="utf-8")
+
+        criterion = ReferenceComparisonCriterion(
+            description="Compare against reference",
+            agent_file="solution.py",
+            reference_file="empty.py",
+        )
+
+        with pytest.raises(CheckerMisuseError, match="is empty"):
+            SuccessChecker(sandbox).check(criterion, reference_dir=ref)
 
     def test_reference_comparison_agent_file_missing(self, sandbox, tmp_path):
         criterion = ReferenceComparisonCriterion(

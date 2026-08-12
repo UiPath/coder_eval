@@ -51,8 +51,10 @@ class CheckContext:
     a live object (the resolved ``route``), so it is NOT a ``coder_eval.models``
     Pydantic model — it never gets serialized into a result record.
 
-    Non-judge checkers receive it too (uniform ``_check_impl`` signature) and
-    ignore it.
+    ``reference_dir`` has a THIRD consumer beyond the two judges:
+    ``reference_comparison`` is entirely dependent on it and scores 0.0 without
+    one. Checkers that consume neither field receive the context anyway (uniform
+    ``_check_impl`` signature) and ignore it.
     """
 
     route: "ApiRoute | None" = None
@@ -291,10 +293,11 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             criterion: The specific criterion definition (Pydantic model)
             sandbox: Sandbox instance for file access and command execution
             turn_records: Optional list of turn records for command inspection
-            context: Optional :class:`CheckContext` carrying the live run state
-                (``route`` / ``reference_dir``) that judge criteria
-                (``agent_judge``, ``llm_judge``) consume. Non-judge checkers
-                accept the uniform signature and ignore it.
+            context: Optional :class:`CheckContext` carrying the live run state.
+                ``route`` is consumed by ``agent_judge`` / ``llm_judge``;
+                ``reference_dir`` by those two AND by ``reference_comparison``,
+                which scores 0.0 without it. Other checkers accept the uniform
+                signature and ignore it.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info
@@ -326,8 +329,8 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             sandbox: Sandbox instance for file access and command execution
             turn_records: Optional list of turn records for command inspection
             context: Optional :class:`CheckContext` (route / reference_dir).
-                Consumed by ``llm_judge`` / ``agent_judge``; ignored by
-                the rest.
+                ``route``: ``llm_judge`` / ``agent_judge``. ``reference_dir``:
+                those two plus ``reference_comparison``. Ignored by the rest.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info

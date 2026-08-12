@@ -1,11 +1,8 @@
 """Main orchestrator for coordinating task evaluation."""
 
 import asyncio
-import contextlib
 import logging
-import os
 import re
-import shutil
 import tempfile
 import time
 import uuid
@@ -26,6 +23,7 @@ from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors import (
     AgentCrashError,
     BudgetExceededError,
+    ReferenceTamperedError,
     TaskTimeoutError,
     TurnTimeoutError,
 )
@@ -51,6 +49,7 @@ from .models import (
     PostRunResult,
     PreRunCommand,
     PreservationMode,
+    ReferenceComparisonCriterion,
     SimulationConfig,
     SimulationTelemetry,
     TaskConfigRecord,
@@ -63,7 +62,7 @@ from .models import (
 )
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
-from .path_utils import format_task_log_id, task_log_path
+from .path_utils import digest_tree, format_task_log_id, rmtree_restrictive, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -79,27 +78,6 @@ logger = logging.getLogger(__name__)
 # Grace on outer wait_for so the agent's in-band watchdog (which preserves a partial)
 # wins the race against the asyncio cancel path (which doesn't).
 _WAIT_FOR_GRACE_SECONDS = 2.0
-
-
-def _rmtree_restrictive(root: Path) -> None:
-    """``rmtree`` a tree that may have been left at mode 000 by a killed run.
-
-    Plain ``rmtree(..., ignore_errors=True)`` silently declines here: ``scandir``
-    on a 000 directory raises ``PermissionError``, the ``rmdir``s then fail with
-    ENOTEMPTY, and every one of those is swallowed — leaving an orphaned tempdir
-    holding the reference solution, with no log line.
-
-    An ``onexc`` handler cannot fix it either: the failing call is the directory
-    ``open``/``scandir`` that drives the walk, which the handler has no way to
-    resume. So restore traversal on the way DOWN first, then delete.
-    """
-    for dirpath, dirnames, _filenames in os.walk(root, topdown=True, onerror=lambda _e: None):
-        for name in (dirpath, *(os.path.join(dirpath, d) for d in dirnames)):
-            with contextlib.suppress(OSError):
-                os.chmod(name, 0o700)
-    shutil.rmtree(root, ignore_errors=True)
-    if root.exists():
-        logger.warning("Staged reference dir %s could not be fully removed", root)
 
 
 async def _pump_stream(
@@ -419,6 +397,22 @@ class Orchestrator:
         # around each agent turn can't block a sibling task's judge mid-read, and a
         # crashed run can only leave a throwaway directory unreadable.
         self._reference_dir: Path | None = None
+
+        # The mkdtemp root that holds ``_reference_dir``, recorded the moment it
+        # is created and BEFORE the copy runs, so a copy that raises part-way
+        # (unreadable source file, ENOSPC) still gets cleaned up. Keying cleanup
+        # on ``_reference_dir.parent`` instead would leak the partial copy of the
+        # reference solution, because ``_reference_dir`` is only assigned on the
+        # success path. None under docker, where the reference is a host-owned
+        # bind mount rather than a tempdir of ours.
+        self._reference_staging_root: Path | None = None
+
+        # SHA-256 of the staged reference tree, taken right after staging and
+        # re-verified before grading. The window is per-turn, so between turns
+        # the (necessarily writable) docker mount is back at its normal mode; an
+        # agent-backgrounded process could overwrite the reference and drive
+        # ``reference_comparison`` to 1.0. See _verify_reference_integrity.
+        self._reference_digest: str | None = None
 
         # Early-stop watcher (created in _setup only when a criterion carries a
         # stop_early: block and the kill switch is not thrown; None otherwise,
@@ -1032,11 +1026,63 @@ class Orchestrator:
             return
         if source == Path(CONTAINER_REFERENCE_DIR):
             self._reference_dir = source
+        else:
+            # Record the root BEFORE the copy: _cleanup keys on this field, so a
+            # copytree that raises part-way must still leave something to remove.
+            staging = Path(tempfile.mkdtemp(prefix="coder_eval_reference_"))
+            self._reference_staging_root = staging
+            # copytree needs a non-existent leaf; mkdtemp already made the parent.
+            destination = staging / "reference"
+            self._reference_dir = await asyncio.to_thread(stage_reference_dir, source, destination)
+        self._reference_digest = await asyncio.to_thread(digest_tree, self._reference_dir)
+        self._validate_reference_consumers()
+
+    def _validate_reference_consumers(self) -> None:
+        """Fail fast on a criterion that names a reference file which isn't there.
+
+        A typo in ``reference_comparison.reference_file`` is an EVAL-CONFIG error,
+        not an agent failure. Left to check time it surfaces as a gating
+        ``score=0.0`` → ``FinalStatus.FAILURE``, i.e. counted against the agent's
+        pass rate — and on a dataset-fanned suite it zeroes every row silently.
+        Raising here routes it to ``FinalStatus.ERROR`` instead, and does so
+        before the agent burns a single token.
+        """
+        reference_dir = self._reference_dir
+        if reference_dir is None:
             return
-        staging = Path(tempfile.mkdtemp(prefix="coder_eval_reference_"))
-        # copytree needs a non-existent leaf; mkdtemp already made the parent.
-        destination = staging / "reference"
-        self._reference_dir = await asyncio.to_thread(stage_reference_dir, source, destination)
+        for criterion in self.task.success_criteria:
+            if not isinstance(criterion, ReferenceComparisonCriterion):
+                continue
+            candidate = (reference_dir / criterion.reference_file).resolve()
+            if not candidate.is_relative_to(reference_dir.resolve()) or not candidate.is_file():
+                raise ValueError(
+                    f"reference_comparison.reference_file {criterion.reference_file!r} does not name a "
+                    + f"readable file inside the task's reference directory ({self.task.reference.directory!r} "  # type: ignore[union-attr]
+                    + "— task.reference is guaranteed set here by the load-time validator). "
+                    + "This is a task-definition error, not an agent failure."
+                )
+
+    async def _verify_reference_integrity(self) -> None:
+        """Re-hash the reference before grading and hard-fail on a mismatch.
+
+        The mode-000 window spans ``agent.communicate`` only, and nothing reaps
+        the agent's child processes at turn end — so a backgrounded writer can
+        modify the reference once the window closes. Under docker the mount MUST
+        be writable (chmod on a ``:ro`` bind fails with EROFS), so this is the
+        control that stops an agent from overwriting the solution with its own
+        file and scoring ``reference_comparison`` 1.0.
+
+        Read-back is not covered by this; see the KNOWN GAP in ``fs_permissions``.
+        """
+        if self._reference_dir is None or self._reference_digest is None:
+            return
+        current = await asyncio.to_thread(digest_tree, self._reference_dir)
+        if current != self._reference_digest:
+            raise ReferenceTamperedError(
+                "The reference solution changed during the run: its content hash before the agent ran "
+                + f"({self._reference_digest[:12]}...) does not match the hash at grading time "
+                + f"({current[:12]}...). Refusing to grade against a reference the agent may have written."
+            )
 
     async def _setup(self) -> None:
         """Set up all components for evaluation.
@@ -1632,6 +1678,7 @@ class Orchestrator:
 
         # Check success criteria (reference_dir feeds reference_comparison + judges)
         logger.debug("Checking success criteria")
+        await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_dir=self._reference_dir,
@@ -1743,6 +1790,7 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
+        await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_dir=self._reference_dir,
@@ -2237,7 +2285,15 @@ class Orchestrator:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=self._POST_RUN_STREAM_LIMIT,
-                )  # nosec B602,B604 - commands come from task YAML, not user input
+                )
+                # No `# nosec` here: bandit does not flag
+                # asyncio.create_subprocess_shell at all (B602 is
+                # subprocess.Popen(shell=True)), so the suppression this line
+                # used to carry was inert -- and an inert id silently
+                # pre-suppresses a real finding if a flagged construct is ever
+                # added here. The shell IS intentional: pre/post_run commands are
+                # authored in the task YAML, which is already a trusted artifact
+                # (it can run anything via a run_command criterion).
 
                 stdout_chunks: list[str] = []
                 stderr_chunks: list[str] = []
@@ -2340,15 +2396,25 @@ class Orchestrator:
 
         # Drop the staged reference copy. Deliberately NOT preserved into
         # run_dir/artifacts: run directories get archived, uploaded, and shared,
-        # and the reference solution must not ride along. The parent is the
-        # mkdtemp root created in _stage_reference.
-        # Skip the container mount: it is not ours to delete (the host owns and
-        # removes that staging dir), and rmtree'ing its parent would take /work.
-        if self._reference_dir is not None and self._reference_dir != Path(CONTAINER_REFERENCE_DIR):
-            staging_root = self._reference_dir.parent
-            self._reference_dir = None
+        # and the reference solution must not ride along.
+        #
+        # Keyed on _reference_staging_root, recorded before the copy — NOT on
+        # _reference_dir.parent, which is only set once the copy succeeds and so
+        # would leak a half-written reference when copytree raises. The field is
+        # None under docker, where the reference is the host-owned bind mount:
+        # that one is not ours to delete, and rmtree'ing its parent would take
+        # /work with it.
+        #
+        # rmtree_restrictive, not rmtree(ignore_errors=True): a run killed
+        # mid-turn leaves the tree at mode 000, where scandir raises
+        # PermissionError and plain rmtree silently declines — orphaning a
+        # tempdir that holds the reference solution, with no log line.
+        staging_root = self._reference_staging_root
+        self._reference_dir = None
+        self._reference_staging_root = None
+        if staging_root is not None:
             try:
-                await asyncio.to_thread(shutil.rmtree, staging_root, ignore_errors=True)
+                await asyncio.to_thread(rmtree_restrictive, staging_root)
             except Exception as e:
                 logger.warning("Failed to remove staged reference dir %s: %s", staging_root, e)
 

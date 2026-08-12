@@ -167,7 +167,7 @@ Quick reference of available types:
 | `json_check` | Fractional | `path`, `schema`, `assertions` (JMESPath) |
 | `run_command` | Binary / Continuous | `command`, `expected_exit_code`, `expected_stdout`, `stdout_match` |
 | `file_matches_regex` | Binary | `path`, `pattern` |
-| `reference_comparison` | Continuous | `agent_file` (requires `reference` block) |
+| `reference_comparison` | Continuous | `agent_file`, `reference_file` (requires `reference` block) |
 | `command_executed` | Fractional | `tool_name`, `command_pattern`, `min_count`, `require_success` |
 | `commands_efficiency` | Continuous | `expected_commands` |
 | `classification_match` | Binary | `path`, `expected_label`, `allowed_labels`, `case_sensitive` |

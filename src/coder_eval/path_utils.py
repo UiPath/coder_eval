@@ -1,5 +1,9 @@
 """Path utilities for run directory management."""
 
+import contextlib
+import hashlib
+import logging
+import os
 import platform
 import shutil
 from collections.abc import Callable
@@ -7,7 +11,59 @@ from datetime import datetime
 from pathlib import Path
 
 
+logger = logging.getLogger(__name__)
+
 TASK_LOG_FILENAME = "task.log"
+
+# Ignore list for every copy of a reference solution tree. A module-level
+# constant, not an inline literal at each call site: the host-side docker mount
+# (`DockerRunner._prepare_reference_mount`) and the per-run staged copy
+# (`orchestration.evaluation.stage_reference_dir`) are the SAME operation on two
+# mutually exclusive driver paths, so a literal at each site would make
+# ``$REFERENCE_DIR`` contents driver-dependent the moment one of them grew an
+# entry.
+REFERENCE_COPY_IGNORE = [".git"]
+
+
+def digest_tree(root: Path) -> str:
+    """Content hash of every file under ``root``, stable across runs.
+
+    Paths are hashed alongside contents (so a rename is a change) in sorted
+    order (so ``os.walk`` ordering can't make the digest nondeterministic).
+    Unreadable entries are folded in as a sentinel rather than skipped: a file
+    that becomes unreadable between two calls IS a change worth catching.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(path.read_bytes())
+        except OSError as e:
+            digest.update(f"<unreadable: {e.errno}>".encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def rmtree_restrictive(root: Path) -> None:
+    """``rmtree`` a tree that may have been left at mode 000 by a killed run.
+
+    Plain ``rmtree(..., ignore_errors=True)`` silently declines here: ``scandir``
+    on a 000 directory raises ``PermissionError``, the ``rmdir``s then fail with
+    ENOTEMPTY, and every one of those is swallowed — leaving an orphaned tempdir
+    holding the reference solution, with no log line.
+
+    An ``onexc`` handler cannot fix it either: the failing call is the directory
+    ``open``/``scandir`` that drives the walk, which the handler has no way to
+    resume. So restore traversal on the way DOWN first, then delete.
+    """
+    for dirpath, dirnames, _filenames in os.walk(root, topdown=True, onerror=lambda _e: None):
+        for name in (dirpath, *(os.path.join(dirpath, d) for d in dirnames)):
+            with contextlib.suppress(OSError):
+                os.chmod(name, 0o700)
+    shutil.rmtree(root, ignore_errors=True)
+    if root.exists():
+        logger.warning("Directory %s could not be fully removed", root)
 
 
 def ignore_patterns_and_symlinks(patterns: list[str]) -> Callable[[str, list[str]], set[str]]:

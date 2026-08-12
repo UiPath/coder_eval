@@ -21,10 +21,29 @@ import shutil
 from pathlib import Path
 
 from ..models import CONTAINER_REFERENCE_DIR, TaskDefinition
-from ..path_utils import ignore_patterns_and_symlinks
+from ..path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks
 
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_host_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path | None:
+    """Resolve ``task.reference.directory`` against the task YAML's directory.
+
+    The ONE place that knows how a reference path is spelled relative to its
+    task file. Both drivers go through it: the in-container/host orchestrator
+    via :func:`resolve_reference_dir` below, and the host-side
+    ``DockerRunner._resolve_host_reference_dir`` which mounts the same directory
+    into the container. When the two resolved independently, a change to the
+    rule made ``$REFERENCE_DIR`` mean different things per driver.
+
+    Returns None when the task declares no reference or has no task file.
+    Existence is NOT checked here — callers differ on whether a missing
+    directory is fatal (orchestrator) or a warning (argv builder).
+    """
+    if task.reference is None or task_file is None:
+        return None
+    return (task_file.parent / task.reference.directory).resolve()
 
 
 def resolve_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path | None:
@@ -70,14 +89,18 @@ def resolve_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path 
         # whole turn, reporting a normal pass/fail. A missing mount means the
         # host-side wiring is broken; that must be loud, not silently unprotected.
         raise FileNotFoundError(
-            f"Task declares a reference but {CONTAINER_REFERENCE_DIR} is not mounted in this container. "
-            + "The host-side DockerRunner should have mounted it; refusing to run unprotected. "
-            + "If the coder-eval-agent image predates the reference mount, rebuild it (`make docker-image`)."
+            f"Task declares reference.directory={task.reference.directory!r} but {CONTAINER_REFERENCE_DIR} "
+            + "is not mounted in this container; refusing to run unprotected. Most likely that path does not "
+            + "resolve to a directory next to the task YAML — the host-side DockerRunner logs "
+            + "'does not resolve to a directory' and skips the mount when it doesn't, so check the host log "
+            + "first. Failing that, the coder-eval-agent image may predate the reference mount: rebuild it "
+            + "with `make docker-image`."
         )
 
     if not task_file:
         raise ValueError("task_file not set, cannot resolve reference directory path")
-    ref_dir = (task_file.parent / task.reference.directory).resolve()
+    ref_dir = resolve_host_reference_dir(task, task_file)
+    assert ref_dir is not None  # task.reference and task_file are both non-None here
     if not ref_dir.is_dir():
         raise FileNotFoundError(
             f"Reference directory not found: {ref_dir} (specified in {task_file}). "
@@ -99,7 +122,7 @@ def stage_reference_dir(source: Path, destination: Path) -> Path:
     if destination.exists():
         shutil.rmtree(destination, ignore_errors=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, ignore=ignore_patterns_and_symlinks([".git"]))
+    shutil.copytree(source, destination, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
     # Log that the reference was staged, but never its contents.
     logger.info("Reference solution staged (content hidden for security)")
     return destination

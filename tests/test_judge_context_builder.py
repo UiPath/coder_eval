@@ -383,14 +383,14 @@ def test_scrub_reference_redacts_when_enabled() -> None:
     # Secrets shorter than 8 chars are skipped to avoid mangling unrelated common substrings;
     # use a realistic-length sentinel here.
     secret = "REF_SOLUTION_BLOCK_42"
-    assert scrub_reference(f"a {secret} b", secret) == "a <reference redacted> b"
+    assert scrub_reference(f"a {secret} b", [secret]) == "a <reference redacted> b"
 
 
 def test_scrub_reference_skips_secrets_below_min_length() -> None:
     # 7 chars and shorter are no-op; redacting a tiny common substring would
     # produce gibberish and isn't a realistic leak vector.
-    assert scrub_reference("a REF b", "REF") == "a REF b"
-    assert scrub_reference("hello1", "hello1") == "hello1"  # 6 chars
+    assert scrub_reference("a REF b", ["REF"]) == "a REF b"
+    assert scrub_reference("hello1", ["hello1"]) == "hello1"  # 6 chars
 
 
 def test_scrub_runs_before_clip_so_partial_secrets_dont_survive() -> None:
@@ -419,7 +419,7 @@ def test_scrub_runs_before_clip_so_partial_secrets_dont_survive() -> None:
         judge_prompt=prompt_text,
         judge_system_prompt="strict reviewer",
         max_chars=500,  # tight budget: forces clipping of the long prompt
-        scrub_key=secret,
+        scrub_key=[secret],
     )
 
     # The post-clip prompt MUST NOT contain any portion of the secret payload —
@@ -448,7 +448,7 @@ def test_scrub_reference_noop_when_none() -> None:
 
 def test_scrub_reference_noop_when_empty() -> None:
     # Guards against "".replace("", "<redacted>") which would insert the sentinel between every char.
-    assert scrub_reference("text", "") == "text"
+    assert scrub_reference("text", []) == "text"
 
 
 # --- truncate ---
@@ -489,13 +489,13 @@ def test_format_details_with_missing_and_notes() -> None:
 
 
 def test_collect_reference_secrets_missing_dir_returns_empty(tmp_path: Path) -> None:
-    assert collect_reference_secrets(tmp_path / "nope") == []
+    assert collect_reference_secrets(tmp_path / "nope", None) == []
 
 
 def test_collect_reference_secrets_collects_file_contents(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("contents of a", encoding="utf-8")
     (tmp_path / "b.py").write_text("contents of b", encoding="utf-8")
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     assert set(secrets) == {"contents of a", "contents of b"}
 
 
@@ -513,7 +513,7 @@ def test_collect_reference_secrets_skips_symlinks(tmp_path: Path) -> None:
     link.symlink_to(real)
     loop = tmp_path / "loop"
     loop.symlink_to(tmp_path)  # symlinked subdir back to root — would loop on rglob if followed
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     assert secrets == ["real file contents"]
 
 
@@ -521,7 +521,7 @@ def test_collect_reference_secrets_bounded_by_file_count(tmp_path: Path) -> None
     """A reference dir with many files must not load all of them into memory unbounded."""
     for i in range(500):
         (tmp_path / f"file_{i:03d}.txt").write_text(f"content {i}", encoding="utf-8")
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     # Cap is well below 500. The exact value is implementation-defined; assert
     # we stopped *before* reading every file rather than locking in the number.
     assert 0 < len(secrets) < 500
@@ -532,7 +532,7 @@ def test_collect_reference_secrets_bounded_by_total_bytes(tmp_path: Path) -> Non
     big = "x" * (512 * 1024)  # 512 KB per file
     for i in range(10):  # 5 MB total, easily over any reasonable budget
         (tmp_path / f"big_{i}.bin").write_text(big, encoding="utf-8")
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     total_bytes = sum(len(s) for s in secrets)
     # We expect the budget to clamp below the full 5 MB.
     assert total_bytes < 5 * 1024 * 1024
@@ -563,7 +563,7 @@ def test_collect_reference_secrets_skips_oversized_file_without_reading(
         return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Path, "read_text", tracking_read_text)
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     # The 4 KB file must NOT have been opened (the pre-check rejects it).
     assert big not in read_calls
     # The small file may or may not have been read depending on rglob order;
@@ -583,7 +583,7 @@ def test_collect_reference_secrets_exact_fit_single_file_accepted(
     """
     monkeypatch.setattr("coder_eval.evaluation.judge_context._MAX_REFERENCE_BYTES", 10)
     (tmp_path / "exact.txt").write_text("a" * 10, encoding="utf-8")
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     assert secrets == ["a" * 10]
 
 
@@ -591,7 +591,7 @@ def test_collect_reference_secrets_one_byte_over_rejected(tmp_path: Path, monkey
     """A single file one byte larger than the budget is rejected before read."""
     monkeypatch.setattr("coder_eval.evaluation.judge_context._MAX_REFERENCE_BYTES", 10)
     (tmp_path / "oversize.txt").write_text("a" * 11, encoding="utf-8")
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     assert secrets == []
 
 
@@ -616,7 +616,7 @@ def test_collect_reference_secrets_stat_oserror_is_skipped(tmp_path: Path, monke
         return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Path, "stat", flaky_stat)
-    secrets = collect_reference_secrets(tmp_path)
+    secrets = collect_reference_secrets(tmp_path, None)
     assert "real content" in secrets
     assert "ghost content" not in secrets
 
@@ -735,3 +735,121 @@ def test_render_reference_dir_truncates_each_file(tmp_path: Path) -> None:
     assert rendered is not None
     assert "--- big.py ---" in rendered
     assert "... (truncated" in rendered
+
+
+# --- $REFERENCE_DIR entries in files: must be scrubbable ---
+
+
+def _builder(**overrides):
+    from coder_eval.evaluation.judge_context import JudgeContextBuilder
+
+    kwargs = dict(
+        files=[],
+        include_reference=False,
+        include_agent_output=False,
+        include_tool_calls=False,
+        max_file_chars=10_000,
+    )
+    kwargs.update(overrides)
+    return JudgeContextBuilder(**kwargs)  # type: ignore[arg-type]
+
+
+def test_reference_dir_file_entry_is_recorded_as_a_scrub_key(tmp_path, sandbox):
+    """The documented `include_reference: false` + `files: [$REFERENCE_DIR/x]`
+    combination attaches reference bytes to the prompt.
+
+    Gating the scrub set on ``include_reference`` therefore persisted the
+    reference verbatim into the archived ``judge-<idx>.yaml`` — the same run dir
+    the reference copy is deliberately kept out of.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "rubric.md").write_text("SECRET_RUBRIC_CONTENT_0123456789", encoding="utf-8")
+
+    ctx = _builder(files=["$REFERENCE_DIR/rubric.md"]).build(sandbox, ref, None)
+
+    assert any("SECRET_RUBRIC_CONTENT" in (b.content or "") for b in ctx.files), "the judge did see it"
+    assert "SECRET_RUBRIC_CONTENT_0123456789" in ctx.reference_secrets, "...so it must be scrubbable"
+    assert scrub_reference("model echoed SECRET_RUBRIC_CONTENT_0123456789", ctx.reference_secrets or None) == (
+        "model echoed <reference redacted>"
+    )
+
+
+def test_task_dir_file_entry_is_not_a_reference_secret(tmp_path, sandbox):
+    """$TASK_DIR assets are not the grading material; redacting them would
+    scrub the judge's own rubric out of its rationale for no reason."""
+    task_assets = tmp_path / "task"
+    task_assets.mkdir()
+    (task_assets / "notes.md").write_text("ORDINARY_TASK_NOTES_ABCDEFGH", encoding="utf-8")
+    sandbox.task_dir = task_assets
+
+    ctx = _builder(files=["$TASK_DIR/notes.md"]).build(sandbox, None, None)
+
+    assert ctx.reference_secrets == []
+
+
+def test_truncated_reference_file_yields_both_scrub_shapes(tmp_path, sandbox):
+    """scrub_reference redacts by exact substring, so a key built only from the
+    untruncated text can never match the text the judge was shown."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    body = "TRUNCATABLE_" + "Z" * 500
+    (ref / "big.py").write_text(body, encoding="utf-8")
+
+    ctx = _builder(files=["$REFERENCE_DIR/big.py"], max_file_chars=50).build(sandbox, ref, None)
+
+    shown = next(b.content for b in ctx.files if b.path == "$REFERENCE_DIR/big.py")
+    assert shown is not None
+    assert body in ctx.reference_secrets, "full form (a tool-using judge can Read the file itself)"
+    assert shown in ctx.reference_secrets, "truncated form (what this prompt actually carried)"
+    assert scrub_reference(shown, ctx.reference_secrets) == "<reference redacted>"
+
+
+def test_include_reference_records_truncated_secrets_too(tmp_path, sandbox):
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    body = "INLINED_REFERENCE_" + "Q" * 500
+    (ref / "solution.py").write_text(body, encoding="utf-8")
+
+    ctx = _builder(include_reference=True, max_file_chars=40).build(sandbox, ref, None)
+
+    assert ctx.reference is not None
+    truncated = truncate(body, 40)
+    assert body in ctx.reference_secrets
+    assert truncated in ctx.reference_secrets
+    assert "INLINED_REFERENCE" not in scrub_reference(ctx.reference, ctx.reference_secrets)
+
+
+# --- render_reference_dir prompt-budget guard ---
+
+
+def test_render_reference_dir_drops_files_past_the_prompt_budget_and_says_so(tmp_path, monkeypatch):
+    """Dropped reference files change what the judge grades against, so the
+    omission must be visible in the prompt rather than read as 'the reference
+    doesn't implement that'."""
+    import coder_eval.evaluation.judge_context as jc
+
+    monkeypatch.setattr(jc, "_MAX_RENDERED_REFERENCE_CHARS", 120)
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    for i in range(4):
+        (ref / f"f{i}.py").write_text(f"CONTENT_{i}_" + "x" * 100, encoding="utf-8")
+
+    rendered = jc.render_reference_dir(ref, 10_000)
+
+    assert rendered is not None
+    assert "CONTENT_0_" in rendered, "the first block must always survive"
+    assert "CONTENT_3_" not in rendered
+    assert "further reference file(s) omitted: prompt budget" in rendered
+
+
+def test_render_reference_dir_returns_none_for_an_empty_reference(tmp_path):
+    """The caller then treats the reference as absent rather than attaching an
+    empty block that reads to the judge as 'the reference is empty'."""
+    from coder_eval.evaluation.judge_context import render_reference_dir
+
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "empty.py").write_text("", encoding="utf-8")
+
+    assert render_reference_dir(ref, 10_000) is None

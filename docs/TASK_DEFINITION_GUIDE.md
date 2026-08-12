@@ -1091,7 +1091,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | Field | Default | Description |
 |-------|---------|-------------|
 | `prompt` | *required* | Grading instructions shown to the judge |
-| `files` | `[]` | Paths whose contents are shown to the judge. Plain entries are sandbox-relative; entries prefixed with `$TASK_DIR/` are read from the host filesystem relative to the task YAML's parent directory (e.g. `$TASK_DIR/../shared/rubric.md` for a rubric shared across a task family). Missing files render as `<file not found>`. |
+| `files` | `[]` | Paths whose contents are shown to the judge. Plain entries are sandbox-relative; entries prefixed with `$TASK_DIR/` or `$REFERENCE_DIR/` are read from the host filesystem, relative to the task YAML's parent directory and to the staged reference directory respectively (e.g. `$TASK_DIR/../shared/rubric.md` for a rubric shared across a task family, or `$REFERENCE_DIR/rubric.md` for one asset out of the reference — which works regardless of `include_reference`). Missing files render as `<file not found>`. |
 | `include_reference` | `true` | Inline the WHOLE reference directory into the judge prompt, one labelled block per file (silently omitted if no reference is configured). Never shown to the agent. Set `false` and use `$REFERENCE_DIR/<path>` entries in `files` to attach only specific assets. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA) |
 | `include_tool_calls` | `false` | Include a summary of the latest agent turn's tool calls |
@@ -1166,7 +1166,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | Field | Default | Description |
 |-------|---------|-------------|
 | `prompt` | *required* | Evaluation instructions for the judge agent |
-| `files` | `[]` | Paths pre-attached to the prompt. Plain entries are sandbox-relative (the judge also has live access via its working-directory copy); entries prefixed with `$TASK_DIR/` are read from the host filesystem relative to the task YAML's parent directory and are inlined into the prompt only. |
+| `files` | `[]` | Paths pre-attached to the prompt. Plain entries are sandbox-relative (the judge also has live access via its working-directory copy); entries prefixed with `$TASK_DIR/` or `$REFERENCE_DIR/` are read from the host filesystem — relative to the task YAML's parent directory and to the staged reference directory respectively (`$REFERENCE_DIR/` works regardless of `include_reference`) — and are inlined into the prompt only. |
 | `include_reference` | `true` | Mount the reference tree at `_reference/` for the judge to Read/Glob (not inlined into the prompt). Use `$REFERENCE_DIR/<path>` entries in `files` to pre-attach specific assets as text. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED) |
 | `include_tool_calls` | `false` | Include summarized tool-call telemetry from the latest agent turn |
@@ -1273,6 +1273,39 @@ There is no inline `code:` or single-file `file:` form. A directory is the only
 shape that can be permission-gated as a unit (see below), and a one-file
 reference is just a directory containing one file.
 
+> **Migrating from `code:` / `file:`.** This is a **breaking** task-schema
+> change, and it is a hard load error, not a silent downgrade — a task carrying
+> either key fails validation with a message naming the replacement. Every task
+> suite outside this repo (the `coder-eval-uipath` / eval-runner suites among
+> them) must migrate before its next scheduled run:
+>
+> | Was | Now |
+> |-----|-----|
+> | `reference: {code: "<source>"}` | write the source to a file in a directory, then `reference: {directory: "reference"}` |
+> | `reference: {file: "solution.py"}` | move the file into a directory: `reference: {directory: "reference"}` |
+>
+> `reference_comparison` also gained a **required** `reference_file` naming
+> which file inside that directory to compare against — previously implicit
+> because there was only one.
+>
+> **Score-comparability warning.** `include_reference: true` (still the default)
+> changed meaning for `llm_judge`: it used to inline the one reference file, and
+> now inlines the **whole reference directory** (capped at 200 000 chars, files
+> truncated to `max_file_chars` each, trailing files dropped with an explicit
+> "omitted" marker). Every pre-existing judge task with a reference therefore
+> sends a larger, differently-shaped prompt — judge scores are **not comparable
+> across this migration**, and per-judge token cost rises roughly in proportion
+> to the added reference bytes. Re-baseline any trend line that spans it, or set
+> `include_reference: false` and attach the one asset you want with a
+> `$REFERENCE_DIR/<path>` entry in `files:` to restore the old shape.
+>
+> **Docker image lockstep.** The host↔image contract changed (a new
+> `/work/references` bind mount plus a tmpfs mask over the reference's original
+> location inside the task-dir mount). A pinned or cached `coder-eval-agent`
+> image predating this change will fail closed with a missing-mount error rather
+> than grade against an empty reference — but rebuild and republish the image in
+> lockstep (`make docker-image`) so docker-driver pipelines don't simply stop.
+
 ### The agent never sees it
 
 The agent under evaluation shares a filesystem with the harness, so "don't show
@@ -1297,20 +1330,36 @@ Under `driver: docker` the reference is bind-mounted **read-write** at
 `/work/references` — deliberately: it is a throwaway copy, and a `:ro` mount
 cannot be chmod'd (EROFS), so the window could not be applied at all. An empty
 tmpfs masks its original location inside the task-directory mount, and the
-container drops `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER` and `CHOWN`.
+container drops `DAC_OVERRIDE` and `DAC_READ_SEARCH`.
 
 > **What this does and does not guarantee.** The mode-000 window stops an agent
-> that *passively reads* the reference — `ls`, `cat`, `grep` all fail. It does
-> **not** contain an agent that deliberately restores the mode: `chmod(2)` is
-> gated on *owner-or-`CAP_FOWNER`*, and the container runs as root, which owns
-> the bind-mounted copy. Verified: `chmod 755 /work/references` succeeds from
-> inside the container and the solution is then readable. The container drops
-> `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER` and `CHOWN`, which closes this
-> where the mount preserves a non-root owner, but not where the mount reports
-> the container's own uid (Docker Desktop). **Closing it fully requires running
-> the agent as a non-root uid that does not own the reference** — tracked as
-> follow-up. Treat the current control as raising the cost of accidental
-> leakage, not as a boundary against an adversarial agent.
+> that *passively reads* the reference — `ls`, `cat`, `grep` all fail. Two
+> things it does **not** stop:
+>
+> 1. **A deliberate re-chmod.** `chmod(2)` is gated on *owner-or-`CAP_FOWNER`*,
+>    and the container runs as root, which owns the bind-mounted copy. Verified:
+>    `chmod 755 /work/references` succeeds from inside the container and the
+>    solution is then readable. Dropping `FOWNER`/`CHOWN` does **not** fix this
+>    and is deliberately not done — the in-container orchestrator that *applies*
+>    the window is the same root process with the same capabilities, so dropping
+>    `FOWNER` breaks the harness's own `chmod` wherever the bind mount preserves
+>    a non-root owner (native Linux). Verified: container root, uid-1000-owned
+>    directory, `FOWNER` dropped → `chmod: Operation not permitted`. The drop
+>    only bites on the hosts where it also disables the control.
+> 2. **Waiting the window out.** The window spans `agent.communicate`, so
+>    between turns and after the final one the reference is back at its normal
+>    mode, and nothing reaps the agent's child processes at turn end — a
+>    backgrounded read loop started during a turn succeeds once the window
+>    closes.
+>
+> The *write* half of (2) IS closed: the reference tree is hashed at staging
+> time and re-verified before grading, and a mismatch fails the run with
+> `ReferenceTamperedError` rather than scoring `reference_comparison` against a
+> file the agent wrote. **Closing the read half fully requires running the agent
+> as a non-root uid that does not own the reference, and holding the window for
+> the agent's whole lifetime** — tracked as follow-up. Treat the current control
+> as raising the cost of accidental leakage, not as a boundary against an
+> adversarial agent.
 
 ### Addressing reference files
 

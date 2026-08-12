@@ -2,20 +2,34 @@
 
 The agent under evaluation shares a filesystem with the harness, so without an
 active control it can read the reference solution instead of solving the task.
-``fs_permissions.set_permissions`` chmods the reference and task
-directories to 000 for the duration of every ``agent.communicate`` call.
+``fs_permissions.set_permissions`` chmods the staged REFERENCE directory to 000
+for the duration of every ``agent.communicate`` call. The task directory is
+deliberately NOT shielded — under docker it is a ``:ro`` mount (chmod -> EROFS)
+and the same YAML is readable at ``/work/input`` regardless, so shielding it was
+ineffective twice over. ``test_task_dir_is_not_shielded`` pins that.
 """
 
 import asyncio
 import contextlib
 import os
+import signal
 import stat
 import sys
+import threading
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
-from coder_eval.fs_permissions import READ_ONLY_MODE, RESTRICTED_MODE, set_permissions
+from coder_eval.fs_permissions import (
+    READ_ONLY_MODE,
+    RESTRICTED_MODE,
+    _PermissionStack,
+    set_permissions,
+)
+from coder_eval.models import CONTAINER_REFERENCE_DIR
+from coder_eval.path_utils import digest_tree
 
 
 # These tests drive `chmod` against the HOST filesystem. Windows `chmod` honours
@@ -296,35 +310,142 @@ class TestRestrictPermissions:
 
         assert _mode(guarded_dir) == original
 
-    async def test_crash_handlers_install_on_first_push_and_restore(self, guarded_dir, monkeypatch):
+    async def test_crash_handlers_install_from_the_event_loop_thread(self, guarded_dir, monkeypatch):
         """The advertised crash-safety property: a killed run must not leave the
-        user's checked-out tree at mode 000. Previously untested."""
-        from coder_eval.fs_permissions import _PermissionStack
+        tree at mode 000.
 
+        Asserted through the PUBLIC ``set_permissions`` entry point, not by
+        calling ``push`` directly. That distinction is the whole bug this test
+        exists for: installation used to happen inside ``push``, which only ever
+        runs on an ``asyncio.to_thread`` worker, where ``signal.signal`` raises
+        ``ValueError`` into a swallowing ``except`` — so SIGTERM had no restore
+        at all in production while a push-level test reported it installed.
+        """
         registered: list[object] = []
         installed_signals: list[int] = []
         monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", registered.append)
-        monkeypatch.setattr(
-            "coder_eval.fs_permissions.signal.signal",
-            lambda signum, handler: installed_signals.append(signum),
-        )
 
+        def _fake_signal(signum, _handler):
+            # Reproduce the property that made the original bug invisible: the
+            # real signal.signal raises off the main thread. A permissive stub
+            # records an install that CPython would have refused, which is
+            # exactly how a push()-time install passed its own test while doing
+            # nothing in production.
+            if threading.current_thread() is not threading.main_thread():
+                raise ValueError("signal only works in main thread of the main interpreter")
+            installed_signals.append(signum)
+
+        monkeypatch.setattr("coder_eval.fs_permissions.signal.signal", _fake_signal)
+        monkeypatch.setattr("coder_eval.fs_permissions._registry", _PermissionStack())
+
+        async with set_permissions([guarded_dir]):
+            pass
+
+        assert registered, "atexit restore was not registered when the window opened"
+        assert {signal.SIGINT, signal.SIGTERM} <= set(installed_signals)
+
+        # Second window must not re-install.
+        before = len(registered)
+        async with set_permissions([guarded_dir]):
+            pass
+        assert len(registered) == before
+
+    async def test_install_failure_is_not_latched(self, guarded_dir, monkeypatch):
+        """A failed install must be retried, not recorded as done.
+
+        ``_install_crash_handlers`` used to swallow the failure internally and
+        latch ``_handlers_installed = True`` regardless, so the one retry that
+        could have succeeded (from the main thread) never happened.
+        """
+        monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
+        attempts: list[int] = []
+
+        def _refuse(signum, _handler):
+            attempts.append(signum)
+            raise ValueError("not the main thread")
+
+        monkeypatch.setattr("coder_eval.fs_permissions.signal.signal", _refuse)
+        registry = _PermissionStack()
+        registry.ensure_crash_handlers()
+        registry.ensure_crash_handlers()
+
+        assert len(attempts) == 4, "a failed install must be retried on the next call, not latched"
+
+    @pytest.mark.parametrize("previous_is_callable", [True, False])
+    async def test_signal_handler_restores_then_chains(self, guarded_dir, monkeypatch, previous_is_callable):
+        """Invoke the handler that was actually installed, rather than discarding it.
+
+        The chaining contract is the reason this handler is allowed to exist at
+        all: an operator's Ctrl-C must not be swallowed. Capturing the handler is
+        what makes that assertable.
+        """
+        monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
+        captured: dict[int, Any] = {}
+        chained: list[int] = []
+        killed: list[int] = []
+
+        previous = (lambda sig, _frame: chained.append(sig)) if previous_is_callable else signal.SIG_DFL
+        monkeypatch.setattr("coder_eval.fs_permissions.signal.getsignal", lambda _s: previous)
+        monkeypatch.setattr("coder_eval.fs_permissions.signal.signal", lambda s, h: captured.__setitem__(s, h))
+        monkeypatch.setattr("coder_eval.fs_permissions.os.kill", lambda _pid, sig: killed.append(sig))
+
+        registry = _PermissionStack()
+        registry.ensure_crash_handlers()
+        original = _mode(guarded_dir)
+        assert registry.push(guarded_dir, RESTRICTED_MODE) is True
+        assert _mode(guarded_dir) == RESTRICTED_MODE
+
+        captured[signal.SIGTERM](signal.SIGTERM, None)
+
+        assert _mode(guarded_dir) == original, "the crash handler must restore before chaining"
+        if previous_is_callable:
+            assert chained == [signal.SIGTERM]
+            assert killed == []
+        else:
+            # SIG_DFL: reset the disposition and re-raise, or SIGTERM stops killing.
+            assert killed == [signal.SIGTERM]
+
+    async def test_sig_ign_previous_is_not_re_raised(self, guarded_dir, monkeypatch):
+        """SIG_IGN is neither callable nor SIG_DFL — the one disposition the
+        original chain fell through entirely. Restoring and returning is correct;
+        killing the process would override a deliberate `signal.signal(SIGINT,
+        SIG_IGN)` by the embedding application."""
+        monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
+        captured: dict[int, Any] = {}
+        killed: list[int] = []
+        monkeypatch.setattr("coder_eval.fs_permissions.signal.getsignal", lambda _s: signal.SIG_IGN)
+        monkeypatch.setattr("coder_eval.fs_permissions.signal.signal", lambda s, h: captured.__setitem__(s, h))
+        monkeypatch.setattr("coder_eval.fs_permissions.os.kill", lambda _pid, sig: killed.append(sig))
+
+        registry = _PermissionStack()
+        registry.ensure_crash_handlers()
+        original = _mode(guarded_dir)
+        registry.push(guarded_dir, RESTRICTED_MODE)
+
+        captured[signal.SIGINT](signal.SIGINT, None)
+
+        assert _mode(guarded_dir) == original
+        assert killed == []
+
+    async def test_failed_restore_keeps_the_entry_for_the_crash_path(self, guarded_dir, monkeypatch):
+        """``pop`` used to ``del`` the entry BEFORE the restoring chmod, so a
+        failed chmod stripped ``restore_all`` of the only record of the original
+        mode — turning a recoverable failure into a permanently-000 tree."""
         registry = _PermissionStack()
         original = _mode(guarded_dir)
         assert registry.push(guarded_dir, RESTRICTED_MODE) is True
 
-        assert registered, "atexit restore was not registered on first push"
-        assert installed_signals, "no signal handlers installed on first push"
+        real_chmod = os.chmod
+        monkeypatch.setattr(
+            "coder_eval.fs_permissions.os.chmod",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError(1, "refused")),
+        )
+        registry.pop(guarded_dir)
+        monkeypatch.setattr("coder_eval.fs_permissions.os.chmod", real_chmod)
 
-        # A second push must not re-install.
-        before = len(registered)
-        registry.push(guarded_dir, RESTRICTED_MODE)
-        assert len(registered) == before
-
-        # The registered hook is what runs on a crash — it must restore.
-        assert _mode(guarded_dir) == RESTRICTED_MODE
+        assert _mode(guarded_dir) == RESTRICTED_MODE, "the failed chmod should have left it restricted"
         registry.restore_all()
-        assert _mode(guarded_dir) == original
+        assert _mode(guarded_dir) == original, "restore_all could not recover: pop discarded the entry"
 
     async def test_same_path_via_different_routes_shares_one_entry(self, guarded_dir):
         """Refcount keys are resolved paths, so `d` and `d/../d` are one entry."""
@@ -580,6 +701,26 @@ def _reference_task(*, reference_dir: str):
     )
 
 
+def _orchestrator_for(tmp_path: Path):
+    """A bare Orchestrator suitable for driving _cleanup directly.
+
+    No sandbox, no agent, no result -- _cleanup tolerates all three being unset,
+    and the reference-removal branch is what these tests exercise.
+    """
+    from coder_eval.orchestrator import Orchestrator
+
+    task_dir = tmp_path / "task"
+    task_dir.mkdir(exist_ok=True)
+    task_file = task_dir / "task.yaml"
+    task_file.write_text("# task", encoding="utf-8")
+    return Orchestrator(
+        task=_reference_task(reference_dir="reference"),
+        run_dir=tmp_path / "run",
+        variant_id="v",
+        task_file=task_file,
+    )
+
+
 class TestSetupWiring:
     """Guards that the feature is actually armed by _setup, not just callable."""
 
@@ -633,14 +774,345 @@ class TestSetupWiring:
     async def test_cleanup_removes_the_staging_root_even_when_left_at_mode_000(self, tmp_path):
         """A killed run can leave the staged copy unreadable; plain
         rmtree(ignore_errors=True) then silently declines, orphaning a tempdir
-        that holds the solution."""
-        from coder_eval.orchestrator import _rmtree_restrictive
+        that holds the solution.
 
+        Drives ``_cleanup`` itself. The earlier version of this test named
+        ``_cleanup`` but called the helper directly, so ``_cleanup`` read as
+        covered while it was in fact still using the swallowing rmtree the
+        helper's docstring rejects.
+        """
+        orchestrator = _orchestrator_for(tmp_path)
         root = tmp_path / "staging"
         (root / "reference").mkdir(parents=True)
         (root / "reference" / "solution.py").write_text("SOLUTION=42", encoding="utf-8")
+        orchestrator._reference_staging_root = root
+        orchestrator._reference_dir = root / "reference"
         os.chmod(root / "reference", RESTRICTED_MODE)
 
-        _rmtree_restrictive(root)
+        await orchestrator._cleanup()
 
         assert not root.exists()
+        assert orchestrator._reference_staging_root is None
+
+    async def test_cleanup_removes_the_staging_root_when_the_copy_failed(self, tmp_path):
+        """CLAUDE.md promises cleanup is 'keyed on the mkdtemp root so a failed
+        copy still cleans up'. Keying on ``_reference_dir.parent`` broke that:
+        ``_reference_dir`` is assigned only on the success path, so a copytree
+        that raised left a partial copy of the solution behind with no warning."""
+        orchestrator = _orchestrator_for(tmp_path)
+        root = tmp_path / "staging"
+        (root / "reference").mkdir(parents=True)
+        (root / "reference" / "partial.py").write_text("SOLUTION=42", encoding="utf-8")
+        # Exactly the state after a mid-copytree failure: root recorded, no
+        # _reference_dir.
+        orchestrator._reference_staging_root = root
+        orchestrator._reference_dir = None
+
+        await orchestrator._cleanup()
+
+        assert not root.exists()
+
+    async def test_cleanup_never_touches_the_container_mount(self, tmp_path):
+        """/work/references is host-owned; rmtree'ing its parent would take /work."""
+        orchestrator = _orchestrator_for(tmp_path)
+        orchestrator._reference_dir = Path(CONTAINER_REFERENCE_DIR)
+        orchestrator._reference_staging_root = None
+
+        removed: list[Path] = []
+        with patch("coder_eval.orchestrator.rmtree_restrictive", side_effect=removed.append):
+            await orchestrator._cleanup()
+
+        assert removed == []
+
+
+@pytest.fixture
+def container_mode(tmp_path, monkeypatch):
+    """Make the in-container code paths reachable from a unit test.
+
+    Docker is the ONLY driver where the reference feature does anything
+    (``Sandbox.enforces_permission_windows`` is False everywhere else), so
+    without this fixture ``make test`` proves none of the shipped behaviour —
+    the happy path was covered solely by a live-API CI job and the fail-closed
+    raise by nothing at all.
+
+    Patches the module-level ``CONTAINER_REFERENCE_DIR`` constants (there is no
+    ``/work/references`` on a dev box) and sets the env gate.
+    """
+    mount = tmp_path / "work_references"
+    monkeypatch.setenv("CODER_EVAL_IN_CONTAINER", "1")
+    monkeypatch.setattr("coder_eval.orchestration.evaluation.CONTAINER_REFERENCE_DIR", str(mount))
+    monkeypatch.setattr("coder_eval.orchestrator.CONTAINER_REFERENCE_DIR", str(mount))
+    return mount
+
+
+class TestInContainerReferenceResolution:
+    """The `/work/references` branch: docker is the only driver this feature runs on."""
+
+    def test_mount_wins_over_the_task_relative_path(self, tmp_path, container_mode):
+        """In-container the task-dir copy is masked by an empty tmpfs, so
+        resolving relative to the task file would find the MASK, not the
+        solution — and the mode-000 window would then shield a decoy."""
+        from coder_eval.orchestration.evaluation import resolve_reference_dir
+
+        container_mode.mkdir()
+        (container_mode / "solution.py").write_text("REAL", encoding="utf-8")
+        task_dir = tmp_path / "task"
+        (task_dir / "reference").mkdir(parents=True)
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+
+        resolved = resolve_reference_dir(_reference_task(reference_dir="reference"), task_file)
+
+        assert resolved == container_mode
+        assert (resolved / "solution.py").read_text(encoding="utf-8") == "REAL"
+
+    def test_missing_mount_fails_closed(self, tmp_path, container_mode):
+        """A missing mount must NOT fall back to the task-relative path.
+
+        That fallback resolves to the un-masked reference under the `:ro`
+        task-dir bind, which the window then cannot chmod (EROFS) — so the run
+        would complete with the solution readable for the whole turn while
+        reporting an ordinary pass/fail.
+        """
+        from coder_eval.orchestration.evaluation import resolve_reference_dir
+
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            resolve_reference_dir(_reference_task(reference_dir="reference"), task_file)
+
+        message = str(excinfo.value)
+        # Names the author's literal value and the likely cause first — a typo'd
+        # reference.directory is far more common than a stale image.
+        assert "reference" in message
+        assert "does not resolve to a directory" in message
+        assert "refusing to run unprotected" in message
+
+    def test_env_gate_is_required_not_just_the_path(self, tmp_path, monkeypatch):
+        """A bare `/work/references` probe would hijack every task's reference on
+        any host that happens to have that directory — silently, with wrong
+        reference content and wrong scores."""
+        from coder_eval.orchestration.evaluation import resolve_reference_dir
+
+        mount = tmp_path / "work_references"
+        mount.mkdir()
+        (mount / "solution.py").write_text("HIJACKED", encoding="utf-8")
+        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
+        monkeypatch.setattr("coder_eval.orchestration.evaluation.CONTAINER_REFERENCE_DIR", str(mount))
+
+        task_dir = tmp_path / "task"
+        (task_dir / "reference").mkdir(parents=True)
+        (task_dir / "reference" / "solution.py").write_text("REAL", encoding="utf-8")
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+
+        resolved = resolve_reference_dir(_reference_task(reference_dir="reference"), task_file)
+
+        assert resolved == (task_dir / "reference").resolve()
+
+    async def test_stage_reference_does_not_copy_the_container_mount(self, tmp_path, container_mode):
+        """Re-copying would move the shielded path OFF the one the agent attacks
+        — the exact leak `tasks/anti_cheat_reference` caught on its first run."""
+        container_mode.mkdir()
+        (container_mode / "solution.py").write_text("SOLUTION=42", encoding="utf-8")
+        orchestrator = _orchestrator_for(tmp_path)
+
+        await orchestrator._stage_reference()
+
+        assert orchestrator._reference_dir == Path(str(container_mode))
+        assert orchestrator._reference_staging_root is None, "the host owns this dir; we must not schedule a delete"
+
+    async def test_cleanup_does_not_rmtree_the_mounts_parent(self, tmp_path, container_mode):
+        """rmtree'ing `/work/references`'s parent would take `/work` with it."""
+        container_mode.mkdir()
+        (container_mode / "solution.py").write_text("SOLUTION=42", encoding="utf-8")
+        orchestrator = _orchestrator_for(tmp_path)
+        await orchestrator._stage_reference()
+
+        await orchestrator._cleanup()
+
+        assert container_mode.exists(), "the host-owned reference mount was deleted"
+        assert (container_mode / "solution.py").exists()
+
+
+class TestFailClosed:
+    """A window that cannot be applied must not produce a normal-looking score."""
+
+    async def test_strict_raises_when_the_chmod_is_refused(self, guarded_dir, monkeypatch):
+        """Left as a warning, an unprotected run is indistinguishable downstream
+        from a protected one — same task.json, same run.json, same report."""
+        from coder_eval.fs_permissions import PermissionWindowError
+
+        monkeypatch.setattr(
+            "coder_eval.fs_permissions.os.chmod",
+            lambda *_a, **_k: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+        )
+
+        with pytest.raises(PermissionWindowError, match="would be able to read it"):
+            async with set_permissions([guarded_dir], strict=True):
+                pass
+
+    async def test_non_strict_still_warns_and_continues(self, guarded_dir, monkeypatch, caplog):
+        """Off the enforced path (host runs) a refused chmod must stay advisory."""
+        monkeypatch.setattr(
+            "coder_eval.fs_permissions.os.chmod",
+            lambda *_a, **_k: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+        )
+
+        with caplog.at_level("WARNING"):
+            async with set_permissions([guarded_dir]):
+                pass
+
+        assert any("could not chmod" in r.message for r in caplog.records)
+
+    async def test_missing_path_is_not_an_error_even_under_strict(self, tmp_path):
+        """A task with no reference passes None/absent paths; that is the normal case."""
+        async with set_permissions([tmp_path / "absent"], strict=True):
+            pass
+
+    async def test_sandbox_uses_strict_only_when_it_enforces(self, tmp_path, monkeypatch):
+
+        seen: dict[str, Any] = {}
+
+        @contextlib.asynccontextmanager
+        async def _spy(paths, *, mode=RESTRICTED_MODE, strict=False):
+            seen["strict"] = strict
+            yield
+
+        monkeypatch.setattr("coder_eval.sandbox.set_permissions", _spy)
+        sandbox = _container_sandbox(tmp_path / "task", tmp_path / "sbx", monkeypatch)
+
+        async with sandbox.set_permissions([tmp_path]):
+            pass
+
+        assert seen["strict"] is True
+
+
+class TestCancellationOnEnter:
+    """A cancel landing on __aenter__ must not strand the tree at mode 000."""
+
+    async def test_cancel_during_push_still_unwinds(self, guarded_dir, monkeypatch):
+        """`asyncio.shield` protects the INNER task, not the awaiting coroutine.
+
+        With the push above the `try`, a task_timeout cancel raised out of
+        __aenter__ while the worker thread went on completing every chmod: the
+        `finally` never ran, the path stayed at 000 for the rest of the run
+        (failing every downstream $REFERENCE_DIR criterion), and the leaked
+        registry entry poisoned the next window on the same path.
+        """
+        original = _mode(guarded_dir)
+        real_chmod = os.chmod
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def _slow_chmod(path, mode):
+            loop.call_soon_threadsafe(started.set)
+            real_chmod(path, mode)
+
+        monkeypatch.setattr("coder_eval.fs_permissions.os.chmod", _slow_chmod)
+
+        async def _body():
+            async with set_permissions([guarded_dir]):
+                pass
+
+        task = asyncio.create_task(_body())
+        await started.wait()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert _mode(guarded_dir) == original, "cancel on __aenter__ left the path shielded"
+        # And the registry must be clean, or the next window records 000 as its
+        # own "original" and never restores.
+        from coder_eval.fs_permissions import _registry
+
+        assert guarded_dir.resolve() not in _registry._entries
+
+
+class TestReferenceIntegrity:
+    """The window is per-turn and the docker mount must be writable, so an
+    agent-backgrounded process can overwrite the reference between turns and
+    drive reference_comparison to 1.0."""
+
+    async def test_unmodified_reference_passes(self, tmp_path):
+        orchestrator = _orchestrator_for(tmp_path)
+        ref = tmp_path / "ref"
+        ref.mkdir()
+        (ref / "solution.py").write_text("SOLUTION=42", encoding="utf-8")
+        orchestrator._reference_dir = ref
+        orchestrator._reference_digest = digest_tree(ref)
+
+        await orchestrator._verify_reference_integrity()
+
+    async def test_overwritten_reference_is_an_error_not_a_score(self, tmp_path):
+        from coder_eval.errors import ReferenceTamperedError
+
+        orchestrator = _orchestrator_for(tmp_path)
+        ref = tmp_path / "ref"
+        ref.mkdir()
+        (ref / "solution.py").write_text("SOLUTION=42", encoding="utf-8")
+        orchestrator._reference_dir = ref
+        orchestrator._reference_digest = digest_tree(ref)
+
+        # Exactly what a backgrounded `cp my_answer.py /work/references/` does.
+        (ref / "solution.py").write_text("def whatever_the_agent_wrote(): ...", encoding="utf-8")
+
+        with pytest.raises(ReferenceTamperedError, match="changed during the run"):
+            await orchestrator._verify_reference_integrity()
+
+    async def test_added_file_is_detected(self, tmp_path):
+        from coder_eval.errors import ReferenceTamperedError
+
+        orchestrator = _orchestrator_for(tmp_path)
+        ref = tmp_path / "ref"
+        ref.mkdir()
+        (ref / "solution.py").write_text("SOLUTION=42", encoding="utf-8")
+        orchestrator._reference_dir = ref
+        orchestrator._reference_digest = digest_tree(ref)
+
+        (ref / "extra.py").write_text("", encoding="utf-8")
+
+        with pytest.raises(ReferenceTamperedError):
+            await orchestrator._verify_reference_integrity()
+
+    def test_digest_is_order_independent_and_path_sensitive(self, tmp_path):
+        """os.walk order must not leak into the digest, but a RENAME must."""
+        a, b = tmp_path / "a", tmp_path / "b"
+        for root in (a, b):
+            (root / "pkg").mkdir(parents=True)
+        (a / "pkg" / "one.py").write_text("1", encoding="utf-8")
+        (a / "two.py").write_text("2", encoding="utf-8")
+        (b / "two.py").write_text("2", encoding="utf-8")
+        (b / "pkg" / "one.py").write_text("1", encoding="utf-8")
+
+        assert digest_tree(a) == digest_tree(b)
+
+        (b / "two.py").rename(b / "renamed.py")
+        assert digest_tree(a) != digest_tree(b)
+
+
+class TestConfigErrorsFailBeforeTheAgentRuns:
+    async def test_typoed_reference_file_raises_during_setup(self, tmp_path):
+        """A gating score=0.0 books an eval-config error against the agent's pass
+        rate; on a dataset-fanned suite it zeroes every row silently."""
+        from coder_eval.models import ReferenceComparisonCriterion
+
+        orchestrator = _orchestrator_for(tmp_path)
+        orchestrator.task.success_criteria = [
+            ReferenceComparisonCriterion(
+                description="cmp",
+                agent_file="solution.py",
+                reference_file="typo.py",
+            )
+        ]
+        task_dir = orchestrator.task_file.parent
+        (task_dir / "reference").mkdir(exist_ok=True)
+        (task_dir / "reference" / "solution.py").write_text("SOLUTION=42", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="task-definition error, not an agent failure"):
+            await orchestrator._stage_reference()
+
+        await orchestrator._cleanup()

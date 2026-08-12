@@ -37,6 +37,39 @@ def path_uses_token(path: str, token: str) -> bool:
     return path.startswith(token) and path[len(token)] in "/\\"
 
 
+def command_uses_token(command: str, token: str) -> bool:
+    """Whether a shell ``command`` references ``token`` as a variable.
+
+    The path-shaped sibling of :func:`path_uses_token`, for the one place a
+    token appears inside free-form shell rather than as a path prefix. Both
+    spellings count, because both are what a task author actually writes::
+
+        diff -r "$REFERENCE_DIR" out/
+        diff -r "${REFERENCE_DIR}" out/
+
+    A plain ``token in command`` substring test matched only the first and let
+    the brace form load clean — then run with the variable unset, so the command
+    silently received an empty argument. It also matched ``$REFERENCE_DIRECTORY``,
+    hard-failing load on an unrelated identifier. The trailing-character check
+    below is the same separator rule :func:`path_uses_token` uses, widened to
+    the shell characters that can legally follow a variable reference.
+    """
+    name = token.lstrip("$")
+    brace = "${" + name + "}"
+    if brace in command:
+        return True
+    idx = 0
+    plain = "$" + name
+    while (idx := command.find(plain, idx)) != -1:
+        after = idx + len(plain)
+        # A following identifier character means this is a LONGER variable name
+        # ($REFERENCE_DIRECTORY), not our token.
+        if after >= len(command) or not (command[after].isalnum() or command[after] == "_"):
+            return True
+        idx = after
+    return False
+
+
 CONTAINER_WORK_DIR = "/work"
 CONTAINER_INPUT_DIR = "/work/input"
 CONTAINER_OUTPUT_DIR = "/work/output"

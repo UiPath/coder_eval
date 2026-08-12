@@ -117,6 +117,7 @@ class SuccessChecker:
     def check(
         self,
         criterion: SuccessCriterion,
+        *,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriterionResult:
@@ -126,8 +127,9 @@ class SuccessChecker:
             criterion: Criterion definition
             turn_records: Optional turn records for command inspection
             reference_dir: Optional resolved path to a reference directory
-                (from ``task.reference.directory``). Only consumed by
-                ``agent_judge``; non-judge criteria ignore it.
+                (from ``task.reference.directory``). Consumed by ``reference_comparison`` (which scores 0.0 without
+                it), ``llm_judge`` and ``agent_judge``; other criteria accept the
+                uniform signature and ignore it.
 
         Returns:
             CriterionResult with score
@@ -138,6 +140,7 @@ class SuccessChecker:
     def check_all(
         self,
         criteria: SuccessCriteria,
+        *,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriteriaResults:
@@ -147,7 +150,9 @@ class SuccessChecker:
             criteria: List of criterion definitions
             turn_records: Optional turn records for command inspection
             reference_dir: Optional resolved path to a reference directory.
-                Only consumed by ``agent_judge``; non-judge criteria ignore it.
+                Consumed by ``reference_comparison`` (which scores 0.0 without
+                it), ``llm_judge`` and ``agent_judge``; other criteria accept the
+                uniform signature and ignore it.
 
         Returns:
             List of criterion results with scores
@@ -158,6 +163,7 @@ class SuccessChecker:
     async def check_all_async(
         self,
         criteria: SuccessCriteria,
+        *,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
     ) -> CriteriaResults:
@@ -188,7 +194,9 @@ class SuccessChecker:
             criteria: List of criterion definitions.
             turn_records: Optional turn records for command inspection.
             reference_dir: Optional resolved path to a reference directory.
-                Only consumed by ``agent_judge``; non-judge criteria ignore it.
+                Consumed by ``reference_comparison`` (which scores 0.0 without
+                it), ``llm_judge`` and ``agent_judge``; other criteria accept the
+                uniform signature and ignore it.
 
         Returns:
             List of criterion results with scores, in the same order as ``criteria``.

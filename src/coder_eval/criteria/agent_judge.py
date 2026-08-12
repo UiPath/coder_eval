@@ -36,10 +36,12 @@ from coder_eval.evaluation.verdict_tool import (
     extract_verdict_from_capture,
 )
 from coder_eval.models import (
+    REFERENCE_DIR_TOKEN,
     AgentJudgeCriterion,
     ClaudeCodeAgentConfig,
     CriterionResult,
     JudgeCriterionResult,
+    path_uses_token,
 )
 
 # Private helper + shared security-floor constant — not part of the public
@@ -231,12 +233,22 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
                 token_usage=None,
             )
 
-        # Build the scrub set from every file's content under reference_dir, honored
-        # only when the criterion opted into seeing the reference; otherwise no scrub
-        # key is needed because the judge never saw the material.
-        scrub_secrets: list[str] = []
+        # The scrub set must cover every route reference bytes took to the judge,
+        # and this criterion has two:
+        #
+        #   1. `$REFERENCE_DIR/...` entries in `files:`, inlined by the builder
+        #      regardless of include_reference — recorded on the context as it
+        #      attached them, already in the truncated shape the judge saw.
+        #   2. include_reference=true, which MOUNTS the tree at _reference/ for
+        #      the judge to Read directly. Nothing inlines it, so the builder
+        #      never sees it; collect it here.
+        #
+        # max_file_chars is passed because route 1 truncates: scrub_reference
+        # redacts by exact substring, so an untruncated-only key cannot match the
+        # text the judge was actually shown. Both forms are emitted.
+        scrub_secrets: list[str] = list(judge_ctx.reference_secrets)
         if criterion.include_reference and reference_dir is not None:
-            scrub_secrets.extend(collect_reference_secrets(reference_dir))
+            scrub_secrets.extend(collect_reference_secrets(reference_dir, criterion.max_file_chars))
 
         return _build_result(
             criterion,
@@ -386,8 +398,19 @@ def _render_user_message(
     points the judge there instead of inlining a single file's content.
     """
     reference_block = ""
-    if reference_dir_mounted:
+    # `$REFERENCE_DIR/x` entries in `files:` are inlined under that literal
+    # label, but the judge's shell has no REFERENCE_DIR variable and its
+    # workspace exposes the tree at `_reference/` — so a judge asked to re-Read
+    # or Glob a file it was shown could not resolve the path it was given. Say
+    # what the label maps to whenever both routes are in play.
+    if reference_dir_mounted and any(path_uses_token(b.path, REFERENCE_DIR_TOKEN) for b in context.files):
         reference_block = (
+            f"NOTE: FILE blocks labelled `{REFERENCE_DIR_TOKEN}/<path>` below come from the reference "
+            f"solution. To re-read one with a tool, use `{_REFERENCE_MOUNT}/<path>` — "
+            f"`{REFERENCE_DIR_TOKEN}` is a label, not a shell variable.\n\n"
+        )
+    if reference_dir_mounted:
+        reference_block += (
             f"REFERENCE SOLUTION (for your review only): a complete reference is mounted at "
             f"`{_REFERENCE_MOUNT}/` in your working directory. Use Read / Glob / Grep to browse "
             f"it (e.g. `Glob {_REFERENCE_MOUNT}/**/*` to list, `Read {_REFERENCE_MOUNT}/<path>` "
