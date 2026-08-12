@@ -167,10 +167,6 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
         expected = criterion.positional
         if positional[offset : offset + len(expected)] != expected:
             return False
-        # Otherwise the match is a prefix: `projects list` accepts
-        # `projects list dummy`, crediting a malformed invocation.
-        if criterion.exact_positional and len(positional) != offset + len(expected):
-            return False
 
     if criterion.flags:
         for name, predicate in criterion.flags.items():
@@ -292,8 +288,7 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         if spellings := criterion.verb_spellings:
             facets.append(f"verb={' | '.join(' '.join(t) for t in spellings)!r}")
         if criterion.positional is not None:
-            exact = " exactly" if criterion.exact_positional else ""
-            facets.append(f"positional{exact}={criterion.positional!r}")
+            facets.append(f"positional={criterion.positional!r}")
         if criterion.flags:
             facets.append(f"flags={sorted(criterion.flags)}")
         wanted = ", ".join(facets)

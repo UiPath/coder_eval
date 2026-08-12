@@ -604,22 +604,9 @@ class CliCalledCriterion(BaseSuccessCriterion):
     positional: list[str] | None = Field(
         default=None,
         description=(
-            "Non-flag arguments that must follow the verb, in order. A PREFIX of what followed: "
-            "trailing arguments beyond these are unconstrained unless exact_positional is set"
-        ),
-    )
-    exact_positional: bool = Field(
-        default=False,
-        description=(
-            "Require the non-flag arguments after the verb to be EXACTLY `positional`, with nothing "
-            "trailing. Without it `verb: 'projects list'` also matches `projects list dummy`. Set it "
-            "with `positional: []` to assert the verb took no arguments at all. Two hazards. (1) The "
-            "asymmetry runs opposite to a short verb's: tightening suits a positive assertion, but on "
-            "a max_count 0 guard it makes the forbidden call EASIER to slip past, since one stray "
-            "argument stops the match. (2) It depends on `value_flags` being complete: an undeclared "
-            "value-bearing flag leaves its VALUE among the positionals, so `--folder Finance` turns "
-            "an otherwise exactly-correct invocation into a 0.0 unless 'folder' is declared in "
-            "`value_flags` or in `flags`"
+            "Non-flag arguments that must follow the verb, in order. A PREFIX of what followed, so "
+            "arguments beyond these are unconstrained: 'projects list' also matches "
+            "'projects list dummy'. To require a specific tail, name every argument in it"
         ),
     )
     flags: dict[str, FlagMatch] | None = Field(
@@ -725,23 +712,18 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if self.max_count is not None and self.max_count < self.min_count:
             msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
             raise ValueError(msg)
-        # `positional: []` alone asserts nothing (an empty slice equals an empty
-        # expectation), so an author writing it to mean "took no arguments" gets a
-        # silent no-op. exact_positional is what gives it meaning, and requiring the
-        # pair keeps "exactly nothing" distinct from "unset".
-        if self.exact_positional and self.positional is None:
+        # `positional: []` asserts nothing: matching slices an empty expectation out
+        # of the argv and compares it to itself. An author writing it to mean "took no
+        # arguments" would get a silent no-op, so say so instead of accepting it.
+        if self.positional is not None and not self.positional:
             msg = (
-                "cli_called exact_positional requires positional to be set. Use `positional: []` to "
-                "assert the verb took no arguments."
+                "cli_called positional must not be empty: an empty list asserts nothing. List the "
+                "arguments you expect, or drop the field."
             )
             raise ValueError(msg)
-        # Falsiness on verb/flags/tool is deliberate: `verb: ""` used to slip past an
+        # Falsiness rather than `is None` on purpose: `verb: ""` used to slip past an
         # `is None` check here and then match EVERY record (empty prefix), scoring 1.0.
-        # `positional` is the exception — exact_positional makes `positional: []` a real
-        # constraint ("zero non-flag arguments"), so falsiness there would reject an
-        # explicitly-set field as unset.
-        has_positional = self.positional is not None if self.exact_positional else bool(self.positional)
-        if not self.verb and not self.verb_any_of and not has_positional and not self.flags and not self.tool:
+        if not self.verb and not self.verb_any_of and not self.positional and not self.flags and not self.tool:
             msg = "cli_called requires at least one of verb / verb_any_of / positional / flags / tool to match on"
             raise ValueError(msg)
         # A predicate on an ignored flag can never be evaluated: ignore_flags drops

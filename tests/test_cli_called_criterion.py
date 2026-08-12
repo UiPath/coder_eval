@@ -738,6 +738,15 @@ class TestModelValidation:
         with pytest.raises(ValidationError, match="at least one of"):
             CliCalledCriterion(description="d", log=LOG)
 
+    def test_empty_positional_rejected(self):
+        """`positional: []` slices an empty expectation and compares it to itself.
+
+        It reads as "the verb took no arguments" and asserts nothing, so it is a
+        silent no-op — rejected rather than accepted quietly.
+        """
+        with pytest.raises(ValidationError, match="positional must not be empty"):
+            CliCalledCriterion(description="d", log=LOG, verb="ixp projects list", positional=[])
+
     def test_unknown_field_rejected(self):
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             CliCalledCriterion(description="d", log=LOG, verb="v", pattern="oops")
@@ -864,18 +873,21 @@ class TestVerbAlternation:
         checker = SuccessChecker(sandbox)
         assert checker.check(forward).score == checker.check(reversed_).score == 1.0
 
-    def test_alternation_combines_with_exact_positional(self, sandbox_with_log):
-        """The two features meet at the same offset arithmetic; nothing covered both."""
+    def test_trailing_arguments_stay_unconstrained(self, sandbox_with_log):
+        """`positional` is a prefix under alternation too, as the field says.
+
+        Recorded so the looseness is a documented property rather than an accident:
+        requiring a specific tail means naming every argument in it.
+        """
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "get", "proj-1", "stray"])])
         criterion = CliCalledCriterion(
-            description="read exactly one project",
+            description="read the project",
             log=LOG,
             verb_any_of=["ixp projects get", "ixp get"],
             positional=["proj-1"],
-            exact_positional=True,
         )
-        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
 
     def test_failure_detail_renders_the_alternatives(self, sandbox_with_log):
         sandbox, sandbox_dir = sandbox_with_log
@@ -888,158 +900,13 @@ class TestVerbAlternation:
         result = SuccessChecker(sandbox).check(criterion)
         assert "ixp projects list | ixp projects get" in (result.details or "")
 
-
-class TestExactPositional:
-    """`positional` is a prefix, so trailing arguments are unconstrained by default.
-
-    That credits a malformed invocation: `verb: 'projects list'` matches
-    `projects list dummy`, which the real CLI would reject.
-    """
-
-    def test_trailing_arguments_are_accepted_by_default(self, sandbox_with_log):
-        """Documents the default, so a change to it fails here rather than silently."""
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "list", "dummy"])])
-        criterion = CliCalledCriterion(description="listed", log=LOG, verb="ixp projects list")
-        assert SuccessChecker(sandbox).check(criterion).score == 1.0
-
-    def test_exact_positional_rejects_trailing_arguments(self, sandbox_with_log):
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "list", "dummy"])])
-        criterion = CliCalledCriterion(
-            description="listed",
-            log=LOG,
-            verb="ixp projects list",
-            positional=[],
-            exact_positional=True,
-        )
-        assert SuccessChecker(sandbox).check(criterion).score == 0.0
-
-    def test_exact_positional_accepts_the_bare_verb(self, sandbox_with_log):
-        """The inverse of the above: tightening must not reject the correct call."""
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "list"])])
-        criterion = CliCalledCriterion(
-            description="listed",
-            log=LOG,
-            verb="ixp projects list",
-            positional=[],
-            exact_positional=True,
-        )
-        assert SuccessChecker(sandbox).check(criterion).score == 1.0
-
-    def test_exact_positional_rejects_extra_beyond_a_listed_argument(self, sandbox_with_log):
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "proj-1", "proj-2"])])
-        criterion = CliCalledCriterion(
-            description="read one project",
-            log=LOG,
-            verb="ixp projects get",
-            positional=["proj-1"],
-            exact_positional=True,
-        )
-        assert SuccessChecker(sandbox).check(criterion).score == 0.0
-
-    def test_exact_positional_ignores_flags(self, sandbox_with_log):
-        """Only NON-flag arguments count, so `--output json` must not break it."""
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "proj-1", "--output", "json"])])
-        criterion = CliCalledCriterion(
-            description="read one project",
-            log=LOG,
-            verb="ixp projects get",
-            positional=["proj-1"],
-            exact_positional=True,
-        )
-        assert SuccessChecker(sandbox).check(criterion).score == 1.0
-
-    def test_a_negative_guard_is_easier_to_evade_with_exact_positional(self, sandbox_with_log):
-        """The asymmetry, asserted so it is visible rather than discovered later.
-
-        Tightening suits a positive assertion. On a max_count 0 guard it works the
-        other way: one stray argument stops the match, so the forbidden call slips
-        past. Documented on the field; pinned here.
-        """
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1", "stray"])])
-        loose = CliCalledCriterion(
-            description="did not delete",
-            log=LOG,
-            verb="ixp projects delete",
-            min_count=0,
-            max_count=0,
-        )
-        tight = CliCalledCriterion(
-            description="did not delete",
-            log=LOG,
-            verb="ixp projects delete",
-            positional=["proj-1"],
-            exact_positional=True,
-            min_count=0,
-            max_count=0,
-        )
-        assert SuccessChecker(sandbox).check(loose).score == 0.0
-        assert SuccessChecker(sandbox).check(tight).score == 1.0
-
-    def test_detail_marks_the_match_as_exact(self, sandbox_with_log):
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "list", "dummy"])])
-        criterion = CliCalledCriterion(
-            description="listed",
-            log=LOG,
-            verb="ixp projects list",
-            positional=[],
-            exact_positional=True,
-        )
-        result = SuccessChecker(sandbox).check(criterion)
-        assert "positional exactly=[]" in (result.details or "")
-
-    def test_exact_positional_without_positional_rejected(self):
-        """`positional: []` is the explicit way to say "no arguments"."""
-        with pytest.raises(ValidationError, match="requires positional to be set"):
-            CliCalledCriterion(description="d", log=LOG, verb="ixp projects list", exact_positional=True)
-
-    def test_positional_empty_with_exact_is_a_facet_on_its_own(self):
-        """`positional: []` + exact means "zero non-flag arguments" — a real constraint.
-
-        The at-least-one-facet guard tests falsiness elsewhere, which would reject an
-        explicitly-set field as unset.
-        """
-        criterion = CliCalledCriterion(description="d", log=LOG, positional=[], exact_positional=True)
-        assert criterion.positional == []
-
-    def test_an_undeclared_value_bearing_flag_causes_a_false_fail(self, sandbox_with_log):
-        """The `value_flags` coupling exact_positional introduces, pinned.
-
-        An undeclared flag is treated as a switch, so its VALUE stays among the
-        positionals and the exact match rejects an invocation that was correct. The
-        agent ran precisely the asserted command and scores 0.0 — declaring the flag
-        is the fix, and this is why the field description states the prerequisite.
-        """
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "proj-1", "--folder", "Finance"])])
-        undeclared = CliCalledCriterion(
-            description="read one project",
-            log=LOG,
-            verb="ixp projects get",
-            positional=["proj-1"],
-            exact_positional=True,
-        )
-        declared = CliCalledCriterion(
-            description="read one project",
-            log=LOG,
-            verb="ixp projects get",
-            positional=["proj-1"],
-            exact_positional=True,
-            value_flags=["output", "folder"],
-        )
-        checker = SuccessChecker(sandbox)
-        assert checker.check(undeclared).score == 0.0
-        assert checker.check(declared).score == 1.0
-
     @pytest.mark.parametrize("verb", ["ixp projects get", "ixp  projects   get"])
     def test_detail_renders_the_verb_normalized(self, sandbox_with_log, verb):
-        """Whitespace is normalized through split()/join(), matching how it was compared."""
+        """The detail now round-trips through split()/join(), so whitespace normalizes.
+
+        Deliberate — it matches how the tokens were compared — but it did change the
+        rendering for existing single-verb configs, so it is pinned rather than assumed.
+        """
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
         criterion = CliCalledCriterion(description="read", log=LOG, verb=verb)
