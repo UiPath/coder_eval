@@ -11,10 +11,15 @@ does not solve the task, it copies the answer.
 mode (0o000 by default) for the duration of an ``async with`` block and falls
 back on exit. The orchestrator wraps every ``agent.communicate`` call in it, so
 the staged reference directory is unreadable exactly while the agent is
-executing, and readable again by the time criteria and judges run. (The task
-directory is deliberately NOT shielded — see the call site in
-``Orchestrator._communicate_with_retry`` for why that is structurally
-impossible under docker.)
+executing, and readable again by the time criteria and judges run. The task
+directory is shielded by the same window: under docker it is mounted as a
+throwaway COPY at a fixed container path, which is what makes it chmod-able
+without touching the user's checked-out ``tasks/`` tree. See the call site in
+``Orchestrator._communicate_with_retry``.
+
+This shields grading MATERIAL that happens to live in the task directory (a
+``reference/`` subdirectory, fixtures), not the task DEFINITION: ``task.yaml``
+is separately staged at ``/work/input``, which the agent can still read.
 
 Windows **stack**, which is what makes a mid-turn re-grant expressible: code
 that runs inside the turn but is not the agent can open a narrower window to

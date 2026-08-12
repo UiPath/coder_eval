@@ -1535,16 +1535,21 @@ class Orchestrator:
         # Routed through the SANDBOX, which owns whether a chmod window means
         # anything for its driver.
         #
-        # ONLY reference_dir is shielded. task_dir deliberately is NOT:
-        #   - under docker it is bind-mounted `:ro`, so chmod returns EROFS and the
-        #     attempt only produced a per-turn "could not chmod" warning; and
-        #   - the same task YAML is staged at /work/input for the in-container
-        #     orchestrator to read, where the agent can read it regardless.
-        # Shielding it was therefore ineffective twice over. Hiding the task
-        # definition from the agent is a separate problem from hiding the
-        # reference, and needs a different mechanism.
+        # task_dir is shielded ALONGSIDE reference_dir. It previously was not,
+        # because under docker it was bind-mounted `:ro` and the chmod returned
+        # EROFS -- producing only a per-turn "could not chmod" warning. It is now
+        # a read-write throwaway copy (docker_runner._prepare_task_dir_mount), so
+        # the window applies. That matters because the task dir holds grading
+        # material beyond the reference: run_command fixtures, expected outputs,
+        # and -- for a task laid out flat, whose parent is the whole `tasks/`
+        # tree -- every SIBLING task's reference solution.
+        #
+        # What this does NOT do is hide the task DEFINITION. `task.yaml` is also
+        # staged at /work/input for the in-container orchestrator to read, and
+        # that mount is untouched by this window. Hiding the criteria from the
+        # agent remains a separate, unsolved problem.
         assert self.sandbox is not None
-        async with self.sandbox.set_permissions([self._reference_dir]):
+        async with self.sandbox.set_permissions([self._reference_dir, self.sandbox.task_dir]):
             turn_record = await execute_with_retry(
                 operation=_communicate_attempt,
                 operation_name=operation_label,

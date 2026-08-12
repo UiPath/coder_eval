@@ -570,7 +570,7 @@ class TestOrchestratorWiring:
 
         async def _cheating_communicate(prompt, **kwargs):
             observed["reference"] = _try_read(staged / "solution.py")
-            observed["task_dir"] = _try_read(task_file)  # deliberately NOT shielded
+            observed["task_dir"] = _try_read(task_file)
             return TurnRecord(iteration=1, prompt=prompt, user_input=prompt, agent_output="done")
 
         agent = MagicMock()
@@ -582,12 +582,15 @@ class TestOrchestratorWiring:
 
         # The reference is denied during the turn...
         assert observed["reference"] == "DENIED"
-        # ...while the task dir deliberately is NOT shielded: under docker it is a
-        # `:ro` mount (chmod -> EROFS) and the same YAML is readable at
-        # /work/input regardless, so shielding it bought nothing but a per-turn
-        # warning. Pinned so re-adding it is a conscious decision.
-        assert observed["task_dir"] == "# task"
-        # ...and readable again afterwards, so criteria and judges still work.
+        # ...and so is the task dir. This reverses an earlier deliberate
+        # exclusion, which held while the task dir was a `:ro` bind mount whose
+        # chmod returned EROFS. It is now a read-write throwaway copy
+        # (docker_runner._prepare_task_dir_mount), so the window applies -- and it
+        # must, because the task dir carries run_command fixtures, expected
+        # outputs, and (for a flat layout, where the parent is the whole `tasks/`
+        # tree) every sibling task's reference solution.
+        assert observed["task_dir"] == "DENIED"
+        # ...and both readable again afterwards, so criteria and judges still work.
         assert (staged / "solution.py").read_text(encoding="utf-8") == "SOLUTION=42"
         assert task_file.read_text(encoding="utf-8") == "# task"
 

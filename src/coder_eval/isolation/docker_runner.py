@@ -29,6 +29,7 @@ from coder_eval.models import (
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
     CONTAINER_REFERENCE_DIR,
+    CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
@@ -463,6 +464,57 @@ def _copy_claude_home(host_claude_dir: Path, claude_copy: Path) -> None:
     ) from last_exc
 
 
+def grant_container_access(root: Path, *, writable: bool) -> None:
+    """Widen ``root`` (recursively) so the container can reach it without DAC caps.
+
+    Paired with the ``--cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH`` in
+    :meth:`DockerRunner._build_argv`. The container runs as **root but is not
+    the owner** of any framework-owned bind mount: on native Linux the mount
+    preserves the uid that ran ``coder-eval`` (uid 1000/1001), so every access
+    root makes to those paths is an "other" access. It only ever succeeded via
+    ``CAP_DAC_OVERRIDE``. Dropping that capability to make the reference's
+    mode-000 window real therefore also revoked the container's ability to write
+    its own output -- the in-container orchestrator died on the very first
+    ``open('/work/output/task.log', 'w')`` with EACCES, taking every
+    ``driver: docker`` task with it (regression-guarded by
+    ``TestContainerAccessWidening``).
+
+    Widening the *host* side restores that access through the ``other`` bits
+    instead of through a capability, which is what keeps the drop affordable.
+    Semantics match ``chmod -R o+rwX`` (``o+rX`` when ``writable=False``): the
+    ``X`` form adds execute only to directories and to files that are already
+    executable, so a copied hook script stays runnable and a data file does not
+    silently become one.
+
+    ``writable=False`` is not cosmetic -- it is what keeps ``/work/references``
+    off the list of things the agent can overwrite. The container only ever
+    *reads* and ``chmod``s that copy (``chmod`` is gated on owner-or-CAP_FOWNER,
+    and FOWNER is deliberately retained), so it needs no write bit, and
+    withholding it keeps ``_verify_reference_integrity`` from being the sole
+    guard against tampering.
+
+    No-op on Windows, where POSIX mode bits are not the access-control mechanism.
+    """
+    if os.name == "nt":  # pragma: no cover - POSIX mode bits are meaningless here
+        return
+    extra = 0o006 if writable else 0o004
+    for path in (root, *root.rglob("*")):
+        # lstat + skip: chmod follows symlinks, so widening one would silently
+        # re-mode its target -- which for the ~/.claude copy can be an arbitrary
+        # path outside the staging tree (it is copied with symlinks=True).
+        if path.is_symlink():
+            continue
+        try:
+            mode = path.lstat().st_mode & 0o7777
+        except OSError:  # pragma: no cover - raced away mid-walk; nothing to widen
+            continue
+        widened = mode | extra
+        if path.is_dir() or mode & 0o100:
+            widened |= 0o001
+        if widened != mode:
+            os.chmod(path, widened)
+
+
 class DockerRunner:
     """Spawns a per-task container and reconstructs the EvaluationResult.
 
@@ -492,6 +544,10 @@ class DockerRunner:
         # Host path the copy came from, cached by _prepare_reference_mount so the
         # argv builder doesn't re-stat it (and re-emit its warning).
         self._reference_source_dir: Path | None = None
+        # Set by _prepare_task_dir_mount: a throwaway copy of the task directory,
+        # mounted read-WRITE at CONTAINER_TASK_DIR so the agent-turn window can
+        # chmod it. None when the task has no task_file.
+        self._task_dir_mount_src: Path | None = None
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
@@ -573,6 +629,13 @@ class DockerRunner:
             # _build_argv to mount. Cleaned up with `staging` in the finally.
             await asyncio.to_thread(self._prepare_host_mounts, staging)
             await asyncio.to_thread(self._prepare_reference_mount, staging)
+            await asyncio.to_thread(self._prepare_task_dir_mount, staging)
+            # AFTER staging, BEFORE the container starts: the DAC caps are
+            # dropped, so every framework-owned mount must be reachable through
+            # its `other` bits. Read-only for the inputs the container merely
+            # consumes; writable only for the run dir it must produce into.
+            await asyncio.to_thread(grant_container_access, input_dir, writable=False)
+            await asyncio.to_thread(grant_container_access, output_dir, writable=True)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
             # Prime the heartbeat before the container starts so the
@@ -949,7 +1012,56 @@ class DockerRunner:
             return
         claude_copy = staging / "claude-home"
         _copy_claude_home(host_claude_dir, claude_copy)
+        # Writable: the CLI rewrites settings/state in place. copytree preserves
+        # the host modes, and ~/.claude is routinely 0700 with 0600 files -- with
+        # DAC_OVERRIDE dropped that is unreadable to the container, so the agent
+        # cannot authenticate.
+        grant_container_access(claude_copy, writable=True)
         self._claude_mount_src = claude_copy
+
+    def _prepare_task_dir_mount(self, staging: Path) -> None:
+        """Copy the task directory under ``staging`` for a read-WRITE mount.
+
+        Replaces the old *symmetric* ``-v <host task dir>:<host task dir>:ro``
+        mount, and for the same reason ``_prepare_reference_mount`` copies: the
+        in-container orchestrator holds this path at mode 000 for the duration of
+        every agent turn, and neither alternative works.
+
+        * ``:ro`` rejects the chmod outright -- verified: ``chmod: /ro:
+          Read-only file system``. No window is expressible at all.
+        * Read-write *without* a copy chmods the operator's REAL ``tasks/`` tree.
+          Verified: the host directory came back 0600 and even the harness's own
+          cleanup then failed with ``Permission denied``. A crashed run would
+          strand a checkout at 000.
+
+        Shielding the whole tree (rather than masking just
+        ``reference.directory`` with a tmpfs, as the symmetric mount required)
+        also closes a leak that mask could not: a task at ``tasks/foo.yaml`` has
+        parent ``tasks/``, so the old mount exposed every SIBLING task's
+        directory -- including their reference solutions, which the
+        single-subdir mask never covered.
+
+        Symmetry was never load-bearing. The container is told where the task
+        dir is via ``--task-dir``, and ``run_task_internal_command`` uses that
+        path only to seed ``TASK_DIR`` -- it is never re-read. ``TASK_DIR`` is
+        exposed solely in ``_build_run_command_env`` (criterion subprocesses), so
+        the agent has no legitimate need for this tree mid-turn.
+
+        Lives under ``staging``, which ``run()`` removes in its ``finally``; one
+        container per task means no cross-task interference.
+        """
+        if not self.rt.task_file:
+            return
+        source = self.rt.task_file.parent.resolve()
+        if not source.is_dir():
+            return
+        task_dir_copy = staging / "task_dir"
+        shutil.copytree(source, task_dir_copy, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
+        # Read-only for the same reason as the reference copy: criteria read
+        # fixtures here, nothing legitimately writes them, and withholding `o+w`
+        # keeps an agent from rewriting the expectations it is graded against.
+        grant_container_access(task_dir_copy, writable=False)
+        self._task_dir_mount_src = task_dir_copy
 
     def _prepare_reference_mount(self, staging: Path) -> None:
         """Copy the reference solution under ``staging`` for a read-WRITE mount.
@@ -972,6 +1084,13 @@ class DockerRunner:
             return
         reference_copy = staging / "reference"
         shutil.copytree(source, reference_copy, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
+        # Read-only on purpose: the harness reads this copy for grading and
+        # chmods it (owner-or-CAP_FOWNER, and FOWNER is retained), but nothing
+        # legitimately writes it. Withholding `o+w` keeps the agent from being
+        # able to overwrite the solution during the gaps between windows, so
+        # _verify_reference_integrity is not the only thing standing between an
+        # agent and a forged reference_comparison score.
+        grant_container_access(reference_copy, writable=False)
         self._reference_mount_src = reference_copy
         self._reference_source_dir = source
 
@@ -1135,26 +1254,27 @@ class DockerRunner:
             return None
         return candidate
 
-    def _reference_mount_args(self, host_task_dir: Path | None) -> list[str]:
+    def _reference_mount_args(self) -> list[str]:
         """Mount args that expose the reference to the harness but not to the agent.
 
         See the call site in ``_build_argv`` for the full rationale. Returns an
         empty list when the task declares no reference.
+
+        No tmpfs mask any more. The mask existed because the task dir was mounted
+        symmetrically and read-only, so a reference living inside it reached the
+        agent as ``$TASK_DIR/<reference dir>`` and the only way to hide it was to
+        layer an empty filesystem over that one subpath. The task dir is now a
+        shielded copy (:meth:`_prepare_task_dir_mount`), so the embedded
+        reference is already covered by that tree's own agent-turn window --
+        along with the sibling-task reference directories the single-subpath mask
+        never reached.
         """
         if self._reference_mount_src is None:
             return []
         # Read-WRITE, and of a COPY: the in-container orchestrator chmods this
         # path to 000 for every agent turn, which a `:ro` mount would reject with
         # EROFS. See _prepare_reference_mount.
-        args = ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
-        host_reference_dir = self._reference_source_dir
-        if (
-            host_reference_dir is not None
-            and host_task_dir is not None
-            and host_reference_dir.is_relative_to(host_task_dir)
-        ):
-            args += ["--tmpfs", f"{host_reference_dir}:ro"]
-        return args
+        return ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
 
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
@@ -1203,6 +1323,14 @@ class DockerRunner:
         # deliberate re-chmod by a root agent stays the documented KNOWN GAP,
         # closed by running the agent as a non-root uid (see
         # docs/DOCKER_ISOLATION.md).
+        #
+        # COUNTERPART, do not remove one without the other: dropping DAC_OVERRIDE
+        # revokes root's bypass on EVERY framework-owned mount, not just the
+        # reference -- including the run dir it must write task.json/task.log
+        # into. `grant_container_access` widens those host-side so the container
+        # reaches them through `other` instead of through the capability. Drop
+        # the caps without that widening and every docker task dies on its first
+        # log write; widen without the drop and the anti-cheat window is a no-op.
         argv += [
             "--cap-drop",
             "DAC_OVERRIDE",
@@ -1288,14 +1416,13 @@ class DockerRunner:
         # so the in-container Orchestrator writes task.json/task.log/etc.
         # directly to the host filesystem via bind-mount.
         argv += ["-v", f"{output_dir}:{CONTAINER_OUTPUT_DIR}"]
-        # Mount the original task dir at the SAME host path so the
-        # in-container Orchestrator can set TASK_DIR (used by run_command
-        # criteria via `$TASK_DIR/foo.json`) to a path that resolves
-        # identically inside and outside the container.
-        host_task_dir: Path | None = None
-        if self.rt.task_file:
-            host_task_dir = self.rt.task_file.parent.resolve()
-            argv += ["-v", f"{host_task_dir}:{host_task_dir}:ro"]
+        # Mount a COPY of the task dir at a fixed container path. Read-WRITE and
+        # a copy for the same reason as the reference (see
+        # _prepare_task_dir_mount): the agent-turn window chmods it to 000, which
+        # `:ro` rejects with EROFS and which -- applied to the real tree --
+        # would chmod the operator's own `tasks/`.
+        if self._task_dir_mount_src is not None:
+            argv += ["-v", f"{self._task_dir_mount_src}:{CONTAINER_TASK_DIR}"]
 
         # ANTI-CHEAT: the reference solution normally lives INSIDE the task dir,
         # so the symmetric mount above would hand the agent the answer via
@@ -1312,7 +1439,7 @@ class DockerRunner:
         # Ordering matters: docker applies mounts by target-path depth, so the
         # tmpfs at the deeper path wins over the task-dir bind regardless of argv
         # order, but we emit it after for readability.
-        argv += self._reference_mount_args(host_task_dir)
+        argv += self._reference_mount_args()
         # Forward the host's Claude Code OAuth state so the in-container CLI
         # inherits the same login as the host. We mount a *throwaway lean copy*
         # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
@@ -1408,8 +1535,12 @@ class DockerRunner:
         if self.verbose:
             argv += ["-v"]
         argv += ["--output", str(CONTAINER_OUTPUT_DIR)]
-        if host_task_dir is not None:
-            argv += ["--task-dir", str(host_task_dir)]
+        if self._task_dir_mount_src is not None:
+            # The container-side path, not the host's. run_task_internal_command
+            # uses this only to seed TASK_DIR for run_command criteria; it never
+            # re-reads the path, which is why the mount no longer has to be
+            # symmetric.
+            argv += ["--task-dir", CONTAINER_TASK_DIR]
         return argv
 
 
