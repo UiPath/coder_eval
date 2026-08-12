@@ -1,0 +1,21 @@
+{"id": "pos-1", "expected_skill": "lint-tasks", "split": "tune", "prompt": "Some of my eval definitions in this repo seem to pass no matter what the agent actually does. Go through them and tell me which ones are broken."}
+{"id": "pos-2", "expected_skill": "lint-tasks", "split": "tune", "prompt": "I inherited a folder of YAML evaluation definitions from a teammate who left and I don't trust them. What's wrong with them?"}
+{"id": "pos-3", "expected_skill": "lint-tasks", "split": "tune", "prompt": "Go over the evaluation suite in this repo and tell me where it is weak."}
+{"id": "pos-4", "expected_skill": "lint-tasks", "split": "tune", "prompt": "A couple of my test cases look almost the same as each other. Can you check the whole set for redundancy?"}
+{"id": "pos-5", "expected_skill": "lint-tasks", "split": "holdout", "prompt": "Are my evals any good?"}
+{"id": "pos-6", "expected_skill": "lint-tasks", "split": "holdout", "prompt": "Before I add more cases, sanity-check the ones I already have."}
+{"id": "neg-1", "expected_skill": "", "split": "tune", "prompt": "Audit my dependencies for known vulnerabilities."}
+{"id": "neg-2", "expected_skill": "", "split": "tune", "prompt": "Review this pull request for bugs before I merge it."}
+{"id": "neg-3", "expected_skill": "", "split": "tune", "prompt": "Check my GitHub Actions workflow for gaps in the test matrix."}
+{"id": "neg-4", "expected_skill": "", "split": "tune", "prompt": "Lint my Python code and fix the style issues."}
+{"id": "neg-5", "expected_skill": "", "split": "holdout", "prompt": "Summarize what this repository does, based on its README."}
+{"id": "neg-6", "expected_skill": "", "split": "holdout", "prompt": "Rename the variable `foo` to `bar` in utils.py."}
+{"id": "sib-1", "expected_skill": "task", "split": "tune", "prompt": "Add an evaluation that checks whether the agent writes a valid Dockerfile."}
+{"id": "sib-2", "expected_skill": "task", "split": "tune", "prompt": "I want a new test case covering the CSV export feature. Create one for me."}
+{"id": "sib-3", "expected_skill": "task", "split": "holdout", "prompt": "Write me an eval for the login flow."}
+{"id": "hard-1", "expected_skill": "lint-tasks", "split": "tune", "prompt": "My evals are a mess. Can you go through them and tell me what to fix?"}
+{"id": "hard-2", "expected_skill": "analyze", "split": "tune", "prompt": "Look at my evaluation results from last night's run and tell me what regressed."}
+{"id": "hard-3", "expected_skill": "init", "split": "tune", "prompt": "Set up coder-eval for this repository."}
+{"id": "hard-4", "expected_skill": "", "split": "tune", "prompt": "Review my CI configuration for problems."}
+{"id": "hard-5", "expected_skill": "lint-tasks", "split": "holdout", "prompt": "I have a bunch of eval files and I am not sure they are testing the right things."}
+{"id": "hard-6", "expected_skill": "init", "split": "holdout", "prompt": "Get evaluations going in this project from scratch."}

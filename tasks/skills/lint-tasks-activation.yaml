@@ -1,0 +1,81 @@
+# Activation suite for the plugin's own `lint-tasks` skill, with `task` as the named
+# sibling. Written by following /coder-eval:check-skill, then split-labelled so
+# /coder-eval:optimize-skill can propose against `tune` and confirm on `holdout`.
+#
+# Reachability: `path` must be a PLUGIN ROOT — a directory holding a `skills/` subdirectory
+# (a `.claude-plugin/plugin.json` is optional; without one the namespace defaults to the
+# directory name). Pointing a local plugin at a bare directory of skill directories loads
+# NOTHING. Here that root is the plugin itself, which mounts all seven skills at once —
+# the point, since activation is a competition between descriptions:
+#
+#   export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
+#
+# An unset or wrong path is only a warning and leaves every skill unreachable, so confirm
+# the first run's recall is non-zero before trusting any low score.
+#
+# `skill_name` below stays the BARE name even though the plugin namespaces these as
+# `coder-eval:lint-tasks` — the checker strips the namespace before comparing.
+task_id: "lint-tasks-activation"
+description: "Does the agent engage `lint-tasks` when it should, leave it alone when it shouldn't, and not steal `task`'s requests?"
+tags: [activation, skills]
+
+agent:
+  # The discriminator is required for `setting_sources` to be in schema — it is a
+  # claude-code field, not a field on the shared agent base.
+  type: "claude-code"
+  plugins:
+    - type: "local"
+      path: "$SKILL_SOURCE_PATH"
+  # The agent must not need the host project's CLAUDE.md or settings — this measures the
+  # skill listing, and injecting a 20 KB project guide into every call is both expensive
+  # and a confound.
+  setting_sources: []
+
+# Activation is decided in the first assistant turn: either the skill is engaged or it is
+# not. Without caps the agent spends turns exploring a sandbox that deliberately holds no
+# eval files, and a row that times out is EXCLUDED from the confusion matrix rather than
+# scored — which silently shrinks the suite. Cap tightly: it buys signal, not just cost.
+run_limits:
+  max_turns: 2
+  turn_timeout: 120
+  task_timeout: 300
+
+dataset:
+  paths:
+    - "lint-tasks-activation-rows.jsonl"
+  split_field: "split"
+
+initial_prompt: |
+  ${row.prompt}
+
+success_criteria:
+  # The skill under test. Positive rows expect engagement; distractor and sibling-owned
+  # rows expect none.
+  - type: "skill_triggered"
+    description: "lint-tasks activation for row ${row.id}"
+    skill_name: "lint-tasks"
+    expected_skill: "${row.expected_skill}"
+    suite_thresholds:
+      recall.yes: 0.7
+      precision.yes: 0.7
+
+  # The sibling. Stacking one criterion per skill yields a per-skill confusion matrix from
+  # the same traces, which turns "this misfired" into "this stole `task`'s requests".
+  # No suite_thresholds: this criterion is the sibling-regression read-out, not a gate.
+  - type: "skill_triggered"
+    description: "task (sibling) activation for row ${row.id}"
+    skill_name: "task"
+    expected_skill: "${row.expected_skill}"
+
+  - type: "skill_triggered"
+    description: "analyze (sibling) activation for row ${row.id}"
+    skill_name: "analyze"
+    expected_skill: "${row.expected_skill}"
+
+  # `init` is disable-model-invocation, so it can never be engaged on its own. Its rows
+  # therefore test whether a MODEL-INVOKABLE sibling wrongly claims setup requests — the
+  # expected reading here is that nothing fires, not that `init` does.
+  - type: "skill_triggered"
+    description: "init (sibling) activation for row ${row.id}"
+    skill_name: "init"
+    expected_skill: "${row.expected_skill}"

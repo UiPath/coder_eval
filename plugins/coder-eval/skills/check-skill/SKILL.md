@@ -164,12 +164,17 @@ block in the template — and it is the template's job only **when nothing alrea
 skill**: if step 3 found an experiment supplying that block, inherit it and delete the
 template's copy rather than writing a second declaration.
 
-Otherwise, fill it in: `path` is the directory **containing** the skill's own directory —
-for `.claude/skills/pdf-forms/SKILL.md` that is `.claude/skills`. Tell the user to export it
-before running, and to use the same variable in CI:
+Otherwise, fill it in. **`path` must be a plugin root: a directory holding a `skills/`
+subdirectory**, so that the skill sits at `<path>/skills/<skill-name>/SKILL.md`. A
+`.claude-plugin/plugin.json` is optional — without one the namespace defaults to the
+directory's own name.
+
+For `.claude/skills/pdf-forms/SKILL.md` that root is **`.claude`**, not `.claude/skills`.
+Pointing at a bare directory of skill directories loads nothing at all. Tell the user to
+export it before running, and to use the same variable in CI:
 
 ```bash
-export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
+export SKILL_SOURCE_PATH="$(pwd)/.claude"
 ```
 
 Keep it an environment variable rather than baking an absolute path into the YAML — the

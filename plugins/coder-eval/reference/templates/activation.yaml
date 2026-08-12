@@ -20,14 +20,24 @@ tags: [activation]
 
 # REPLACE: the skill under test must be REACHABLE by the sandboxed agent, or every
 # positive row scores 0 and the suite reports recall 0.0 — which reads exactly like a
-# broken skill. `path` is the directory CONTAINING the skill's directory (for
-# `.claude/skills/my-skill/SKILL.md` that is `.claude/skills`), supplied through an
-# environment variable so the committed suite stays portable across machines and CI:
+# broken skill.
 #
-#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills
+# `path` must be a PLUGIN ROOT: a directory holding a `skills/` subdirectory, i.e.
+# `<path>/skills/<skill-name>/SKILL.md`. A `.claude-plugin/plugin.json` is optional —
+# without one the namespace defaults to the directory's own name.
 #
-# An unset variable is logged as a warning and leaves the skill unreachable, so check
-# the first run's recall before trusting a low score.
+# So for `.claude/skills/my-skill/SKILL.md` the path is `.claude` — NOT `.claude/skills`.
+# Pointing at a bare directory of skill directories loads NOTHING, silently, and produces
+# exactly the recall 0.0 this comment warns about.
+#
+#   export SKILL_SOURCE_PATH=/abs/path/to/.claude
+#
+# Supplied through an environment variable so the committed suite stays portable across
+# machines and CI. An unset or wrong path is only a warning, so confirm the first run's
+# recall is non-zero before trusting a low score.
+#
+# `skill_name` below stays the BARE name even when a plugin namespaces the skill as
+# `plugin:skill` — the checker strips the namespace before comparing.
 agent:
   plugins:
     - type: "local"

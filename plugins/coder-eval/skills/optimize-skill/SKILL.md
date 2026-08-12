@@ -144,14 +144,19 @@ One candidate per hypothesis. Each candidate is a snapshot of **the whole skills
 directory**, not of one skill:
 
 ```
-.optimize-skill/<skill>/<round>-<slug>/
-    <skill-name>/SKILL.md      <- the candidate: description rewritten
-    <sibling-a>/SKILL.md       <- every sibling, copied unchanged
-    <sibling-b>/SKILL.md
+.optimize-skill/<skill>/<round>-<slug>/        <- this path is what a variant mounts
+    skills/
+        <skill-name>/SKILL.md                  <- the candidate: description rewritten
+        <sibling-a>/SKILL.md                   <- every sibling, copied unchanged
+        <sibling-b>/SKILL.md
 ```
 
-The round-slug directory is the arm's replacement for the user's `.claude/skills`, so it
-must contain everything that directory contained. **Copy the siblings in unchanged.** Two
+**The `skills/` level is required, not decorative.** A local plugin path must be a **plugin
+root** — a directory holding a `skills/` subdirectory. Mount a bare directory of skill
+directories and nothing loads at all, which is the recall-0.0 failure below.
+
+The round-slug directory is the arm's replacement for the user's whole skill source, so it
+must contain everything that source contained. **Copy the siblings in unchanged.** Two
 things break if you snapshot only the target skill, and both fail silently at full cost:
 
 - Sibling `skill_triggered` criteria would observe `no` on every row in every arm, because
@@ -206,6 +211,8 @@ Four facts that decide whether this measures anything:
 - Plugin paths resolve against the **process working directory**, not the task file's
   directory. A relative path silently points elsewhere the moment the user runs from a
   subdirectory, so write absolute paths.
+- Each `path` is a **plugin root**, so it must hold `skills/<skill-name>/SKILL.md`. This is
+  the single easiest thing to get wrong, and it is silent.
 - A wrong `path` leaves the skill unreachable and **every arm scores recall 0.0**. In a
   one-shot check that reads as "broken skill"; in an optimization loop it reads as "all my
   candidates are bad", which is far more convincing and completely wrong. An unset

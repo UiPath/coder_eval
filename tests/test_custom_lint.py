@@ -1342,6 +1342,40 @@ class TestPluginArtifacts:
                 f"emit (available: {sorted(aggregate.metrics)})"
             )
 
+    def test_reachability_guidance_names_the_plugin_root_layout(self):
+        # A local plugin path must be a PLUGIN ROOT — a directory holding `skills/`, so the
+        # skill sits at `<path>/skills/<name>/SKILL.md`. A manifest is optional (the
+        # namespace then defaults to the directory name). Pointing at a bare directory of
+        # skill directories loads NOTHING, silently, and every positive row scores 0 —
+        # indistinguishable from a skill that never triggers.
+        #
+        # The shipped guidance said the opposite (".claude/skills" for
+        # ".claude/skills/my-skill/SKILL.md"), so every generated suite reported recall 0.0.
+        # Caught only by running one for real. This pins the corrected form in all three
+        # places that state it.
+        surfaces = {
+            "activation template": self.TEMPLATES / "activation.yaml",
+            "check-skill": PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md",
+            "optimize-skill": PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md",
+        }
+        for name, path in surfaces.items():
+            text = path.read_text(encoding="utf-8")
+            assert "plugin root" in text.lower(), (
+                f"{name} no longer says the plugin `path` must be a PLUGIN ROOT — a bare "
+                "directory of skill directories loads nothing and scores recall 0.0"
+            )
+            assert "skills/" in text, (
+                f"{name} no longer shows the required `<path>/skills/<name>/SKILL.md` layout"
+            )
+        # The two skill-facing surfaces must also name the trap by example, since the
+        # wrong form is the intuitive one.
+        for name in ("activation template", "check-skill"):
+            text = surfaces[name].read_text(encoding="utf-8")
+            assert "not `.claude/skills`" in text or "NOT `.claude/skills`" in text, (
+                f"{name} no longer warns that `.claude/skills` is the WRONG path for "
+                "`.claude/skills/my-skill/SKILL.md` — `.claude` is the plugin root"
+            )
+
     def test_activation_template_makes_the_skill_reachable(self):
         # The suite runs in a fresh sandbox holding none of the user's files, so without a
         # plugin source the agent is never OFFERED the skill: every positive row scores 0,
