@@ -739,11 +739,7 @@ class TestModelValidation:
             CliCalledCriterion(description="d", log=LOG)
 
     def test_empty_positional_rejected(self):
-        """`positional: []` slices an empty expectation and compares it to itself.
-
-        It reads as "the verb took no arguments" and asserts nothing, so it is a
-        silent no-op — rejected rather than accepted quietly.
-        """
+        """Reads as "took no arguments" while asserting nothing — a silent no-op."""
         with pytest.raises(ValidationError, match="positional must not be empty"):
             CliCalledCriterion(description="d", log=LOG, verb="ixp projects list", positional=[])
 
@@ -755,10 +751,8 @@ class TestModelValidation:
 class TestVerbAlternation:
     """A verb the tool spells several ways, e.g. the old regex's `(list|get)`.
 
-    Without alternation the only way to accept two verbs was to truncate to their
-    common prefix, which leaves the following tokens unconstrained — safe for a
-    max_count 0 guard, but on a positive assertion it credits `projects delete` as
-    readily as `projects get`.
+    The alternative was truncating to the common prefix, which on a positive assertion
+    credits `projects delete` as readily as `projects get`.
     """
 
     @pytest.mark.parametrize("subcommand", ["list", "get"])
@@ -784,11 +778,7 @@ class TestVerbAlternation:
         assert SuccessChecker(sandbox).check(criterion).score == 0.0
 
     def test_spelling_is_compared_token_by_token(self, sandbox_with_log):
-        """`projects list` must not match `projects lists` or `projects list-models`.
-
-        The match is an ordered prefix over TOKENS, not a string startswith, so a
-        typo'd or longer-named sibling shares no token with the verb.
-        """
+        """Prefix is over TOKENS, not a string startswith, so `lists` shares none."""
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(
             sandbox_dir,
@@ -802,11 +792,7 @@ class TestVerbAlternation:
 
     @pytest.mark.parametrize("subcommand", ["publish", "unpublish"])
     def test_negative_guard_fires_on_every_listed_spelling(self, sandbox_with_log, subcommand):
-        """The inverse: a max_count 0 guard must fail on ANY listed verb.
-
-        A change that only widened what scores 1.0 would leave the positive tests
-        green while the guard quietly stopped firing.
-        """
+        """The inverse: widening only the positive path would leave a guard silently dead."""
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "projects", subcommand, "proj-1"])])
         criterion = CliCalledCriterion(
@@ -829,10 +815,8 @@ class TestVerbAlternation:
     def test_positional_offset_follows_the_matched_spelling(self, sandbox_with_log, argv):
         """Spellings of DIFFERING length each measure `positional` from their own end.
 
-        Both entries must differ in length or the branch is not discriminated: with
-        equal-length spellings `len(matched)` equals `len(spellings[0])` and a wrong
-        derivation still passes. Both spellings are exercised so neither is the one
-        that happens to be first.
+        Equal-length spellings would not discriminate the branch: `len(matched)` would
+        equal `len(spellings[0])` and a wrong derivation still pass.
         """
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(argv)])
@@ -857,11 +841,7 @@ class TestVerbAlternation:
         assert SuccessChecker(sandbox).check(criterion).score == 0.0
 
     def test_score_is_independent_of_spelling_order(self, sandbox_with_log):
-        """Makes the "at most one can match" invariant executable.
-
-        The prefix-collision validator exists so the offset cannot depend on order;
-        nothing pinned that the score doesn't either.
-        """
+        """The prefix-collision validator's reason for existing, made executable."""
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "get", "proj-1"])])
         forward = CliCalledCriterion(
@@ -874,11 +854,7 @@ class TestVerbAlternation:
         assert checker.check(forward).score == checker.check(reversed_).score == 1.0
 
     def test_trailing_arguments_stay_unconstrained(self, sandbox_with_log):
-        """`positional` is a prefix under alternation too, as the field says.
-
-        Recorded so the looseness is a documented property rather than an accident:
-        requiring a specific tail means naming every argument in it.
-        """
+        """`positional` is a prefix under alternation too — a stated property, not an accident."""
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "get", "proj-1", "stray"])])
         criterion = CliCalledCriterion(
@@ -902,10 +878,9 @@ class TestVerbAlternation:
 
     @pytest.mark.parametrize("verb", ["ixp projects get", "ixp  projects   get"])
     def test_detail_renders_the_verb_normalized(self, sandbox_with_log, verb):
-        """The detail now round-trips through split()/join(), so whitespace normalizes.
+        """Rendering round-trips through split()/join(), so whitespace normalizes.
 
-        Deliberate — it matches how the tokens were compared — but it did change the
-        rendering for existing single-verb configs, so it is pinned rather than assumed.
+        Deliberate, but it changed the detail text for every existing single-verb config.
         """
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
@@ -916,14 +891,11 @@ class TestVerbAlternation:
 
 class TestVerbAlternationValidation:
     def test_a_token_chain_in_verb_is_a_type_error(self):
-        """The reason alternation is its own key rather than a list arm on `verb`.
+        """Why alternation is its own key rather than a list arm on `verb`.
 
-        `verb: ["ixp", "projects", "list"]` is the natural way to mistype a chain. As
-        an alternation it would mean "ixp OR projects OR list", and the bare `ixp`
-        entry is a one-token prefix matching EVERY uip call — so it scored 1.0 on
-        `ixp projects delete`, the exact fail-open this criterion exists to prevent.
-        No validator can separate that from a legitimate `["list", "ls"]`, so the
-        schema forbids the shape instead.
+        As an alternation, the mistyped chain's bare `ixp` entry is a one-token prefix
+        matching every uip call — it scored 1.0 on `ixp projects delete`. Indistinguishable
+        from a legitimate `["list", "ls"]`, so the schema forbids the shape.
         """
         with pytest.raises(ValidationError, match="Input should be a valid string"):
             CliCalledCriterion(description="d", log=LOG, verb=["ixp", "projects", "list"])

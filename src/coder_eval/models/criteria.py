@@ -653,7 +653,7 @@ class CliCalledCriterion(BaseSuccessCriterion):
         """Each accepted verb as its token list; empty when there is no verb constraint.
 
         The only place either verb field is split, so the validators, the matcher and
-        the failure detail cannot disagree about what a spelling is.
+        the failure detail cannot disagree.
         """
         if self.verb is not None:
             return [self.verb.split()]
@@ -667,13 +667,11 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if self.verb is not None and self.verb_any_of is not None:
             msg = "cli_called accepts verb or verb_any_of, not both"
             raise ValueError(msg)
-        # `verb_any_of: []` is falsy, so the "at least one facet" check would read it
-        # as "no verb constraint" and quietly match more than the author wrote.
+        # Falsy, so the at-least-one-facet check below would read it as "no verb".
         if self.verb_any_of is not None and not self.verb_any_of:
             msg = "cli_called verb_any_of must not be empty: drop the field to match any verb"
             raise ValueError(msg)
-        # A character count would pass "   ", and `"   ".split()` is `[]` — an empty
-        # prefix that matches every record.
+        # A character count would pass "   ", whose split() is an empty prefix.
         if any(not tokens for tokens in self.verb_spellings):
             msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
             raise ValueError(msg)
@@ -685,9 +683,6 @@ class CliCalledCriterion(BaseSuccessCriterion):
                 if first == second:
                     msg = f"cli_called verb_any_of lists {' '.join(first)!r} twice"
                     raise ValueError(msg)
-                # A shorter entry that prefixes a longer one accepts everything the
-                # longer one does, so which is matched — and how many tokens it
-                # consumes — would depend on list order.
                 for shorter, longer in ((first, second), (second, first)):
                     if longer[: len(shorter)] == shorter:
                         msg = (
@@ -712,17 +707,16 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if self.max_count is not None and self.max_count < self.min_count:
             msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
             raise ValueError(msg)
-        # `positional: []` asserts nothing: matching slices an empty expectation out
-        # of the argv and compares it to itself. An author writing it to mean "took no
-        # arguments" would get a silent no-op, so say so instead of accepting it.
+        # Matching slices an empty expectation and compares it to itself, so this reads
+        # as "took no arguments" while asserting nothing.
         if self.positional is not None and not self.positional:
             msg = (
                 "cli_called positional must not be empty: an empty list asserts nothing. List the "
                 "arguments you expect, or drop the field."
             )
             raise ValueError(msg)
-        # Falsiness rather than `is None` on purpose: `verb: ""` used to slip past an
-        # `is None` check here and then match EVERY record (empty prefix), scoring 1.0.
+        # Falsiness, not `is None`: `verb: ""` slipped past an `is None` check here and
+        # then matched every record, scoring 1.0.
         if not self.verb and not self.verb_any_of and not self.positional and not self.flags and not self.tool:
             msg = "cli_called requires at least one of verb / verb_any_of / positional / flags / tool to match on"
             raise ValueError(msg)

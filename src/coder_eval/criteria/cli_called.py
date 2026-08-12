@@ -152,15 +152,13 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
     offset = 0
     spellings = criterion.verb_spellings
     if spellings:
-        # ORDERED prefix compared token by token — not a subset, and not a string
-        # startswith: `labellings confirm` must never be satisfied by
-        # `labellings unconfirm`, nor `projects list` by `projects lists`.
+        # Token-wise, not a subset and not a string startswith: `labellings confirm`
+        # must never be satisfied by `labellings unconfirm`.
         matched = next((tokens for tokens in spellings if positional[: len(tokens)] == tokens), None)
         if matched is None:
             return False
-        # Offset comes from the candidate that matched, since spellings may differ in
-        # length. Validation rejects one spelling being a prefix of another, so at
-        # most one can match and this cannot depend on list order.
+        # Spellings may differ in length; validation rules out two matching the same
+        # argv, so this cannot depend on list order.
         offset = len(matched)
 
     if criterion.positional is not None:
@@ -282,9 +280,8 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         facets = []
         if criterion.tool is not None:
             facets.append(f"tool={criterion.tool!r}")
-        # Same source as the matcher, so the detail can never describe a different
-        # constraint than the one applied. Whitespace is normalized on the way through
-        # (`'a  b'` renders as `'a b'`), which matches how the tokens were compared.
+        # Same source as the matcher, so the detail cannot describe a different
+        # constraint than the one applied.
         if spellings := criterion.verb_spellings:
             facets.append(f"verb={' | '.join(' '.join(t) for t in spellings)!r}")
         if criterion.positional is not None:
