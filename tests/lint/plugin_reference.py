@@ -49,7 +49,13 @@ from pathlib import Path
 
 from pydantic.fields import FieldInfo
 
-from coder_eval.models import BaseSuccessCriterion, LiveSuccessCriterion, SuccessCriterion
+from coder_eval.models import (
+    NORMALIZED_CRITERION_ALIASES,
+    REMOVED_CRITERION_TYPES,
+    BaseSuccessCriterion,
+    LiveSuccessCriterion,
+    SuccessCriterion,
+)
 from tests.lint.generated import diff_all, write_all
 
 
@@ -140,6 +146,50 @@ def _field_sections(fields: Sequence[tuple[str, FieldInfo]]) -> list[str]:
     return out
 
 
+def _alias_sections() -> list[str]:
+    """Render the legacy-alias and removed-type tables from the loader's own two maps.
+
+    Rendered defensively: with both maps empty the section is absent rather than an
+    empty table under a heading. Neither map is parameterized — they bind at import,
+    and widening a public seam for a state production cannot reach would be machinery
+    without a caller.
+    """
+    if not NORMALIZED_CRITERION_ALIASES and not REMOVED_CRITERION_TYPES:
+        return []
+
+    lines = ["", "## Accepted aliases", ""]
+
+    if NORMALIZED_CRITERION_ALIASES:
+        lines += [
+            "Older `type:` values the loader still rewrites before validation, so a task using one",
+            "stays valid. The overlay **overrides** whatever the task set for those fields — write a",
+            "new task against the current name instead.",
+            "",
+            "| Legacy `type:` | Rewritten to |",
+            "| --- | --- |",
+        ]
+        for alias, overlay in sorted(NORMALIZED_CRITERION_ALIASES.items()):
+            target = overlay.get(_DISCRIMINATOR, "")
+            # The overlay is shown rather than described, so a wrong one is visible here.
+            extras = ", ".join(f"`{key}: {value}`" for key, value in overlay.items() if key != _DISCRIMINATOR)
+            rewritten = f"`{target}`" + (f" with {extras}" if extras else "")
+            lines.append(f"| `{alias}` | {rewritten} |")
+        lines.append("")
+
+    if REMOVED_CRITERION_TYPES:
+        lines += [
+            "### Removed",
+            "",
+            "Rejected outright. The error names the replacement:",
+            "",
+            "| Removed `type:` | Migration |",
+            "| --- | --- |",
+            *(f"| `{name}` | {_cell(hint)} |" for name, hint in sorted(REMOVED_CRITERION_TYPES.items())),
+        ]
+
+    return lines
+
+
 def render_criteria(variants: Sequence[type[BaseSuccessCriterion]] = _VARIANTS) -> str:
     """Render the bundled criteria reference from the criterion models."""
     live = sorted(_tag(cls) for cls in variants if issubclass(cls, LiveSuccessCriterion))
@@ -177,6 +227,8 @@ def render_criteria(variants: Sequence[type[BaseSuccessCriterion]] = _VARIANTS) 
         if summary:
             lines += [summary, ""]
         lines += _field_sections(_own_fields(cls))
+
+    lines += _alias_sections()
 
     return "\n".join(lines).rstrip("\n") + "\n"
 

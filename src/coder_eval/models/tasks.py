@@ -33,6 +33,33 @@ CriteriaCheckTiming = Literal["end_of_dialog", "every_turn", "both"]
 """When success criteria are evaluated inside a simulated dialog."""
 
 
+NORMALIZED_CRITERION_ALIASES: dict[str, dict[str, Any]] = {
+    "command_not_executed": {"type": "command_executed", "min_count": 0, "max_count": 0},
+}
+"""Legacy criterion ``type:`` values the loader still accepts, mapped to the field overlay
+applied to each before validation.
+
+Module-level rather than local to
+:meth:`TaskDefinition.check_removed_criteria_types` so the generated plugin criteria
+reference can render its "Accepted aliases" table from the same declaration the loader
+enforces. A hand-written alias list in that reference would be a second declaration, free
+to drift from this one.
+
+The overlay is applied as ``{**item, **overlay}`` — it OVERRIDES what the task supplied,
+which is why the values are stated here in full rather than as defaults.
+"""
+
+
+REMOVED_CRITERION_TYPES: dict[str, str] = {
+    "program_stdout_equals": "Use 'run_command' with 'expected_stdout' and 'stdout_match' instead.",
+    "code_lints": "Use 'run_command' to run your linter directly instead.",
+    "scored_command": "Use 'run_command' with 'score_from_stdout: true' instead.",
+}
+"""Criterion ``type:`` values that were removed, mapped to the migration hint the
+resulting error carries. Module-level for the same reason as
+:data:`NORMALIZED_CRITERION_ALIASES`."""
+
+
 class SimulationConfig(BaseModel):
     """Configuration for multi-turn user simulation.
 
@@ -596,25 +623,20 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
     @classmethod
     def check_removed_criteria_types(cls, v: Any) -> Any:
         """Normalize legacy criterion aliases and error on removed types."""
-        removed: dict[str, str] = {
-            "program_stdout_equals": "Use 'run_command' with 'expected_stdout' and 'stdout_match' instead.",
-            "code_lints": "Use 'run_command' to run your linter directly instead.",
-            "scored_command": "Use 'run_command' with 'score_from_stdout: true' instead.",
-        }
         if isinstance(v, list):
             normalized: list[Any] = []
             for item in v:
                 if isinstance(item, dict):
                     ctype = item.get("type")
-                    if ctype in removed:
-                        raise ValueError(f"Criterion type '{ctype}' has been removed. {removed[ctype]}")
-                    if ctype == "command_not_executed":
-                        item = {
-                            **item,
-                            "type": "command_executed",
-                            "min_count": 0,
-                            "max_count": 0,
-                        }
+                    if ctype in REMOVED_CRITERION_TYPES:
+                        raise ValueError(f"Criterion type '{ctype}' has been removed. {REMOVED_CRITERION_TYPES[ctype]}")
+                    if ctype in NORMALIZED_CRITERION_ALIASES:
+                        # `{**item, **overlay}` — the overlay WINS, and the order is
+                        # load-bearing. A legacy `command_not_executed` carrying an explicit
+                        # `min_count: 2` is still asking for "this was NOT run"; letting that
+                        # count survive would yield a criterion passing exactly when the
+                        # original asked it to fail.
+                        item = {**item, **NORMALIZED_CRITERION_ALIASES[ctype]}
                 normalized.append(item)
             return normalized
         return v

@@ -266,3 +266,23 @@ Check evaluation results against UiPath agent performance.
 | `agent_name` | Name of the UiPath agent to evaluate |
 | `eval_set` | Evaluation set identifier |
 | `thresholds` | Minimum acceptable value per metric (e.g., {'accuracy': 0.8, 'f1': 0.75}). A metric passes if its value >= the threshold. |
+
+## Accepted aliases
+
+Older `type:` values the loader still rewrites before validation, so a task using one
+stays valid. The overlay **overrides** whatever the task set for those fields — write a
+new task against the current name instead.
+
+| Legacy `type:` | Rewritten to |
+| --- | --- |
+| `command_not_executed` | `command_executed` with `min_count: 0`, `max_count: 0` |
+
+### Removed
+
+Rejected outright. The error names the replacement:
+
+| Removed `type:` | Migration |
+| --- | --- |
+| `code_lints` | Use 'run_command' to run your linter directly instead. |
+| `program_stdout_equals` | Use 'run_command' with 'expected_stdout' and 'stdout_match' instead. |
+| `scored_command` | Use 'run_command' with 'score_from_stdout: true' instead. |

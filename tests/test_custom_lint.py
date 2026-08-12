@@ -1871,6 +1871,26 @@ class TestCE033PluginReferenceParity:
         for cls in _VARIANTS:
             assert f"### `{_tag(cls)}`" in rendered, f"{cls.__name__} is missing from the rendered reference"
 
+    def test_generated_reference_lists_every_accepted_alias(self):
+        # The loader accepts legacy `type:` values and rejects removed ones, and until now
+        # neither fact reached the bundled reference — so an authoring agent reading a task
+        # that uses one had nothing to look it up in, and no way to know the replacement.
+        # Driven off the same two maps the validator consumes, so a new alias cannot ship
+        # undocumented; the constants are the SSOT and this asserts the render followed.
+        from coder_eval.models import NORMALIZED_CRITERION_ALIASES, REMOVED_CRITERION_TYPES
+        from tests.lint.plugin_reference import render_criteria
+
+        rendered = render_criteria()
+        assert NORMALIZED_CRITERION_ALIASES or REMOVED_CRITERION_TYPES, (
+            "both alias maps are empty — this guard is inert; drop it along with the section"
+        )
+        for alias, overlay in NORMALIZED_CRITERION_ALIASES.items():
+            assert f"`{alias}`" in rendered, f"legacy alias {alias} is not documented in the reference"
+            assert f"`{overlay['type']}`" in rendered, f"{alias}'s replacement type is not named"
+        for name, hint in REMOVED_CRITERION_TYPES.items():
+            assert f"`{name}`" in rendered, f"removed type {name} is not documented in the reference"
+            assert hint.split(".")[0] in rendered, f"{name}'s migration hint is not rendered"
+
     def test_common_base_fields_are_not_repeated_per_criterion(self):
         from tests.lint.plugin_reference import render_criteria
 
