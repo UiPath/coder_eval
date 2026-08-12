@@ -576,17 +576,25 @@ class CliCalledCriterion(BaseSuccessCriterion):
             "generated recorders never repeats it"
         ),
     )
-    verb: str | list[str] | None = Field(
+    verb: str | None = Field(
         default=None,
         description=(
             "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's "
             "non-flag arguments, compared token by token (so 'projects list' never matches "
             "'projects lists'). Order matters, so 'labellings confirm' never matches "
-            "'labellings unconfirm'. A LIST matches if ANY entry does, for a verb the tool spells "
-            "several ways. Prefer listing full verbs over truncating one to cover several: a short "
-            "verb leaves the following tokens unconstrained, which is safe for a max_count 0 guard "
-            "(it fires on more) but NOT for a positive assertion, where 'projects' would credit "
-            "'projects delete' as readily as 'projects get'"
+            "'labellings unconfirm'. Prefer the full verb over a short one: the tokens after it are "
+            "unconstrained, which is safe for a max_count 0 guard (it fires on more) but NOT for a "
+            "positive assertion, where 'projects' credits 'projects delete' as readily as "
+            "'projects get'. For one operation the tool spells several ways, use verb_any_of"
+        ),
+    )
+    verb_any_of: list[str] | None = Field(
+        default=None,
+        description=(
+            "Alternative whole verbs; matches if ANY of them does, e.g. ['projects list', "
+            "'projects get']. Each entry is a complete verb in the same form `verb` takes, NOT one "
+            "token of a chain — a chain belongs in `verb` as a single string. Mutually exclusive "
+            "with `verb`"
         ),
     )
     tool: str | None = Field(
@@ -605,10 +613,13 @@ class CliCalledCriterion(BaseSuccessCriterion):
         description=(
             "Require the non-flag arguments after the verb to be EXACTLY `positional`, with nothing "
             "trailing. Without it `verb: 'projects list'` also matches `projects list dummy`. Set it "
-            "with `positional: []` to assert the verb took no arguments at all. Note the asymmetry "
-            "runs opposite to a short verb's: tightening suits a positive assertion, but on a "
-            "max_count 0 guard it makes the forbidden call EASIER to slip past, since one stray "
-            "argument stops the match"
+            "with `positional: []` to assert the verb took no arguments at all. Two hazards. (1) The "
+            "asymmetry runs opposite to a short verb's: tightening suits a positive assertion, but on "
+            "a max_count 0 guard it makes the forbidden call EASIER to slip past, since one stray "
+            "argument stops the match. (2) It depends on `value_flags` being complete: an undeclared "
+            "value-bearing flag leaves its VALUE among the positionals, so `--folder Finance` turns "
+            "an otherwise exactly-correct invocation into a 0.0 unless 'folder' is declared in "
+            "`value_flags` or in `flags`"
         ),
     )
     flags: dict[str, FlagMatch] | None = Field(
@@ -654,13 +665,52 @@ class CliCalledCriterion(BaseSuccessCriterion):
     def verb_spellings(self) -> list[list[str]]:
         """Each accepted verb as its token list; empty when there is no verb constraint.
 
-        One place splits the field, so the validator and the checker cannot disagree
-        about what a spelling is.
+        The only place either verb field is split, so the validators, the matcher and
+        the failure detail cannot disagree about what a spelling is.
         """
-        if self.verb is None:
-            return []
-        spellings = [self.verb] if isinstance(self.verb, str) else self.verb
-        return [spelling.split() for spelling in spellings]
+        if self.verb is not None:
+            return [self.verb.split()]
+        if self.verb_any_of is not None:
+            return [spelling.split() for spelling in self.verb_any_of]
+        return []
+
+    @model_validator(mode="after")
+    def _validate_verb(self) -> CliCalledCriterion:
+        """Verb rules, kept off _validate_bounds so neither grows unreadable."""
+        if self.verb is not None and self.verb_any_of is not None:
+            msg = "cli_called accepts verb or verb_any_of, not both"
+            raise ValueError(msg)
+        # `verb_any_of: []` is falsy, so the "at least one facet" check would read it
+        # as "no verb constraint" and quietly match more than the author wrote.
+        if self.verb_any_of is not None and not self.verb_any_of:
+            msg = "cli_called verb_any_of must not be empty: drop the field to match any verb"
+            raise ValueError(msg)
+        # A character count would pass "   ", and `"   ".split()` is `[]` — an empty
+        # prefix that matches every record.
+        if any(not tokens for tokens in self.verb_spellings):
+            msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
+            raise ValueError(msg)
+        spellings = self.verb_spellings
+        for outer, first in enumerate(spellings):
+            for inner, second in enumerate(spellings):
+                if outer >= inner:
+                    continue
+                if first == second:
+                    msg = f"cli_called verb_any_of lists {' '.join(first)!r} twice"
+                    raise ValueError(msg)
+                # A shorter entry that prefixes a longer one accepts everything the
+                # longer one does, so which is matched — and how many tokens it
+                # consumes — would depend on list order.
+                for shorter, longer in ((first, second), (second, first)):
+                    if longer[: len(shorter)] == shorter:
+                        msg = (
+                            f"cli_called verb_any_of entry {' '.join(shorter)!r} is a prefix of "
+                            f"{' '.join(longer)!r}; the shorter one already accepts every invocation "
+                            "the longer one does, so drop the longer entry or list only the verbs "
+                            "you mean."
+                        )
+                        raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _validate_bounds(self) -> CliCalledCriterion:
@@ -675,37 +725,6 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if self.max_count is not None and self.max_count < self.min_count:
             msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
             raise ValueError(msg)
-        if self.verb is not None:
-            spellings = [self.verb] if isinstance(self.verb, str) else self.verb
-            # `verb: []` is falsy, so the "at least one facet" check below would let
-            # it through whenever positional/flags/tool is set — as "no verb
-            # constraint", quietly matching more than the author wrote.
-            if not spellings:
-                msg = "cli_called verb list must not be empty: drop the field to match any verb"
-                raise ValueError(msg)
-            # A character count would pass "   ", and `"   ".split()` is `[]` — an
-            # empty prefix that matches every record.
-            if any(not spelling.strip() for spelling in spellings):
-                msg = (
-                    "cli_called verb must not be blank: a blank verb is an empty prefix and matches "
-                    "every record"
-                )
-                raise ValueError(msg)
-            # One candidate being a prefix of another makes the match ambiguous: both
-            # accept the same argv but consume a different number of tokens, so the
-            # offset `positional` is measured from would depend on candidate order.
-            # Identical entries land here too, a prefix of itself.
-            token_lists = [spelling.split() for spelling in spellings]
-            for outer, shorter in enumerate(token_lists):
-                for inner, longer in enumerate(token_lists):
-                    if outer != inner and longer[: len(shorter)] == shorter:
-                        msg = (
-                            f"cli_called verb {' '.join(shorter)!r} is a prefix of "
-                            f"{' '.join(longer)!r}; both would match the same invocation while "
-                            "consuming a different number of tokens, making the `positional` offset "
-                            "ambiguous. List only the verbs you mean, or keep the shorter one alone."
-                        )
-                        raise ValueError(msg)
         # `positional: []` alone asserts nothing (an empty slice equals an empty
         # expectation), so an author writing it to mean "took no arguments" gets a
         # silent no-op. exact_positional is what gives it meaning, and requiring the
@@ -716,10 +735,14 @@ class CliCalledCriterion(BaseSuccessCriterion):
                 "assert the verb took no arguments."
             )
             raise ValueError(msg)
-        # Falsiness-symmetric on purpose: `verb: ""` used to slip past an `is None`
-        # check here and then match EVERY record (empty prefix), silently scoring 1.0.
-        if not self.verb and not self.positional and not self.flags and not self.tool:
-            msg = "cli_called requires at least one of verb / positional / flags / tool to match on"
+        # Falsiness on verb/flags/tool is deliberate: `verb: ""` used to slip past an
+        # `is None` check here and then match EVERY record (empty prefix), scoring 1.0.
+        # `positional` is the exception — exact_positional makes `positional: []` a real
+        # constraint ("zero non-flag arguments"), so falsiness there would reject an
+        # explicitly-set field as unset.
+        has_positional = self.positional is not None if self.exact_positional else bool(self.positional)
+        if not self.verb and not self.verb_any_of and not has_positional and not self.flags and not self.tool:
+            msg = "cli_called requires at least one of verb / verb_any_of / positional / flags / tool to match on"
             raise ValueError(msg)
         # A predicate on an ignored flag can never be evaluated: ignore_flags drops
         # the flag before any predicate runs, so `absent` would pass vacuously and

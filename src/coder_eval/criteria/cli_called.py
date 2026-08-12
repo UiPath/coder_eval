@@ -286,10 +286,11 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         facets = []
         if criterion.tool is not None:
             facets.append(f"tool={criterion.tool!r}")
-        if criterion.verb is not None:
-            # ' | ' rather than repr of the list: a bare list reads as "the verb is
-            # these tokens". A single verb renders exactly as it did before.
-            facets.append(f"verb={' | '.join(' '.join(t) for t in criterion.verb_spellings)!r}")
+        # Same source as the matcher, so the detail can never describe a different
+        # constraint than the one applied. Whitespace is normalized on the way through
+        # (`'a  b'` renders as `'a b'`), which matches how the tokens were compared.
+        if spellings := criterion.verb_spellings:
+            facets.append(f"verb={' | '.join(' '.join(t) for t in spellings)!r}")
         if criterion.positional is not None:
             exact = " exactly" if criterion.exact_positional else ""
             facets.append(f"positional{exact}={criterion.positional!r}")

@@ -926,6 +926,7 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
   log: "mocks/calls.jsonl"            # Invocation log; omit it to use the record_cli default
   verb: "ixp projects configure-model" # Ordered prefix of the non-flag arguments
   positional: ["my_invoices-ixp"]      # Non-flag arguments following the verb, in order
+  exact_positional: false              # true = nothing may follow `positional`
   flags:
     model: "gemini_2_5_pro"            # Bare scalar == {equals: ...}
   tool: "uip"                          # Optional: match only records with this tool
@@ -933,6 +934,21 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
   max_count: null                      # Maximum; null = unbounded, 0 = forbidden
   ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
 ```
+
+**One operation, several verbs.** Use `verb_any_of` instead of `verb` (mutually exclusive); it matches if any entry does. Each entry is a *complete* verb in the form `verb` takes — not one token of a chain:
+
+```yaml
+- type: "cli_called"
+  description: "Read the project through the CLI"
+  verb_any_of: ["ixp projects list", "ixp projects get"]
+```
+
+Do **not** shorten the verb instead. `verb: "ixp projects"` matches all 14 of its subcommands, so a positive assertion that the agent *read* a project is equally satisfied by `ixp projects delete`. Two entries are rejected when one prefixes the other, since the shorter already accepts everything the longer does.
+
+**Pinning the argument tail.** `positional` is a prefix too, so `verb: "ixp projects list"` also matches `ixp projects list dummy`. `exact_positional: true` requires the non-flag arguments to be exactly `positional` and nothing more; pair it with `positional: []` to assert the verb took no arguments at all. Two prerequisites:
+
+- **Declare value-bearing flags.** An undeclared flag is read as a switch, so its *value* stays among the positionals: `--folder Finance` turns an otherwise exactly-correct invocation into `0.0` unless `folder` appears in `value_flags` or `flags`.
+- **Not on a negative guard.** Tightening suits a positive assertion. Under `max_count: 0` it works the other way — one stray argument stops the match, so the forbidden call slips past.
 
 `log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
 
@@ -1021,7 +1037,7 @@ flags:
 
 **Negative guards.** Set `min_count: 0` and `max_count: 0` to assert a call did **not** happen. A missing log file *fails* rather than counting as zero matches — otherwise a mock writing to the wrong path would make every negative guard pass vacuously.
 
-**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`.
+**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix compared token by token**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`, nor `ixp projects list` by `ixp projects lists`. What a prefix leaves open is the *tail*, which `positional` and `exact_positional` close.
 
 ### `commands_efficiency`
 
