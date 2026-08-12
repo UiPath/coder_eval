@@ -1972,3 +1972,81 @@ class TestLoginShellMockPathHome:
             assert path_value.split(":")[0] == str(tmp_path / "mocks")
         finally:
             agent._cleanup_login_shell_home()
+
+
+class TestMaxTurnsVisibleTurnCap:
+    """``max_turns`` was documented as "unused for Codex single-turn" and dropped.
+
+    Codex delivers one SDK turn per ``communicate()``, so a native turn counter would
+    cap at 1 and mean nothing; the cap therefore counts VISIBLE turns (completed tool
+    calls — the unit ``reports_stats.visible_turn_count`` sums) and is enforced on the
+    same pump boundary as the cooperative stop.
+    """
+
+    @staticmethod
+    def _cmd_notifications(count: int) -> list:
+        """`count` completed shell commands, then the terminal turn/completed."""
+        notifications = []
+        for i in range(count):
+            root = SimpleNamespace(
+                type="commandExecution",
+                id=f"c{i}",
+                command=f"echo step-{i}",
+                exit_code=0,
+                aggregated_output=f"step-{i}\n",
+                duration_ms=5,
+            )
+            notifications.append(_item_notification("item/started", root))
+            notifications.append(_item_notification("item/completed", root))
+        notifications.append(_turn_completed())
+        return notifications
+
+    async def test_cap_stops_the_pump_at_the_limit(self):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
+
+        record = await agent.communicate("go", max_turns=2)
+
+        assert len(record.commands) == 2
+        assert record.max_turns_exhausted is True
+
+    async def test_cap_keeps_the_deciding_call_complete(self):
+        """Counting COMPLETED calls means the one that reaches the cap keeps its result."""
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(3))
+
+        record = await agent.communicate("go", max_turns=1)
+
+        assert len(record.commands) == 1
+        assert record.commands[0].result_status == "success"
+
+    async def test_cap_interrupts_the_in_flight_turn(self):
+        """Best-effort server-side interrupt, so the cap actually stops spend."""
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
+
+        await agent.communicate("go", max_turns=1)
+
+        assert agent.thread.last_handle.interrupted is True
+
+    async def test_under_the_cap_completes_normally(self):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(2))
+
+        record = await agent.communicate("go", max_turns=5)
+
+        assert len(record.commands) == 2
+        assert record.max_turns_exhausted is False
+
+    async def test_no_cap_consumes_the_whole_stream(self):
+        """None must preserve the pre-existing behavior exactly."""
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(4))
+
+        record = await agent.communicate("go")
+
+        assert len(record.commands) == 4
+        assert record.max_turns_exhausted is False
+
+    async def test_cooperative_stop_outranks_the_cap(self):
+        """Both firing on the same notification reports STOPPED_EARLY."""
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
+
+        record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
+
+        assert record.max_turns_exhausted is False

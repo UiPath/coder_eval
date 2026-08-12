@@ -56,6 +56,7 @@ from .models import (
     resolve_evaluation_route,
     resolve_route,
 )
+from .orchestration.config_support import validate_config_support
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
@@ -989,6 +990,10 @@ class Orchestrator:
         # some criterion carries a stop_early: block.
         validate_early_stop(self.task)
 
+        # Same defensive posture for the agent config-support guardrail: no-op unless
+        # the task sets a field this harness declares it does not implement.
+        validate_config_support(self.task)
+
         # Build the early-stop watcher once, up front, when armed (>= 1 criterion
         # with a stop_early: block and the run_limits.stop_early kill switch not
         # thrown). This sits BEFORE the evaluate-only early return below, so an
@@ -1641,6 +1646,7 @@ class Orchestrator:
         sim_in: int,
         sim_out: int,
         sim_failures: int,
+        sim_model: str | None = None,
     ) -> SimulationTelemetry:
         """Single construction point for SimulationTelemetry across the dialog loop's exit paths."""
         return SimulationTelemetry(
@@ -1651,6 +1657,9 @@ class Orchestrator:
             simulator_output_tokens=sim_out,
             simulator_failures=sim_failures,
             total_turns=total_turns,
+            # The resolved id, not the configured one, so the record names the model
+            # the backend actually served and simulator cost prices from a fact.
+            simulator_model=sim_model,
         )
 
     async def _run_dialog_criteria_check(
@@ -1768,6 +1777,7 @@ class Orchestrator:
                 sim_in=0,
                 sim_out=0,
                 sim_failures=1,
+                sim_model=sim_model_id,
             )
             return _OpenerOutcome(short_circuit=True, return_value=False)
 
@@ -1783,6 +1793,7 @@ class Orchestrator:
                 sim_in=solicited.sim_in,
                 sim_out=solicited.sim_out,
                 sim_failures=0,
+                sim_model=sim_model_id,
             )
             return _OpenerOutcome(short_circuit=True, return_value=False)
 
@@ -1857,7 +1868,10 @@ class Orchestrator:
         # UserMessage captured for the upcoming agent call; prepended to the
         # next turn_record.messages. None outside simulation paths.
         pending_user_turn: UserMessage | None = None
-        sim_model_id = getattr(sim_config, "model", None)
+        # The RESOLVED simulator model (backend-translated), not the configured id —
+        # it labels each simulator UserMessage and is persisted on the telemetry so
+        # simulator cost prices from the model that actually served the call.
+        sim_model_id = simulator.model
         # Track whether we entered the agent-call loop — used by the finally
         # block to decide whether to persist an orphaned pending_user_turn.
         agent_turn_attempted = False
@@ -2035,6 +2049,7 @@ class Orchestrator:
                 sim_in=simulator_input_tokens,
                 sim_out=simulator_output_tokens,
                 sim_failures=simulator_failures,
+                sim_model=sim_model_id,
             )
             logger.info(
                 "Simulation dialog ended: stop_reason=%s turns=%s criteria_passed=%s",
@@ -2070,6 +2085,7 @@ class Orchestrator:
                     sim_in=simulator_input_tokens,
                     sim_out=simulator_output_tokens,
                     sim_failures=simulator_failures,
+                    sim_model=sim_model_id,
                 )
             # Always tear down the simulator agent (and its scratch dir) even
             # when the dialog bails out via exception.

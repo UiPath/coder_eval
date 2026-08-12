@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
+from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.merge_strategy import MergeField
 from coder_eval.models.sandbox import SandboxConfig
@@ -27,6 +28,16 @@ class UnknownTaskFieldWarning(DeprecationWarning):
 
 DEFAULT_SIMULATION_STOP_TOKEN = "<<<END>>>"
 """Sentinel token the user simulator emits when it considers the task complete."""
+
+
+DEFAULT_SIMULATOR_MODEL = DEFAULT_JUDGE_MODEL
+"""Default model for the simulated user (``SimulationConfig.model``).
+
+Aliased to the judge default so both evaluator-side models move together: neither
+is the subject under test, and both must stay fixed while the subject varies.
+Distinct constants (rather than one shared name at the use sites) so pinning the
+simulator to something else later does not drag the judge with it.
+"""
 
 
 CriteriaCheckTiming = Literal["end_of_dialog", "every_turn", "both"]
@@ -54,9 +65,19 @@ class SimulationConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Master switch — when false, simulation is skipped entirely.")
 
-    # The simulator runs as a tools-disabled Claude Code agent sharing the
-    # coding agent's ApiRoute, so model/temperature/max_tokens are resolved at
-    # the route level and are not configured here.
+    # The simulator runs as a tools-disabled Claude Code agent sharing the coding
+    # agent's ApiRoute, so temperature/max_tokens are resolved at the route level and
+    # are not configured here. The MODEL is pinned below rather than inherited.
+    model: str = Field(
+        default=DEFAULT_SIMULATOR_MODEL,
+        description=(
+            "Model that plays the simulated user. Pinned to a constant by default, NOT "
+            "inherited from the route: leaving it unset let BEDROCK_MODEL swap the "
+            "simulated user underneath an A/B, so a run comparing two subject models was "
+            "silently also comparing two interlocutors. Mirrors llm_judge's `model` field — "
+            "hold it fixed to keep the dialog partner constant across variants."
+        ),
+    )
 
     # Persona / goal.
     persona: str = Field(

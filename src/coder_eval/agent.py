@@ -6,6 +6,8 @@
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
@@ -18,6 +20,34 @@ from .streaming.events import AgentEndStatus
 
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigSupport(StrEnum):
+    """How faithfully one agent backend implements a shared ``BaseAgentConfig`` field.
+
+    A base-config field must mean the same thing on every harness, and where it
+    cannot, the divergence has to be declared rather than discovered from a run that
+    quietly did something else. Every field an agent does not fully implement is
+    listed in its ``config_support`` map with one of these and a reason.
+    """
+
+    APPROXIMATED = "approximated"
+    """Accepted and acted on, but with a documented divergence the operator must know
+    about (e.g. Codex forwards ``disallowed_tools`` to the SDK, which does not enforce
+    it). The agent warns at ``start()``; resolution does NOT reject."""
+
+    UNHONORED = "unhonored"
+    """Read by nothing — setting it changes no behavior. Resolution HARD-ERRORS when a
+    task sets the field to anything other than its model default, because a silently
+    dropped field means two harnesses reading one task file run different tasks."""
+
+
+@dataclass(frozen=True)
+class ConfigFieldSupport:
+    """One entry in an agent's ``config_support`` map: the state plus why."""
+
+    support: ConfigSupport
+    reason: str
 
 
 class _FinalizeFn(Protocol):
@@ -85,6 +115,14 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     # ``cost_log_tags`` to agents that set this True, else a route-driven kwarg would
     # crash every agent (NoOp/Codex/Antigravity/plugins) whose ``__init__`` lacks it.
     supports_cost_log_tags: ClassVar[bool] = False
+
+    # Declared divergences from the shared ``BaseAgentConfig`` contract, keyed by field
+    # name. Empty (the default) asserts the agent honors every field, so a new agent
+    # opts in to scrutiny only where it must — but a field it silently drops without
+    # declaring is a bug, not a shortcut. Read by
+    # ``orchestration/config_support.py::validate_config_support`` at resolution and by
+    # the parity table in docs/agents/HARNESS_PARITY.md.
+    config_support: ClassVar[dict[str, ConfigFieldSupport]] = {}
 
     def _begin_turn(self) -> None:
         """Mark the start of a ``communicate()`` turn: reset the pending slot and

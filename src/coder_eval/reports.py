@@ -87,8 +87,14 @@ def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -
         betas = settings_source.get("betas")
         if betas:
             rows.append(("Betas", ", ".join(betas)))
-        if settings_source.get("system_prompt") is not None:
-            prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
+        # `system_prompt` reaches the SDK as the preset+append form (the appended
+        # text is what the task actually configured; the preset itself is constant),
+        # so report the append payload and render nothing when there is none.
+        raw_prompt = settings_source.get("system_prompt")
+        if isinstance(raw_prompt, dict):
+            raw_prompt = raw_prompt.get("append")
+        if raw_prompt is not None:
+            prompt_str = str(raw_prompt).replace("\n", " ")
             if len(prompt_str) > SYSTEM_PROMPT_PREVIEW_CHARS:
                 prompt_str = prompt_str[:SYSTEM_PROMPT_PREVIEW_CHARS] + "..."
             rows.append(("System Prompt", prompt_str))
@@ -469,11 +475,13 @@ class ReportGenerator:
                 )
             if t.get("stopped_early"):
                 reason = t.get("early_stop_reason") or "unknown"
-                turns_remaining = t.get("turns_remaining_at_stop")
-                avoided = f" <= {turns_remaining} turn(s) avoided —" if isinstance(turns_remaining, int) else ""
-                notes.append(
-                    f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided} {early_stop_gate_note(reason)}"
-                )
+                # No "N turn(s) avoided" claim here. It derived from
+                # ``max_turns - sdk_turn_index``, and on Codex and Antigravity one
+                # ``communicate()`` is a single SDK turn — so an early-stopped row
+                # advertised dozens of avoided turns when all that was cut was a
+                # tool-call tail. ``turns_remaining_at_stop`` is still persisted on
+                # EarlyStopInfo, labelled there as the upper bound it is.
+                notes.append(f"> **NOTE:** [{task_id}] stopped early ({reason}); {early_stop_gate_note(reason)}")
         if not notes:
             return []
         return ["## Run-time Notes", "", *notes]

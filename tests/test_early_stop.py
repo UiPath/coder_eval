@@ -2734,12 +2734,22 @@ class TestEarlyStopReportSurfaces:
         d = eval_result_to_task_dict(_stopped_result(reason=EarlyStopReason.DECISION_BUDGET_EXCEEDED))
         assert d["early_stop_reason"] == "decision_budget_exceeded"
 
-    def test_runtime_note_rendered_with_turns_avoided(self) -> None:
+    def test_runtime_note_omits_the_turns_avoided_claim(self) -> None:
+        """The note states the reason and the gate, and claims no turn saving.
+
+        It used to render ``<= N turn(s) avoided`` from ``max_turns - sdk_turn_index``.
+        On Codex and Antigravity one ``communicate()`` is a single SDK turn, so that
+        subtraction advertised the entire max_turns budget as saved when all that was
+        actually cut was a tool-call tail. ``turns_remaining_at_stop`` is still
+        persisted on ``EarlyStopInfo``, where its docstring calls it an upper bound.
+        """
         lines = ReportGenerator._runtime_notes_lines(_run_summary([eval_result_to_task_dict(_stopped_result())]))
         blob = "\n".join(lines)
         assert "stopped early (criterion_passed)" in blob
-        assert "<= 14 turn(s) avoided" in blob
         assert "gated on armed criteria only; other criteria are advisory" in blob
+        assert "avoided" not in blob
+        # Still recorded on the row for anyone who wants the bound.
+        assert eval_result_to_task_dict(_stopped_result())["turns_remaining_at_stop"] == 14
 
     def test_runtime_note_for_decision_budget_exceeded_names_the_timeout(self) -> None:
         # The budget-exceeded reason is an effective fail gated through the

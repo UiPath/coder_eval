@@ -580,6 +580,7 @@ def resolve_all_tasks(
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
     """
+    from .config_support import AgentConfigSupportError, validate_config_support
     from .early_stop import EarlyStopConfigError, validate_early_stop
 
     resolved: list[ResolvedTask] = []
@@ -672,6 +673,12 @@ def resolve_all_tasks(
                     # a bad arming raises EarlyStopConfigError (a ValueError).
                     validate_early_stop(resolved_task)
 
+                    # Agent config-support guardrail: reject a task that sets a field
+                    # the chosen harness declares it does not implement, so one task
+                    # file cannot silently run as two different tasks. No-op unless a
+                    # declared-unhonored field is set to a non-default value.
+                    validate_config_support(resolved_task)
+
                     # Fan-out: simulation n_trials takes precedence over experiment repeats
                     # when simulation is active; otherwise use experiment-level repeats.
                     sim = resolved_task.simulation
@@ -694,9 +701,10 @@ def resolve_all_tasks(
                                 config_lineage=dict(lineage),
                             )
                         )
-        # Early-stop arming errors are a deliberate hard stop: they always
-        # propagate (never demoted to skipped) so a misarmed run fails loudly.
-        except EarlyStopConfigError:
+        # Early-stop arming and agent-config-support errors are a deliberate hard
+        # stop: they always propagate (never demoted to skipped) so a misconfigured
+        # run fails loudly instead of quietly shrinking the suite.
+        except (EarlyStopConfigError, AgentConfigSupportError):
             raise
         # Narrow set, matching the load/expand block above: config-resolution
         # and IO failures are collected (decided after the loop, below);

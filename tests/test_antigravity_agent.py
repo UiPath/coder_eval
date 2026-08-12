@@ -5,8 +5,11 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 """
 
 import asyncio
+import logging
 import os
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -503,191 +506,429 @@ async def test_communicate_requires_started_agent():
         await agent.communicate("x")
 
 
-# --- env_path_prepend / harness-spawn PATH shadowing ------------------------------
+def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
+    """Stub ``google.antigravity`` in sys.modules so ``start()`` runs without the extra.
+
+    ``LocalAgentConfig`` becomes a SimpleNamespace factory, so a test can assert on
+    exactly the kwargs the agent built (``env``, ``policies``, ``capabilities``, ...).
+    """
+    ag = ModuleType("google.antigravity")
+    ag.Agent = sdk_agent_cls
+    ag.LocalAgentConfig = lambda **kwargs: SimpleNamespace(models=[], **kwargs)
+    ag.types = SimpleNamespace(
+        ThinkingLevel=lambda level: level,
+        GeminiAPIEndpoint=type("GeminiAPIEndpoint", (), {}),
+        GeminiModelOptions=lambda **kw: SimpleNamespace(**kw),
+        CapabilitiesConfig=lambda **kw: SimpleNamespace(**kw),
+    )
+    hooks = ModuleType("google.antigravity.hooks")
+    hooks.policy = SimpleNamespace(
+        allow_all=lambda: SimpleNamespace(kind="allow_all"),
+        deny=lambda tool, **kw: SimpleNamespace(kind="deny", tool=tool),
+        allow=lambda tool, **kw: SimpleNamespace(kind="allow", tool=tool),
+    )
+    google_pkg = sys.modules.get("google") or ModuleType("google")
+    monkeypatch.setitem(sys.modules, "google", google_pkg)
+    monkeypatch.setitem(sys.modules, "google.antigravity", ag)
+    monkeypatch.setitem(sys.modules, "google.antigravity.hooks", hooks)
+
+
+# --- env_path_prepend / mock-CLI PATH shadowing -----------------------------------
 #
-# The localharness subprocess inherits os.environ at Popen time (no SDK env seam),
-# so mock CLIs shadow real ones only if the mock dirs sit at the FRONT of PATH for
-# the spawn. These drive the guard directly (no SDK needed) — an inverted join
-# order (mocks at the back) or a missing restore must fail here.
+# The mock dirs reach the localharness through the SDK's per-agent ``env`` seam
+# (LocalAgentConfig.env), which the SDK merges over os.environ at Popen time. Mock
+# CLIs shadow real ones only if those dirs sit at the FRONT of the merged PATH, so
+# an inverted join order (mocks at the back) must fail here. The process env is
+# never mutated, which is what lets two tasks start harnesses concurrently.
 
 
-async def test_harness_spawn_guard_prepends_path_in_order_then_restores(monkeypatch):
-    """Mock dirs land at the FRONT of PATH in order during the spawn; PATH is restored on exit."""
+async def test_harness_env_prepends_path_in_order(monkeypatch):
+    """Mock dirs land at the FRONT of the overlay PATH, in order, ahead of the parent's."""
     monkeypatch.setenv("PATH", "/parent/bin")
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks", "/sandbox/bins"]
 
-    async with agent._harness_spawn_guard():
-        assert os.environ["PATH"] == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
-    assert os.environ["PATH"] == "/parent/bin"  # restored
+    assert agent._harness_env() == {"PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"}
 
 
-async def test_harness_spawn_guard_no_prepend_leaves_path_untouched(monkeypatch):
-    """Default (no env_path_prepend) never mutates PATH — the guard is a no-op."""
+async def test_harness_env_none_without_prepend(monkeypatch):
+    """No mock dirs → no overlay at all, so the SDK spawns with a plain inherited env."""
     monkeypatch.setenv("PATH", "/parent/bin")
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
 
-    async with agent._harness_spawn_guard():
-        assert os.environ["PATH"] == "/parent/bin"
+    assert agent._harness_env() is None
+
+
+async def test_harness_env_never_mutates_process_env(monkeypatch):
+    """Building the overlay leaves os.environ untouched — the whole point of the seam."""
+    monkeypatch.setenv("PATH", "/parent/bin")
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent._env_path_prepend = ["/sandbox/mocks"]
+
+    agent._harness_env()
+
     assert os.environ["PATH"] == "/parent/bin"
 
 
-async def test_harness_spawn_guard_resolves_path_key_case_insensitively(monkeypatch):
-    """A non-uppercase PATH key (e.g. Windows 'Path') is reused, not duplicated."""
+async def test_harness_env_resolves_path_key_case_insensitively(monkeypatch):
+    """A non-uppercase PATH key (e.g. Windows 'Path') is reused, so the merge overrides it.
+
+    The SDK merges as ``{**os.environ, **env}``; keying the overlay 'PATH' against an
+    inherited 'Path' would add a sibling entry and leave the real PATH in force.
+    """
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent.os, "environ", {"Path": "/parent/bin"})
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks"]
 
-    async with agent._harness_spawn_guard():
-        assert antigravity_agent.os.environ == {"Path": f"/sandbox/mocks{os.pathsep}/parent/bin"}
-    assert antigravity_agent.os.environ == {"Path": "/parent/bin"}
+    assert agent._harness_env() == {"Path": f"/sandbox/mocks{os.pathsep}/parent/bin"}
 
 
-async def test_harness_spawn_guard_restores_absent_path(monkeypatch):
-    """When PATH was unset, the guard removes the key it added rather than leaving ''."""
+async def test_harness_env_handles_absent_path(monkeypatch):
+    """When PATH is unset, the overlay is just the mock dirs (no stray separator tail)."""
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent.os, "environ", {})
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks"]
 
-    async with agent._harness_spawn_guard():
-        assert antigravity_agent.os.environ["PATH"] == f"/sandbox/mocks{os.pathsep}"
-    assert "PATH" not in antigravity_agent.os.environ
+    assert agent._harness_env() == {"PATH": f"/sandbox/mocks{os.pathsep}"}
 
 
-async def test_harness_spawn_guard_restores_path_when_body_raises(monkeypatch):
-    """PATH is restored even when the guarded spawn raises (the failed-boot path).
+async def test_concurrent_starts_get_isolated_mock_dirs(monkeypatch, tmp_path):
+    """Two agents starting concurrently each see ONLY their own mock dirs.
 
-    In start() the guard wraps the SDK context-enter, which raises on harness-boot
-    failure — the restore must live in ``finally`` or a failed spawn leaks the mock
-    dirs onto the global PATH.
+    The defect this replaces: with a process-wide PATH mutation, agent B's harness
+    could spawn inside agent A's mutated-PATH window and resolve run_command against
+    A's mock CLIs for B's entire session. With the per-agent env seam the two configs
+    are independent, so overlapping starts cannot contaminate each other.
     """
     monkeypatch.setenv("PATH", "/parent/bin")
-    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
-    agent._env_path_prepend = ["/sandbox/mocks"]
-
-    with pytest.raises(RuntimeError, match="harness boot failed"):
-        async with agent._harness_spawn_guard():
-            assert os.environ["PATH"] == f"/sandbox/mocks{os.pathsep}/parent/bin"
-            raise RuntimeError("harness boot failed")
-    assert os.environ["PATH"] == "/parent/bin"
-
-
-async def test_harness_spawn_guard_serializes_concurrent_starts(monkeypatch):
-    """Two overlapping guards must NOT stack PATHs — the lock serializes the spawn window.
-
-    Without the lock, agent B entering while A holds the guard would observe A's mock
-    dirs on PATH (cross-task mock contamination — the exact defect this fixes).
-    """
-    monkeypatch.setenv("PATH", "/parent/bin")
-    a = AntigravityAgent(parse_agent_config(type="antigravity"))
-    a._env_path_prepend = ["/a/mocks"]
-    b = AntigravityAgent(parse_agent_config(type="antigravity"))
-    b._env_path_prepend = ["/b/mocks"]
-
-    b_entered = asyncio.Event()
-    b_saw_path: list[str] = []
-
-    async def run_b() -> None:
-        async with b._harness_spawn_guard():
-            b_saw_path.append(os.environ["PATH"])
-            b_entered.set()
-
-    async with a._harness_spawn_guard():
-        # A holds the guard. Launch B; it must block on the lock and NOT mutate PATH.
-        task = asyncio.create_task(run_b())
-        await asyncio.sleep(0.05)
-        assert not b_entered.is_set()
-        assert os.environ["PATH"] == f"/a/mocks{os.pathsep}/parent/bin"  # only A's dirs
-
-    await task
-    # B ran only after A released: it saw the restored parent PATH, not A's mocks.
-    assert b_saw_path == [f"/b/mocks{os.pathsep}/parent/bin"]
-    assert os.environ["PATH"] == "/parent/bin"
-
-
-async def test_harness_spawn_guard_no_prepend_waits_for_active_prepend(monkeypatch):
-    """A no-prepend spawn must wait out another task's mutated-PATH window.
-
-    Without taking the lock on the no-prepend path, agent B would spawn its harness
-    while A's mock dirs are live on the global PATH — B's run_command tool would
-    resolve to A's mock CLIs for B's entire session.
-    """
-    monkeypatch.setenv("PATH", "/parent/bin")
-    a = AntigravityAgent(parse_agent_config(type="antigravity"))
-    a._env_path_prepend = ["/a/mocks"]
-    b = AntigravityAgent(parse_agent_config(type="antigravity"))  # no mock dirs
-
-    b_entered = asyncio.Event()
-    b_saw_path: list[str] = []
-
-    async def run_b() -> None:
-        async with b._harness_spawn_guard():
-            b_saw_path.append(os.environ["PATH"])
-            b_entered.set()
-
-    async with a._harness_spawn_guard():
-        # A holds the guard with its mock dirs on PATH. B must block, not spawn.
-        task = asyncio.create_task(run_b())
-        await asyncio.sleep(0.05)
-        assert not b_entered.is_set()
-
-    await task
-    # B ran only after A restored PATH: it saw the parent PATH, not A's mocks.
-    assert b_saw_path == ["/parent/bin"]
-    assert os.environ["PATH"] == "/parent/bin"
-
-
-async def test_start_stores_env_path_prepend(monkeypatch, tmp_path):
-    """start(env_path_prepend=[...]) records the dirs on the instance for the spawn guard.
-
-    The SDK is stubbed via sys.modules so this needs no google-antigravity install:
-    the fake SdkAgent captures os.environ['PATH'] at context-enter (mirroring the real
-    Popen inheriting env), proving the prepend is live exactly at spawn time.
-    """
-    import sys
-    from types import ModuleType, SimpleNamespace
-
-    monkeypatch.setenv("PATH", "/parent/bin")
-    captured: dict[str, str] = {}
+    configs: list[Any] = []
+    a_entered = asyncio.Event()
 
     class _FakeSdkAgent:
         def __init__(self, cfg):
-            self._cfg = cfg
+            self._first = not configs
+            configs.append(cfg)
 
         async def __aenter__(self):
-            captured["path"] = os.environ["PATH"]  # env the Popen would inherit
+            if self._first:
+                # A parks inside its spawn so B's start() fully overlaps it.
+                a_entered.set()
+                await asyncio.sleep(0.05)
             return self
 
         async def __aexit__(self, *exc):
             return False
 
-    def _local_agent_config(**kwargs):
-        return SimpleNamespace(models=[], **kwargs)
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
 
-    ag = ModuleType("google.antigravity")
-    ag.Agent = _FakeSdkAgent
-    ag.LocalAgentConfig = _local_agent_config
-    ag.types = SimpleNamespace(
-        ThinkingLevel=lambda level: level,
-        GeminiAPIEndpoint=type("GeminiAPIEndpoint", (), {}),
-        GeminiModelOptions=lambda **kw: SimpleNamespace(**kw),
-    )
-    hooks = ModuleType("google.antigravity.hooks")
-    hooks.policy = SimpleNamespace(allow_all=lambda: object())
-    google_pkg = sys.modules.get("google") or ModuleType("google")
-    monkeypatch.setitem(sys.modules, "google", google_pkg)
-    monkeypatch.setitem(sys.modules, "google.antigravity", ag)
-    monkeypatch.setitem(sys.modules, "google.antigravity.hooks", hooks)
+    a = AntigravityAgent(parse_agent_config(type="antigravity"))
+    b = AntigravityAgent(parse_agent_config(type="antigravity"))
+
+    task_a = asyncio.create_task(a.start(str(tmp_path), env_path_prepend=["/a/mocks"]))
+    await a_entered.wait()
+    await b.start(str(tmp_path), env_path_prepend=["/b/mocks"])
+    await task_a
+
+    envs = [c.env for c in configs]
+    assert envs == [
+        {"PATH": f"/a/mocks{os.pathsep}/parent/bin"},
+        {"PATH": f"/b/mocks{os.pathsep}/parent/bin"},
+    ]
+    assert os.environ["PATH"] == "/parent/bin"  # process env untouched throughout
+
+
+async def test_start_passes_env_path_prepend_to_sdk_config(monkeypatch, tmp_path):
+    """start(env_path_prepend=[...]) reaches LocalAgentConfig.env, not the process env.
+
+    The SDK is stubbed via sys.modules so this needs no google-antigravity install.
+    """
+    monkeypatch.setenv("PATH", "/parent/bin")
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
 
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
 
     assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
-    # The harness spawn saw the mock dirs at the front of PATH...
-    assert captured["path"] == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
-    # ...and PATH was restored once the spawn completed.
-    assert os.environ["PATH"] == "/parent/bin"
+    assert configs[0].env == {"PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"}
+    assert os.environ["PATH"] == "/parent/bin"  # never mutated
+
+
+async def test_start_omits_env_when_no_mock_dirs(monkeypatch, tmp_path):
+    """Without mock dirs the SDK gets env=None, so the harness inherits os.environ verbatim."""
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    configs: list[Any] = []
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    await agent.start(str(tmp_path))
+
+    assert configs[0].env is None
+
+
+# --- allowed_tools / disallowed_tools / permission_mode -----------------------------
+#
+# These fields were ignored entirely before (policies were hardcoded to allow_all and
+# no CapabilitiesConfig was built), so two harnesses reading the same task file ran
+# different tasks. CapabilitiesConfig validates against the BuiltinTools enum, so the
+# Claude→Antigravity name mapping has to be exact and unmappables must be dropped.
+
+
+def _agent(**cfg) -> AntigravityAgent:
+    return AntigravityAgent(parse_agent_config(type="antigravity", **cfg))
+
+
+def _fake_types() -> SimpleNamespace:
+    return SimpleNamespace(CapabilitiesConfig=lambda **kw: SimpleNamespace(**kw))
+
+
+def test_claude_to_antigravity_tool_map_is_exact_inverse():
+    """The inverse map is derived, so a forward-map edit can never leave it stale."""
+    from coder_eval.agents.antigravity_agent import _CLAUDE_TO_ANTIGRAVITY_TOOL_MAP
+
+    assert len(_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP) == len(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP)
+    for antigravity_name, claude_name in _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.items():
+        assert _CLAUDE_TO_ANTIGRAVITY_TOOL_MAP[claude_name] == antigravity_name
+
+
+def test_allowed_tools_become_enabled_tools():
+    """The repo-default allowlist maps onto the matching Antigravity builtins."""
+    agent = _agent(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep"])
+
+    caps = agent._build_capabilities(_fake_types())
+
+    assert caps.enabled_tools == [
+        "run_command",
+        "view_file",
+        "create_file",
+        "edit_file",
+        "find_file",
+        "search_directory",
+        "finish",
+    ]
+
+
+def test_allowed_tools_always_keep_finish():
+    """`finish` is how a turn ends — an allowlist must never strip it."""
+    agent = _agent(allowed_tools=["Read"])
+
+    caps = agent._build_capabilities(_fake_types())
+
+    assert "finish" in caps.enabled_tools
+
+
+def test_unmappable_allowed_tools_are_dropped_not_raised():
+    """`Skill` has no Antigravity builtin (skills come from skills_paths) — drop it."""
+    agent = _agent(allowed_tools=["Skill", "Bash"])
+
+    caps = agent._build_capabilities(_fake_types())
+
+    assert "Skill" not in caps.enabled_tools
+    assert "run_command" in caps.enabled_tools
+
+
+def test_allowlist_that_maps_to_nothing_falls_back_to_defaults(caplog):
+    """An allowlist of only-unmappable names must not hand the model just `finish`.
+
+    Enabling nothing but the turn-ender scores 0 with no diagnosable cause, so the
+    harness default (all tools) plus a loud warning is the better failure mode.
+    """
+    agent = _agent(allowed_tools=["Skill", "TodoWrite"])
+
+    with caplog.at_level(logging.WARNING, logger="coder_eval.agents.antigravity_agent"):
+        caps = agent._build_capabilities(_fake_types())
+
+    assert caps is None
+    assert "maps to no usable Antigravity tool" in caplog.text
+
+
+def test_disallowed_tools_are_subtracted_from_an_allowlist():
+    """enabled_tools and disabled_tools are mutually exclusive in the SDK, so subtract."""
+    agent = _agent(allowed_tools=["Bash", "Read", "Write"], disallowed_tools=["Write"])
+
+    caps = agent._build_capabilities(_fake_types())
+
+    # One field only — passing both would fail the SDK's mutual-exclusion validator.
+    assert not hasattr(caps, "disabled_tools")
+    assert caps.enabled_tools == ["run_command", "view_file", "finish"]
+
+
+def test_disallowed_tools_alone_become_disabled_tools():
+    agent = _agent(disallowed_tools=["WebSearch"])
+
+    caps = agent._build_capabilities(_fake_types())
+
+    assert caps.disabled_tools == ["search_web"]
+
+
+def test_disallowed_tools_cannot_disable_a_structural_tool():
+    agent = _agent(disallowed_tools=["Finish"])
+
+    assert agent._build_capabilities(_fake_types()) is None
+
+
+def test_no_tool_fields_leaves_harness_defaults():
+    assert _agent()._build_capabilities(_fake_types()) is None
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
+async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path, mode: str):
+    """permission_mode is declared unhonored: every mode stays fully autonomous.
+
+    coder_eval's write boundary is the driver (docker container / ephemeral tempdir),
+    not the agent — same deliberate stance as Codex. A mode that silently switched the
+    policy list would make an A/B across harnesses incomparable.
+    """
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(permission_mode=mode).start(str(tmp_path))
+
+    assert [p.kind for p in configs[0].policies] == ["allow_all"]
+
+
+async def test_start_passes_capabilities_to_sdk_config(monkeypatch, tmp_path):
+    """End-to-end: the allowlist reaches LocalAgentConfig, not just the builder."""
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(allowed_tools=["Bash", "Read"]).start(str(tmp_path))
+
+    assert configs[0].capabilities.enabled_tools == ["run_command", "view_file", "finish"]
+
+
+async def test_start_omits_capabilities_when_unconstrained(monkeypatch, tmp_path):
+    """No allowlist → the kwarg is absent entirely, so the SDK default stands."""
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent().start(str(tmp_path))
+
+    assert not hasattr(configs[0], "capabilities")
+
+
+# --- max_turns visible-turn cap -----------------------------------------------------
+#
+# max_turns was accepted and never read on this backend, so a task capping turns ran
+# uncapped here while the same file capped on Claude Code. The cap counts VISIBLE
+# turns (tool calls — reports_stats.visible_turn_count's unit), enforced on the same
+# step-loop boundary as the cooperative stop.
+
+
+def _tool_steps(count: int) -> list:
+    """`count` complete tool calls, each an ACTIVE step followed by its DONE step."""
+    steps = []
+    for i in range(count):
+        call = _tc("run_command", f"t{i}", {"command_line": f"echo {i}"})
+        steps.append(_step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[call]))
+        done = _tc("run_command", f"t{i}", {"command_line": f"echo {i}", "exit_code": 0, "combined_output": str(i)})
+        steps.append(_step("TOOL_CALL", "DONE", target="TARGET_ENVIRONMENT", tool_calls=[done]))
+    return steps
+
+
+async def test_max_turns_caps_visible_turns():
+    """The stream offers 5 tool calls; max_turns=2 keeps 2 and never pulls the rest."""
+    agent = _agent_with_steps(_tool_steps(5))
+
+    record = await agent.communicate("go", max_turns=2)
+
+    assert len(record.commands) == 2
+    assert record.max_turns_exhausted is True
+
+
+async def test_max_turns_keeps_the_deciding_step_whole():
+    """The tool call that reaches the cap is completed, not cut mid-flight."""
+    agent = _agent_with_steps(_tool_steps(3))
+
+    record = await agent.communicate("go", max_turns=1)
+
+    assert len(record.commands) == 1
+    assert record.commands[0].result_status == "success"
+    assert record.commands[0].result_summary == "0"
+
+
+async def test_under_the_cap_completes_normally():
+    agent = _agent_with_steps(_tool_steps(2))
+
+    record = await agent.communicate("go", max_turns=5)
+
+    assert len(record.commands) == 2
+    assert record.max_turns_exhausted is False
+
+
+async def test_no_max_turns_is_uncapped():
+    """None must preserve the pre-existing behavior exactly."""
+    agent = _agent_with_steps(_tool_steps(4))
+
+    record = await agent.communicate("go")
+
+    assert len(record.commands) == 4
+    assert record.max_turns_exhausted is False
+
+
+async def test_cooperative_stop_outranks_the_cap():
+    """Both firing on the same step reports STOPPED_EARLY — the more specific reason."""
+    agent = _agent_with_steps(_tool_steps(5))
+
+    record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
+
+    assert record.max_turns_exhausted is False
+    assert len(record.commands) == 1

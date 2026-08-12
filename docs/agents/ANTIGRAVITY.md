@@ -176,10 +176,16 @@ as every other agent.
 3. **`kill_sync()` is best-effort.** The SDK's cancel/disconnect are async-only, so
    the watchdog's synchronous kill only flips agent state to `ERROR`; real teardown
    happens on the subsequent async `stop()`.
-4. **Process-global spawn lock.** The SDK spawns `localharness` via a subprocess with
-   no env-injection seam, so the agent transiently mutates `PATH` across the spawn
-   under a process-wide lock. This serializes harness startup across concurrent
-   tasks (it does not serialize the turns themselves).
+4. **`permission_mode` does not confine the harness.** Every mode runs
+   `policy.allow_all()`; coder_eval's write boundary is the sandbox driver, and a
+   headless eval has no human to approve anything. Declared `approximated` in the
+   agent's `config_support` — see [Harness Config Parity](HARNESS_PARITY.md).
+5. **`allowed_tools` entries with no Antigravity builtin are dropped.** `Skill` is the
+   expected case (skills are discovered through `skills_paths`, not a tool); the drop
+   is logged. An allowlist that maps to *nothing* usable falls back to the harness
+   default with a warning, rather than leaving the model only its turn-ender.
+6. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
+   so the cap counts resolved tool calls instead, enforced on the step loop.
 
 ## Running in Docker
 

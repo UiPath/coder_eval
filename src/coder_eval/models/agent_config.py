@@ -151,17 +151,20 @@ class BaseAgentConfig(BaseModel):
     system_prompt: str | None = Field(
         default=None,
         description=(
-            "Custom system prompt. Replaces the default system prompt. "
-            "Supports inline text or multi-line YAML strings. "
+            "Extra system-prompt text, APPENDED to the harness's own default agent prompt "
+            "(Claude Code --append-system-prompt, Codex developer_instructions, Antigravity "
+            "system_instructions section) so one task file means the same thing on every "
+            "harness. It does not replace the harness prompt — write task guardrails here, "
+            "not a whole agent persona. Supports inline text or multi-line YAML strings. "
             "Mutually exclusive with system_prompt_file."
         ),
     )
     system_prompt_file: str | None = Field(
         default=None,
         description=(
-            "Path to a file containing the system prompt (relative to task YAML). "
-            "The file contents are loaded at task resolution time and set as system_prompt. "
-            "Mutually exclusive with system_prompt."
+            "Path to a file containing the system-prompt text (relative to task YAML). "
+            "The file contents are loaded at task resolution time and set as system_prompt, "
+            "with the same append semantics. Mutually exclusive with system_prompt."
         ),
     )
 
