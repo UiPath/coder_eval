@@ -39,7 +39,10 @@ not run anything yet.
 1. **It is model-invokable.** Its description actually enters the activation decision. A
    skill with `disable-model-invocation: true` — here `init`, `ci`, and `optimize-skill`
    itself — can never be optimized this way, because its description never competes for
-   anything. `optimize-skill` hard-stops on exactly that.
+   anything — so `optimize-skill` closes the **activation** track for such a skill and
+   routes it to the execution track instead, where the body is still measurable. (To
+   exercise one in a sandbox, the task's `initial_prompt` must invoke it by slash command;
+   asking in prose does not reach it.)
 2. **It has a real boundary dispute with a sibling.** `lint-tasks` reviews existing tasks;
    `task` authors new ones. *"Are my evals any good?"* and *"add a task for X"* genuinely
    misroute between them.

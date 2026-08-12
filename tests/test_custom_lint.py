@@ -1678,9 +1678,15 @@ class TestPluginArtifacts:
             # tracks onto one instrument that answers the wrong question.
             ("wrong instrument", "the execution track must refuse to reuse an activation suite"),
             # Inverse of the activation rule, and easy to "correct" into a bug: the body
-            # track NAMES the skill in the prompt to hold activation constant, so what
+            # track invokes the skill from the prompt to hold activation constant, so what
             # varies is the body alone.
-            ("Name the skill in the prompt", "the execution track holds activation constant by naming the skill"),
+            ("Invoke the skill from the prompt", "the execution track holds activation constant by invoking the skill"),
+            # And it must be the SLASH form. Verified live: a `disable-model-invocation`
+            # skill is not offered to the model at all, so asking in prose returns "no such
+            # skill available" and the row measures nothing — while `/plugin:skill` in the
+            # prompt loads it, emits a real Skill tool call, and is detected by
+            # skill_triggered. Prose-instead-of-slash is the intuitive edit and it is silent.
+            ("Use the slash form", "prose cannot reach a disable-model-invocation skill; only the slash form loads it"),
             # One variable per round. A body edit shipped alongside a description edit is
             # unattributable, and the description change also moves activation.
             ("Never run both tracks in one round", "tracks must not be combined in a single measurement"),

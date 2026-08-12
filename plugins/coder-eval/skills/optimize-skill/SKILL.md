@@ -41,6 +41,15 @@ If it is missing, follow `${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md`: offer t
 also covers whether this project pins a version and what to do when the installed one
 disagrees.
 
+**A version string is not a capability check, and this loop needs a capability.** Once you
+have a suite (step 4), run `coder-eval plan <suite>` and require it to exit 0 *before*
+spending. Two binaries can report the same version and differ in whether `--split` and
+`dataset.split_field` exist at all — a repository whose working tree is ahead of its last
+release has exactly that shape, and then the pinned-version rule says "carry on" while every
+run fails at load. If `plan` rejects a field this skill relies on, prefer a project-local
+binary (a virtualenv under the eval root) over whatever is on `PATH`, and say which one you
+settled on.
+
 ## Step 2 — Locate the skill, and check it can be optimized at all
 
 `$ARGUMENTS` may be a path to a `SKILL.md`, a path to the skill's directory, a skill name,
@@ -80,7 +89,15 @@ Ask which failure the user actually has, and say what each track can and cannot 
 | Row cost | one turn — seconds | a whole task — minutes |
 | Gate | non-overlapping replicate F1 ranges | paired comparison over replicates |
 
-Route on the evidence, not on preference:
+**First, ask whether this needs an A/B at all.** Some complaints are statically detectable,
+and a lint rule or a unit test answers them for zero agent runs and keeps answering forever.
+"The workflow it emits is missing a step", "it references a flag that does not exist", "it
+points at a path that moved" — those are assertions about the skill's *output shape*, not
+about model behaviour, and this loop is the expensive way to learn them. Check whether the
+repository already has a rule covering it before proposing to spend. Reach for the A/B when
+the question is genuinely behavioural: *will the model do the right thing more often?*
+
+Then route on the evidence, not on preference:
 
 - *"It never fires"* / *"it fires on the wrong things"* → **activation**.
 - *"It fires, then does the wrong thing"* / *"it ignores half its own instructions"* →
@@ -90,6 +107,12 @@ Route on the evidence, not on preference:
   mixture of two effects rather than one. Fix reach, then fix behaviour.
 - The user names a specific bad output → **execution**, and use that output as the first
   hypothesis.
+- **Step 2 already closed the activation track** (`disable-model-invocation: true`, or no
+  `description`) → execution, and do not re-offer activation here.
+- **Invoked with a bare skill name and no symptom, and no user to ask** → say which track you
+  picked and why, rather than proceeding silently. Default to activation when both are open:
+  it is an order of magnitude cheaper, and its result tells you whether execution
+  measurements would even be well-formed.
 
 **Never run both tracks in one round.** Two edits, one measurement, no attribution — and a
 body change can move activation (the listing sees the whole file's frontmatter, and a body
@@ -112,8 +135,14 @@ does not restate its numbers. But state the part that belongs here: **a split ha
 side.** A suite sized for a single one-shot check is undersized for an optimization loop,
 because you are now measuring a *difference* between arms rather than one level, and the
 tune half is all you get to develop against. Roughly double what a one-shot check would
-want. If the suite is too small to gate on, say so and hand back rather than producing a
-confident number from four rows.
+want.
+
+Apply that as a number, not a feeling: compute the *tune half's* count for the polarity you
+are gating on. Below `check-skill`'s un-doubled minimum, **hand back rather than gate** — a
+metric over three or four rows moves in 25–33 point jumps and cannot separate a real gain
+from noise. Between the un-doubled minimum and the doubled target, you may proceed, but say
+in the report that the suite is under-sized and that a non-result may simply be a suite too
+coarse to see the effect.
 
 ### Execution track — an outcome suite
 
@@ -122,18 +151,43 @@ scores engagement, and a skill can engage perfectly while giving terrible instru
 the execution track needs is an ordinary coder-eval suite — one task per realistic scenario,
 scored on the artifacts and commands the agent actually produced.
 
-Glob the eval tree for tasks that exercise this skill's job. If none exist, `/coder-eval:task`
-authors them; do not write them as a side effect of optimizing, for the same reason the
-activation track hands row design to `/coder-eval:check-skill` — a suite written by the thing
-it will judge is fitted to it.
+Glob the eval tree for tasks that exercise this skill's job.
+
+**No suite → stop and point at `/coder-eval:task`.** Do not author one here, for the same
+reason the activation track hands row design to `/coder-eval:check-skill` — a suite written
+by the thing it will judge is fitted to it. Hand back with two requirements attached, or the
+suite comes back unusable and the user pays for a second round trip: the rows must **carry
+`tune`/`holdout` split labels**, and each must **invoke the skill by slash command** (below).
+Neither is `/coder-eval:task`'s default.
 
 Three requirements specific to this track:
 
-- **Name the skill in the prompt.** This is the exact inverse of the activation rule, and it
-  matters: there, naming the skill tests obedience instead of activation and is forbidden.
-  Here you are holding activation *constant* so that what varies is the body alone. A prompt
-  that only sometimes engages the skill yields a mixture of two effects and a gate that
-  cannot attribute either. Verify engagement actually happened before scoring a row.
+- **Invoke the skill from the prompt.** This is the exact inverse of the activation rule,
+  and it matters: there, naming the skill tests obedience instead of activation and is
+  forbidden. Here you are holding activation *constant* so that what varies is the body
+  alone. A prompt that only sometimes engages the skill yields a mixture of two effects and
+  a gate that cannot attribute either.
+
+  **Use the slash form, not a description of it.** Open `initial_prompt` with
+  `/<plugin>:<skill>` (or `/<skill>` for an unscoped one) and put the scenario underneath:
+
+  ```yaml
+  initial_prompt: |
+    /coder-eval:ci
+
+    This repo has tasks under evals/ and no .github/ directory yet. Wire up CI.
+  ```
+
+  This is the **only** mechanism that works for a skill with
+  `disable-model-invocation: true`, and asking in prose does not substitute: such a skill is
+  not offered to the model at all, so *"use the ci skill"* gets you "no such skill is
+  available" and a row that measures nothing. The slash form loads it, emits a real `Skill`
+  tool call, and is detected by `skill_triggered` — so you can assert engagement per row.
+
+- **Assert engagement, do not assume it.** Stack a `skill_triggered` criterion naming the
+  skill on every row. It costs nothing extra — the trajectory is already recorded — and it
+  is what separates "the body gave bad instructions" from "the skill never ran", which score
+  identically low and look nothing alike once you know which happened.
 - **Score outcomes, not prose.** Prefer criteria that check what exists on disk and what ran
   — `file_check`, `json_check`, `run_command`, `cli_called`, `command_executed`. Reach for
   `llm_judge` or `agent_judge` only for genuinely unmeasurable qualities, and expect them to
@@ -250,11 +304,28 @@ directory**, not of one skill:
 
 ```
 .optimize-skill/<skill>/<round>-<slug>/        <- this path is what a variant mounts
+    .claude-plugin/plugin.json                 <- copy it if the source had one (see below)
     skills/
         <skill-name>/SKILL.md                  <- the candidate: ONE part edited
         <sibling-a>/SKILL.md                   <- every sibling, copied unchanged
         <sibling-b>/SKILL.md
+    reference/                                 <- and everything else the root held
+    ...
 ```
+
+**Copy the whole source root, not just `skills/`.** The tree above names the parts that
+matter; it is not an inventory. Skills routinely read sibling files at runtime — a bundled
+`reference/`, a rubric, templates — via `${CLAUDE_PLUGIN_ROOT}`, and a snapshot that omits
+them mounts skills whose own references are missing. On the activation track that damage is
+invisible (nothing opens those files before the trigger decision) and it poisons any later
+execution round reusing the same snapshots.
+
+**Copy `.claude-plugin/plugin.json` too, if the source has one — this one is a trap.** The
+namespace defaults to the *directory name* when no manifest is present, so manifest-less
+arms are namespaced after their own slug: `1-incumbent:<skill>` competing against
+`1-a-widen-vocabulary:<skill>`. The arms would then differ in the name shown in the listing
+as well as in the text under test, on the very track where activation is a competition
+between listings. One variable per arm means the manifest travels too.
 
 Exactly one thing varies per arm, and which thing depends on the track: the frontmatter
 `description` on the activation track, the **body below the frontmatter** on the execution
@@ -281,6 +352,16 @@ things break if you snapshot only the target skill, and both fail silently at fu
 skill's frontmatter `description`. Do not edit the body in the same round: the body does not
 drive activation, so the suite could not measure the change, and it would confound the one
 it can.
+
+**Budget the length before you write, because every natural fix here makes it longer.**
+Widening vocabulary, naming the symptom, spelling out exclusions — each adds characters, and
+descriptions are subject to two ceilings: a per-skill truncation, and a whole-listing budget
+shared with **every** skill installed on the machine, which drops descriptions
+least-invoked-first when it overflows. A candidate that wins the A/B and then cannot be
+loaded has won nothing. If the repository caps the total (this plugin does, in its own lint
+suite), measure the current total and the headroom *first*, and treat it as a constraint on
+the candidate set rather than something to discover afterwards. Where a candidate needs room,
+buy it by cutting what the body already covers — never a trigger clause.
 
 **On the execution track**, each candidate differs only in the body, and each embodies a
 single named hypothesis from step 7 — "state the ordering constraint explicitly", "add a
@@ -325,7 +406,7 @@ Five facts that decide whether this measures anything:
   what makes one-variant-per-candidate work — an arm never mounts two copies of the skill.
 - **Because it replaces, the task's own block is gone in every arm.** Whatever that block
   exposed — typically the user's whole skills directory via `$SKILL_SOURCE_PATH` — is not
-  mounted. That is exactly why step 7's snapshot has to carry the siblings: the variant
+  mounted. That is exactly why step 8's snapshot has to carry the siblings: the variant
   path is the *only* skill source the arm gets.
 - Plugin paths resolve against the **process working directory**, not the task file's
   directory. A relative path silently points elsewhere the moment the user runs from a
@@ -345,8 +426,21 @@ downstream means anything.
 ## Step 10 — Three stages, and the gate
 
 State the projected run count before each stage and ask. With N candidates, S survivors,
-M<sub>tune</sub> tune rows and M<sub>holdout</sub> holdout rows: Stage A is
-`(N+1) × M_tune` runs, Stage B is `3 × (S+1) × M_tune`, Stage C is `6 × M_holdout`.
+M<sub>tune</sub> tune rows and M<sub>holdout</sub> holdout rows:
+
+| Spend | Runs |
+| --- | --- |
+| Step 6 baseline | `M_tune` |
+| Stage A — triage | `(N+1) × M_tune` |
+| Stage B — gate | `3 × (S+1) × M_tune` |
+| Stage C — confirm | `6 × M_holdout` |
+
+**The baseline is a real line item, and it is not redundant with Stage A's incumbent arm.**
+It looks like the same measurement on the same rows, and that is precisely its value: the
+baseline runs through the *task's own* skill source, while Stage A's incumbent runs through a
+*snapshot you built*. Agreement between them is the wiring check — it is what proves the
+snapshot machinery did not change what is being measured. Quote both numbers when you
+compare them.
 
 **Every stage runs the suite through the experiment.** The suite is the positional
 argument; the experiment carrying the arms is passed with `-e`. Passing the experiment file
@@ -371,6 +465,12 @@ Rank each variant from its `suite.json`, then discard anything at or below the i
 Check `completion_rate` on every arm before ranking anything. An arm that lost rows computed
 its score over a different denominator and is not comparable — that is a re-run, not a
 ranking.
+
+It is **not** a top-level `suite.json` key: it sits in each entry of `criterion_aggregates`,
+alongside that entry's `rows_total` and `rows_excluded`. A suite stacking several criteria
+therefore has one per criterion. Read the one belonging to the criterion you are gating on,
+and if two disagree, say so rather than picking — divergent denominators across criteria on
+the same rows means something dropped mid-run.
 
 This decides nothing — it only narrows. Replicate pooling is irrelevant here because
 nothing is being gated on.
