@@ -1,0 +1,33 @@
+task_id: run-limits-max-turns-cap
+description: >-
+  Parity fixture for run_limits.max_turns. The prompt asks for far more
+  sequential tool calls than the cap allows, so every harness must stop at the
+  cap rather than running the prompt to completion. Run it with --type
+  claude-code / codex / antigravity and compare: the cap must produce a CLEAN
+  stop (max_turns_exhausted, criteria still checked), never a crash.
+
+initial_prompt: |
+  Create 12 files in the current directory named step-01.txt through step-12.txt.
+  Each file must contain its own name and nothing else.
+
+  Create them ONE AT A TIME. Run a separate shell command for each file. Do not
+  use a loop, do not combine several files into one command, and do not batch
+  multiple tool calls together. Work strictly in order, starting at step-01.txt.
+
+run_limits:
+  # Far below the 12 the prompt asks for, so the cap always decides the ending.
+  max_turns: 4
+  # Generous: this fixture must fail on the cap, never on the clock.
+  turn_timeout: 300
+  task_timeout: 600
+
+agent:
+  permission_mode: bypassPermissions
+
+success_criteria:
+  # The early files prove the agent really was working when the cap cut it off,
+  # which distinguishes "capped" from "never started".
+  - type: file_exists
+    path: "step-01.txt"
+    description: "First file was created before the cap fired"
+    weight: 1.0
