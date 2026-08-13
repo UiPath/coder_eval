@@ -187,11 +187,11 @@ as every other agent.
    [Run-Limit Parity](HARNESS_PARITY.md).
 7. **Shell commands over ~10s are moved to the background.** The localharness has a
    10-second maximum synchronous wait; past it the command becomes a background task
-   and the model gets a task id, not a result. The turn then usually ends before
-   `turn_timeout` can fire, and the tool call is force-closed as
-   `result_status: unknown`. Tasks whose real work is a long `npm install`, build, or
-   CLI call do not run the same way here as on the other two harnesses. Measured in
-   [Run-Limit Parity](HARNESS_PARITY.md).
+   and the model gets a task id, not a result. The turn polls for that result instead
+   of finalizing on an idle step stream, so slow work does complete — but the wait is
+   bounded by 80% of `turn_timeout`, and a job that outlives it is force-closed as
+   `result_status: unknown` and graded as an ordinary low score rather than a timeout.
+   Measured in [Run-Limit Parity](HARNESS_PARITY.md).
 
 ## Running in Docker
 

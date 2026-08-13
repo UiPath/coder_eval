@@ -12,7 +12,7 @@ This page is the contract for what each run limit means per harness.
 | Limit | claude-code | codex | antigravity |
 |---|---|---|---|
 | `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, but see the 10s note below |
+| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` |
 
@@ -91,32 +91,39 @@ what was interrupted.
 |---|---|---|
 | claude-code | turn timeout, partial turn captured, `crashed: true` | 45.6s |
 | codex | turn timeout, partial turn captured, `crashed: true` | 46.4s |
-| antigravity | **no timeout** — turn ended on its own | 19.3s |
+| antigravity | poll budget exhausted, tool force-closed, turn graded, `crashed: false` | 40.0s |
 
 Claude Code and Codex behave identically: the watchdog fires at the deadline, the
-partial turn is preserved, and the run ends as an error. Antigravity never reaches
-the deadline, for the reason below.
+partial turn is preserved, and the run ends as an error. Antigravity stops earlier
+and more gently, for the reason below.
 
 ## Antigravity backgrounds anything over 10 seconds
 
 The Antigravity localharness has a **10-second maximum synchronous wait** for shell
 commands. Past it, the harness moves the command to a background task and hands the
 model a task id instead of a result. Measured: `sleep 5` resolves normally in 10.4s
-wall-clock; `sleep 240` returns immediately as a background task, the model ends its
-turn waiting for a notification that never arrives inside the turn, and the tool call
-is force-closed with `result_status: unknown`.
+wall-clock; anything longer comes back immediately as a background task. That is
+harness behavior, not something coder_eval configures.
 
-Consequences worth knowing before reading an Antigravity score:
+What coder_eval does about it: the turn polls for the backgrounded result rather
+than finalizing the moment the step stream goes idle. Measured on a command that
+finishes inside the budget (`sleep 60` writing a file, `turn_timeout: 300`), same
+task and model on either side:
 
-- `turn_timeout` is not a meaningful limit for slow commands there. The turn ends
-  early rather than timing out, so the run looks like a plain failure instead of
-  a timeout.
-- Any task whose real work is a long command (`npm install`, a build, a CLI call
-  that takes minutes) is not running the same task on Antigravity that it runs on
-  the other two.
+| | outcome | duration |
+|---|---|---|
+| without the poll loop | FAILURE — file never written, tool left unresolved | 19.5s |
+| with it | SUCCESS — file written, exit code reported back | 75.0s |
 
-This is harness behavior, not something coder_eval configures, and it is documented
-here rather than worked around.
+The wait is bounded by **80% of `turn_timeout`** (or 120 five-second cycles when the
+task sets no timeout), not by `turn_timeout` itself. A job that outlives that bound
+is force-closed as unresolved and the turn is graded on everything else, where
+Claude Code and Codex instead raise a turn timeout and mark the turn crashed.
+
+So the residual divergence is the terminal signal, not whether slow work completes:
+a long `npm install` or build now runs to completion here the way it does on the
+other two, but a command that never finishes reads as an ordinary low score rather
+than a timeout.
 
 ## Timeouts are otherwise unchanged by this contract
 
