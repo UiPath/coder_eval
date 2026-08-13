@@ -1610,13 +1610,18 @@ class TestPluginArtifacts:
         # `expected_skill: ""` would assert the skill must not engage — inverting the premise.
         import json
 
+        from coder_eval.orchestration.task_loader import row_split_label
+
         rows = [
             json.loads(line)
             for line in (self.TEMPLATES / "outcome-rows.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
         assert rows, "the outcome template ships no rows"
-        assert all(r.get("split") for r in rows), (
+        # `row_split_label`, not `r.get("split")`: truthiness would report a legitimate
+        # `"split": 0` as unlabelled, which is a SECOND definition of "labelled" competing
+        # with the runtime's. CE035 exists precisely to have one.
+        assert all(row_split_label(r, "split") is not None for r in rows), (
             "every template row must carry a `split` — a PARTLY labelled dataset is the one bad "
             "state: --split keeps the matching rows and drops the unlabelled ones, shrinking the "
             "suite the metrics are computed over"
@@ -1826,12 +1831,17 @@ class TestPluginArtifacts:
         # to hold — an edit that moved one row could break it silently.
         import json
 
+        from coder_eval.orchestration.task_loader import row_split_label
+
         rows = [
             json.loads(line)
             for line in (self.TEMPLATES / "activation-rows.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        assert all(r.get("split") for r in rows), (
+        # `row_split_label`, not `r.get("split")`: truthiness would report a legitimate
+        # `"split": 0` as unlabelled, which is a SECOND definition of "labelled" competing
+        # with the runtime's. CE035 exists precisely to have one.
+        assert all(row_split_label(r, "split") is not None for r in rows), (
             "every template row must carry a `split` — a PARTLY labelled dataset is the one "
             "bad state: --split keeps the matching rows and drops the unlabelled ones, "
             "shrinking the suite the metrics are computed over"
@@ -3994,3 +4004,132 @@ class TestCE036LiveVerdictContract:
         )
         violations = permuted_violations(checker, case)
         assert any("NON-MONOTONIC" in v for v in violations), violations
+
+
+@pytest.mark.lint
+class TestCE035SplitLabelsAllOrNothing:
+    """CE035 — a dataset's split field must be on every row or on none, never on some.
+
+    `optimize-skill` calls a partly-labelled dataset "the dangerous state, because it does
+    not look like one", and it is right: ``--split`` keeps the rows whose label matches and
+    **silently drops the unlabelled ones**, so the run succeeds, the report renders, and
+    every metric is computed over a smaller suite than the file suggests. Nothing in the
+    output says how many rows went missing.
+
+    That is mechanically detectable, so per CLAUDE.md's standing instruction it becomes a
+    rule rather than a paragraph. Wired as a dedicated ``@pytest.mark.lint`` class rather
+    than a ``BaseRule`` because it reasons over YAML + JSONL, not over one ``.py`` AST —
+    the same shape as CE034 above.
+
+    Both legal states pass: fully labelled (``--split`` selects) and fully unlabelled
+    (``--split`` does not apply to the task at all, via ``expand_dataset``'s ``if labelled:``
+    branch). Only the mixture is a finding.
+    """
+
+    @staticmethod
+    def _split_labels(task, task_file_dir: Path) -> list[str | None]:
+        """Each row's split label, using the runtime's own definition of "labelled"."""
+        from coder_eval.orchestration.task_loader import _load_dataset_rows, row_split_label
+
+        rows = _load_dataset_rows(task.dataset, task_file_dir)
+        # The CONFIGURED field name, never the literal "split" — a dataset may name it
+        # anything, and keying on the default would silently pass every such suite.
+        return [row_split_label(row, task.dataset.split_field) for row in rows]
+
+    @classmethod
+    def _offenders(cls, task, task_file_dir: Path) -> str | None:
+        labels = cls._split_labels(task, task_file_dir)
+        labelled = [x for x in labels if x is not None]
+        if labelled and len(labelled) != len(labels):
+            return f"{len(labelled)} of {len(labels)} rows carry a split label"
+        return None
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_tasks_are_fully_labelled_or_not_at_all(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        if task.dataset is None:
+            pytest.skip("no dataset: block — the rule says nothing about it")
+
+        offender = self._offenders(task, path.parent)
+        assert offender is None, (
+            f"{path}: {offender}. A PARTLY labelled dataset is the one bad state — "
+            f"`--split` keeps the matching rows and silently DROPS the unlabelled ones, so "
+            f"every metric is computed over a smaller suite than the file suggests, with "
+            f"nothing in the run reporting it. Label the remaining rows (do not exempt)."
+        )
+
+    def _task_from_rows(self, tmp_path: Path, rows: list[dict], split_field: str = "split"):
+        """A minimal dataset-backed task over inline rows."""
+        from coder_eval.models import Dataset, FileExistsCriterion, TaskDefinition
+
+        return TaskDefinition(
+            task_id="t",
+            description="split-label fixture",
+            initial_prompt="${row.id}",
+            success_criteria=[FileExistsCriterion(description="d", path="out.txt")],
+            dataset=Dataset(rows=rows, split_field=split_field),
+        )
+
+    def test_detects_a_partly_labelled_dataset(self, tmp_path: Path):
+        task = self._task_from_rows(
+            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}, {"id": "c"}]
+        )
+        assert self._offenders(task, tmp_path) == "2 of 3 rows carry a split label"
+
+    def test_fully_labelled_dataset_is_not_flagged(self, tmp_path: Path):
+        task = self._task_from_rows(tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}])
+        assert self._offenders(task, tmp_path) is None
+
+    def test_fully_unlabelled_dataset_is_not_flagged(self, tmp_path: Path):
+        # Legal and safe: `--split` then does not apply to this task at all.
+        task = self._task_from_rows(tmp_path, [{"id": "a"}, {"id": "b"}])
+        assert self._offenders(task, tmp_path) is None
+
+    def test_zero_counts_as_a_label(self, tmp_path: Path):
+        # A falsy 0 is a real label, not a missing value — the split filter compares via
+        # str(), so `--split 0` selects it. Treating it as unlabelled would make a fully
+        # labelled dataset read as partly labelled.
+        task = self._task_from_rows(tmp_path, [{"id": "a", "split": 0}, {"id": "b", "split": 1}])
+        assert self._offenders(task, tmp_path) is None
+
+    def test_explicit_null_and_empty_string_count_as_unlabelled(self, tmp_path: Path):
+        # Pins the (None, "") convention. A half-labelled JSONL carries explicit nulls, and
+        # an empty string is the same "no value here" state.
+        task = self._task_from_rows(
+            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": None}, {"id": "c", "split": ""}]
+        )
+        assert self._offenders(task, tmp_path) == "1 of 3 rows carry a split label"
+
+    def test_rule_keys_on_the_configured_split_field(self, tmp_path: Path):
+        # Not the literal "split". A dataset naming its field anything else would otherwise
+        # read as fully unlabelled and pass no matter how it was labelled.
+        task = self._task_from_rows(tmp_path, [{"id": "a", "fold": "train"}, {"id": "b"}], split_field="fold")
+        assert self._offenders(task, tmp_path) == "1 of 2 rows carry a split label"
+
+    def test_expand_dataset_keeps_exactly_the_rows_the_convention_names(self, tmp_path: Path):
+        # Asserted against LITERAL expected sets, not against `row_split_label` — the helper
+        # is what `expand_dataset` now calls, so deriving the expectation from it would
+        # compare the code to itself and pass however wrong both were.
+        #
+        # These literals encode the convention the extraction had to preserve: `0` is a
+        # real label reached by `--split 0` (compared via str()), while explicit `null` and
+        # `""` are unlabelled and are reachable by no split at all.
+        from coder_eval.orchestration.task_loader import expand_dataset
+
+        rows = [
+            {"id": "a", "split": "train"},
+            {"id": "b", "split": "test"},
+            {"id": "c", "split": 0},
+            {"id": "d", "split": None},
+            {"id": "e", "split": ""},
+        ]
+        task = self._task_from_rows(tmp_path, rows)
+        for split, expected in (("train", {"a"}), ("test", {"b"}), ("0", {"c"})):
+            kept = {t.task_id.split("/")[-1] for t in expand_dataset(task, tmp_path, split=split)}
+            assert kept == expected, f"split={split!r}: expand_dataset kept {kept}, expected {expected}"
