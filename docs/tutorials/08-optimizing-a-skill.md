@@ -1,8 +1,8 @@
 ---
 description: >-
   Measure whether a Claude Code skill's description can be improved — build an
-  activation suite, split it into tune and holdout rows, A/B candidate rewrites
-  as experiment variants, and promote only what survives rows it was never tuned
+  activation suite, split it into train and test rows, A/B candidate rewrites
+  as experiment variants, and promote only what survives rows it was never trained
   on.
 ---
 
@@ -27,12 +27,12 @@ it actually produced — including the part where the first attempt measured not
     completely blind to the quality of the work that follows. If your skill fires reliably
     and then does the wrong thing, that is the track you want.
 
-**What you will do:** build an activation suite for `lint-tasks`, split it into tune and
-holdout rows, baseline it, read the confusion matrix, and decide whether to spend anything.
+**What you will do:** build an activation suite for `lint-tasks`, split it into train and
+test rows, baseline it, read the confusion matrix, and decide whether to spend anything.
 For `lint-tasks` the answer turns out to be no — about 20 agent runs settle it. The suite
 then points at a sibling that *does* have headroom, `analyze`, and the full three-stage A/B
 runs against that: roughly 350 further runs, ending in a promotion that survives the
-holdout.
+test.
 
 All of it on Sonnet. Never Opus for a suite this size.
 
@@ -71,7 +71,7 @@ Do not hand-author it. Run the sibling skill:
 That produces a task YAML plus a JSONL row file. The suite used here has **21 rows**,
 counted by `expected_skill` — the field that actually decides a row's polarity:
 
-| Kind | `expected_skill` | Total | tune | holdout |
+| Kind | `expected_skill` | Total | train | test |
 | --- | --- | --- | --- | --- |
 | Positive | `lint-tasks` | 8 | 5 | 3 |
 | Distractor | `""` | 9 | 6 | 3 |
@@ -103,14 +103,14 @@ dataset:
 ```
 
 ```jsonl
-{"id": "pos-1", "expected_skill": "lint-tasks", "split": "tune",    "prompt": "..."}
-{"id": "pos-5", "expected_skill": "lint-tasks", "split": "holdout", "prompt": "Are my evals any good?"}
+{"id": "pos-1", "expected_skill": "lint-tasks", "split": "train",    "prompt": "..."}
+{"id": "pos-5", "expected_skill": "lint-tasks", "split": "test", "prompt": "Are my evals any good?"}
 ```
 
-Then select one at run time with `--split tune` or `--split holdout`. The filter runs
-**before** any sampling, so `--split tune --sample 8` is always drawn from tune rows alone.
+Then select one at run time with `--split train` or `--split test`. The filter runs
+**before** any sampling, so `--split train --sample 8` is always drawn from train rows alone.
 
-Keep both polarities on both sides. A holdout of only positives measures recall and calls it
+Keep both polarities on both sides. A test of only positives measures recall and calls it
 a result.
 
 ## Step 3 — Make the skill reachable, and check that it worked
@@ -142,7 +142,7 @@ export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"   # the plugin root
 
     It pointed one level too deep, at the bare skills directory. Nothing loaded, no `Skill`
     tool was ever offered, and every positive row failed. On an earlier, smaller draft of
-    this suite — 10 tune rows rather than the 14 below — that produced:
+    this suite — 10 train rows rather than the 14 below — that produced:
 
     ```
     lint-tasks   recall.yes=0.000 precision.yes=0.000 f1.yes=0.000
@@ -202,11 +202,11 @@ run_limits:
 
 That buys signal, not just cost.
 
-## Step 5 — Baseline on the tune split
+## Step 5 — Baseline on the train split
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
-  --split tune -D run_limits.stop_early=false
+  --split train -D run_limits.stop_early=false
 ```
 
 `stop_early: false` is insurance: if a suite arms early stop, a pass-stop can end a run
@@ -217,7 +217,7 @@ nothing.
 **Check the resolved row count, not just the exit code.** A mistyped split (`--split holdou`)
 is reported as a skipped task and the run still **exits 0** — a green run over zero rows.
 
-Result, 14 tune rows:
+Result, 14 train rows:
 
 | Skill | recall.yes | precision.yes | f1.yes |
 | --- | --- | --- | --- |
@@ -266,7 +266,7 @@ repository"* and *"Get evaluations going in this project from scratch"*, the `ta
 fired — apparently annexing setup work — dropping its precision to 0.667 and 0.500. It
 reproduced on **both splits**, which is normally the signal that a finding is real.
 
-Running the same tune split three more times settled it. The row fires **two times in
+Running the same train split three more times settled it. The row fires **two times in
 three**, on byte-identical prompts (`expected_skill` is a dataset label the criterion reads
 and the agent never sees, so nothing about the rows changed):
 
@@ -336,14 +336,14 @@ precision.
 One incumbent invocation dropped a row and was excluded from the gate rather than averaged
 in. A gate computed over a shifting denominator is not a gate.
 
-## Step 7 — Confirm on the holdout
+## Step 7 — Confirm on the test
 
-Even with nothing to promote, the holdout is what turns "the trim was safe" from a claim
+Even with nothing to promote, the test split is what turns "the trim was safe" from a claim
 about the rows you looked at into a claim about rows you did not.
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
-  --split holdout -D run_limits.stop_early=false
+  --split test -D run_limits.stop_early=false
 ```
 
 | Skill | recall.yes | precision.yes | f1.yes |
@@ -357,9 +357,9 @@ two splits, three sittings — it never missed a positive and never took a distr
 about as much as a suite this size can say, and it is enough to conclude the trim did no
 harm.
 
-### Stage C, and a holdout that could not answer the question
+### Stage C, and a test split that could not answer the question
 
-The winner went to holdout as a **two-variant** experiment at `--repeats 3`, which is the one
+The winner went to test as a **two-variant** experiment at `--repeats 3`, which is the one
 place `--repeats` is correct: `paired_comparison` fires only for exactly two variants and
 averages replicates per row before pairing.
 
@@ -369,16 +369,16 @@ Both arms scored `analyze` F1 **1.000**, and the paired block was a flat tie:
 **Paired mean diff (incumbent - a-regression)**: +0.000 [95% CI +0.000, +0.000], p = 1.000
 ```
 
-That is not a confirmation. It is an **uninformative holdout**: its `analyze` rows happened
+That is not a confirmation. It is an **uninformative test**: its `analyze` rows happened
 to be ones the incumbent already caught, because every regression-phrased row had been put
-in the tune half. A holdout can only confirm a fix for a failure mode it actually contains.
+in the train half. A test can only confirm a fix for a failure mode it actually contains.
 
-The remedy is the one `optimize-skill` prescribes — author **fresh holdout rows** that
+The remedy is the one `optimize-skill` prescribes — author **fresh test rows** that
 exercise the failure mode, at promotion time, when you know what needs confirming:
 
 ```jsonl
-{"id": "an-6", "expected_skill": "analyze", "split": "holdout", "prompt": "Which of my tasks got worse after I switched the model?"}
-{"id": "an-7", "expected_skill": "analyze", "split": "holdout", "prompt": "Something in the suite degraded this week. Find out what."}
+{"id": "an-6", "expected_skill": "analyze", "split": "test", "prompt": "Which of my tasks got worse after I switched the model?"}
+{"id": "an-7", "expected_skill": "analyze", "split": "test", "prompt": "Something in the suite degraded this week. Find out what."}
 ```
 
 Write them as requests a real user would send, and commit to whatever they say — rows
@@ -415,7 +415,7 @@ denominator, not the effect. The run was discarded, not interpreted.
 
 ### Stage C, run properly
 
-With budget restored, the same experiment ran again over the 11-row holdout. Erosion this
+With budget restored, the same experiment ran again over the 11-row test. Erosion this
 time was one row against `a-regression` and none against the incumbent — near-symmetric, and
 pointing *against* the candidate, so any positive result is conservative:
 
@@ -429,7 +429,7 @@ incumbent      rows_total=33 rows_excluded=0 completion=1.000
 | incumbent | 0.833 | 1.000 | **0.909** | `task` precision 0.750 |
 | **`a-regression`** | **1.000** | **1.000** | **1.000** | all 1.000 |
 
-**The direction reproduces on rows the candidate was never tuned against**, which is what
+**The direction reproduces on rows the candidate was never trained against**, which is what
 Stage C is required to show. One row separates them — and it is one of the *fresh* rows
 authored at promotion time:
 
@@ -439,7 +439,7 @@ an-6  "Which of my tasks got worse after I switched the model?"
         a-regression   ['analyze', 'analyze', 'analyze']  3 of 3
 ```
 
-Every other holdout row is identical across the arms. The incumbent also shows the
+Every other test row is identical across the arms. The incumbent also shows the
 intermittent `task` misfire on the setup row once more (precision 0.750), consistent with
 the 2-in-3 rate measured earlier.
 
@@ -456,8 +456,8 @@ promotion metric; the paired block corroborates direction when it can and, at th
 size, it cannot. Report both, and do not let a null paired result overturn a metric it was
 never measuring.
 
-**Verdict: promote.** Gated on tune (1.000 vs 0.667, non-overlapping, three invocations),
-confirmed in direction on holdout (1.000 vs 0.909), no sibling regression anywhere, and
+**Verdict: promote.** Gated on train (1.000 vs 0.667, non-overlapping, three invocations),
+confirmed in direction on the test split (1.000 vs 0.909), no sibling regression anywhere, and
 precision never off 1.000 in any run of either stage.
 
 ## The three stages, and when each applies
@@ -467,9 +467,9 @@ for `analyze`, above. In summary:
 
 | Stage | What it does | Replicates |
 | --- | --- | --- |
-| **A — triage** | All candidates + incumbent, one invocation, `--split tune`. Rank by F1, discard anything at or below the incumbent. Decides nothing. | one run |
-| **B — gate** | Survivors + incumbent, `--split tune`, **three separate `coder-eval run` invocations**. Promote only on `min(candidate) > max(incumbent)`. | three runs |
-| **C — confirm** | Best survivor vs. incumbent only, `--split holdout --repeats 3`. Read the rendered `## Paired Comparison` block. | `--repeats 3` |
+| **A — triage** | All candidates + incumbent, one invocation, `--split train`. Rank by F1, discard anything at or below the incumbent. Decides nothing. | one run |
+| **B — gate** | Survivors + incumbent, `--split train`, **three separate `coder-eval run` invocations**. Promote only on `min(candidate) > max(incumbent)`. | three runs |
+| **C — confirm** | Best survivor vs. incumbent only, `--split test --repeats 3`. Read the rendered `## Paired Comparison` block. | `--repeats 3` |
 
 **Stage B must be three invocations, not `--repeats 3`.** Suite rollups are keyed on
 `(variant, suite)` alone, so `--repeats` pools every replicate into a single `suite.json`
@@ -483,7 +483,7 @@ it corroborates the direction; it does not re-test the promotion metric.
 
 And be precise about what Stage B proves. The replicate spread measures agent stochasticity
 over a **fixed** set of rows. It does not correct for the survivors having been chosen on
-those same rows in Stage A. Stage B bounds run noise; **the holdout is what bounds the fit.**
+those same rows in Stage A. Stage B bounds run noise; **the test split is what bounds the fit.**
 
 ## Two caveats about what else is in the sandbox
 
@@ -523,10 +523,10 @@ options are to rename the skill, or to measure it somewhere the collision is abs
   door.
 - **Two agreeing runs are not evidence.** The `task` misfire reproduced on both splits and
   still turned out to be 2-in-3 variance. Only replicates told the difference.
-- **A holdout only confirms failure modes it contains.** The first one here was a flat tie
-  because every regression-phrased row sat in the tune half. Fresh rows, authored to test the
+- **A test only confirms failure modes it contains.** The first one here was a flat tie
+  because every regression-phrased row sat in the train half. Fresh rows, authored to test the
   hypothesis rather than to flatter the candidate, are the fix.
-- **A holdout confirms direction, not significance.** `a-regression` shipped on F1 1.000 vs
+- **A test confirms direction, not significance.** `a-regression` shipped on F1 1.000 vs
   0.909 on unseen rows while the paired *t*-test read exactly zero. At eleven pairs, across
   three criteria, that block cannot resolve a one-criterion gain — which is a fact about the
   test, not about the change. Report both and say which one you promoted on.

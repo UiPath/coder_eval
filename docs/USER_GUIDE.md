@@ -44,7 +44,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. A task with *any* final status (incl. FAILED/ERROR) counts as finalized, so resume does **not** retry failures — delete a task's `task.json` to force a re-run. A config mismatch is warned, not refused. |
 | `--sample N` | For dataset-backed tasks, run a fixed-seed random N-row sample (reproducible; cheap smoke test). See [Bring Your Own Dataset](DATASETS.md). |
 | `--sample-per-stratum N` | For dataset-backed tasks, keep up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — see [Bring Your Own Dataset](DATASETS.md). |
-| `--split NAME` | For dataset-backed tasks, keep only rows whose `dataset.split_field` value (default field: `split`) matches — e.g. `--split tune` / `--split holdout`. Applied **before** `--sample` / `--sample-per-stratum`. Tasks whose rows carry no split label are unaffected. See [Bring Your Own Dataset](DATASETS.md). |
+| `--split NAME` | For dataset-backed tasks, keep only rows whose `dataset.split_field` value (default field: `split`) matches — e.g. `--split train` / `--split test`. Applied **before** `--sample` / `--sample-per-stratum`. Tasks whose rows carry no split label are unaffected. See [Bring Your Own Dataset](DATASETS.md). |
 | `--include-skipped` | Also run tasks marked `skip: true` in their YAML (off by default so CI keeps excluding them). |
 | `--exclude-tags` | Skip tasks matching any of these tags (comma-separated) |
 | `--tags, -t` | Only run tasks matching any of these tags (comma-separated) |

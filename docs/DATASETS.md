@@ -124,7 +124,7 @@ Load-time errors, with their message shapes:
 | Two rows share an id | `Duplicate dataset row id for task '<task_id>': '<x>'` |
 | Both/neither `rows` and `paths` | `Dataset must specify either 'paths' or 'rows'` / `... only one of ...` |
 | `paths: []` | `Dataset.paths must be a non-empty list` |
-| `--split X` on a labelled dataset with no `X` rows | `Dataset for task '<task_id>' has no rows in split 'X' (split_field='split'); labelled splits present: ['holdout', 'tune']` |
+| `--split X` on a labelled dataset with no `X` rows | `Dataset for task '<task_id>' has no rows in split 'X' (split_field='split'); labelled splits present: ['test', 'train']` |
 
 ## Selecting a subset
 
@@ -144,8 +144,8 @@ Three behaviours are worth knowing before you rely on it:
 - **A task whose rows carry no split label at all passes through unfiltered.** `--split` is global to
   the invocation, so an unlabelled dataset sitting beside a labelled one in the same run must not
   fail. A row counts as unlabelled when the field is absent, `null`, or `""`.
-- **Partial labelling drops the unlabelled rows.** If only some rows carry a label, `--split tune`
-  keeps just the `tune` rows — the unlabelled ones are excluded rather than folded in. That is the
+- **Partial labelling drops the unlabelled rows.** If only some rows carry a label, `--split train`
+  keeps just the `train` rows — the unlabelled ones are excluded rather than folded in. That is the
   safe direction (an unlabelled row never leaks into a named split), but during an incremental
   migration it silently *shrinks* the suite, which moves the aggregate metrics `suite_thresholds`
   gates on. Finish labelling before you compare two runs.
@@ -182,31 +182,31 @@ Three behaviours are worth knowing before you rely on it:
     coverage over time matters more than run-to-run comparability. Note the contrast with
     `--sample N`, which is fixed-seed and reproducible by default.
 
-### Tune and holdout splits
+### Train and test splits
 
 Label each row with a split and you can develop against one half and confirm on the other, which is
-what keeps a measured improvement from being an artifact of the rows you tuned on:
+what keeps a measured improvement from being an artifact of the rows you trained on:
 
 ```jsonl
-{"id": "pos-1", "prompt": "review my task files", "expected_skill": "lint-tasks", "split": "tune"}
-{"id": "pos-2", "prompt": "are my evals any good?", "expected_skill": "lint-tasks", "split": "holdout"}
+{"id": "pos-1", "prompt": "review my task files", "expected_skill": "lint-tasks", "split": "train"}
+{"id": "pos-2", "prompt": "are my evals any good?", "expected_skill": "lint-tasks", "split": "test"}
 ```
 
 ```bash
-coder-eval run tasks/skills/activation.yaml --split tune      # iterate here
-coder-eval run tasks/skills/activation.yaml --split holdout   # confirm here, once
+coder-eval run tasks/skills/activation.yaml --split train      # iterate here
+coder-eval run tasks/skills/activation.yaml --split test   # confirm here, once
 ```
 
 **The filter runs before either sampler, and that ordering is load-bearing.** Sampling first would
 leave an unpredictable — possibly zero — number of rows per split, so the two arms of the comparison
-would no longer be the same size or the same rows. Filter-then-sample means `--split tune --sample 8`
-is always drawn from the tune rows alone — at most eight of them, and all of them if `tune` holds
+would no longer be the same size or the same rows. Filter-then-sample means `--split train --sample 8`
+is always drawn from the train rows alone — at most eight of them, and all of them if `train` holds
 fewer than eight.
 
 Two consequences worth planning for. A split **halves each side of the suite**, so a dataset sized
 for a single one-shot measurement is undersized once split — budget roughly double the rows you
-would otherwise want. And a holdout is only worth what its independence buys: consult it to confirm
-a decision already made on `tune`, not to choose between candidates, or it becomes a second tune set.
+would otherwise want. And a test split is only worth what its independence buys: consult it to confirm
+a decision already made on `train`, not to choose between candidates, or it becomes a second train set.
 
 ## Suite-level scoring
 

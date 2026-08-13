@@ -302,7 +302,7 @@ def run_command(
         "--split",
         help=(
             "For dataset-backed tasks, keep only rows whose dataset.split_field value "
-            "(default field: split) matches this name — e.g. --split tune / --split holdout. "
+            "(default field: split) matches this name — e.g. --split train / --split test. "
             "Applied BEFORE --sample / --sample-per-stratum, so a sampled split keeps a "
             "predictable size. Tasks whose rows are all unlabelled are unaffected; a "
             "labelled task with no row in this split is reported in skipped_tasks."

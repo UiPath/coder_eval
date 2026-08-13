@@ -452,7 +452,7 @@ def expand_dataset(
 
     # --split filters BEFORE either sampler below: sampling first would leave an
     # unpredictable (possibly zero) number of rows per split, destroying the
-    # tune/holdout comparison the split exists to protect.
+    # train/test comparison the split exists to protect.
     # Duplicate ids are a property of the DATASET, so check the whole row set BEFORE any
     # filtering or sampling narrows it. Checking only what survives would let a duplicate
     # sitting in an unselected split validate under every --split and surface only on a

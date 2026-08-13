@@ -464,7 +464,7 @@ with the two `action.yml` items above — one considered change to the action's 
   and suite gates — passes. Verified directly: `coder-eval run <suite> --split holdou`
   prints one yellow "1 task file(s) skipped" line and exits 0. This is pre-existing, but
   `--split` makes it reachable by a one-character CLI typo rather than a broken file, and
-  the whole point of a holdout confirmation is that you trust its verdict. Not guarded, and
+  the whole point of a test confirmation is that you trust its verdict. Not guarded, and
   not a five-minute fix: making an all-skipped run non-green changes exit semantics for
   every skipped-task path (including deliberate `skip: true` suites and tag filters that
   match nothing), so it needs a decision about which of those should be fatal, plus tests

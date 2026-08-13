@@ -1184,7 +1184,7 @@ PLUGIN_TEXT_FILES = sorted(
 # has no `Bash` at all (the `coder-eval plan` in its report is a suggestion to the user,
 # not a command it runs) — so none of those three needs the CLI.
 # `optimize-skill` drives the CLI harder than any other skill here — a baseline, a triage
-# stage, three gate invocations and a holdout confirmation, all `coder-eval run`.
+# stage, three gate invocations and a test confirmation, all `coder-eval run`.
 SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task", "optimize-skill"}
 
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
@@ -1438,8 +1438,8 @@ class TestPluginArtifacts:
 
     def test_activation_rows_split_both_polarities_both_sides(self):
         # `optimize-skill` and the template both require both polarities on BOTH sides of
-        # the split: a holdout of only positives measures recall and calls it a result, and
-        # a tune half with no distractors cannot see a candidate over-claiming. The shipped
+        # the split: a test of only positives measures recall and calls it a result, and
+        # a train half with no distractors cannot see a candidate over-claiming. The shipped
         # template is the worked example everyone copies, so the balance it demonstrates has
         # to hold — an edit that moved one row could break it silently.
         import json
@@ -1462,7 +1462,7 @@ class TestPluginArtifacts:
             assert polarities == {True, False}, (
                 f"split {split!r} carries only {'positive' if True in polarities else 'distractor'} "
                 "rows — both splits need positives AND distractors, or one half of the "
-                "tune/holdout comparison measures nothing"
+                "train/test comparison measures nothing"
             )
 
     @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
@@ -1656,9 +1656,9 @@ class TestPluginArtifacts:
         )
 
         for token, why in (
-            ("--split tune", "the tune split drives proposals and the gate"),
-            ("--split holdout", "the holdout split is what makes a promotion more than a fit"),
-            ("--split holdout --repeats 3", "Stage C's paired comparison needs replicates averaged per row"),
+            ("--split train", "the train split drives proposals and the gate"),
+            ("--split test", "the test split is what makes a promotion more than a fit"),
+            ("--split test --repeats 3", "Stage C's paired comparison needs replicates averaged per row"),
             ("stop_early", "an armed suite can pass-stop before a sibling misfire is observable"),
             ("agent.plugins", "reachability wiring — the mechanism, not an invented one"),
             ("recall 0.0", "the silent failure mode of a wrong plugin path"),

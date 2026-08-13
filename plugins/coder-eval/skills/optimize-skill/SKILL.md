@@ -17,7 +17,7 @@ gives bad instructions. This measures and improves either one.
 The method is the same either way and it is an A/B test, not a rewrite: candidate edits
 become experiment variants, every arm runs the same labelled suite, and a candidate is
 promoted only when it beats the incumbent by more than the run-to-run noise — then survives
-rows it was never tuned on. Most rounds promote nothing. That is a real result, not a
+rows it was never trained on. Most rounds promote nothing. That is a real result, not a
 failure.
 
 **What differs between the tracks is the instrument, and that difference is load-bearing.**
@@ -134,10 +134,10 @@ to the thing it is meant to judge.
 does not restate its numbers. But state the part that belongs here: **a split halves each
 side.** A suite sized for a single one-shot check is undersized for an optimization loop,
 because you are now measuring a *difference* between arms rather than one level, and the
-tune half is all you get to develop against. Roughly double what a one-shot check would
+train half is all you get to develop against. Roughly double what a one-shot check would
 want.
 
-Apply that as a number, not a feeling: compute the *tune half's* count for the polarity you
+Apply that as a number, not a feeling: compute the *train half's* count for the polarity you
 are gating on. Below `check-skill`'s un-doubled minimum, **hand back rather than gate** — a
 metric over three or four rows moves in 25–33 point jumps and cannot separate a real gain
 from noise. Between the un-doubled minimum and the doubled target, you may proceed, but say
@@ -157,7 +157,7 @@ Glob the eval tree for tasks that exercise this skill's job.
 reason the activation track hands row design to `/coder-eval:check-skill` — a suite written
 by the thing it will judge is fitted to it. Hand back with two requirements attached, or the
 suite comes back unusable and the user pays for a second round trip: the rows must **carry
-`tune`/`holdout` split labels**, and each must **invoke the skill by slash command** (below).
+`train`/`test` split labels**, and each must **invoke the skill by slash command** (below).
 Neither is `/coder-eval:task`'s default.
 
 Three requirements specific to this track:
@@ -202,43 +202,54 @@ Three requirements specific to this track:
 seconds an activation probe costs. Expect an order of magnitude more spend per row, so
 prefer fewer, richer scenarios over many thin ones, and state the projected count early.
 
-## Step 5 — Require split labels
+## Step 5 — Split the rows
 
-The suite's rows must carry split labels, and the run selects one with `--split`.
+The rows need `train` / `test` labels, and the run selects one with `--split`. **Do the
+labelling yourself — do not hand it to the user as homework.** It is a mechanical edit to a
+JSONL file and you are better placed to get the balance right than they are.
 
-Without a holdout, every reported improvement is fitted to the sample you tuned on: with
-3–5 candidates scored on the same rows, the winner is partly whichever one happened to suit
-those rows. The holdout is what separates a real gain from that.
+Why it is worth doing at all: with 3–5 candidates scored on the same rows, the winner is
+partly whichever one happened to suit those rows. The test split is what separates a real
+gain from that.
 
-- **Rows already labelled** → carry on.
-- **Rows *partly* labelled** → stop and finish the labelling first. This is the dangerous
-  state, because it does not look like one: `--split` keeps the matching rows and silently
-  **drops the unlabelled ones**, so the run succeeds, the report renders, and every metric
-  is computed over a smaller suite than the file suggests. Count the rows the run actually
-  resolved against the rows in the dataset before believing any number.
-- **Rows unlabelled and the suite is big enough to halve** → explain the discipline and
-  offer to add `split_field` plus a `tune`/`holdout` label per row, keeping both polarities
-  on both sides.
-- **Rows unlabelled and the suite is too small to halve** → do not carve a token two-row
-  holdout out of an already scarce sample; it confirms nothing and reads as if it did. The
-  better trade is to keep every row in `tune` and author **fresh holdout rows at promotion
-  time**, when you know which single candidate needs confirming. Offer that.
+**Rows already labelled** → carry on.
 
-  If you take that route, note what follows: with every row labelled `tune`, a later
-  `--split holdout` matches nothing, which is reported as a skipped task and a green run of
-  zero rows. Write the fresh rows first, then run Stage C.
+**Rows unlabelled** → add `split_field: "split"` to the `dataset:` block and write a
+`"split"` into every row, then **show the user the resulting counts and let them object**.
+Two rules make the assignment sound, and both are easy to get wrong by eye:
 
-**Refuse to run a proposal round with neither.** Say why rather than proceeding quietly.
+- **Stratify, do not slice.** Assign within each polarity separately — positives, distractors
+  and each sibling-owned group — so both halves carry both polarities. A test split of only
+  positives measures recall and calls it a result. Aim for roughly 60/40 train/test; exactness
+  matters far less than both sides being represented.
+- **Assign deterministically and never re-roll.** Sort by `id` and alternate, or hash the id
+  — anything stable. A split reshuffled between rounds is not a test split, because rows you
+  already tuned against leak into it. Once written, the labels are fixed; if you later add
+  rows, label the new ones and leave the existing ones alone.
+
+**Rows unlabelled and too few to halve** → do not carve a token two-row test out of an
+already scarce sample; it confirms nothing and reads as if it did. Keep every row in `train`
+and author **fresh test rows at promotion time**, when you know which single candidate needs
+confirming.
+
+  Note what follows: with every row labelled `train`, a later `--split test` matches nothing,
+  which is reported as a skipped task and a green run of zero rows. Write the fresh rows
+  first, then run Stage C.
+
+**Rows *partly* labelled** → finish the labelling before running anything. This is the
+dangerous state, because it does not look like one: `--split` keeps the matching rows and
+silently **drops the unlabelled ones**, so the run succeeds, the report renders, and every
+metric is computed over a smaller suite than the file suggests.
 
 ## Step 6 — Baseline
 
 ```bash
-coder-eval run <suite> --split tune -D run_limits.stop_early=false
+coder-eval run <suite> --split train -D run_limits.stop_early=false
 ```
 
 **Check the resolved row count, not just the exit code.** A mistyped split name (`--split
 holdou`) is reported as a skipped task and the run still exits 0 — a green run of zero rows.
-If the count is zero or lower than the tune rows you expect, that is a wiring problem, not a
+If the count is zero or lower than the train rows you expect, that is a wiring problem, not a
 result.
 
 On `stop_early`: a suite that arms it can pass-stop a run before a later sibling misfire is
@@ -426,7 +437,7 @@ downstream means anything.
 ## Step 10 — Three stages, and the gate
 
 State the projected run count before each stage and ask. With N candidates, S survivors,
-M<sub>tune</sub> tune rows and M<sub>holdout</sub> holdout rows:
+M<sub>train</sub> train rows and M<sub>test</sub> test rows:
 
 | Spend | Runs |
 | --- | --- |
@@ -449,10 +460,10 @@ run of zero rows.
 
 ### Stage A — triage (cheap)
 
-All candidates plus the incumbent, **one** invocation, `--split tune`:
+All candidates plus the incumbent, **one** invocation, `--split train`:
 
 ```bash
-coder-eval run <suite> -e <experiment> --split tune
+coder-eval run <suite> -e <experiment> --split train
 ```
 
 Rank each variant from its `suite.json`, then discard anything at or below the incumbent:
@@ -477,13 +488,13 @@ nothing is being gated on.
 
 ### Stage B — the gate (replicates)
 
-**Activation track.** Incumbent plus survivors, `--split tune`, **invoked three separate
+**Activation track.** Incumbent plus survivors, `--split train`, **invoked three separate
 times** — three `coder-eval run` commands, **not** `--repeats 3`:
 
 ```bash
-coder-eval run <suite> -e <experiment> --split tune --run-dir <runs>/round<N>-gate-1
-coder-eval run <suite> -e <experiment> --split tune --run-dir <runs>/round<N>-gate-2
-coder-eval run <suite> -e <experiment> --split tune --run-dir <runs>/round<N>-gate-3
+coder-eval run <suite> -e <experiment> --split train --run-dir <runs>/round<N>-gate-1
+coder-eval run <suite> -e <experiment> --split train --run-dir <runs>/round<N>-gate-2
+coder-eval run <suite> -e <experiment> --split train --run-dir <runs>/round<N>-gate-3
 ```
 
 **This is the instruction most likely to be "simplified" into a bug.** Suite rollups are
@@ -524,17 +535,17 @@ suite and needlessly strict on a forty-row one. **Do not introduce one.**
 **Be precise about what this bounds, because it is easy to claim more.** The replicate
 spread measures agent stochasticity over a *fixed* set of rows. It does not measure
 row-sampling variance, and it does not correct for the fact that the survivors were already
-chosen on these same tune rows in Stage A — so with S survivors each tested independently,
-some separation by luck is expected. Stage B bounds run noise. **The holdout is what bounds
+chosen on these same train rows in Stage A — so with S survivors each tested independently,
+some separation by luck is expected. Stage B bounds run noise. **The test is what bounds
 the fit**, and it is why Stage C is not optional. Report the gate as "separated beyond
-run-to-run noise on the tune rows", never as "proven better".
+run-to-run noise on the train rows", never as "proven better".
 
 **Execution track — gate pairwise, with `--repeats 3`, and let the reporter do the
 statistics.** Take the single best Stage A survivor against the incumbent as a **two-variant**
 experiment:
 
 ```bash
-coder-eval run <suite> -e <experiment> --split tune --repeats 3
+coder-eval run <suite> -e <experiment> --split train --repeats 3
 ```
 
 This is a deliberate departure from the activation gate above, for one reason: the
@@ -564,10 +575,10 @@ Promote only when all of these hold:
 Print the paired block verbatim alongside the per-criterion table. A body change is a
 behavioural change, and the numbers behind it are the whole argument.
 
-### Stage C — confirm on holdout
+### Stage C — confirm on the test split
 
 Only the best candidate that already passed Stage B, as a **two-variant** experiment
-(incumbent + that candidate) at `--split holdout --repeats 3`.
+(incumbent + that candidate) at `--split test --repeats 3`.
 
 Here `--repeats` is correct and required. The experiment reporter renders a
 `## Paired Comparison` block in `experiment.md` — mean difference, 95% confidence interval,
@@ -575,20 +586,20 @@ Cohen's *d*, and a paired-*t* p-value — but it fires **only** for exactly two 
 it averages replicates per row *before* pairing, which is precisely what pooling breaks in
 `suite.json` and exactly what is wanted here.
 
-Report that block verbatim alongside the holdout F1s, and state its limit honestly: it
+Report that block verbatim alongside the test F1s, and state its limit honestly: it
 pairs per-row `weighted_score` — row-level correctness, an accuracy-flavoured quantity —
 **not** F1. F1 remains the promotion metric; the paired block corroborates the direction on
 the paired rows, it does not re-test the promotion metric.
 
-Require the F1 direction to reproduce on holdout. Do **not** require replicate separation
-there — a holdout is usually smaller and the separation usually weaker — and say that,
+Require the F1 direction to reproduce on the test split. Do **not** require replicate separation
+there — a test split is usually smaller and the separation usually weaker — and say that,
 rather than implying a stronger result than was obtained.
 
 ## Step 11 — Ledger
 
 Append to `.optimize-skill/<skill>/history.json`: round, **track**, candidate slug,
-hypothesis, the tune numbers (per-invocation F1 on activation; the paired block on
-execution), the holdout numbers, per-criterion or sibling movement, `completion_rate` per
+hypothesis, the train numbers (per-invocation F1 on activation; the paired block on
+execution), the test numbers, per-criterion or sibling movement, `completion_rate` per
 arm, verdict, and the run ids. Append-only — never rewrite an earlier round. An existing
 directory means read `history.json` first and continue the numbering.
 
@@ -612,4 +623,4 @@ noise, here are the numbers" — is worth more than a promotion that will not re
 ## Step 13 — Stop rule
 
 Stop after two consecutive rounds that promote nothing. Continuing past that is fitting to
-the tune set, and the holdout will eventually stop catching it.
+the train set, and the test will eventually stop catching it.
