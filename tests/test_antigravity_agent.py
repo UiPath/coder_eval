@@ -6,6 +6,7 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 
 import asyncio
 import os
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -247,6 +248,8 @@ def _step(
     usage=None,
     complete=None,
     error="",
+    step_index=0,
+    trajectory_id="",
 ):
     # Plain strings stand in for the SDK's str-enums (_enum_value passes them through).
     return SimpleNamespace(
@@ -262,24 +265,44 @@ def _step(
         usage_metadata=usage,
         is_complete_response=complete,
         error=error,
-        step_index=0,
+        step_index=step_index,
+        trajectory_id=trajectory_id,
     )
 
 
 class _FakeConversation:
+    """Scriptable fake SDK conversation.
+
+    ``steps`` is either a flat list (one batch, yielded on the first
+    ``receive_steps()`` call) or a list of batches (one per successive
+    ``receive_steps()`` call — the shape a poll loop drains repeatedly). Once
+    the authored batches are exhausted, further calls yield an EMPTY batch —
+    this mirrors the real SDK's local connection, which drains a queue and
+    returns immediately with nothing once idle; it never replays already-
+    yielded steps. A test standing in for a background job that never
+    resolves should author one batch that opens the orphan and let
+    exhaustion naturally fall through to empty polls, not repeat itself.
+    """
+
     def __init__(self, steps):
-        self._steps = steps
+        self._batches = list(steps) if steps and isinstance(steps[0], list) else [steps]
+        self._batch_index = 0
         self.last_response = ""
+        self.receive_steps_call_count = 0
+        self.cancel_call_count = 0
 
     async def send(self, prompt, **kwargs):
         return None
 
     async def receive_steps(self):
-        for s in self._steps:
+        self.receive_steps_call_count += 1
+        batch = self._batches[self._batch_index] if self._batch_index < len(self._batches) else []
+        self._batch_index += 1
+        for s in batch:
             yield s
 
     async def cancel(self):
-        return None
+        self.cancel_call_count += 1
 
 
 def _agent_with_steps(steps):
@@ -289,6 +312,31 @@ def _agent_with_steps(steps):
     agent.working_directory = Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=_FakeConversation(steps), is_started=True)
     return agent
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """Stand-in for asyncio.sleep in poll-loop tests — no real wait."""
+    return None
+
+
+class _FiringWatchdog:
+    """Fake ThreadedWatchdog that fires ``on_timeout`` synchronously at entry.
+
+    Sets ``state.timeout_hit = True`` before any draining happens (exactly
+    like the real watchdog thread firing early), so a CancelledError raised
+    later — whether from the first drain or from a poll loop's re-drain — is
+    classified via the SAME existing ``if state.timeout_hit`` branch.
+    """
+
+    def __init__(self, *, on_timeout, **_kwargs):
+        self._on_timeout = on_timeout
+
+    def __enter__(self):
+        self._on_timeout()
+        return self
+
+    def __exit__(self, *_exc):
+        return False
 
 
 async def test_communicate_maps_steps_to_turn_record():
@@ -459,17 +507,6 @@ async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
 
     from coder_eval.errors import TurnTimeoutError
 
-    class _FiringWatchdog:
-        def __init__(self, *, on_timeout, **_kwargs):
-            self._on_timeout = on_timeout
-
-        def __enter__(self):
-            self._on_timeout()  # watchdog fired: state.timeout_hit = True
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _FiringWatchdog)
 
     class _Cancelled:
@@ -501,6 +538,655 @@ async def test_communicate_requires_started_agent():
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     with pytest.raises(RuntimeError, match="not started"):
         await agent.communicate("x")
+
+
+# --- background-task poll loop (wait_for_wakeup is a dead stub on the Local ------
+# harness; see antigravity_agent.py's communicate() comment + the plan for the
+# full evidence trail. The model leaves a tool call open (never DONE) when it
+# backgrounds work and goes idle -- these tests drive that signal directly. ------
+
+
+def test_has_orphaned_tool_call_detects_active_vs_other_statuses():
+    """Allowlist on ACTIVE, not a denylist on "not closed": a tool stuck in
+    WAITING_FOR_USER/CANCELED/UNKNOWN is also never added to _closed_tools
+    (that set only tracks DONE/ERROR), but must NOT be treated as pollable —
+    it will never become DONE on its own (Phase-2-review finding). Layered on
+    top: a cid already in _closed_tools is never orphaned even if its last-seen
+    status were ever left at ACTIVE by a re-emission (final-review finding)."""
+    from coder_eval.agents.antigravity_agent import _AntigravityTurnState
+
+    state = _AntigravityTurnState.__new__(_AntigravityTurnState)
+    state._closed_tools = set()
+    state._tool_last_status = {}
+    assert state.has_orphaned_tool_call() is False  # no tool calls at all
+
+    state._tool_last_status = {"t1": "ACTIVE"}
+    assert state.has_orphaned_tool_call() is True  # genuinely still running
+
+    state._tool_last_status = {"t1": "DONE"}
+    assert state.has_orphaned_tool_call() is False  # closed normally
+
+    for stuck_status in ["WAITING_FOR_USER", "CANCELED", "UNKNOWN"]:
+        state._tool_last_status = {"t1": stuck_status}
+        assert state.has_orphaned_tool_call() is False, (
+            f"a tool stuck in {stuck_status} must not trigger polling -- it will never become DONE"
+        )
+
+    # A second tool call still ACTIVE is enough, even if the first is DONE.
+    state._tool_last_status = {"t1": "DONE", "t2": "ACTIVE"}
+    assert state.has_orphaned_tool_call() is True
+
+    # A closed cid stuck at ACTIVE (e.g. a stale re-emission) must not re-arm the
+    # poll loop -- closure is authoritative over the last-seen status.
+    state._closed_tools = {"t1"}
+    state._tool_last_status = {"t1": "ACTIVE"}
+    assert state.has_orphaned_tool_call() is False
+
+
+async def test_communicate_fast_path_when_no_orphaned_tools(monkeypatch):
+    """A normal turn closes its tool call before the stream exhausts -- the poll
+    loop's condition is False on first check, so it's never entered: exactly one
+    receive_steps() call, no sleep, byte-identical to today's behavior."""
+    from coder_eval.agents import antigravity_agent
+
+    async def _sleep_should_not_be_called(_seconds: float) -> None:
+        raise AssertionError("asyncio.sleep must not be called on the no-orphan fast path")
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _sleep_should_not_be_called)
+
+    steps = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "echo hi", "exit_code": 0, "combined_output": "hi"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps(steps)
+    tr = await agent.communicate("run it")
+
+    conv = agent._sdk_agent.conversation
+    assert conv.receive_steps_call_count == 1
+    assert tr.agent_output == "done"
+
+
+async def test_communicate_does_not_poll_a_tool_stuck_waiting_for_user(monkeypatch):
+    """A tool call whose LAST status is WAITING_FOR_USER (not ACTIVE) is never
+    added to _closed_tools (that set only tracks DONE/ERROR) -- but it must
+    NOT be mistaken for a genuine backgrounded job either, since a headless
+    eval run will never actually answer the question. This is the exact gap a
+    final cross-cutting review found: has_orphaned_tool_call must allowlist
+    ACTIVE specifically, not just check "not yet closed"."""
+    from coder_eval.agents import antigravity_agent
+
+    async def _sleep_should_not_be_called(_seconds: float) -> None:
+        raise AssertionError("asyncio.sleep must not be called for a tool stuck WAITING_FOR_USER")
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _sleep_should_not_be_called)
+
+    steps = [
+        _step(
+            "TOOL_CALL",
+            "WAITING_FOR_USER",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("ask_question", "t1", {"question": "which region?"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting on you", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps(steps)
+    tr = await agent.communicate("do it")
+
+    conv = agent._sdk_agent.conversation
+    assert conv.receive_steps_call_count == 1  # poll loop never entered
+    ask = next(c for c in tr.commands if c.tool_name == "AskUser")
+    assert ask.result_status == "unknown"  # force-closed as UNRESOLVED by finalize(), not polled forever
+
+
+async def test_communicate_polls_and_resumes_after_orphaned_tool_closes(monkeypatch):
+    """The model backgrounds a run_command and goes idle -- the tool call stays
+    ACTIVE (never DONE) even past the final TEXT_RESPONSE. The orphaned-tool
+    signal triggers a poll; the second receive_steps() call closes the tool and
+    delivers the real result."""
+    from coder_eval.agents import antigravity_agent
+
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 12 && echo done"})],
+        ),
+        _step(
+            "TEXT_RESPONSE",
+            "DONE",
+            content="I've started this in the background.",
+            content_delta="I've started this in the background.",
+            complete=True,
+            usage=_usage(100, 0, 10, 0),
+        ),
+    ]
+    batch2 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc(
+                    "run_command",
+                    "bg1",
+                    {"command_line": "sleep 12 && echo done", "exit_code": 0, "combined_output": "done"},
+                )
+            ],
+            usage=_usage(50, 0, 5, 0),
+        ),
+        _step(
+            "TEXT_RESPONSE",
+            "DONE",
+            content="All finished.",
+            content_delta="All finished.",
+            complete=True,
+            usage=_usage(60, 0, 8, 0),
+        ),
+    ]
+    agent = _agent_with_steps([batch1, batch2])
+    tr = await agent.communicate("do it")
+
+    assert sleep_calls == [antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS]
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "success"
+    assert "All finished." in tr.agent_output
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 2
+
+
+async def test_communicate_resolves_backgrounded_tool_call_with_no_id(monkeypatch):
+    """The SDK types ToolCall.id as optional; the fallback synthetic id must be
+    stable across a step's own ACTIVE -> DONE re-emission (same step_index), not
+    derived from a mutable counter -- otherwise the DONE step mints a fresh id
+    and the ACTIVE entry is orphaned forever, stalling the poll loop for its
+    full budget on every id-less turn (final-review finding)."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", None, {"command_line": "sleep 12 && echo done"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc(
+                    "run_command",
+                    None,
+                    {"command_line": "sleep 12 && echo done", "exit_code": 0, "combined_output": "done"},
+                )
+            ],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="All finished.", complete=True, usage=_usage(5, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([batch1, batch2])
+    tr = await agent.communicate("do it")
+
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 2  # closed on the first poll, not the cap
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "success"
+    assert len(tr.commands) == 1  # the id-less ACTIVE and DONE steps collapsed to ONE tool call, not two
+
+
+async def test_id_less_tool_calls_in_different_trajectories_do_not_collide():
+    """step_index is only unique WITHIN a trajectory -- the SDK itself keys step
+    tracking on (trajectory_id, step_index), since a sub-agent trajectory can
+    reuse the same low step_index values as the main one. Two id-less tool
+    calls sharing a step_index but in DIFFERENT trajectories must still mint
+    distinct fallback cids and produce two separate commands, not collapse
+    into one (round-3 review finding); same trajectory + same step_index
+    still collapses to one, as test_communicate_resolves_backgrounded_tool_call_with_no_id covers."""
+    steps = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", None, {"command_line": "main job", "exit_code": 0, "output": "main"})],
+            step_index=1,
+            trajectory_id="",
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", None, {"command_line": "subagent job", "exit_code": 0, "output": "sub"})],
+            step_index=1,  # same index as the step above, different trajectory
+            trajectory_id="subagent-42",
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps(steps)
+    tr = await agent.communicate("do two things")
+
+    bash_calls = [c for c in tr.commands if c.tool_name == "Bash"]
+    assert len(bash_calls) == 2  # distinct cids, not collapsed into one
+    assert {c.tool_id for c in bash_calls} == {"run_command_1_0", "run_command_subagent-42:1_0"}
+
+
+async def test_communicate_handles_two_sequential_background_jobs(monkeypatch):
+    """paratransit-routing's real observed shape: the model backgrounds a job,
+    it resolves, and the model immediately backgrounds a SECOND job before
+    finally finishing -- the loop must not stop after just one poll cycle."""
+    from coder_eval.agents import antigravity_agent
+
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bgA", {"command_line": "job_a"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started A", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc("run_command", "bgA", {"command_line": "job_a", "exit_code": 0, "combined_output": "a done"})
+            ],
+        ),
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bgB", {"command_line": "job_b"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started B", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch3 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc("run_command", "bgB", {"command_line": "job_b", "exit_code": 0, "combined_output": "b done"})
+            ],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="all done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([batch1, batch2, batch3])
+    tr = await agent.communicate("do two things")
+
+    assert len(sleep_calls) == 2  # exactly two poll cycles, one per backgrounded job
+    bash_calls = [c for c in tr.commands if c.tool_name == "Bash"]
+    assert len(bash_calls) == 2
+    assert all(c.result_status == "success" for c in bash_calls)
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 3
+
+
+async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
+    """A pathological, never-closing background job must not poll forever --
+    the hard _MAX_BACKGROUND_POLLS cap bounds it independent of the turn budget."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 3)
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    # A single batch that opens the orphan; every later call exhausts to an
+    # empty batch (see _FakeConversation's docstring, matching the real SDK) --
+    # the orphan is never closed, simulating a job whose state never changes.
+    agent = _agent_with_steps([never_closing])
+    tr = await agent.communicate("do it forever")
+
+    assert len(sleep_calls) == 3  # exactly _MAX_BACKGROUND_POLLS, not infinite
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
+
+
+async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(monkeypatch):
+    """A never-resolving orphan under a REALISTIC configured timeout (300s, the
+    framework's own experiments/default.yaml turn_timeout) must finalize through
+    the poll loop's own graceful path -- force-close the orphan, grade normally
+    -- instead of the ThreadedWatchdog cutting the whole turn at `timeout` first.
+
+    Pre-fix, `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS` (120 *
+    5s = 600s) was DOUBLE the 300s default, so the watchdog always won that race
+    and this exact scenario -- a tool call spuriously left ACTIVE with no real
+    background job behind it, confirmed live in the final validation run -- burned
+    the full turn timeout and crashed as TurnTimeoutError with zero criteria
+    graded, a strict regression versus the pre-fix immediate finalize. Deriving
+    the poll deadline from a FRACTION of the real `timeout` (not a disconnected
+    cycle count) fixes it: the loop now exits through its own graceful path with
+    room to spare before the watchdog's harder cutoff would ever fire."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    # Fake clock: turn_start_time=0.0, then +130s per subsequent call. The poll
+    # loop reads time.monotonic() at least twice per iteration (the while-head
+    # check, then the post-sleep deadline check), so this crosses the 240s
+    # deadline (0.8 * 300s) after exactly one poll cycle -- proving the exit is
+    # driven by the deadline, not by exhausting all 120 cycles.
+    clock = iter([0.0, 130.0, 260.0])
+    monkeypatch.setattr(antigravity_agent.time, "monotonic", lambda: next(clock, 1_000_000.0))
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([never_closing])
+
+    tr = await agent.communicate("do it forever", timeout=300.0)  # the real default turn_timeout
+
+    # Finalized and graded -- no TurnTimeoutError, no crash.
+    assert tr is not None
+    assert not tr.crashed
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
+    # Exited via the poll_deadline (well under the 120-cycle cap), matching a
+    # real turn where the watchdog's 300s cutoff never gets the chance to fire.
+    assert agent._sdk_agent.conversation.receive_steps_call_count < 5
+
+
+class _WatchdogFiresLater:
+    """Fake ThreadedWatchdog that does NOT fire on entry (unlike _FiringWatchdog
+    above) -- it hands its ``on_timeout`` callback to the caller so the test can
+    invoke it mid-poll-loop, simulating a real watchdog thread firing between
+    poll cycles rather than before the turn even starts."""
+
+    captured_on_timeout: Callable[[], None] | None = None
+
+    def __init__(self, *, on_timeout, **_kwargs):
+        _WatchdogFiresLater.captured_on_timeout = on_timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(monkeypatch):
+    """A watchdog timeout landing BETWEEN poll cycles (state.timeout_hit flips
+    to True while the loop is sleeping) must stop the loop on its next condition
+    check, not burn through the rest of _MAX_BACKGROUND_POLLS waiting for a
+    cancellation that may not land on this coroutine right away (final-review
+    finding: the loop condition must read the flag the watchdog already set)."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 50)
+    monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
+
+    sleep_calls: list[float] = []
+
+    async def _fire_watchdog_on_second_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 2:
+            assert _WatchdogFiresLater.captured_on_timeout is not None
+            _WatchdogFiresLater.captured_on_timeout()
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _fire_watchdog_on_second_sleep)
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    from coder_eval.errors import TurnTimeoutError
+
+    agent = _agent_with_steps([never_closing])
+    with pytest.raises(TurnTimeoutError):
+        await agent.communicate("do it forever", timeout=30.0)
+
+    # Stopped right after the sleep that flipped timeout_hit -- NOT the (patched) cap of 50.
+    assert len(sleep_calls) == 2
+    # 1 initial drain + 1 poll re-drain (after sleep #1) -- the mid-loop
+    # `if state.timeout_hit: break` skips the re-drain that would otherwise
+    # follow sleep #2, so no 3rd receive_steps() call happens.
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 2
+    assert agent.pending_turn is not None
+    bash = next(c for c in agent.pending_turn.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"
+
+
+async def test_communicate_respects_should_stop_during_poll(monkeypatch):
+    """A cooperative-stop request arriving during the poll phase must be
+    honored before the next re-drain, not ignored until the job finishes."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [  # must never be drained -- should_stop fires right after the sleep
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc("run_command", "bg1", {"command_line": "sleep 999", "exit_code": 0, "combined_output": "x"})
+            ],
+        ),
+    ]
+    agent = _agent_with_steps([batch1, batch2])
+    conv = agent._sdk_agent.conversation
+
+    call_count = 0
+
+    def should_stop() -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count > 2  # False for batch1's 2 steps; True on the post-sleep check
+
+    await agent.communicate("do it", should_stop=should_stop)
+
+    assert conv.receive_steps_call_count == 1  # the poll's re-drain never happened
+    assert conv.cancel_call_count == 1
+
+
+class _TwoLayerReentrancyGuardedConversation:
+    """Faithfully mirrors the REAL SDK's two-generator-layer shape:
+    ``Conversation.receive_steps()`` (the public method ``_drain()`` calls) is
+    ITSELF an async generator that delegates to
+    ``LocalConnection.receive_steps()`` (``async for step in
+    self._connection.receive_steps(): yield step``, verified against the
+    installed SDK) -- and the ``_is_receiving`` re-entrancy flag lives on that
+    INNER, connection-layer generator, not the outer one. A single-layer fake
+    (putting the flag directly on the generator ``_drain()`` iterates) cannot
+    catch a bug in how the outer/inner boundary is handled, since aclose()-ing
+    a generator always closes ITSELF -- the question this fake exists to probe
+    is whether that also reaches the inner one, and (confirmed live against
+    real asyncio semantics) it does NOT do so synchronously: a `GeneratorExit`
+    thrown into a delegating generator's frame does not immediately run the
+    generator it was mid-iterating -- that's deferred to the event loop's
+    async-gen finalizer, exactly like the original single-layer bug, just one
+    level down. ``_drain()``'s fix is therefore a bounded retry (yielding via
+    ``asyncio.sleep(0)`` for that already-scheduled finalizer to land), not a
+    claim that the inner generator closes synchronously."""
+
+    last_response = ""
+
+    def __init__(self, batches):
+        self._batches = list(batches)
+        self._batch_index = 0
+        self._is_receiving = False  # lives on the "connection" layer, like the real SDK
+        self.receive_steps_call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def _connection_receive_steps(self):
+        if self._is_receiving:
+            raise RuntimeError("Concurrent receive_steps() calls are not supported on this connection.")
+        self._is_receiving = True
+        try:
+            batch = self._batches[self._batch_index] if self._batch_index < len(self._batches) else []
+            self._batch_index += 1
+            for s in batch:
+                yield s
+        finally:
+            self._is_receiving = False
+
+    async def receive_steps(self):
+        # The "Conversation" layer: delegates to the connection layer exactly
+        # like the real SDK's Conversation.receive_steps() does.
+        self.receive_steps_call_count += 1
+        async for step in self._connection_receive_steps():
+            yield step
+
+    async def cancel(self):
+        return None
+
+
+async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_stop():
+    """A cooperative-stop break on a PRIOR communicate() call can leave the
+    real SDK's inner (connection-layer) generator not-yet-closed for a short
+    window, since asyncio's async-gen finalizer runs it on a LATER event-loop
+    turn, not synchronously when the outer generator is aclose()'d (confirmed
+    live against the real two-layer delegation shape -- round-3 review finding;
+    see _drain()'s docstring). The NEXT communicate() call must recover by
+    retrying past that window (mirroring the SDK's own Conversation.send()
+    handling of this exact RuntimeError) instead of crashing with
+    AgentCrashError."""
+    from pathlib import Path
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [
+        _step("TEXT_RESPONSE", "DONE", content="second turn", complete=True, usage=_usage(5, 0, 1, 0)),
+    ]
+    conversation = _TwoLayerReentrancyGuardedConversation([batch1, batch2])
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = Path("/tmp")
+    agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
+
+    await agent.communicate("do it", should_stop=lambda: True)  # breaks after the first step
+
+    # Without the retry, this second call raises AgentCrashError wrapping the
+    # fake's RuntimeError (verified live before the fix landed). With it, the
+    # transient window clears within a couple of asyncio.sleep(0) yields and
+    # the second turn's real content is delivered, not silently dropped.
+    tr = await agent.communicate("do it again")
+    assert tr.agent_output == "second turn"
+
+
+async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_path(monkeypatch):
+    """A watchdog timeout landing during the poll loop's re-drain (not the first
+    drain) must surface as TurnTimeoutError via the SAME existing exception
+    branch -- the poll loop must not create a second, inconsistent timeout path.
+
+    Uses ``_WatchdogFiresLater`` (not ``_FiringWatchdog``, which fires at entry
+    and would make the loop's head condition skip the poll cycle entirely, per
+    round-3 review) so ``state.timeout_hit`` only flips once a re-drain is
+    genuinely in flight -- mirroring the real watchdog, whose ``on_timeout``
+    callback and the ``CancelledError`` it triggers are the same causal event,
+    not two independently-timed ones."""
+    from coder_eval.agents import antigravity_agent
+    from coder_eval.errors import TurnTimeoutError
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
+
+    class _FiresWatchdogThenCancelsOnSecondDrain:
+        last_response = ""
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def send(self, prompt, **kwargs):
+            return None
+
+        async def receive_steps(self):
+            self.call_count += 1
+            if self.call_count == 1:
+                yield _step(
+                    "TOOL_CALL",
+                    "ACTIVE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 999"})],
+                )
+                yield _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0))
+            else:
+                assert _WatchdogFiresLater.captured_on_timeout is not None
+                _WatchdogFiresLater.captured_on_timeout()
+                raise asyncio.CancelledError
+                yield  # pragma: no cover - makes this an async generator
+
+        async def cancel(self):
+            return None
+
+    from pathlib import Path
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = Path("/tmp")
+    conversation = _FiresWatchdogThenCancelsOnSecondDrain()
+    agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
+
+    with pytest.raises(TurnTimeoutError):
+        await agent.communicate("x", timeout=30.0)
+    assert conversation.call_count == 2  # the re-drain genuinely ran, not skipped
+    assert agent.pending_turn is not None
+    assert agent.pending_turn.crashed is True
+
+    await agent.discard_pending_turn()
+    assert agent.pending_turn is None
 
 
 # --- env_path_prepend / harness-spawn PATH shadowing ------------------------------

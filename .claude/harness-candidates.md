@@ -314,3 +314,80 @@ with the two `action.yml` items above — one considered change to the action's 
   advertises otherwise. Either mark it `required: true` (a published-input contract change,
   see the `working-directory` item) or fail with a clear message instead of an obscure
   discovery error.
+
+## From the coder-eval-code-review of fix/antigravity-wait-for-wakeup (2026-08-12)
+
+- [ ] **A retry/poll loop's continuation state must derive from a stable per-entity
+  key, never a mutable monotonic counter used as an id fallback.** `_AntigravityTurnState._handle_tool_call`
+  minted a synthetic tool-call id from `f"{raw_name}_{self._next_seq}"` when the SDK's
+  `call.id` was falsy; since `_next_seq` advances between a tool call's ACTIVE and DONE
+  emissions, the DONE step computed a *different* fallback id than the ACTIVE step,
+  stranding the ACTIVE entry as a permanent orphan and stalling `communicate()`'s new
+  poll loop for its full `_MAX_BACKGROUND_POLLS` budget on every id-less turn. Fixed by
+  deriving the fallback from `(step.step_index, call_index)` instead (stable across a
+  step's own re-emissions, per this class's own docstring) -- then, in the same PR,
+  further folded in `step.trajectory_id` (falling back to bare `step_index` when it's
+  empty, mirroring the SDK's own `trajectory_id:step_index` id scheme), since a
+  sub-agent trajectory can reuse the same low `step_index` values as the main one and
+  two id-less calls across trajectories would otherwise collide. Not promoted to a CExxx rule:
+  this is the only id-fallback-driving-control-flow site in the codebase today (a
+  single call site, not a recurring class per the existing "single call-site fix, no
+  recurring pattern to guard" convention) — a mechanical AST rule for "no mutable
+  counter in a dict-key fallback" would need real design work to avoid false-positiving
+  on ordinary sequence-numbering counters elsewhere in the file. Caught by two
+  independent reviewers (Opus fallback pair) in this run's final code review.
+
+- [ ] **A `while` loop built around a cooperative-cancellation watchdog should read the
+  watchdog's own "already decided to fire" flag in its condition, not rely solely on a
+  later exception handler to notice.** The antigravity poll loop's condition checked
+  `not state.stopped_early_hit and state.has_orphaned_tool_call() and poll_count < cap`
+  but not `state.timeout_hit`, so if `ThreadedWatchdog`'s background thread set the flag
+  before its `task.cancel()` actually landed on this coroutine, the loop kept
+  sleeping/re-draining for up to the full poll budget before the pre-existing
+  post-loop `if state.timeout_hit:` check ever got a chance to run. Fixed by adding
+  `and not state.timeout_hit` to the condition, plus a mid-body early exit right after
+  the sleep (`if state.timeout_hit: break`) so a flag landing DURING the sleep skips
+  the following re-drain too, instead of waiting for the loop's next head check. Not
+  promoted: `ThreadedWatchdog` + a bespoke poll loop reading its own state flag is a
+  one-off shape unique to this agent; no second instance exists to generalize a rule
+  from. Caught in the same
+  final review as above.
+
+- [ ] **A regression test's fake dependency must model every layer the fix under test
+  actually touches, not just the outermost one.** `_drain()`'s cooperative-stop path
+  wraps a real SDK call (`Conversation.receive_steps()`) that is itself a delegating
+  async generator over an inner, connection-layer generator holding the real
+  re-entrancy guard. The first regression test written for this fix used a
+  single-layer fake (the guard lived on the SAME generator `_drain()` iterated), which
+  passed against an incomplete fix (`contextlib.aclosing` on the outer generator only)
+  that does not work against the real two-layer SDK shape — confirmed live that the
+  inner generator's cleanup is deferred to a LATER event-loop turn, not synchronous
+  with the outer's `aclose()`. Caught by a reviewer re-deriving the real dependency's
+  shape from its installed source, not by the test itself. Not promoted: detecting "a
+  test double is missing a delegation layer the source has" is a semantic match
+  against third-party source, not an AST pattern in our own code — no cheap mechanical
+  check exists. Caught in the round-3 coder-eval-code-review of this same branch.
+
+- [ ] **An agent's internal sleep-and-retry loop must derive its own exit bound from
+  the turn's actual `timeout`, never a fixed cycle count picked independently.** The
+  poll loop's own graceful exit path (force-close a never-resolving orphan as
+  unresolved, finalize and grade normally) was bounded by `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS`
+  (120 × 5s = 600s) — DOUBLE `experiments/default.yaml`'s own default `turn_timeout: 300`.
+  Since the pre-existing `ThreadedWatchdog` enforces `timeout` by cancelling the whole
+  turn, it always won that race under default settings, making the graceful path dead
+  code: a tool call spuriously left ACTIVE with no real background job behind it (a
+  real, observed case — see the final validation run) went from "finalizes immediately,
+  graded on whatever the agent wrote" pre-fix to "burns the full 300s, then crashes as
+  `TurnTimeoutError` with zero criteria graded" post-fix — a strict regression for that
+  input class. Fixed by deriving a `poll_deadline` from a fraction (0.8x) of the actual
+  `timeout` passed to `communicate()`, falling back to the cycle cap only when
+  `timeout is None`. Caught independently by two reviewers (`bai-uipath`, `uipreliga`)
+  on the PR, both citing the exact same arithmetic mismatch. **Not promoted in this
+  pass**, but a stronger candidate than most entries here: `uipreliga` proposed a
+  generic whole-tree rule (their CE035) — for every sleep-loop under
+  `src/coder_eval/agents/**`, assert its own cycle-count × interval either references a
+  timeout-derived name or is provably below `experiments/default.yaml`'s baseline — that
+  would catch this class of bug in ANY agent, not just this one (confirmed zero
+  violations on `main` before this bug, one on this PR). Worth a real look next time
+  `agents/` is touched, since a second agent adding its own disconnected sleep-loop
+  constant would reintroduce the exact same shape.
