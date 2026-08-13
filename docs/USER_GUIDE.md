@@ -127,13 +127,21 @@ suite/variant grouping they need is not recoverable from `task.json` alone.
 
 ### Claude Code slash commands
 
-The project ships [Claude Code custom slash commands](https://docs.anthropic.com/en/docs/claude-code/slash-commands)
-in `.claude/commands/`, available when using Claude Code in this repository:
+Authoring and analysis commands ship in the [Claude Code plugin](PLUGIN.md), so they work
+in **any** repository rather than only this one:
+
+```
+/plugin marketplace add UiPath/coder_eval
+```
 
 | Command | Description |
 | --- | --- |
-| `/coder-eval-run-analysis <path>` | Analyze evaluation runs and suggest improvements to tasks, config, and prompts. Works at task, variant, or run scope. |
-| `/coder-eval-task-create` | Create evaluation task YAML files from a natural language description. |
+| `/coder-eval:task` | Create evaluation task YAML files from a natural language description. |
+| `/coder-eval:analyze <path>` | Analyze evaluation runs and suggest improvements to tasks, config, and prompts. Works at task, variant, or run scope. |
+
+See [Claude Code Plugin](PLUGIN.md) for the full set of six skills. The
+`.claude/commands/` directory in this repository holds contributor-only tooling
+(code review, planning) that is deliberately not shipped.
 
 <a id="api-routing--benchmarking"></a>
 

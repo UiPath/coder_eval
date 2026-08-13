@@ -1,0 +1,17 @@
+{
+  "name": "coder-eval",
+  "owner": {
+    "name": "UiPath",
+    "url": "https://github.com/UiPath/coder_eval"
+  },
+  "description": "Evaluate and benchmark AI coding agents and Claude Code skills.",
+  "plugins": [
+    {
+      "name": "coder-eval",
+      "source": "./plugins/coder-eval",
+      "description": "Author, run, and analyze coder-eval suites — including whether your Claude Code skills actually trigger.",
+      "category": "testing",
+      "keywords": ["evaluation", "testing", "skills", "benchmark", "ci"]
+    }
+  ]
+}

@@ -34,6 +34,7 @@ and A/B plumbing.
 - [Dialog Mode](https://coder-eval.com/docs/dialog-mode): Evaluate agents in multi-turn conversation via a simulated user
 - [Docker Isolation](https://coder-eval.com/docs/docker-isolation): The container sandbox driver, with custom images
 - [CI Gate & GitHub Action](https://coder-eval.com/docs/ci-gate): Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor
+- [Claude Code Plugin](https://coder-eval.com/docs/plugin): Install the Claude Code plugin — author, run, and analyze suites from inside the agent
 - [Extending Coder Eval](https://coder-eval.com/docs/extending): Author a custom agent, criterion, or model pricing via the plugin SPI
 - [Report Schema](https://coder-eval.com/docs/report-schema): Field-level reference for run.json / variant.json / task.json
 - [How It Compares](https://coder-eval.com/docs/comparison): vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts
@@ -48,6 +49,7 @@ and A/B plumbing.
 - [04 · Writing a task](https://coder-eval.com/docs/tutorials/04-writing-a-task)
 - [05 · Comparing two models](https://coder-eval.com/docs/tutorials/05-comparing-models)
 - [06 · Docker isolation](https://coder-eval.com/docs/tutorials/06-use-docker-isolation)
+- [07 · Driving Coder Eval from Claude Code](https://coder-eval.com/docs/tutorials/07-plugin-in-claude-code)
 <!-- docs-index:end:tutorials -->
 
 ## Source

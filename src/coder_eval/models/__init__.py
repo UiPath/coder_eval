@@ -171,6 +171,8 @@ from coder_eval.models.sandbox import (
 from coder_eval.models.tasks import (
     DEFAULT_SIMULATION_STOP_TOKEN,
     DEFAULT_SIMULATOR_MODEL,
+    NORMALIZED_CRITERION_ALIASES,
+    REMOVED_CRITERION_TYPES,
     CriteriaCheckTiming,
     Dataset,
     PostRunCommand,
@@ -344,6 +346,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TaskDefinition",
     "DEFAULT_SIMULATION_STOP_TOKEN",
     "DEFAULT_SIMULATOR_MODEL",
+    "NORMALIZED_CRITERION_ALIASES",
+    "REMOVED_CRITERION_TYPES",
     "CriteriaCheckTiming",
     "Dataset",
     "PostRunCommand",
