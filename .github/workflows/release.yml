@@ -186,7 +186,7 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Publishing version: $V"
 
-      - name: Regenerate uv.lock, bump action.yml pin, and amend release commit
+      - name: Regenerate uv.lock, bump action.yml + plugin.json pins, and amend release commit
         if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
         env:
           # Passed via env (not interpolated into the script) per GitHub's
@@ -204,10 +204,18 @@ jobs:
           sed -i -E 's/^([[:space:]]*default: ")[0-9]+\.[0-9]+\.[0-9]+("   # <-- kept in sync)/\1'"${VERSION}"'\2/' action.yml
           grep -q "default: \"${VERSION}\"" action.yml || { echo "action.yml version bump failed"; exit 1; }
           git add action.yml
+          # Keep the Claude Code plugin manifest's version in lockstep. `claude
+          # plugin validate --strict` (run in pr-checks) rejects a manifest with
+          # no version, and a stale one strands users on a cached copy.
+          sed -i -E 's/^([[:space:]]*"version": ")[0-9]+\.[0-9]+\.[0-9]+(",)/\1'"${VERSION}"'\2/' \
+            plugins/coder-eval/.claude-plugin/plugin.json
+          grep -q "\"version\": \"${VERSION}\"" plugins/coder-eval/.claude-plugin/plugin.json \
+            || { echo "plugin.json version bump failed"; exit 1; }
+          git add plugins/coder-eval/.claude-plugin/plugin.json
           # Regenerate the lock too; stage it (a no-op if unchanged).
           uv lock
           git add uv.lock
-          # Amend only if action.yml/uv.lock actually changed the tree.
+          # Amend only if action.yml/plugin.json/uv.lock actually changed the tree.
           if ! git diff --cached --quiet; then
             git commit --amend --no-edit
             # Amend replaced the commit the tag points at; re-point it before pushing.
@@ -216,7 +224,11 @@ jobs:
 
       - name: Push release commit and tags
         if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
-        run: git push origin main "v${{ steps.release.outputs.version }}"
+        env:
+          # Passed via env (not interpolated into the script) per GitHub's
+          # injection guidance — matching the step above.
+          VERSION: ${{ steps.release.outputs.version }}
+        run: git push origin main "v${VERSION}"
 
       - name: Move major action tag (vN -> this release)
         if: steps.release.outputs.version != ''

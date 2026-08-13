@@ -5,7 +5,7 @@ description: Generate per-task review.json (summary + tags) for a completed run
 
 ## Context
 
-If `$ARGUMENTS` is empty or blank, default to `runs/latest` and inform the user: "No path provided — reviewing the latest run at `runs/latest`."
+If `$ARGUMENTS` is empty or blank, resolve the run to review per the "No target given" rule in `.claude/shared/run-layout.md` — discover the run root, then take `latest` if that symlink resolves and the newest run directory by name if it does not. Tell the user which run you picked and how you got there before reading anything.
 
 You are producing post-run reviews for a coder_eval evaluation run. The target path is: `$ARGUMENTS`
 

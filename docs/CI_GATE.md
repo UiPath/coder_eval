@@ -30,7 +30,7 @@ repo path — there is no Marketplace install step:
 
 - uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
-    tasks: tests/tasks/**/*.yaml
+    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
     model: claude-sonnet-5
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
@@ -46,7 +46,7 @@ those steps for your own agent's runtime as needed.
 
 | Input | Default | Purpose |
 | --- | --- | --- |
-| `tasks` | *(all `tasks/`)* | Task YAML path(s)/glob passed to `coder-eval run`. |
+| `tasks` | — | Task YAML path(s)/glob(s) passed to `coder-eval run`. Effectively required — see below. |
 | `tags` | — | Only run tasks matching these comma-separated tags (`--tags`). |
 | `model` | — | Override agent model for all tasks (`--model`). |
 | `extra-args` | — | Extra args appended verbatim to `coder-eval run` (`--experiment`, `-D …`, `--exclude-tags`, …). Trusted caller input. |
@@ -56,6 +56,29 @@ those steps for your own agent's runtime as needed.
 | `step-summary` | `true` | Append `run.md` to the GitHub job summary. |
 | `env` | — | Credential/backend passthrough (see below). |
 | `minimum-task-score` | *(off)* | Optional strict per-task score floor (see below). |
+
+#### Writing the `tasks` glob
+
+Always pass `tasks` explicitly, and spell out each depth you actually have:
+
+```yaml
+tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
+```
+
+Three sharp edges make that worth the words:
+
+- **Omitting `tasks` does not run everything.** The value is shell-expanded into the
+  `coder-eval run` argument list, so an empty one invokes the CLI with no paths — and
+  zero-argument discovery resolves against the *installed package's* location, not your
+  checkout. It finds nothing and exits 1.
+- **Do not use `**`.** The expansion happens with `globstar` off, so
+  `tests/tasks/**/*.yaml` collapses to `tests/tasks/*/*.yaml` and **silently drops every
+  top-level task** — the gate goes green having never run them.
+- **Only list depths that match.** `nullglob` is off too, so a pattern matching nothing
+  reaches the CLI verbatim and fails the run with
+  `Error: Task file not found: tests/tasks/*/*/*.yaml`.
+
+An explicit file list is always safe, and is the better choice for a small suite.
 
 ### Outputs
 
@@ -76,7 +99,7 @@ values from repository secrets — never inline a secret literal.
 ```yaml
 - uses: UiPath/coder_eval@v0
   with:
-    tasks: tests/tasks/**/*.yaml
+    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
       API_BACKEND=direct

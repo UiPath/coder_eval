@@ -206,3 +206,111 @@ harness once for all of them.
   preceding `&&`/`||`, NOT on the string's shape — a "contains 'ubuntu'" heuristic
   silently fails on `uipath-ubunut-latest`, the exact transposition typo the rule is
   for. Caught in the multi-model review of PR #86.
+
+## From the 2026-08-04 Claude Code plugin marketplace run
+
+- [ ] **Plugin skills must not name a file that exists only in THIS repo** — the
+  `test_bundled_files_reference_no_repo_paths` denylist (`docs/`, `src/`,
+  `.claude/shared/`, `.claude/commands/`, `uv run`, `../`) deliberately allows
+  `tasks/` and `.claude/skills/`, because those are user-workspace paths the
+  skills legitimately scan and scaffold. So a skill body naming a specific repo
+  file (e.g. `tasks/hello_date.yaml`) would slip past the guard even though an
+  installed plugin is copied to `~/.claude/plugins/cache/` without it. The
+  obvious rule — "extract path-shaped tokens, fail if the path exists at the repo
+  root" — is NOT cheap: `init` legitimately tells users to scan `pyproject.toml`
+  and `package.json`, and `pyproject.toml` exists here, so the heuristic
+  false-positives on correct prose. Needs a token classifier that distinguishes
+  "a file to look for in the user's repo" from "a file in ours", which is a
+  design problem, not a 30-minute one. No skill violates it today (grepped) —
+  caught in the 2026-08-04 claude-code-plugin-marketplace implementation run.
+  *Update (2026-08-04, plugin-audit-p0-p1 run): the guard was renamed and widened
+  from `skills/*/SKILL.md` to every shipped text file under `plugins/coder-eval/`
+  (`PLUGIN_TEXT_FILES`), which closed the coverage half of this gap — a bundled
+  reference now cannot name a repo path either. The token-classifier problem
+  described above is unchanged and still deferred.*
+
+## From 2026-08-04 plugin-audit-p0-p1 run
+
+- [ ] **A skill's advertised `description` must not promise a check that no bundled
+  reference declares.** `lint-tasks` ships a user-facing description claiming it
+  finds "prompts that give away the answer", but that check was declared only in
+  `skills/task/SKILL.md` prose — a file `lint-tasks` never reads — so the two
+  rubric readers had already forked on it before the skill shipped. Caught by a
+  reviewer, not by a test; fixed by promoting it to rubric check 7. A guard would
+  have to map claim-phrases in a description onto declarations in
+  `reference/task-rubric.md`, which is natural-language matching, not a token
+  grep — the phrasings are deliberately different (a description sells, a rubric
+  check instructs), so any cheap version either misses the real case or fails on
+  correct prose. Needs a fixed vocabulary of claim tags shared between the two
+  files to become mechanical, which is a design change rather than a 30-minute
+  rule — caught in the 2026-08-04 plugin-audit-p0-p1 implementation run.
+
+## From the PR #82 review follow-up (2026-08-10)
+
+- [ ] **CE035 — documented `coder-eval` invocations must be executable as written.**
+  `init/SKILL.md` told the agent to run `coder-eval plan <task-directory>` and
+  "iterate until it exits 0", which the CLI rejects outright (`plan` takes files;
+  a directory argument exits 1 with a hint) — an unreachable loop condition
+  shipped in a skill. A rule would scan inline-code spans and fenced `bash` blocks
+  across `README.md`, `docs/**/*.md` and `plugins/**/*.md`, assert the subcommand
+  exists in the Typer app, and — the harder half — that the *argument shape* is
+  one the command accepts. The subcommand check is cheap and would not have caught
+  this; the argument-shape check is what matters and needs either a real
+  invocation (see the live-smoke candidate below) or a per-command arity model
+  that duplicates the CLI signature. Deferred on that split — caught in the PR #82
+  review, fixed by hand in `init/SKILL.md`.
+
+- [ ] **Documented-CLI live smoke.** The behavioural counterpart to CE035: in a
+  `-m live`/`-m slow` test, materialize a fixture repo with one task YAML and
+  execute every fenced `coder-eval …` command extracted from the shipped skills
+  and docs, asserting exit 0 (or an explicitly-expected non-zero). This is the
+  only form that proves argument shape rather than command existence. Not
+  statically reachable, hence separate from CE035 — proposed in the PR #82 review.
+
+## From the 2026-08-11 plugin generic-adopter run
+
+- [ ] **`working-directory` input on `action.yml`.** A repository whose eval tree is
+  nested (`tests/tasks/…`) has no way to tell the composite action to run from that
+  subdirectory, so every path in every input has to be spelled from the repo root. The
+  fix is a new input, and that is why it is deferred rather than cheap: `action.yml`'s
+  inputs are a **published API** — CE026 clause 4 asserts every `with:` key across four
+  onboarding surfaces is a real input, so adding one means updating those surfaces (the
+  `ci` skill among them, whose output lands in other people's repositories), and it
+  carries action tag/release implications. Out of scope for the plan that surfaced it,
+  which worked around it in the `ci` skill's prose instead.
+
+- [ ] **`shopt -s globstar` (or quoting `$CE_TASKS`) in `action.yml`'s run step.** The
+  real fix for a degradation the `ci` skill currently works around in prose:
+  `args+=($CE_TASKS)` is deliberately unquoted so a caller can pass several patterns, but
+  with `globstar` off `a/**/*.yaml` expands to `a/*/*.yaml` and **silently drops every
+  top-level task** — reproduced with `a/top.yaml` + `a/sub/deep.yaml`, which yields
+  `deep.yaml` alone. `nullglob` is off too, so an unmatched pattern reaches the CLI
+  literally and exits 1 (`Error: Task file not found: …`). One line in the action fixes
+  the first half; the second half is arguably correct-as-is (failing loudly beats
+  silently running nothing). Deferred alongside `working-directory` because both change
+  the action's observable contract and belong in one considered change.
+
+## From the final review of the 2026-08-11 plugin generic-adopter run
+
+Two **pre-existing `action.yml` defects** surfaced by an external reviewer during that
+run's final review. Neither is caused by the change, and `action.yml` was explicitly out
+of that plan's scope, so both are recorded here rather than fixed in passing. They belong
+with the two `action.yml` items above — one considered change to the action's contract.
+
+- [ ] **The score gate silently drops a malformed `weighted_score`.** `action.yml`'s
+  minimum-task-score step filters `task_results` rows down to usable floats; a row whose
+  score is a string, a bool, `NaN`/`inf`, or out of `[0, 1]` is omitted from the
+  comparison rather than failing it. So a `run.json` carrying one corrupt row **and** one
+  valid row above the floor gates **green**, which contradicts the fail-closed intent
+  stated in that step's own comment. The fix is to error on a present-but-invalid score
+  while still skipping `None` (errored tasks are already covered by coder-eval's exit
+  code). Wants a test over a synthetic `run.json` per bad-value class, which is why it is
+  not a five-minute change.
+
+- [ ] **`tasks:` is declared optional but omitting it cannot work.** The input defaults to
+  empty and the run step then appends no path arguments, so `coder-eval run` is invoked
+  bare — and zero-argument discovery resolves against the *installed package's* location,
+  finds nothing, and exits 1. The input is therefore effectively required, and the action
+  advertises otherwise. Either mark it `required: true` (a published-input contract change,
+  see the `working-directory` item) or fail with a clear message instead of an obscure
+  discovery error.

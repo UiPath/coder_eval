@@ -1,4 +1,3 @@
-<!-- Mirrored verbatim at plugins/coder-eval/reference/run-layout.md — update both together. -->
 # Run layout
 
 The on-disk structure of a coder_eval evaluation run — the factual contract every

@@ -1,14 +1,15 @@
 """CE026 — the GitHub Action's onboarding surfaces must stay truthful and self-sufficient.
 
-Three doc surfaces introduce the same composite Action (``README.md``,
-``docs/CI_GATE.md``, ``docs/tutorials/02-ci-pipeline.md``) and each was hand-maintained,
-so they drifted. The motivating bug: ``docs/CI_GATE.md`` claimed "there is nothing to
+Several surfaces introduce the same composite Action — ``README.md``,
+``docs/CI_GATE.md``, ``docs/tutorials/02-ci-pipeline.md``, and now the Claude Code
+plugin's ``ci`` skill, whose emitted workflow users copy verbatim — and each was
+hand-maintained, so they drifted. The motivating bug: ``docs/CI_GATE.md`` claimed "there is nothing to
 install" and offered a copy-pasteable ``uses:`` step with no agent runtime — the action
 is agent-agnostic, so an integrator who copied it got a run that dies on a missing
 ``claude`` binary. The correcting paragraph was 11 lines away; the tutorial's snippet
 showed the prerequisite steps; the reference page's did not.
 
-Three clauses, all mechanical:
+Four clauses, all mechanical:
 
 1. **Prerequisite parity.** The *first* fenced ``yaml`` block on a doc page that
    references the action (``uses: <owner>/coder_eval@…``) is the page's quickstart, so
@@ -22,6 +23,11 @@ Three clauses, all mechanical:
 3. **Marketplace slug parity.** Every ``github.com/marketplace/actions/<slug>`` link and
    the shields badge label must match ``action.yml``'s ``name:`` — the listing title,
    which a rename would silently 404 in four places at once.
+4. **Input parity.** Every ``with:`` key on a snippet's ``uses: <owner>/coder_eval@…``
+   step must be a real ``action.yml`` input. GitHub does not fail a workflow on an
+   unknown input, so a renamed input leaves every snippet promising something the step
+   no longer does — silently, and worst of all in the ``ci`` skill, whose output lands
+   in *other people's* repositories where our CI can never see it.
 
 Like CE027-CE031 this is deliberately NOT a ``BaseRule`` in ``tests/lint/runner.py``:
 that runner is AST-only over ``.py`` files, whereas this rule reasons over Markdown and
@@ -31,6 +37,7 @@ YAML. It is wired as ``tests/test_custom_lint.py::TestCE026ActionDocSurfaces``.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +71,8 @@ CLAIM_QUALIFIERS = ("marketplace", "pypi", "npm", "pip install")
 CLAIM_PROXIMITY_LINES = 15
 
 _ACTION_USES = re.compile(r"uses:\s*[\w.-]+/coder_eval@")
+# The same reference as a parsed YAML *value* (``uses: UiPath/coder_eval@v0`` -> the value).
+_ACTION_REF = re.compile(r"^[\w.-]+/coder_eval@")
 _MARKETPLACE_URL = re.compile(r"github\.com/marketplace/actions/([\w.-]+)")
 _SHIELDS_MARKETPLACE = re.compile(r"img\.shields\.io/badge/marketplace-([^-\s)]+)-")
 
@@ -81,9 +90,11 @@ class Finding:
 
 
 def default_doc_paths(repo_root: Path) -> list[Path]:
-    """Markdown surfaces that may introduce the Action: README plus every docs page."""
+    """Markdown surfaces that may introduce the Action: README, every docs page, and
+    every plugin markdown file (the `ci` skill emits an Action snippet users copy verbatim)."""
     paths = [repo_root / "README.md"]
     paths.extend(sorted(p for p in (repo_root / "docs").rglob("*.md") if p.is_file()))
+    paths.extend(sorted(p for p in (repo_root / "plugins").rglob("*.md") if p.is_file()))
     return [p for p in paths if p.is_file()]
 
 
@@ -206,6 +217,65 @@ def find_slug_mismatches(paths: list[Path], listing_name: str) -> list[Finding]:
                             f"Marketplace badge label {match.group(1)!r} displays as {shown!r}, not "
                             f"action.yml `name: {listing_name}` (shields renders a single `_` as a "
                             "space, so the doubled form is required)",
+                        )
+                    )
+    return findings
+
+
+def action_input_names(action_yml: Path) -> set[str]:
+    """The input names ``action.yml`` actually declares."""
+    data = yaml.safe_load(action_yml.read_text(encoding="utf-8"))
+    inputs = data.get("inputs")
+    if not isinstance(inputs, dict) or not inputs:
+        raise AssertionError(f"{action_yml} declares no usable `inputs:` block")
+    return set(inputs)
+
+
+def _iter_action_steps(node: object) -> Iterator[dict]:
+    """Every mapping in a parsed YAML block that invokes the composite Action.
+
+    Walks to any depth so it finds the step whether the snippet is a whole
+    workflow (``jobs.<id>.steps``), a bare list of steps, or one step alone —
+    all three shapes appear across the doc pages.
+    """
+    if isinstance(node, dict):
+        uses = node.get("uses")
+        if isinstance(uses, str) and _ACTION_REF.match(uses.strip()):
+            yield node
+        for value in node.values():
+            yield from _iter_action_steps(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_action_steps(item)
+
+
+def find_unknown_action_inputs(paths: list[Path], input_names: set[str]) -> list[Finding]:
+    """Flag a snippet passing a ``with:`` key that ``action.yml`` does not declare."""
+    findings: list[Finding] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        if not _ACTION_USES.search(text):
+            continue
+        for block in extract_yaml_blocks(path, text):
+            try:
+                parsed = yaml.safe_load(block.text)
+            except yaml.YAMLError:
+                # Doc snippets are often deliberate fragments; an unparseable one
+                # is not this clause's business (CE029 owns example validity).
+                continue
+            for step in _iter_action_steps(parsed):
+                with_block = step.get("with")
+                if not isinstance(with_block, dict):
+                    continue
+                for key in sorted(k for k in with_block if k not in input_names):
+                    findings.append(
+                        Finding(
+                            path,
+                            block.line,
+                            f"snippet passes `with: {key}:`, which action.yml does not declare "
+                            f"(inputs: {', '.join(sorted(input_names))}). GitHub does not fail a "
+                            "workflow on an unknown input, so a reader who copies this gets a step "
+                            "that silently ignores it",
                         )
                     )
     return findings
