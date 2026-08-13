@@ -1712,8 +1712,128 @@ class TestPluginArtifacts:
             # A skill that cannot be model-invoked still has an optimizable body — routing
             # to the execution track rather than stopping is the point of the two-track split.
             ("route to the execution track", "disable-model-invocation must route to the body track, not hard-stop"),
+            # The whole execution track is predicated on this. suite.json is written only for
+            # tasks the dataset expander touched (rollups group on suite_id, which nothing
+            # else sets) and --split filters dataset ROWS — so a directory of separate task
+            # files gives Stage A no rollup to rank and makes Stage C's --split test silently
+            # re-run the train rows. "One task per scenario" is the intuitive shape and it is
+            # the broken one.
+            (
+                "ONE dataset-backed task",
+                "the outcome suite must be one dataset-backed task or Stage A has no rollup and Stage C re-runs train",
+            ),
+            (
+                "silently re-runs the train rows",
+                "the consequence that makes the dataset requirement non-optional, not a preference",
+            ),
+            # expand_dataset copies the SAME success_criteria onto every row, substituting
+            # ${row.*} into every string leaf. Per-scenario assertions are therefore
+            # parameterized by row fields; writing different criteria per scenario is
+            # unrepresentable, and discovering that after authoring the rows is expensive.
+            (
+                "Criteria are copied to every row",
+                "per-scenario assertions must be parameterized by row fields, never written per scenario",
+            ),
+            # Substitution reaches initial_prompt and success_criteria ONLY, never
+            # sandbox.template_sources — so a suite has exactly one fixture and scenario
+            # variation has to live in the prompt.
+            (
+                "Every row shares ONE sandbox fixture",
+                "row substitution never reaches sandbox:, so rows needing different repo shapes are two suites",
+            ),
+            (
+                "preconditions the skill under test checks",
+                "a fixture that fails the skill's own hard stop ties every arm at zero and reads as bad candidates",
+            ),
+            # There is no --variant flag, so the arm set changes by AUTHORING A NEW FILE.
+            # Re-passing the triage file at Stage B/C costs (N+1)/2x the budgeted runs and
+            # renders no paired block at all, with nothing in the output announcing it.
+            (
+                "no `--variant` filter",
+                "the arm set can only be changed by authoring a per-stage experiment file",
+            ),
+            (
+                "no `## Paired Comparison` block at all",
+                "the cost of re-passing the triage file at Stage B/C — more spend, strictly less evidence",
+            ),
+            (
+                "round<N>-triage.yaml",
+                "Stage A's own experiment file — the per-stage naming Steps 9/10 and the ledger depend on",
+            ),
+            (
+                "round<N>-gate.yaml",
+                "Stage B's own experiment file, which on the execution track must hold exactly two variants",
+            ),
+            (
+                "round<N>-confirm.yaml",
+                "Stage C's own experiment file — reusing the gate or triage file is the documented mistake",
+            ),
+            (
+                "because that block fires only for exactly two variants",
+                "the REASON the per-stage files matter: paired_comparison's exactly-two precondition",
+            ),
+            # The P1-5 mitigation: the skill supplies the artifact rather than relaying
+            # requirements to /coder-eval:task, which come back half-applied.
+            (
+                "reference/templates/outcome.yaml",
+                "the execution track must hand over the bundled outcome template, not point vaguely at one",
+            ),
+            (
+                "Hand over the template itself",
+                "relayed requirements come back half-applied and the user pays for a second round trip",
+            ),
+            # Step 5: the common path is that the suite is ALREADY labelled, so the
+            # unlabelled branches are the exception rather than the expected work.
+            (
+                "arrives labelled",
+                "a check-skill suite already carries splits — the labelling branches are for hand-authored ones",
+            ),
+            # A body naming a tool outside the allowlist fails identically in every arm and
+            # reads as "the body is bad". The activation track cannot have this confound.
+            (
+                "tool policy constant across arms",
+                "an unpinned tool policy makes a body that names a disallowed tool look like a bad body",
+            ),
+            # Per-row cost brake. Without it a runaway row eats a whole stage's budget.
+            ("run_limits.max_usd", "the per-row cost brake on an outcome suite, where every row is a full task run"),
+            # The inverse of the activation guidance. An activation suite caps max_turns at 2
+            # deliberately; carried over, an outcome row is truncated and scores as a body
+            # failure — a fabricated result, since the body was never allowed to finish.
+            # Anchored on the plain-prose consequence rather than the emphasized phrase: a
+            # sensor that depends on Markdown bold breaks on a rewrap without the
+            # instruction having been touched, which trains readers to distrust it.
+            (
+                "which is a fabricated result",
+                "carrying an activation suite's tight caps to an outcome suite fabricates body failures",
+            ),
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
+
+        # The paired-diff sign rule has to appear in BOTH gates that read the block —
+        # Stage B (execution) and Stage C — because each is a separate decision point and a
+        # reader lands on one or the other. Counted rather than `in text`: a presence check
+        # stays green when one of the two is deleted, which is exactly the edit to catch.
+        # The sign follows VARIANT DECLARATION ORDER (reports_stats builds vid_a/vid_b from
+        # variant_ids[0]/[1]), so with `incumbent` declared first a candidate win is NEGATIVE
+        # — and a reversed reading promotes the arm that lost, with every later number in the
+        # ledger corroborating it.
+        for phrase, expected in (("variant declaration order", 2), ("a candidate win reads negative", 2)):
+            assert text.count(phrase) >= expected, (
+                f"optimize-skill states {phrase!r} {text.count(phrase)} time(s); both the execution "
+                f"Stage B gate and Stage C must carry the paired-diff sign rule, so it needs {expected}"
+            )
+
+        # The cost table's symbols must match the prose that defines them. It shipped
+        # reading `M_tune`/`M_holdout` after the split values were renamed to train/test —
+        # invisible to every sensor above, because the rename deleted no instruction, and
+        # the table is the surface a reader budgets from.
+        for stale in ("M_tune", "M_holdout"):
+            assert stale not in text, (
+                f"optimize-skill's cost table still uses {stale!r} — the splits are `train`/`test`, "
+                "so the table names symbols the surrounding prose never defines"
+            )
+        for symbol in ("M_train", "M_test"):
+            assert symbol in text, f"optimize-skill's cost table lost {symbol!r}"
 
         # The two gates use DIFFERENT machinery, on purpose, and the reason is subtle enough
         # that a well-meaning edit would unify them. Activation compares F1, which the pooled

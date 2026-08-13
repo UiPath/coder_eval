@@ -148,19 +148,70 @@ coarse to see the effect.
 
 An activation suite is the **wrong instrument** here and must not be reused: `skill_triggered`
 scores engagement, and a skill can engage perfectly while giving terrible instructions. What
-the execution track needs is an ordinary coder-eval suite — one task per realistic scenario,
-scored on the artifacts and commands the agent actually produced.
+the execution track needs is an ordinary coder-eval suite, scored on the artifacts and
+commands the agent actually produced.
+
+**The outcome suite is ONE dataset-backed task, one row per scenario.** Not one task file
+per scenario. This is a hard constraint rather than a style preference, and violating it
+produces a green run that measures nothing:
+
+- `suite.json` — the rollup every stage below ranks and gates on — is written **only for
+  tasks the dataset expander touched.** Rollups group on `suite_id`, and nothing but the
+  expander sets it. A directory of separate task files therefore produces **no rollup at
+  all**, and Stage A has nothing to rank.
+- `--split` filters **dataset rows**. A task carrying no `dataset:` block is untouched by it,
+  so **Stage C's `--split test` silently re-runs the train rows** and reports a confirmation
+  that confirmed nothing — at full price, with no error anywhere.
+
+So the suite carries a `dataset:` block naming a JSONL in `paths:` plus
+`split_field: "split"`, and each row is one scenario. Start from
+`${CLAUDE_PLUGIN_ROOT}/reference/templates/outcome.yaml`, the worked example of everything
+in this section (Step 4 already points at `reference/criteria.md` for the criterion types;
+this is a second reference on the same step, not a replacement).
 
 Glob the eval tree for tasks that exercise this skill's job.
 
 **No suite → stop and point at `/coder-eval:task`.** Do not author one here, for the same
 reason the activation track hands row design to `/coder-eval:check-skill` — a suite written
-by the thing it will judge is fitted to it. Hand back with two requirements attached, or the
-suite comes back unusable and the user pays for a second round trip: the rows must **carry
-`train`/`test` split labels**, and each must **invoke the skill by slash command** (below).
-Neither is `/coder-eval:task`'s default.
+by the thing it will judge is fitted to it. **Hand over the template itself**, not a
+description of its requirements: copy `${CLAUDE_PLUGIN_ROOT}/reference/templates/outcome.yaml`
+and its rows file to where the user wants the suite, and say that is the shape to fill in.
+Relayed requirements come back half-applied and the user pays for a second round trip; the
+two that go missing first are that the rows must **carry `train`/`test` split labels** and
+that each must **invoke the skill by slash command** (below). Neither is
+`/coder-eval:task`'s default.
 
-Three requirements specific to this track:
+**Two consequences of being dataset-backed, and both decide how the rows are written.**
+
+- **Criteria are copied to every row**, with `${row.<field>}` substituted into every string
+  leaf. There is no per-scenario criterion list. Heterogeneous assertions are therefore
+  expressed by **parameterizing one criterion with row fields** — never by writing different
+  criteria per scenario:
+
+  ```yaml
+  success_criteria:
+    - type: "file_check"
+      description: "the artifact row ${row.id} asked for"
+      path: "${row.expected_path}"
+      includes: ["${row.expected_snippet}"]
+  ```
+
+  Where two scenarios cannot share a criterion *shape*, that is two suites, gated separately.
+
+- **Every row shares ONE sandbox fixture.** Substitution reaches `initial_prompt` and
+  `success_criteria` only; it never reaches `sandbox.template_sources`, which is a task-level
+  field. Every scenario in a suite therefore starts from the identical repository and
+  **variation lives in the prompt**. A suite whose rows need different repo shapes ("a
+  workflow already exists" vs. "there is none") is two suites, not one.
+
+  The corollary is the one that wastes a whole round: **the fixture must already satisfy
+  whatever preconditions the skill under test checks before it will act at all.** A skill
+  that stops on a missing directory scores zero on every row of **every** arm — which ties
+  the round at the floor while reading exactly like "all my candidates are bad". Read the
+  body for its own hard stops and build the fixture to clear them, before Stage A is paid
+  for, not after.
+
+Five requirements specific to this track:
 
 - **Invoke the skill from the prompt.** This is the exact inverse of the activation rule,
   and it matters: there, naming the skill tests obedience instead of activation and is
@@ -175,8 +226,17 @@ Three requirements specific to this track:
   initial_prompt: |
     /coder-eval:ci
 
-    This repo has tasks under evals/ and no .github/ directory yet. Wire up CI.
+    This repo has tasks under evals/ and a .github/workflows/ holding only a lint
+    workflow. Add a workflow at .github/workflows/evals.yml that gates pull
+    requests on the eval score.
   ```
+
+  Note what that prompt does and does not give away. It names the **output path**, which
+  removes the agent's filename choice from the measurement — otherwise a criterion asserting
+  on a path cannot know which file to read — while leaking nothing about the workflow
+  *content* being graded. And it describes a repository that **already has** `.github/`,
+  because `ci` stops outright on one that does not: the fixture rule above is not abstract,
+  and this is what obeying it looks like in a prompt.
 
   This is the **only** mechanism that works for a skill with
   `disable-model-invocation: true`, and asking in prose does not substitute: such a skill is
@@ -197,10 +257,42 @@ Three requirements specific to this track:
   previously passed, and it will do so silently unless a row covers it. This is the biggest
   practical difference from the activation track, where the confusion matrix shows regressions
   for free.
+- **Hold the agent's tool policy constant across arms — and wide enough for every arm.**
+  Declare `allowed_tools` and `permission_mode` once, under the experiment's
+  `defaults: agent:` block (they are agent config, not top-level `defaults:` keys, which is
+  `extra="forbid"`), so no arm can differ in what it was permitted to do.
+
+  The subtle half is the *width*, and it bites in one direction only. Omitting
+  `allowed_tools` allows everything, so the risk is not laxness — it is an allowlist drawn
+  around the **incumbent's** tools. Candidates differ in their bodies, and a hypothesis is
+  often precisely *"tell it to reach for a different tool"*; that candidate then fails on a
+  policy that forbids its own fix, and the arm is scored on the prohibition rather than on
+  the instruction. So take the union of the tools **every** arm's body names, not the
+  incumbent's set. Where a body names a tool no arm may have, that failure is identical
+  everywhere: it does not bias the comparison, but it does depress every arm toward the
+  floor, and a round pinned at the floor reads as "all my candidates are bad".
+
+  The activation track cannot have any of this — a one-turn probe calls no tools.
 
 **Sizing and cost.** Every row is a full task run — minutes and real tokens, not the
 seconds an activation probe costs. Expect an order of magnitude more spend per row, so
 prefer fewer, richer scenarios over many thin ones, and state the projected count early.
+
+**Name the brake, per row.** Set `run_limits.max_usd` on the suite. It is a **per-row** cap —
+each expanded row is its own task with its own budget — so a 12-row suite at `0.50` bounds
+one arm at about $6 *per replicate*, which is $18 in a `--repeats 3` stage. Multiply it out
+against the cost table below rather than reading the per-arm figure as a stage total. The
+check runs after each turn is billed, so a row can overshoot by one turn; and it is skipped
+entirely when no turn reports a cost, so confirm the run recorded costs before treating the
+cap as enforced. Pair it with realistic `max_turns` and `task_timeout`.
+
+**And state the inverse of the activation guidance explicitly, because carrying it over is
+the intuitive mistake.** An activation suite's caps are deliberately tight — activation is
+decided in the first assistant turn, so those suites typically cap `max_turns` at 2 and buy
+signal by doing so. An outcome row needs a whole task's budget. A row truncated by an
+activation-sized cap scores as a body failure, which is a fabricated result: the body was
+never allowed to finish. Set outcome caps generously enough that only a genuinely runaway row
+hits them.
 
 ## Step 5 — Split the rows
 
@@ -212,7 +304,10 @@ Why it is worth doing at all: with 3–5 candidates scored on the same rows, the
 partly whichever one happened to suit those rows. The test split is what separates a real
 gain from that.
 
-**Rows already labelled** → carry on.
+**Rows already labelled** → carry on. This is the common path, not the exception: a suite
+generated by `/coder-eval:check-skill` arrives labelled, because the template it copies ships
+a `split` on every row plus `dataset.split_field`. The branches below are for hand-authored
+suites and for suites that predate the split field.
 
 **Rows unlabelled** → add `split_field: "split"` to the `dataset:` block and write a
 `"split"` into every row, then **show the user the resulting counts and let them object**.
@@ -411,6 +506,29 @@ variants:
 `experiment_id` is required and must be kebab-case — an experiment without one fails to
 load. Name it for the skill and the round.
 
+**Write one experiment file per stage, because there is no `--variant` filter.** Nothing on
+`coder-eval run` selects a subset of an experiment's variants, so the only way to change the
+arm set between stages is to **author another file**. Write three per round, beside the
+snapshots:
+
+- `round<N>-triage.yaml` — incumbent + every candidate (Stage A).
+- `round<N>-gate.yaml` — incumbent + the survivors; on the execution track that means
+  **exactly two** variants (Stage B).
+- `round<N>-confirm.yaml` — the same **exactly two** variants (Stage C).
+
+Authoring one is a single edit — copy the triage file and delete the variants that did not
+survive — so the alternative is not cheaper, it is just wrong. Re-passing the triage file at
+Stage B or C on the execution track costs `(N+1)/2` times the runs those stages were budgeted
+for **and** renders **no `## Paired Comparison` block at all**, because that block fires only
+for exactly two variants. The stage then produces a bigger bill and strictly less evidence,
+with nothing in the output announcing it.
+
+**Pass these with an explicit path, not a bare name.** `-e` takes the value as a path first
+and only falls back to a bare-name lookup, and that fallback searches an `experiments/`
+directory next to coder-eval's own source — not the user's project, and not anywhere near
+the round's snapshots. It is also absent entirely from a pip-installed coder-eval. The
+failure is loud rather than silent, but a path costs nothing and always works.
+
 Five facts that decide whether this measures anything:
 
 - A variant's `plugins` block **replaces** the task's rather than stacking with it. That is
@@ -441,10 +559,10 @@ State the projected run count before each stage and ask. With N candidates, S su
 
 | Spend | Runs |
 | --- | --- |
-| Step 6 baseline | `M_tune` |
-| Stage A — triage | `(N+1) × M_tune` |
-| Stage B — gate | `3 × (S+1) × M_tune` |
-| Stage C — confirm | `6 × M_holdout` |
+| Step 6 baseline | `M_train` |
+| Stage A — triage | `(N+1) × M_train` |
+| Stage B — gate | `3 × (S+1) × M_train` |
+| Stage C — confirm | `6 × M_test` |
 
 **The baseline is a real line item, and it is not redundant with Stage A's incumbent arm.**
 It looks like the same measurement on the same rows, and that is precisely its value: the
@@ -460,7 +578,8 @@ run of zero rows.
 
 ### Stage A — triage (cheap)
 
-All candidates plus the incumbent, **one** invocation, `--split train`:
+All candidates plus the incumbent — that is `round<N>-triage.yaml` — in **one** invocation,
+`--split train`:
 
 ```bash
 coder-eval run <suite> -e <experiment> --split train
@@ -558,7 +677,16 @@ a 95% confidence interval, Cohen's *d* and a paired *t*-test — tested code ins
 arithmetic done by hand.
 
 That constrains the shape: it fires only for exactly two variants, so gate one candidate at
-a time. With expensive rows that is the right trade anyway — Stage A already ranked them.
+a time, in `round<N>-gate.yaml`. With expensive rows that is the right trade anyway — Stage A
+already ranked them.
+
+**Read the sign off the header, and never state a direction without it.** The block renders
+as `**Paired mean diff (<first declared variant> - <second declared variant>)**`, subtracting
+in **variant declaration order** — not incumbent-minus-candidate, and not
+better-minus-worse. With `incumbent` declared first, as in the example above, **a candidate
+win reads negative**. Quote the header verbatim next to the number, and resolve the direction
+from it every time rather than from memory; a reversed reading promotes the arm that lost,
+and every subsequent number in the ledger corroborates it.
 
 Promote only when all of these hold:
 
@@ -578,13 +706,23 @@ behavioural change, and the numbers behind it are the whole argument.
 ### Stage C — confirm on the test split
 
 Only the best candidate that already passed Stage B, as a **two-variant** experiment
-(incumbent + that candidate) at `--split test --repeats 3`.
+(incumbent + that candidate) at `--split test --repeats 3`. That is `round<N>-confirm.yaml`,
+a third file — re-passing the triage file here is the mistake Step 9 describes, and it costs
+more while producing no paired block at all.
 
 Here `--repeats` is correct and required. The experiment reporter renders a
 `## Paired Comparison` block in `experiment.md` — mean difference, 95% confidence interval,
 Cohen's *d*, and a paired-*t* p-value — but it fires **only** for exactly two variants, and
 it averages replicates per row *before* pairing, which is precisely what pooling breaks in
 `suite.json` and exactly what is wanted here.
+
+**The same sign rule applies, and it is easiest to get wrong here** — this is the number the
+promotion is reported on. It is restated rather than cross-referenced because each stage is
+read on its own, and a lint sensor requires it in both. The header subtracts in
+**variant declaration order**
+(`<first declared> - <second declared>`), so with `incumbent` declared first **a candidate
+win reads negative**. Quote the header verbatim beside the figure and read the direction off
+it, every time.
 
 Report that block verbatim alongside the test F1s, and state its limit honestly: it
 pairs per-row `weighted_score` — row-level correctness, an accuracy-flavoured quantity —
