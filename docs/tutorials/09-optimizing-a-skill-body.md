@@ -294,6 +294,20 @@ the excerpt omits):
 
 That is the same skill, on the same suite, that scored 0.333 everywhere one setting earlier.
 
+> **One caveat on that ceiling, found in review after the run.** Four of the ten scenarios
+> stated the behaviour they graded — one asked for task paths "listed explicitly rather than
+> with a recursive wildcard" and then scored the explicit glob; another named the skill-source
+> requirement and then scored it being passed through. A prompt that supplies the answer means
+> an arm whose body *deleted* that rule would still have scored 1.0. The rows have since been
+> tightened to describe the situation and leave the method to the body, but the figures above
+> come from the earlier phrasing. That makes the ceiling reading **softer**, not firmer: some
+> of what looks like a well-followed body is the prompt doing the work. It does not change the
+> no-go — engagement alone settled that — but a future round on this suite should expect a
+> lower baseline than the table shows.
+>
+> The lesson generalizes past this run: **scenarios describe the user's situation; the body is
+> what should supply the method.** A row that names the thing it scores is measuring the prompt.
+
 ### The number this round never got to read
 
 Had the baseline been trustworthy, the gate would have been a two-variant experiment at

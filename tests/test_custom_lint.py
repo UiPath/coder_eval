@@ -1286,9 +1286,11 @@ REPO_PATH_TOKENS = ("docs/", "src/", ".claude/shared/", ".claude/commands/", "uv
 def _normalized(path: Path) -> str:
     """A surface's text with all whitespace collapsed to single spaces.
 
-    Every prose sensor in this file must read its surface through here. These documents
-    are hard-wrapped, so a phrase the sensor looks for routinely straddles a newline —
-    and a raw substring check then passes on exactly the text it exists to catch.
+    Prefer this for any prose sensor that substring-matches a multi-word phrase. These
+    documents are hard-wrapped, so such a phrase routinely straddles a newline — and a raw
+    substring check then passes on exactly the text it exists to catch. (Several older
+    sensors still inline the same idiom; converting them is safe but was out of scope when
+    this was extracted, so this is a preference the file does not yet uniformly follow.)
 
     That is not hypothetical: `docs/PLUGIN.md` read ``All six\\n  skills read it`` while
     the plugin shipped seven, and the count sensor stayed green through 91 lint tests
@@ -1342,7 +1344,12 @@ def _wrong_skill_count_offenders(surfaces: dict[str, Path], *, count: int, auto:
 
 
 def _outcome_metric_vocabulary() -> set[str]:
-    """Every metric name a `suite_thresholds` on an outcome suite may legitimately gate on.
+    """The metric names available to a `suite_thresholds` gating a DEFAULT-aggregate criterion.
+
+    Scope note: derived from `file_check`, which inherits `BaseCriterion.aggregate`'s summary
+    stats. A criterion with a richer aggregate (`skill_triggered` emits `recall.yes`,
+    `f1.yes`, ...) has a LARGER vocabulary, so callers must not treat this as the universal
+    set — extend it per criterion type before asserting against one of those.
 
     Derived from TWO real sources, because they are genuinely separate and checking only
     the first fails on the very template this repo ships:
@@ -1699,7 +1706,13 @@ class TestPluginArtifacts:
         # than `tasks/` (discovery is exercised, not a lucky guess) and at two depths, so a
         # workflow using a `**` glob — which degrades to one level with globstar off — is
         # detectably wrong rather than indistinguishable from a correct one.
-        depths = {p.relative_to(fixture).parent.as_posix() for p in (fixture / "evals").rglob("*.yaml")}
+        # TASK depths only. Counting `evals/experiments/` would let this pass with
+        # `evals/suite/json-shape.yaml` — the file the assertion is entirely about — deleted.
+        depths = {
+            p.relative_to(fixture).parent.as_posix()
+            for p in (fixture / "evals").rglob("*.yaml")
+            if "experiments" not in p.parts
+        }
         assert len(depths) >= 2, (
             f"the fixture's eval tree sits at a single depth ({sorted(depths)}). `ci` forbids "
             "`**` in the tasks: input because globstar is off and it silently drops a level — "
@@ -2374,10 +2387,11 @@ class TestPluginArtifacts:
             "shown, so the warning is what stops the next reader collapsing them"
         )
 
-    def test_tutorial_09_keeps_the_two_claims_a_reader_most_needs(self):
-        # Tutorial 09 reports a NULL result, and the two facts that make it useful are the
-        # ones an editor tightening a long page would trim first: the suite shape, and why
-        # the round stopped. Same deletion-sensor shape as the optimize-skill guard above.
+    def test_tutorial_09_keeps_the_claims_a_reader_most_needs(self):
+        # Tutorial 09 reports a NULL result, and the facts that make it useful are the ones
+        # an editor tightening a long page would trim first: the suite's shape, the setting
+        # that decided the outcome, why the round stopped, and the denominator rule. Same
+        # deletion-sensor shape as the optimize-skill guard above.
         text = _normalized(self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md")
 
         for token, why in (

@@ -27,8 +27,9 @@ description: "Given that `ci` fired, does it emit a workflow that would actually
 tags: [outcome, skills]
 
 agent:
-  # The discriminator is required for `setting_sources` and `allowed_tools` to be in
-  # schema — they are claude-code fields, not fields on the shared agent base.
+  # The discriminator is required for `setting_sources` to be in schema — that one IS a
+  # claude-code field. `allowed_tools`, `disallowed_tools` and `permission_mode` live on the
+  # shared agent base and would resolve without it.
   type: "claude-code"
   plugins:
     - type: "local"
@@ -37,14 +38,17 @@ agent:
   # would be both expensive and a confound.
   setting_sources: []
   # The tools `ci`'s body actually uses: it globs and reads the eval tree, greps the
-  # workflows, then writes one workflow file. Keep this list byte-identical across every
-  # arm of an A/B — declare it in the experiment's `defaults: agent:` block there — and
-  # size it to the union of what every arm's body names, or a candidate whose hypothesis
-  # is "reach for a different tool" gets scored on the prohibition instead of the
-  # instruction.
+  # workflows, then writes one workflow file. Declared here on the suite, so every arm of
+  # an A/B inherits one policy: these fields merge by REPLACE and the task layer outranks
+  # experiment defaults, so setting them in an experiment's `defaults:` instead would be
+  # silently overridden by this block. Size the list to the union of what every arm's body
+  # names, or a candidate whose hypothesis is "reach for a different tool" gets scored on
+  # the prohibition instead of the instruction.
   #
-  # `Skill` is listed because it is the mechanism under test: the prompt's `/coder-eval:ci`
-  # is delivered as a Skill tool call, and that call is what `skill_triggered` observes.
+  # `Skill` is listed for documentation rather than effect: the prompt's `/coder-eval:ci`
+  # arrives as a Skill tool call, and that call is what `skill_triggered` observes — but
+  # the tool is available whether or not it is listed, so omitting it changes nothing. It
+  # is named so a reader can see what the mechanism under test actually needs.
   allowed_tools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "Skill"]
   # Sub-agent delegation has to be off, and this is measurement hygiene rather than
   # preference. Left available, the model sometimes answers `/coder-eval:ci` by dispatching
@@ -91,6 +95,11 @@ run_limits:
 # guess), at two depths (so a `**` glob is detectably wrong), with one task interpolating
 # $SKILL_SOURCE_PATH, one experiment, and a version pin — each making one load-bearing
 # instruction in the body observable.
+#
+# The fixture lives under `templates/`, NOT beside this file, and that is deliberate:
+# anything matching `tasks/**/*.yaml` is loaded as a real TaskDefinition by CE034, CE035,
+# test_tags and test_yaml_migration — and this fixture must contain an experiment file,
+# which is not a valid task. A fixture placed beside its suite would break all four.
 sandbox:
   template_sources:
     - type: "template_dir"

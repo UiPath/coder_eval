@@ -29,8 +29,9 @@ tags: [outcome]
 # An unset or wrong path is only a warning, so confirm the engagement criterion below
 # passes before trusting any low score.
 agent:
-  # The discriminator is required for `setting_sources` and `allowed_tools` to be in
-  # schema — they are claude-code fields, not fields on the shared agent base.
+  # The discriminator is required for `setting_sources` to be in schema — that one IS a
+  # claude-code field. `allowed_tools`, `disallowed_tools` and `permission_mode` live on the
+  # shared agent base and would resolve without it.
   type: "claude-code"
   plugins:
     - type: "local"
@@ -40,8 +41,10 @@ agent:
   setting_sources: []
   # REPLACE: the tools this skill's body actually instructs the agent to use.
   #
-  # Declare them, and keep the list BYTE-IDENTICAL across every arm of an A/B — put it in
-  # the experiment's `defaults: agent:` block when you get there. Size it to the UNION of
+  # Declare them HERE, on the suite, and every arm of an A/B inherits one policy. Do not
+  # move them to an experiment's `defaults:`: these fields merge by REPLACE and the task
+  # layer outranks experiment defaults, so a suite declaring them overrides `defaults:`
+  # silently. Size the list to the UNION of
   # what every arm's body names, not to the incumbent's set: a candidate whose whole
   # hypothesis is "reach for a different tool" would otherwise be scored on the
   # prohibition rather than on the instruction.
@@ -49,8 +52,9 @@ agent:
   # Omitting this field allows ALL tools, which is why the risk here is a list drawn too
   # narrow, never one drawn too wide.
   #
-  # Keep `Skill` in the list: on this track the prompt's slash command is delivered as a
-  # Skill tool call, and that call is what the engagement criterion observes.
+  # `Skill` is named for documentation rather than effect: the prompt's slash command
+  # arrives as a Skill tool call, which is what the engagement criterion observes — but the
+  # tool is available whether or not it is listed, so omitting it changes nothing.
   allowed_tools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "Skill"]
   # Deny sub-agent delegation. Left available, the model sometimes answers the slash command
   # by dispatching an Agent that reads the skill in the CHILD, so no Skill call appears in
@@ -65,10 +69,19 @@ agent:
 # `max_turns` at 2 on purpose, because activation is decided in the first assistant turn.
 # An outcome row truncated by such a cap scores as a body failure that never happened.
 #
-# `max_usd` is the brake, and it is PER ROW (each expanded row is its own task): at 0.50,
-# a 12-row suite bounds one arm at ~$6 per replicate — so ~$18 in a `--repeats 3` stage.
-# It is checked after each turn is billed, so a row can overshoot by one turn, and it is
-# skipped entirely if no turn reports a cost.
+# `max_usd` is the brake, and it is PER ROW (each expanded row is its own task), so a
+# 10-row suite at 2.00 bounds one arm at ~$20 per replicate — ~$60 in a `--repeats 3` stage.
+# Multiply it out rather than reading the per-row figure as a stage total.
+#
+# Set it from a MEASURED row, generously. A real outcome row here cost $0.43, and a draft
+# cap of 0.50 sat 15% above that: a slightly longer row would have aborted as
+# COST_BUDGET_EXCEEDED and scored as a body failure that never happened — a fabricated
+# result of exactly the kind this file warns about. Leave several times the typical row's
+# cost of headroom; the brake exists for a runaway row, not a slow one.
+#
+# Two caveats: it is checked AFTER each turn is billed, so a row can overshoot by one turn;
+# and it is skipped entirely if no turn reports a cost, so confirm costs were recorded
+# before treating the cap as enforced.
 run_limits:
   max_turns: 20
   # Measured: outcome rows commonly run 100-200s, and a 300s turn cap turned one into an
@@ -76,7 +89,7 @@ run_limits:
   # only as completion_rate < 1.0 and silently voids any cross-arm comparison.
   turn_timeout: 900
   task_timeout: 1800
-  max_usd: 0.50
+  max_usd: 2.00
 
 # ONE fixture serves EVERY row, and this is the constraint that most often has to be
 # designed around. Row substitution reaches `initial_prompt` and `success_criteria` only —

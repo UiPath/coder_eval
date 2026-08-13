@@ -254,8 +254,10 @@ Five requirements specific to this track:
     another skill's subject matter can beat the explicit command.
 
   So deny sub-agent delegation (`disallowed_tools: ["Agent", "Task"]` — an *allowlist*
-  cannot do it, because those tools stay available whatever `allowed_tools` says), keep
-  `Skill` in `allowed_tools`, phrase scenarios in the vocabulary of *this* skill's job, and
+  cannot do it, because those tools stay available whatever `allowed_tools` says), name
+  `Skill` in `allowed_tools` so the mechanism under test is visible (the tool is available
+  either way, so this documents rather than fixes), phrase scenarios in the vocabulary of
+  *this* skill's job, and
   above all **read the engagement rate before the scores**. A round whose engagement is not
   1.0 on every row is measuring a mixture, and no amount of replicates fixes it.
 
@@ -284,9 +286,13 @@ Five requirements specific to this track:
   practical difference from the activation track, where the confusion matrix shows regressions
   for free.
 - **Hold the agent's tool policy constant across arms — and wide enough for every arm.**
-  Declare `allowed_tools` and `permission_mode` once, under the experiment's
-  `defaults: agent:` block (they are agent config, not top-level `defaults:` keys, which is
-  `extra="forbid"`), so no arm can differ in what it was permitted to do.
+  Declare `allowed_tools`, `disallowed_tools` and `permission_mode` **on the suite itself**,
+  not in the experiment's `defaults:`. Those fields merge by *replace*, and the task layer
+  sits above experiment defaults, so a suite that declares them — as the bundled template
+  does — silently overrides anything `defaults:` set, and widening the allowlist there for a
+  round would quietly not apply. Put them on the suite and every arm inherits one policy.
+  (Should a single arm genuinely need its own, a variant block outranks the task — but that
+  is a deliberate difference between arms, so say why.)
 
   The subtle half is the *width*, and it bites in one direction only. Omitting
   `allowed_tools` allows everything, so the risk is not laxness — it is an allowlist drawn
@@ -315,10 +321,16 @@ cap as enforced. Pair it with realistic `max_turns` and `task_timeout`.
 **And state the inverse of the activation guidance explicitly, because carrying it over is
 the intuitive mistake.** An activation suite's caps are deliberately tight — activation is
 decided in the first assistant turn, so those suites typically cap `max_turns` at 2 and buy
-signal by doing so. An outcome row needs a whole task's budget. A row truncated by an
-activation-sized cap scores as a body failure, which is a fabricated result: the body was
-never allowed to finish. Set outcome caps generously enough that only a genuinely runaway row
-hits them.
+signal by doing so. An outcome row needs a whole task's budget.
+
+**The two caps fail differently, and you find them in different places.** A row that
+exhausts `max_turns` is still scored — the criteria run against whatever exists — so it
+scores low and reads as a body failure, which is a fabricated result: the body was never
+allowed to finish. A row that breaches `turn_timeout` or `task_timeout` errors out instead,
+and an errored row is **excluded** from the criterion aggregate rather than scored, so it
+never appears as a low number at all — only as `completion_rate` below 1.0. The first
+corrupts the score; the second corrupts the denominator, silently. Set outcome caps
+generously enough that only a genuinely runaway row hits either.
 
 ## Step 5 — Split the rows
 
