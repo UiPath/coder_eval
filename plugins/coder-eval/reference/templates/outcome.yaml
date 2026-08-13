@@ -162,6 +162,13 @@ success_criteria:
     description: "my-skill engaged for row ${row.id}"
     skill_name: "my-skill"
     expected_skill: "${row.expected_skill}"
+    # Engagement is a GATE, not a read-out, and this is the line that makes it one. An
+    # outcome suite where the skill did not run measures the model's background knowledge
+    # instead — plausibly enough that nothing else looks wrong. recall.yes is the right
+    # metric here: of the rows that should have engaged the skill, how many did. Every row
+    # of an outcome suite is a positive, so anything below 1.0 means the round is a mixture.
+    suite_thresholds:
+      recall.yes: 1.0
 
   # Score OUTCOMES, not prose: what exists on disk and what ran.
   - type: "file_check"

@@ -1343,13 +1343,13 @@ def _wrong_skill_count_offenders(surfaces: dict[str, Path], *, count: int, auto:
     return offenders
 
 
-def _outcome_metric_vocabulary() -> set[str]:
-    """The metric names available to a `suite_thresholds` gating a DEFAULT-aggregate criterion.
+def _outcome_metric_vocabulary(criterion_type: str = "file_check") -> set[str]:
+    """The metric names a `suite_thresholds` on ``criterion_type`` may legitimately gate on.
 
-    Scope note: derived from `file_check`, which inherits `BaseCriterion.aggregate`'s summary
-    stats. A criterion with a richer aggregate (`skill_triggered` emits `recall.yes`,
-    `f1.yes`, ...) has a LARGER vocabulary, so callers must not treat this as the universal
-    set — extend it per criterion type before asserting against one of those.
+    Per criterion type, because the vocabularies genuinely differ: `file_check` inherits
+    `BaseCriterion.aggregate`'s summary stats, while a classification-style criterion such as
+    `skill_triggered` also emits `recall.yes` / `precision.yes` / `f1.yes`. Asserting one
+    type's thresholds against another's vocabulary would reject a perfectly valid gate.
 
     Derived from TWO real sources, because they are genuinely separate and checking only
     the first fails on the very template this repo ships:
@@ -1367,12 +1367,24 @@ def _outcome_metric_vocabulary() -> set[str]:
     from coder_eval.reports import _attach_row_accounting
 
     init_criteria(validate=False)
-    checker = CriterionRegistry.get_checker("file_check")()
-    per_row = [
-        CriterionResult(criterion_type="file_check", description="d", score=score, passed=score >= 0.9)
-        for score in (1.0, 0.0)
-    ]
-    aggregate = checker.aggregate(FileCheckCriterion(description="d", path="x"), per_row)
+    checker = CriterionRegistry.get_checker(criterion_type)()
+    if criterion_type == "skill_triggered":
+        from coder_eval.models import ClassificationCriterionResult, SkillTriggeredCriterion
+
+        criterion = SkillTriggeredCriterion(description="d", skill_name="x", expected_skill="x")
+        per_row: list[CriterionResult] = [
+            ClassificationCriterionResult(
+                criterion_type=criterion_type, description="d", score=1.0, observed_label=label, expected_label=label
+            )
+            for label in ("yes", "no")
+        ]
+    else:
+        criterion = FileCheckCriterion(description="d", path="x")  # type: ignore[assignment]
+        per_row = [
+            CriterionResult(criterion_type=criterion_type, description="d", score=score, passed=score >= 0.9)
+            for score in (1.0, 0.0)
+        ]
+    aggregate = checker.aggregate(criterion, per_row)
     assert aggregate is not None
     return set(aggregate.metrics) | set(_attach_row_accounting(aggregate, 2, 2).metrics)
 
@@ -1584,11 +1596,11 @@ class TestPluginArtifacts:
         from coder_eval.orchestration.task_loader import load_task
 
         task, _ = load_task(self.TEMPLATES / "outcome.yaml")
-        available = _outcome_metric_vocabulary()
 
         gated = [c for c in task.success_criteria if c.suite_thresholds]
         assert gated, "the outcome template must gate the suite on something, or the round has no verdict"
         for criterion in gated:
+            available = _outcome_metric_vocabulary(criterion.type)
             for metric in criterion.suite_thresholds:
                 assert metric in available, (
                     f"suite_thresholds names {metric!r}, which no aggregate emits for "
