@@ -1,0 +1,12 @@
+[project]
+name = "widgets"
+version = "0.3.1"
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    # A pinned coder-eval. A generated workflow should pass this through the
+    # action's `version:` input rather than tracking the action's default.
+    "coder-eval==0.9.6",
+]

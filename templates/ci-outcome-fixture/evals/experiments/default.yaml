@@ -1,0 +1,13 @@
+# The suite resolves through this experiment, which supplies the agent config. A CI
+# workflow that does not pass it via the action's `extra-args` input runs a different
+# test from the one developers run locally, and nothing reports the difference.
+experiment_id: "default"
+description: "Baseline agent configuration for the widgets evals."
+
+defaults:
+  agent:
+    model: "claude-haiku-4-5-20251001"
+
+variants:
+  - variant_id: "baseline"
+    description: "Stock configuration."

@@ -1,0 +1,30 @@
+# An activation suite. The interesting part for a generated CI workflow is the
+# `agent.plugins` path below: it is an environment variable, so the committed suite stays
+# portable — and a workflow that does not pass it through leaves the skill unreachable,
+# every positive row scoring 0, which is a permanent red indistinguishable from real drift.
+task_id: "widget-skill-activation"
+description: "Does the agent engage `widget-skill` when it should?"
+tags: [activation]
+
+agent:
+  type: "claude-code"
+  plugins:
+    - type: "local"
+      path: "$SKILL_SOURCE_PATH"
+  setting_sources: []
+
+run_limits:
+  max_turns: 2
+  turn_timeout: 120
+  task_timeout: 300
+
+initial_prompt: |
+  I need to add a new widget to this project — what's the right way?
+
+success_criteria:
+  - type: "skill_triggered"
+    description: "widget-skill activation"
+    skill_name: "widget-skill"
+    expected_skill: "widget-skill"
+    suite_thresholds:
+      recall.yes: 0.7

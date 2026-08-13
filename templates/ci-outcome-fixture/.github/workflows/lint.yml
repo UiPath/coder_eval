@@ -1,0 +1,29 @@
+# An ordinary lint workflow, deliberately unrelated to evaluation.
+#
+# Two reasons this file exists, both load-bearing for the outcome suite that mounts
+# this fixture:
+#
+#  1. The `ci` skill stops outright on a repository with no `.github/` directory. An
+#     empty fixture therefore scores zero on every row of every arm, which ties a whole
+#     A/B round at the floor while reading exactly like "all my candidates are bad".
+#  2. It must NOT mention the evaluation harness by name, or `ci` takes its "a workflow
+#     already runs coder-eval — do not add a second one" branch and every row measures
+#     the refusal path instead of the emission path.
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .

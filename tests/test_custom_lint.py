@@ -1628,6 +1628,80 @@ class TestPluginArtifacts:
             "engage. The execution track holds activation constant — every row is a positive"
         )
 
+    def test_checked_in_outcome_sample_matches_the_shipped_template_shape(self):
+        # `tasks/skills/ci-outcome.yaml` is the execution track's worked example, standing
+        # to it exactly as lint-tasks-activation.yaml stands to the activation track — and
+        # it is the suite the real A/B round runs against. Asserted through the SAME helper
+        # as the bundled template, so the shipped shape and the worked example cannot drift
+        # into disagreeing about what an outcome suite is.
+        #
+        # Note this establishes the guard rather than extending one: there is currently no
+        # equivalent for the checked-in activation sample either.
+        # (`test_lint_tasks_does_not_flag_the_shipped_activation_template` is a different
+        # thing — it guards lint-tasks' carve-out against the BUNDLED template and never
+        # reads tasks/.)
+        sample = self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml"
+        _assert_outcome_suite_shape(
+            sample,
+            expected_rows=10,
+            expected_split_counts={"train": 6, "test": 4},
+            skill_name="ci",
+            prompt_prefix="/coder-eval:ci",
+        )
+
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(sample)
+        artifact_scoring = {"file_check", "json_check", "run_command", "cli_called", "command_executed"}
+        assert {c.type for c in task.success_criteria} & artifact_scoring, (
+            "the checked-in outcome sample scores nothing on disk — an outcome suite that "
+            "asserts only engagement is an activation suite with a bigger bill"
+        )
+
+    def test_checked_in_outcome_fixture_lets_the_skill_act(self):
+        # The fixture is load-bearing, and every way it can be wrong is SILENT at full cost.
+        # `ci` stops outright on a repo with no `.github/`, so a fixture missing it scores
+        # zero on every row of every arm — which ties an A/B round at the floor and reads
+        # exactly like three bad candidates. And a fixture workflow that mentions the
+        # harness by name flips `ci` into its "one already runs coder-eval, do not add a
+        # second" branch, so every row would measure the refusal path instead.
+        from coder_eval.orchestration.task_loader import load_task
+
+        sample = self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml"
+        task, _ = load_task(sample)
+        assert task.sandbox is not None and task.sandbox.template_sources, (
+            "ci-outcome.yaml mounts no fixture. Row substitution never reaches `sandbox:`, so "
+            "the fixture is the ONLY starting repository all 10 rows get — without one the "
+            "agent lands in an empty sandbox and `ci` refuses on every row"
+        )
+        fixture = Path(task.sandbox.template_sources[0].path)  # type: ignore[attr-defined]
+        assert fixture.is_dir(), f"the mounted fixture {fixture} does not exist"
+
+        workflows = sorted((fixture / ".github" / "workflows").glob("*.yml"))
+        assert workflows, (
+            f"{fixture} has no .github/workflows/*.yml. `ci` says so explicitly: 'If there is "
+            "no .github/ directory at all, say that this skill targets GitHub Actions and "
+            "stop' — so every row of every arm would score zero on a refusal"
+        )
+        for workflow in workflows:
+            assert "coder_eval" not in workflow.read_text(encoding="utf-8"), (
+                f"{workflow.name} names `coder_eval`, which trips `ci`'s 'a workflow already "
+                "runs coder-eval — do not add a second one' branch. Every row would then "
+                "measure the refusal path rather than the emission path"
+            )
+
+        # The eval tree the rows expect the agent to discover: deliberately `evals/` rather
+        # than `tasks/` (discovery is exercised, not a lucky guess) and at two depths, so a
+        # workflow using a `**` glob — which degrades to one level with globstar off — is
+        # detectably wrong rather than indistinguishable from a correct one.
+        depths = {p.relative_to(fixture).parent.as_posix() for p in (fixture / "evals").rglob("*.yaml")}
+        assert len(depths) >= 2, (
+            f"the fixture's eval tree sits at a single depth ({sorted(depths)}). `ci` forbids "
+            "`**` in the tasks: input because globstar is off and it silently drops a level — "
+            "with one depth, a candidate that ignores that rule scores identically to one that "
+            "follows it"
+        )
+
     def test_bundled_plugin_root_references_resolve(self):
         # Skills point at their own bundled files with `${CLAUDE_PLUGIN_ROOT}/...`, which is
         # resolved by Claude Code at runtime and by nothing at authoring time. A pointer to a

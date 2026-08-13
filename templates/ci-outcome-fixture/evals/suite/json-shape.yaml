@@ -1,0 +1,23 @@
+# Deliberately at a SECOND depth (evals/suite/), not alongside hello-world.yaml.
+#
+# A generated workflow's `tasks:` input is expanded unquoted with `globstar` off, so a
+# recursive `**` glob degrades to a single level and silently drops one of these two
+# depths. A fixture with tasks at one depth only cannot tell a workflow that gets this
+# right from one that does not.
+task_id: "json-shape"
+description: "The agent emits a manifest with the required shape."
+tags: [smoke]
+
+initial_prompt: |
+  Write `build/manifest.json` with a top-level `name` and `version`, matching the
+  values in pyproject.toml.
+
+success_criteria:
+  - type: "json_check"
+    description: "manifest.json has the required keys"
+    path: "build/manifest.json"
+    assertions:
+      - expression: "name"
+        expected: "widgets"
+      - expression: "version"
+        expected: "0.3.1"

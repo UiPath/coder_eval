@@ -1,0 +1,141 @@
+# Outcome suite for the plugin's own `ci` skill — the worked example for
+# /coder-eval:optimize-skill's EXECUTION track, exactly as lint-tasks-activation.yaml is
+# the worked example for its activation track. Written from the bundled template at
+# plugins/coder-eval/reference/templates/outcome.yaml.
+#
+# Why `ci` is the subject: it sets `disable-model-invocation: true`, so the rows MUST use
+# the slash form — dogfooding the mechanism the template documents; its output is a real
+# .github/workflows/*.yml file, so the criteria assert on artifacts rather than prose; and
+# it needs neither the coder-eval CLI nor extra credentials inside the sandbox.
+#
+# Reachability: `path` must be a PLUGIN ROOT — a directory holding a `skills/`
+# subdirectory. Here that root is the plugin itself:
+#
+#   export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
+#
+# An unset or wrong path is only a WARNING, not an error. It leaves the skill unreachable
+# and every row scoring zero, which reads exactly like a bad skill body — so confirm the
+# `ci engaged` criterion below passes before trusting any low score.
+#
+# COST: 10 rows, each a full task run. `--split train` is 6 rows, `--split test` is 4.
+# A measured row is ~$0.43 and ~150s, so a full pass over the suite is ~$4.30. An A/B
+# round (baseline + a 4-arm triage + a 3-replicate 2-arm gate + a 3-replicate 2-arm
+# confirmation) is roughly 90 runs, i.e. ~$40 and several hours of wall clock. Budget
+# before starting, not after.
+task_id: "ci-outcome"
+description: "Given that `ci` fired, does it emit a workflow that would actually work?"
+tags: [outcome, skills]
+
+agent:
+  # The discriminator is required for `setting_sources` and `allowed_tools` to be in
+  # schema — they are claude-code fields, not fields on the shared agent base.
+  type: "claude-code"
+  plugins:
+    - type: "local"
+      path: "$SKILL_SOURCE_PATH"
+  # This measures the skill body; injecting the host project's CLAUDE.md into every call
+  # would be both expensive and a confound.
+  setting_sources: []
+  # The tools `ci`'s body actually uses: it globs and reads the eval tree, then writes one
+  # workflow file. Keep this list byte-identical across every arm of an A/B — declare it in
+  # the experiment's `defaults: agent:` block there — and size it to the union of what
+  # every arm's body names, or a candidate whose hypothesis is "reach for a different
+  # tool" gets scored on the prohibition instead of the instruction.
+  allowed_tools: ["Read", "Glob", "Grep", "Write", "Bash"]
+  permission_mode: "acceptEdits"
+
+# Each row is a full task run: the agent discovers the eval tree, reads the skill, and
+# writes a workflow. These are NOT the caps an activation suite uses (`max_turns: 2`) —
+# a row truncated by those would score as a body failure that never happened.
+#
+# `max_usd` is set from a MEASURED row, not a guess. The first smoke row cost $0.43 (149s,
+# one iteration, SUCCESS), so the 0.50 this suite was drafted with sat 15% above the
+# typical case: a slightly longer row would have aborted as COST_BUDGET_EXCEEDED and
+# scored as a body failure — a fabricated result of exactly the kind this file warns
+# about. 2.00 is still a real brake (~5x a normal row) while leaving ordinary variation
+# well clear of it.
+run_limits:
+  max_turns: 20
+  turn_timeout: 300
+  task_timeout: 1800
+  max_usd: 2.00
+
+# ONE fixture serves all 10 rows: `${row.*}` substitution reaches `initial_prompt` and
+# `success_criteria` only, never `sandbox:`. So every scenario is a different REQUEST
+# against the identical repository, and the variation lives in the prompt.
+#
+# What that rules out, stated so a reader does not discover it the expensive way: the
+# scenario "a coder-eval workflow already exists, do not add a second one" needs a
+# DIFFERENT repo shape and is therefore out of scope for this suite. It belongs in a
+# second suite with its own fixture, gated separately.
+#
+# The fixture is not neutral scenery. `ci` stops outright on a repo with no `.github/`,
+# so `lint.yml` is what keeps every arm from tying at zero; and it is deliberately silent
+# about the evaluation harness, or `ci` would take its "one already exists" branch. The
+# eval tree sits at `evals/` rather than `tasks/` (so discovery is exercised, not a
+# guess), at two depths (so a `**` glob is detectably wrong), with one task interpolating
+# $SKILL_SOURCE_PATH, one experiment, and a version pin — each making one load-bearing
+# instruction in the body observable.
+sandbox:
+  template_sources:
+    - type: "template_dir"
+      path: "../../templates/ci-outcome-fixture"
+
+dataset:
+  paths:
+    - "ci-outcome-rows.jsonl"
+  split_field: "split"
+
+# The slash form is mandatory here, not stylistic: `ci` sets
+# `disable-model-invocation: true`, so it is never offered to the model and asking in
+# prose returns "no such skill is available" — a row that measures nothing.
+#
+# Each scenario names the output path it wants. That removes the agent's filename choice
+# from the measurement (the criteria below assert on a path) while leaking nothing about
+# the workflow CONTENT being graded, which is the actual subject.
+initial_prompt: |
+  /coder-eval:ci
+
+  ${row.scenario}
+
+success_criteria:
+  # Engagement. Check this first on any arm that scores badly: it separates "the body gave
+  # bad instructions" from "the skill never ran", which score identically low.
+  - type: "skill_triggered"
+    description: "ci engaged for row ${row.id}"
+    skill_name: "ci"
+    expected_skill: "${row.expected_skill}"
+
+  # The scenario-specific outcome, and the suite's gate. `${row.expected_snippet}` is the
+  # one thing THAT row asked for — a runtime prerequisite step, a trigger, a passthrough
+  # input, a hardening line — never boilerplate any workflow would carry.
+  #
+  # This is the ONLY criterion carrying suite_thresholds, and deliberately so: it is the
+  # discriminating dimension, the one that differs row to row and arm to arm. Anything
+  # constant across rows must not be folded in here, because `file_check` scores
+  # `found / total` over its `includes` — a constant sub-check would put a fixed
+  # contribution in every row's score in every arm, compressing the variance the gate
+  # reads and making `mean: 0.7` quietly weaker than it looks.
+  - type: "file_check"
+    description: "the workflow row ${row.id} asked for"
+    path: "${row.expected_path}"
+    includes:
+      - "${row.expected_snippet}"
+    suite_thresholds:
+      mean: 0.7
+      completion_rate: 1.0
+
+  # A separate criterion, not a second `includes` entry on the one above, for exactly the
+  # reason that comment gives. This assertion is universal rather than scenario-specific:
+  # a workflow naming an action that does not exist is broken whatever it was asked for,
+  # and the emitted file looks entirely plausible. The first smoke row invented
+  # `anthropics/coder-eval-action@v1` and scored a clean 1.0 with nothing to catch it.
+  #
+  # No suite_thresholds: this is a read-out, like the sibling criterion in
+  # lint-tasks-activation.yaml, not a second gate. The tag is deliberately unpinned so a
+  # move from @v0 to @v1 does not fail the suite.
+  - type: "file_check"
+    description: "row ${row.id}'s workflow references the real published action"
+    path: "${row.expected_path}"
+    includes:
+      - "UiPath/coder_eval"
