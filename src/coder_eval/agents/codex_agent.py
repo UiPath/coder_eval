@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
@@ -192,6 +192,34 @@ def _fresh_input_tokens(raw_input: int, cached: int) -> int:
     they can't drift if the billing model ever changes.
     """
     return max(raw_input - cached, 0)
+
+
+class _ThreadTotals(NamedTuple):
+    """A snapshot of the Codex SDK's thread-cumulative ``ThreadTokenUsage.total``.
+
+    Held on the agent across turns (the thread outlives the turn) so each turn can
+    report its own slice instead of the running total. ``input`` is the full prompt
+    count, cached prefix included — the SDK's convention, not ours.
+    """
+
+    input: int = 0
+    output: int = 0
+    cached: int = 0
+
+    def since(self, baseline: "_ThreadTotals") -> "_ThreadTotals":
+        """This turn's tokens = the cumulative snapshot minus the previous one.
+
+        A total that moved BACKWARDS means the thread restarted under us (a fresh
+        thread counts from zero), so the snapshot is already turn-local: return it
+        whole rather than clamping every bucket to zero and losing the turn.
+        """
+        if self.input < baseline.input or self.output < baseline.output or self.cached < baseline.cached:
+            return self
+        return _ThreadTotals(
+            input=self.input - baseline.input,
+            output=self.output - baseline.output,
+            cached=self.cached - baseline.cached,
+        )
 
 
 def _message_uncached_input(m: AssistantMessage) -> int:
@@ -544,8 +572,8 @@ class _CodexTurnState:
                 self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=delta))
 
     def on_token_usage_updated(self, notification: Any) -> None:
-        """One per generation → cut a message. Carries `total` (cumulative turn
-        figure) and `last` (this generation's delta)."""
+        """One per generation → cut a message. Carries `total` (cumulative over the
+        whole THREAD, i.e. every turn so far) and `last` (this generation's delta)."""
         if notification.payload:
             self.latest_token_usage = getattr(notification.payload, "token_usage", None)
             self._flush_message(getattr(self.latest_token_usage, "last", None))
@@ -583,13 +611,19 @@ class _CodexTurnState:
             return
         self.finalized = True
 
-        # Prefer the SDK total; on crash/timeout it stays None, so fall back to the
-        # per-generation tokens already captured on the messages.
-        token_usage = self._agent._token_usage_from_sdk(self.sdk_token_usage) or self._agent._token_usage_from_messages(
-            self.messages
-        )
+        # Prefer the SDK total (deltas off the thread-cumulative figure); on
+        # crash/timeout it stays None, so fall back to the per-generation tokens
+        # already captured on the messages — those are per-turn to begin with, but
+        # the thread baseline still has to move past them or the NEXT turn's delta
+        # re-books this one.
+        token_usage = self._agent._token_usage_from_sdk(self.sdk_token_usage)
+        if token_usage is None:
+            token_usage = self._agent._token_usage_from_messages(self.messages)
+            self._agent._advance_usage_baseline(token_usage)
         # Codex bills sub-agents on separate threads, so fold the recovered child
         # generations into the turn total — matching Claude's bubbled-up totals.
+        # Folded AFTER the baseline advance: the SDK total covers the parent thread
+        # only, so child tokens must not shift the parent's baseline.
         token_usage = self._agent._fold_subagent_tokens(token_usage, self.messages)
 
         self.emit.on_event(
@@ -657,6 +691,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.route = route or DirectRoute()
         self.codex_client: Any = None
         self.thread: Any = None
+        # Thread-cumulative token snapshot as of the END of the last finalized turn.
+        # The thread outlives the turn, so this is what makes each turn's usage its
+        # own delta rather than the running total (see _token_usage_from_sdk).
+        self._thread_usage_baseline = _ThreadTotals()
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
         self._login_shell_home: Path | None = None
@@ -809,6 +847,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 if self.working_directory:
                     thread_kwargs["cwd"] = str(self.working_directory)
                 self.thread = await self._run_async(self.codex_client.thread_start, **thread_kwargs)
+                # A fresh thread counts its cumulative total from zero.
+                self._thread_usage_baseline = _ThreadTotals()
 
             def _on_turn_timeout() -> None:
                 state.timeout_hit = True
@@ -898,6 +938,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         self._close_client()
         self.thread = None
+        self._thread_usage_baseline = _ThreadTotals()
         self._active_turn_handle = None
         self._cleanup_login_shell_home()
         self._mark_stopped()
@@ -2125,12 +2166,22 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return None
 
     def _token_usage_from_sdk(self, sdk_token_usage: Any) -> TokenUsage | None:
-        """Convert the Codex SDK's ThreadTokenUsage to our TokenUsage.
+        """This turn's own slice of the Codex SDK's thread-cumulative total.
 
         Single conversion site for both the TurnEndEvent and the AgentEndEvent,
         so cached-input tokens can't be captured in one path but dropped in the
         other. The Codex SDK does not surface cost, so we derive it from the
         pricing table keyed on the effective model (None if the model is unpriced).
+
+        ``ThreadTokenUsage.total`` counts the whole THREAD, not the turn — that is
+        the SDK's contract, and ``last`` is the per-generation delta beside it. The
+        Codex thread is created once per task and reused for every turn (see
+        ``communicate``), so by turn N ``total`` still carries turns 1..N-1. The
+        orchestrator sums per-turn usages into the task total, so handing it the
+        cumulative figure books turn 1 again on turn 2, turns 1-2 again on turn 3,
+        and so on: the task total becomes a sum of prefix sums, inflating an
+        N-turn task by roughly (N+1)/2. Subtracting the baseline captured at the
+        end of the previous turn leaves just this turn.
 
         Cache-bucket convention (Codex/OpenAI): the SDK's ``input_tokens`` is the
         FULL prompt count, *inclusive* of the cached prefix. The fresh slice
@@ -2151,22 +2202,46 @@ class CodexAgent(Agent[CodexAgentConfig]):
         total = getattr(sdk_token_usage, "total", None)
         if not total:
             return None
-        input_tokens = getattr(total, "input_tokens", 0) or 0
-        output_tokens = getattr(total, "output_tokens", 0) or 0
-        cached_input = getattr(total, "cached_input_tokens", 0) or 0
+        cumulative = _ThreadTotals(
+            input=getattr(total, "input_tokens", 0) or 0,
+            output=getattr(total, "output_tokens", 0) or 0,
+            cached=getattr(total, "cached_input_tokens", 0) or 0,
+        )
+        turn = cumulative.since(self._thread_usage_baseline)
+        self._thread_usage_baseline = cumulative
         # Fresh (uncached) prompt slice = full prompt minus the cached prefix.
-        uncached = _fresh_input_tokens(input_tokens, cached_input)
+        uncached = _fresh_input_tokens(turn.input, turn.cached)
         cost = calculate_cost(
             self._effective_model() or "",
             uncached_input_tokens=uncached,
-            output_tokens=output_tokens,
-            cache_read_tokens=cached_input,
+            output_tokens=turn.output,
+            cache_read_tokens=turn.cached,
         )
         return TokenUsage(
             uncached_input_tokens=uncached,
-            output_tokens=output_tokens,
-            cache_read_input_tokens=cached_input,
+            output_tokens=turn.output,
+            cache_read_input_tokens=turn.cached,
             total_cost_usd=cost,
+        )
+
+    def _advance_usage_baseline(self, usage: TokenUsage | None) -> None:
+        """Move the thread baseline past a turn whose SDK total never arrived.
+
+        The crash/timeout fallback (``_token_usage_from_messages``) reads
+        per-generation tokens straight off the flushed messages, so the crashed
+        turn itself is right — but the thread's cumulative total kept climbing on
+        the SDK side. Without advancing past it here, the next turn's delta would
+        re-book everything the crashed turn already reported.
+        """
+        if usage is None:
+            return
+        base = self._thread_usage_baseline
+        # SDK ``input_tokens`` is the full prompt, cached prefix included, so the
+        # input baseline advances by uncached + cache_read.
+        self._thread_usage_baseline = _ThreadTotals(
+            input=base.input + usage.uncached_input_tokens + usage.cache_read_input_tokens,
+            output=base.output + usage.output_tokens,
+            cached=base.cached + usage.cache_read_input_tokens,
         )
 
     def _fold_subagent_tokens(self, parent: TokenUsage | None, messages: list[TranscriptMessage]) -> TokenUsage | None:
