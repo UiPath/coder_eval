@@ -5,6 +5,11 @@ description: >-
   contrast with the max_turns fixture is the point: a timeout is a FAILURE with a
   partial turn captured, while the turn cap is a clean stop.
 
+tags:
+  - run-limits
+  - timeout
+  - parity
+
 initial_prompt: |
   Run the shell command `sleep 240` and wait for it to finish. When it returns,
   report its exit code. Do not run it in the background, and do not shorten the

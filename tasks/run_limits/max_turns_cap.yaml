@@ -6,6 +6,11 @@ description: >-
   claude-code / codex / antigravity and compare: the cap must produce a CLEAN
   stop (max_turns_exhausted, criteria still checked), never a crash.
 
+tags:
+  - run-limits
+  - max-turns
+  - parity
+
 initial_prompt: |
   Create 12 files in the current directory named step-01.txt through step-12.txt.
   Each file must contain its own name and nothing else.
