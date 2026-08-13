@@ -58,6 +58,8 @@ not run anything yet.
 4. **It supplies its own distractors.** The description mentions auditing and gaps, so
    *"audit my dependencies"* is a natural false-positive probe.
 
+# Part 1 — A ceiling result, and when to stop (`lint-tasks`)
+
 ## Step 1 — Build the suite
 
 Do not hand-author it. Run the sibling skill:
@@ -288,52 +290,7 @@ Recall **0.500 in all three runs**, precision 1.000 in all three. Perfectly stab
 consistently missed, no over-claiming. That is a hypothesis worth spending on — which is
 where the rest of this tutorial goes.
 
-## Optimizing the skill that actually had headroom
-
-`lint-tasks` had nothing to fix. `analyze` did, so the loop ran for real against it. The
-hypothesis, phrased as a claim about specific rows: **the description never names
-regression or comparison between runs**, so requests about things getting *worse* find
-nothing to match.
-
-Three candidates, one per hypothesis, each differing from the incumbent only in `analyze`'s
-frontmatter `description`, each a full seven-skill snapshot:
-
-| Candidate | Hypothesis |
-| --- | --- |
-| `a-regression` | Name regression directly: *"what regressed or got worse since a previous run"* |
-| `b-results` | Users say "results" and "scores"; the description only says "run" |
-| `c-symptom` | Lead the trigger clause with symptoms rather than the operation |
-
-### Stage A — triage (68 runs)
-
-| Arm | analyze recall | precision | F1 | completion |
-| --- | --- | --- | --- | --- |
-| incumbent | 0.500 | 1.000 | 0.667 | 1.000 |
-| `a-regression` | 0.750 | 1.000 | **0.857** | 1.000 |
-| `c-symptom` | 0.750 | 1.000 | **0.857** | 1.000 |
-| `b-results` | 0.667 | 1.000 | 0.800 | **0.941** |
-
-`b-results` looks competitive and **is not comparable**: it lost a row to an error, so its
-recall was computed over 3 analyze rows instead of 4. Check `completion_rate` before ranking
-anything. The two clean leaders went through to the gate.
-
-### Stage B — the gate (153 runs, three separate invocations)
-
-| Arm | run 1 | run 2 | run 3 | Range |
-| --- | --- | --- | --- | --- |
-| incumbent | 0.667 | *(row excluded)* | 0.667 | [0.667, 0.667] |
-| `c-symptom` | 0.857 | 0.857 | 0.857 | [0.857, 0.857] |
-| **`a-regression`** | **1.000** | **1.000** | **1.000** | **[1.000, 1.000]** |
-
-Both candidates clear `min(candidate) > max(incumbent)` with no overlap, and every arm held
-`lint-tasks` and `task` at recall 1.000 — no sibling regression. `a-regression` wins
-outright: it turns the one consistently-missed row into a consistent hit without touching
-precision.
-
-One incumbent invocation dropped a row and was excluded from the gate rather than averaged
-in. A gate computed over a shifting denominator is not a gate.
-
-## Step 7 — Confirm on the test
+## Step 7 — Confirm on the test split
 
 Even with nothing to promote, the test split is what turns "the trim was safe" from a claim
 about the rows you looked at into a claim about rows you did not.
@@ -354,11 +311,148 @@ two splits, three sittings — it never missed a positive and never took a distr
 about as much as a suite this size can say, and it is enough to conclude the trim did no
 harm.
 
+---
+
+# Part 2 — A full A/B that promotes (`analyze`)
+
+## Optimizing the skill that actually had headroom
+
+`lint-tasks` had nothing to fix. `analyze` did, so the loop ran for real against it. The
+hypothesis, phrased as a claim about specific rows: **the description never names
+regression or comparison between runs**, so requests about things getting *worse* find
+nothing to match.
+
+Three candidates, one per hypothesis, each differing from the incumbent only in `analyze`'s
+frontmatter `description`, each a full seven-skill snapshot:
+
+| Candidate | Hypothesis |
+| --- | --- |
+| `a-regression` | Name regression directly: *"what regressed or got worse since a previous run"* |
+| `b-results` | Users say "results" and "scores"; the description only says "run" |
+| `c-symptom` | Lead the trigger clause with symptoms rather than the operation |
+
+### Wiring the arms: snapshots, then one experiment file per stage
+
+This is the part the numbers below cannot show, and the part most easily got wrong.
+
+Each candidate is a snapshot of the **whole plugin root**, not of one skill:
+
+```
+.optimize-skill/analyze/1-a-regression/
+    .claude-plugin/plugin.json   <- copy it if the source had one
+    skills/
+        analyze/SKILL.md         <- the arm's ONE varying part: its description
+        lint-tasks/SKILL.md      <- every sibling, copied unchanged
+        task/SKILL.md
+        ...                      <- all seven
+    reference/                   <- and everything else the root held
+```
+
+Both halves of that matter and both fail silently. **`plugin.json`**: with no manifest the
+namespace defaults to the *directory name*, so the arms would compete as `1-incumbent:analyze`
+against `1-a-regression:analyze` — differing in the name shown in the listing as well as in the
+description under test, on the very track where activation *is* a competition between listings.
+**The siblings**: a variant's `plugins` block *replaces* the task's, so this directory is the
+only skill source the arm gets. Snapshot one skill and every sibling criterion observes `no` in
+every arm, and the sibling half of the gate "passes" by measuring nothing.
+
+Add `.optimize-skill/` to `.gitignore` first — a round writes several copies of the whole
+plugin per arm.
+
+The experiment mounts each snapshot by absolute path, using the same `agent.plugins` mechanism
+the suite itself uses:
+
+```yaml
+experiment_id: "optimize-analyze-round-1"
+defaults:
+  run_limits:
+    stop_early: false
+variants:
+  - variant_id: "incumbent"
+    agent:
+      plugins:
+        - type: "local"
+          path: "/abs/path/to/.optimize-skill/analyze/1-incumbent"
+  - variant_id: "a-regression"
+    agent:
+      plugins:
+        - type: "local"
+          path: "/abs/path/to/.optimize-skill/analyze/1-a-regression"
+```
+
+Paths resolve against the **process working directory**, not the task file's, so write them
+absolute. And each `path` must be a plugin root holding `skills/` — the same trap as Step 3.
+
+**There is no flag that selects a subset of an experiment's variants**, so the arm set changes
+by writing another file. Three per round:
+
+| Stage | File | Arms |
+| --- | --- | --- |
+| A — triage | `round1-triage.yaml` | incumbent + all three candidates |
+| B — gate | `round1-gate.yaml` | incumbent + the two clean survivors |
+| C — confirm | `round1-confirm.yaml` | incumbent + `a-regression` only |
+
+Copying the triage file and deleting the arms that did not survive is one edit; reusing it
+instead costs several times the budgeted runs and, at Stage C, renders no
+`## Paired Comparison` block at all, because that block fires only for exactly two variants.
+
+### Stage A — triage (68 runs)
+
+```bash
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-triage.yaml --split train
+```
+
+| Arm | analyze recall | precision | F1 | completion |
+| --- | --- | --- | --- | --- |
+| incumbent | 0.500 | 1.000 | 0.667 | 1.000 |
+| `a-regression` | 0.750 | 1.000 | **0.857** | 1.000 |
+| `c-symptom` | 0.750 | 1.000 | **0.857** | 1.000 |
+| `b-results` | 0.667 | 1.000 | 0.800 | **0.941** |
+
+`b-results` looks competitive and **is not comparable**: it lost a row to an error, so its
+recall was computed over 3 analyze rows instead of 4. Check `completion_rate` before ranking
+anything. The two clean leaders went through to the gate.
+
+### Stage B — the gate (153 runs, three separate invocations)
+
+Three `coder-eval run` commands, **not** `--repeats 3` — see the Reference section for why:
+
+```bash
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-gate.yaml --split train --run-dir runs/round1-gate-1
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-gate.yaml --split train --run-dir runs/round1-gate-2
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-gate.yaml --split train --run-dir runs/round1-gate-3
+```
+
+| Arm | run 1 | run 2 | run 3 | Range |
+| --- | --- | --- | --- | --- |
+| incumbent | 0.667 | *(row excluded)* | 0.667 | [0.667, 0.667] |
+| `c-symptom` | 0.857 | 0.857 | 0.857 | [0.857, 0.857] |
+| **`a-regression`** | **1.000** | **1.000** | **1.000** | **[1.000, 1.000]** |
+
+Both candidates clear `min(candidate) > max(incumbent)` with no overlap, and every arm held
+`lint-tasks` and `task` at recall 1.000 — no sibling regression. `a-regression` wins
+outright: it turns the one consistently-missed row into a consistent hit without touching
+precision.
+
+One incumbent invocation dropped a row and was excluded from the gate rather than averaged
+in. A gate computed over a shifting denominator is not a gate.
+
 ### Stage C, and a test split that could not answer the question
 
 The winner went to test as a **two-variant** experiment at `--repeats 3`, which is the one
-place `--repeats` is correct: `paired_comparison` fires only for exactly two variants and
-averages replicates per row before pairing.
+place `--repeats` is correct:
+
+```bash
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-confirm.yaml --split test --repeats 3
+```
+
+`paired_comparison` fires only for exactly two variants and averages replicates per row
+before pairing.
 
 Both arms scored `analyze` F1 **1.000**, and the paired block was a flat tie:
 
@@ -457,6 +551,10 @@ never measuring.
 confirmed in direction on the test split (1.000 vs 0.909), no sibling regression anywhere, and
 precision never off 1.000 in any run of either stage.
 
+---
+
+# Reference
+
 ## The three stages, and when each applies
 
 They did not run for `lint-tasks`, because that incumbent was already perfect. They did run
@@ -532,4 +630,6 @@ options are to rename the skill, or to measure it somewhere the collision is abs
 
 - [Comparing models](05-comparing-models.md) — the same experiment-variant machinery, applied to models instead of descriptions.
 - [Bring Your Own Dataset](../DATASETS.md) — split labels, sampling precedence, and suite-level thresholds in full.
-- [Claude Code plugin](../PLUGIN.md) — the other six skills.
+- [Tutorial 09 — Optimizing a Skill Body](09-optimizing-a-skill-body.md) — the execution
+  track: same method, different instrument, and another honest stop.
+- [Claude Code plugin](../PLUGIN.md) — all seven skills.

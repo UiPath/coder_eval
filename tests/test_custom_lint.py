@@ -2334,6 +2334,46 @@ class TestPluginArtifacts:
                 "bare `command not found` mid-task."
             )
 
+    def test_tutorial_08_shows_stage_b_as_three_separate_invocations(self):
+        # The single most dangerous edit in this whole area. Suite rollups are keyed on
+        # (variant, suite), so `--repeats 3` pools all three replicates into ONE suite.json
+        # with one confusion matrix — the per-replicate F1 the activation gate compares
+        # would not exist, and the gate would silently compare a number against itself.
+        # Now that the page shows real command lines, "simplifying" them is a one-line edit.
+        page = self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md"
+        lines = page.read_text(encoding="utf-8").splitlines()
+
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("### Stage B"))
+        end = next(i for i, ln in enumerate(lines[start + 1 :], start + 1) if ln.startswith("### "))
+        block = "\n".join(lines[start:end])
+
+        assert block.count("--run-dir") >= 3, (
+            "tutorial 08's Stage B no longer shows THREE separate invocations with distinct "
+            f"--run-dir values (found {block.count('--run-dir')}). Three run directories are "
+            "what produce three suite.json files; the gate has nothing to read without them"
+        )
+        # Scoped to the fenced COMMANDS, not the prose: the section's own warning says
+        # "**not** `--repeats 3`", and a sensor that fired on the warning would be telling
+        # the author to delete the very sentence it exists to protect.
+        fenced, inside = [], False
+        for line in lines[start:end]:
+            if line.strip().startswith("```"):
+                inside = not inside
+                continue
+            if inside:
+                fenced.append(line)
+        commands = "\n".join(fenced)
+        assert "--repeats" not in commands, (
+            "tutorial 08's activation Stage B now RUNS `--repeats` — rollups pool replicates "
+            "into one suite.json, so the per-replicate F1 this gate compares would not exist. "
+            "`--repeats` is correct at Stage C only, where paired_comparison averages per row "
+            "BEFORE pairing"
+        )
+        assert "not** `--repeats 3`" in block, (
+            "tutorial 08's Stage B no longer WARNS against --repeats 3. The commands are now "
+            "shown, so the warning is what stops the next reader collapsing them"
+        )
+
     def test_tutorial_09_keeps_the_two_claims_a_reader_most_needs(self):
         # Tutorial 09 reports a NULL result, and the two facts that make it useful are the
         # ones an editor tightening a long page would trim first: the suite shape, and why
