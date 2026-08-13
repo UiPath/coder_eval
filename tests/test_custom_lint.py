@@ -4218,3 +4218,74 @@ class TestCE035SplitLabelsAllOrNothing:
         for split, expected in (("train", {"a"}), ("test", {"b"}), ("0", {"c"})):
             kept = {t.task_id.split("/")[-1] for t in expand_dataset(task, tmp_path, split=split)}
             assert kept == expected, f"split={split!r}: expand_dataset kept {kept}, expected {expected}"
+
+
+@pytest.mark.lint
+class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
+    """CE036 — a dataset row's prompt must not contain the value a criterion grades it on.
+
+    This repo's own task rubric (and the `lint-tasks` skill) call a prompt that supplies its
+    own answer the most common way a suite scores well while measuring nothing. `lint-tasks`
+    applies that rule to a *user's* files; nothing applied it to this repository's, and a
+    checked-in worked example shipped with four such rows.
+
+    Scope, stated plainly: this catches the **verbatim** form — the prompt literally contains
+    the string a criterion asserts. It cannot catch a *semantic* leak, where the prompt
+    describes the graded behaviour in different words ("list the paths explicitly rather than
+    with a recursive wildcard" while grading an explicit glob). That form needs a reader, and
+    is what `lint-tasks` and code review are for. Guarding the blunt case is still worth it:
+    it is the easy mistake, and it is silent.
+    """
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_task_prompts_do_not_contain_the_graded_string(self, path: Path):
+
+        from coder_eval.orchestration.task_loader import expand_dataset, load_task
+
+        task, _ = load_task(path)
+        if task.dataset is None:
+            pytest.skip("no dataset: block — nothing is row-substituted")
+
+        offenders: list[str] = []
+        for row in expand_dataset(task, path.parent):
+            prompt = (row.initial_prompt or "").lower()
+            if not prompt:
+                continue
+            for criterion in row.success_criteria:
+                # Every string the criterion asserts CONTENT on. `description` is excluded:
+                # it is a label, routinely echoes the scenario, and grades nothing.
+                dumped = criterion.model_dump()
+                dumped.pop("description", None)
+                # Location fields are exempt, and the distinction is the whole rule: a
+                # prompt MAY say WHERE to write ("call it .github/workflows/evals.yml"),
+                # which removes the agent's filename choice from the measurement without
+                # revealing anything graded. It may not say WHAT the artifact must contain.
+                for locator in ("path", "agent_file", "file_path", "command"):
+                    dumped.pop(locator, None)
+                for value in _string_leaves(dumped):
+                    # Short values collide by chance ("ci", "0.7"); a leak worth flagging is
+                    # a substantive string the author put in both places.
+                    if len(value) >= 12 and value.lower() in prompt:
+                        offenders.append(f"{row.task_id}: prompt contains {value!r} ({criterion.type})")
+
+        assert not offenders, (
+            f"{path}: the prompt hands the agent the exact string a criterion grades it on, so "
+            f"the row scores well whether or not the behaviour under test happened — and an "
+            f"A/B arm that DELETED that behaviour would still pass. Describe the situation and "
+            f"let the skill or the agent supply the method.\n\n" + "\n".join(f"  {o}" for o in offenders)
+        )
+
+
+def _string_leaves(node: object) -> list[str]:
+    """Every string in a nested dict/list, flattened."""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for v in node.values() for s in _string_leaves(v)]
+    if isinstance(node, list):
+        return [s for v in node for s in _string_leaves(v)]
+    return []
