@@ -17,13 +17,20 @@ from coder_eval.models.results import TurnRecord
 from coder_eval.models.telemetry import CommandTelemetry
 
 
-def _cmd(tool_name: str, parameters: dict[str, Any] | None = None, tool_id: str = "t1") -> CommandTelemetry:
+def _cmd(
+    tool_name: str,
+    parameters: dict[str, Any] | None = None,
+    tool_id: str = "t1",
+    result_status: str = "success",
+    result_summary: str | None = None,
+) -> CommandTelemetry:
     return CommandTelemetry(
         tool_name=tool_name,
         tool_id=tool_id,
         timestamp=datetime.now(),
         parameters=parameters or {},
-        result_status="success",
+        result_status=result_status,  # type: ignore[arg-type]
+        result_summary=result_summary,
     )
 
 
@@ -53,6 +60,51 @@ class TestSkillTriggeredChecker:
     def test_no_skill_tn(self) -> None:
         result = _check(expected_skill="", skill_name="uipath-flow", commands=[_cmd("Read", {"file_path": "x"})])
         assert result.score == 1.0 and result.observed_label == "no" and result.expected_label == "no"
+
+    def test_errored_skill_call_is_not_engagement(self) -> None:
+        # A skill carrying `disable-model-invocation: true` cannot be invoked by the model:
+        # the Skill tool refuses it, the body is NEVER loaded, and the agent proceeds on its
+        # own prior knowledge — producing plausible output that hides what happened.
+        #
+        # Counting the attempt reported `yes` for a run the skill took no part in. Observed
+        # on 24 of 24 rows of a real outcome suite, where it silently turned an entire A/B
+        # round into a measurement of the model's background knowledge: all four arms tied
+        # exactly, because none of them ever saw the body they differed in.
+        result = _check(
+            expected_skill="uipath-flow",
+            skill_name="uipath-flow",
+            commands=[
+                _cmd(
+                    "Skill",
+                    {"skill": "uipath-flow"},
+                    result_status="error",
+                    result_summary=(
+                        "<tool_use_error>Skill uipath-flow cannot be used with Skill tool "
+                        "due to disable-model-invocation</tool_use_error>"
+                    ),
+                )
+            ],
+        )
+        assert result.observed_label == "no", (
+            "an errored Skill call counted as engagement — the body never loaded, so the row "
+            "measured the model's prior knowledge while reporting the skill had run"
+        )
+        assert result.score == 0.0
+
+    def test_errored_skill_call_still_counts_when_the_file_was_read(self) -> None:
+        # The two signals are not the same thing. A failed Skill CALL loaded nothing; a path
+        # reference means the SKILL.md was actually opened, which is genuine engagement (and
+        # is how non-Claude agents engage a skill at all). The result_status gate must not
+        # suppress that.
+        result = _check(
+            expected_skill="uipath-flow",
+            skill_name="uipath-flow",
+            commands=[
+                _cmd("Skill", {"skill": "uipath-flow"}, result_status="error"),
+                _cmd("Read", {"file_path": "/x/skills/uipath-flow/SKILL.md"}, tool_id="t2"),
+            ],
+        )
+        assert result.observed_label == "yes" and result.score == 1.0
 
     def test_skill_invoked_fp(self) -> None:
         result = _check(expected_skill="", skill_name="uipath-flow", commands=[_cmd("Skill", {"skill": "uipath-flow"})])
