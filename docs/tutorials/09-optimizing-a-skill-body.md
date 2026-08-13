@@ -294,10 +294,39 @@ artifacts of the criterion bug. Engagement was never 50–80%; it was **zero**. 
 figure came from counting refused calls plus the occasional row that genuinely read a
 `SKILL.md` off disk.
 
-What survives is the conclusion, arrived at properly: **nothing to promote.** Once the body
-does load, `ci` already emits the per-depth globs with the reason attached, the real action,
-the version pin, the experiment passthrough, both runtime prerequisite steps, and both
-hardening lines:
+What survives is the conclusion, arrived at properly: **nothing to promote — this is a
+ceiling.** With the body loaded, all six train rows score 1.000 on all three criteria. `ci`
+emits the per-depth globs with the reason attached, the real action, the version pin, the
+experiment passthrough, both runtime prerequisite steps, and both hardening lines:
+
+```yaml
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # The action installs no coding-agent runtime — provide it here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g @anthropic-ai/claude-code
+
+      - uses: UiPath/coder_eval@v0
+        with:
+          version: "0.9.6"
+          # Two explicit per-depth globs, with the reason kept next to them.
+          tasks: evals/*.yaml evals/suite/*.yaml
+          extra-args: "-e evals/experiments/default.yaml"
+          minimum-task-score: "0.7"
+```
+
+So the three candidates were solving a problem that did not exist. The hallucinated action,
+the missing runtime steps, the dropped hardening lines — every defect that looked like
+headroom was the model working without the body, not the body instructing it badly.
+
+A ceiling is a real answer, and the method's response is to stop rather than spend 84 runs
+chasing a number the gate cannot reach. To optimize `ci` from here the honest next move is
+**harder rows** — scenarios these six do not reach — not a looser gate and not another round
+of candidates.
 
 ### The number this round never got to read
 
