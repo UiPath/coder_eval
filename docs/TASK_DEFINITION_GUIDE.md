@@ -166,7 +166,7 @@ agent:
     - "Read"
     - "Write"
     - "Bash"
-  model: "claude-sonnet-4-20250514"   # Optional: specific model
+  model: "claude-sonnet-5"            # Optional: specific model
   sdk_options:                        # Optional: Claude Code SDK pass-through
     effort: high                      # any non-framework-managed ClaudeAgentOptions field
 ```
@@ -616,11 +616,11 @@ Experiment variants can add `template_sources` that are **appended after** the t
 variants:
   - variant_id: baseline
     agent:
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-5"
 
   - variant_id: with-context-hint
     agent:
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-5"
     template_sources:
       - type: "starter_files"
         files:
@@ -1153,7 +1153,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
   max_turns: 5
   turn_timeout: 300
   agent:                              # Nested AgentConfig — same shape as task.agent
-    model: "claude-sonnet-4-6"
+    model: "claude-sonnet-5"
     permission_mode: "bypassPermissions"
     allowed_tools: ["Bash", "Read", "Grep", "Glob"]
     sdk_options: {effort: low}        # Optional SDK pass-through (e.g. effort)
