@@ -1283,6 +1283,118 @@ SKILL_LISTING_BUDGET_CHARS = 1_600
 REPO_PATH_TOKENS = ("docs/", "src/", ".claude/shared/", ".claude/commands/", "uv run", "../")
 
 
+def _outcome_metric_vocabulary() -> set[str]:
+    """Every metric name a `suite_thresholds` on an outcome suite may legitimately gate on.
+
+    Derived from TWO real sources, because they are genuinely separate and checking only
+    the first fails on the very template this repo ships:
+
+    * ``BaseCriterion.aggregate`` emits the summary stats (``count``/``mean``/``median``/
+      ``std``/``min``/``max``).
+    * ``completion_rate`` is **not** an ``aggregate()`` metric at all — it is injected
+      downstream by ``reports._attach_row_accounting`` alongside ``rows_total`` /
+      ``rows_excluded``.
+
+    Both halves are obtained by calling the real code, never by writing the names down.
+    """
+    from coder_eval.criteria import CriterionRegistry, init_criteria
+    from coder_eval.models import CriterionResult, FileCheckCriterion
+    from coder_eval.reports import _attach_row_accounting
+
+    init_criteria(validate=False)
+    checker = CriterionRegistry.get_checker("file_check")()
+    per_row = [
+        CriterionResult(criterion_type="file_check", description="d", score=score, passed=score >= 0.9)
+        for score in (1.0, 0.0)
+    ]
+    aggregate = checker.aggregate(FileCheckCriterion(description="d", path="x"), per_row)
+    assert aggregate is not None
+    return set(aggregate.metrics) | set(_attach_row_accounting(aggregate, 2, 2).metrics)
+
+
+def _assert_outcome_suite_shape(
+    path: Path,
+    *,
+    expected_rows: int,
+    expected_split_counts: dict[str, int],
+    skill_name: str,
+    prompt_prefix: str,
+) -> None:
+    """The structural contract every outcome suite must satisfy.
+
+    Asserted twice — once against the bundled template, once against the checked-in worked
+    example — so the two cannot drift into different shapes while both looking fine. Uses
+    the real ``load_task`` / ``expand_dataset``, never a re-implementation of either.
+
+    The contract:
+
+    1. **Dataset-backed**, expanding to exactly one task per row. This is the load-bearing
+       one: ``suite.json`` is written only for tasks the expander touched (rollups group on
+       ``suite_id``), and ``--split`` filters dataset *rows* — so a suite written as
+       separate task files gives an optimization round no rollup to rank on and makes
+       ``--split test`` silently re-run the train rows.
+    2. **Split counts** as declared, checked through ``expand_dataset(..., split=...)``
+       because ``coder-eval plan`` has no ``--split`` flag to check them from a shell.
+    3. **No surviving ``${row.`` anywhere** in the prompt or the expanded criteria —
+       substitution has to reach list leaves (``includes: ["${row.x}"]``), not just scalars.
+    4. **The slash form** opens every prompt: it is the only mechanism that reaches a
+       ``disable-model-invocation: true`` skill, and prose does not substitute for it.
+    5. **An engagement criterion on every row** with a non-empty ``expected_skill`` —
+       what separates "the body gave bad instructions" from "the skill never ran".
+    """
+    import json
+
+    from coder_eval.orchestration.task_loader import expand_dataset, load_task
+
+    task, _source_yaml = load_task(path)
+    assert task.dataset is not None, (
+        f"{path.name} has no `dataset:` block — an outcome suite MUST be one dataset-backed "
+        "task with one row per scenario. Without it no suite.json is written (rollups group "
+        "on suite_id, which only the expander sets) and `--split test` silently re-runs the "
+        "train rows"
+    )
+    assert task.dataset.split_field, f"{path.name} has a dataset but no `split_field` — `--split` would filter nothing"
+
+    rows = expand_dataset(task, path.parent)
+    assert len(rows) == expected_rows, (
+        f"{path.name}: expected one task per dataset row ({expected_rows}), got {len(rows)}"
+    )
+
+    for split, count in expected_split_counts.items():
+        actual = len(expand_dataset(task, path.parent, split=split))
+        assert actual == count, f"{path.name}: `--split {split}` resolves {actual} rows, expected {count}"
+
+    for row in rows:
+        # `initial_prompt` is `str | None` (a task may use `initial_prompt_file`), so narrow
+        # it — otherwise moving the prompt to a file turns these into a TypeError.
+        assert row.initial_prompt, f"{row.task_id} has no initial_prompt"
+        assert "${row." not in row.initial_prompt, f"unsubstituted row placeholder in {row.task_id}'s prompt"
+        assert row.initial_prompt.lstrip().startswith(prompt_prefix), (
+            f"{row.task_id}'s prompt does not open with {prompt_prefix!r}. The slash form is the "
+            "ONLY mechanism that reaches a `disable-model-invocation: true` skill — asking in "
+            "prose returns 'no such skill is available' and the row measures nothing"
+        )
+
+        rendered = json.dumps([c.model_dump() for c in row.success_criteria], default=str)
+        assert "${row." not in rendered, (
+            f"unsubstituted row placeholder in {row.task_id}'s criteria — substitution must reach "
+            'every string leaf including inside lists (`includes: ["${row.x}"]`)'
+        )
+
+        engagement = [
+            c
+            for c in row.success_criteria
+            if c.type == "skill_triggered" and c.skill_name == skill_name  # type: ignore[attr-defined]
+        ]
+        assert engagement, f"{row.task_id} carries no `skill_triggered` criterion naming {skill_name!r}"
+        for criterion in engagement:
+            assert criterion.expected_skill, (  # type: ignore[attr-defined]
+                f"{row.task_id}'s engagement criterion has an empty `expected_skill`, which asserts "
+                f"{skill_name!r} must NOT engage. An outcome suite holds activation CONSTANT — every "
+                "row is a positive, and a distractor row here inverts the suite's premise"
+            )
+
+
 def _skill_frontmatter(path: Path) -> dict:
     """Parse a SKILL.md's YAML frontmatter block."""
     import yaml
@@ -1360,6 +1472,125 @@ class TestPluginArtifacts:
                 f"suite_thresholds names {metric!r}, which the skill_triggered aggregate does not "
                 f"emit (available: {sorted(aggregate.metrics)})"
             )
+
+    def test_outcome_template_shape(self):
+        # The execution track's instrument. Everything the shared helper asserts is
+        # something that fails SILENTLY at full cost when it is wrong — see its docstring.
+        _assert_outcome_suite_shape(
+            self.TEMPLATES / "outcome.yaml",
+            expected_rows=4,
+            expected_split_counts={"train": 2, "test": 2},
+            skill_name="my-skill",
+            prompt_prefix="/my-plugin:my-skill",
+        )
+
+    def test_outcome_template_scores_artifacts_not_prose(self):
+        # "Score outcomes, not prose" is the execution track's core instruction, and the
+        # template is what everyone copies. An LLM judge adds variance to the very number
+        # the gate reads, so a template that reached for one would teach the opposite of
+        # what optimize-skill says — and the added noise would be invisible in the result.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+        types = {c.type for c in task.success_criteria}
+
+        artifact_scoring = {"file_check", "json_check", "run_command", "cli_called", "command_executed"}
+        assert types & artifact_scoring, (
+            f"the outcome template's criteria are {sorted(types)} — none of them scores a real "
+            f"artifact or command ({sorted(artifact_scoring)}), which is the whole difference "
+            "between an outcome suite and an activation probe"
+        )
+        assert not types & {"llm_judge", "agent_judge"}, (
+            f"the outcome template reaches for a judge ({sorted(types & {'llm_judge', 'agent_judge'})}). "
+            "Judges add variance to the number the A/B gate reads; the template is the copied "
+            "default and must demonstrate deterministic scoring"
+        )
+
+    def test_outcome_template_thresholds_use_real_metric_keys(self):
+        # A threshold naming a metric nothing emits is not a loose gate — `_attach_row_accounting`
+        # records it with `actual_value=None` and `passed=False`, so the suite fails forever and
+        # the cause is a typo. Derived from real calls to BOTH sources; see the helper.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+        available = _outcome_metric_vocabulary()
+
+        gated = [c for c in task.success_criteria if c.suite_thresholds]
+        assert gated, "the outcome template must gate the suite on something, or the round has no verdict"
+        for criterion in gated:
+            for metric in criterion.suite_thresholds:
+                assert metric in available, (
+                    f"suite_thresholds names {metric!r}, which no aggregate emits for "
+                    f"{criterion.type!r} (available: {sorted(available)})"
+                )
+
+    def test_outcome_template_caps_cost(self):
+        # An outcome row is a FULL task run, so the template needs a per-row brake the
+        # activation template does not. An absolute floor, deliberately not a comparison
+        # against activation.yaml: that file ships no `run_limits:` block at all, so there
+        # is nothing to compare against.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+        limits = task.run_limits
+        assert limits is not None, "the outcome template ships no `run_limits:` — every row is a full task run"
+        assert limits.max_usd is not None, (
+            "the outcome template sets no `max_usd`. It is the per-row cost brake; without it a "
+            "single runaway row can consume a whole stage's budget"
+        )
+        assert limits.max_turns is not None and limits.max_turns >= 15, (
+            f"the outcome template caps max_turns at {limits.max_turns}. An activation suite caps "
+            "at 2 on purpose (activation is decided in the first assistant turn), but an outcome "
+            "row needs a whole task's budget — a row truncated by an activation-sized cap scores "
+            "as a body failure that never happened"
+        )
+
+    def test_outcome_rows_are_all_positive(self):
+        # The INVERSE of the activation template's polarity rule, and the two must not be
+        # confused. An activation suite needs distractors on both sides of the split; an
+        # outcome suite holds activation CONSTANT, so every row is a positive and a row with
+        # `expected_skill: ""` would assert the skill must not engage — inverting the premise.
+        import json
+
+        rows = [
+            json.loads(line)
+            for line in (self.TEMPLATES / "outcome-rows.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert rows, "the outcome template ships no rows"
+        assert all(r.get("split") for r in rows), (
+            "every template row must carry a `split` — a PARTLY labelled dataset is the one bad "
+            "state: --split keeps the matching rows and drops the unlabelled ones, shrinking the "
+            "suite the metrics are computed over"
+        )
+        assert len({str(r["split"]) for r in rows}) >= 2, "outcome template rows collapsed to a single split"
+        blank = [r["id"] for r in rows if not r.get("expected_skill")]
+        assert not blank, (
+            f"outcome rows {blank} have an empty `expected_skill`, which asserts the skill must NOT "
+            "engage. The execution track holds activation constant — every row is a positive"
+        )
+
+    def test_bundled_plugin_root_references_resolve(self):
+        # Skills point at their own bundled files with `${CLAUDE_PLUGIN_ROOT}/...`, which is
+        # resolved by Claude Code at runtime and by nothing at authoring time. A pointer to a
+        # file that does not exist is therefore invisible until a user follows it — and the
+        # skills' whole value is handing over an artifact rather than describing one.
+        # Caught for real: optimize-skill shipped a pointer at reference/templates/outcome.yaml
+        # one commit before that file existed, past 344 green lint tests.
+        import re
+
+        broken: list[str] = []
+        for doc in (p for p in PLUGIN_TEXT_FILES if p.suffix == ".md"):
+            text = doc.read_text(encoding="utf-8")
+            for match in re.finditer(r"\$\{CLAUDE_PLUGIN_ROOT\}/([\w./-]+)", text):
+                target = match.group(1).rstrip(".")
+                if not (PLUGIN_ROOT / target).exists():
+                    broken.append(f"{doc.relative_to(PLUGIN_ROOT)} -> {target}")
+        assert not broken, (
+            f"these bundled files point at ${{CLAUDE_PLUGIN_ROOT}} paths that do not exist: "
+            f"{sorted(set(broken))}. An installed plugin is copied without its parent directories, "
+            "so the reference resolves to nothing and the skill hands the user a dead path."
+        )
 
     def test_reachability_guidance_names_the_plugin_root_layout(self):
         # A local plugin path must be a PLUGIN ROOT — a directory holding `skills/`, so the
