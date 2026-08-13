@@ -48,7 +48,16 @@ agent:
   #
   # Omitting this field allows ALL tools, which is why the risk here is a list drawn too
   # narrow, never one drawn too wide.
-  allowed_tools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash"]
+  #
+  # Keep `Skill` in the list: on this track the prompt's slash command is delivered as a
+  # Skill tool call, and that call is what the engagement criterion observes.
+  allowed_tools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "Skill"]
+  # Deny sub-agent delegation. Left available, the model sometimes answers the slash command
+  # by dispatching an Agent that reads the skill in the CHILD, so no Skill call appears in
+  # the parent stream, engagement observes `no`, and the row measures nothing while still
+  # producing a plausible artifact. An allowlist cannot express this — Agent/Task stay
+  # available whatever `allowed_tools` says, so denial is the only lever.
+  disallowed_tools: ["Agent", "Task"]
   permission_mode: "acceptEdits"
 
 # Outcome rows are FULL TASK RUNS — minutes and real tokens each, not the seconds an
@@ -62,7 +71,10 @@ agent:
 # skipped entirely if no turn reports a cost.
 run_limits:
   max_turns: 20
-  turn_timeout: 300
+  # Measured: outcome rows commonly run 100-200s, and a 300s turn cap turned one into an
+  # ERROR rather than a score. An errored row is EXCLUDED from the aggregate, so it shows up
+  # only as completion_rate < 1.0 and silently voids any cross-arm comparison.
+  turn_timeout: 900
   task_timeout: 1800
   max_usd: 0.50
 
@@ -95,8 +107,15 @@ dataset:
 
 # The slash form is MANDATORY and is not interchangeable with asking in prose. A skill
 # with `disable-model-invocation: true` is not offered to the model at all, so "use the
-# my-skill skill" returns "no such skill is available" and the row measures nothing. The
-# slash form loads it, emits a real Skill tool call, and is detected by `skill_triggered`.
+# my-skill skill" returns "no such skill is available" and the row measures nothing.
+#
+# It is also NOT a guarantee. Measured across four runs of a 6-row suite, engagement landed
+# between 50% and 80%, failing on different rows each time: the model sometimes dispatches a
+# sub-agent that reads the skill in the child, sometimes just does the work itself, and
+# sometimes follows the scenario's wording to a sibling skill instead. That is why
+# `disallowed_tools` above denies Agent/Task, why scenarios should use this skill's own
+# vocabulary, and why the engagement criterion below is a GATE on the baseline rather than
+# a diagnostic: below 1.0 on every row, the suite is measuring a mixture.
 #
 # Everything after it is the scenario, which is where per-row variation lives. Have each
 # scenario name the output path it wants: that removes the agent's filename choice from
@@ -110,10 +129,16 @@ initial_prompt: |
 # leaf. There is no per-scenario criterion list — heterogeneous assertions are expressed
 # by parameterizing a criterion with row fields, as `path`/`includes` do below.
 success_criteria:
-  # The engagement assertion. It costs nothing extra (the trajectory is already recorded)
-  # and it separates the two failures that score identically low and look nothing alike:
-  # "the body gave bad instructions" and "the skill never ran". Check this FIRST on any
-  # arm that scores badly — a wrong plugin path fails here, not in the criteria below.
+  # The engagement assertion, and the baseline's gate. It costs nothing extra (the
+  # trajectory is already recorded) and it separates the two failures that score
+  # identically low and look nothing alike: "the body gave bad instructions" and "the skill
+  # never ran". Check this FIRST on any arm that scores badly — a wrong plugin path fails
+  # here, not in the criteria below. If it is not 1.0 on every row, fix the suite before
+  # spending a stage.
+  #
+  # Necessary but not sufficient: it counts READING the skill's SKILL.md as engagement, not
+  # only a Skill tool call, so a row can report engaged while the command it issued named a
+  # different skill. Check the trajectory when a number surprises you.
   - type: "skill_triggered"
     description: "my-skill engaged for row ${row.id}"
     skill_name: "my-skill"

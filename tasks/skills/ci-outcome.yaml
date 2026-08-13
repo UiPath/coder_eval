@@ -36,12 +36,24 @@ agent:
   # This measures the skill body; injecting the host project's CLAUDE.md into every call
   # would be both expensive and a confound.
   setting_sources: []
-  # The tools `ci`'s body actually uses: it globs and reads the eval tree, then writes one
-  # workflow file. Keep this list byte-identical across every arm of an A/B — declare it in
-  # the experiment's `defaults: agent:` block there — and size it to the union of what
-  # every arm's body names, or a candidate whose hypothesis is "reach for a different
-  # tool" gets scored on the prohibition instead of the instruction.
-  allowed_tools: ["Read", "Glob", "Grep", "Write", "Bash"]
+  # The tools `ci`'s body actually uses: it globs and reads the eval tree, greps the
+  # workflows, then writes one workflow file. Keep this list byte-identical across every
+  # arm of an A/B — declare it in the experiment's `defaults: agent:` block there — and
+  # size it to the union of what every arm's body names, or a candidate whose hypothesis
+  # is "reach for a different tool" gets scored on the prohibition instead of the
+  # instruction.
+  #
+  # `Skill` is listed because it is the mechanism under test: the prompt's `/coder-eval:ci`
+  # is delivered as a Skill tool call, and that call is what `skill_triggered` observes.
+  allowed_tools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "Skill"]
+  # Sub-agent delegation has to be off, and this is measurement hygiene rather than
+  # preference. Left available, the model sometimes answers `/coder-eval:ci` by dispatching
+  # an `Agent` that reads the skill inside the child instead of emitting a Skill call in
+  # the parent stream — so `skill_triggered` observes `no` and the row measures nothing,
+  # while still producing a plausible workflow. Observed on 2 of 6 rows in the first
+  # baseline. Note an allowlist cannot express this: `Agent`/`Task` stay available whatever
+  # `allowed_tools` says, so the denial is the only lever.
+  disallowed_tools: ["Agent", "Task"]
   permission_mode: "acceptEdits"
 
 # Each row is a full task run: the agent discovers the eval tree, reads the skill, and
@@ -56,7 +68,10 @@ agent:
 # well clear of it.
 run_limits:
   max_turns: 20
-  turn_timeout: 300
+  # 300 was too tight and produced an ERROR row rather than a score: a timed-out row is
+  # EXCLUDED from the aggregate, so it shows up as completion_rate < 1.0 and voids any
+  # cross-arm comparison. Typical rows finish in 100-170s; 900 leaves real headroom.
+  turn_timeout: 900
   task_timeout: 1800
   max_usd: 2.00
 

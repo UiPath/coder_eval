@@ -241,13 +241,39 @@ Five requirements specific to this track:
   This is the **only** mechanism that works for a skill with
   `disable-model-invocation: true`, and asking in prose does not substitute: such a skill is
   not offered to the model at all, so *"use the ci skill"* gets you "no such skill is
-  available" and a row that measures nothing. The slash form loads it, emits a real `Skill`
-  tool call, and is detected by `skill_triggered` — so you can assert engagement per row.
+  available" and a row that measures nothing.
+
+  **But the slash form is not a guarantee, and this is the single biggest threat to an
+  outcome round.** Measured on a 6-row suite across four runs, engagement landed between
+  50% and 80%, failing on *different* rows each time. Three ways it slips, all silent:
+
+  - the model answers the command by **dispatching a sub-agent**, which reads the skill in
+    the child instead of emitting a `Skill` call in the parent stream;
+  - it ignores the command and simply **does the work itself**, emitting no `Skill` call;
+  - the scenario's own wording **routes it to a sibling skill** — a request phrased around
+    another skill's subject matter can beat the explicit command.
+
+  So deny sub-agent delegation (`disallowed_tools: ["Agent", "Task"]` — an *allowlist*
+  cannot do it, because those tools stay available whatever `allowed_tools` says), keep
+  `Skill` in `allowed_tools`, phrase scenarios in the vocabulary of *this* skill's job, and
+  above all **read the engagement rate before the scores**. A round whose engagement is not
+  1.0 on every row is measuring a mixture, and no amount of replicates fixes it.
+
+  One subtlety when you read it: `skill_triggered` counts **reading the skill's `SKILL.md`**
+  as engagement, not only a `Skill` call. A row can therefore report engaged while the
+  command it actually issued named a different skill. Treat the criterion as necessary, not
+  sufficient, and check the trajectory when a number surprises you.
 
 - **Assert engagement, do not assume it.** Stack a `skill_triggered` criterion naming the
   skill on every row. It costs nothing extra — the trajectory is already recorded — and it
   is what separates "the body gave bad instructions" from "the skill never ran", which score
   identically low and look nothing alike once you know which happened.
+
+  **This is a hard gate on the baseline, not a diagnostic to consult afterwards.** If
+  engagement is anything below 1.0 on every row, stop and fix the suite before spending a
+  stage. A round at 60% engagement is not a noisy round; it is a round where four rows in
+  ten measured the absence of the thing under test, and Stage B's own promotion rule
+  ("the skill actually engaged on every scored row") could not be satisfied by it.
 - **Score outcomes, not prose.** Prefer criteria that check what exists on disk and what ran
   — `file_check`, `json_check`, `run_command`, `cli_called`, `command_executed`. Reach for
   `llm_judge` or `agent_judge` only for genuinely unmeasurable qualities, and expect them to
