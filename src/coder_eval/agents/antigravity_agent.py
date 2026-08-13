@@ -119,15 +119,37 @@ _BACKGROUND_POLL_INTERVAL_SECONDS = 5.0
 # separately-tuned budget.
 _RECEIVE_STEPS_REENTRY_RETRIES = 5
 
-# Cap on poll *cycles* per turn -- bounds how many times communicate() will
-# sleep-and-redrain. Wall-clock enforcement of the whole turn is a separate
-# concern, left to the pre-existing ThreadedWatchdog (see communicate()); this
-# cap only matters when a task sets no run_limits.turn_timeout/task_timeout at
-# all, or when a single re-drain returns promptly each cycle.
-# 120 * 5s = 10 minutes: real backgrounded jobs observed in confirmed-broken
-# tasks ran 60-300s, so this carries a ~2x safety margin over the worst one
-# seen while still bounding a truly pathological (never-resolving) orphan to a
-# reasonable cap.
+# Fraction of the turn's configured `timeout` the poll loop is allowed to spend
+# waiting on a backgrounded tool call, before giving up and finalizing through
+# its OWN graceful path (force-close the orphan as unresolved, grade normally)
+# instead of running into the ThreadedWatchdog's harder cutoff at `timeout`
+# itself. Deliberately a FRACTION of `timeout`, not `timeout` itself: a check
+# against the identical value the watchdog uses races it non-deterministically
+# for who fires first (the bug an earlier review round removed); a check
+# against a smaller fraction is a strictly earlier, non-racing internal
+# deadline whose whole purpose is to reliably win that race. 0.8 leaves the
+# watchdog a fifth of the turn's budget as margin for this loop's own exit
+# bookkeeping (the warning log, finalize()'s force-close/grade pass) to
+# complete before the harder cancellation would land anyway.
+#
+# This bound is what actually matters: without it, a tool call spuriously left
+# ACTIVE with no real background job behind it (observed live -- see the final
+# validation run) used to finalize immediately pre-fix and grade whatever the
+# agent had already produced. Bounding this loop only by a fixed cycle count
+# disconnected from `timeout` (as an earlier revision did: 120 * 5s = 600s,
+# double the framework's own default `turn_timeout: 300` in
+# experiments/default.yaml) makes the graceful path unreachable in practice --
+# the watchdog always wins first, and the SAME spurious-orphan turn now burns
+# the full turn timeout before crashing as TurnTimeoutError with zero criteria
+# evaluated, a strict regression for that input class.
+_POLL_DEADLINE_TIMEOUT_FRACTION = 0.8
+
+# Cap on poll *cycles* per turn -- the SOLE bound when a task sets no
+# run_limits.turn_timeout/task_timeout at all (timeout=None), since
+# _POLL_DEADLINE_TIMEOUT_FRACTION has nothing to multiply in that case. Also a
+# backstop against a very large configured timeout turning this loop into an
+# effectively unbounded wait: 120 * 5s = 10 minutes, ~2x the worst real
+# backgrounded-job duration observed in confirmed-broken tasks (60-300s).
 #
 # Deliberately NOT "break after N consecutive empty polls" instead: the real
 # SDK's receive_steps() returns identically empty whether a backgrounded job is
@@ -566,6 +588,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=model))
                 conversation = self._sdk_agent.conversation
                 poll_count = 0
+                # Bound the poll loop's OWN exit by a fraction of `timeout` so its
+                # graceful path (force-close the orphan, grade normally) reliably
+                # wins the race against the ThreadedWatchdog's harder cutoff at
+                # `timeout` itself, instead of the watchdog always firing first —
+                # see _POLL_DEADLINE_TIMEOUT_FRACTION's comment for why a FRACTION
+                # of `timeout` doesn't race it the way an identical value would.
+                # `timeout=None` has nothing to derive a fraction from, so the
+                # cycle-based _MAX_BACKGROUND_POLLS is the sole bound in that case.
+                poll_deadline = turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
                 try:
                     await conversation.send(user_input)
                     # The cooperative should_stop poll runs AFTER process_step (the
@@ -584,31 +615,24 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     # instead, gated on that orphaned-tool signal so a normal turn
                     # (which always closes its tool calls before the stream
                     # exhausts) takes this branch zero times and finalizes exactly
-                    # as fast as today. No separate in-loop deadline check against
-                    # `timeout`: the ThreadedWatchdog above already enforces it by
-                    # cancelling this whole coroutine, and a second check against
-                    # the SAME value would just race it non-deterministically for
-                    # who fires first. `_MAX_BACKGROUND_POLLS` bounds the number of
-                    # poll *cycles*; the `not state.timeout_hit` check below is a
-                    # fast exit once the watchdog has already decided to fire but
-                    # its cancellation hasn't landed on this coroutine yet (a single
-                    # re-drain can itself await indefinitely while genuinely
-                    # non-idle work is in flight, so true wall-clock safety for an
-                    # unbounded background job still depends on a configured
-                    # `run_limits.turn_timeout`/`task_timeout` reaching the watchdog
-                    # — not on this cap alone).
+                    # as fast as today.
                     while (
                         not state.stopped_early_hit
                         and not state.timeout_hit
                         and state.has_orphaned_tool_call()
-                        and poll_count < _MAX_BACKGROUND_POLLS
+                        and (
+                            poll_count < _MAX_BACKGROUND_POLLS
+                            if poll_deadline is None
+                            else time.monotonic() < poll_deadline
+                        )
                     ):
                         poll_count += 1
                         self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
                         await asyncio.sleep(_BACKGROUND_POLL_INTERVAL_SECONDS)
-                        if state.timeout_hit:
-                            # The watchdog decided to fire during the sleep above; skip
-                            # the re-drain (which could itself await indefinitely on
+                        if state.timeout_hit or (poll_deadline is not None and time.monotonic() >= poll_deadline):
+                            # The watchdog decided to fire during the sleep above, or
+                            # this loop's own (earlier) deadline just passed: skip the
+                            # re-drain (which could itself await indefinitely on
                             # genuinely non-idle work) rather than waiting for the
                             # loop's own head check to catch it next cycle.
                             break
@@ -617,9 +641,18 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             break
                         await self._drain(conversation, state, should_stop)
 
-                    if poll_count >= _MAX_BACKGROUND_POLLS and state.has_orphaned_tool_call():
-                        msg = "Poll budget (_MAX_BACKGROUND_POLLS=%d) exhausted with a tool call still ACTIVE."
-                        self._log.warning(msg, _MAX_BACKGROUND_POLLS)
+                    if state.has_orphaned_tool_call() and not state.stopped_early_hit and not state.timeout_hit:
+                        # Exited via this loop's own bound (poll_deadline or the
+                        # cycle cap), not an external stop/timeout -- the tool call
+                        # is force-closed as unresolved in finalize() below and the
+                        # turn is still graded normally on everything else.
+                        bound = (
+                            f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
+                            if poll_deadline is not None
+                            else f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
+                        )
+                        msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
+                        self._log.warning(msg, bound, poll_count)
 
                     if state.stopped_early_hit:
                         # Best-effort server-side cancel, mirrors kill(); a raising

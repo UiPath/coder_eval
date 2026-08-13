@@ -877,6 +877,56 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
     assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
 
 
+async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(monkeypatch):
+    """A never-resolving orphan under a REALISTIC configured timeout (300s, the
+    framework's own experiments/default.yaml turn_timeout) must finalize through
+    the poll loop's own graceful path -- force-close the orphan, grade normally
+    -- instead of the ThreadedWatchdog cutting the whole turn at `timeout` first.
+
+    Pre-fix, `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS` (120 *
+    5s = 600s) was DOUBLE the 300s default, so the watchdog always won that race
+    and this exact scenario -- a tool call spuriously left ACTIVE with no real
+    background job behind it, confirmed live in the final validation run -- burned
+    the full turn timeout and crashed as TurnTimeoutError with zero criteria
+    graded, a strict regression versus the pre-fix immediate finalize. Deriving
+    the poll deadline from a FRACTION of the real `timeout` (not a disconnected
+    cycle count) fixes it: the loop now exits through its own graceful path with
+    room to spare before the watchdog's harder cutoff would ever fire."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    # Fake clock: turn_start_time=0.0, then +130s per subsequent call. The poll
+    # loop reads time.monotonic() at least twice per iteration (the while-head
+    # check, then the post-sleep deadline check), so this crosses the 240s
+    # deadline (0.8 * 300s) after exactly one poll cycle -- proving the exit is
+    # driven by the deadline, not by exhausting all 120 cycles.
+    clock = iter([0.0, 130.0, 260.0])
+    monkeypatch.setattr(antigravity_agent.time, "monotonic", lambda: next(clock, 1_000_000.0))
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([never_closing])
+
+    tr = await agent.communicate("do it forever", timeout=300.0)  # the real default turn_timeout
+
+    # Finalized and graded -- no TurnTimeoutError, no crash.
+    assert tr is not None
+    assert not tr.crashed
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
+    # Exited via the poll_deadline (well under the 120-cycle cap), matching a
+    # real turn where the watchdog's 300s cutoff never gets the chance to fire.
+    assert agent._sdk_agent.conversation.receive_steps_call_count < 5
+
+
 class _WatchdogFiresLater:
     """Fake ThreadedWatchdog that does NOT fire on entry (unlike _FiringWatchdog
     above) -- it hands its ``on_timeout`` callback to the caller so the test can
