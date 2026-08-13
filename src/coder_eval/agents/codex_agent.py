@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
-from coder_eval.agent import Agent, AgentState, ConfigFieldSupport, ConfigSupport
+from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
@@ -663,22 +663,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
     # The notification pump has a between-items guard where the cooperative
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
-
-    # Declared divergences from the shared BaseAgentConfig contract. Both are
-    # APPROXIMATED, not UNHONORED: the values are forwarded to the SDK and the agent
-    # warns about each at start() (_log_config_enforcement), so an operator reading
-    # the task log sees exactly what the harness did and did not enforce.
-    config_support: ClassVar[dict[str, ConfigFieldSupport]] = {
-        "permission_mode": ConfigFieldSupport(
-            ConfigSupport.APPROXIMATED,
-            "every mode resolves to full-access; coder_eval's isolation boundary is the "
-            + "sandbox driver, and Codex's own OS sandbox is unusable on our container/CI paths",
-        ),
-        "disallowed_tools": ConfigFieldSupport(
-            ConfigSupport.APPROXIMATED,
-            "forwarded to the SDK as disabled_tools but not enforced by it — not a security boundary",
-        ),
-    }
 
     def __init__(
         self,

@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
-from coder_eval.agent import Agent, AgentState, ConfigFieldSupport, ConfigSupport
+from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
@@ -93,22 +93,8 @@ _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: dict[str, str] = {
     "search_web": "WebSearch",
     "generate_image": "GenerateImage",
     "ask_question": "AskUser",
-    "read_url_content": "WebFetch",
     "finish": "Finish",
 }
-
-# The inverse, for translating ``agent.allowed_tools`` / ``disallowed_tools`` (written
-# in Claude names) into the harness's ``CapabilitiesConfig`` tool lists. Built from the
-# forward map so the two can never drift; the forward map is 1:1, so the inversion is
-# lossless. A Claude tool with no Antigravity counterpart (``Skill`` — Antigravity
-# discovers skills through ``skills_paths``, not a tool; ``TodoWrite``; ...) is absent
-# here and is dropped with a log line rather than crashing the enum validation.
-_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP: dict[str, str] = {v: k for k, v in _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.items()}
-
-# Tools that keep the harness's control flow working and are therefore never removed
-# by an allowlist. ``finish`` is how the agent ends its turn — disabling it strands
-# every run at the step-loop until the turn timeout fires.
-_ANTIGRAVITY_STRUCTURAL_TOOLS: frozenset[str] = frozenset({"finish"})
 
 # Tool-call arg keys the harness ADDS at completion (the result payload), not
 # model-supplied inputs — stripped from CommandTelemetry.parameters and mined for
@@ -181,20 +167,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     # The step loop has a between-steps guard where the cooperative
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
-
-    # Declared divergence from the shared BaseAgentConfig contract. APPROXIMATED
-    # rather than UNHONORED for the same reason as Codex: the run is genuinely
-    # unconfined under every mode by design, and the isolation the field implies is
-    # provided one layer down by the sandbox driver — so the mode is not ignored so
-    # much as satisfied elsewhere. Rejecting it would break every task that sets
-    # bypassPermissions to mean "this is a headless eval, do not stop to ask".
-    config_support: ClassVar[dict[str, ConfigFieldSupport]] = {
-        "permission_mode": ConfigFieldSupport(
-            ConfigSupport.APPROXIMATED,
-            "every mode runs the harness with policy.allow_all(); coder_eval's isolation "
-            + "boundary is the sandbox driver, and a headless eval has no human to approve",
-        ),
-    }
 
     def __init__(
         self,
@@ -296,73 +268,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """
         return [str(self.working_directory), *skills_paths]
 
-    def _map_tools(self, tools: list[str], field: str) -> list[str]:
-        """Translate Claude-named tools to Antigravity builtin names, dropping unmappables.
-
-        ``CapabilitiesConfig`` validates against the ``BuiltinTools`` enum, so an
-        unmapped name would raise instead of being ignored — hence the explicit drop
-        plus a log line naming what was dropped and why.
-        """
-        mapped: list[str] = []
-        dropped: list[str] = []
-        for tool in tools:
-            antigravity_name = _CLAUDE_TO_ANTIGRAVITY_TOOL_MAP.get(tool)
-            if antigravity_name is None:
-                dropped.append(tool)
-            elif antigravity_name not in mapped:
-                mapped.append(antigravity_name)
-        if dropped:
-            self._log.debug(
-                "agent.%s entries with no Antigravity builtin were dropped: %s "
-                + "(Skill is expected here — Antigravity discovers skills via skills_paths, not a tool)",
-                field,
-                ", ".join(dropped),
-            )
-        return mapped
-
-    def _build_capabilities(self, types_mod: Any) -> Any:
-        """Build ``CapabilitiesConfig`` from ``allowed_tools`` / ``disallowed_tools``.
-
-        The two SDK fields are mutually exclusive, so an allowlist wins and any
-        denylist is subtracted from it rather than passed separately — same resulting
-        tool set, no SDK validation error. Returns ``None`` when neither field
-        constrains anything, leaving the harness defaults (all tools) in force.
-
-        The structural tools are always re-added: an allowlist that stripped ``finish``
-        would leave the agent unable to end its turn. An allowlist that maps to nothing
-        usable falls back to the harness defaults with a warning — handing the model a
-        single ``finish`` tool produces a zero-scoring run with no diagnosable cause,
-        which is the worse failure for an eval harness.
-        """
-        requested_allow = self.config.allowed_tools or []
-        allowed = self._map_tools(requested_allow, "allowed_tools")
-        disallowed = self._map_tools(self.config.disallowed_tools or [], "disallowed_tools")
-
-        # Branch on what the TASK asked for, not on what survived mapping: an
-        # allowlist whose every entry is unmappable must reach the warning below,
-        # not fall through to "no allowlist configured".
-        if requested_allow:
-            enabled = [t for t in allowed if t not in disallowed]
-            enabled += [t for t in sorted(_ANTIGRAVITY_STRUCTURAL_TOOLS) if t not in enabled]
-            if set(enabled) <= _ANTIGRAVITY_STRUCTURAL_TOOLS:
-                self._log.warning(
-                    "agent.allowed_tools (%s) maps to no usable Antigravity tool; "
-                    + "falling back to the harness default (all tools enabled).",
-                    ", ".join(self.config.allowed_tools or []),
-                )
-                return None
-            self._log.debug("Antigravity enabled_tools: %s", ", ".join(enabled))
-            return types_mod.CapabilitiesConfig(enabled_tools=enabled)
-
-        if disallowed:
-            disabled = [t for t in disallowed if t not in _ANTIGRAVITY_STRUCTURAL_TOOLS]
-            if not disabled:
-                return None
-            self._log.debug("Antigravity disabled_tools: %s", ", ".join(disabled))
-            return types_mod.CapabilitiesConfig(disabled_tools=disabled)
-
-        return None
-
     def _harness_env(self) -> dict[str, str] | None:
         """Per-agent environment for the localharness subprocess (``LocalAgentConfig.env``).
 
@@ -456,11 +361,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # inherited os.environ when it spawns the localharness, so two
                 # concurrent tasks never see each other's mock dirs.
                 env=self._harness_env(),
-                # allowed_tools / disallowed_tools → the harness's tool exposure.
-                # Stripping a tool from the model's context (rather than denying the
-                # call via a policy) matches how Claude Code and Codex read the same
-                # fields, and costs no tokens on rejected attempts.
-                **({"capabilities": capabilities} if (capabilities := self._build_capabilities(types)) else {}),
             )
             # Attach the configured thinking level (reasoning effort) onto every
             # resolved model's Gemini endpoint. The SDK validates the model list in

@@ -1,37 +1,20 @@
-# Harness Config Parity
+# Run-Limit Parity
 
-One task file, run on three harnesses, must be the same task. This page is the
-contract for how each shared `agent:` field is implemented on Claude Code, Codex,
-and Antigravity — and, where a backend genuinely cannot implement one, what it
-does instead.
+One task file, run on three harnesses, must be the same task. `run_limits.max_turns`
+was the field that broke that promise hardest: Claude Code enforced it, and Codex and
+Antigravity accepted it and never read it, so `max_turns: 6` ran capped on one
+backend and unbounded on the other two.
 
-The declarations here are not prose: each agent class carries them as
-`config_support`, and resolution rejects a task that sets a field its agent
-declares it cannot honor.
-
-## Support states
-
-| State | Meaning | What happens |
-|-------|---------|--------------|
-| **honored** | Implemented faithfully. | Nothing to declare — the default. |
-| **approximated** | Acted on, with a documented divergence. | The agent warns at `start()`; resolution allows it. |
-| **unhonored** | Read by nothing. | Resolution **hard-errors** if the task sets it to a non-default value. |
-
-An agent declares only its divergences. An empty `config_support` asserts it
-honors every shared field — so a field silently dropped without a declaration is
-a bug, not a shortcut.
+This page is the contract for what each run limit means per harness.
 
 ## The table
 
-| Field | claude-code | codex | antigravity |
+| Limit | claude-code | codex | antigravity |
 |---|---|---|---|
-| `model` | honored | honored | honored |
-| `allowed_tools` | honored | honored (`enabled_tools`) | honored (`CapabilitiesConfig.enabled_tools`) |
-| `disallowed_tools` | honored | **approximated** — forwarded as `disabled_tools`, not enforced by the SDK | honored (subtracted from the allowlist) |
-| `permission_mode` | honored | **approximated** — every mode runs full-access | **approximated** — every mode runs `policy.allow_all()` |
-| `plugins` | honored | honored (symlinked into `.agents/skills/`) | honored (`skills_paths`) |
-| `run_limits.max_turns` | honored (native SDK turn cap) | honored (visible-turn cap) | honored (visible-turn cap) |
-| `run_limits.stop_early` | honored | honored | honored |
+| `run_limits.max_turns` | native SDK cap (assistant messages) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) |
+| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog + cooperative interrupt |
+| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
+| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` |
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 
@@ -43,8 +26,7 @@ both.
 
 They need their own counter because a native one would be meaningless: Codex and
 Antigravity each deliver exactly **one SDK turn per `communicate()` call**, so an
-SDK-level cap would clamp at 1 no matter what the task asked for. Before this,
-both simply ignored the field.
+SDK-level cap would clamp at 1 no matter what the task asked for.
 
 The cap is enforced on the same loop boundary as the cooperative early stop: the
 step or notification that reaches the cap is processed whole, and the next one is
@@ -57,29 +39,26 @@ That is a real, honored cap, so it is left alone rather than restated in a
 different unit; the same `max_turns: 20` therefore bounds slightly different things
 on claude-code than on the other two. Documented rather than papered over.
 
-## `permission_mode` does not confine any harness
+### What a capped run looks like
 
-On Codex and Antigravity, every mode runs unconfined, by design:
+The three signals a capped run leaves behind, on every backend:
 
-- coder_eval's isolation boundary is the **sandbox driver** — a Docker container,
-  or an ephemeral per-task tempdir it creates and discards. An in-agent approval
-  policy on top of that is redundant.
-- Codex's own OS sandbox actively breaks on the paths we run: Landlock is
-  unavailable inside the container, the `bwrap` re-exec is denied on constrained CI
-  agents, and Windows has no OS sandbox at all. In each case writes fail silently
-  and the task scores 0 with no loud error.
-- The modes below `bypassPermissions` differ only in *what they would ask a human
-  about*, and there is no human on a headless eval path.
+- `final_status` is a completed status, not `agent_crash`. The cap is an ordinary
+  end-of-run, so criteria are still checked against whatever the agent produced.
+- `max_turns_exhausted: true` on the turn record.
+- `visible_turn_count` equals the cap on Codex and Antigravity. On claude-code it
+  is whatever tool calls fit inside the assistant-message budget, so it is
+  bounded by the cap rather than equal to it.
 
-This is declared as **approximated** rather than unhonored — the isolation the
-field implies is provided, one layer down — so setting `bypassPermissions` on a
-nightly does not fail resolution.
+## Timeouts are unchanged by this contract
 
-**For adversarial or untrusted evals, use the Docker driver.** The tempdir/host
-driver is a working directory, not a confinement boundary, on any of the three.
+`turn_timeout` and `task_timeout` already behaved consistently and are listed here
+only so the parity table is complete. A timeout is a *failure* (partial turn
+captured, `agent_crash` / timeout status); the turn cap is a *clean stop*. Conflating
+them is the mistake this page exists to prevent: a task whose cap fires should not
+look like a task whose harness hung.
 
 ## Related
 
 - [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md)
-- [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) — the full `agent:` schema
-- [Extending Coder Eval](../EXTENDING.md) — declaring `config_support` on a new agent
+- [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) — the full `run_limits` schema

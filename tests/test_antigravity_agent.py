@@ -5,7 +5,6 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 """
 
 import asyncio
-import logging
 import os
 import sys
 from types import ModuleType, SimpleNamespace
@@ -703,99 +702,6 @@ def _agent(**cfg) -> AntigravityAgent:
     return AntigravityAgent(parse_agent_config(type="antigravity", **cfg))
 
 
-def _fake_types() -> SimpleNamespace:
-    return SimpleNamespace(CapabilitiesConfig=lambda **kw: SimpleNamespace(**kw))
-
-
-def test_claude_to_antigravity_tool_map_is_exact_inverse():
-    """The inverse map is derived, so a forward-map edit can never leave it stale."""
-    from coder_eval.agents.antigravity_agent import _CLAUDE_TO_ANTIGRAVITY_TOOL_MAP
-
-    assert len(_CLAUDE_TO_ANTIGRAVITY_TOOL_MAP) == len(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP)
-    for antigravity_name, claude_name in _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.items():
-        assert _CLAUDE_TO_ANTIGRAVITY_TOOL_MAP[claude_name] == antigravity_name
-
-
-def test_allowed_tools_become_enabled_tools():
-    """The repo-default allowlist maps onto the matching Antigravity builtins."""
-    agent = _agent(allowed_tools=["Bash", "Read", "Write", "Edit", "Glob", "Grep"])
-
-    caps = agent._build_capabilities(_fake_types())
-
-    assert caps.enabled_tools == [
-        "run_command",
-        "view_file",
-        "create_file",
-        "edit_file",
-        "find_file",
-        "search_directory",
-        "finish",
-    ]
-
-
-def test_allowed_tools_always_keep_finish():
-    """`finish` is how a turn ends — an allowlist must never strip it."""
-    agent = _agent(allowed_tools=["Read"])
-
-    caps = agent._build_capabilities(_fake_types())
-
-    assert "finish" in caps.enabled_tools
-
-
-def test_unmappable_allowed_tools_are_dropped_not_raised():
-    """`Skill` has no Antigravity builtin (skills come from skills_paths) — drop it."""
-    agent = _agent(allowed_tools=["Skill", "Bash"])
-
-    caps = agent._build_capabilities(_fake_types())
-
-    assert "Skill" not in caps.enabled_tools
-    assert "run_command" in caps.enabled_tools
-
-
-def test_allowlist_that_maps_to_nothing_falls_back_to_defaults(caplog):
-    """An allowlist of only-unmappable names must not hand the model just `finish`.
-
-    Enabling nothing but the turn-ender scores 0 with no diagnosable cause, so the
-    harness default (all tools) plus a loud warning is the better failure mode.
-    """
-    agent = _agent(allowed_tools=["Skill", "TodoWrite"])
-
-    with caplog.at_level(logging.WARNING, logger="coder_eval.agents.antigravity_agent"):
-        caps = agent._build_capabilities(_fake_types())
-
-    assert caps is None
-    assert "maps to no usable Antigravity tool" in caplog.text
-
-
-def test_disallowed_tools_are_subtracted_from_an_allowlist():
-    """enabled_tools and disabled_tools are mutually exclusive in the SDK, so subtract."""
-    agent = _agent(allowed_tools=["Bash", "Read", "Write"], disallowed_tools=["Write"])
-
-    caps = agent._build_capabilities(_fake_types())
-
-    # One field only — passing both would fail the SDK's mutual-exclusion validator.
-    assert not hasattr(caps, "disabled_tools")
-    assert caps.enabled_tools == ["run_command", "view_file", "finish"]
-
-
-def test_disallowed_tools_alone_become_disabled_tools():
-    agent = _agent(disallowed_tools=["WebSearch"])
-
-    caps = agent._build_capabilities(_fake_types())
-
-    assert caps.disabled_tools == ["search_web"]
-
-
-def test_disallowed_tools_cannot_disable_a_structural_tool():
-    agent = _agent(disallowed_tools=["Finish"])
-
-    assert agent._build_capabilities(_fake_types()) is None
-
-
-def test_no_tool_fields_leaves_harness_defaults():
-    assert _agent()._build_capabilities(_fake_types()) is None
-
-
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
 async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path, mode: str):
     """permission_mode is declared unhonored: every mode stays fully autonomous.
@@ -821,48 +727,6 @@ async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path,
     await _agent(permission_mode=mode).start(str(tmp_path))
 
     assert [p.kind for p in configs[0].policies] == ["allow_all"]
-
-
-async def test_start_passes_capabilities_to_sdk_config(monkeypatch, tmp_path):
-    """End-to-end: the allowlist reaches LocalAgentConfig, not just the builder."""
-    configs: list[Any] = []
-
-    class _FakeSdkAgent:
-        def __init__(self, cfg):
-            configs.append(cfg)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
-
-    await _agent(allowed_tools=["Bash", "Read"]).start(str(tmp_path))
-
-    assert configs[0].capabilities.enabled_tools == ["run_command", "view_file", "finish"]
-
-
-async def test_start_omits_capabilities_when_unconstrained(monkeypatch, tmp_path):
-    """No allowlist → the kwarg is absent entirely, so the SDK default stands."""
-    configs: list[Any] = []
-
-    class _FakeSdkAgent:
-        def __init__(self, cfg):
-            configs.append(cfg)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
-
-    await _agent().start(str(tmp_path))
-
-    assert not hasattr(configs[0], "capabilities")
 
 
 # --- max_turns visible-turn cap -----------------------------------------------------

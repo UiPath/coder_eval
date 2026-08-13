@@ -56,7 +56,6 @@ from .models import (
     resolve_evaluation_route,
     resolve_route,
 )
-from .orchestration.config_support import validate_config_support
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
@@ -989,10 +988,6 @@ class Orchestrator:
         # paths (the CLI already validated during resolution). No-op unless
         # some criterion carries a stop_early: block.
         validate_early_stop(self.task)
-
-        # Same defensive posture for the agent config-support guardrail: no-op unless
-        # the task sets a field this harness declares it does not implement.
-        validate_config_support(self.task)
 
         # Build the early-stop watcher once, up front, when armed (>= 1 criterion
         # with a stop_early: block and the run_limits.stop_early kill switch not

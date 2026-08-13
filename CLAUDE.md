@@ -81,7 +81,6 @@ coder_eval/
 ├── orchestration/                 # Batch execution utilities
 │   ├── batch.py                   # Parallel task execution (run_batch + run_batch_resolved)
 │   ├── config.py                  # Batch run configuration
-│   ├── config_support.py          # validate_config_support: rejects a task setting a field its agent declares unhonored
 │   ├── early_stop.py              # validate_early_stop guardrails + EarlyStopWatcher (armed live-verdict observer)
 │   ├── evaluation.py              # Evaluation helpers
 │   ├── experiment.py              # ExperimentRunner, resolve_task_for_variant, load_experiment

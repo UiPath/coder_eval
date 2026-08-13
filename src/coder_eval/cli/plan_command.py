@@ -59,7 +59,6 @@ def plan_command(
     check_api_keys()
 
     # Lazy import to avoid circular dependency at module level
-    from ..orchestration.config_support import AgentConfigSupportError, validate_config_support
     from ..orchestration.early_stop import EarlyStopConfigError, validate_early_stop
     from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
 
@@ -137,9 +136,6 @@ def plan_command(
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
                     # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
                     validate_early_stop(resolved)
-                    # Agent config-support guardrail (no-op unless the task sets a field
-                    # the chosen harness declares it does not implement).
-                    validate_config_support(resolved)
                     agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""
@@ -148,11 +144,6 @@ def plan_command(
                     # A hard config error (unlike generic per-variant resolution
                     # failures, which stay soft): flip the plan exit code.
                     console.print(f"    [red]Variant '{variant.variant_id}': early-stop config error - {e}[/red]")
-                    all_valid = False
-                except AgentConfigSupportError as e:
-                    # Same hard-error treatment: the task asks this harness for
-                    # something it declares it cannot do.
-                    console.print(f"    [red]Variant '{variant.variant_id}': agent config error - {e}[/red]")
                     all_valid = False
                 except Exception as e:
                     console.print(f"    [red]Variant '{variant.variant_id}': resolution failed - {e}[/red]")

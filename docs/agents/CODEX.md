@@ -214,18 +214,18 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 | **Command Tracking** | Full telemetry (tool name, params, duration) | Streamed telemetry: shell → `Bash`, apply_patch → `Write` |
 | **Model Selection** | Direct via `--model` or config | `agent.model` pinned into `thread_start` |
 | **Session Resume** | `--resume {session_id}` | Via thread ID |
-| **Permissions** | `permission_mode` honored | `permission_mode` runs full-access on every mode — the sandbox driver is the boundary |
+| **Permissions** | `permission_mode` + `allowed_tools` | `permission_mode` → sandbox/approval + `allowed_tools`/`disallowed_tools` → thread config |
 | **Tool Enforcement** | Not enforced by Coder Eval wrapper | `enabled_tools` honored; `disabled_tools` NOT enforced by the SDK |
 | **`max_turns`** | Native SDK turn cap (assistant messages) | Visible-turn cap (tool calls), enforced on the notification pump |
 | **Early stop** | Supported (cooperative `should_stop`, polled between messages) | Supported — polled after each streamed notification; the in-flight turn is interrupted best-effort |
 
-Field-by-field, with the reasoning behind each divergence: [Harness Config Parity](HARNESS_PARITY.md).
+Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).
 
 ## Known Limitations
 
 1. **Tool-name collapse** - Codex reports shell tools (`Read`/`Grep`/`Bash`) all as shell commands, surfaced as `Bash` telemetry; name-keyed criteria that distinguish these tools aren't meaningful across agents.
 2. **`skill_triggered` criterion** - Codex has no distinct `Skill` tool (it engages a skill by reading its files via shell), so the criterion detects Codex engagement from that file-read signal (a command referencing `skills/<name>/`) instead of a `Skill` tool call. The file-read signal is weaker than Claude's explicit invocation.
-3. **`disallowed_tools`** - passed to the SDK but not enforced; not a security boundary. Declared `approximated` in the agent's `config_support`.
+3. **`disallowed_tools`** - passed to the SDK but not enforced; not a security boundary.
 4. **Authentication** - Requires `CODEX_API_KEY` in the environment (point it at whichever endpoint's key you use — OpenAI, gateway, or Azure); the agent calls `login_api_key` when a key is present. `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` are NOT read.
 5. **Model field** - `TurnRecord.model_used` reflects the pinned `agent.model`; the Codex `Turn` payload itself doesn't carry the resolved model.
 6. **Skills with Windows paths** - Symlink creation may fail on Windows; agent falls back to copying (slower).
