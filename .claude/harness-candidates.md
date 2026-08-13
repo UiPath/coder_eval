@@ -187,7 +187,7 @@ harness once for all of them.
   mechanizable guard; the durable lesson is: when a test names a narrowing, construct
   the fixture so the row SURVIVES every other rule, or the assertion proves nothing.
 
-- [ ] **CE034 — runner-label registry + dogfood runner parity** over
+- [ ] **CE038 — runner-label registry + dogfood runner parity** over
   `.github/workflows/*.yml`. Two clauses: (a) every label a job can land on must appear
   in `.github/actionlint.yaml`'s `self-hosted-runner.labels` or a stock GitHub-hosted
   allowlist — including *both* branches of an expression-valued `runs-on:`, which
@@ -247,7 +247,7 @@ harness once for all of them.
 
 ## From the PR #82 review follow-up (2026-08-10)
 
-- [ ] **CE035 — documented `coder-eval` invocations must be executable as written.**
+- [ ] **CE039 — documented `coder-eval` invocations must be executable as written.**
   `init/SKILL.md` told the agent to run `coder-eval plan <task-directory>` and
   "iterate until it exits 0", which the CLI rejects outright (`plan` takes files;
   a directory argument exits 1 with a hint) — an unreachable loop condition
@@ -260,12 +260,12 @@ harness once for all of them.
   that duplicates the CLI signature. Deferred on that split — caught in the PR #82
   review, fixed by hand in `init/SKILL.md`.
 
-- [ ] **Documented-CLI live smoke.** The behavioural counterpart to CE035: in a
+- [ ] **Documented-CLI live smoke.** The behavioural counterpart to CE039: in a
   `-m live`/`-m slow` test, materialize a fixture repo with one task YAML and
   execute every fenced `coder-eval …` command extracted from the shipped skills
   and docs, asserting exit 0 (or an explicitly-expected non-zero). This is the
   only form that proves argument shape rather than command existence. Not
-  statically reachable, hence separate from CE035 — proposed in the PR #82 review.
+  statically reachable, hence separate from CE039 — proposed in the PR #82 review.
 
 ## From the 2026-08-11 plugin generic-adopter run
 
@@ -394,7 +394,7 @@ with the two `action.yml` items above — one considered change to the action's 
 
 ## From 2026-08-04 published-action verification review
 
-- [ ] **CE034 — `VAR=$(… | grep …)` under `set -e` followed by an emptiness check
+- [ ] **CE041 — `VAR=$(… | grep …)` under `set -e` followed by an emptiness check
   is a dead diagnostic.** With `set -euo pipefail`, a pipeline whose `grep` matches
   nothing exits 1, so the assignment aborts the step *before* the
   `if [ -z "$VAR" ]; then echo "::error::…"` branch that was written to report it —

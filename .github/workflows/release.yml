@@ -517,7 +517,7 @@ jobs:
     # and no Release is cut. Emptiness is enforced inside the job instead, by
     # "Validate version shape", so a lost output is a RED job, not a silent no-op.
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
     # Every write in this job goes through the app token below, so GITHUB_TOKEN needs
     # nothing beyond read. Declared explicitly to drop the workflow-level

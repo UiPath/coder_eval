@@ -183,7 +183,7 @@ def test_all_three_pin_anchor_readers_agree_on_action_yml():
     bump_sed = next(
         line.strip()
         for line in _run_body(
-            _load(RELEASE_WF), "Regenerate uv.lock, bump action.yml pin, and amend release commit"
+            _load(RELEASE_WF), "Regenerate uv.lock, bump action.yml + plugin.json pins, and amend release commit"
         ).splitlines()
         if line.strip().startswith("sed -i -E") and "kept in sync" in line
     )

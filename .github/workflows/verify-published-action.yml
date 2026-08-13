@@ -42,7 +42,7 @@ jobs:
   # tag/pin/PyPI desync, so it gates the paid tier below.
   preflight:
     name: Preflight (tag/pin/PyPI/Marketplace parity)
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout (full history for tags)
@@ -289,6 +289,10 @@ jobs:
     # still runs. Schedule/dispatch events have no workflow_run context, so the first
     # clause lets them through.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == github.event.repository.default_branch
+    # Stock `ubuntu-latest` ON PURPOSE, not the managed pool the rest of CI moved to:
+    # this job exists to reproduce what an external consumer gets, and the documented
+    # consumer snippet (docs/tutorials/02-ci-pipeline.md, mirrored by `action-dogfood`)
+    # says `ubuntu-latest`. A bulk `runs-on:` migration must not sweep this up.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
