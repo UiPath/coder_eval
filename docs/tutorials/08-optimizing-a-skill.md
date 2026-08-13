@@ -1,4 +1,12 @@
-# Optimizing a skill description
+---
+description: >-
+  Measure whether a Claude Code skill's description can be improved — build an
+  activation suite, split it into tune and holdout rows, A/B candidate rewrites
+  as experiment variants, and promote only what survives rows it was never tuned
+  on.
+---
+
+# Tutorial 08 — Optimizing a Skill Description
 
 `check-skill` tells you whether a skill triggers. This tutorial covers the next question:
 **can its description be made to trigger better, and how would you know?**
