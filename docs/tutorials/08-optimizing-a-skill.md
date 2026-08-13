@@ -15,17 +15,15 @@ The honest answer is usually "measure first, and often the answer is don't chang
 walkthrough is a real run against a real skill in this repository, reported with the numbers
 it actually produced — including the part where the first attempt measured nothing at all.
 
-!!! note "This is the activation track"
-
-    `/coder-eval:optimize-skill` has two tracks, and this page walks the first:
-    **activation** — the frontmatter `description`, measured with an activation suite, asking
-    *does the skill fire when it should?*
-
-    Its **execution** track improves the skill **body** instead, measured against an outcome
-    suite with real success criteria, asking *having fired, does it do the job?* That is a
-    different instrument for a different failure: `skill_triggered` scores engagement and is
-    completely blind to the quality of the work that follows. If your skill fires reliably
-    and then does the wrong thing, that is the track you want.
+> **This page walks the activation track.** `/coder-eval:optimize-skill` has two:
+> **activation** — the frontmatter `description`, measured with an activation suite, asking
+> *does the skill fire when it should?* — and **execution**, which improves the skill
+> **body** instead, measured against an outcome suite with real success criteria, asking
+> *having fired, does it do the job?*
+>
+> They are different instruments for different failures: `skill_triggered` scores engagement
+> and is completely blind to the quality of the work that follows. If your skill fires
+> reliably and then does the wrong thing, execution is the track you want.
 
 **What you will do:** build an activation suite for `lint-tasks`, split it into train and
 test rows, baseline it, read the confusion matrix, and decide whether to spend anything.
@@ -138,28 +136,27 @@ The intuitive path is the wrong one. For `.claude/skills/my-skill/SKILL.md` the 
 export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"   # the plugin root
 ```
 
-!!! danger "The first baseline for this tutorial scored recall 0.0"
-
-    It pointed one level too deep, at the bare skills directory. Nothing loaded, no `Skill`
-    tool was ever offered, and every positive row failed. On an earlier, smaller draft of
-    this suite — 10 train rows rather than the 14 below — that produced:
-
-    ```
-    lint-tasks   recall.yes=0.000 precision.yes=0.000 f1.yes=0.000
-                 confusion: [('no','no',4), ('yes','no',3)]
-    ```
-
-    Note the confusion matrix accounts for only 7 of the 10 rows; the missing 3 are the
-    next section.
-
-    A wrong path is only a **warning**, never an error. The run completes, the report
-    renders, and the number it produces is indistinguishable from a skill whose description
-    is hopeless. In a one-shot check that misleads you once; in an optimization loop it
-    poisons everything — every candidate scores zero, nothing separates from the incumbent,
-    and you conclude your rewrites are all bad when your wiring is broken.
-
-    **So the first thing to check is never the description. It is whether recall is
-    non-zero at all.**
+> **The first baseline for this tutorial scored recall 0.0.** It pointed one level too deep,
+> at the bare skills directory. Nothing loaded, no `Skill` tool was ever offered, and every
+> positive row failed. On an earlier, smaller draft of this suite — 10 train rows rather than
+> the 14 below — that produced:
+>
+> ```
+> lint-tasks   recall.yes=0.000 precision.yes=0.000 f1.yes=0.000
+>              confusion: [('no','no',4), ('yes','no',3)]
+> ```
+>
+> Note the confusion matrix accounts for only 7 of the 10 rows; the missing 3 are the next
+> section.
+>
+> A wrong path is only a **warning**, never an error. The run completes, the report renders,
+> and the number it produces is indistinguishable from a skill whose description is hopeless.
+> In a one-shot check that misleads you once; in an optimization loop it poisons everything —
+> every candidate scores zero, nothing separates from the incumbent, and you conclude your
+> rewrites are all bad when your wiring is broken.
+>
+> **So the first thing to check is never the description. It is whether recall is non-zero
+> at all.**
 
 Point it at the plugin root and the same suite goes to `recall.yes=1.000`. Nothing about the
 descriptions changed.

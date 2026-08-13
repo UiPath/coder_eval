@@ -1074,6 +1074,25 @@ class TestCE028DocIndexParity:
         drift = tutorials_table_drift(self.REPO_ROOT, self._nav)
         assert drift is None, drift
 
+    def test_tutorials_avoid_mkdocs_only_admonitions(self):
+        # Tutorials are read on GitHub as often as on the docs site — from the repo, from a
+        # PR diff, from a search result. `!!! note` is mkdocs-material syntax that GitHub
+        # does not understand: it renders the marker as literal text and turns the indented
+        # body into an accidental code block. Tutorials 01-07 use plain `>` blockquotes,
+        # which render correctly in both, so this pins that convention for new ones.
+        #
+        # Scoped to tutorials on purpose: reference pages under docs/ are site-first and one
+        # (DATASETS.md) predates this rule.
+        offenders = []
+        for path in sorted((self.REPO_ROOT / "docs" / "tutorials").glob("*.md")):
+            for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if line.startswith("!!! ") or line.startswith("??? "):
+                    offenders.append(f"{path.relative_to(self.REPO_ROOT)}:{line_no}: {line.strip()}")
+        assert not offenders, (
+            "mkdocs-material admonition(s) in a tutorial — these render as literal text plus "
+            "a stray code block on GitHub. Use a `>` blockquote instead:\n  " + "\n  ".join(offenders)
+        )
+
     def test_real_mkdocs_yaml_parses_despite_env_tag(self):
         # The real mkdocs.yml carries `!ENV [CI, false]`; load_nav must tolerate it.
         nav = self._nav

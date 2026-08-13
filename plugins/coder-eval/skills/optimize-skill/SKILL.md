@@ -437,7 +437,7 @@ downstream means anything.
 ## Step 10 — Three stages, and the gate
 
 State the projected run count before each stage and ask. With N candidates, S survivors,
-M<sub>train</sub> train rows and M<sub>test</sub> test rows:
+`M_train` train rows and `M_test` test rows:
 
 | Spend | Runs |
 | --- | --- |
