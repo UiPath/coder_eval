@@ -178,14 +178,20 @@ as every other agent.
    happens on the subsequent async `stop()`.
 4. **`permission_mode` does not confine the harness.** Every mode runs
    `policy.allow_all()`; coder_eval's write boundary is the sandbox driver, and a
-   headless eval has no human to approve anything. Declared `approximated` in the
-   agent's `config_support` — see [Harness Config Parity](HARNESS_PARITY.md).
-5. **`allowed_tools` entries with no Antigravity builtin are dropped.** `Skill` is the
-   expected case (skills are discovered through `skills_paths`, not a tool); the drop
-   is logged. An allowlist that maps to *nothing* usable falls back to the harness
-   default with a warning, rather than leaving the model only its turn-ender.
+   headless eval has no human to approve anything.
+5. **`allowed_tools` / `disallowed_tools` are not read.** The harness runs with its
+   full builtin tool set, so an Antigravity run has tools (web search, subagents,
+   URL fetch) that the same task file denies on Claude Code and Codex.
 6. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
-   so the cap counts resolved tool calls instead, enforced on the step loop.
+   so the cap counts resolved tool calls instead, enforced on the step loop. See
+   [Run-Limit Parity](HARNESS_PARITY.md).
+7. **Shell commands over ~10s are moved to the background.** The localharness has a
+   10-second maximum synchronous wait; past it the command becomes a background task
+   and the model gets a task id, not a result. The turn then usually ends before
+   `turn_timeout` can fire, and the tool call is force-closed as
+   `result_status: unknown`. Tasks whose real work is a long `npm install`, build, or
+   CLI call do not run the same way here as on the other two harnesses. Measured in
+   [Run-Limit Parity](HARNESS_PARITY.md).
 
 ## Running in Docker
 
