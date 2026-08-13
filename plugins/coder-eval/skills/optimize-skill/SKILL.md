@@ -269,6 +269,11 @@ Five requirements specific to this track:
   everything but the text under test. Verified: with the flag removed the call succeeds and
   the body loads; with it present, 24 of 24 rows failed silently.
 
+  Do **not** try to route around it by telling the agent to locate and read the `SKILL.md`
+  itself. It is a reasonable idea — a file read counts as engagement and does load the body —
+  but the plugin sits at a host path the sandbox cannot discover. Tested: 0 of 2 rows found
+  the file, both scored zero.
+
   **Then confirm engagement is genuinely 1.0 before spending.** And confirm it against a
   version of `skill_triggered` that ignores errored calls — an older one counted the refused
   attempt as engagement, which is precisely what hid all of this.

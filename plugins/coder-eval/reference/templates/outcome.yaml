@@ -128,7 +128,15 @@ dataset:
 # output plausible enough that every criterion below scores it as though the skill wrote it.
 # Remove that frontmatter line from the target skill in EVERY arm's snapshot (incumbent
 # included): it reproduces what a real user gets, since typing the slash command does inject
-# the body, and keeps the arms identical apart from the text under test.
+# the body, and keeps the arms identical apart from the text under test. Two lines:
+#
+#   cp -R <plugin-root> tmp/arm && sed -i '' '/^disable-model-invocation: true$/d' \
+#       tmp/arm/skills/<skill>/SKILL.md
+#
+# Do NOT instead ask the agent to find and read the SKILL.md itself. That looks like it
+# should work — a file read counts as engagement and genuinely loads the body — but the
+# plugin lives at a host path the sandbox cannot discover. Tested: 0 of 2 rows located it,
+# both scored 0.000.
 #
 # Engagement below 1.0 on every row means the suite is measuring a mixture of "did the
 # skill run" and "was the body good". That is also why `disallowed_tools` above denies

@@ -8,10 +8,24 @@
 # .github/workflows/*.yml file, so the criteria assert on artifacts rather than prose; and
 # it needs neither the coder-eval CLI nor extra credentials inside the sandbox.
 #
-# Reachability: `path` must be a PLUGIN ROOT — a directory holding a `skills/`
-# subdirectory. Here that root is the plugin itself:
+# RUNNING THIS SUITE — two lines, and the first one is not optional.
 #
-#   export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
+# `ci` sets `disable-model-invocation: true`, which makes the Skill tool REFUSE the call, so
+# mounting the plugin as-is loads no body and the suite measures the model's own knowledge of
+# GitHub Actions instead. It fails loudly now (the engagement gate below), but the fix is to
+# mount a prepared copy — which is exactly the snapshot step an A/B round performs anyway, so
+# this is a preview of the real workflow rather than an extra chore:
+#
+#   cp -R plugins/coder-eval tmp/ci-arm
+#   sed -i '' '/^disable-model-invocation: true$/d' tmp/ci-arm/skills/ci/SKILL.md   # GNU sed: -i
+#   export SKILL_SOURCE_PATH="$(pwd)/tmp/ci-arm"
+#
+#   coder-eval run tasks/skills/ci-outcome.yaml --split train
+#
+# Verified: prepared this way the Skill call succeeds and the train split scores 1.000 on
+# every row. Mount `plugins/coder-eval` directly instead and engagement is 0/6.
+#
+# `path` must be a PLUGIN ROOT either way — a directory holding a `skills/` subdirectory.
 #
 # An unset or wrong path is only a WARNING, not an error. It leaves the skill unreachable
 # and every row scoring zero, which reads exactly like a bad skill body — so confirm the
