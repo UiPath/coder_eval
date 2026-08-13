@@ -37,7 +37,13 @@ the cap actually stops spend. A run cut this way finalizes cleanly as
 **claude-code keeps its native SDK cap.** That is a real, honored cap, so it is
 left alone rather than reimplemented in a different unit. Its unit is the SDK's own
 agent-loop turn, which absorbs an arbitrary number of *parallel* tool calls, so the
-same number bounds very different amounts of work: see the measurement below.
+same number bounds very different amounts of work: under a prompt that encourages
+batching, a cap of N here permits many more than N tool calls, where it buys exactly
+N on the other two.
+
+**So holding `max_turns` constant across harnesses does not hold the budget
+constant.** If you are A/B-ing across backends and the cap is close to binding, that
+is the number to distrust.
 
 ### What a capped run looks like
 
@@ -47,73 +53,31 @@ The signals a capped run leaves behind, on every backend:
   end-of-run, so criteria are still checked against whatever the agent produced.
 - `max_turns_exhausted: true` on the task record.
 - On Codex and Antigravity, the count of *resolved* tool calls equals the cap.
+- A tool call already in flight when the cap fires is force-closed and recorded with
+  `result_status: unknown` rather than dropped, so the trajectory shows what was
+  interrupted. That can leave one more *recorded* command than the cap; the resolved
+  count still matches it.
 
-## Measured
+## What a timeout looks like
 
-Two fixtures under `tasks/run_limits/`, one prompt per limit, run on all three
-harnesses (`--type claude-code --backend bedrock` / `--type codex` /
-`--type antigravity`).
+On Claude Code and Codex a `turn_timeout` breach is a *failure*: the watchdog fires
+at the deadline, the partial turn is preserved on `pending_turn`, and the turn is
+marked `crashed`.
 
-**`max_turns_cap.yaml` — 12 sequential file writes requested, `max_turns: 4`:**
-
-| Harness | resolved tool calls | `max_turns_exhausted` | `final_status` |
-|---|---|---|---|
-| claude-code | 4 | true | SUCCESS |
-| codex | 4 | true | SUCCESS |
-| antigravity | 4 | true | SUCCESS |
-
-All three stop at 4 and finish cleanly, with the first file on disk so the criteria
-still grade real work. Before this change, Codex and Antigravity ran the prompt to
-completion and wrote all 12.
-
-**A batching prompt (parallel tool calls encouraged), `max_turns: 2`:**
-
-| Harness | resolved tool calls | assistant messages |
-|---|---|---|
-| claude-code | **12** | 14 |
-| codex | 2 (+1 in-flight, recorded unresolved) | 1 |
-| antigravity | 2 | 1 |
-
-This is the divergence, quantified: on claude-code a cap of 2 permitted all 12
-writes, because one SDK agent-loop turn carries as many parallel calls as the model
-emits. Codex and Antigravity stop at 2. **Hold `max_turns` constant across harnesses
-and it is not a constant budget** — if you are A/B-ing across backends and the cap
-matters to the result, that is the number to distrust.
-
-The Codex `+1` is the tool that was already in flight when the cap fired. The cap
-stopped the run after 2 completed calls; the third is force-closed and recorded with
-`result_status: unknown` rather than being silently dropped, so the trajectory shows
-what was interrupted.
-
-**`turn_timeout.yaml` — `sleep 240` under a 45s watchdog:**
-
-| Harness | outcome | duration |
-|---|---|---|
-| claude-code | turn timeout, partial turn captured, `crashed: true` | 45.6s |
-| codex | turn timeout, partial turn captured, `crashed: true` | 46.4s |
-| antigravity | poll budget exhausted, tool force-closed, turn graded, `crashed: false` | 40.0s |
-
-Claude Code and Codex behave identically: the watchdog fires at the deadline, the
-partial turn is preserved, and the run ends as an error. Antigravity stops earlier
-and more gently, for the reason below.
+Antigravity stops earlier and more gently, for the reason in the next section.
 
 ## Antigravity backgrounds anything over 10 seconds
 
 The Antigravity localharness has a **10-second maximum synchronous wait** for shell
 commands. Past it, the harness moves the command to a background task and hands the
-model a task id instead of a result. Measured: `sleep 5` resolves normally in 10.4s
-wall-clock; anything longer comes back immediately as a background task. That is
-harness behavior, not something coder_eval configures.
+model a task id instead of a result. That is harness behavior, not something
+coder_eval configures.
 
 What coder_eval does about it: the turn polls for the backgrounded result rather
-than finalizing the moment the step stream goes idle. Measured on a command that
-finishes inside the budget (`sleep 60` writing a file, `turn_timeout: 300`), same
-task and model on either side:
-
-| | outcome | duration |
-|---|---|---|
-| without the poll loop | FAILURE — file never written, tool left unresolved | 19.5s |
-| with it | SUCCESS — file written, exit code reported back | 75.0s |
+than finalizing the moment the step stream goes idle, so slow work does finish and
+its real exit code reaches the model. Without that poll, a command over the 10s
+boundary left the tool call unresolved and the turn was graded on work that had not
+happened yet.
 
 The wait is bounded by **80% of `turn_timeout`** (or 120 five-second cycles when the
 task sets no timeout), not by `turn_timeout` itself. A job that outlives that bound
@@ -121,15 +85,22 @@ is force-closed as unresolved and the turn is graded on everything else, where
 Claude Code and Codex instead raise a turn timeout and mark the turn crashed.
 
 So the residual divergence is the terminal signal, not whether slow work completes:
-a long `npm install` or build now runs to completion here the way it does on the
-other two, but a command that never finishes reads as an ordinary low score rather
-than a timeout.
+a long `npm install` or build runs to completion here the way it does on the other
+two, but a command that never finishes reads as an ordinary low score rather than a
+timeout.
 
-## Timeouts are otherwise unchanged by this contract
+## Timeouts are not turn caps
 
 A timeout is a *failure* (partial turn captured, error status); the turn cap is a
 *clean stop*. Conflating them is the mistake this page exists to prevent: a task
 whose cap fires should not look like a task whose harness hung.
+
+## Reproducing
+
+`tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more
+sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
+outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
+`--type antigravity` to check a backend against the contract above.
 
 ## Related
 
