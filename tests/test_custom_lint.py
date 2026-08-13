@@ -1748,6 +1748,7 @@ class TestPluginArtifacts:
             "docs/PLUGIN.md": self.REPO_ROOT / "docs" / "PLUGIN.md",
             "tutorial 07": self.REPO_ROOT / "docs" / "tutorials" / "07-plugin-in-claude-code.md",
             "tutorial 08": self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md",
+            "tutorial 09": self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md",
         }
         for name, path in surfaces.items():
             text = path.read_text(encoding="utf-8")
@@ -2332,6 +2333,36 @@ class TestPluginArtifacts:
                 "user of an unnamed skill is told nothing about needing the CLI and meets a "
                 "bare `command not found` mid-task."
             )
+
+    def test_tutorial_09_keeps_the_two_claims_a_reader_most_needs(self):
+        # Tutorial 09 reports a NULL result, and the two facts that make it useful are the
+        # ones an editor tightening a long page would trim first: the suite shape, and why
+        # the round stopped. Same deletion-sensor shape as the optimize-skill guard above.
+        text = _normalized(self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md")
+
+        for token, why in (
+            (
+                "one dataset-backed task",
+                "the outcome suite's shape — separate task files produce no rollup to rank and "
+                "make --split test silently re-run the train rows",
+            ),
+            (
+                "disallowed_tools",
+                "denying sub-agent delegation is the setting that moved engaged rows from 0.333 "
+                "to 1.000; an allowlist cannot express it",
+            ),
+            (
+                "not, however, reliable",
+                "the slash form's measured 50-80% engagement is the finding that stopped the "
+                "round — without it the page reads as a tutorial that simply gave up",
+            ),
+            (
+                "completion_rate",
+                "an errored row is excluded from the aggregate, so it never shows up as a low "
+                "score — only as a denominator that shrank",
+            ),
+        ):
+            assert token in text, f"tutorial 09 lost {token!r} — {why}"
 
     def test_analyze_routes_fixes_to_the_right_layer(self):
         # A shallow keyword sensor: it guards against the guidance being DELETED, not
