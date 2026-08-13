@@ -102,6 +102,12 @@ AGENT_ENV_SCRUB_VARS: tuple[str, ...] = (
 AGENT_ENV_SCRUB_PREFIXES: tuple[str, ...] = ("CODER_EVAL_",)
 
 
+def is_agent_scrubbed_env(name: str) -> bool:
+    """Whether an env var is harness-only and must be hidden from agent subprocesses."""
+
+    return name in AGENT_ENV_SCRUB_VARS or name.startswith(AGENT_ENV_SCRUB_PREFIXES)
+
+
 def scrub_agent_env_overrides() -> dict[str, str]:
     """Mask harness-only variables in SDK subprocess environments.
 
@@ -111,9 +117,7 @@ def scrub_agent_env_overrides() -> dict[str, str]:
     during its serialized spawn window.
     """
 
-    return {
-        name: "" for name in os.environ if name in AGENT_ENV_SCRUB_VARS or name.startswith(AGENT_ENV_SCRUB_PREFIXES)
-    }
+    return {name: "" for name in os.environ if is_agent_scrubbed_env(name)}
 
 
 SKIP = object()  # Sentinel marking values that serialize_value should drop from the result.

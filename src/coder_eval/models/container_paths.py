@@ -27,7 +27,6 @@ CONTAINER_TASK_DIR = f"{CONTAINER_GRADER_DIR}/task_dir"
 
 AGENT_UID = 2000
 AGENT_GID = 2000
-AGENT_USERNAME = "agent"
 AGENT_HOME = "/home/agent"
 
 CONTAINER_DROP_SHIM = "/usr/local/bin/coder_eval_drop_privilege.sh"

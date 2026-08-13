@@ -764,11 +764,9 @@ class DockerRunner:
         for source in self.rt.task.sandbox.template_sources or []:
             if not isinstance(source, TemplateDirSource):
                 continue
-            host_path = Path(source.path)
-            if task_dir is not None and (host_path.resolve() == task_dir or task_dir in host_path.resolve().parents):
-                continue
-            self._register_private_mount(host_path, f"/opt/coder-eval/grader/templates/source-{template_index}")
-            template_index += 1
+            target = f"/opt/coder-eval/grader/templates/source-{template_index}"
+            if self._register_external_private_path(Path(source.path), target):
+                template_index += 1
 
         reference = self.rt.task.reference
         if reference is not None:
@@ -781,12 +779,14 @@ class DockerRunner:
                     Path(reference.file).parent, "/opt/coder-eval/grader/references/file-parent"
                 )
 
-    def _register_external_private_path(self, source: Path, target: str) -> None:
+    def _register_external_private_path(self, source: Path, target: str) -> bool:
+        """Register a private mount unless ``source`` is already covered by the task-dir mount."""
         task_dir = self.rt.task_file.parent.resolve() if self.rt.task_file else None
         resolved = source.resolve()
         if task_dir is not None and (resolved == task_dir or task_dir in resolved.parents):
-            return
+            return False
         self._register_private_mount(source, target)
+        return True
 
     def _register_private_mount(self, source: Path, target: str) -> None:
         # The rewrite map keys on BOTH the resolved and the raw textual form:

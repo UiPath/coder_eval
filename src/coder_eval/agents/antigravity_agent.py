@@ -72,11 +72,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import (
-    AGENT_ENV_SCRUB_PREFIXES,
-    AGENT_ENV_SCRUB_VARS,
-    expand_env_vars,
-)
+from coder_eval.utils import expand_env_vars, is_agent_scrubbed_env
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +96,14 @@ def _harness_spawn_lock() -> asyncio.Lock:
         _HARNESS_SPAWN_LOCK = asyncio.Lock()
         _HARNESS_SPAWN_LOCK_LOOP = loop
     return _HARNESS_SPAWN_LOCK
+
+
+def _restore_env(key: str, original: str | None) -> None:
+    """Restore an env var mutated for the spawn window (pop if originally unset)."""
+    if original is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = original
 
 
 # Recommended Gemini coding model when a task pins no ``agent.model`` and neither
@@ -525,18 +529,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             # CODER_EVAL_AGENT_ISOLATION itself, so a later
             # agent_isolation_enabled() call would always read False.
             isolation_active = agent_isolation_enabled()
-            scrubbed = {
-                name: os.environ.pop(name)
-                for name in list(os.environ)
-                if name in AGENT_ENV_SCRUB_VARS or name.startswith(AGENT_ENV_SCRUB_PREFIXES)
-            }
+            scrubbed = {name: os.environ.pop(name) for name in list(os.environ) if is_agent_scrubbed_env(name)}
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
             original_path = os.environ.get(path_key)
             original_home = os.environ.get("HOME")
             original_harness_path = os.environ.get("ANTIGRAVITY_HARNESS_PATH")
-            # The SDK checks ANTIGRAVITY_HARNESS_PATH FIRST and PATH last (the
-            # wheel-bundled binary resolves via importlib before PATH), so the env
-            # var is the only seam that reliably launches the setpriv wrapper.
             harness_wrapper = self._drop_shim_wrapper if isolation_active else None
             if self._env_path_prepend:
                 os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original_path or ""])
@@ -550,20 +547,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             finally:
                 os.environ.update(scrubbed)
                 if self._env_path_prepend:
-                    if original_path is None:
-                        os.environ.pop(path_key, None)
-                    else:
-                        os.environ[path_key] = original_path
+                    _restore_env(path_key, original_path)
                 if isolation_active:
-                    if original_home is None:
-                        os.environ.pop("HOME", None)
-                    else:
-                        os.environ["HOME"] = original_home
+                    _restore_env("HOME", original_home)
                 if harness_wrapper is not None:
-                    if original_harness_path is None:
-                        os.environ.pop("ANTIGRAVITY_HARNESS_PATH", None)
-                    else:
-                        os.environ["ANTIGRAVITY_HARNESS_PATH"] = original_harness_path
+                    _restore_env("ANTIGRAVITY_HARNESS_PATH", original_harness_path)
 
     async def communicate(
         self,

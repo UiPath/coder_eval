@@ -1125,25 +1125,26 @@ class CodexAgent(Agent[CodexAgentConfig]):
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
             env[path_key] = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key, "")])
             self._log.debug(f"PATH prepend: {os.pathsep.join(self._env_path_prepend)}")
+        # Point login shells at the generated profile dir (see
+        # _setup_login_shell_home) while pinning codex state (auth, rollout
+        # sessions) to its real location — _codex_home() reads the same
+        # resolution for sub-agent rollout recovery, so both sides agree.
+        # HOME steers bash/sh; ZDOTDIR steers zsh (the macOS default
+        # shell), which ignores HOME for dotfile selection when it is set.
+        # Under isolation start() always materializes _login_shell_home; the
+        # AGENT_HOME fallback keeps the root harness HOME out of the
+        # app-server env even if that ever changes.
         if self._login_shell_home is not None:
-            # Point login shells at the generated profile dir (see
-            # _setup_login_shell_home) while pinning codex state (auth, rollout
-            # sessions) to its real location — _codex_home() reads the same
-            # resolution for sub-agent rollout recovery, so both sides agree.
-            # HOME steers bash/sh; ZDOTDIR steers zsh (the macOS default
-            # shell), which ignores HOME for dotfile selection when it is set.
-            env["HOME"] = str(self._login_shell_home)
-            env["ZDOTDIR"] = str(self._login_shell_home)
+            home_override = str(self._login_shell_home)
+        else:
+            home_override = AGENT_HOME if agent_isolation_enabled() else None
+        if home_override is not None:
+            env["HOME"] = home_override
+            env["ZDOTDIR"] = home_override
             # The binary hard-errors on an explicitly set CODEX_HOME that does
             # not exist (unset, it materializes the ~/.codex default itself) —
             # hosts that auth via CODEX_API_KEY never ran `codex login`, so
             # the dir may not exist yet. Create it before pinning.
-            codex_home = self._codex_home()
-            codex_home.mkdir(parents=True, exist_ok=True)
-            env["CODEX_HOME"] = str(codex_home)
-        elif agent_isolation_enabled():
-            env["HOME"] = AGENT_HOME
-            env["ZDOTDIR"] = AGENT_HOME
             codex_home = self._codex_home()
             codex_home.mkdir(parents=True, exist_ok=True)
             env["CODEX_HOME"] = str(codex_home)
