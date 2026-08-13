@@ -58,9 +58,9 @@ not run anything yet.
 4. **It supplies its own distractors.** The description mentions auditing and gaps, so
    *"audit my dependencies"* is a natural false-positive probe.
 
-# Part 1 — A ceiling result, and when to stop (`lint-tasks`)
+## Part 1 — A ceiling result, and when to stop (`lint-tasks`)
 
-## Step 1 — Build the suite
+### Step 1 — Build the suite
 
 Do not hand-author it. Run the sibling skill:
 
@@ -91,7 +91,7 @@ polarity. A split **halves each side**, so a suite you intend to optimize wants 
 16–24 of each. This one is smaller than that, deliberately, so the tutorial stays affordable
 — and you will see the cost of that in the result.
 
-## Step 2 — Label the splits
+### Step 2 — Label the splits
 
 Add a `split` to every row and point the dataset at the field:
 
@@ -113,7 +113,7 @@ Then select one at run time with `--split train` or `--split test`. The filter r
 Keep both polarities on both sides. A test of only positives measures recall and calls it
 a result.
 
-## Step 3 — Make the skill reachable, and check that it worked
+### Step 3 — Make the skill reachable, and check that it worked
 
 This is the step that decides whether anything downstream means anything, so it gets a
 section of its own.
@@ -163,7 +163,7 @@ export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"   # the plugin root
 Point it at the plugin root and the same suite goes to `recall.yes=1.000`. Nothing about the
 descriptions changed.
 
-## Step 4 — Cap the run, or pay for exploration
+### Step 4 — Cap the run, or pay for exploration
 
 Activation is decided in the first assistant turn. Without caps the agent explores a sandbox
 that deliberately contains no eval files, and rows time out after five minutes each:
@@ -201,7 +201,7 @@ run_limits:
 
 That buys signal, not just cost.
 
-## Step 5 — Baseline on the train split
+### Step 5 — Baseline on the train split
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
@@ -224,7 +224,7 @@ Result, 14 train rows:
 | `task` | 1.000 | 1.000 | 1.000 |
 | `analyze` | 0.000 | 0.000 | 0.000 |
 
-## Step 6 — Read it, and decide whether to spend anything
+### Step 6 — Read it, and decide whether to spend anything
 
 **The target skill is at ceiling.** `lint-tasks` caught all five positives, including
 *"My evals are a mess. Can you go through them and tell me what to fix?"*, and stayed off all
@@ -246,7 +246,7 @@ the description.** Fourteen well-separated rows could not distinguish a good des
 a better one. If you need to tell those apart, the fix is more rows and harder ones — not a
 looser gate.
 
-### Where the headroom actually was
+#### Where the headroom actually was
 
 The sibling matrix is the part worth reading, and in a multi-skill plugin it usually is:
 
@@ -258,7 +258,7 @@ This is what sibling-owned rows buy you. A plain distractor would have said only
 something misfired; these say **where the request went**, which is the difference between
 "this description is vague" and "these two descriptions are fighting."
 
-### The finding that evaporated
+#### The finding that evaporated
 
 An earlier pair of runs showed something else: on both *"Set up coder-eval for this
 repository"* and *"Get evaluations going in this project from scratch"*, the `task` skill
@@ -290,7 +290,7 @@ Recall **0.500 in all three runs**, precision 1.000 in all three. Perfectly stab
 consistently missed, no over-claiming. That is a hypothesis worth spending on — which is
 where the rest of this tutorial goes.
 
-## Step 7 — Confirm on the test split
+### Step 7 — Confirm on the test split
 
 Even with nothing to promote, the test split is what turns "the trim was safe" from a claim
 about the rows you looked at into a claim about rows you did not.
@@ -313,9 +313,9 @@ harm.
 
 ---
 
-# Part 2 — A full A/B that promotes (`analyze`)
+## Part 2 — A full A/B that promotes (`analyze`)
 
-## Optimizing the skill that actually had headroom
+### Optimizing the skill that actually had headroom
 
 `lint-tasks` had nothing to fix. `analyze` did, so the loop ran for real against it. The
 hypothesis, phrased as a claim about specific rows: **the description never names
@@ -331,7 +331,7 @@ frontmatter `description`, each a full seven-skill snapshot:
 | `b-results` | Users say "results" and "scores"; the description only says "run" |
 | `c-symptom` | Lead the trigger clause with symptoms rather than the operation |
 
-### Wiring the arms: snapshots, then one experiment file per stage
+#### Wiring the arms: snapshots, then one experiment file per stage
 
 This is the part the numbers below cannot show, and the part most easily got wrong.
 
@@ -396,7 +396,7 @@ Copying the triage file and deleting the arms that did not survive is one edit; 
 instead costs several times the budgeted runs and, at Stage C, renders no
 `## Paired Comparison` block at all, because that block fires only for exactly two variants.
 
-### Stage A — triage (68 runs)
+#### Stage A — triage (68 runs)
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
@@ -414,7 +414,7 @@ coder-eval run tasks/skills/lint-tasks-activation.yaml \
 recall was computed over 3 analyze rows instead of 4. Check `completion_rate` before ranking
 anything. The two clean leaders went through to the gate.
 
-### Stage B — the gate (153 runs, three separate invocations)
+#### Stage B — the gate (153 runs, three separate invocations)
 
 Three `coder-eval run` commands, **not** `--repeats 3` — see the Reference section for why:
 
@@ -441,7 +441,7 @@ precision.
 One incumbent invocation dropped a row and was excluded from the gate rather than averaged
 in. A gate computed over a shifting denominator is not a gate.
 
-### Stage C, and a test split that could not answer the question
+#### Stage C, and a test split that could not answer the question
 
 The winner went to test as a **two-variant** experiment at `--repeats 3`, which is the one
 place `--repeats` is correct:
@@ -475,7 +475,7 @@ exercise the failure mode, at promotion time, when you know what needs confirmin
 Write them as requests a real user would send, and commit to whatever they say — rows
 authored to flatter a candidate confirm nothing.
 
-### And then the infrastructure lied to us
+#### And then the infrastructure lied to us
 
 The re-run returned a result that looked publishable and was worthless:
 
@@ -504,7 +504,7 @@ computed over an eroded, asymmetric sample is not evidence of anything.** This i
 `completion_rate` is a gateable metric, and why the first thing to read in a rollup is the
 denominator, not the effect. The run was discarded, not interpreted.
 
-### Stage C, run properly
+#### Stage C, run properly
 
 With budget restored, the same experiment ran again over the 11-row test. Erosion this
 time was one row against `a-regression` and none against the incumbent — near-symmetric, and
@@ -553,9 +553,9 @@ precision never off 1.000 in any run of either stage.
 
 ---
 
-# Reference
+## Reference
 
-## The three stages, and when each applies
+### The three stages, and when each applies
 
 They did not run for `lint-tasks`, because that incumbent was already perfect. They did run
 for `analyze`, above. In summary:
@@ -580,7 +580,7 @@ And be precise about what Stage B proves. The replicate spread measures agent st
 over a **fixed** set of rows. It does not correct for the survivors having been chosen on
 those same rows in Stage A. Stage B bounds run noise; **the test split is what bounds the fit.**
 
-## Two caveats about what else is in the sandbox
+### Two caveats about what else is in the sandbox
 
 **The machine's other skills are part of the experiment.** One distractor row engaged a
 skill named `review` — not from this plugin at all, but from the operator's own install.

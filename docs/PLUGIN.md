@@ -32,9 +32,8 @@ uv tool install coder-eval    # or: pip install coder-eval
 ```
 
 You do not have to do it in advance. `init`, `task`, `check-skill` and
-`optimize-skill` — the four that shell out to the CLI — check
-`coder-eval --version` before doing any
-work and, if it is missing, **offer to install it and ask first**. They never
+`optimize-skill` — the four that shell out to the CLI — check `coder-eval --version`
+before doing any work and, if it is missing, **offer to install it and ask first**. They never
 install unprompted: that writes outside your repository, so it is your call, and
 they verify the install worked before continuing. `analyze` and `ci` do not invoke
 the CLI, and `lint-tasks` needs neither the CLI nor credentials — it only reads

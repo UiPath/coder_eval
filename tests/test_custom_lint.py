@@ -1283,14 +1283,18 @@ SKILL_LISTING_BUDGET_CHARS = 1_600
 REPO_PATH_TOKENS = ("docs/", "src/", ".claude/shared/", ".claude/commands/", "uv run", "../")
 
 
+# `_normalized`'s own implementation — the single legitimate use of the raw idiom, named
+# here so the guard below can exempt it without depending on where in the file it sits.
+_NORMALIZED_IMPL = 'return " ".join(path.read_text(encoding="utf-8").split())'
+
+
 def _normalized(path: Path) -> str:
     """A surface's text with all whitespace collapsed to single spaces.
 
-    Prefer this for any prose sensor that substring-matches a multi-word phrase. These
-    documents are hard-wrapped, so such a phrase routinely straddles a newline — and a raw
-    substring check then passes on exactly the text it exists to catch. (Several older
-    sensors still inline the same idiom; converting them is safe but was out of scope when
-    this was extracted, so this is a preference the file does not yet uniformly follow.)
+    Every prose sensor in this file reads its surface through here, and
+    ``test_no_sensor_inlines_the_normalization_idiom`` keeps it that way. These documents are
+    hard-wrapped, so a phrase a sensor looks for routinely straddles a newline — and a raw
+    substring check then passes on exactly the text it exists to catch.
 
     That is not hypothetical: `docs/PLUGIN.md` read ``All six\\n  skills read it`` while
     the plugin shipped seven, and the count sensor stayed green through 91 lint tests
@@ -2018,7 +2022,7 @@ class TestPluginArtifacts:
         # review the prose rule is the only thing enforcing read-only. Deleting it would leave
         # a skill that advertises "Read-only." in its description with nothing behind it after
         # the first reply.
-        text = " ".join((PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md")
         assert "Never modify a file" in text, "lint-tasks lost its standing read-only prohibition"
         assert "standing, not per-turn" in text, (
             "lint-tasks no longer says its read-only rule outlives the frontmatter deny — the "
@@ -2310,6 +2314,30 @@ class TestPluginArtifacts:
             f"{offenders}. Update the prose alongside the table."
         )
 
+    def test_no_sensor_inlines_the_normalization_idiom(self):
+        # `_normalized` exists because a hard wrap silently defeated a sensor and shipped a
+        # stale skill count past 91 green tests. The extraction only helps if every sensor
+        # actually uses it, and a new one is usually copied from a neighbour — so if the
+        # neighbour inlines the idiom, the bug propagates. This forbids the raw form.
+        source = Path(__file__).read_text(encoding="utf-8")
+        offenders = [
+            f"{n}: {line.strip()}"
+            for n, line in enumerate(source.splitlines(), 1)
+            # The one legitimate occurrence is `_normalized`'s own body, exempted by exact
+            # match rather than by line number so the guard survives edits above it.
+            if '" ".join(' in line
+            and ".read_text(" in line
+            and ".split()" in line
+            and line.strip() != _NORMALIZED_IMPL
+            # ...and skip this guard's own machinery, which must mention the pattern to test it.
+            and "_NORMALIZED_IMPL" not in line
+        ]
+        assert not offenders, (
+            "these lines inline the whitespace-normalization idiom instead of calling "
+            f"`_normalized()`: {offenders}. A sensor copied from one of them inherits the "
+            "wrapped-phrase blind spot that `_normalized` exists to close."
+        )
+
     def test_count_sensor_catches_a_wrapped_phrase(self, tmp_path: Path):
         # The self-test for the fix above, driven through the REAL matcher rather than
         # through `_normalized` alone. That distinction is the whole value: asserting only
@@ -2374,8 +2402,14 @@ class TestPluginArtifacts:
         page = self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md"
         lines = page.read_text(encoding="utf-8").splitlines()
 
-        start = next(i for i, ln in enumerate(lines) if ln.startswith("### Stage B"))
-        end = next(i for i, ln in enumerate(lines[start + 1 :], start + 1) if ln.startswith("### "))
+        # Matched on heading TEXT at any level: pinning `###` broke the first time the page
+        # was legitimately restructured, which is a sensor failing for a reason that has
+        # nothing to do with what it guards.
+        def _is_heading(ln: str) -> bool:
+            return ln.lstrip("#") != ln and ln.lstrip("#").startswith(" ")
+
+        start = next(i for i, ln in enumerate(lines) if _is_heading(ln) and "Stage B" in ln)
+        end = next(i for i, ln in enumerate(lines[start + 1 :], start + 1) if _is_heading(ln))
         block = "\n".join(lines[start:end])
 
         assert block.count("--run-dir") >= 3, (
@@ -2524,7 +2558,7 @@ class TestPluginArtifacts:
         # with the plugin's defaults produces work its maintainers have to undo — so the
         # precedence has to be stated, and the conventions adopted have to be reported
         # (otherwise "I followed the repo" is unfalsifiable).
-        text = " ".join((PLUGIN_ROOT / "skills" / "task" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "task" / "SKILL.md")
         assert "the repo wins" in text or "the repository wins" in text, (
             "task no longer says repo-local convention beats the bundled rubric — it will "
             "impose the plugin's defaults on a repository that already declared its own"
@@ -2533,7 +2567,7 @@ class TestPluginArtifacts:
             "task does not report WHICH conventions it adopted — an unreported precedence "
             "rule cannot be checked by the person reading the result"
         )
-        rubric = " ".join((PLUGIN_ROOT / "reference" / "task-rubric.md").read_text(encoding="utf-8").split())
+        rubric = _normalized(PLUGIN_ROOT / "reference" / "task-rubric.md")
         assert "the repo wins" in rubric or "the repository wins" in rubric, (
             "reference/task-rubric.md does not carry the same precedence line — the rubric "
             "is read at review time too, and must not contradict the authoring skill"
@@ -2544,7 +2578,7 @@ class TestPluginArtifacts:
         # drops the `agent:` config it supplies, so the gate measures something other than
         # what the suite measures locally; and a `version:` input that ignores the repo's
         # pin runs the gate on a different CLI than the repo is authored against.
-        text = " ".join((PLUGIN_ROOT / "skills" / "ci" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "ci" / "SKILL.md")
         assert "extra-args" in text and "experiment" in text, (
             "the ci skill does not say how to pass an experiment through to the run — a "
             "suite that resolves through one silently measures something else without it"
@@ -2590,7 +2624,7 @@ class TestPluginArtifacts:
         # skill is worse than doing nothing: two suites drift, and the user pays for both
         # on every run. The existence check therefore has to happen BEFORE row design,
         # which is where the token spend is committed.
-        text = " ".join((PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md")
         check = text.find("existing suite")
         assert check != -1 and "skill_triggered" in text, (
             "check-skill names no `existing suite` check — it will scaffold a parallel suite "
@@ -2610,7 +2644,7 @@ class TestPluginArtifacts:
     def test_check_skill_defers_to_an_experiment_supplied_plugins_block(self):
         # A task that redeclares what the experiment layer already provides drifts from it
         # silently — the same reason `task` tells authors to omit `agent:` entirely.
-        text = " ".join((PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md")
         assert "experiment" in text and "agent.plugins" in text, (
             "check-skill no longer mentions an experiment-supplied `agent.plugins` block"
         )
@@ -2625,7 +2659,7 @@ class TestPluginArtifacts:
         # that already has a suite, it wrote a "first task" beside an existing tree and
         # reported success — so the inventory has to be able to END the skill, not just
         # precede it.
-        text = " ".join((PLUGIN_ROOT / "skills" / "init" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "init" / "SKILL.md")
         assert "already configured" in text or "already has" in text, (
             "init no longer recognizes an already-configured repository"
         )
@@ -2656,7 +2690,7 @@ class TestPluginArtifacts:
         # concrete heading plus the stop rule rather than on the token `pin`, which
         # appeared nowhere in this file before the section landed — so any passing
         # mention would have satisfied a looser test and guarded nothing.
-        text = " ".join((PLUGIN_ROOT / "reference" / "cli-setup.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "reference" / "cli-setup.md")
         assert "## Version pin" in text, (
             "reference/cli-setup.md lost its `## Version pin` section — the CLI-driving "
             "skills would go back to validating a pinned repository with whatever binary "
