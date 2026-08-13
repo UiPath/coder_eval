@@ -48,8 +48,14 @@ STEP_OUTPUT_REF = re.compile(r"steps\.(?P<id>[A-Za-z_][A-Za-z0-9_-]*)\.outputs\.
 NEEDS_OUTPUT_REF = re.compile(r"needs\.(?P<job>[A-Za-z_][A-Za-z0-9_-]*)\.outputs\.(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)")
 
 # `echo "key=value"` / `printf 'key=%s' …` / `echo "key<<EOF"` (multiline form).
-# Deliberately loose: see the module docstring on over-approximating writers.
-OUTPUT_WRITE = re.compile(r"""(?:echo|printf)\s+[^\n]*?["']?(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?:=|<<)""")
+# Loose about what precedes the key, but the key must start at a TOKEN boundary — the
+# start of the arguments, whitespace, or an opening quote. Without that anchor the lazy
+# prefix walks into a format string and reports the conversion letter as the key:
+# `printf "%s=%s\n" "$KEY" "$VAL"` yielded `{'s'}`, a non-empty set, which defeats the
+# "no readable key => skip the step" contract in `_written_keys` and turns every real
+# reference to that step into a false CE035 failure. See the docstring: over-approximating
+# writers is safe, INVENTING one is not.
+OUTPUT_WRITE = re.compile(r"""(?:echo|printf)\s+(?:[^\n]*?["'\s])?(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?:=|<<)""")
 
 
 @dataclass(frozen=True)
@@ -200,7 +206,20 @@ def _check_needs_refs(
                     continue
                 seen.add((producer, key))
                 if producer not in declared:
-                    continue  # unknown job name — actionlint's territory, not this rule's
+                    # Fully enumerable from this file — every job name is right here — and
+                    # it fails exactly like an undeclared key: the reference expands to ''.
+                    # Not deferred to actionlint, which this repo does not run as a gate
+                    # (.github/actionlint.yaml says so in its own header).
+                    findings.append(
+                        Finding(
+                            path,
+                            _first_line_containing(lines, match.group(0)),
+                            f"job '{job_name}': `needs.{producer}.outputs.{key}` names job "
+                            f"'{producer}', which does not exist in this workflow "
+                            f"(jobs present: {sorted(declared)}). It expands to the empty string",
+                        )
+                    )
+                    continue
                 if key not in declared[producer]:
                     findings.append(
                         Finding(

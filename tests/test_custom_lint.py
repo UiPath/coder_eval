@@ -2853,3 +2853,114 @@ class TestCE035WorkflowOutputParity:
             encoding="utf-8",
         )
         assert find_unresolved_output_refs([wf], tmp_path) == []
+
+    def test_catches_an_undeclared_local_composite_output(self, tmp_path: Path):
+        """The `uses: ./` arm: outputs ARE on disk, so a typo against them is enumerable.
+        Without this, deleting the composite branch leaves the suite green."""
+        from tests.lint.workflow_outputs import find_unresolved_output_refs
+
+        (tmp_path / "action.yml").write_text("name: coder_eval\noutputs:\n  run-dir:\n    value: x\n", encoding="utf-8")
+        wf = tmp_path / "w.yml"
+        wf.write_text(
+            "jobs:\n"
+            "  j:\n"
+            "    steps:\n"
+            "      - id: gate\n"
+            "        uses: ./\n"
+            "      - run: echo ${{ steps.gate.outputs.rundir }} ${{ steps.gate.outputs.run-dir }}\n",
+            encoding="utf-8",
+        )
+        findings = find_unresolved_output_refs([wf], tmp_path)
+        assert len(findings) == 1, [str(f) for f in findings]
+        assert "outputs.rundir`" in findings[0].message
+        assert "['run-dir']" in findings[0].message, "the message must name the real outputs"
+
+    def test_catches_a_reference_to_a_step_that_writes_no_outputs(self, tmp_path: Path):
+        """A `run:` step that never touches $GITHUB_OUTPUT writes nothing — distinct from
+        the 'unreadable writers' skip, and the branch that reports it (`writes no outputs`)
+        was otherwise unexercised."""
+        from tests.lint.workflow_outputs import find_unresolved_output_refs
+
+        wf = tmp_path / "w.yml"
+        wf.write_text(
+            "jobs:\n"
+            "  j:\n"
+            "    steps:\n"
+            "      - id: quiet\n"
+            "        run: echo 'this step sets nothing'\n"
+            "      - run: echo ${{ steps.quiet.outputs.anything }}\n",
+            encoding="utf-8",
+        )
+        findings = find_unresolved_output_refs([wf], tmp_path)
+        assert len(findings) == 1, [str(f) for f in findings]
+        assert "writes no outputs" in findings[0].message
+
+    def test_catches_a_needs_reference_to_a_nonexistent_job(self, tmp_path: Path):
+        """A typo'd job name fails identically to a typo'd key — it expands to '' — and is
+        just as enumerable, so it is a finding rather than a deferral to actionlint (which
+        this repo documents as advisory, not a gate)."""
+        from tests.lint.workflow_outputs import find_unresolved_output_refs
+
+        wf = tmp_path / "w.yml"
+        wf.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    outputs:\n"
+            "      version: ${{ steps.v.outputs.version }}\n"
+            "    steps:\n"
+            "      - id: v\n"
+            '        run: echo "version=1.0.0" >> "$GITHUB_OUTPUT"\n'
+            "  promote:\n"
+            "    needs: [release]\n"
+            "    if: needs.relase.outputs.version != ''\n"
+            "    steps:\n"
+            "      - run: echo hi\n",
+            encoding="utf-8",
+        )
+        findings = find_unresolved_output_refs([wf], tmp_path)
+        assert len(findings) == 1, [str(f) for f in findings]
+        assert "names job 'relase', which does not exist" in findings[0].message
+        assert "['promote', 'release']" in findings[0].message
+
+    def test_a_dynamic_printf_writer_is_unreadable_not_a_bogus_key(self, tmp_path: Path):
+        """Regression: the writer scan used to capture the conversion letter out of a
+        format string (`printf "%s=%s\\n"` -> the key `s`). That non-empty-but-wrong set
+        defeats the "no readable key => skip" contract and false-FAILS a correct workflow,
+        which is the one direction the docstring promises the rule can never take."""
+        from tests.lint.workflow_outputs import _written_keys, find_unresolved_output_refs
+
+        assert _written_keys({"run": 'printf "%s=%s\\n" "$K" "$V" >> "$GITHUB_OUTPUT"'}) is None
+        assert _written_keys({"run": 'echo "pin=$PIN" >> "$GITHUB_OUTPUT"'}) == {"pin"}
+
+        wf = tmp_path / "w.yml"
+        wf.write_text(
+            "jobs:\n"
+            "  j:\n"
+            "    steps:\n"
+            "      - id: dyn\n"
+            '        run: printf "%s=%s\\n" "$K" "$V" >> "$GITHUB_OUTPUT"\n'
+            "      - run: echo ${{ steps.dyn.outputs.pin }}\n",
+            encoding="utf-8",
+        )
+        assert find_unresolved_output_refs([wf], tmp_path) == []
+
+    def test_finding_reports_the_line_of_the_offending_reference(self, tmp_path: Path):
+        """`Finding.line` is what sends a developer to the right place; nothing asserted
+        it, so it could regress to a constant 1 with a green suite."""
+        from tests.lint.workflow_outputs import find_unresolved_output_refs
+
+        wf = tmp_path / "w.yml"
+        wf.write_text(
+            "jobs:\n"  # 1
+            "  j:\n"  # 2
+            "    steps:\n"  # 3
+            "      - id: s\n"  # 4
+            '        run: echo "a=1" >> "$GITHUB_OUTPUT"\n'  # 5
+            "      - run: echo hi\n"  # 6
+            "      - run: echo ${{ steps.s.outputs.b }}\n",  # 7
+            encoding="utf-8",
+        )
+        findings = find_unresolved_output_refs([wf], tmp_path)
+        assert len(findings) == 1
+        assert findings[0].line == 7, f"expected line 7, got {findings[0].line}"
+        assert str(findings[0]).startswith(f"{wf}:7 — ")

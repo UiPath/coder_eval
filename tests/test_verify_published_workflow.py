@@ -75,21 +75,45 @@ def _line_after(body: str, anchor: str) -> str:
     raise AssertionError(f"anchor '{anchor}' not found — did the step get reflowed?")
 
 
-def _bash(script: str, stdin: str = "", env: dict[str, str] | None = None) -> str:
-    """Run a snippet lifted verbatim out of a workflow. Inputs go through the
-    environment, never argv or interpolation, so a fixture value carrying quotes cannot
-    be mistaken for shell syntax."""
-    proc = subprocess.run(
+def _bash_result(
+    script: str,
+    stdin: str = "",
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a lifted snippet and return the raw result, exit code included.
+
+    Used for the guards, whose whole contract is *refusing* — asserting exit 0 would
+    make every one of them untestable.
+    """
+    return subprocess.run(
         ["bash", "-c", script],
         input=stdin,
         capture_output=True,
         text=True,
         encoding="utf-8",
         env={**os.environ, **(env or {})},
+        cwd=cwd,
         check=False,
     )
+
+
+def _bash(script: str, stdin: str = "", env: dict[str, str] | None = None) -> str:
+    """Run a snippet lifted verbatim out of a workflow. Inputs go through the
+    environment, never argv or interpolation, so a fixture value carrying quotes cannot
+    be mistaken for shell syntax."""
+    proc = _bash_result(script, stdin=stdin, env=env)
     assert proc.returncode == 0, f"script failed ({proc.returncode}): {proc.stderr}"
     return proc.stdout
+
+
+def _body_before(body: str, marker: str) -> str:
+    """The lines of a ``run:`` body up to (excluding) the first line starting with
+    ``marker``. Lets a guard be exercised without the irreversible action it guards."""
+    lines = body.splitlines()
+    cut = next((i for i, line in enumerate(lines) if line.strip().startswith(marker)), None)
+    assert cut is not None, f"marker {marker!r} not found — did the step get restructured?"
+    return "\n".join(lines[:cut])
 
 
 def _slug_pipeline() -> str:
@@ -215,3 +239,116 @@ def test_inline_consumer_task_yaml_loads(tmp_path: Path):
 
     assert task.task_id == "published_action_smoke"
     assert task.success_criteria, "the nightly's task must assert something"
+
+
+def test_inline_consumer_task_declares_run_limits(tmp_path: Path):
+    """The nightly is unattended and paid: an uncapped run burns spend until the job's
+    `timeout-minutes` cancels the runner, which produces no run.json for the gate to
+    read. Every RunLimits cap defaults to None, so omitting the block is silent."""
+    from coder_eval.orchestration.task_loader import load_task
+
+    body = _run_body(_load(VERIFY_WF), "Write a consumer task YAML")
+    lines = body.splitlines()
+    start = next(i for i, line in enumerate(lines) if "<<'YAML'" in line)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "YAML")
+    path = tmp_path / "published_smoke.yaml"
+    path.write_text("\n".join(lines[start + 1 : end]) + "\n", encoding="utf-8")
+
+    limits = load_task(path)[0].run_limits
+    assert limits is not None, "the unattended paid task must declare run_limits"
+    assert limits.max_turns, "an unbounded turn count on a cron-triggered paid run"
+    assert limits.max_usd, "an unbounded spend on a cron-triggered paid run"
+    assert limits.task_timeout, "no wall-clock cap below the job's timeout-minutes"
+
+
+# --------------------------------------------------------------------------------------
+# 5. the promote job's two consumer-visible guards
+#
+# `promote` moves `v0` — the ref every `uses: UiPath/coder_eval@v0` consumer resolves.
+# Its two guards are the branch's highest-stakes new shell and cannot be exercised
+# before merge (promote only runs on a real release), so they are lifted and run here.
+# --------------------------------------------------------------------------------------
+
+
+def _version_shape_guard() -> str:
+    return _run_body(_load(RELEASE_WF), "Validate version shape")
+
+
+@pytest.mark.parametrize("version", ["0.9.6", "1.0.0", "10.20.30"])
+def test_version_shape_guard_accepts_real_releases(version: str):
+    proc = _bash_result(_version_shape_guard(), env={"VERSION": version})
+    assert proc.returncode == 0, f"guard rejected the valid version {version!r}: {proc.stdout}{proc.stderr}"
+    assert f"promoting v{version}" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.9",  # too few components
+        "0.9.6.1",  # too many
+        "0.9.6rc1",  # a prerelease is not promotable to the major tag
+        "v0.9.6",  # already prefixed; would yield `vv0.9.6` in the ref
+        "0.9.6 && echo pwned",  # shape check is defence-in-depth for the `ref:` interpolation
+    ],
+)
+def test_version_shape_guard_refuses_malformed_versions(version: str):
+    proc = _bash_result(_version_shape_guard(), env={"VERSION": version})
+    assert proc.returncode == 1, f"guard accepted the malformed version {version!r}"
+    assert "malformed version" in proc.stdout
+
+
+def test_version_shape_guard_owns_the_empty_version_case():
+    """The job's `if:` deliberately does not gate on the output being non-empty (that
+    shape resolves to SKIPPED-green and strands a release), so this guard is the sole
+    enforcement point — and it must say so, not just fail the regex."""
+    proc = _bash_result(_version_shape_guard(), env={"VERSION": ""})
+    assert proc.returncode == 1
+    assert "Release version unavailable" in proc.stdout, (
+        "an empty version must get its own partial-re-run diagnostic, not the generic "
+        f"malformed-version message: {proc.stdout}"
+    )
+
+
+def _tag_repo(root: Path, tags: tuple[str, ...]) -> Path:
+    """A git repo carrying `tags` on one commit, for the monotonicity guard to read."""
+    run = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    (root / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run([*run, "add", "f.txt"], cwd=root, check=True, capture_output=True)
+    subprocess.run([*run, "commit", "-qm", "c"], cwd=root, check=True, capture_output=True)
+    for tag in tags:
+        subprocess.run(["git", "tag", tag], cwd=root, check=True, capture_output=True)
+    return root
+
+
+def _monotonicity_guard() -> str:
+    """The guard only — everything before the irreversible `git tag -f` / `git push -f`."""
+    body = _run_body(_load(RELEASE_WF), "Move major action tag (vN -> this release)")
+    guard = _body_before(body, "git tag -f")
+    assert "NEWEST" in guard, "the monotonicity check is no longer above the tag move"
+    return guard
+
+
+def test_monotonicity_guard_allows_promoting_the_newest_release(tmp_path: Path):
+    repo = _tag_repo(tmp_path / "newest", ("v0.9.5", "v0.9.6", "v0"))
+    proc = _bash_result(_monotonicity_guard(), env={"VERSION": "0.9.6"}, cwd=repo)
+    assert proc.returncode == 0, f"{proc.stdout}{proc.stderr}"
+
+
+def test_monotonicity_guard_refuses_to_walk_the_major_tag_backwards(tmp_path: Path):
+    """The 30-day "Re-run failed jobs" hazard: replaying an OLD release's promote after a
+    newer one shipped would downgrade every consumer pinned to the major tag."""
+    repo = _tag_repo(tmp_path / "backwards", ("v0.9.5", "v0.9.6", "v0"))
+    proc = _bash_result(_monotonicity_guard(), env={"VERSION": "0.9.5"}, cwd=repo)
+    assert proc.returncode == 1, "the guard promoted a superseded release"
+    assert "backwards" in proc.stdout
+    assert "v0.9.6" in proc.stdout, "the operator is not told which release to promote instead"
+
+
+def test_monotonicity_guard_refuses_when_no_release_tag_exists(tmp_path: Path):
+    """`v0` alone must not satisfy the newest-tag lookup: the grep keeps only vX.Y.Z, and
+    an empty result has to fail loudly rather than compare against the empty string."""
+    repo = _tag_repo(tmp_path / "majoronly", ("v0",))
+    proc = _bash_result(_monotonicity_guard(), env={"VERSION": "0.9.6"}, cwd=repo)
+    assert proc.returncode == 1
+    assert "no vX.Y.Z release tag found" in proc.stdout

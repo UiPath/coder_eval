@@ -415,6 +415,11 @@ jobs:
       # not: the JSON API can lag seconds behind an upload, and a transient must not
       # redden a publish that actually succeeded (it would also block the re-run story
       # `skip-existing` exists for). So: mismatch => error, unreachable => warning.
+      #
+      # Scope, so the guarantee is not read as wider than it is: this is a POINT-IN-TIME
+      # set-equality check -- the files PyPI serves for this version at the moment the
+      # step runs are exactly the files this run built. It cannot see an upload that
+      # lands after it passes, and it says nothing about any other version.
       - name: Assert PyPI serves this run's artifacts
         env:
           VERSION: ${{ needs.release.outputs.version }}
@@ -457,6 +462,18 @@ jobs:
                   bad.append(f"{path.name}: PyPI serves sha256 {got}, this run built {want}")
               else:
                   print(f"  {path.name}: sha256 matches ({want[:12]}...)")
+
+          # Digest-matching every local file proves nothing about files we did NOT build.
+          # An EXTRA distribution under our exact version is the more dangerous half of
+          # the threat this step exists for: installers prefer a platform-specific wheel
+          # over our `py3-none-any`, so a single planted `...-cp313-manylinux_*.whl` would
+          # be what `uv tool install coder-eval==<version>` (action.yml) actually resolves,
+          # while every file we built still matches byte-for-byte. Set equality, not
+          # containment.
+          extra = sorted(set(remote) - {p.name for p in local})
+          if extra:
+              bad.append(f"PyPI serves {len(extra)} file(s) this run did not build: {', '.join(extra)}")
+
           if bad:
               print("::error title=Published artifact is not ours::PyPI does not serve the artifacts this run "
                     f"built for {version}: " + "; ".join(bad) + ". Do NOT promote: investigate before moving "

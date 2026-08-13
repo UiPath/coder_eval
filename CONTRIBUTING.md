@@ -130,7 +130,7 @@ Actions tab and pick a bump level. It runs three jobs, in this order:
 | Job | Does | Re-runnable? |
 |-----|------|--------------|
 | `release` | bumps the version, bumps `action.yml`'s `version:` pin, tags `vX.Y.Z`, pushes `main` + that tag, builds the wheel/sdist, pushes the GHCR agent image | **No** — re-running bumps and tags a *second* version |
-| `publish-pypi` | publishes the wheel/sdist to public PyPI (OIDC, `pypi` environment) and asserts PyPI serves the exact files this run built | Yes |
+| `publish-pypi` | publishes the wheel/sdist to public PyPI (OIDC, `pypi` environment) and asserts that, at that moment, the files PyPI serves for this version are exactly the ones this run built — same names, same sha256, nothing extra | Yes |
 | `promote` | moves the `v0` tag and cuts the GitHub Release | Yes |
 
 `v0` is the ref every consumer pins (`uses: UiPath/coder_eval@v0`), and the

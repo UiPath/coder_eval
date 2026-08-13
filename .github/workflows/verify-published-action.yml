@@ -336,6 +336,18 @@ jobs:
             # run is isolated and cheap regardless of the runner's state.
             setting_sources: []
 
+          # This is the repo's only UNATTENDED, PAID run: a nightly cron with a live
+          # ANTHROPIC_API_KEY and no human watching. Every RunLimits cap defaults to
+          # None, so without this block the only bound is the job's `timeout-minutes`,
+          # which cancels the runner and leaves NO run.json for the gate below to read
+          # -- the failure is both maximally expensive and minimally diagnosable. These
+          # caps are ~10x what the one-file task needs; tripping one produces a
+          # COST_BUDGET_EXCEEDED / TIMEOUT row the gate prints and fails on.
+          run_limits:
+            max_turns: 5
+            task_timeout: 300
+            max_usd: 0.25
+
           success_criteria:
             - type: "file_exists"
               path: "hello.txt"
@@ -425,12 +437,20 @@ jobs:
           import json, os, sys, xml.etree.ElementTree as ET
 
           # Error categories that mean the failure is UPSTREAM of the published action --
-          # the model/API was unavailable or the agent process died on a transient. Those
-          # must not be reported as broken wiring: this check answers "does the published
-          # action still work", not "is the model available right now". Everything else
-          # (auth, billing, config, sandbox/install, or no category at all) IS the
-          # published action's problem and stays a hard error.
-          UPSTREAM = {"agent_api_error", "agent_rate_limit", "agent_timeout", "agent_crash"}
+          # the model/API was unavailable. Those must not be reported as broken wiring:
+          # this check answers "does the published action still work", not "is the model
+          # available right now". Everything else (auth, billing, config, sandbox/install,
+          # or no category at all) IS the published action's problem and stays a hard error.
+          UNREACHABLE = {"agent_api_error", "agent_rate_limit", "agent_timeout"}
+
+          # `agent_crash` is deliberately NOT in the set above. It is the categorizer's
+          # catch-all last resort (errors/categorization.py: any AgentCrashError that
+          # matched no more specific rule), so it is exactly what a MISSING OR BROKEN
+          # `claude` CLI produces -- the failure this gate exists to catch, arriving under
+          # the label that would excuse it. It is tolerable only once the run has proven
+          # the runtime works at all, i.e. after the zero-token check below has passed;
+          # a crash mid-run with tokens already billed is a plausible transient.
+          TOLERABLE_AFTER_TOKENS = UNREACHABLE | {"agent_crash"}
 
           data = json.load(open(os.environ["RUN_JSON"], encoding="utf-8"))
           rows = data.get("task_results") or []
@@ -467,9 +487,9 @@ jobs:
           # passthrough for an Anthropic outage is how a check earns being ignored. So
           # discriminate on the category run.json already records per row.
           if tokens <= 0:
-              if any(c in UPSTREAM for c in categories):
+              if any(c in UNREACHABLE for c in categories):
                   print("::warning::no tokens consumed, but the run reports an upstream failure "
-                        f"(error_category={[c for c in categories if c in UPSTREAM]}) -- the model/API was "
+                        f"(error_category={[c for c in categories if c in UNREACHABLE]}) -- the model/API was "
                         "unavailable, which says nothing about the published action. Inconclusive, not a "
                         "wiring failure; re-run to confirm.")
                   sys.exit(0)
@@ -486,7 +506,7 @@ jobs:
           # the category says the cause was upstream.
           harness_errors = [
               (s, c) for s, c in zip(statuses, categories, strict=True)
-              if s in {"ERROR", "BUILD_FAILED"} and c not in UPSTREAM
+              if s in {"ERROR", "BUILD_FAILED"} and c not in TOLERABLE_AFTER_TOKENS
           ]
           if harness_errors:
               print(f"::error::task(s) failed with a harness/environment error, not a model flake: "
