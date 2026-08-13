@@ -1254,6 +1254,27 @@ async def test_harness_env_never_mutates_process_env(monkeypatch):
     assert os.environ["PATH"] == "/parent/bin"
 
 
+def test_installed_sdk_still_exposes_the_env_seam():
+    """Pin the SDK-side half of the contract the rest of this section fakes.
+
+    Every other env test stubs ``LocalAgentConfig``, so they prove only that we
+    build the right kwarg. If a future ``google-antigravity`` bump dropped or
+    renamed ``env``, all of them would still pass while mock CLIs silently
+    stopped shadowing and the agent called the real tool instead — the exact
+    silent-wrong-mode this seam exists to prevent. So assert against the real
+    class: the field exists and round-trips.
+    """
+    config_mod = pytest.importorskip("google.antigravity.connections.local.local_connection_config")
+
+    assert "env" in config_mod.LocalAgentConfig.model_fields
+    cfg = config_mod.LocalAgentConfig(env={"PATH": "/sandbox/mocks:/usr/bin"})
+    assert cfg.env == {"PATH": "/sandbox/mocks:/usr/bin"}
+    # Omitted must stay None, not {} — the connection reads `is not None` to decide
+    # whether to build a merged env at all, so {} would spawn with a rebuilt env
+    # for every task instead of plain inheritance.
+    assert config_mod.LocalAgentConfig().env is None
+
+
 async def test_harness_env_resolves_path_key_case_insensitively(monkeypatch):
     """A non-uppercase PATH key (e.g. Windows 'Path') is reused, so the merge overrides it.
 
