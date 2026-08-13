@@ -27,7 +27,7 @@ once:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-You do not have to do this in advance. `init`, `task` and `check-skill` check
+You do not have to do this in advance. `init`, `task`, `check-skill` and `optimize-skill` check
 `coder-eval --version` before doing any work and, if it is missing, **offer to install it and
 ask first** — they never install unprompted, and they verify it worked before continuing.
 Running a suite also needs credentials for whichever agent the tasks use (e.g.
@@ -64,7 +64,9 @@ real money across several rounds of runs. `check-skill`, `task`, `lint-tasks`, a
   *inside* a run directory.
 - `repo-layout.md` — how every skill finds *where* your eval tree is: discovered by
   content (`task_id:` files, `run.json`), never assumed to be `tasks/` and `runs/`.
-- `templates/` — the canonical activation suite `check-skill` copies into your repo.
+- `templates/` — the two canonical suites the skills copy into your repo: the activation
+  suite `check-skill` writes, and the outcome suite `optimize-skill`'s execution track
+  starts from.
 
 ## Links
 

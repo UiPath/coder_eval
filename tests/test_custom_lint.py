@@ -1211,7 +1211,7 @@ SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task", "optimize-skill"}
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
 # Whether each skill must locate a repository's eval tree before it can do anything.
-# All six currently must, and each for its own reason: `analyze` needs the run store,
+# All seven currently must, and each for its own reason: `analyze` needs the run store,
 # `init` and `check-skill` must know where tasks already live before writing beside
 # them, `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob
 # into the workflow it emits. Every one of them used to carry its own hardcoded guess
@@ -1281,6 +1281,64 @@ SKILL_LISTING_BUDGET_CHARS = 1_600
 # `.claude/skills/` are deliberately absent: those are user-workspace paths the
 # skills legitimately scan and scaffold.
 REPO_PATH_TOKENS = ("docs/", "src/", ".claude/shared/", ".claude/commands/", "uv run", "../")
+
+
+def _normalized(path: Path) -> str:
+    """A surface's text with all whitespace collapsed to single spaces.
+
+    Every prose sensor in this file must read its surface through here. These documents
+    are hard-wrapped, so a phrase the sensor looks for routinely straddles a newline —
+    and a raw substring check then passes on exactly the text it exists to catch.
+
+    That is not hypothetical: `docs/PLUGIN.md` read ``All six\\n  skills read it`` while
+    the plugin shipped seven, and the count sensor stayed green through 91 lint tests
+    because the newline sat between the two words.
+    """
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def _wrong_skill_count_offenders(surfaces: dict[str, Path], *, count: int, auto: int) -> list[str]:
+    """Every place a surface states a skill count other than the real one.
+
+    A module-level function rather than a loop inside its test, so the self-test below can
+    run the REAL matcher against a hand-built file. That distinction is the whole point:
+    the previous self-test asserted things about ``_normalized`` in isolation, which left
+    the sensor itself free to be reverted to a raw ``read_text`` with every test still
+    green — a guard that guarded nothing, which is the exact failure class this file exists
+    to prevent.
+
+    Three phrasings are in use and all three are covered: ``<word> skills`` /
+    ``<word> slash commands`` (both READMEs, ``docs/PLUGIN.md``), ``x <digit>``
+    (``CLAUDE.md``'s ``SKILL.md`` x 6), and ``The other <word>`` (the model-invokable
+    subset, which is the skill count minus the explicit-invocation-only ones).
+    """
+    words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    assert count in words, f"{count} skills — extend `words` to cover the new count"
+    assert auto in words, f"{auto} model-invokable skills — extend `words`"
+
+    wrong_total = sorted(set(words.values()) - {words[count]})
+    wrong_subset = sorted(set(words.values()) - {words[auto]})
+
+    offenders: list[str] = []
+    for name, path in surfaces.items():
+        # Whitespace-collapsed, or a hard-wrapped "All six\n  skills" defeats every
+        # substring check below — which is exactly how the stale count shipped green.
+        text = _normalized(path)
+        offenders += [
+            f"{name}: '{word} {noun}'"
+            for word in wrong_total
+            for noun in ("skills", "slash commands")
+            if f"{word} {noun}" in text
+        ]
+        offenders += [f"{name}: 'The other {word}'" for word in wrong_subset if f"The other {word}" in text]
+        # The multiplication sign CLAUDE.md writes is given as an escape below, so ruff's
+        # ambiguous-character rules do not flag a literal one.
+        offenders += [
+            f"{name}: 'SKILL.md` \u00d7 {digit}'"
+            for digit in range(2, 9)
+            if digit != count and f"SKILL.md` \u00d7 {digit}" in text
+        ]
+    return offenders
 
 
 def _outcome_metric_vocabulary() -> set[str]:
@@ -1889,7 +1947,7 @@ class TestPluginArtifacts:
         # every one of these instructions is something a well-meaning edit would "simplify"
         # away, leaving a skill that still reads plausibly and measures nothing. Same
         # deletion-sensor shape as the lint-tasks read-only guard above.
-        text = " ".join((PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
 
         # The single most important invariant. Suite rollups pool replicates, so --repeats
         # writes ONE pooled suite.json and the per-replicate F1 the Stage B gate reads would
@@ -2122,42 +2180,74 @@ class TestPluginArtifacts:
         # surfaces also state the count in prose, and adding the sixth skill meant hand-editing
         # seven such sites across four files. Without this, a seventh ships with every count
         # silently wrong — the exact drift that repair was. Derived from disk: no count is
-        # written down here.
-        #
-        # Three phrasings are in use and all three are covered: "<word> skills" / "<word> slash
-        # commands" (both READMEs, docs/PLUGIN.md), "x <digit>" (CLAUDE.md's `SKILL.md` x 6),
-        # and "The other <word>" (the model-invokable subset, which is the skill count minus
-        # the explicit-invocation-only ones).
-        words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+        # written down here, and the matcher itself lives in `_wrong_skill_count_offenders`
+        # so the wrapped-phrase self-test below can exercise the real thing.
         count = len(PLUGIN_SKILLS)
-        assert count in words, f"{count} skills — extend `words` to cover the new count"
         auto = count - sum(1 for v in SKILL_DISABLE_MODEL_INVOCATION.values() if v)
-        assert auto in words, f"{auto} model-invokable skills — extend `words`"
-
-        wrong_total = sorted(set(words.values()) - {words[count]})
-        wrong_subset = sorted(set(words.values()) - {words[auto]})
-
-        offenders: list[str] = []
-        for surface in SKILL_DOC_SURFACES:
-            text = (self.REPO_ROOT / surface).read_text(encoding="utf-8")
-            offenders += [
-                f"{surface}: '{word} {noun}'"
-                for word in wrong_total
-                for noun in ("skills", "slash commands")
-                if f"{word} {noun}" in text
-            ]
-            offenders += [f"{surface}: 'The other {word}'" for word in wrong_subset if f"The other {word}" in text]
-            # The multiplication sign CLAUDE.md writes is given as an escape below, so
-            # ruff's ambiguous-character rules do not flag a literal one.
-            offenders += [
-                f"{surface}: 'SKILL.md` \u00d7 {digit}'"
-                for digit in range(2, 9)
-                if digit != count and f"SKILL.md` \u00d7 {digit}" in text
-            ]
+        offenders = _wrong_skill_count_offenders(
+            {surface: self.REPO_ROOT / surface for surface in SKILL_DOC_SURFACES},
+            count=count,
+            auto=auto,
+        )
         assert not offenders, (
             f"there are {count} shipped skills, but these surfaces still state another count: "
             f"{offenders}. Update the prose alongside the table."
         )
+
+    def test_count_sensor_catches_a_wrapped_phrase(self, tmp_path: Path):
+        # The self-test for the fix above, driven through the REAL matcher rather than
+        # through `_normalized` alone. That distinction is the whole value: asserting only
+        # that `_normalized` collapses whitespace leaves the sensor free to be reverted to a
+        # raw `read_text` with every test still green — a guard that guards nothing.
+        #
+        # `docs/PLUGIN.md` said "All six\n  skills read it" while seven shipped, and the
+        # count sensor passed 91 lint tests: the hard wrap put a newline between the two
+        # words the substring check needed adjacent.
+        surface = tmp_path / "PLUGIN.md"
+        surface.write_text("All six\n  skills read it, which is the point.\n", encoding="utf-8")
+
+        assert "six skills" not in surface.read_text(encoding="utf-8"), (
+            "this test's premise is gone: the wrapped form is now literally adjacent, so it "
+            "no longer demonstrates what the normalization buys"
+        )
+        assert _wrong_skill_count_offenders({"wrapped": surface}, count=7, auto=4) == ["wrapped: 'six skills'"], (
+            "the count sensor found nothing in a surface reading 'All six\\n  skills' while "
+            "seven ship. It has stopped collapsing whitespace, so any wrapped count phrase "
+            "slips past it — the exact bug that let the stale count ship green."
+        )
+
+        # The converse, so a passing sensor is not simply one that reports everything: the
+        # correct count in the same wrapped shape must yield no finding.
+        clean = tmp_path / "CLEAN.md"
+        clean.write_text("All seven\n  skills read it, which is the point.\n", encoding="utf-8")
+        assert _wrong_skill_count_offenders({"clean": clean}, count=7, auto=4) == []
+
+    def test_cli_driving_skills_are_named_in_the_install_prose(self):
+        # Both READMEs promise that the CLI-driving skills preflight `coder-eval --version`.
+        # SKILLS_REQUIRING_THE_CLI is the declared set, but nothing tied it to the prose, so
+        # `optimize-skill` joined the set and both files went on naming three of four — a
+        # first-run user of the fourth gets a bare `command not found`. Derived from the set,
+        # with no skill names written down here, so a fifth cannot ship silently either.
+        #
+        # Scoped to the install paragraph, not the whole file: every skill name appears
+        # SOMEWHERE in both documents, so a whole-file match would assert nothing at all.
+        for surface in ("plugins/coder-eval/README.md", "docs/PLUGIN.md"):
+            text = _normalized(self.REPO_ROOT / surface)
+            anchor = text.find("coder-eval --version")
+            assert anchor != -1, (
+                f"{surface} no longer mentions `coder-eval --version` — the install paragraph "
+                "this sensor anchors on is gone, so the promise it checks is unverifiable"
+            )
+            # The sentence naming the skills sits just before the anchor; take a generous
+            # window either side rather than guessing at sentence boundaries.
+            paragraph = text[max(0, anchor - 400) : anchor + 400]
+            missing = sorted(name for name in SKILLS_REQUIRING_THE_CLI if f"`{name}`" not in paragraph)
+            assert not missing, (
+                f"{surface}'s install paragraph does not name {missing}, which "
+                f"SKILLS_REQUIRING_THE_CLI declares must preflight `coder-eval --version`. A "
+                "user of an unnamed skill is told nothing about needing the CLI and meets a "
+                "bare `command not found` mid-task."
+            )
 
     def test_analyze_routes_fixes_to_the_right_layer(self):
         # A shallow keyword sensor: it guards against the guidance being DELETED, not
@@ -2167,7 +2257,7 @@ class TestPluginArtifacts:
         # Whitespace-collapsed so a reflowed paragraph does not fail it — these files are
         # hard-wrapped prose, and a sensor that breaks on rewrapping trains people to
         # distrust it.
-        text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md")
         assert "prompt_gap" in text, "analyze lost the `prompt_gap` root-cause token"
         for phrase in ("fix the prompt", "file the tool bug", "which layer"):
             assert phrase in text, (
@@ -3291,7 +3381,7 @@ class TestRunRecordFieldVocabulary:
         # reading a real older run was told its correct extraction was wrong. The four
         # OTHER names in that sentence were never top-level in any generation and were
         # denied on purpose; rewriting the sentence must not take them with it.
-        text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md")
         assert "There is no top-level `turns`" not in text, (
             "analyze denies the legacy `turns` key absolutely again — it is what runs "
             "written before the rename actually carry. Make it conditional on the file."

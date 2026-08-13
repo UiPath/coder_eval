@@ -31,8 +31,9 @@ references, not packages, so the `coder-eval` binary is a separate step:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-You do not have to do it in advance. `init`, `task` and `check-skill` — the three
-skills that shell out to the CLI — check `coder-eval --version` before doing any
+You do not have to do it in advance. `init`, `task`, `check-skill` and
+`optimize-skill` — the four that shell out to the CLI — check
+`coder-eval --version` before doing any
 work and, if it is missing, **offer to install it and ask first**. They never
 install unprompted: that writes outside your repository, so it is your call, and
 they verify the install worked before continuing. `analyze` and `ci` do not invoke
@@ -195,10 +196,12 @@ directories, so every file a skill reads travels with it under `reference/`:
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads: what is *inside*
   a run directory.
 - `repo-layout.md` — how a skill finds *where* your eval tree is, by globbing for
-  `task_id:` files and `run.json` rather than assuming `tasks/` and `runs/`. All six
+  `task_id:` files and `run.json` rather than assuming `tasks/` and `runs/`. All seven
   skills read it, which is what lets them work in a repository that names or nests the
   tree differently.
-- `templates/` — the canonical activation suite `check-skill` copies.
+- `templates/` — the two canonical suites the skills copy: the activation suite
+  `check-skill` writes, and the outcome suite `optimize-skill`'s execution track starts
+  from.
 
 ## Related
 
