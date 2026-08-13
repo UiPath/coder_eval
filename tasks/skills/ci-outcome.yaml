@@ -110,15 +110,35 @@ dataset:
     - "ci-outcome-rows.jsonl"
   split_field: "split"
 
-# The slash form is mandatory here, not stylistic: `ci` sets
-# `disable-model-invocation: true`, so it is never offered to the model and asking in
-# prose returns "no such skill is available" — a row that measures nothing.
+# The slash form ALONE is not enough, and this was measured rather than assumed. Nothing
+# in coder-eval expands a slash command — `/coder-eval:ci` reaches the model as plain text
+# it may or may not act on. Over three prompt forms on these six rows:
+#
+#   slash only                    3/6 engaged
+#   prose instruction only        5/6 engaged
+#   slash + explicit imperative    6/6 engaged
+#
+# So the imperative is what makes the instrument reliable, and engagement below 1.0 on
+# every row means the suite is measuring a mixture of "did the skill run" and "was the
+# body good". Holding activation constant this way is the point of the execution track,
+# not a thumb on the scale.
+#
+# AND THE PART THAT DECIDES WHETHER THIS SUITE MEASURES ANYTHING AT ALL: `ci` sets
+# `disable-model-invocation: true`, so the Skill tool REFUSES the call and the body never
+# loads. Run this suite against the plugin as-is and every row scores the model's prior
+# knowledge of GitHub Actions instead of the skill — plausibly enough that nothing looks
+# wrong. Measured: 24 of 24 rows, four arms tying exactly because none saw the body.
+#
+# To measure the body, mount a snapshot with that frontmatter line REMOVED (in every arm),
+# which is what a real user's slash command effectively does. With it removed, the same
+# rows score 1.000.
 #
 # Each scenario names the output path it wants. That removes the agent's filename choice
 # from the measurement (the criteria below assert on a path) while leaking nothing about
 # the workflow CONTENT being graded, which is the actual subject.
 initial_prompt: |
-  /coder-eval:ci
+  Use the `coder-eval:ci` skill to handle this request. Invoke it with the Skill
+  tool and follow it before writing anything.
 
   ${row.scenario}
 

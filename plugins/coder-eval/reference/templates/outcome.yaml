@@ -118,23 +118,29 @@ dataset:
   # `train`, confirm the winner on `test`.
   split_field: "split"
 
-# The slash form is MANDATORY and is not interchangeable with asking in prose. A skill
-# with `disable-model-invocation: true` is not offered to the model at all, so "use the
-# my-skill skill" returns "no such skill is available" and the row measures nothing.
+# Invoke the skill EXPLICITLY, and pair the slash form with an imperative. Nothing expands
+# a slash command — `/my-plugin:my-skill` arrives as plain text the model may ignore.
+# Measured on a 6-row suite: slash alone 3/6 engaged, prose alone 5/6, slash + imperative 6/6.
 #
-# It is also NOT a guarantee. Measured across four runs of a 6-row suite, engagement landed
-# between 50% and 80%, failing on different rows each time: the model sometimes dispatches a
-# sub-agent that reads the skill in the child, sometimes just does the work itself, and
-# sometimes follows the scenario's wording to a sibling skill instead. That is why
-# `disallowed_tools` above denies Agent/Task, why scenarios should use this skill's own
-# vocabulary, and why the engagement criterion below is a GATE on the baseline rather than
-# a diagnostic: below 1.0 on every row, the suite is measuring a mixture.
+# IF THE SKILL SETS `disable-model-invocation: true`, STOP AND READ THIS. The Skill tool
+# refuses the call ("cannot be used with Skill tool due to disable-model-invocation"), the
+# body is never loaded, and the agent answers from its own background knowledge — producing
+# output plausible enough that every criterion below scores it as though the skill wrote it.
+# Remove that frontmatter line from the target skill in EVERY arm's snapshot (incumbent
+# included): it reproduces what a real user gets, since typing the slash command does inject
+# the body, and keeps the arms identical apart from the text under test.
+#
+# Engagement below 1.0 on every row means the suite is measuring a mixture of "did the
+# skill run" and "was the body good". That is also why `disallowed_tools` above denies
+# Agent/Task, and why scenarios should use this skill's own vocabulary rather than a
+# sibling's — the criterion below is a GATE on the baseline, not a diagnostic.
 #
 # Everything after it is the scenario, which is where per-row variation lives. Have each
 # scenario name the output path it wants: that removes the agent's filename choice from
 # the measurement without hinting at the content being graded.
 initial_prompt: |
-  /my-plugin:my-skill
+  Use the `my-plugin:my-skill` skill to handle this request. Invoke it with the
+  Skill tool and follow it before writing anything.
 
   ${row.scenario}
 

@@ -238,14 +238,43 @@ Five requirements specific to this track:
   because `ci` stops outright on one that does not: the fixture rule above is not abstract,
   and this is what obeying it looks like in a prompt.
 
-  This is the **only** mechanism that works for a skill with
-  `disable-model-invocation: true`, and asking in prose does not substitute: such a skill is
-  not offered to the model at all, so *"use the ci skill"* gets you "no such skill is
-  available" and a row that measures nothing.
+  **Nothing expands that slash command.** It reaches the model as plain text it may or may
+  not act on, so on its own it is a hint rather than a mechanism — measured at 3/6 rows,
+  against 5/6 for a plain prose instruction and 6/6 for an explicit imperative. Pair the
+  two: *"Use the `plugin:skill` skill to handle this request. Invoke it with the Skill tool
+  and follow it before writing anything."*
 
-  **But the slash form is not a guarantee, and this is the single biggest threat to an
-  outcome round.** Measured on a 6-row suite across four runs, engagement landed between
-  50% and 80%, failing on *different* rows each time. Three ways it slips, all silent:
+  ### A `disable-model-invocation: true` skill cannot be reached at all — read this first
+
+  If the skill under test sets that flag, **the execution track does not work on it
+  unmodified**, and the way it fails is the worst possible one. The `Skill` tool refuses the
+  call outright:
+
+  ```
+  <tool_use_error>Skill plugin:my-skill cannot be used with Skill tool
+  due to disable-model-invocation</tool_use_error>
+  ```
+
+  The body is never loaded. The agent, given a capable model and a plausible request,
+  carries on from its own background knowledge and produces confident, wrong-in-detail
+  output — and every criterion downstream scores that output as though the skill had
+  written it. A whole round measured this way tells you nothing about the body: in a real
+  case, four arms differing only in that body tied *exactly*, because none of them ever saw
+  it.
+
+  **Fix it in the snapshot, not in the suite.** Step 8's arms are already modified copies of
+  the plugin, so remove the `disable-model-invocation:` line from the target skill's
+  frontmatter in **every** arm, incumbent included. That reproduces what a real user gets —
+  typing the slash command *does* inject the body — while keeping the arms identical in
+  everything but the text under test. Verified: with the flag removed the call succeeds and
+  the body loads; with it present, 24 of 24 rows failed silently.
+
+  **Then confirm engagement is genuinely 1.0 before spending.** And confirm it against a
+  version of `skill_triggered` that ignores errored calls — an older one counted the refused
+  attempt as engagement, which is precisely what hid all of this.
+
+  **Engagement below 1.0 on every row is the single biggest threat to an outcome round.**
+  Three ways it slips, all silent:
 
   - the model answers the command by **dispatching a sub-agent**, which reads the skill in
     the child instead of emitting a `Skill` call in the parent stream;

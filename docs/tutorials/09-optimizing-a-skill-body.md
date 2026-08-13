@@ -15,13 +15,15 @@ The two are different instruments and the difference is load-bearing. `skill_tri
 binary, cheap, one-turn probe that says nothing whatsoever about the quality of the work that
 follows. An outcome suite scores real artifacts and costs a whole task per row.
 
-This walkthrough is a real run against `/coder-eval:ci` in this repository. It reports what
-actually happened, which is that **the A/B never ran**. The baseline could not be trusted, and
-the method says that is a stop rather than a starting point. Reading why is more useful than
-reading a promotion would have been.
+This walkthrough is a real run against `/coder-eval:ci` in this repository, and it reports
+what actually happened: the round promoted nothing, and the first two explanations of *why*
+were both wrong. The skill under test was never loaded at all — and the criterion built to
+catch exactly that reported success on every row. Reading how that stayed hidden through 24
+paid runs is more useful than reading a promotion would have been.
 
-> **Cost.** 24 agent runs and $7.47 on Sonnet, all of it baselines. The A/B stages the round
-> did not spend would have been ~84 more runs and ~$36.
+> **Cost.** About 55 agent runs and ~$20 on Sonnet — baselines, a prompt-form calibration, a
+> four-arm Stage A, and the probe that finally explained all of it. Stages B and C were never
+> reached, and correctly so.
 
 **What you will do:** build an outcome suite whose rows are scenarios against one fixture,
 run a baseline, check three things before reading any score, and decide. Here the decision is
@@ -138,53 +140,72 @@ zero, and the output is indistinguishable from a skill whose body is terrible �
 track is the reading you are least equipped to doubt. Confirm the engagement criterion passes
 before trusting any low score.
 
-## The slash form, and what it does not guarantee
+## The skill was never loaded, and the suite said it was
 
-`ci` sets `disable-model-invocation: true`, so it is never offered to the model. Asking in
-prose returns "no such skill is available" and the row measures nothing. The **slash form** is
-the only mechanism that reaches it:
+This is the finding the round actually produced, and it invalidates every number above it
+that looked like a measurement of `ci`'s body.
+
+`ci` sets `disable-model-invocation: true`. That flag keeps a skill out of the listing the
+model chooses from — but it also makes the `Skill` tool **refuse the call outright**:
+
+```
+<tool_use_error>Skill coder-eval:ci cannot be used with Skill tool
+due to disable-model-invocation</tool_use_error>
+```
+
+**24 of 24 Skill calls across the four A/B arms failed exactly this way**, `result_status:
+"error"` on every one, and no row read the `SKILL.md` off disk either. The body never entered
+the context. What the agent produced came from its own knowledge of GitHub Actions — plausible
+enough that no criterion downstream looked wrong.
+
+And the criterion built to catch precisely this reported `yes` every time. `skill_triggered`
+read the call's *parameters* and never its *result*, so an attempt the tool had refused scored
+as engagement. That one omission is why four arms differing only in `ci`'s body tied
+**exactly** on every criterion: none of them had ever seen the body they differed in.
+
+The tell was visible in the output the whole time:
+
+```
+body NOT loaded:  uses: anthropics/coder-eval-action@v1   <- does not exist
+body loaded:    - uses: UiPath/coder_eval@v0             <- what the body specifies
+```
+
+Remove that one frontmatter line from the arm's snapshot and the call succeeds, the body
+loads, and the same rows score 1.000 — with the action reference right.
+
+### What to do about it
+
+**Fix it in the snapshot, not the suite.** The arms are already modified copies of the plugin,
+so delete the `disable-model-invocation:` line from the target skill in **every** arm,
+incumbent included. That reproduces what a real user gets — typing the slash command *does*
+inject the body — while keeping the arms identical in everything but the text under test.
+
+**And do not trust a slash command to invoke anything.** Nothing in coder-eval expands one; it
+arrives as plain text the model may act on. Measured across the six train rows, by how often
+the model even *attempted* the call: slash form alone 3/6, a prose instruction alone 5/6, slash
+plus an explicit imperative 6/6. Pair them:
 
 ```yaml
 initial_prompt: |
-  /coder-eval:ci
+  Use the `coder-eval:ci` skill to handle this request. Invoke it with the Skill
+  tool and follow it before writing anything.
 
   ${row.scenario}
 ```
 
-**It is not, however, reliable — and this is what stopped the round.** Measured across four
-runs of the 6-row train split, engagement landed at 4/6, 4/5, 3/6 and 4/6, failing on
-*different* rows each time. Three ways it slips, all observed and all silent:
+That makes the model attempt the call every time. Whether the call *succeeds* is the separate
+question above — and the two failing independently is exactly why the engagement criterion has
+to be read before anything else, and has to be one that checks the result.
 
-- the model answers the command by **dispatching a sub-agent**, which reads the skill in the
-  child, so no `Skill` call ever reaches the parent stream;
-- it **ignores the command** and simply does the work itself, emitting no `Skill` call;
-- the scenario's own wording **routes it to a sibling skill**. One row asked for a schedule
-  "so we find out if a skill quietly stops triggering" — that is `check-skill`'s subject
-  matter, and the phrasing beat the explicit command.
+## The tool policy still matters — but read this one carefully
 
-One subtlety when reading the result: `skill_triggered` counts **reading the skill's
-`SKILL.md`** as engagement, not only a `Skill` call. A row here reported engaged while the
-command it actually issued named a different skill. Treat the criterion as necessary, not
-sufficient.
+Before the loading bug was understood, this looked like the round's big finding: with
+sub-agent delegation available every row scored 0.333, and denying it moved rows to 1.000.
+The numbers are real; the causal story was wrong. **The body was not loading in either
+case** — what changed was whether the main agent did the work itself, and on the
+then-leaky rows the prompt supplied much of the answer.
 
-## The tool policy is not a detail — it decided the result
-
-The first baseline scored **0.333 on every single row** — engagement only, nothing else.
-It looked like a uniformly bad skill body. It was not.
-
-With sub-agent delegation available, the model dispatched an `Agent` that did the work
-*without* following the skill. The workflows it produced were plausible and wrong in four
-ways at once:
-
-- `uses: anthropics/coder-eval-action@v1` — an action that does not exist;
-- a recursive `**` glob in the `tasks:` input, which the body explicitly forbids because the
-  action expands that value with `globstar` off, so it degrades to one level and silently
-  drops every task above it;
-- `min-score:` where the real input is `minimum-task-score:` — GitHub ignores unknown inputs,
-  so the score floor would simply never apply;
-- no Node or Claude CLI prerequisite steps, and no `persist-credentials: false`.
-
-Denying delegation changed the same suite's engaged rows from 0.333 to **1.000**:
+The guidance survives on its own merits, which are about *observability* rather than score:
 
 ```yaml
 agent:
@@ -192,13 +213,16 @@ agent:
   disallowed_tools: ["Agent", "Task"]
 ```
 
-Two things worth taking from that. First, `Skill` was missing from the original `allowed_tools`
-even though it is the mechanism under test — it worked anyway, because `Skill` is available
-regardless, which is exactly why the omission was invisible. Second, **an allowlist cannot
-suppress delegation at all**: `Agent` and `Task` remain available whatever `allowed_tools`
-says, so `disallowed_tools` is the only lever.
+Left available, the model sometimes answers by dispatching a sub-agent that engages the skill
+in the *child*, where the parent's trajectory never records it — so the engagement criterion
+reads `no` for a row where the skill genuinely ran. That is the mirror image of the bug above,
+and both corrupt the same signal. **An allowlist cannot express this**: `Agent` and `Task`
+remain available whatever `allowed_tools` says, so denial is the only lever.
 
-## Check three things before reading any score
+`Skill` in the allowlist is documentation rather than effect — the tool is available either
+way. It is listed so a reader can see what the mechanism under test requires.
+
+## Check four things before reading any score
 
 ```bash
 export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
@@ -212,27 +236,30 @@ In order, because each one makes every number below it meaningless if it fails:
 2. **Engagement passes on every row.** Not most rows. A row where the skill never ran measures
    nothing, and Stage B's own promotion rule requires the skill to have engaged on every
    scored row.
-3. **`completion_rate` is 1.0.** An errored row is *excluded* from the aggregate rather than
+3. **The Skill calls actually succeeded.** This is the one this round learned, and it is not
+   the same as check 2. Grep a `task.json` for the tool's `result_status`; an errored call
+   means the body never loaded, whatever the criterion says. On an older criterion that
+   distinction was invisible, so it is worth confirming directly the first time you run a
+   suite:
+
+   ```bash
+   jq -r '.iterations[].commands[] | select(.tool_name=="Skill")
+          | "\(.parameters.skill) -> \(.result_status)"' <run>/<variant>/<suite>/<row>/00/task.json
+   ```
+
+4. **`completion_rate` is 1.0.** An errored row is *excluded* from the aggregate rather than
    scored, so it never appears as a low number — only as a denominator that shrank. A 300s
    `turn_timeout` did exactly this here; rows commonly run 100–200s, and one exceeded it.
 
-The final baseline:
+Run against the plugin as shipped, this suite fails check 3 on every row — and, with the
+criterion fixed, check 2 as well. Mount a snapshot with the target skill's
+`disable-model-invocation:` line removed and all four pass, at which point the numbers mean
+what they appear to mean.
 
-| Row | Engaged | Snippet | Action ref | Weighted |
-| --- | --- | --- | --- | --- |
-| `pr-gate` | no | 0.0 | 0.0 | 0.000 |
-| `regression-least-privilege` | yes | 1.0 | 1.0 | 1.000 |
-| `regression-node-runtime` | yes | 1.0 | 1.0 | 1.000 |
-| `schedule-weekly` | yes | 1.0 | 1.0 | 1.000 |
-| `skill-source-path` | no | 1.0 | 0.0 | 0.333 |
-| `tasks-two-depths` | no | 1.0 | 0.0 | 0.333 |
+## What an arm looks like
 
-`completion_rate` 1.0, `average_weighted_score` 0.611, engagement **3/6**.
-
-## What an arm would have looked like
-
-The round stopped before Stage A, but the incumbent snapshot was built, and its shape is the
-part most easily got wrong. Each arm is a copy of the **whole plugin root**, not of one skill:
+Stage A ran — four arms, 24 rows — and told us nothing, for the reason above. The snapshot
+shape is still worth having, because it is the part most easily got wrong. Each arm is a copy of the **whole plugin root**, not of one skill:
 
 ```
 .optimize-skill/ci/1-incumbent/
@@ -254,59 +281,23 @@ text under test. The siblings matter for the same reason: a variant's `plugins` 
 Add `.optimize-skill/` to `.gitignore` before writing any of it; a round is several copies of
 the whole plugin per arm.
 
-## The go/no-go, and why this one is no-go
+And since the arm is already a modified copy, this is where the reachability fix belongs:
+delete the target skill's `disable-model-invocation:` line here, in every arm.
+
+## The go/no-go, and what it actually turned on
 
 The baseline costs 6 runs; the three A/B stages cost ~84 more. Decide here, not after.
 
-**Both no-go conditions held at once.**
+The first reading of this round was that engagement was flaky at 50–80% and that the rows
+where `ci` did engage were at a ceiling — two independent reasons not to spend. Both were
+artifacts of the criterion bug. Engagement was never 50–80%; it was **zero**. The varying
+figure came from counting refused calls plus the occasional row that genuinely read a
+`SKILL.md` off disk.
 
-*The instrument is unreliable.* At 50–80% engagement, a fifth to a half of every arm's sample
-measures the absence of the thing under test. Replicates do not fix that — they average a
-mixture more precisely.
-
-*And there is no headroom where it is reliable.* On rows where `ci` did engage, the score is
-1.000. The emitted workflow carries the per-depth globs *with the reason attached*, the real
-action, the version pin, the experiment passthrough, both runtime prerequisite steps, and both
-hardening lines (`persist-credentials: false` below, and a `permissions: contents: read` block
-the excerpt omits):
-
-```yaml
-# Abridged: junit-path, step-summary, the env: passthrough and the job's
-# `permissions: contents: read` block are omitted. Every value shown is verbatim.
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      # The action installs no coding-agent runtime — provide it here.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: npm install -g @anthropic-ai/claude-code
-
-      - uses: UiPath/coder_eval@v0
-        with:
-          version: "0.9.6"
-          # Two explicit per-depth globs, with the reason kept next to them.
-          tasks: evals/*.yaml evals/suite/*.yaml
-          extra-args: "-e evals/experiments/default.yaml"
-          minimum-task-score: "0.7"
-```
-
-That is the same skill, on the same suite, that scored 0.333 everywhere one setting earlier.
-
-> **One caveat on that ceiling, found in review after the run.** Four of the ten scenarios
-> stated the behaviour they graded — one asked for task paths "listed explicitly rather than
-> with a recursive wildcard" and then scored the explicit glob; another named the skill-source
-> requirement and then scored it being passed through. A prompt that supplies the answer means
-> an arm whose body *deleted* that rule would still have scored 1.0. The rows have since been
-> tightened to describe the situation and leave the method to the body, but the figures above
-> come from the earlier phrasing. That makes the ceiling reading **softer**, not firmer: some
-> of what looks like a well-followed body is the prompt doing the work. It does not change the
-> no-go — engagement alone settled that — but a future round on this suite should expect a
-> lower baseline than the table shows.
->
-> The lesson generalizes past this run: **scenarios describe the user's situation; the body is
-> what should supply the method.** A row that names the thing it scores is measuring the prompt.
+What survives is the conclusion, arrived at properly: **nothing to promote.** Once the body
+does load, `ci` already emits the per-depth globs with the reason attached, the real action,
+the version pin, the experiment passthrough, both runtime prerequisite steps, and both
+hardening lines:
 
 ### The number this round never got to read
 
@@ -340,19 +331,27 @@ whole method exists to prevent.
 
 ## What to take away
 
-- **The body track needs an outcome suite: one dataset-backed task, one row per scenario.**
-  Separate task files produce no rollup to rank and make `--split test` silently re-run train.
-- **One fixture serves every row.** Variation lives in the prompt, and the fixture must clear
-  the skill's own preconditions or every arm ties at the floor.
-- **Hold the tool policy constant, and size it deliberately.** Here it was the difference
-  between 0.333 and 1.000 on identical rows. Denying sub-agent delegation needs
-  `disallowed_tools`; an allowlist cannot express it.
-- **Engagement is a gate on the baseline, not a diagnostic.** Below 1.0 on every row, stop and
-  fix the suite. And it is necessary, not sufficient — reading the skill's file counts.
-- **Read `completion_rate` before any effect.** An errored row vanishes from the denominator
-  rather than scoring low.
-- **A null result is a result.** $7.47 of baselines bought a firm answer and avoided ~$36 of
-  numbers that would have meant nothing.
+- **Read the engagement criterion before anything else, and make sure it checks the tool
+  result.** The version used here counted a *refused* Skill call as engagement. Everything
+  downstream — the scores, the arm comparison, the diagnosis, two rounds of conclusions — was
+  built on that one unchecked field.
+- **A `disable-model-invocation: true` skill is unreachable in a run.** The Skill tool refuses
+  it and nothing expands a slash command, so the body never loads. Delete that line in every
+  arm's snapshot; it reproduces what a real user's slash command does.
+- **An agent given a plausible request and no skill produces plausible output.** That is what
+  makes this failure so quiet: nothing errors, nothing looks empty, and the artifact is wrong
+  only in the details the missing body would have supplied — here, an action reference that
+  does not exist.
+- **Four arms tying exactly is a bug report, not a result.** Bodies that differ should produce
+  *some* variance. Perfect agreement means they are not being distinguished.
+- **The rest of the method held up.** One dataset-backed task, one row per scenario, one
+  fixture clearing the skill's preconditions, criteria parameterized by row, the tool policy
+  pinned — all of that was sound. It was the reachability underneath it that was not.
+- **Scenarios describe the situation; the body supplies the method.** A row naming the thing it
+  scores is measuring the prompt. `CE036` now fails the build on the verbatim form.
+- **A null result is still a result — once you know which null you have.** "The candidates did
+  not beat the incumbent" and "the skill never ran" look identical in the numbers and mean
+  opposite things.
 
 ## Next
 

@@ -1383,7 +1383,7 @@ def _assert_outcome_suite_shape(
     expected_rows: int,
     expected_split_counts: dict[str, int],
     skill_name: str,
-    prompt_prefix: str,
+    invocation: str,
 ) -> None:
     """The structural contract every outcome suite must satisfy.
 
@@ -1402,8 +1402,12 @@ def _assert_outcome_suite_shape(
        because ``coder-eval plan`` has no ``--split`` flag to check them from a shell.
     3. **No surviving ``${row.`` anywhere** in the prompt or the expanded criteria —
        substitution has to reach list leaves (``includes: ["${row.x}"]``), not just scalars.
-    4. **The slash form** opens every prompt: it is the only mechanism that reaches a
-       ``disable-model-invocation: true`` skill, and prose does not substitute for it.
+    4. **Every prompt invokes the skill explicitly**, in its opening lines — by slash form,
+       by an imperative naming it, or both. Holding activation constant is what makes the
+       body the only variable. Note this is deliberately NOT a check for the slash form
+       specifically: nothing expands a slash command, so `/plugin:skill` is plain text the
+       model may ignore, and the measured-most-reliable form is an explicit imperative
+       (6/6 engaged, against 3/6 for the slash form alone).
     5. **An engagement criterion on every row** with a non-empty ``expected_skill`` —
        what separates "the body gave bad instructions" from "the skill never ran".
     """
@@ -1434,10 +1438,12 @@ def _assert_outcome_suite_shape(
         # it — otherwise moving the prompt to a file turns these into a TypeError.
         assert row.initial_prompt, f"{row.task_id} has no initial_prompt"
         assert "${row." not in row.initial_prompt, f"unsubstituted row placeholder in {row.task_id}'s prompt"
-        assert row.initial_prompt.lstrip().startswith(prompt_prefix), (
-            f"{row.task_id}'s prompt does not open with {prompt_prefix!r}. The slash form is the "
-            "ONLY mechanism that reaches a `disable-model-invocation: true` skill — asking in "
-            "prose returns 'no such skill is available' and the row measures nothing"
+        opening = row.initial_prompt.lstrip()[:300]
+        assert invocation in opening, (
+            f"{row.task_id}'s prompt does not invoke {invocation!r} in its opening lines. An "
+            "outcome suite holds activation CONSTANT so the body is the only variable; a prompt "
+            "that leaves engagement to chance yields a mixture of two effects and a gate that "
+            "can attribute neither"
         )
 
         rendered = json.dumps([c.model_dump() for c in row.success_criteria], default=str)
@@ -1546,7 +1552,7 @@ class TestPluginArtifacts:
             expected_rows=4,
             expected_split_counts={"train": 2, "test": 2},
             skill_name="my-skill",
-            prompt_prefix="/my-plugin:my-skill",
+            invocation="my-plugin:my-skill",
         )
 
     def test_outcome_template_scores_artifacts_not_prose(self):
@@ -1658,7 +1664,7 @@ class TestPluginArtifacts:
             expected_rows=10,
             expected_split_counts={"train": 6, "test": 4},
             skill_name="ci",
-            prompt_prefix="/coder-eval:ci",
+            invocation="coder-eval:ci",
         )
 
         from coder_eval.orchestration.task_loader import load_task
@@ -2406,9 +2412,14 @@ class TestPluginArtifacts:
                 "to 1.000; an allowlist cannot express it",
             ),
             (
-                "not, however, reliable",
-                "the slash form's measured 50-80% engagement is the finding that stopped the "
-                "round — without it the page reads as a tutorial that simply gave up",
+                "disable-model-invocation",
+                "the round's actual root cause: the Skill tool REFUSES such a call, so the body "
+                "never loads and every criterion scores the model's prior knowledge instead",
+            ),
+            (
+                "read the call's *parameters* and never its *result*",
+                "why it stayed hidden — the engagement criterion reported yes for a refused "
+                "call, which is what made four arms tie exactly",
             ),
             (
                 "completion_rate",
