@@ -554,8 +554,7 @@ def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
     ag.types = SimpleNamespace(
         ThinkingLevel=lambda level: level,
         GeminiAPIEndpoint=type("GeminiAPIEndpoint", (), {}),
-        GeminiModelOptions=lambda **kw: SimpleNamespace(**kw),
-        CapabilitiesConfig=lambda **kw: SimpleNamespace(**kw),
+        GeminiModelOptions=SimpleNamespace,
     )
     hooks = ModuleType("google.antigravity.hooks")
     hooks.policy = SimpleNamespace(
@@ -1316,7 +1315,9 @@ async def test_concurrent_starts_get_isolated_mock_dirs(monkeypatch, tmp_path):
     task_a = asyncio.create_task(a.start(str(tmp_path), env_path_prepend=["/a/mocks"]))
     await a_entered.wait()
     await b.start(str(tmp_path), env_path_prepend=["/b/mocks"])
-    await task_a
+    # Bounded: if a start ever serializes behind the other again, fail the test
+    # rather than hang the suite waiting for a task that will never finish.
+    await asyncio.wait_for(task_a, timeout=10)
 
     envs = [c.env for c in configs]
     assert envs == [
@@ -1376,12 +1377,12 @@ async def test_start_omits_env_when_no_mock_dirs(monkeypatch, tmp_path):
     assert configs[0].env is None
 
 
-# --- allowed_tools / disallowed_tools / permission_mode -----------------------------
+# --- permission_mode ----------------------------------------------------------------
 #
-# These fields were ignored entirely before (policies were hardcoded to allow_all and
-# no CapabilitiesConfig was built), so two harnesses reading the same task file ran
-# different tasks. CapabilitiesConfig validates against the BuiltinTools enum, so the
-# Claude→Antigravity name mapping has to be exact and unmappables must be dropped.
+# The local harness has one mode: policies are hardcoded to allow_all, so no
+# permission_mode confines it. These pin that as intended behavior rather than an
+# oversight — the write boundary is the sandbox driver, and a headless eval has
+# nobody to approve anything.
 
 
 def _agent(**cfg) -> AntigravityAgent:
@@ -1390,7 +1391,7 @@ def _agent(**cfg) -> AntigravityAgent:
 
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
 async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path, mode: str):
-    """permission_mode is declared unhonored: every mode stays fully autonomous.
+    """permission_mode is not honored here: every mode stays fully autonomous.
 
     coder_eval's write boundary is the driver (docker container / ephemeral tempdir),
     not the agent — same deliberate stance as Codex. A mode that silently switched the
