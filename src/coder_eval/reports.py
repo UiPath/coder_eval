@@ -469,11 +469,13 @@ class ReportGenerator:
                 )
             if t.get("stopped_early"):
                 reason = t.get("early_stop_reason") or "unknown"
-                turns_remaining = t.get("turns_remaining_at_stop")
-                avoided = f" <= {turns_remaining} turn(s) avoided —" if isinstance(turns_remaining, int) else ""
-                notes.append(
-                    f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided} {early_stop_gate_note(reason)}"
-                )
+                # No "N turn(s) avoided" claim here. It derived from
+                # ``max_turns - sdk_turn_index``, and on Codex and Antigravity one
+                # ``communicate()`` is a single SDK turn — so an early-stopped row
+                # advertised dozens of avoided turns when all that was cut was a
+                # tool-call tail. ``turns_remaining_at_stop`` is still persisted on
+                # EarlyStopInfo, labelled there as the upper bound it is.
+                notes.append(f"> **NOTE:** [{task_id}] stopped early ({reason}); {early_stop_gate_note(reason)}")
         if not notes:
             return []
         return ["## Run-time Notes", "", *notes]

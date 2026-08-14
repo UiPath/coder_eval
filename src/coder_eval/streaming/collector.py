@@ -82,6 +82,24 @@ class EventCollector:
         elif isinstance(event, AgentEndEvent):
             self._agent_end = event
 
+    @property
+    def visible_turn_count(self) -> int:
+        """Visible timeline entries observed so far — one per resolved tool call.
+
+        The live, in-stream counterpart of ``reports_stats.visible_turn_count``,
+        which counts the very same list once the turn is a finished
+        ``TurnRecord`` (minus its trailing final-reply entry, which cannot exist
+        while the turn is still running).
+
+        Agents whose SDK has no meaningful native turn counter — Codex and
+        Antigravity each deliver a single SDK turn per ``communicate()`` — enforce
+        ``run_limits.max_turns`` against this. Reading it from the collector rather
+        than from each agent's own scratch list is what makes the cap mean the same
+        thing on both: the collector is the single agent-agnostic capture path, and
+        keying on ``tool_id`` means a re-emitted end event cannot double-count.
+        """
+        return len(self._commands)
+
     def _ordered_commands(self) -> list[CommandTelemetry]:
         return sorted(self._commands.values(), key=lambda c: c.sequence_number)
 

@@ -176,10 +176,22 @@ as every other agent.
 3. **`kill_sync()` is best-effort.** The SDK's cancel/disconnect are async-only, so
    the watchdog's synchronous kill only flips agent state to `ERROR`; real teardown
    happens on the subsequent async `stop()`.
-4. **Process-global spawn lock.** The SDK spawns `localharness` via a subprocess with
-   no env-injection seam, so the agent transiently mutates `PATH` across the spawn
-   under a process-wide lock. This serializes harness startup across concurrent
-   tasks (it does not serialize the turns themselves).
+4. **`permission_mode` does not confine the harness.** Every mode runs
+   `policy.allow_all()`; coder_eval's write boundary is the sandbox driver, and a
+   headless eval has no human to approve anything.
+5. **`allowed_tools` / `disallowed_tools` are not read.** The harness runs with its
+   full builtin tool set, so an Antigravity run has tools (web search, subagents,
+   URL fetch) that the same task file denies on Claude Code and Codex.
+6. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
+   so the cap counts resolved tool calls instead, enforced on the step loop. See
+   [Run-Limit Parity](HARNESS_PARITY.md).
+7. **Shell commands over ~10s are moved to the background.** The localharness has a
+   10-second maximum synchronous wait; past it the command becomes a background task
+   and the model gets a task id, not a result. The turn polls for that result instead
+   of finalizing on an idle step stream, so slow work does complete — but the wait is
+   bounded by 80% of `turn_timeout`, and a job that outlives it is force-closed as
+   `result_status: unknown` and graded as an ordinary low score rather than a timeout.
+   Measured in [Run-Limit Parity](HARNESS_PARITY.md).
 
 ## Running in Docker
 

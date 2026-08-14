@@ -39,7 +39,7 @@ variants:
       model: claude-haiku-4-5-20251001
   - variant_id: sonnet
     agent:
-      model: claude-sonnet-4-6
+      model: claude-sonnet-5
 ```
 
 A variant declares only what differs — here just `agent.model`. Everything else

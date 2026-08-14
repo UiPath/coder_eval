@@ -11,6 +11,7 @@ import pytest
 
 from coder_eval.errors import BudgetExceededError
 from coder_eval.models import (
+    DEFAULT_SIMULATOR_MODEL,
     AgentKind,
     ClaudeCodeAgentConfig,
     CriterionResult,
@@ -369,6 +370,9 @@ class TestSimulationBudgetAbort:
         # The UserSimulator must NOT be reached after the budget trip — we
         # configure it but it should not produce another user message.
         mock_simulator = MagicMock()
+        # UserSimulator.model is a real str property (the pinned simulator model);
+        # an auto-specced MagicMock here fails SimulationTelemetry validation.
+        mock_simulator.model = DEFAULT_SIMULATOR_MODEL
         mock_simulator.start = AsyncMock()
         mock_simulator.stop = AsyncMock()
         mock_simulator.next_user_message = AsyncMock()
@@ -529,6 +533,9 @@ class TestExpectedTurnsSimulation:
         # Simulator emits the stop token on the second prompt so the dialog
         # terminates cleanly after the warning has fired.
         mock_simulator = MagicMock()
+        # UserSimulator.model is a real str property (the pinned simulator model);
+        # an auto-specced MagicMock here fails SimulationTelemetry validation.
+        mock_simulator.model = DEFAULT_SIMULATOR_MODEL
         mock_simulator.start = AsyncMock()
         mock_simulator.stop = AsyncMock()
         mock_simulator.next_user_message = AsyncMock(
@@ -580,6 +587,9 @@ class TestExpectedTurnsSimulation:
         orch.success_checker = mock_checker
 
         mock_simulator = MagicMock()
+        # UserSimulator.model is a real str property (the pinned simulator model);
+        # an auto-specced MagicMock here fails SimulationTelemetry validation.
+        mock_simulator.model = DEFAULT_SIMULATOR_MODEL
         mock_simulator.start = AsyncMock()
         mock_simulator.stop = AsyncMock()
         mock_simulator.next_user_message = AsyncMock(
