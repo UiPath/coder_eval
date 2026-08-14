@@ -475,6 +475,53 @@ class TestCE037SingleF1Implementation:
 
 
 @pytest.mark.lint
+class TestCE040BootstrapPFloorSeam:
+    """CE040 flags a re-derivation of the bootstrap's p-floor outside `reports_stats.py`.
+
+    The floor is a property of the ESTIMATOR — `1/m` under the naive count, `2/(m+1)` under
+    Phipson & Smyth — so a consumer that spells it inline keeps reporting the old value after
+    the estimator moves. That is exactly what happened: four sites in `optimize_gate.py` and two
+    field descriptions understated it by 2x, in a block a user reads to decide whether to spend.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "<test>"):
+        import ast
+
+        from tests.lint.rules.ce040_bootstrap_p_floor_seam import BootstrapPFloorSeam
+
+        return BootstrapPFloorSeam(filepath).check(ast.parse(src))
+
+    def test_flags_the_old_naive_floor(self):
+        assert self._run("floor = 1.0 / n_resamples")
+
+    def test_flags_an_attribute_spelling(self):
+        # The shape the gate actually had: `1.0 / verdict.n_resamples` in a rendered string.
+        assert self._run("floor = 1.0 / verdict.n_resamples")
+        assert self._run("trigger = 5.0 / verdict.n_resamples")
+
+    def test_flags_a_re_derivation_of_the_current_floor(self):
+        # A "helpful" inline copy of the CURRENT estimator's floor is the same defect one
+        # estimator later, so it is caught too.
+        assert self._run("floor = 2.0 / (n_resamples + 1)")
+        assert self._run("floor = 2.0 / (verdict.n_resamples + 1)")
+
+    def test_allows_the_canonical_module(self):
+        assert not self._run("return 2.0 / (n_resamples + 1)", filepath="/repo/src/coder_eval/reports_stats.py")
+
+    def test_does_not_claim_to_catch_a_renamed_count(self):
+        # Pins the documented boundary: a floor derived from a differently-named local is NOT
+        # matched. A test asserting otherwise would misrepresent what `make lint` proves.
+        assert not self._run("floor = 2.0 / (m + 1)")
+        assert not self._run("floor = 1.0 / draws")
+
+    def test_ignores_unrelated_arithmetic(self):
+        assert not self._run("rate = hits / total")
+        assert not self._run("x = n_resamples / 2")  # dividing BY 2, not by the count
+        assert not self._run("share = n_resamples * 1.0")
+
+
+@pytest.mark.lint
 class TestCE022SimulationDialogLoopStatementCap:
     """CE022 bounds the regrowth of the noqa'd _simulation_dialog_loop.
 
