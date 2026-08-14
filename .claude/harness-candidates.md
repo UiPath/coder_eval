@@ -560,3 +560,12 @@ with the two `action.yml` items above — one considered change to the action's 
       decision, not a refactor. The mechanical half is easy: derive the list from every criterion
       field whose name matches a locator vocabulary, and fail when a criterion grows a
       location-shaped field nobody classified. — caught in the same review.
+- [ ] The search loop's accept/revert arithmetic lives in a markdown snippet rather than a tested
+      function, against `models/optimize.py`'s own stated principle ("the gate's verdict is a typed
+      value the skill prints, instead of arithmetic an agent performs by hand"). A
+      `search_compare(head, candidate)` in `optimize_gate` would make the shared-row-set guard and
+      the corpus check enforceable and unit-testable instead of paragraphs an agent may skim. Not
+      done in-plan because EVERY snippet in this skill (Steps 6, 8, 10, 11) is hand-written the
+      same way, so this is a pre-existing property of the surface rather than something the ReAPO
+      change introduced — fixing it for one snippet alone would leave the inconsistency it is
+      meant to remove. — caught in the ReAPO optimize-skill Phase 1 quality review.
