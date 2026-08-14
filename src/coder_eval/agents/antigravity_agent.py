@@ -47,6 +47,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -232,6 +233,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
 
+    # Antigravity has always appended (TemplatedSystemInstructions wraps
+    # system_instructions around its own harness prompt), so its runs are
+    # comparable across the marker boundary.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+
     def __init__(
         self,
         config: AntigravityAgentConfig,
@@ -416,10 +422,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # human about — there is no human on a headless eval path. Declared as
                 # such in the parity table so it is visible rather than silent.
                 policies=[policy.allow_all()],
-                # Forward verbatim (None stays None): an explicit "" is a
-                # configured-but-empty prompt and must be forwarded, matching
-                # the `is not None` semantics in the Claude Code / Codex agents.
-                system_instructions=self.config.system_prompt,
+                system_instructions=self.config.system_prompt or None,
                 # Skill discovery: hand the harness the search-path roots that parent
                 # the UiPath skill dirs. Unlike Codex (which symlinks into
                 # .agents/skills/), Antigravity takes skill search paths natively.
@@ -750,11 +753,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Gemini model + thinking level for auditability."""
         return {
+            **super().get_environment_info(),
             "antigravity_model": self._effective_model(),
             "antigravity_thinking_level": self.config.thinking_level,
-            # Antigravity has always appended (TemplatedSystemInstructions);
-            # emitted for cross-agent uniformity of the marker.
-            "system_prompt_semantics": "append",
         }
 
     def _conversation_or_none(self) -> Any:

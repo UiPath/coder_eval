@@ -25,6 +25,20 @@ type SettingSource = Literal["user", "project", "local"]
 """Vendor-neutral mirror of claude_agent_sdk.SettingSource (no SDK dependency)."""
 
 
+type SystemPromptMode = Literal["append", "replace"]
+"""How a configured ``system_prompt`` combines with the agent's own default prompt."""
+
+
+type SystemPromptSemantics = Literal["append", "replace", "unknown"]
+"""The regime a run actually used, as recorded in ``environment_info``.
+
+Wider than :data:`SystemPromptMode` by ``"unknown"``: every agent emits the marker
+(``Agent.system_prompt_semantics``), but an agent that has not declared which regime
+it implements says so explicitly rather than being silently absent. Absent still means
+one thing only — a run from before the marker existed.
+"""
+
+
 class LocalPluginConfig(TypedDict):
     """Vendor-neutral local plugin/skills source: a directory the agent scans for skills.
 
@@ -213,7 +227,7 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
 
-    system_prompt_mode: Literal["append", "replace"] = Field(
+    system_prompt_mode: SystemPromptMode = Field(
         default="append",
         description=(
             "How system_prompt combines with the Claude Code default prompt: 'append' layers it "

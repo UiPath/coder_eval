@@ -33,6 +33,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -664,6 +665,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
 
+    # Codex appends system_prompt as developer_instructions on top of its base
+    # prompt. Runs from before this marker existed silently DROPPED the field —
+    # dashboards must not pool system_prompt-setting tasks across that boundary.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+
     def __init__(
         self,
         config: CodexAgentConfig,
@@ -977,7 +983,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Codex routing so runs are auditable/comparable.
 
-        Always emits ``system_prompt_semantics``. The routing keys
+        Always emits ``system_prompt_semantics`` (from the base). The routing keys
         (``codex_base_url_host`` / ``codex_wire_api`` / ``codex_api_version`` /
         ``codex_model_is_deployment``) are added only when a custom endpoint is
         configured (CODEX_BASE_URL): on a custom endpoint the model is an
@@ -986,11 +992,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         artifacts. The host (not the full URL) is recorded to avoid leaking any
         embedded credentials; the API key is never recorded.
         """
-        # system_prompt_semantics: Codex appends system_prompt as
-        # developer_instructions on top of its base prompt. Runs from before this
-        # marker existed silently DROPPED the field — dashboards must not pool
-        # system_prompt-setting tasks across that boundary.
-        info: dict[str, Any] = {"system_prompt_semantics": "append"}
+        info: dict[str, Any] = dict(super().get_environment_info())
         base_url = self._resolve_base_url()
         if not base_url:
             return info
