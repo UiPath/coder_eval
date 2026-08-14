@@ -81,6 +81,9 @@ from .registry import AgentRegistry
 logger = logging.getLogger(__name__)
 
 # Grace period between SIGTERM and SIGKILL when tearing down the CLI subprocess.
+# Doubles as the post-EOF exit grace in _settle_turn when no turn deadline is
+# configured (a CLI that closed its stream but won't exit gets this long to die
+# before the turn is crashed).
 _TERM_GRACE_SECONDS = 5.0
 
 # How long to keep draining stdout/stderr after the CLI process has been reaped.
