@@ -457,6 +457,12 @@ criterion, which the same skill requires to be 1.0 on every row — so both halv
 1.0, the floor comes back `0.000`, and you would report a confidently meaningless number about a
 metric the gate does not use.
 
+**The execution track has its own preflight, on its own metric, and it sits at Step 8** — after
+the control arm, before Stage A. The position is not an oversight: a floor needs rows with two or
+more replicates, and Step 6's baseline is a single replicate per row, so a floor here would be
+`None` by construction. The control arm is the cheapest replicated data on that track, which is
+what makes its preflight free.
+
 Compute it and report it *before* proposing anything:
 
 ```python
@@ -672,6 +678,59 @@ re-spending. `${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md` carries the ha
 follows from it: if the incumbent does not beat the control with a confidence interval excluding
 zero, stop and fix the skill's premise rather than its wording.
 
+Run it as a two-variant experiment, `incumbent` and `control`, at `--repeats 3`:
+
+```bash
+coder-eval run <suite> -e <path to round<N>-control.yaml> --split train --repeats 3 \
+  --run-dir <runs>/control
+```
+
+`--repeats 3` here rather than three invocations, for the same reason the execution gate uses it:
+the comparison is per-row `weighted_score` through the reporter's `## Paired Comparison` block,
+which averages replicates per row before pairing and fires only for exactly two variants.
+
+### The execution preflight — after the control arm, before Stage A
+
+The control run above is the cheapest replicated data on this track, and that makes a **noise
+floor** free — it is arithmetic over a run directory that already exists. Read it before Stage A:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import (
+    UNRESOLVED_MODEL,
+    load_arm_rows,
+    load_measurements,
+    measure_execution_noise_floor,
+    resolve_model,
+)
+
+control_dirs = [Path("<runs>/control")]   # the run dir from the control-arm command above
+sidecar = Path(".optimize-skill/<skill>/measurements.json")
+suite_id = "<the suite's task_id>"
+
+rows = load_arm_rows(control_dirs, "incumbent", suite_id)
+floor = measure_execution_noise_floor(
+    run_dirs=control_dirs, variant_id="incumbent", suite_id=suite_id,
+    model=resolve_model(rows) or UNRESOLVED_MODEL, measurements=load_measurements(sidecar),
+)
+print(None if floor is None else floor.mde)
+```
+
+**Be honest about what this can and cannot claim.** It is read *after* the control arm, so it
+cannot save that spend. But Stage A, Stage B and Stage C are all still unspent, and those are the
+stages that multiply by candidate count. The hand-back rule is the activation track's: **if the
+gain you are hypothesising is smaller than the floor, this suite cannot see it — more rows, not
+more rounds.**
+
+It measures `weighted_score`, not `f1.yes`, because that is what this track's gate compares. A
+`None` means fewer than two rows carried two or more replicates; the function logs which
+precondition failed, so read the warning rather than treating `None` as a floor of zero.
+
+**The fallback, priced.** A user who skipped the control arm has no run directory with two or more
+replicates per row, so the floor costs an extra `--repeats 2` baseline — `+M_train` runs. That is
+one more reason to run the control arm first.
+
 ## Step 9 — Materialize as an experiment
 
 One variant per candidate, plus `incumbent`. **Reachability uses `agent.plugins`, the same
@@ -711,6 +770,13 @@ snapshots:
 
 A fourth appears only if you halve Stage A: `round<N>-triage-survivors.yaml`, the arms that
 survived the first pass.
+
+On the execution track there is one more, `round<N>-control.yaml` — exactly two variants,
+`incumbent` and `control` (Step 8). It is the one file authored **once per suite** rather than
+once per round: the control is a property of the suite and the skill, so later rounds reuse its
+numbers instead of re-spending. Every reason above still applies to it — there is no `--variant`
+filter, and the paired block fires only for exactly two variants, which is what this comparison
+needs.
 
 Authoring one is a single edit — copy the triage file and delete the variants that did not
 survive — so the alternative is not cheaper, it is just wrong. Re-passing the triage file at
@@ -1038,6 +1104,12 @@ append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round
 whole keyed record — including `n_rows`, the count of rows scored in both halves of the split,
 which is smaller than the suite whenever a row errored and which you cannot obtain any other way.
 Record the suite's row count instead and the entry never matches its own lookup again.
+
+On the execution track, `measure_execution_noise_floor` (Step 8) already returns a full keyed
+record, so it goes to `record_noise_floor` unchanged. **`metric` is the field that keeps the two
+tracks' floors from colliding** — `f1.yes` for activation, `weighted_score` for execution. They are
+different numbers on the same suite, variant, model and row count, so both live in the sidecar at
+once and neither replaces the other.
 - **The regression corpus.** On promotion, append the rows that justified it, with why. That is
   what stops a later round from quietly undoing an earlier one: a candidate that re-loses a row
   a previous promotion was built on is a regression, however good its aggregate looks.

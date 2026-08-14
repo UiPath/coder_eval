@@ -1,4 +1,4 @@
-"""The activation track's promotion gate, computed from finalized run directories.
+"""`/coder-eval:optimize-skill`'s promotion gate and preflights, over finalized run directories.
 
 `/coder-eval:optimize-skill` decides whether a candidate skill description beats the incumbent.
 That decision used to be `min(candidate F1) > max(incumbent F1)` across three invocations —
@@ -25,13 +25,14 @@ import logging
 import math
 import os
 import statistics as _stats
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from coder_eval.criteria._classification_aggregate import classification_metrics
 from coder_eval.models import (
+    TARGET_LABEL,
     ActivationGateVerdict,
     ArmRowScores,
     ClassificationCriterionResult,
@@ -52,10 +53,6 @@ from coder_eval.reports_stats import (
 
 
 logger = logging.getLogger(__name__)
-
-# The label whose F1 the activation gate reads. `skill_triggered` emits `yes` / `no`, and
-# "did the skill engage when it should" is the `yes` class.
-TARGET_LABEL = "yes"
 
 # How large a measured cost/latency increase has to be, relative to the incumbent's median, before
 # it is worth reporting as a breach.
@@ -545,6 +542,59 @@ def noise_floor_mde(
 UNRESOLVED_MODEL = "(unresolved)"
 
 
+def _no_floor(reason: str) -> None:
+    """Log why a null comparison could not be made, and return None.
+
+    Both floor functions return ``None`` for several distinct reasons, and the caller is an agent
+    about to decide whether to spend money. A silent ``None`` is indistinguishable from a floor of
+    zero to anyone not reading the source — and it was silent: verified against the shipped code,
+    ``noise_floor_mde`` with a mistyped run directory returned a bare ``None`` and printed nothing,
+    on the one function whose job is to stop a user spending.
+
+    An unconfigured ``logging.warning`` reaches stderr through Python's last-resort handler, so the
+    agent driving the skill's inline snippet sees this without any logging setup.
+    """
+    logger.warning("No noise floor could be computed: %s", reason)
+    return None
+
+
+def _floor_from_clusters[T](
+    clusters_a: list[list[T]],
+    clusters_b: list[list[T]],
+    statistic: Callable[[list[T]], float],
+    probe: NoiseFloor,
+    measurements: OptimizeMeasurements | None,
+) -> NoiseFloor | None:
+    """The cache lookup, the bootstrap and the half-width — the half both floors share.
+
+    Generic over the cluster element type because its two callers genuinely differ: the activation
+    floor's clusters hold ``(expected, observed)`` label pairs reduced by ``_f1_yes``, the execution
+    floor's hold ``weighted_score`` floats reduced by ``mean``. Parameterized exactly the way
+    :func:`reports_stats.cluster_bootstrap_diff_ci` already is, rather than unified behind a
+    ``split=`` flag — the split axes (invocations vs. replicates) are different computations, and a
+    boolean would hide that.
+    """
+    # An unresolved model must never hit the cache: borrowing a floor measured on another model
+    # would be worse than the bootstrap it saves.
+    if measurements is not None and probe.model != UNRESOLVED_MODEL:
+        cached = lookup_noise_floor(measurements, probe)
+        if cached is not None:
+            return cached
+
+    bootstrap = cluster_bootstrap_diff_ci(
+        clusters_a,
+        clusters_b,
+        statistic,
+        n_resamples=probe.n_resamples,
+        confidence=probe.confidence,
+        seed=probe.seed,
+    )
+    if bootstrap is None:
+        return _no_floor(f"the bootstrap declined on {len(clusters_a)} cluster(s) for {probe.suite_id!r} — it needs 2")
+    _diff, ci_low, ci_high, _p = bootstrap
+    return probe.model_copy(update={"mde": (ci_high - ci_low) / 2.0})
+
+
 def measure_noise_floor(
     *,
     run_dirs: Sequence[Path],
@@ -573,7 +623,7 @@ def measure_noise_floor(
     is not.
     """
     if len(run_dirs) < 2:
-        return None
+        return _no_floor(f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}")
 
     per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
     midpoint = (len(per_dir) + 1) // 2
@@ -584,12 +634,16 @@ def measure_noise_floor(
     clusters_b = [_label_pairs(second[rid], criterion_index) for rid in shared]
     scored = [(a, b) for a, b in zip(clusters_a, clusters_b, strict=True) if a and b]
     if len(scored) < 2:
-        return None
+        return _no_floor(
+            f"only {len(scored)} row(s) of {suite_id!r} scored a classification result at criterion "
+            + f"{criterion_index} in BOTH halves of the invocation split — an interval needs 2"
+        )
 
     probe = NoiseFloor(
         suite_id=suite_id,
         variant_id=variant_id,
         model=model,
+        metric=f"f1.{TARGET_LABEL}",
         criterion_index=criterion_index,
         n_rows=len(scored),
         n_invocations=len(run_dirs),
@@ -599,25 +653,104 @@ def measure_noise_floor(
         mde=0.0,
         computed_at=datetime.now(UTC),
     )
-    # An unresolved model must never hit the cache: borrowing a floor measured on another model
-    # would be worse than the bootstrap it saves.
-    if measurements is not None and model != UNRESOLVED_MODEL:
-        cached = lookup_noise_floor(measurements, probe)
-        if cached is not None:
-            return cached
+    return _floor_from_clusters([a for a, _b in scored], [b for _a, b in scored], _f1_yes, probe, measurements)
 
-    bootstrap = cluster_bootstrap_diff_ci(
-        [a for a, _b in scored],
-        [b for _a, b in scored],
-        _f1_yes,
-        n_resamples=n_resamples,
+
+def measure_execution_noise_floor(
+    *,
+    run_dirs: Sequence[Path],
+    variant_id: str,
+    suite_id: str,
+    model: str,
+    confidence: float = 0.95,
+    seed: int = 0,
+    n_resamples: int = GATE_RESAMPLES,
+    measurements: OptimizeMeasurements | None = None,
+) -> NoiseFloor | None:
+    """The execution track's minimum detectable effect: a null half-split over REPLICATES.
+
+    The activation floor splits *invocations*, because Stage B there is three separate
+    ``coder-eval run`` commands. The execution track has no such axis — it runs one invocation at
+    ``--repeats 3`` — so the null comparison splits each row's **replicates** instead, the larger
+    half first: at three replicates per row, two against one. The true difference is zero by
+    construction either way, and the interval's half-width is the floor.
+
+    Replicates are pooled across ``run_dirs`` before splitting, so the halves are ordered by run
+    directory first and replicate number second. Which is which does not matter — replicates of one
+    arm are exchangeable, so any fixed split is a valid null — but the ordering is deterministic,
+    which is what makes the floor reproducible for a seed.
+
+    The statistic is the mean per-row ``weighted_score``, which is what the execution gate's
+    ``## Paired Comparison`` block actually compares. It is deliberately NOT ``f1.yes``: computing
+    an F1 floor for a gate that never reads F1 is the bug this function exists to replace, and on
+    the bundled outcome template it returns a confidently meaningless 0.000.
+
+    **+0 runs.** It reads the control-arm run directory, which the method already requires once
+    per suite at ``--repeats 3`` — so the preflight costs arithmetic, not money.
+
+    Returns ``None`` — never a fabricated number — when nothing loaded (a mistyped path) or when
+    fewer than 2 rows carry at least 2 replicates; the two are distinguished in the logged reason.
+    An odd replicate count splits unevenly (3 -> 2/1), which widens the interval and therefore
+    reports a CONSERVATIVE floor: the safe direction, exactly as on the activation side.
+
+    A floor of exactly **0.000** is a real answer, not a missing one: it means every row's
+    replicates agreed exactly, so the suite showed no run-to-run noise at all. On a real agent run
+    that is worth checking rather than treating as a green light — it is what a suite whose rows
+    are deterministic looks like, and also what one whose rows all failed identically looks like.
+    """
+    rows = _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
+    # A mistyped variant, suite or run directory is the documented SILENT-ZERO failure mode, and
+    # "no row carries 2+ replicates" would send the reader off to check --repeats instead of the
+    # path. Distinguished here for the same reason `activation_gate` distinguishes it.
+    if not rows:
+        searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
+        return _no_floor(
+            f"nothing matched <run>/{variant_id}/{suite_id}/*/NN/task.json under {searched} — that "
+            + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
+        )
+
+    # `criterion_index=None` is already the "read the row's weighted_score" mode, so this reuses
+    # the existing extractor rather than adding a second definition of what a row scored.
+    replicated: list[list[float]] = []
+    for _row_id, results in sorted(rows.items()):
+        values = [v for r in results if (v := _row_score(r, None)) is not None]
+        if len(values) >= 2:
+            replicated.append(values)
+    if len(replicated) < 2:
+        return _no_floor(
+            f"only {len(replicated)} of {len(rows)} row(s) of {suite_id!r} carry 2+ replicates with a "
+            + "weighted_score — the replicate split needs 2. Was this run made with --repeats 2 or more?"
+        )
+
+    # BALANCE to a common replicate count before splitting, mirroring the per-row trim
+    # `activation_gate` applies for the same reason. `cluster_bootstrap_diff_ci` pools the drawn
+    # clusters' OBSERVATIONS before applying the statistic, so an unbalanced row weighs 2:1 across
+    # the halves while a balanced one weighs 1:1 — and between-row spread then leaks into a
+    # difference that is supposed to be zero by construction. Measured: 8 rows with NO within-row
+    # variance report 0.000 at uniform counts and 0.056 when half of them carry 2 replicates
+    # instead of 3 — a floor invented out of nothing but the imbalance. The trigger is mundane: one
+    # crashed replicate at `--repeats 3` writes an empty result list and drops that row to 2.
+    per_row = min(len(values) for values in replicated)
+    # Split point is (per_row+1)//2, so 3 replicates go 2/1 rather than 1/2. Deliberate: the larger
+    # half first keeps the bias conservative, exactly as the invocation split does.
+    midpoint = (per_row + 1) // 2
+    halves = [(values[:midpoint], values[midpoint:per_row]) for values in replicated]
+    probe = NoiseFloor(
+        suite_id=suite_id,
+        variant_id=variant_id,
+        model=model,
+        metric="weighted_score",
+        criterion_index=None,
+        n_rows=len(replicated),
+        n_invocations=len(run_dirs),
+        n_replicates=per_row,
         confidence=confidence,
         seed=seed,
+        n_resamples=n_resamples,
+        mde=0.0,
+        computed_at=datetime.now(UTC),
     )
-    if bootstrap is None:
-        return None
-    _diff, ci_low, ci_high, _p = bootstrap
-    return probe.model_copy(update={"mde": (ci_high - ci_low) / 2.0})
+    return _floor_from_clusters([a for a, _b in halves], [b for _a, b in halves], mean, probe, measurements)
 
 
 def _sibling_checks(

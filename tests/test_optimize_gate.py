@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from coder_eval.models import (
     EvaluationResult,
     FinalStatus,
     GuardrailCheck,
+    NoiseFloor,
     TokenUsage,
 )
 from coder_eval.optimize_gate import (
@@ -37,8 +39,11 @@ from coder_eval.optimize_gate import (
     holm_promote,
     load_arm_rows,
     load_suite_rows,
+    measure_execution_noise_floor,
+    measure_noise_floor,
     noise_floor_mde,
     pareto_front,
+    record_noise_floor,
     render_markdown,
     render_row_matrix,
     resolve_model,
@@ -1077,9 +1082,13 @@ class TestGateResampleCount:
 
         assert inspect.signature(holm_promote).parameters["alpha"].default == DEFAULT_ALPHA
         assert inspect.signature(holm_rejections).parameters["alpha"].default == DEFAULT_ALPHA
+        # `0\.05(?!\d)` rather than a substring test: a bare `"0.05" in line` also matches 0.056
+        # and 0.0501, so a comment quoting an unrelated measured figure would fail this for a
+        # reason that has nothing to do with alpha.
+        alpha_literal = re.compile(r"0\.05(?!\d)")
         for module in ("optimize_gate.py", "reports_stats.py"):
             source = (Path(__file__).parent.parent / "src" / "coder_eval" / module).read_text(encoding="utf-8")
-            literals = [ln for ln in source.splitlines() if "0.05" in ln and "DEFAULT_ALPHA = " not in ln]
+            literals = [ln for ln in source.splitlines() if alpha_literal.search(ln) and "DEFAULT_ALPHA = " not in ln]
             assert not literals, f"{module} still spells 0.05 outside DEFAULT_ALPHA: {literals}"
 
 
@@ -1334,3 +1343,209 @@ class TestPFloorOnTheVerdict:
         assert f"estimator {bootstrap_p_floor(_FAST_RESAMPLES):.4f}" in text
         assert verdict.p_floor is not None
         assert f"this suite {verdict.p_floor:.4f}" in text
+
+
+def _weighted_arm(tmp_path: Path, variant: str, per_row: dict[str, list[float]], *, run_dirs: int = 1) -> list[Path]:
+    """One arm whose rows carry N replicates each, spread across ``run_dirs`` directories.
+
+    `weighted_score` is set EXPLICITLY on every result: it is `float | None` with default None,
+    populated by the orchestrator, so a fixture that forgets it makes every cluster empty and the
+    floor silently comes back None.
+    """
+    dirs = [tmp_path / f"run-{i}" for i in range(run_dirs)]
+    for row_id, scores in per_row.items():
+        for i, score in enumerate(scores):
+            run_dir = dirs[i % run_dirs]
+            replicate = i // run_dirs
+            _write_row(run_dir, variant, row_id, _scored_result(row_id, score), replicate)
+    return dirs
+
+
+def _execution_floor(run_dirs: list[Path], **kwargs) -> NoiseFloor | None:
+    return measure_execution_noise_floor(
+        run_dirs=run_dirs,
+        variant_id="incumbent",
+        suite_id=SUITE,
+        **{"model": "claude-haiku-4-5", "n_resamples": _FAST_RESAMPLES, **kwargs},
+    )
+
+
+class TestExecutionNoiseFloor:
+    """The execution track's preflight: a null split over REPLICATES, on weighted_score."""
+
+    def _spread(self) -> dict[str, list[float]]:
+        # 8 rows x 3 replicates with real within-row spread, so the null comparison has something
+        # to measure and the floor is above zero.
+        return {f"r{i}": [0.3 + 0.1 * ((i + j) % 4) for j in range(3)] for i in range(8)}
+
+    def test_splits_replicates_not_run_dirs(self, tmp_path: Path) -> None:
+        # One run dir, 3 replicates per row -> a floor. The SAME data spread one-replicate-per-dir
+        # across 3 dirs still pools to 3 replicates per row, so it also works; what does NOT is a
+        # fixture where no row has 2 replicates at all.
+        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", self._spread()))
+        assert floor is not None and floor.mde > 0.0
+
+        single = _weighted_arm(tmp_path / "b", "incumbent", {f"r{i}": [0.5] for i in range(8)})
+        assert _execution_floor(single) is None
+
+    def test_pools_replicates_across_run_dirs(self, tmp_path: Path) -> None:
+        # The split axis is replicates, but they may arrive from several run directories — one
+        # `--repeats 3` invocation or three separate ones both give a row 3 replicates.
+        spread = _weighted_arm(tmp_path, "incumbent", self._spread(), run_dirs=3)
+        assert _execution_floor(spread) is not None
+
+    def test_is_none_without_enough_replicated_rows(self, tmp_path: Path) -> None:
+        one_row = {"r0": [0.2, 0.9, 0.4], "r1": [0.5]}  # only r0 qualifies
+        assert _execution_floor(_weighted_arm(tmp_path, "incumbent", one_row)) is None
+
+    def test_is_none_when_weighted_score_is_unset(self, tmp_path: Path, caplog) -> None:
+        # A result with criteria but no weighted_score yields None from _row_score, so every
+        # cluster is empty. It must return None rather than a confident 0.0.
+        run_dir = tmp_path / "run-0"
+        for i in range(8):
+            for replicate in range(3):
+                _write_row(run_dir, "incumbent", f"r{i}", _eval_result(f"r{i}", [("yes", "yes")]), replicate)
+        with caplog.at_level(logging.WARNING):
+            assert _execution_floor([run_dir]) is None
+        assert "carry 2+ replicates" in caplog.text
+
+    def test_splits_three_replicates_two_one(self, tmp_path: Path) -> None:
+        """Pinned, so a "tidy" change to len//2 (which gives 1/2) cannot silently reverse the bias.
+
+        With 3 replicates the first half must hold 2 and the second 1: the larger half first keeps
+        the interval conservative, exactly as the invocation split does.
+        """
+        # Two rows whose third replicate is an outlier. Under a 2/1 split the outlier sits alone in
+        # the second half; under 1/2 it would be averaged with a middle value, narrowing the
+        # interval. The two produce different floors, which is what makes this test discriminating.
+        rows = {"r0": [0.1, 0.1, 0.9], "r1": [0.2, 0.2, 0.8], "r2": [0.3, 0.3, 0.7]}
+        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", rows))
+        assert floor is not None
+        # first half mean = 0.1, second = 0.9 for r0 -> the diff is large and the floor is not 0.
+        assert floor.mde > 0.1
+
+    def test_reads_weighted_score_not_f1(self, tmp_path: Path) -> None:
+        """The regression test for the exact bug N2 names.
+
+        Labels are perfect on every replicate, so an F1 floor reads a confidently meaningless
+        0.000 — while `weighted_score` varies and the real floor is above zero.
+        """
+        # The per-row spread has to VARY across rows: an identical replicate pattern on every row
+        # makes every resampled difference identical, the interval zero-width, and the floor 0.0 —
+        # which is correct arithmetic and would make this test pass for the wrong reason.
+        run_dir = tmp_path / "run-0"
+        for i in range(8):
+            for replicate, score in enumerate((0.2 + 0.05 * i, 0.55, 0.9 - 0.05 * i)):
+                result = _eval_result(f"r{i}", [("yes", "yes")]).model_copy(update={"weighted_score": score})
+                _write_row(run_dir, "incumbent", f"r{i}", result, replicate)
+
+        f1_floor = measure_noise_floor(
+            run_dirs=[run_dir, run_dir],
+            variant_id="incumbent",
+            suite_id=SUITE,
+            criterion_index=0,
+            model="claude-haiku-4-5",
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert f1_floor is not None and f1_floor.mde == 0.0, "the F1 floor is the meaningless 0.000 N2 names"
+
+        execution = _execution_floor([run_dir])
+        assert execution is not None and execution.mde > 0.0
+
+    def test_a_different_repeat_count_is_a_different_cache_entry(self, tmp_path: Path) -> None:
+        """The replicate count is the split AXIS, so it has to key — and nothing else catches it.
+
+        `n_invocations` is 1 for both a `--repeats 3` and a `--repeats 2` control run, so without
+        `n_replicates` the two records share a key and `lookup_noise_floor` serves one for the
+        other. Measured before the fix: 0.099 at 3 replicates against 0.169 at 2, same key.
+
+        Round-tripped through the REAL cache rather than hand-built `NoiseFloor`s, because a
+        hand-built probe cannot catch a field the producer forgets to set.
+        """
+        three = {f"r{i}": [0.2 + 0.05 * i, 0.55, 0.9 - 0.05 * i] for i in range(8)}
+        two = {row: scores[:2] for row, scores in three.items()}
+
+        floor_3 = _execution_floor(_weighted_arm(tmp_path / "a", "incumbent", three))
+        floor_2 = _execution_floor(_weighted_arm(tmp_path / "b", "incumbent", two))
+        assert floor_3 is not None and floor_2 is not None
+        assert (floor_3.n_replicates, floor_2.n_replicates) == (3, 2)
+        assert floor_3.mde != floor_2.mde, "the fixture no longer distinguishes replicate counts"
+
+        sidecar = tmp_path / ".optimize-skill" / "my-skill" / "measurements.json"
+        record_noise_floor(sidecar, floor_3)
+        measurements = record_noise_floor(sidecar, floor_2)
+        assert len(measurements.noise_floors) == 2, "the 2-replicate floor REPLACED the 3-replicate one"
+
+        # And the round that actually ran at --repeats 3 gets its own number back.
+        reused = _execution_floor(_weighted_arm(tmp_path / "c", "incumbent", three), measurements=measurements)
+        assert reused is not None and reused.mde == floor_3.mde
+
+    def test_rows_with_uneven_replicate_counts_are_balanced(self, tmp_path: Path) -> None:
+        """An unbalanced row must not invent a floor out of nothing.
+
+        `cluster_bootstrap_diff_ci` pools the drawn clusters' OBSERVATIONS before applying the
+        statistic, so a 3-replicate row weighs 2:1 across the halves while a 2-replicate row weighs
+        1:1 — and between-row spread then leaks into a difference that is zero by construction.
+        These rows have NO within-row variance at all, so the only honest floor is 0.0. Measured
+        before the balancing: 0.056.
+        """
+        uneven = {f"r{i}": [1.0 if i % 2 else 0.0] * (3 if i < 4 else 2) for i in range(8)}
+        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", uneven))
+        assert floor is not None
+        assert floor.mde == 0.0, "an unbalanced row leaked between-row spread into the null"
+        assert floor.n_replicates == 2, "balancing trims to the smallest qualifying row"
+
+    def test_a_mistyped_path_says_so_rather_than_blaming_repeats(self, tmp_path: Path, caplog) -> None:
+        # "no row carries 2+ replicates" would send the reader off to check --repeats when the real
+        # cause is a wrong variant, suite or run directory.
+        with caplog.at_level(logging.WARNING):
+            assert _execution_floor([tmp_path / "typo"]) is None
+        assert "wrong variant id, a wrong suite id or a wrong run directory" in caplog.text
+        assert "--repeats" not in caplog.text
+
+    def test_records_its_metric(self, tmp_path: Path) -> None:
+        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", self._spread()))
+        assert floor is not None
+        assert floor.metric == "weighted_score"
+        assert floor.criterion_index is None
+
+    def test_defaults_to_the_gate_resample_count(self) -> None:
+        import inspect
+
+        assert inspect.signature(measure_execution_noise_floor).parameters["n_resamples"].default == GATE_RESAMPLES
+
+
+class TestEveryMissingFloorSaysWhy:
+    """A silent None on a spend-gating function was the shipped defect; each one now names why."""
+
+    def test_activation_floor_names_too_few_invocations(self, tmp_path: Path, caplog) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {f"r{i}": [("yes", "yes")] for i in range(6)}, invocations=1)
+        with caplog.at_level(logging.WARNING):
+            assert noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0) is None
+        assert "at least 2 invocations" in caplog.text
+
+    def test_activation_floor_names_too_few_scored_rows(self, tmp_path: Path, caplog) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=3)
+        with caplog.at_level(logging.WARNING):
+            assert noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0) is None
+        assert "in BOTH halves of the invocation split" in caplog.text
+
+    def test_a_mistyped_run_directory_is_not_silent(self, tmp_path: Path, caplog) -> None:
+        # The measured defect: a wrong path returned a bare None and printed nothing, on the one
+        # function whose job is to stop a user spending.
+        with caplog.at_level(logging.WARNING):
+            assert (
+                noise_floor_mde(
+                    run_dirs=[tmp_path / "typo-a", tmp_path / "typo-b"],
+                    variant_id="incumbent",
+                    suite_id=SUITE,
+                    criterion_index=0,
+                )
+                is None
+            )
+        assert "No noise floor could be computed" in caplog.text
+
+    def test_execution_floor_names_too_few_replicated_rows(self, tmp_path: Path, caplog) -> None:
+        with caplog.at_level(logging.WARNING):
+            assert _execution_floor(_weighted_arm(tmp_path, "incumbent", {"r0": [0.1, 0.2]})) is None
+        assert "carry 2+ replicates" in caplog.text

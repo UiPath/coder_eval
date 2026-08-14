@@ -115,6 +115,7 @@ from coder_eval.models.mutations import (
 
 # Optimize gate
 from coder_eval.models.optimize import (
+    TARGET_LABEL,
     ActivationGateVerdict,
     ArmRowScores,
     GuardrailCheck,
@@ -352,6 +353,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "judge_cost_usd",
     "simulator_cost_usd",
     # Optimize gate
+    "TARGET_LABEL",
     "ActivationGateVerdict",
     "ArmRowScores",
     "GuardrailCheck",

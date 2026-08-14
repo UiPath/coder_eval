@@ -2376,8 +2376,23 @@ class TestPluginArtifacts:
                 "a refusal's remedy is more rows or a smaller family — never another round on the "
                 "same suite, which reproduces the floor exactly",
             ),
+            # Two preflights, not one. The method file said the execution track gets none; it now
+            # gets one on its own metric, from data the control stage already pays for.
+            (
+                "Two preflights",
+                "the method file must describe BOTH tracks' noise floors — it previously said the "
+                "execution track gets none, which is the claim this phase made false",
+            ),
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
+
+        # The now-false claim, asserted ABSENT. A sensor that only checks the replacement is
+        # present would stay green if both sentences shipped side by side, which is worse than
+        # either alone: the reader gets two contradictory instructions and no way to pick.
+        assert "Not on the execution track" not in method, (
+            "reference/optimize-method.md still says the execution track gets no preflight. It gets "
+            "one — on weighted_score, after the control arm — and the two claims cannot both stand."
+        )
 
         # The PROCEDURE half, asserted against `SKILL.md` alone. Moving any of these into
         # the method file would leave the step that must act on it silently pointing
@@ -2406,6 +2421,24 @@ class TestPluginArtifacts:
             (
                 "CANNOT SEPARATE AT THIS SIZE",
                 "Step 10 must name the refusal headline and say it is not a negative result",
+            ),
+            # The control arm had no invocation at all until the execution preflight needed its
+            # output — Step 8 described the snapshot and Step 9's file list never mentioned it.
+            # The "+0 runs" claim is false without a run directory to read.
+            ("round<N>-control.yaml", "Step 9's per-stage experiment file for the control arm"),
+            (
+                "--run-dir <runs>/control",
+                "Step 8 must give the control arm an actual invocation — the execution preflight "
+                "reads that run directory, so a snapshot with no run command buys nothing",
+            ),
+            (
+                "measure_execution_noise_floor",
+                "Step 8 must name the function that prices the execution track",
+            ),
+            (
+                "weighted_score",
+                "the execution preflight measures weighted_score, not f1.yes — an F1 floor prices a "
+                "gate that never reads F1 and comes back a meaningless 0.000",
             ),
         ):
             assert token in skill, (
@@ -2542,6 +2575,15 @@ class TestPluginArtifacts:
                 ),
             ):
                 assert token in surface, f"optimize-skill's {name} lost {token!r} — {why}"
+
+        # `round<N>-control.yaml` is named for the round, unlike every other per-stage file, and
+        # that reads as "author one per round" unless the skill says otherwise. Asserted against
+        # SKILL.md specifically, because Step 9's file list is where an agent decides what to write.
+        assert "authored **once per suite**" in skill or "once per suite** rather than" in skill, (
+            "optimize-skill's SKILL.md lists round<N>-control.yaml among the per-stage experiment "
+            "files without saying it is authored ONCE PER SUITE. Its round-numbered name reads "
+            "like its neighbours, which are per-round, so the distinction has to be explicit."
+        )
 
     def test_outcome_template_still_loads_after_the_control_comment(self):
         # The control note is a COMMENT, and this is the inertness sensor: the comment is present

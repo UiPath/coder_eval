@@ -10,6 +10,15 @@ from __future__ import annotations
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
+# The label whose F1 the activation gate reads. `skill_triggered` emits `yes` / `no`, and
+# "did the skill engage when it should" is the `yes` class.
+#
+# It lives HERE rather than in `optimize_gate` because `NoiseFloor.metric`'s default interpolates
+# it, and this module cannot import the gate — the gate imports these models, and the reverse is a
+# cycle. Same cycle-free-leaf role `models/judge_defaults.py` plays for `DEFAULT_JUDGE_MODEL`.
+TARGET_LABEL = "yes"
+
+
 class GuardrailCheck(BaseModel):
     """One non-primary quantity that may veto a promotion.
 
@@ -170,6 +179,12 @@ class NoiseFloor(BaseModel):
     `n_resamples` are in it for a smaller version of the same argument — they move the number by
     Monte-Carlo error rather than by a lot, but "every field above `mde` is part of the key" is
     only a rule worth having if it has no exceptions.
+
+    `metric` joins the key for a sharper reason than the rest: a floor is now measured on two
+    different quantities. The activation track's is a floor on `f1.yes`, the execution track's on
+    per-row `weighted_score`, and on the SAME suite, variant, model and row count they are
+    different numbers. Without `metric` in the key one track's lookup is handed the other track's
+    measurement — and a floor decides whether a round runs at all.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -179,14 +194,49 @@ class NoiseFloor(BaseModel):
     model: str = Field(
         min_length=1, description="Model the rows ran under. Sourced ONLY from optimize_gate.resolve_model."
     )
-    criterion_index: int = Field(ge=0, description="Criterion position the floor was measured on.")
+    metric: str = Field(
+        default=f"f1.{TARGET_LABEL}",
+        min_length=1,
+        description=(
+            "What the floor is a floor ON. 'f1.yes' for the activation track, 'weighted_score' for "
+            "the execution track. Part of the cache key: the two are different numbers on the same "
+            "suite, and a lookup that ignored this would be handed the other track's measurement."
+        ),
+    )
+    criterion_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Criterion position the floor was measured on. None when the metric is not per-criterion "
+            "— the execution track's weighted_score is the row's, not a criterion's."
+        ),
+    )
     n_rows: int = Field(ge=0, description="Rows scored in BOTH halves of the split — not the suite's row count.")
     n_invocations: int = Field(ge=0, description="Invocations the null comparison was split across.")
+    n_replicates: int | None = Field(
+        default=None,
+        ge=2,
+        description=(
+            "Replicates per row the split used, after balancing — the execution track's split AXIS, "
+            "and None on the activation track where `n_invocations` already is it. In the key "
+            "because it moves the number and nothing else in the key would catch it: measured on "
+            "one suite, 0.099 at `--repeats 3` against 0.169 at `--repeats 2`, with `n_invocations` "
+            "equal to 1 in both. Without this field the cache serves one floor for the other, "
+            "silently, on the number that decides whether a round runs at all."
+        ),
+    )
     confidence: float = Field(gt=0.0, lt=1.0, description="Interval width used. A wider interval is a wider floor.")
     seed: int = Field(description="Bootstrap seed. Two seeds give two (close, but different) floors.")
     n_resamples: int = Field(gt=0, description="Bootstrap draws. Fewer draws, coarser floor.")
     mde: float = Field(
-        ge=0.0, le=1.0, description="The half-width: the smallest difference this suite can resolve. An F1 difference."
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The half-width: the smallest difference this suite can resolve. Read `metric` for WHICH "
+            "difference — an f1.yes difference on the activation track, a weighted_score difference "
+            "on the execution track. Bounded [0, 1] either way: weighted_score is itself bounded "
+            "[0, 1], so a half-width on a difference of two per-row means is too."
+        ),
     )
     computed_at: AwareDatetime = Field(
         description="When it was measured, so a stale cache is legible rather than silent. Timezone-aware."
@@ -261,7 +311,11 @@ class OptimizeMeasurements(BaseModel):
         min_length=1, description="Skill these measurements belong to. Must match the parent directory name."
     )
     noise_floors: list[NoiseFloor] = Field(
-        default_factory=list, description="Cache, replaced in place per (suite_id, model, n_rows)."
+        default_factory=list,
+        description=(
+            "Cache, replaced in place on the whole key — every NoiseFloor field except `mde` and "
+            "`computed_at`, derived from the model rather than listed here."
+        ),
     )
     regression_corpus: list[RegressionRow] = Field(
         default_factory=list, description="Append-only, de-duplicated on row_id. Never rewritten."

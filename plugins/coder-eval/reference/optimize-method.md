@@ -16,7 +16,7 @@ State the projected run count before each stage and ask. With N candidates, S su
 | Spend | Runs |
 | --- | --- |
 | Step 6 baseline | `M_train`, or `2 × M_train` on the activation track |
-| Control arm — execution track, **once per suite** | `3 × M_train` (`6 × M_train` with the incumbent it is paired against) |
+| Control arm — execution track, **once per suite** | `3 × M_train` (`6 × M_train` with the incumbent it is paired against) — also buys the execution preflight |
 | Stage A — triage | `(N+1) × M_train` |
 | Stage A — triage, halved (an abandon point, NOT a saving) | `(N+1) × M_train/2 + ceil((N+1)/2) × M_train` |
 | Stage B — gate, activation track | `3 × (S+1) × M_train` |
@@ -43,18 +43,38 @@ spread is the only thing that can tell you whether the gain you are hoping for i
 on this suite. It is the cheapest stage in the table, and it is the one that can stop you
 spending the rest of it.
 
-**Not on the execution track.** There a row is a whole task run, so doubling the baseline is the
-most expensive thing in the skill — and the floor it would buy is a floor on `f1.yes`, which the
-execution gate never reads. One baseline there.
+**Do not double the baseline on the execution track.** There a row is a whole task run, so
+doubling it is the most expensive thing in the skill — and the floor it would buy is a floor on
+`f1.yes`, which the execution gate never reads. One baseline there. That track gets a floor too,
+on its own metric and from data it was already going to pay for; see the second preflight below.
 
-### Before Stage A — price what the suite can see
+### Two preflights — price what the suite can see, on each track's own metric
 
-**State the minimum detectable effect before spending.** This is an activation-track preflight —
-it is computed on `f1.yes`, so it prices the activation gate and nothing else. Run the same
-machinery against the incumbent alone: split its invocations into two halves, treat them as two arms, and bootstrap
-the difference in `f1.yes` between them. The true difference there is zero by construction, so
-the interval's half-width is the smallest F1 difference this suite at this size can resolve —
-its noise floor.
+Same machinery both times: run it against **one** arm, split that arm's data into two halves, treat
+the halves as two arms, and bootstrap the difference. The true difference is zero by construction,
+so the interval's half-width is the smallest difference this suite at this size can resolve — its
+noise floor. What differs is the metric, the split axis, and where in the procedure it can be read.
+
+| | activation track | execution track |
+| --- | --- | --- |
+| metric | `f1.yes` — what its gate compares | `weighted_score` — what its gate compares |
+| split axis | invocations (Stage B runs three) | replicates within a row (`--repeats 3`) |
+| read it | before any candidate spend | after the control arm, before Stage A |
+| costs | the second baseline invocation | nothing — it reads the control run |
+
+**The metric is not interchangeable, and using the wrong one fails quietly.** An `f1.yes` floor on
+an outcome suite reads a confidently meaningless `0.000`: the engagement criterion is required to
+be 1.0 on every row, so both halves score perfectly and the interval collapses. That number then
+prices a gate that never reads F1.
+
+**The positions differ because a floor needs replicated rows, and that is worth stating rather
+than leaving to look like an oversight.** The activation preflight genuinely runs before any
+candidate spend — a second one-turn baseline is cheap. The execution track has no such option: its
+baseline is a single replicate per row, so a floor there is `None` by construction, and the
+cheapest replicated data on that track is the control stage. So its preflight is a *post-control,
+pre-Stage-A* check. The weaker claim is the honest one, and the hand-back rule still bites where it
+matters: Stage A, Stage B and Stage C are all still unspent when it is read, and those are the
+stages that multiply by candidate count.
 
 Then say the quiet part out loud, before any money is spent: **if the gain you are hypothesising
 is smaller than the minimum detectable effect, this suite cannot see it.** Hand back and say so —
@@ -90,6 +110,10 @@ rather than a skill that never ran.
 Gate it with the same machinery Stage B uses on this track — incumbent and control as a
 two-variant experiment at `--repeats 3`, which is why the table prices the pair at `6 × M_train`
 and the control's own share at `3 × M_train` — and apply the hard stop:
+
+Give that invocation its own `--run-dir` and remember where it is: it is also the run directory the
+execution preflight above reads, and it is the only replicated data on this track that the
+procedure already pays for.
 
 > **If the incumbent does not beat the control, with a confidence interval excluding zero, stop.**
 > The body is not doing measurable work on this suite. Optimizing its wording is optimizing

@@ -183,6 +183,9 @@ class TestNoiseFloorCache:
             {"suite_id": "another-suite"},
             {"variant_id": "1-incumbent"},
             {"model": "claude-sonnet-5"},
+            # A floor is measured on two different metrics now, and on the same suite they are
+            # different numbers — so `metric` has to key or one track is served the other's.
+            {"metric": "weighted_score", "criterion_index": None},
             {"criterion_index": 1},
             {"n_rows": 16},
             {"n_invocations": 6},
@@ -459,3 +462,94 @@ class TestAnUnresolvedModelIsNeverCached:
     def test_a_real_model_still_records(self, tmp_path: Path) -> None:
         path = _path(tmp_path)
         assert len(record_noise_floor(path, _floor()).noise_floors) == 1
+
+
+class TestTheTwoTracksCoexist:
+    """`metric` joins the cache key because a floor is now measured on two different quantities."""
+
+    def _activation(self, **overrides) -> NoiseFloor:
+        return _floor(**overrides)
+
+    def _execution(self, **overrides) -> NoiseFloor:
+        # Same suite, variant, model, row count and invocation count — everything the key held
+        # BEFORE `metric` existed. Only the metric (and its criterion_index) differ.
+        return _floor(metric="weighted_score", criterion_index=None, **overrides)
+
+    def test_the_two_tracks_floors_do_not_collide_in_the_cache(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        record_noise_floor(path, self._activation(mde=0.11))
+        measurements = record_noise_floor(path, self._execution(mde=0.44))
+
+        assert len(measurements.noise_floors) == 2, "the execution floor REPLACED the activation one"
+        activation = lookup_noise_floor(measurements, self._activation(mde=0.0))
+        execution = lookup_noise_floor(measurements, self._execution(mde=0.0))
+        assert activation is not None and activation.mde == 0.11
+        assert execution is not None and execution.mde == 0.44
+
+    def test_metric_is_part_of_the_key(self) -> None:
+        measurements = OptimizeMeasurements(skill="my-skill", noise_floors=[self._activation()])
+        assert lookup_noise_floor(measurements, self._execution()) is None
+
+    def test_a_floor_written_before_the_metric_field_still_matches_an_activation_probe(self, tmp_path: Path) -> None:
+        """An existing `measurements.json` must still load AND still match.
+
+        `load_measurements` deliberately RAISES on a malformed file rather than rebuilding it, so a
+        non-defaulted field here would make every pre-existing sidecar unreadable — not a cache
+        miss, a hard failure on a file carrying a regression corpus that is not reconstructible.
+        """
+        path = _path(tmp_path)
+        path.parent.mkdir(parents=True)
+        legacy = {
+            "skill": "my-skill",
+            "noise_floors": [
+                {
+                    "suite_id": "my-skill-activation",
+                    "variant_id": "incumbent",
+                    "model": "claude-haiku-4-5-20251001",
+                    "criterion_index": 0,
+                    "n_rows": 12,
+                    "n_invocations": 3,
+                    "confidence": 0.95,
+                    "seed": 0,
+                    "n_resamples": 2000,
+                    "mde": 0.08,
+                    "computed_at": "2026-08-13T12:00:00Z",
+                }
+            ],
+        }
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        loaded = load_measurements(path)
+        assert loaded.noise_floors[0].metric == "f1.yes", "a legacy entry IS an activation floor"
+        found = lookup_noise_floor(loaded, _floor(mde=0.0))
+        assert found is not None and found.mde == 0.08
+
+    def test_criterion_index_none_is_legal_and_negative_is_not(self) -> None:
+        assert _floor(criterion_index=None).criterion_index is None
+        with pytest.raises(ValueError):
+            _floor(criterion_index=-1)
+
+
+class TestTargetLabelMoved:
+    def test_target_label_is_importable_from_models(self) -> None:
+        # A module-level constant that is not in `__all__` is a private import in disguise, so the
+        # move is only complete when both halves are done.
+        import coder_eval.models as models
+        from coder_eval.models import TARGET_LABEL
+
+        assert TARGET_LABEL == "yes"
+        assert "TARGET_LABEL" in models.__all__
+
+    def test_the_gate_imports_it_rather_than_redeclaring_it(self) -> None:
+        import coder_eval.optimize_gate as gate
+        from coder_eval.models import TARGET_LABEL
+
+        assert gate.TARGET_LABEL is TARGET_LABEL
+        source = (REPO_ROOT / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
+        assert "TARGET_LABEL = " not in source, "optimize_gate re-declares TARGET_LABEL — it must import it"
+
+    def test_the_noise_floor_default_is_derived_from_it(self) -> None:
+        # The model cannot import the gate (that is a cycle), so the literal needs a guard.
+        from coder_eval.models import TARGET_LABEL
+
+        assert NoiseFloor.model_fields["metric"].default == f"f1.{TARGET_LABEL}"
