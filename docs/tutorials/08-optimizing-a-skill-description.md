@@ -708,8 +708,20 @@ for `analyze`, above. In summary:
 | Stage | What it does | Replicates |
 | --- | --- | --- |
 | **A — triage** | All candidates + incumbent, one invocation, `--split train`. Rank by F1, discard anything at or below the incumbent. Promotes nothing on its own — but when every candidate lands at or below, it ends the round there, which against a ceiling incumbent it always will. | one run |
-| **B — gate** | Survivors + incumbent, `--split train`, **three separate `coder-eval run` invocations**. Promote only on `min(candidate) > max(incumbent)`. | three runs |
+| **B — gate** | Survivors + incumbent, `--split train`, **three separate `coder-eval run` invocations**. Promote only when the paired cluster-bootstrap interval on the difference **excludes zero** *and* the **Holm-corrected** test rejects across the survivors. | three runs |
 | **C — confirm** | Best survivor vs. incumbent only, `--split test --repeats 3`. Read the rendered `## Paired Comparison` block. | `--repeats 3` |
+
+**The Stage B rule above is not the one these rounds ran under.** They used
+`min(candidate F1) > max(incumbent F1)` — range non-overlap — which threw away the pairing
+(both arms run the *same* rows) and had very little power at 8–12 rows per polarity. That rule
+is now retained only as a **reported diagnostic**, printed beside the interval and never
+consulted in the decision. The narrative above is reported as it was run, and its conclusions
+are unchanged: an arm whose best case is a tie cannot separate under either rule.
+
+`coder-eval` computes the current verdict for you — the skill drives
+`optimize_gate.activation_gate` and then one `holm_promote` call over **all** the survivors at
+once, because Holm corrects a *family*: correcting one candidate at a time degenerates to an
+uncorrected `p ≤ alpha` while still looking like a correction.
 
 **Stage B must be three invocations, not `--repeats 3`.** Suite rollups are keyed on
 `(variant, suite)` alone, so `--repeats` pools every replicate into a single `suite.json`
@@ -721,9 +733,13 @@ exactly two variants and averages replicates per row *before* pairing, which is 
 the paired *t*-test valid. It pairs per-row `weighted_score` — row correctness, not F1 — so
 it corroborates the direction; it does not re-test the promotion metric.
 
-And be precise about what Stage B proves. The replicate spread measures agent stochasticity
-over a **fixed** set of rows. It does not correct for the survivors having been chosen on
-those same rows in Stage A. Stage B bounds run noise; **the test split is what bounds the fit.**
+And be precise about what Stage B proves. Resampling *rows* is what makes the interval bound
+row-sampling variation, and pooling each drawn row's replicates is what keeps run noise in it
+too — so it bounds both, which the old fixed-row rule did not. Holm bounds the multiplicity
+across the survivors tested. What none of it corrects for is the survivors having been *chosen*
+on those same rows at Stage A. Stage B bounds noise and multiplicity; **the test split is what
+bounds the fit** — which is why Stage C is not optional. Report a gate result as "separated
+beyond run-to-run and row-sampling noise on the train rows", never as "proven better".
 
 ### Two caveats about what else is in the sandbox
 

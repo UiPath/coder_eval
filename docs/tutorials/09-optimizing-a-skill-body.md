@@ -357,6 +357,13 @@ experiment reporter renders — mean difference, 95% confidence interval, Cohen'
 header next to the figure rather than resolving the direction from memory: read backwards, it
 promotes the arm that lost, and every later number in the ledger then agrees with the mistake.
 
+**Since this round ran, the sign is resolved for you.** `optimize_gate.execution_gate` reuses
+the same paired statistic but knows which arm is the incumbent, so its `mean_diff` is always
+*candidate − incumbent* whichever order the experiment file declared — with the interval bounds
+ordered to match. It also carries the cost and latency guardrails and two integrity checks
+(engagement `recall.yes`, and `completion_rate` across arms) that a human used to do by eye.
+The warning above still applies to the **reporter's own** block, which you may read directly.
+
 The block also fires **only** for exactly two variants. Since no flag filters an experiment's
 arms, each stage needs its own file — `round1-triage.yaml` for the wide triage,
 `round1-gate.yaml` and `round1-confirm.yaml` for the two-arm stages. Re-passing the triage file
@@ -388,6 +395,15 @@ whole method exists to prevent.
   does not exist.
 - **Four arms tying exactly is a bug report, not a result.** Bodies that differ should produce
   *some* variance. Perfect agreement means they are not being distinguished.
+
+  The method now has a stage for exactly this, added because of this round: a **control arm**,
+  run **once per suite** before any candidate spend. It is the incumbent snapshot with the
+  target skill's `SKILL.md` **body emptied** and its frontmatter kept — so activation is held
+  constant and only the instructions under test vary. Gate the incumbent against it, and if the
+  incumbent does not beat it with an interval excluding zero, stop: the body is not doing
+  measurable work on this suite, and every later round would be noise dressed as a result. Here
+  the control would have scored *identically* to all four arms, which names the defect on the
+  first comparison instead of the fourth.
 - **The rest of the method held up.** One dataset-backed task, one row per scenario, one
   fixture clearing the skill's preconditions, criteria parameterized by row, the tool policy
   pinned — all of that was sound. It was the reachability underneath it that was not.

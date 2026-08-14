@@ -60,8 +60,14 @@ real money across several rounds of runs. `check-skill`, `task`, `lint-tasks`, a
   reason?", fixture lifecycle, scope match) that `task` and `lint-tasks` both apply.
 - `optimize-method.md` — the track-invariant half of `optimize-skill`: the cost table, what
   each of the three stages does and does not bound, why the two tracks' gates use different
-  machinery, and how to read the paired-diff sign. Its one reader is `optimize-skill`, which
-  keeps the procedure and points here for the method.
+  machinery, how to read the paired-diff sign, and the cheap single-lineage **search loop**
+  that may run before Stage A from round 2 (it bounds nothing and promotes nothing, which is
+  why it is not a fourth stage). Its one reader is `optimize-skill`, which keeps the
+  procedure and points here for the method.
+- `proposal-prompt.md` — the shape of `optimize-skill`'s candidate-generation prompt: the
+  failing rows and their trajectories, the gold solution where the suite carries one, every
+  previous attempt with the instruction to try something structurally different, and the test
+  split it stays blinded to. A proposer handed only scores writes plausible rewrites.
 - `cli-setup.md` — the missing-CLI policy the CLI-driving skills follow: offer, ask,
   verify.
 - `run-layout.md` — the on-disk run-directory contract that `analyze` reads: what is
