@@ -214,12 +214,27 @@ def cost_latency_guardrails(
     checks: list[GuardrailCheck] = []
 
     for name, extract in (("cost (USD/row)", _row_costs), ("latency (seconds/row)", _row_durations)):
-        incumbent_clusters = [extract(incumbent_rows[rid]) for rid in ids]
-        candidate_clusters = [extract(candidate_rows[rid]) for rid in ids]
-        incumbent_median = _median([mean(c) for c in incumbent_clusters if c])
-        candidate_median = _median([mean(c) for c in candidate_clusters if c])
+        # Only rows BOTH arms measured, and balanced to the same observation count per row — the
+        # same two rules the F1 gate applies. Without the first, a draw whose rows are all
+        # cost-less on one arm pools to `[]`, `mean([])` reads 0.0, and the interval says that arm
+        # cost nothing (measured: a 10x cost increase passing with ci_low = -0.1). Without the
+        # second, an interrupted invocation reweights the comparison exactly as it does for F1.
+        paired = [(extract(incumbent_rows[rid]), extract(candidate_rows[rid])) for rid in ids]
+        measured = sum(1 for inc, _c in paired if inc), sum(1 for _i, cand in paired if cand)
+        comparable = [(inc[: min(len(inc), len(cand))], cand[: min(len(inc), len(cand))]) for inc, cand in paired]
+        comparable = [(inc, cand) for inc, cand in comparable if inc and cand]
 
-        measured = sum(1 for c in incumbent_clusters if c), sum(1 for c in candidate_clusters if c)
+        incumbent_clusters = [inc for inc, _c in comparable]
+        candidate_clusters = [cand for _i, cand in comparable]
+        incumbent_median = _median([mean(c) for c in incumbent_clusters])
+        candidate_median = _median([mean(c) for c in candidate_clusters])
+        # The floor scales by the incumbent's MEAN, because the interval it is compared against is
+        # an interval on the difference of means. Scaling a mean-difference by a median is a unit
+        # mismatch on any skewed distribution — and per-row cost is strongly right-skewed, so a
+        # uniform 10% increase measured as FAIL against a 25% floor. The medians stay as the
+        # reported level, which is the robust thing to READ; the mean is what is being tested.
+        incumbent_mean = mean([mean(c) for c in incumbent_clusters]) if incumbent_clusters else 0.0
+
         if incumbent_median is None or candidate_median is None:
             checks.append(
                 GuardrailCheck(
@@ -249,12 +264,12 @@ def cost_latency_guardrails(
         if bootstrap is None:
             notes.append("fewer than 2 comparable rows — no interval, so nothing is claimed")
             passed, ci_low, ci_high = True, None, None
-        elif incumbent_median == 0.0:
-            notes.append("incumbent median is zero, so a relative change is undefined")
+        elif incumbent_mean == 0.0:
+            notes.append("the incumbent measured zero, so a relative change is undefined")
             passed, (_diff, ci_low, ci_high, _p) = True, bootstrap
         else:
             _diff, ci_low, ci_high, _p = bootstrap
-            passed = ci_low <= materiality * incumbent_median
+            passed = ci_low <= materiality * incumbent_mean
             if passed and ci_low > 0.0:
                 notes.append("a real increase, but below the materiality floor — reported, not vetoed")
 
@@ -345,6 +360,9 @@ def record_noise_floor(path: Path, floor: NoiseFloor) -> OptimizeMeasurements:
     append-only next door.
     """
     measurements = load_measurements(path)
+    if floor.model == UNRESOLVED_MODEL:
+        logger.info("Not caching a noise floor measured under an unresolved model — it could never match a lookup")
+        return measurements
     key = _floor_key(floor)
     kept = [f for f in measurements.noise_floors if _floor_key(f) != key]
     updated = measurements.model_copy(update={"noise_floors": [*kept, floor]})
@@ -443,14 +461,18 @@ def noise_floor_mde(
         seed=seed,
         n_resamples=n_resamples,
         measurements=measurements,
-        model=model or _UNRESOLVED_MODEL,
+        model=model or UNRESOLVED_MODEL,
     )
     return measured.mde if measured is not None else None
 
 
-# Placeholder used when the caller did not resolve a model. It can never collide with a real model
-# id, and a floor carrying it is deliberately never cached — see measure_noise_floor.
-_UNRESOLVED_MODEL = "(unresolved)"
+# Placeholder for "the caller resolved no single model" — a mixed-model or unlabelled suite. It can
+# never collide with a real model id. A floor carrying it is neither read from nor written to the
+# cache: borrowing another model's floor is worse than recomputing, and storing one under this key
+# would accumulate entries that can never match their own lookup. PUBLIC because the skill's
+# snippet needs to spell it; a literal in the prose would silently become a REAL key if this value
+# ever changed.
+UNRESOLVED_MODEL = "(unresolved)"
 
 
 def measure_noise_floor(
@@ -502,12 +524,14 @@ def measure_noise_floor(
         n_rows=len(scored),
         n_invocations=len(run_dirs),
         confidence=confidence,
+        seed=seed,
+        n_resamples=n_resamples,
         mde=0.0,
         computed_at=datetime.now(UTC),
     )
     # An unresolved model must never hit the cache: borrowing a floor measured on another model
     # would be worse than the bootstrap it saves.
-    if measurements is not None and model != _UNRESOLVED_MODEL:
+    if measurements is not None and model != UNRESOLVED_MODEL:
         cached = lookup_noise_floor(measurements, probe)
         if cached is not None:
             return cached
@@ -669,8 +693,32 @@ def activation_gate(
             + "failed to produce one."
         )
 
-    incumbent_clusters = [per_row[rid][0] for rid in scored_row_ids]
-    candidate_clusters = [per_row[rid][1] for rid in scored_row_ids]
+    # BALANCE the replicate counts per row before pooling. A row's weight in an arm's f1.yes is
+    # its number of observations, so an arm that contributed 3 replicates for a row while the other
+    # contributed 2 has silently reweighted the comparison — and the trigger is mundane: Stage B is
+    # three separate invocations, and one interrupted run leaves a partial row set. Measured, two
+    # arms with BYTE-IDENTICAL labels on every row produced f1 0.818 vs 0.750 with an interval
+    # excluding zero and rows_excluded == 0. Truncating each row to min(n_incumbent, n_candidate)
+    # makes every row weigh the same on both sides; the dropped observations are counted and noted.
+    balanced: dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]] = {}
+    dropped = 0
+    for rid in scored_row_ids:
+        inc, cand = per_row[rid]
+        keep = min(len(inc), len(cand))
+        dropped += len(inc) + len(cand) - 2 * keep
+        balanced[rid] = (inc[:keep], cand[:keep])
+    unbalanced_rows = [rid for rid in scored_row_ids if len(per_row[rid][0]) != len(per_row[rid][1])]
+    if unbalanced_rows:
+        notes.append(
+            f"{len(unbalanced_rows)} row(s) had different replicate counts on the two arms and were "
+            + f"trimmed to the smaller count, dropping {dropped} observation(s): "
+            + f"{', '.join(unbalanced_rows)}. A row's weight in an arm's F1 is its observation count, "
+            + "so an unbalanced row shifts the comparison on its own — usually an interrupted "
+            + "invocation. Re-run it rather than reading the interval below as an effect."
+        )
+
+    incumbent_clusters = [balanced[rid][0] for rid in scored_row_ids]
+    candidate_clusters = [balanced[rid][1] for rid in scored_row_ids]
 
     incumbent_pairs = [p for cluster in incumbent_clusters for p in cluster]
     candidate_pairs = [p for cluster in candidate_clusters for p in cluster]
@@ -843,6 +891,26 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> 
             )
         if i in rejected_at and not favours_candidate:
             notes.append("not promoted: the interval separates in the incumbent's favour.")
+        threshold = alpha / max(1, len(family) - sorted(p for _i, p in family).index(verdict.p_value))
+        if i not in rejected_at:
+            notes.append(
+                f"not promoted: p = {verdict.p_value:.4f} did not clear the Holm threshold for its rank "
+                + f"in a family of {len(family)} (alpha={alpha}). This is the ordinary negative result — "
+                + "the interval and the effect size above are what to report."
+            )
+        # A p at the resample floor is a resolution statement, not a measurement: the corrected
+        # threshold can sit BELOW what the bootstrap can express, and then no candidate can ever
+        # promote however good it is. Measured: 4 perfect candidates at 8 rows flip from all-rejected
+        # to all-promoted between 2,000 and 20,000 resamples on identical data.
+        if verdict.p_value <= 5.0 / verdict.n_resamples:
+            notes.append(
+                f"p = {verdict.p_value:.4f} is at or near this bootstrap's resolution floor "
+                + f"(1/{verdict.n_resamples} = {1.0 / verdict.n_resamples:.4f}), and the Holm threshold for "
+                + f"this rank is {threshold:.4f}. Where the threshold approaches the floor the decision is "
+                + "being made by the resample count rather than by the data — re-run the gate with a larger "
+                + "n_resamples before believing either answer. A small suite has its own coarser floor: with "
+                + "few positive rows the smallest achievable p is bounded well above 1/n_resamples."
+            )
         notes.append(f"Holm applied across a family of {len(family)} at alpha={alpha}.")
         decided.append(verdict.model_copy(update={"promoted": promoted, "holm_alpha": alpha, "notes": notes}))
     return decided
@@ -906,6 +974,7 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
             + f"(p floors at {1.0 / verdict.n_resamples:.4f})"
         ),
         f"- Holm alpha: {_fmt(verdict.holm_alpha, '.3f')}",
+        f"- Interval excludes zero: {verdict.ci_low is not None and verdict.ci_low > 0.0}",
         f"- Range non-overlap (DIAGNOSTIC, not the gate): {verdict.range_non_overlap}",
         f"- Minimum detectable effect: {_fmt(verdict.mde)}",
     ]
@@ -923,7 +992,16 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
 
 
 def _row_score(result: EvaluationResult, criterion_index: int | None) -> float | None:
-    """The row's score for one arm: the criterion's score, or the row's weighted score."""
+    """The row's score for one arm: the criterion's score, or the row's weighted score.
+
+    ``None`` when the row produced no criterion results at all. That case matters on the execution
+    track specifically: ``calculate_weighted_score`` sets ``weighted_score`` to 0.0 for an empty
+    result list, so an errored or timed-out row arrives as a *scored zero* rather than a hole — and
+    the arm is then discarded from the Pareto front for having crashed, with no `—` in the matrix
+    to show it. A hole is not a failure, and this is where that distinction is enforced.
+    """
+    if not result.success_criteria_results:
+        return None
     if criterion_index is None:
         return result.weighted_score
     if criterion_index >= len(result.success_criteria_results):
@@ -1029,7 +1107,8 @@ def render_row_matrix(arms: list[ArmRowScores], pareto: list[str]) -> str:
             "Rows missing from at least one arm, shown as — and excluded from the domination "
             + f"comparison rather than counted as 0.0: {', '.join(holes)}"
         )
-    floored = [rid for rid in row_ids if all(a.row_scores.get(rid, 0.0) == 0.0 for a in arms)]
+    # Every arm that MEASURED the row scored zero — an arm's hole is not a zero here either.
+    floored = [rid for rid in row_ids if all(a.row_scores[rid] == 0.0 for a in arms if rid in a.row_scores)]
     if floored:
         lines.append(
             f"Rows no arm scored above zero: {', '.join(floored)}. These contribute nothing to the "

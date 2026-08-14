@@ -141,18 +141,26 @@ in two passes instead:
 1. All `N+1` arms on a **stratified half** of the train rows.
 2. Keep the top `ceil((N+1)/2)`, and run *those* on the **full** train split.
 
-**It does not save runs, and the arithmetic is worth doing rather than assuming.**
-`(N+1) × M_train/2 + ceil((N+1)/2) × M_train` against the flat `(N+1) × M_train` is
-`2.5 × M_train + 3 × M_train` versus `5 × M_train` at five arms — a **premium of half a train
-split**, and it is exactly half a train split at every arm count, because
-`ceil(A/2) ≥ A/2` for all `A`. Pass 2 re-measures the half that pass 1 already ran, and that
-re-measurement is what eats the saving.
+**It never saves runs, and what it costs depends on the parity of the arm count — do the
+arithmetic rather than assuming it.** `(N+1) × M_train/2 + ceil((N+1)/2) × M_train` against the
+flat `(N+1) × M_train`, writing `A = N+1`:
 
-**So do it for the abandon point, not for the price.** What pass 1 buys is a cheap look at every
-arm before committing to any of them: if nothing separates from the incumbent on the half, you can
-stop the round there and have spent half a Stage A rather than a whole one. That is a real option
-and it is often the one worth having. If you already intend to run pass 2 whatever pass 1 says,
-halving costs you and buys nothing — run the flat Stage A.
+| arms `A` | flat | halved | premium |
+| --- | --- | --- | --- |
+| 4 | `4 × M_train` | `4 × M_train` | **none** |
+| 5 | `5 × M_train` | `5.5 × M_train` | `M_train/2` |
+| 6 | `6 × M_train` | `6 × M_train` | **none** |
+
+`ceil(A/2) − A/2` is zero for an even `A` and a half for an odd one, so halving is **free at an
+even arm count** and costs half a train split at an odd one. Never a saving either way: pass 2
+re-measures the half pass 1 already ran.
+
+**So do it for the abandon point, and note that at an even arm count the option is free.** What
+pass 1 buys is a cheap look at every arm before committing to any of them: if nothing separates
+from the incumbent on the half, stop there having spent half a Stage A rather than a whole one.
+Three or five candidates give `A = 4` or `A = 6` — free — and four give `A = 5`, where the option
+costs half a split. If you intend to run pass 2 whatever pass 1 says, and `A` is odd, run the flat
+Stage A instead.
 
 **The version that would save needs a mechanism this CLI does not have.** Pass 2 would have to
 cover only the rows pass 1 did *not*, leaving each survivor a full train split pooled across two

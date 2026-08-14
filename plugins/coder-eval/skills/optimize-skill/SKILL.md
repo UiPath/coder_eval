@@ -462,13 +462,21 @@ Compute it and report it *before* proposing anything:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import noise_floor_mde
+from coder_eval.optimize_gate import load_measurements, load_arm_rows, noise_floor_mde, resolve_model
+
+baseline_dirs = [Path("<runs>/baseline-1"), Path("<runs>/baseline-2")]
+sidecar = Path(".optimize-skill/<skill>/measurements.json")
+suite_id = "<the suite's task_id>"
 
 print(noise_floor_mde(
-    run_dirs=[Path("<runs>/baseline-1"), Path("<runs>/baseline-2")],
+    run_dirs=baseline_dirs,
     variant_id="default",
-    suite_id="<the suite's task_id>",
+    suite_id=suite_id,
     criterion_index=0,
+    # Reuse an earlier round's floor when every key field still matches. This is the moment the
+    # cache exists for — reading it only after the round is over saves nothing.
+    measurements=load_measurements(sidecar),
+    model=resolve_model(load_arm_rows(baseline_dirs, "default", suite_id)),
 ))
 ```
 
@@ -515,7 +523,8 @@ specific rows is not one you can test.
 **On the execution track, read the trajectory, not just the score.** A failed criterion tells
 you the outcome was wrong; only the transcript tells you *which instruction the agent
 followed instead*. Open the failing rows' `task.json` and compare what the agent actually did
-— its `commands`, and their order — against what the body told it to do. The recurring
+— the `commands` on each entry of its `iterations`, and their order — against what the body
+told it to do. The recurring
 failure modes each imply a different edit:
 
 - **Instruction ignored** — the body says it, the agent never does it. Usually buried,
@@ -774,9 +783,11 @@ total — the first pass is what you can still abandon after:
 
 ```bash
 # Pass 1 — every arm, a stratified half of the train rows
-coder-eval run <suite> -e <path to round<N>-triage.yaml> --split train --sample-per-stratum <N>
+coder-eval run <suite> -e <path to round<N>-triage.yaml> --split train \
+  --sample-per-stratum <N> --run-dir <runs>/round<N>-triage-pass1
 # Pass 2 — the surviving half of the arms, the full train split
-coder-eval run <suite> -e <path to round<N>-triage-survivors.yaml> --split train
+coder-eval run <suite> -e <path to round<N>-triage-survivors.yaml> --split train \
+  --run-dir <runs>/round<N>-triage-pass2
 ```
 
 **`--sample-per-stratum` takes rows PER STRATUM, not a fraction.** Read the per-stratum counts off
@@ -788,6 +799,11 @@ proportionally; say what each half actually contains rather than assuming it is 
 Pass 2 needs its own experiment file, `round<N>-triage-survivors.yaml` — there is still no
 `--variant` filter, so dropping arms means authoring a file, exactly as Step 9 says for every other
 stage, and it is passed by explicit path for the reason Step 9 gives.
+
+**Build the row matrix below from PASS 1 only, and pass that one run dir.** Pass 1 is the only
+comparison where every arm ran the same rows; pass 2 holds a different arm set over a different row
+subset. Pooling both into `arm_row_scores` averages a survivor's two passes against a dropped arm's
+single one, and the coverage rule then lets the survivor dominate on the extra measurement alone.
 
 **Skip halving on a small suite.** Below `check-skill`'s un-doubled minimum on either polarity,
 run the full train split in one pass: the first pass would be ranking on noise and discarding real
@@ -854,9 +870,10 @@ verdicts = [
     activation_gate(
         incumbent_run_dirs=gate_dirs, candidate_run_dirs=gate_dirs,
         incumbent_variant="incumbent", candidate_variant=slug,
-        # sibling_indices only if the suite stacks sibling criteria — a stock check-skill
-        # suite has ONE criterion, so it would be `sibling_indices=()` there.
-        suite_id="<the suite's task_id>", criterion_index=0, sibling_indices=[1],
+        # sibling_indices ONLY if the suite stacks sibling skill_triggered criteria. A stock
+        # check-skill suite has one criterion, so leave it empty there — an index past the end
+        # renders a PASSING sibling line that looks like a check nobody actually performed.
+        suite_id="<the suite's task_id>", criterion_index=0, sibling_indices=(),
     )
     for slug in ("cand-a-widen-vocabulary", "cand-b-name-the-symptom")
 ]
@@ -939,11 +956,14 @@ below invites the assumption that this one must now be structured too, and that 
 destroy the thing worth keeping.
 
 **The validated sidecar is `measurements.json`, beside it.** Three things need to be machine-read
-rather than narrated, and only those live there:
+rather than narrated, and only those live there — the noise floor, the round's row vectors, and
+the regression corpus:
 
 - **The round's noise floor**, recorded with the suite, the model and the row count it was
-  measured at. A later round reuses it only when all three still match — a floor measured on
-  another model, or before the suite grew, is not this suite's floor. The model comes from
+  measured at. A later round reuses it only when **every** key field still matches — suite,
+  variant, model, criterion index, row count, invocation count and confidence, which is what
+  `NoiseFloor` stores. A floor measured on another model, under a renamed incumbent, or before the
+  suite grew is not this suite's floor. The model comes from
   `resolve_model` on the loaded rows and from nowhere else: it returns `None` for a mixed-model
   suite, and a `None` model never caches and never matches, which is the intended behaviour
   rather than a failure.
@@ -957,16 +977,18 @@ rather than narrated, and only those live there:
   and never truncated: being able to look back at which rows a *discarded* candidate won is the
   whole reason to keep them, and it is what a merge candidate in a later round is built from.
 
-- **Whether this round reused a stored floor or recomputed one.** A reused floor is a measurement
-  from an earlier round, and a reader comparing two rounds' MDEs needs to know when they are the
-  same number rather than two agreeing ones.
+**Say in `history.json` whether the floor was reused or recomputed.** That is narrative, not a
+field: `measurements.json` is `extra="forbid"` and has nowhere to put it. It matters because a
+reused floor is an *earlier round's* measurement, so two rounds quoting the same MDE may be one
+number rather than two agreeing ones.
 
-Both are one call each:
+One call each:
 
 ```python
 from pathlib import Path
 
 from coder_eval.optimize_gate import (
+    UNRESOLVED_MODEL,
     append_regression_rows,
     load_arm_rows,
     load_measurements,
@@ -984,7 +1006,7 @@ measurements = load_measurements(sidecar)
 rows = load_arm_rows(baseline_dirs, "default", suite_id)
 floor = measure_noise_floor(
     run_dirs=baseline_dirs, variant_id="default", suite_id=suite_id, criterion_index=0,
-    model=resolve_model(rows) or "(unresolved)", measurements=measurements,
+    model=resolve_model(rows) or UNRESOLVED_MODEL, measurements=measurements,
 )
 if floor is not None:
     record_noise_floor(sidecar, floor)

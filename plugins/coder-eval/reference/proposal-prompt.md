@@ -12,7 +12,8 @@ specific failures.
 
 **The failing rows, with what actually happened on them.** Not the aggregate — the rows. For
 each one: the prompt that produced it, the expected outcome, the observed outcome, and the
-trajectory from that row's `task.json` — its `commands`, in order. A score says a row failed. The
+trajectory from that row's `task.json` — the `commands` on each entry of its `iterations`,
+in order. A score says a row failed. The
 trajectory says *which instruction the agent followed instead*, and that difference is the whole
 content of a good hypothesis.
 

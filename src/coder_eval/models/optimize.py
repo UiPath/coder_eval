@@ -25,7 +25,13 @@ class GuardrailCheck(BaseModel):
     relative_change: float | None = Field(
         description="(candidate - incumbent) / incumbent. None when the incumbent value is zero or unmeasured."
     )
-    tolerance: float = Field(description="How much of a relative increase/drop is tolerated before the check fails.")
+    tolerance: float = Field(
+        description=(
+            "How much movement is tolerated before the check fails. Units differ by check and the "
+            "check's own name says which: cost/latency scale it by the incumbent's mean (a RELATIVE "
+            "materiality floor), while a sibling recall check reads it as an ABSOLUTE drop in recall."
+        )
+    )
     ci_low: float | None = Field(
         default=None,
         description=(
@@ -81,8 +87,9 @@ class ActivationGateVerdict(BaseModel):
     ci_low: float | None = Field(description="Lower bound of the paired cluster-bootstrap interval on the difference.")
     ci_high: float | None = Field(
         description=(
-            "Upper bound of that interval. Reported, not consulted: the promotion decision reads the "
-            "Holm-corrected p-value, which is the same test with the family correction applied."
+            "Upper bound of that interval. Promotion requires the interval to exclude zero (ci_low > 0) "
+            "AND the Holm-corrected test to reject; this bound is reported as the effect size rather "
+            "than consulted, since a candidate's interval is bounded below by ci_low."
         )
     )
     p_value: float | None = Field(
@@ -127,7 +134,10 @@ class NoiseFloor(BaseModel):
     costs a bootstrap over data already on disk.
 
     `variant_id` is in the key for a mundane reason that makes it the likeliest trip: the incumbent
-    variant is renamed round to round while suite, model and row count stay put.
+    variant is renamed round to round while suite, model and row count stay put. `seed` and
+    `n_resamples` are in it for a smaller version of the same argument — they move the number by
+    Monte-Carlo error rather than by a lot, but "every field above `mde` is part of the key" is
+    only a rule worth having if it has no exceptions.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -141,6 +151,8 @@ class NoiseFloor(BaseModel):
     n_rows: int = Field(ge=0, description="Rows scored in BOTH halves of the split — not the suite's row count.")
     n_invocations: int = Field(ge=0, description="Invocations the null comparison was split across.")
     confidence: float = Field(gt=0.0, lt=1.0, description="Interval width used. A wider interval is a wider floor.")
+    seed: int = Field(description="Bootstrap seed. Two seeds give two (close, but different) floors.")
+    n_resamples: int = Field(gt=0, description="Bootstrap draws. Fewer draws, coarser floor.")
     mde: float = Field(
         ge=0.0, le=1.0, description="The half-width: the smallest difference this suite can resolve. An F1 difference."
     )

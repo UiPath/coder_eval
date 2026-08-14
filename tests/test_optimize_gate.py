@@ -430,8 +430,6 @@ class TestRenderMarkdown:
         assert "Rows paired: 12" in text and "excluded: 1" in text
 
     def test_prints_every_check_with_its_note(self) -> None:
-        from coder_eval.models import GuardrailCheck
-
         verdict = self._verdict(
             sibling_checks=[
                 GuardrailCheck(
@@ -608,13 +606,13 @@ class TestCostLatencyGuardrails:
         assert check.incumbent is None
         assert check.note is not None and "not evaluated" in check.note
 
-    def test_zero_incumbent_median_does_not_divide(self) -> None:
+    def test_a_zero_incumbent_does_not_divide(self) -> None:
         incumbent = _cost_rows({f"r{i}": [0.0] for i in range(12)})
         candidate = _cost_rows({f"r{i}": [0.5] for i in range(12)})
         check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.relative_change is None
         assert check.passed is True
-        assert check.note is not None and "incumbent median is zero" in check.note
+        assert check.note is not None and "the incumbent measured zero" in check.note
 
     def test_notes_an_asymmetric_measurement_count(self) -> None:
         incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
@@ -634,16 +632,6 @@ class TestCostLatencyGuardrails:
 
 
 class TestMdeAndGuardrailsInTheVerdict:
-    def _noisy_arm(self, tmp_path: Path, variant: str, *, flip_every: int) -> list[Path]:
-        run_dirs = []
-        for i in range(4):
-            run_dir = tmp_path / f"run-{i}"
-            for row in range(10):
-                observed = "yes" if (row + i) % flip_every else "no"
-                _write_row(run_dir, variant, f"r{row}", _eval_result(f"r{row}", [("yes", observed)]))
-            run_dirs.append(run_dir)
-        return run_dirs
-
     def test_gate_notes_a_difference_below_the_mde(self, tmp_path: Path) -> None:
         # Both arms noisy in the same way: the difference is tiny, and the incumbent's own
         # invocation-to-invocation spread is larger than it.
@@ -914,3 +902,106 @@ class TestAnArmThatScoredNothing:
     def test_all_arms_empty_yields_an_empty_front(self) -> None:
         arms = [ArmRowScores(variant_id=n, row_scores={}) for n in ("a", "b")]
         assert pareto_front(arms) == []
+
+
+class TestUnbalancedReplicates:
+    """Two arms that did the SAME thing on every row must not separate.
+
+    A row's weight in an arm's pooled f1.yes is its observation count, so an arm that contributed
+    three replicates for a row while the other contributed two has silently reweighted the
+    comparison. The trigger is mundane — Stage B is three separate invocations, and one interrupted
+    run leaves a partial row set. Measured before the fix: byte-identical labels on all 20 rows,
+    f1.yes 0.818 vs 0.750, interval excluding zero, p = 0.022, rows_excluded 0, no note.
+    """
+
+    def _rows(self) -> dict[str, list[tuple[str, str]]]:
+        # A mix the arms agree on exactly: 12 engage, 8 do not.
+        return {f"r{i}": [("yes", "yes" if i % 5 else "no")] for i in range(20)}
+
+    def _dirs(self, tmp_path: Path, *, truncate_after: int) -> list[Path]:
+        rows = self._rows()
+        run_dirs = []
+        for i in range(3):
+            run_dir = tmp_path / f"run-{i}"
+            for n, (row_id, labels) in enumerate(sorted(rows.items())):
+                # The incumbent's third invocation stopped part-way through.
+                if not (i == 2 and n >= truncate_after):
+                    _write_row(run_dir, "incumbent", row_id, _eval_result(row_id, labels))
+                _write_row(run_dir, "candidate", row_id, _eval_result(row_id, labels))
+            run_dirs.append(run_dir)
+        return run_dirs
+
+    def test_identical_arms_do_not_separate_when_one_run_was_interrupted(self, tmp_path: Path) -> None:
+        verdict = _gate(self._dirs(tmp_path, truncate_after=12))
+        assert verdict.incumbent_f1 == verdict.candidate_f1
+        assert verdict.mean_diff == 0.0
+        assert verdict.ci_low == verdict.ci_high == 0.0
+        assert holm_promote([verdict])[0].promoted is False
+
+    def test_the_trim_is_named_so_the_run_is_re_run_not_read(self, tmp_path: Path) -> None:
+        verdict = _gate(self._dirs(tmp_path, truncate_after=12))
+        note = " ".join(verdict.notes)
+        assert "different replicate counts" in note
+        assert "trimmed to the smaller count" in note
+        assert "Re-run it" in note
+
+    def test_balanced_arms_are_untouched(self, tmp_path: Path) -> None:
+        verdict = _gate(self._dirs(tmp_path, truncate_after=20))
+        assert not any("replicate counts" in n for n in verdict.notes)
+        assert verdict.rows_paired == 20
+
+
+class TestGuardrailScaleAndHoles:
+    """Two ways the guardrail produced a number that meant something else."""
+
+    def test_a_uniform_increase_is_judged_against_the_same_statistic_it_measures(self) -> None:
+        """The interval is on the difference of MEANS, so the floor must scale by the mean.
+
+        Per-row cost is strongly right-skewed. Measured against a median-scaled floor, a uniform
+        +10% on `[0.01]*11 + [1.00]*9` rendered `FAIL ... 0.010 -> 0.011` against a 25% floor — a
+        line that contradicts itself, and a real win killed by a unit mismatch.
+        """
+        costs = [0.01] * 11 + [1.00] * 9
+        incumbent = _cost_rows({f"r{i}": [c] for i, c in enumerate(costs)})
+        candidate = _cost_rows({f"r{i}": [c * 1.10] for i, c in enumerate(costs)})
+        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        assert check.passed is True, "a 10% increase must not breach a 25% floor"
+
+    def test_a_genuinely_large_increase_still_fails_on_the_same_distribution(self) -> None:
+        costs = [0.01] * 11 + [1.00] * 9
+        incumbent = _cost_rows({f"r{i}": [c] for i, c in enumerate(costs)})
+        candidate = _cost_rows({f"r{i}": [c * 2.0] for i, c in enumerate(costs)})
+        assert _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate)).passed is False
+
+    def test_a_row_measured_on_one_arm_only_cannot_fabricate_a_zero(self) -> None:
+        """`mean([])` is 0.0, so an unfiltered empty cluster reads as "this arm cost nothing".
+
+        Measured before the fix: incumbent $0.10/row, candidate $1.00 on half its rows and no cost
+        recorded on the rest — a 10x increase PASSING with ci_low = -0.1, the incumbent's own mean
+        negated by draws where the candidate contributed nothing.
+        """
+        incumbent = _cost_rows({f"r{i}": [0.10] for i in range(4)})
+        candidate = _cost_rows({f"r{i}": ([1.00] if i < 2 else [None]) for i in range(4)})  # type: ignore[arg-type]
+        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        assert check.ci_low is not None and check.ci_low > 0.0, "the interval must not include the fabricated zero"
+        assert check.passed is False, "a 10x cost increase must breach the floor"
+
+
+class TestAnErroredRowIsAHoleNotAZero:
+    def test_on_the_execution_track_too(self, tmp_path: Path) -> None:
+        """`weighted_score` is 0.0 for an empty result list, so an errored row looked scored.
+
+        Measured before the fix: arm B, identical to A except that it ERRORED on r1, was dropped
+        from the Pareto front — discarded for crashing, with no `—` in the matrix to show why.
+        """
+        run_dir = tmp_path / "run-0"
+        _write_row(run_dir, "a", "r0", _scored_result("r0", 0.5))
+        _write_row(run_dir, "a", "r1", _scored_result("r1", 0.5))
+        _write_row(run_dir, "b", "r0", _scored_result("r0", 0.5))
+        errored = _eval_result("r1", []).model_copy(update={"weighted_score": 0.0})
+        _write_row(run_dir, "b", "r1", errored)
+
+        arms = arm_row_scores(run_dirs=[run_dir], variant_ids=["a", "b"], suite_id=SUITE)
+        assert arms[1].row_scores == {"r0": 0.5}, "the errored row must be ABSENT, not 0.0"
+        assert pareto_front(arms) == ["a", "b"]
+        assert "| r1 | 0.500 | — |" in render_row_matrix(arms, pareto_front(arms))

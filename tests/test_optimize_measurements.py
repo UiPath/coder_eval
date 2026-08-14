@@ -19,12 +19,14 @@ import pytest
 from coder_eval.models import ArmRowScores, NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores
 from coder_eval.optimize_gate import (
     MEASUREMENTS_FILENAME,
+    UNRESOLVED_MODEL,
     append_regression_rows,
     load_measurements,
     lookup_noise_floor,
     measure_noise_floor,
     noise_floor_mde,
     record_noise_floor,
+    record_round_scores,
 )
 from tests.test_optimize_gate import SUITE, _eval_result, _write_row
 
@@ -41,6 +43,8 @@ def _floor(**overrides) -> NoiseFloor:
         "n_rows": 12,
         "n_invocations": 3,
         "confidence": 0.95,
+        "seed": 0,
+        "n_resamples": 2000,
         "mde": 0.08,
         "computed_at": datetime(2026, 8, 13, 12, 0, tzinfo=UTC),
     }
@@ -182,6 +186,8 @@ class TestNoiseFloorCache:
             {"n_rows": 16},
             {"n_invocations": 6},
             {"confidence": 0.9},
+            {"seed": 7},
+            {"n_resamples": 500},
         ):
             assert lookup_noise_floor(measurements, _floor(**differing)) is None, (
                 f"a floor measured at {differing} was served for a different measurement"
@@ -394,3 +400,50 @@ class TestRoundScores:
             OptimizeMeasurements.model_validate(
                 {"skill": "s", "round_scores": [{"round": 1, "arm_row_scores": [], "pareto": []}]}
             )
+
+
+class TestRecordRoundScores:
+    def _scores(self, rnd: int, mde_marker: float) -> RoundScores:
+        return RoundScores(
+            round=rnd,
+            arm_row_scores=[ArmRowScores(variant_id="cand-a", row_scores={"r1": mde_marker})],
+            pareto_front=["cand-a"],
+        )
+
+    def test_replaces_the_same_round_rather_than_appending(self, tmp_path: Path) -> None:
+        # Replace, unlike the regression corpus beside it: re-running a round supersedes its
+        # measurement rather than leaving two contradictory records of the same round.
+        path = _path(tmp_path)
+        record_round_scores(path, self._scores(1, 0.1))
+        updated = record_round_scores(path, self._scores(1, 0.9))
+        assert len(updated.round_scores) == 1
+        assert updated.round_scores[0].arm_row_scores[0].row_scores == {"r1": 0.9}
+        assert load_measurements(path) == updated
+
+    def test_keeps_other_rounds(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        record_round_scores(path, self._scores(1, 0.1))
+        updated = record_round_scores(path, self._scores(2, 0.2))
+        assert [r.round for r in updated.round_scores] == [1, 2]
+
+    def test_coexists_with_the_other_two_writers(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        record_noise_floor(path, _floor())
+        append_regression_rows(path, [RegressionRow(row_id="pos-1", promoted_in_round=1, reason="x")])
+        updated = record_round_scores(path, self._scores(1, 0.5))
+        assert len(updated.noise_floors) == 1
+        assert len(updated.regression_corpus) == 1
+        assert len(updated.round_scores) == 1
+
+
+class TestAnUnresolvedModelIsNeverCached:
+    def test_record_noise_floor_refuses_the_placeholder(self, tmp_path: Path) -> None:
+        # It could never match its own lookup, so writing it only accumulates dead entries.
+        path = _path(tmp_path)
+        updated = record_noise_floor(path, _floor(model=UNRESOLVED_MODEL))
+        assert updated.noise_floors == []
+        assert not path.exists(), "nothing should have been written at all"
+
+    def test_a_real_model_still_records(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        assert len(record_noise_floor(path, _floor()).noise_floors) == 1
