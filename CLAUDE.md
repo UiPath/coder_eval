@@ -333,6 +333,7 @@ Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_G
 
 ## Notes for AI Assistants
 
+- Communication style: Use ASD-STE-100 when you speak to the user.
 - When doing code review, reach out to gemini-3 and codex through multi mcp server
 - Any temporary files should be created in `tmp/` folder, NOT `/tmp` folder
 - All models are importable from `coder_eval.models` — don't import from submodules directly
