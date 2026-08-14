@@ -42,8 +42,10 @@ also covers whether this project pins a version and what to do when the installe
 disagrees.
 
 **A version string is not a capability check, and this loop needs a capability.** Once you
-have a suite (step 4), run `coder-eval plan <suite>` and require it to exit 0 *before*
-spending. Two binaries can report the same version and differ in whether `--split` and
+have a suite (step 4), run `coder-eval plan <suite> --split <the split that stage will use>`
+and require it to exit 0 *before* spending — then read the printed row count, which is the
+number every cost estimate below depends on. A binary whose `plan` does not accept `--split`
+is an older coder-eval, which makes this a sharper capability check than the version string. Two binaries can report the same version and differ in whether `--split` and
 `dataset.split_field` exist at all — a repository whose working tree is ahead of its last
 release has exactly that shape, and then the pinned-version rule says "carry on" while every
 run fails at load. If `plan` rejects a field this skill relies on, prefer a project-local

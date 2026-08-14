@@ -90,7 +90,7 @@ coder_eval/
 ├── cli/                           # CLI commands (Typer + Rich)
 │   ├── __init__.py                # Typer app setup (core commands)
 │   ├── run_command.py             # `coder-eval run`
-│   ├── plan_command.py            # `coder-eval plan`
+│   ├── plan_command.py            # `coder-eval plan` (also expands datasets: previews total/selected row counts, takes `--split`, warns on partial labelling)
 │   ├── report_command.py          # `coder-eval report`
 │   ├── run_helpers.py             # CLI helper functions
 │   ├── console.py                 # Rich console instance
