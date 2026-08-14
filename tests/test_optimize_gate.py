@@ -6,9 +6,12 @@ exercised against the on-disk contract rather than against a mock of it.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import logging
 import random
 import re
+import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
@@ -21,6 +24,8 @@ from coder_eval.models import (
     ClassificationCriterionResult,
     CriterionResult,
     EvaluationResult,
+    ExecutionGateVerdict,
+    ExperimentResult,
     FinalStatus,
     GuardrailCheck,
     NoiseFloor,
@@ -45,7 +50,9 @@ from coder_eval.optimize_gate import (
     cost_latency_guardrails,
     cost_quality_front,
     cost_quality_points,
+    execution_gate,
     holm_promote,
+    holm_promote_execution,
     instance_best_front,
     load_arm_rows,
     load_suite_rows,
@@ -57,6 +64,7 @@ from coder_eval.optimize_gate import (
     record_noise_floor,
     regression_check,
     render_cost_quality,
+    render_execution_markdown,
     render_markdown,
     render_row_matrix,
     resolve_model,
@@ -2077,3 +2085,350 @@ class TestOneRowCostDefinition:
     def test_an_empty_cluster_is_absent_not_zero(self) -> None:
         # `mean([])` is 0.0, so an unfiltered empty cluster would read as "this row cost nothing".
         assert _row_cost_levels([[1.0], [], [3.0]]) == [1.0, 3.0]
+
+
+# ---------------------------------------------------------------------------
+# The execution track's gate
+# ---------------------------------------------------------------------------
+
+EXEC_SUITE = SUITE
+
+
+def _experiment_json(run_dir: Path, variant_ids: list[str], per_replicate: dict[str, dict[str, list[float]]]) -> Path:
+    """A minimal two-variant `experiment.json`, written where a real run writes it.
+
+    Built through `ExperimentResult` rather than as a hand-rolled dict, so a field the model
+    requires cannot be forgotten here and pass anyway.
+    """
+    result = ExperimentResult(
+        experiment_id="round1-gate",
+        description="gate",
+        variant_ids=variant_ids,
+        task_summaries=[],
+        variant_aggregates={},
+        total_duration_seconds=1.0,
+        per_replicate_scores=per_replicate,
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "experiment.json"
+    path.write_text(result.model_dump_json(), encoding="utf-8")
+    return path
+
+
+def _exec_run_dir(
+    tmp_path: Path,
+    *,
+    incumbent: dict[str, list[float]],
+    candidate: dict[str, list[float]],
+    declare_incumbent_first: bool = True,
+    extra_scores: dict[str, dict[str, list[float]]] | None = None,
+    variant_ids: list[str] | None = None,
+) -> Path:
+    """One Stage B gate run directory: both arms' rows on disk plus the experiment file."""
+    run_dir = tmp_path / "round1-gate"
+    for variant, per_row in (("incumbent", incumbent), ("candidate", candidate)):
+        for row_id, scores in per_row.items():
+            for replicate, score in enumerate(scores):
+                _write_row(run_dir, variant, row_id, _scored_result(row_id, score), replicate)
+
+    per_replicate = {
+        variant: {f"{EXEC_SUITE}/{row_id}": list(scores) for row_id, scores in per_row.items()}
+        for variant, per_row in (("incumbent", incumbent), ("candidate", candidate))
+    }
+    for variant, extra in (extra_scores or {}).items():
+        per_replicate.setdefault(variant, {}).update(extra)
+    declared = variant_ids or (["incumbent", "candidate"] if declare_incumbent_first else ["candidate", "incumbent"])
+    _experiment_json(run_dir, declared, per_replicate)
+    return run_dir
+
+
+def _exec_gate(run_dir: Path, **kwargs) -> ExecutionGateVerdict:
+    return execution_gate(
+        run_dir=run_dir,
+        incumbent_variant="incumbent",
+        candidate_variant="candidate",
+        suite_id=EXEC_SUITE,
+        **{"n_resamples": _FAST_RESAMPLES, **kwargs},
+    )
+
+
+# A candidate that wins on every row, with within-row spread so the paired t has variance.
+_WINNER = {
+    "incumbent": {"r1": [0.2, 0.3], "r2": [0.4, 0.5], "r3": [0.1, 0.2], "r4": [0.5, 0.6]},
+    "candidate": {"r1": [0.7, 0.8], "r2": [0.9, 1.0], "r3": [0.6, 0.8], "r4": [0.9, 0.9]},
+}
+
+
+class TestExecutionGateSign:
+    """The single most important assertion in this phase: the tool resolves the subtraction."""
+
+    def test_the_candidate_wins_positively_whichever_arm_is_declared_first(self, tmp_path: Path) -> None:
+        first = _exec_gate(_exec_run_dir(tmp_path / "a", **_WINNER, declare_incumbent_first=True))
+        second = _exec_gate(_exec_run_dir(tmp_path / "b", **_WINNER, declare_incumbent_first=False))
+        assert first.mean_diff is not None and first.mean_diff > 0.0
+        assert second.mean_diff == pytest.approx(first.mean_diff)
+        assert second.p_value == pytest.approx(first.p_value)
+
+    def test_the_interval_stays_ordered_under_both_declaration_orders(self, tmp_path: Path) -> None:
+        # Negating an interval reverses it; without the re-order a promoted candidate reports a
+        # "low" above its "high".
+        for i, order in enumerate((True, False)):
+            verdict = _exec_gate(_exec_run_dir(tmp_path / f"o{i}", **_WINNER, declare_incumbent_first=order))
+            assert verdict.ci_low is not None and verdict.ci_high is not None
+            assert verdict.ci_low <= verdict.ci_high
+
+    def test_the_effect_size_carries_the_sign_too(self, tmp_path: Path) -> None:
+        first = _exec_gate(_exec_run_dir(tmp_path / "a", **_WINNER, declare_incumbent_first=True))
+        second = _exec_gate(_exec_run_dir(tmp_path / "b", **_WINNER, declare_incumbent_first=False))
+        assert first.effect_size is not None and first.effect_size > 0.0
+        assert second.effect_size == pytest.approx(first.effect_size)
+
+    def test_a_losing_candidate_reads_negative(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["candidate"], candidate=_WINNER["incumbent"])
+        verdict = _exec_gate(run_dir)
+        assert verdict.mean_diff is not None and verdict.mean_diff < 0.0
+
+
+class TestExecutionGateLoading:
+    def test_narrows_to_the_target_suite(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(
+            tmp_path,
+            **_WINNER,
+            extra_scores={
+                "incumbent": {"other-suite/r1": [0.1], "other-suite/r2": [0.1]},
+                "candidate": {"other-suite/r1": [0.9], "other-suite/r2": [0.9]},
+            },
+        )
+        assert _exec_gate(run_dir).rows_paired == 4
+
+    def test_a_missing_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        (run_dir / "experiment.json").unlink()
+        verdict = _exec_gate(run_dir)
+        assert (verdict.mean_diff, verdict.ci_low, verdict.p_value) == (None, None, None)
+        assert any("experiment.json" in note and "-e" in note for note in verdict.notes)
+
+    def test_a_malformed_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        (run_dir / "experiment.json").write_text("{not json", encoding="utf-8")
+        verdict = _exec_gate(run_dir)
+        assert verdict.p_value is None
+        assert any("could not be parsed" in note for note in verdict.notes)
+
+    def test_a_three_variant_experiment_names_the_exactly_two_precondition(self, tmp_path: Path) -> None:
+        # The triage file re-passed at Stage B: the mistake reaching the gate.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER, variant_ids=["incumbent", "candidate", "cand-b"])
+        verdict = _exec_gate(run_dir)
+        assert verdict.p_value is None
+        assert any("EXACTLY two" in note and "round<N>-gate.yaml" in note for note in verdict.notes)
+
+    def test_a_variant_the_experiment_does_not_carry_names_both_actual_ids(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="typo-arm",
+            suite_id=EXEC_SUITE,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert verdict.mean_diff is None
+        assert any("'incumbent'" in note and "'candidate'" in note for note in verdict.notes)
+
+    def test_fewer_than_two_paired_rows_is_carried_not_treated_as_a_wiring_error(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, incumbent={"r1": [0.2, 0.3]}, candidate={"r1": [0.8, 0.9]})
+        verdict = _exec_gate(run_dir)
+        assert verdict.rows_paired == 1
+        assert verdict.p_value is None
+        assert any("fewer than the 2 a paired interval needs" in note for note in verdict.notes)
+
+    def test_an_unpairable_row_is_carried_as_excluded(self, tmp_path: Path) -> None:
+        incumbent = {**_WINNER["incumbent"], "r5": [0.4]}
+        run_dir = _exec_run_dir(tmp_path, incumbent=incumbent, candidate=_WINNER["candidate"])
+        verdict = _exec_gate(run_dir)
+        assert (verdict.rows_paired, verdict.rows_excluded) == (4, 1)
+
+
+class TestExecutionGateIntegrity:
+    def test_engagement_below_one_fails_and_names_the_drop(self, tmp_path: Path) -> None:
+        # `_scored_result` writes observed="no" below 0.5, which is a recall.yes miss.
+        candidate = {**_WINNER["candidate"], "r3": [0.6, 0.2]}
+        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=candidate)
+        verdict = _exec_gate(run_dir)
+        engagement = next(c for c in verdict.integrity_checks if "engagement" in c.name)
+        assert engagement.candidate is not None and engagement.candidate < 1.0
+        assert not engagement.passed
+
+    def test_engagement_at_one_on_both_arms_passes(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [0.6, 0.7] for i in range(4)},
+            candidate={f"r{i}": [0.8, 0.9] for i in range(4)},
+        )
+        engagement = next(c for c in _exec_gate(run_dir).integrity_checks if "engagement" in c.name)
+        assert engagement.passed and engagement.candidate == 1.0
+
+    def test_a_non_classification_index_is_unevaluated_not_a_pass_on_the_merits(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        verdict = _exec_gate(run_dir, engagement_criterion_index=7)
+        engagement = next(c for c in verdict.integrity_checks if "engagement" in c.name)
+        assert engagement.note is not None and "NOT evaluated" in engagement.note
+        assert "criterion_aggregates" in engagement.note
+        assert (engagement.incumbent, engagement.candidate) == (None, None)
+
+    def test_none_skips_engagement_and_leaves_only_completion(self, tmp_path: Path) -> None:
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER), engagement_criterion_index=None)
+        assert [c.name for c in verdict.integrity_checks] == ["completion_rate"]
+
+    def test_a_lower_completion_rate_on_the_candidate_fails(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        # An errored replicate: the row directory exists, but nothing scored.
+        hollow = _scored_result("r2", 0.9).model_copy(update={"success_criteria_results": []})
+        _write_row(run_dir, "candidate", "r2", hollow, 1)
+        completion = next(c for c in _exec_gate(run_dir).integrity_checks if c.name == "completion_rate")
+        assert not completion.passed
+        assert completion.candidate is not None and completion.incumbent is not None
+        assert completion.candidate < completion.incumbent
+
+    def test_equal_completion_passes(self, tmp_path: Path) -> None:
+        completion = next(
+            c for c in _exec_gate(_exec_run_dir(tmp_path, **_WINNER)).integrity_checks if c.name == "completion_rate"
+        )
+        assert completion.passed and completion.candidate == completion.incumbent == 1.0
+
+    def test_the_gate_reads_no_suite_json(self, tmp_path: Path) -> None:
+        # The positional read of `criterion_aggregates` the planning spike falsified: that list is
+        # FILTERED, so position i there is not criterion i. Nothing here may depend on it.
+        import coder_eval.optimize_gate as gate
+
+        # A PATH JOIN is what a read looks like — `run_dir / ... / "suite.json"`. Both functions
+        # also NAME the file in prose (a docstring, and the wrong-index note that tells a user the
+        # two index spaces differ), and that must stay legal, so the assertion is on the operator
+        # rather than on the string.
+        for function in (execution_gate, gate._integrity_checks):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+            joined = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.BinOp)
+                and isinstance(node.op, ast.Div)
+                and isinstance(node.right, ast.Constant)
+                and isinstance(node.right.value, str)
+                and node.right.value.endswith(".json")
+                and node.right.value != "experiment.json"
+            ]
+            assert not joined, f"{function.__name__} joins a path to {[n.right.value for n in joined]}"  # type: ignore[attr-defined]
+        assert "SuiteRollup" not in inspect.getsource(gate)
+
+
+class TestExecutionGateMde:
+    def test_a_floor_of_exactly_zero_survives_as_zero(self, tmp_path: Path) -> None:
+        # Every replicate identical -> a real 0.000 floor. `measured.mde or None` would erase it.
+        run_dir = _exec_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [0.4, 0.4] for i in range(4)},
+            candidate={f"r{i}": [0.9, 0.9] for i in range(4)},
+        )
+        assert _exec_gate(run_dir).mde == 0.0
+
+    def test_a_difference_below_the_mde_is_noted(self, tmp_path: Path) -> None:
+        rows = {f"r{i}": [0.2, 0.9] for i in range(6)}
+        run_dir = _exec_run_dir(tmp_path, incumbent=rows, candidate={f"r{i}": [0.25, 0.9] for i in range(6)})
+        verdict = _exec_gate(run_dir)
+        assert verdict.mde is not None
+        if verdict.mean_diff is not None and abs(verdict.mean_diff) < verdict.mde:
+            assert any("minimum detectable effect" in note for note in verdict.notes)
+
+
+class TestHolmPromoteExecution:
+    def _verdict(self, p: float, **overrides) -> ExecutionGateVerdict:
+        base = {
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "cand",
+            "suite_id": EXEC_SUITE,
+            "confidence": 0.95,
+            "rows_paired": 8,
+            "rows_excluded": 0,
+            "mean_diff": 0.2,
+            "ci_low": 0.1,
+            "ci_high": 0.3,
+            "effect_size": 1.1,
+            "p_value": p,
+        }
+        return ExecutionGateVerdict(**{**base, **overrides})
+
+    def test_the_correction_bites_across_a_family(self) -> None:
+        # A p that promotes alone must not promote in a family of four identical ones: ties take
+        # the strictest rank, so every one is decided against alpha/4.
+        alone = holm_promote_execution([self._verdict(0.02)])
+        assert alone[0].promoted is True
+        family = holm_promote_execution([self._verdict(0.02) for _ in range(4)])
+        assert [v.promoted for v in family] == [False] * 4
+
+    def test_a_none_p_value_is_outside_the_family(self) -> None:
+        decided = holm_promote_execution([self._verdict(0.001), self._verdict(0.0, p_value=None)])
+        assert decided[1].promoted is False
+        assert any("outside the family" in note for note in decided[1].notes)
+        assert decided[0].promoted is True
+
+    def test_a_difference_favouring_the_incumbent_never_promotes(self) -> None:
+        decided = holm_promote_execution([self._verdict(0.001, mean_diff=-0.2, ci_low=-0.3, ci_high=-0.1)])[0]
+        assert decided.promoted is False
+        assert any("favours the incumbent" in note for note in decided.notes)
+
+    def test_an_interval_containing_zero_never_promotes(self) -> None:
+        decided = holm_promote_execution([self._verdict(0.001, ci_low=-0.05)])[0]
+        assert decided.promoted is False
+        assert any("contains zero" in note for note in decided.notes)
+
+    def test_records_the_alpha_it_applied(self) -> None:
+        assert holm_promote_execution([self._verdict(0.01)], alpha=0.10)[0].holm_alpha == 0.10
+
+    def test_empty_list_returns_empty(self) -> None:
+        assert holm_promote_execution([]) == []
+
+    def test_a_failed_guardrail_leaves_promoted_true_and_is_noted(self) -> None:
+        # Load-bearing: folding guardrails into `promoted` makes the BLOCKED headline unreachable.
+        failing = GuardrailCheck(
+            name="cost (USD/row)",
+            incumbent=1.0,
+            candidate=3.0,
+            relative_change=2.0,
+            tolerance=MATERIALITY_FLOOR,
+            ci_low=1.5,
+            ci_high=2.5,
+            passed=False,
+        )
+        decided = holm_promote_execution([self._verdict(0.001, guardrails=[failing])])[0]
+        assert decided.promoted is True
+        assert any("cost (USD/row) FAILED" in note for note in decided.notes)
+        assert "BLOCKED BY A GUARDRAIL" in render_execution_markdown(decided)
+
+
+class TestRenderExecutionMarkdown:
+    def _decided(self, tmp_path: Path, **kwargs) -> ExecutionGateVerdict:
+        return holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER), **kwargs)])[0]
+
+    def test_says_undecided_before_holm_has_run(self, tmp_path: Path) -> None:
+        text = render_execution_markdown(_exec_gate(_exec_run_dir(tmp_path, **_WINNER)))
+        assert "UNDECIDED" in text
+        assert "NOT PROMOTED" not in text
+
+    def test_prints_the_interval_the_mde_and_every_check(self, tmp_path: Path) -> None:
+        text = render_execution_markdown(self._decided(tmp_path))
+        assert "candidate - incumbent, sign resolved by the tool" in text
+        assert "Minimum detectable effect" in text
+        assert "Integrity checks" in text and "completion_rate" in text
+        assert "Guardrails" in text
+
+    def test_a_failing_integrity_check_blocks_the_headline(self, tmp_path: Path) -> None:
+        candidate = {**_WINNER["candidate"], "r3": [0.6, 0.2]}
+        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=candidate)
+        decided = holm_promote_execution([_exec_gate(run_dir, n_resamples=_FAST_RESAMPLES)])[0]
+        if decided.promoted:
+            text = render_execution_markdown(decided)
+            assert "BLOCKED BY A GUARDRAIL" in text
+            assert "engagement" in text
+
+    def test_renders_a_missing_effect_size_as_a_dash(self, tmp_path: Path) -> None:
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER)).model_copy(update={"effect_size": None})
+        assert "Cohen's d: —" in render_execution_markdown(verdict)

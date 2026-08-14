@@ -38,6 +38,8 @@ from coder_eval.models import (
     ArmRowScores,
     ClassificationCriterionResult,
     EvaluationResult,
+    ExecutionGateVerdict,
+    ExperimentResult,
     GuardrailCheck,
     NoiseFloor,
     OptimizeMeasurements,
@@ -50,6 +52,7 @@ from coder_eval.reports_stats import (
     cluster_bootstrap_diff_ci,
     holm_rejections,
     mean,
+    paired_comparison,
 )
 
 
@@ -1301,6 +1304,405 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
             )
         )
     return decided
+
+
+# ---------------------------------------------------------------------------
+# The execution track's gate — the same decision, on the reporter's own statistic
+# ---------------------------------------------------------------------------
+
+
+def _completion_check(rows: dict[str, list[EvaluationResult]], row_ids: Sequence[str], arm: str) -> tuple[int, int]:
+    """(replicates that produced a score, replicates present) for one arm over ``row_ids``."""
+    present = [result for rid in row_ids for result in rows.get(rid, [])]
+    scored = [result for result in present if result.success_criteria_results]
+    logger.debug("completion for %s: %d scored of %d present", arm, len(scored), len(present))
+    return len(scored), len(present)
+
+
+def _integrity_checks(
+    *,
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    row_ids: Sequence[str],
+    engagement_criterion_index: int | None,
+) -> list[GuardrailCheck]:
+    """The two readings the method's promote-only-when list requires, derived from the ROWS.
+
+    Deliberately not from ``suite.json``'s ``criterion_aggregates``: that list is *filtered*
+    (``reports._compute_suite_rollup`` skips a criterion whose ``aggregate()`` returns ``None``
+    with no ``suite_thresholds``, and an unregistered checker entirely), so position *i* there is
+    not criterion *i*. Reading a positional engagement index out of it silently reports a
+    DIFFERENT criterion's ``recall.yes`` the moment any earlier criterion produces no aggregate.
+
+    ``engagement_criterion_index`` is a position in ``EvaluationResult.success_criteria_results``
+    — the same index space :func:`activation_gate` uses, and the one that IS aligned with the
+    suite's ``success_criteria``. ``None`` skips the engagement check.
+    """
+    checks: list[GuardrailCheck] = []
+    metric_name = f"recall.{TARGET_LABEL}"
+
+    if engagement_criterion_index is not None:
+        index = engagement_criterion_index
+        incumbent_pairs = [p for rid in row_ids for p in _label_pairs(incumbent_rows.get(rid, []), index)]
+        candidate_pairs = [p for rid in row_ids for p in _label_pairs(candidate_rows.get(rid, []), index)]
+        if not incumbent_pairs and not candidate_pairs:
+            found = _observed_result_types(incumbent_rows, engagement_criterion_index) | _observed_result_types(
+                candidate_rows, engagement_criterion_index
+            )
+            checks.append(
+                GuardrailCheck(
+                    name=f"engagement {metric_name} [criterion {engagement_criterion_index}]",
+                    incumbent=None,
+                    candidate=None,
+                    relative_change=None,
+                    tolerance=0.0,
+                    passed=True,
+                    note=(
+                        f"criterion {engagement_criterion_index} holds no classification result on either arm "
+                        + f"(types found: {sorted(found) or 'none — the index is past the end'}), so engagement "
+                        + "was NOT evaluated. This is a wrong index, not a pass on the merits — the index is the "
+                        + "criterion's POSITION in success_criteria, and it is not a position in suite.json's "
+                        + "criterion_aggregates, which is a filtered list."
+                    ),
+                )
+            )
+        else:
+            incumbent_recall = _metric(incumbent_pairs, metric_name)
+            candidate_recall = _metric(candidate_pairs, metric_name)
+            # Below the incumbent OR below 1.0: a row the skill never engaged on measured the
+            # ABSENCE of the thing under test, so it is not evidence about the candidate's body.
+            checks.append(
+                GuardrailCheck(
+                    name=f"engagement {metric_name} [criterion {engagement_criterion_index}]",
+                    incumbent=incumbent_recall,
+                    candidate=candidate_recall,
+                    relative_change=(
+                        (candidate_recall - incumbent_recall) / incumbent_recall if incumbent_recall else None
+                    ),
+                    tolerance=0.0,
+                    passed=candidate_recall >= incumbent_recall and candidate_recall >= 1.0,
+                    note=(
+                        None
+                        if candidate_recall >= 1.0
+                        else "the skill did not engage on every scored row, so part of the sample measured the "
+                        + "absence of the thing under test rather than a worse version of it"
+                    ),
+                )
+            )
+
+    incumbent_scored, incumbent_present = _completion_check(incumbent_rows, row_ids, "incumbent")
+    candidate_scored, candidate_present = _completion_check(candidate_rows, row_ids, "candidate")
+    incumbent_rate = incumbent_scored / incumbent_present if incumbent_present else None
+    candidate_rate = candidate_scored / candidate_present if candidate_present else None
+    checks.append(
+        GuardrailCheck(
+            name="completion_rate",
+            incumbent=incumbent_rate,
+            candidate=candidate_rate,
+            relative_change=(
+                (candidate_rate - incumbent_rate) / incumbent_rate
+                if incumbent_rate and candidate_rate is not None
+                else None
+            ),
+            tolerance=0.0,
+            # An eroded, asymmetric sample produces confident nonsense: a p computed over rows that
+            # vanished from one arm is not evidence. Equal, or favouring the incumbent, is the bar.
+            passed=incumbent_rate is None or candidate_rate is None or candidate_rate >= incumbent_rate,
+            note=(
+                f"{candidate_scored}/{candidate_present} candidate replicate(s) scored against "
+                + f"{incumbent_scored}/{incumbent_present} incumbent"
+                if incumbent_present or candidate_present
+                else "no replicates loaded on either arm — completion was not evaluated"
+            ),
+        )
+    )
+    return checks
+
+
+def execution_gate(
+    *,
+    run_dir: Path,
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    engagement_criterion_index: int | None = 0,
+    materiality: float = MATERIALITY_FLOOR,
+    confidence: float = 0.95,
+    seed: int = 0,
+    n_resamples: int = GATE_RESAMPLES,
+) -> ExecutionGateVerdict:
+    """Gate ONE candidate against the incumbent on the execution track, from a Stage B gate run.
+
+    The primary statistic is :func:`coder_eval.reports_stats.paired_comparison` — the reporter's
+    own paired *t* over per-row ``weighted_score``, which the method file already calls this
+    track's primary instrument. It is REUSED, never re-derived: a second assembly of a statistic
+    this repo owns is the CE037-class defect, and it would let the gate disagree with the
+    ``## Paired Comparison`` block a user reads beside it.
+
+    **One ``run_dir`` per candidate.** ``paired_comparison`` fires only for exactly two variants,
+    so the execution track gates one candidate at a time in its own ``round<N>-gate.yaml``. A round
+    gating three candidates therefore has three gate run dirs — and the Holm family is assembled
+    ACROSS them by :func:`holm_promote_execution`, exactly as the activation track assembles its
+    family across candidates in shared ones.
+
+    **The gate resolves the sign.** ``paired_comparison`` subtracts in variant *declaration* order,
+    so with the incumbent declared first a candidate win comes back negative. This function knows
+    which arm is the incumbent, so ``mean_diff`` here is ALWAYS ``candidate - incumbent`` and the
+    interval bounds are swapped along with it. The method file warns twice that a reversed reading
+    promotes the arm that lost; this is that warning, implemented.
+
+    Every failure mode — a missing ``experiment.json``, an experiment with other than two variants,
+    variant ids that do not match it — returns a verdict whose statistics are ``None`` with a note
+    naming what failed. Never an exception, and never a silent zero.
+
+    Leaves ``promoted=None``: one gate knows nothing about its family.
+    """
+    notes: list[str] = []
+    incumbent_rows = load_arm_rows([run_dir], incumbent_variant, suite_id)
+    candidate_rows = load_arm_rows([run_dir], candidate_variant, suite_id)
+    row_ids = sorted(set(incumbent_rows) & set(candidate_rows))
+
+    def _verdict(**overrides) -> ExecutionGateVerdict:
+        base = {
+            "incumbent_variant": incumbent_variant,
+            "candidate_variant": candidate_variant,
+            "suite_id": suite_id,
+            "confidence": confidence,
+            "rows_paired": 0,
+            "rows_excluded": 0,
+            "integrity_checks": _integrity_checks(
+                incumbent_rows=incumbent_rows,
+                candidate_rows=candidate_rows,
+                row_ids=row_ids,
+                engagement_criterion_index=engagement_criterion_index,
+            ),
+            "guardrails": cost_latency_guardrails(
+                incumbent_rows=incumbent_rows,
+                candidate_rows=candidate_rows,
+                row_ids=row_ids,
+                materiality=materiality,
+                seed=seed,
+                confidence=confidence,
+                n_resamples=n_resamples,
+            ),
+            # `measured.mde if ... is not None`, never `measured.mde or None`: a floor of exactly
+            # 0.000 is a real answer (every replicate agreed), and truthiness would erase it.
+            "mde": (
+                measured.mde
+                if (
+                    measured := measure_execution_noise_floor(
+                        run_dirs=[run_dir],
+                        variant_id=incumbent_variant,
+                        suite_id=suite_id,
+                        model=resolve_model(incumbent_rows) or UNRESOLVED_MODEL,
+                        confidence=confidence,
+                        seed=seed,
+                        n_resamples=n_resamples,
+                    )
+                )
+                is not None
+                else None
+            ),
+            "notes": notes,
+        }
+        return ExecutionGateVerdict(**{**base, **overrides})
+
+    experiment_json = run_dir / "experiment.json"
+    if not experiment_json.is_file():
+        notes.append(
+            f"no experiment file at {experiment_json} — the paired statistic could not be computed. "
+            + "A plain `coder-eval run` without `-e <experiment>` writes none, and this track's gate "
+            + "is a two-variant experiment. Nothing below is a result about the candidate."
+        )
+        return _verdict()
+    try:
+        result = ExperimentResult.model_validate_json(experiment_json.read_text(encoding="utf-8"))
+    except ValueError:
+        logger.warning("Failed to load %s for the execution gate", experiment_json, exc_info=True)
+        notes.append(f"the experiment file at {experiment_json} could not be parsed, so no statistic was computed.")
+        return _verdict()
+
+    # Only this suite's rows. `expand_dataset` writes row task ids as `<suite_id>/<row_id>`, so
+    # both forms are kept: the fanned rows and an unfanned single-task suite.
+    scoped_scores = {
+        variant_id: {
+            task_id: scores
+            for task_id, scores in per_task.items()
+            if task_id == suite_id or task_id.startswith(f"{suite_id}/")
+        }
+        for variant_id, per_task in result.per_replicate_scores.items()
+    }
+    comparison = paired_comparison(result.model_copy(update={"per_replicate_scores": scoped_scores}), confidence)
+    if comparison is None:
+        # `variant_ids` is deliberately NOT narrowed to force a comparison out of an N-variant
+        # file: that would compute a Stage B verdict from Stage A data — one replicate per row,
+        # arms chosen on those same rows — which is precisely what the method forbids.
+        notes.append(
+            f"no paired comparison: {experiment_json} declares {len(result.variant_ids)} variant(s) "
+            + f"({', '.join(result.variant_ids) or 'none'}) and no row of {suite_id!r} scored on both, "
+            + "or the file predates per-replicate scores. The statistic fires only for EXACTLY two "
+            + "variants, so gate one candidate at a time in its own round<N>-gate.yaml — re-passing "
+            + "the triage experiment here produces no paired block at all."
+        )
+        return _verdict()
+
+    if candidate_variant == comparison.vid_a:
+        sign = 1.0
+    elif candidate_variant == comparison.vid_b:
+        sign = -1.0
+    else:
+        notes.append(
+            f"candidate_variant={candidate_variant!r} is not one of the two variants the experiment "
+            + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}), so no sign could be resolved and "
+            + "no statistic is reported. Check the variant id against the experiment file."
+        )
+        return _verdict(rows_paired=comparison.task_count, rows_excluded=comparison.excluded_count)
+    if incumbent_variant not in (comparison.vid_a, comparison.vid_b):
+        notes.append(
+            f"incumbent_variant={incumbent_variant!r} is not one of the two variants the experiment "
+            + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}); the sign was resolved from the "
+            + "candidate, so the difference is against whichever arm the file actually carries."
+        )
+
+    def _signed(value: float | None) -> float | None:
+        return None if value is None else sign * value
+
+    # Negating an interval reverses it, so re-order rather than reporting a "low" above its "high".
+    bounds = sorted(b for b in (_signed(comparison.ci_low), _signed(comparison.ci_high)) if b is not None)
+    if comparison.task_count < 2:
+        notes.append(
+            f"only {comparison.task_count} row(s) of {suite_id!r} scored on both arms — fewer than the 2 a "
+            + "paired interval needs, so every statistic is reported as unavailable rather than fabricated."
+        )
+
+    verdict = _verdict(
+        rows_paired=comparison.task_count,
+        rows_excluded=comparison.excluded_count,
+        mean_diff=_signed(comparison.mean_diff),
+        ci_low=bounds[0] if len(bounds) == 2 else None,
+        ci_high=bounds[1] if len(bounds) == 2 else None,
+        # Cohen's d carries the direction too, so it is signed with the rest.
+        effect_size=_signed(comparison.effect_size),
+        p_value=comparison.p_value,
+    )
+    if verdict.mean_diff is not None and verdict.effect_size is None:
+        notes.append(
+            "the effect size is unavailable while the difference is not: Cohen's d is undefined at zero "
+            + "variance, which is what two arms agreeing exactly on every row produce. Read the interval."
+        )
+    if verdict.mde is not None and verdict.mean_diff is not None and abs(verdict.mean_diff) < verdict.mde:
+        notes.append(
+            f"the observed difference ({verdict.mean_diff:.3f}) is smaller than this suite's minimum "
+            + f"detectable effect ({verdict.mde:.3f}) on weighted_score. An interval excluding zero is "
+            + "still reportable, but do not present it as a comfortable win."
+        )
+    return verdict
+
+
+def holm_promote_execution(
+    verdicts: list[ExecutionGateVerdict], alpha: float = DEFAULT_ALPHA
+) -> list[ExecutionGateVerdict]:
+    """Decide a whole execution-track family at once — the second, and only other, Holm call site.
+
+    Gating candidates one at a time against the same incumbent on the same train rows IS a family,
+    even though each gate is its own two-variant run directory. So the correction is applied once,
+    across every verdict a round predeclared it would gate, exactly as :func:`holm_promote` does on
+    the other track. Correcting per candidate would degenerate to an uncorrected ``p <= alpha``.
+
+    **``promoted`` is Holm rejecting AND the difference favouring the candidate AND the interval
+    excluding zero — nothing else.** Guardrails and integrity checks stay advisory in the model and
+    gating in the render, which is how :func:`holm_promote` already treats guardrails: folding them
+    into ``promoted`` would make :func:`render_execution_markdown`'s BLOCKED headline unreachable,
+    and that headline is the thing that stops a reader promoting past a doubled row cost.
+
+    A verdict with no ``p_value`` is outside the family and comes back ``promoted=False``. There is
+    no refusal state here — the paired *t* is continuous and has no discreteness floor.
+    """
+    family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
+    rejections = holm_rejections([p for _i, p in family], alpha)
+    rejected_at = {i for (i, _p), reject in zip(family, rejections, strict=True) if reject}
+
+    decided: list[ExecutionGateVerdict] = []
+    for i, verdict in enumerate(verdicts):
+        notes = list(verdict.notes)
+        if verdict.p_value is None:
+            notes.append("not promoted: the sample could not support a p-value, so this arm is outside the family.")
+            decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
+            continue
+
+        favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
+        excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
+        promoted = i in rejected_at and favours_candidate and excludes_zero
+
+        if i in rejected_at and not favours_candidate:
+            notes.append(
+                "not promoted: the paired difference favours the incumbent. (The sign is already "
+                + "resolved as candidate - incumbent, so this reads the way it looks.)"
+            )
+        elif i in rejected_at and not excludes_zero:
+            notes.append(
+                "not promoted: the Holm-corrected test rejects but the confidence interval still "
+                + "contains zero, so the effect is not separated at the reported interval width."
+            )
+        elif i not in rejected_at:
+            notes.append(
+                f"not promoted: p = {verdict.p_value:.4f} did not clear the Holm threshold for its rank in a "
+                + f"family of {len(family)} (alpha={alpha}). This is the ordinary negative result — the "
+                + "interval and the effect size above are what to report."
+            )
+        for check in (*verdict.integrity_checks, *verdict.guardrails):
+            if not check.passed:
+                notes.append(
+                    f"{check.name} FAILED — this blocks the promotion even if the statistic separated. "
+                    + "It is reported here and gated in the rendered block, not folded into `promoted`."
+                )
+        notes.append(f"Holm applied across a family of {len(family)} at alpha={alpha}.")
+        decided.append(verdict.model_copy(update={"promoted": promoted, "holm_alpha": alpha, "notes": notes}))
+    return decided
+
+
+def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
+    """The block the skill prints verbatim, mirroring :func:`render_markdown`'s headline precedence.
+
+    Three headlines rather than four: **UNDECIDED** when Holm has not run, **BLOCKED BY A
+    GUARDRAIL** when it has and something non-primary failed, else PROMOTED / NOT PROMOTED. There
+    is no CANNOT SEPARATE here — that headline reports a discreteness floor the paired *t* does
+    not have.
+    """
+    failed = [check.name for check in (*verdict.integrity_checks, *verdict.guardrails) if not check.passed]
+    if verdict.promoted is None:
+        headline = "UNDECIDED — holm_promote_execution has not been applied, so this verdict decides nothing"
+    elif verdict.promoted and failed:
+        headline = (
+            "BLOCKED BY A GUARDRAIL — the paired comparison separated, but "
+            + f"{', '.join(failed)} failed. Do not promote on this block."
+        )
+    else:
+        headline = "PROMOTED" if verdict.promoted else "NOT PROMOTED"
+
+    lines = [
+        f"### Execution gate — `{verdict.candidate_variant}` vs `{verdict.incumbent_variant}`",
+        "",
+        f"**{headline}**",
+        "",
+        f"- Suite `{verdict.suite_id}`, per-row `weighted_score` through the reporter's paired comparison",
+        f"- Rows paired: {verdict.rows_paired} · excluded: {verdict.rows_excluded}",
+        (
+            "- Paired mean difference (candidate - incumbent, sign resolved by the tool): "
+            + f"{_fmt(verdict.mean_diff)} {verdict.confidence:.0%} CI "
+            + f"[{_fmt(verdict.ci_low)}, {_fmt(verdict.ci_high)}]"
+        ),
+        f"- Cohen's d: {_fmt(verdict.effect_size)} · p = {_fmt(verdict.p_value, '.4f')}",
+        f"- Holm alpha: {_fmt(verdict.holm_alpha, '.3f')}",
+        f"- Interval excludes zero: {verdict.ci_low is not None and verdict.ci_low > 0.0}",
+        f"- Minimum detectable effect (weighted_score): {_fmt(verdict.mde)}",
+    ]
+    lines += _render_checks("Integrity checks", verdict.integrity_checks)
+    lines += _render_checks("Guardrails", verdict.guardrails)
+    if verdict.notes:
+        lines.append("- **Notes:**")
+        lines += [f"  - {note}" for note in verdict.notes]
+    return "\n".join(lines)
 
 
 def _fmt(value: float | None, spec: str = ".3f") -> str:

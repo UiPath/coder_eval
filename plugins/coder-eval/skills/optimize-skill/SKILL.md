@@ -1126,27 +1126,56 @@ GUARDRAIL** rather than PROMOTED — and the rule behind it is in the method fil
 list. Do not talk yourself past it: a description that wins two points of F1 by making every row
 cost twice as much is a trade, and the user is the one who gets to decide whether to take it.
 
-### Stage B, execution track — the same guardrails, called directly
+### Stage B, execution track — run the gate, do not resolve the sign by hand
 
-The execution gate's primary instrument is the reporter's `## Paired Comparison` block, but the
-cost and latency guardrails are not in it. Call them on the same two arms:
+The primary instrument is the reporter's own paired statistic, and the gate calls it for you —
+along with the cost and latency guardrails, which are not in that block, and the two integrity
+readings the method's promote-only-when list requires and a human used to check by eye:
 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import cost_latency_guardrails, load_arm_rows
+from coder_eval.optimize_gate import execution_gate, holm_promote_execution, render_execution_markdown
 
-gate_dirs = [Path("<runs>/round1-gate")]
-kwargs = {"suite_id": "<the suite's task_id>"}
-incumbent = load_arm_rows(gate_dirs, "incumbent", **kwargs)
-candidate = load_arm_rows(gate_dirs, "<the candidate's variant_id>", **kwargs)
+# ONE run dir per candidate: the paired statistic fires only for exactly two variants, so each
+# candidate is gated in its own two-variant round<N>-gate.yaml. The family therefore lives ACROSS
+# run dirs, and this dict is what assembles it.
+gates = {"cand-a-name-the-action": Path("<runs>/round1-gate-a"),
+         "cand-b-forbid-invention": Path("<runs>/round1-gate-b")}
 
-for check in cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate):
-    print(check.name, check.passed, check.incumbent, check.candidate, check.ci_low, check.note)
+verdicts = [
+    execution_gate(run_dir=d, incumbent_variant="incumbent", candidate_variant=c,
+                   suite_id="<the suite's task_id>")
+    for c, d in gates.items()
+]
+for v in holm_promote_execution(verdicts):
+    print(render_execution_markdown(v))
 ```
 
-They matter more here than on the activation track, not less: an outcome row is a whole task
-run, so a body edit that sends the agent down a longer path moves real money.
+**Gate every survivor first, then correct once** — the identical failure mode as on the activation
+track. The list is built before `holm_promote_execution` sees any of it; correcting one candidate
+at a time silently reverts to an uncorrected alpha. A round that gates a single candidate passes a
+family of one, which is the same call. `execution_gate` alone never promotes anything, and
+`render_execution_markdown` prints **UNDECIDED** if you forget the correction.
+
+**The tool resolves the subtraction; you never do.** `mean_diff` in this block is always
+`candidate - incumbent`, whichever order the experiment file declared its variants in. If you also
+read the reporter's own `## Paired Comparison` block, that one still subtracts in *declaration
+order* — quote its header verbatim there, or read this block instead.
+
+**Read the block, not `.passed` by eye.** A failing guardrail or integrity check renders as
+**BLOCKED BY A GUARDRAIL** even though the statistic separated. The two integrity checks are
+engagement (`recall.yes` must be 1.0 — a row the skill never engaged on measured the *absence* of
+the thing under test) and `completion_rate` (equal, or favouring the incumbent; a p computed over
+rows that vanished from one arm is not evidence).
+
+The guardrails matter more here than on the activation track, not less: an outcome row is a whole
+task run, so a body edit that sends the agent down a longer path moves real money.
+
+`engagement_criterion_index` is a position in the row's `success_criteria_results` — the same index
+space `activation_gate`'s `criterion_index` uses, counted from the top of the suite YAML. It is
+**not** a position in `suite.json`'s `criterion_aggregates`, which is a filtered list. Pass `None`
+to skip the check on a suite with no engagement criterion.
 
 ## Step 11 — Ledger
 

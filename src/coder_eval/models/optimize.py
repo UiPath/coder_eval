@@ -177,6 +177,89 @@ class ActivationGateVerdict(BaseModel):
     )
 
 
+class ExecutionGateVerdict(BaseModel):
+    """The execution track's Stage B verdict for ONE candidate against the incumbent.
+
+    Mirrors :class:`ActivationGateVerdict`'s conventions deliberately — statistics are ``None``
+    rather than fabricated, ``notes`` is the distrust-the-numbers channel, and ``promoted`` is
+    ``None`` until :func:`coder_eval.optimize_gate.holm_promote_execution` has seen the whole
+    family — but it is a separate flat model rather than a track-discriminated union with it. A
+    union would carry ``p_floor`` / ``gate_refusal`` / ``criterion_index`` as permanently-``None``
+    noise on one side and ``effect_size`` on the other, and every reader would have to know which
+    half applied.
+
+    **``mean_diff`` is ALWAYS candidate - incumbent.** The reporter's own ``## Paired Comparison``
+    block subtracts in variant *declaration* order, so with the incumbent declared first a
+    candidate win renders there as a negative number — which the method file warns about twice,
+    because a reversed reading promotes the arm that lost. The gate knows which arm is the
+    incumbent, so it resolves the sign once, in code, and every number here reads the same way
+    regardless of how the experiment file was written. ``ci_low``/``ci_high`` are swapped along
+    with it, so ``ci_low <= ci_high`` always holds.
+
+    **There is no ``p_floor`` and no refusal state here, and that is not an oversight.** The
+    activation gate's discreteness floor exists because a resample that draws no discordant row
+    produces a difference of exactly 0.0, which bounds the smallest p a suite can express. The
+    paired *t* is continuous: it has no such floor, so there is nothing to refuse against.
+    """
+
+    incumbent_variant: str = Field(description="Variant id of the incumbent arm.")
+    candidate_variant: str = Field(description="Variant id of the candidate arm under test.")
+    suite_id: str = Field(description="Suite id (the pre-fan-out task_id) both arms ran.")
+    confidence: float = Field(
+        gt=0.0, lt=1.0, description="Interval width the paired t used, so the report cannot mislabel it."
+    )
+    rows_paired: int = Field(description="Rows scored by BOTH arms — PairedComparison.task_count.")
+    rows_excluded: int = Field(
+        description=(
+            "Rows seen for at least one arm but not paired, carried through from "
+            "PairedComparison.excluded_count rather than recomputed."
+        )
+    )
+    mean_diff: float | None = Field(
+        default=None,
+        description="Paired mean difference in per-row weighted_score, ALWAYS candidate - incumbent.",
+    )
+    ci_low: float | None = Field(default=None, description="Lower bound of the paired-t interval on that difference.")
+    ci_high: float | None = Field(default=None, description="Upper bound of that interval.")
+    effect_size: float | None = Field(
+        default=None,
+        description=(
+            "Cohen's d for the paired difference. None does NOT mean the comparison failed — d is "
+            "undefined at zero variance, which two arms agreeing exactly on every row produce."
+        ),
+    )
+    p_value: float | None = Field(default=None, description="Paired t-test p. None when fewer than 2 rows paired.")
+    holm_alpha: float | None = Field(
+        default=None, description="The family-wise alpha holm_promote_execution applied. None until it has run."
+    )
+    promoted: bool | None = Field(
+        default=None, description="None means gated but undecided — holm_promote_execution has not been applied."
+    )
+    mde: float | None = Field(
+        default=None,
+        description=(
+            "Minimum detectable effect on weighted_score, from the replicate null split. None when "
+            "it could not be computed; 0.0 is a real answer meaning the replicates agreed exactly."
+        ),
+    )
+    integrity_checks: list[GuardrailCheck] = Field(
+        default_factory=list,
+        description=(
+            "The two readings the method's promote-only-when list requires and a human used to do "
+            "by eye: engagement recall.yes and completion rate, per arm. A GuardrailCheck list "
+            "rather than four scalars because that is exactly what the type already models — one "
+            "non-primary quantity that may veto a promotion — and it renders through the same "
+            "helper as sibling_checks on the other track."
+        ),
+    )
+    guardrails: list[GuardrailCheck] = Field(
+        default_factory=list, description="Cost / latency guardrails. Advisory in the model, gating in the render."
+    )
+    notes: list[str] = Field(
+        default_factory=list, description="Everything the reader needs to distrust or qualify the numbers above."
+    )
+
+
 class NoiseFloor(BaseModel):
     """A cached minimum detectable effect, keyed on everything that changes its value.
 

@@ -458,15 +458,27 @@ That constrains the shape: it fires only for exactly two variants, so gate one c
 a time, in `round<N>-gate.yaml`. With expensive rows that is the right trade anyway — Stage A
 already ranked them.
 
-**Read the sign off the header, and never state a direction without it.** The block renders
-as `**Paired mean diff (<first declared variant> - <second declared variant>)**`, subtracting
-in **variant declaration order** — not incumbent-minus-candidate, and not
-better-minus-worse. With `incumbent` declared first, as in the example above, **a candidate
-win reads negative**. Quote the header verbatim next to the number, and resolve the direction
-from it every time rather than from memory; a reversed reading promotes the arm that lost,
-and every subsequent number in the ledger corroborates it.
+**The gate resolves the sign; a reader never should.** `execution_gate` knows which arm is the
+incumbent, so the difference it reports is always *candidate minus incumbent* and its interval
+bounds are ordered to match — whichever order the experiment file declared its variants in. That
+single behaviour is why the gate exists: a reversed reading promotes the arm that lost, and every
+subsequent number in the ledger corroborates it.
 
-Promote only when all of these hold:
+The warning still applies to the **reporter's own** block, which a user may read directly. It
+renders as `**Paired mean diff (<first declared variant> - <second declared variant>)**`,
+subtracting in **variant declaration order** — not incumbent-minus-candidate, and not
+better-minus-worse. With `incumbent` declared first, **a candidate win reads negative** there.
+Quote that header verbatim next to any number taken from it, or take the number from the gate.
+
+**Holm applies here too, and the family lives across run directories.** Each execution gate is its
+own two-variant invocation with its own run dir, so a round gating three candidates has three of
+them — but they are still three tests of the same incumbent on the same train rows, which is a
+family. Correct it **once**, with the same step-down the activation track uses, by passing every
+verdict through `holm_promote_execution` in a single call. A round gating one candidate passes a
+family of one, which is the same call and costs nothing.
+
+Promote only when all of these hold — and **the rendered block reports every one of them**, so
+this list is the contract the code enforces rather than a checklist to work through by eye:
 
 - **The paired mean difference favours the candidate and its 95% CI excludes zero.**
 - **The PREDECLARED primary and its guardrails hold.** Before Stage B runs, name **one**
@@ -481,12 +493,15 @@ Promote only when all of these hold:
   criterion "regressed" is unstable from round to round.
 - **`completion_rate` is equal across arms**, or the difference favours the incumbent. An
   eroded, asymmetric sample produces confident nonsense — a *p*-value computed over rows that
-  vanished from one arm is not evidence.
+  vanished from one arm is not evidence. The block reports this as an integrity check, derived
+  from the rows themselves rather than from `suite.json`'s `criterion_aggregates` — that list is
+  *filtered*, so a position in it is not a position in `success_criteria`.
 - **Cost and latency have not materially regressed**, by the same bootstrap-derived guardrails
   described above. They matter more here than on the activation track, not less: an outcome row
   is a whole task run, so a body edit that sends the agent down a longer path moves real money.
 - The skill **actually engaged** on every scored row; otherwise part of the sample measured
-  the absence of the thing under test.
+  the absence of the thing under test. The block reports this too, as the engagement
+  `recall.yes` integrity check.
 
 Print the paired block verbatim alongside the per-criterion table. A body change is a
 behavioural change, and the numbers behind it are the whole argument.

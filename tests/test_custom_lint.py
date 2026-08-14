@@ -10,8 +10,11 @@ Run just these tests:
     make lint
 """
 
+import ast
 import re
+import textwrap
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -5428,3 +5431,78 @@ class TestCE039ComputedClaims:
         text = "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```\n| x | y |\n| --- | --- |\n| 3 | 4 |\n```\n"
         tables = parse_markdown_tables(text)
         assert [t.header for t in tables] == [["a", "b"]]
+
+
+@pytest.mark.lint
+class TestHolmRejectionsIsConfined:
+    """`holm_rejections` may be called only from `optimize_gate`, and only by its two wrappers.
+
+    Holm is a property of a FAMILY. A call site that sees one candidate at a time degenerates to
+    an uncorrected `p <= alpha` while still looking like a correction — the failure mode both
+    wrappers exist to prevent, and one no type or test of theirs can catch from the outside.
+
+    CLAUDE.md said `holm_promote` was the ONLY call site until the execution track got its own
+    gate. The honest replacement is "both call sites live in optimize_gate", and that is worth a
+    sensor rather than a sentence — the same reasoning that confines the F1 idiom (CE037).
+
+    CALL NODES are counted, not files. A file-set assertion was already true before this existed
+    and would have proved nothing; counting calls is what catches a third one appearing INSIDE
+    `optimize_gate`, which is exactly where it would be written.
+    """
+
+    SRC = Path(__file__).parent.parent / "src" / "coder_eval"
+    ALLOWED: ClassVar[set[str]] = {"holm_promote", "holm_promote_execution"}
+
+    @staticmethod
+    def _call_sites(tree: ast.AST) -> list[tuple[str, int]]:
+        """(enclosing function name, line) for every `holm_rejections(...)` call in ``tree``."""
+        enclosing: dict[int, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                for child in ast.walk(node):
+                    enclosing.setdefault(id(child), node.name)
+        sites = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+            if name == "holm_rejections":
+                sites.append((enclosing.get(id(node), "<module>"), node.lineno))
+        return sites
+
+    def test_exactly_two_call_sites_both_in_optimize_gate(self):
+        found: dict[str, list[tuple[str, int]]] = {}
+        for module in sorted(self.SRC.rglob("*.py")):
+            sites = self._call_sites(ast.parse(module.read_text(encoding="utf-8")))
+            if sites:
+                found[module.name] = sites
+
+        assert set(found) == {"optimize_gate.py"}, (
+            f"holm_rejections is called from {sorted(found)}. Holm corrects a FAMILY, so every call "
+            "site has to see the whole family at once — which is why both wrappers live in one "
+            "module. A caller elsewhere is almost certainly correcting one candidate at a time."
+        )
+        callers = sorted(name for name, _line in found["optimize_gate.py"])
+        assert callers == sorted(self.ALLOWED), (
+            f"holm_rejections is called by {callers}, not {sorted(self.ALLOWED)}. A third call — even "
+            "inside optimize_gate — is a family being decided somewhere that cannot see all of it."
+        )
+
+    def test_a_third_call_inside_the_module_is_caught(self):
+        # The self-test. A file-set assertion passes this; counting call nodes is what does not.
+        source = textwrap.dedent(
+            """
+            def holm_promote(verdicts, alpha):
+                return holm_rejections([v.p for v in verdicts], alpha)
+
+            def holm_promote_execution(verdicts, alpha):
+                return holm_rejections([v.p for v in verdicts], alpha)
+
+            def _quietly_uncorrected(verdict, alpha):
+                return holm_rejections([verdict.p], alpha)
+            """
+        )
+        callers = sorted(name for name, _line in self._call_sites(ast.parse(source)))
+        assert callers != sorted(self.ALLOWED)
+        assert "_quietly_uncorrected" in callers
