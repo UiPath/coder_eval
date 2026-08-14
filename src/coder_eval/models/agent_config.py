@@ -25,6 +25,20 @@ type SettingSource = Literal["user", "project", "local"]
 """Vendor-neutral mirror of claude_agent_sdk.SettingSource (no SDK dependency)."""
 
 
+type SystemPromptMode = Literal["append", "replace"]
+"""How a configured ``system_prompt`` combines with the agent's own default prompt."""
+
+
+type SystemPromptSemantics = Literal["append", "replace", "unknown"]
+"""The regime a run actually used, as recorded in ``environment_info``.
+
+Wider than :data:`SystemPromptMode` by ``"unknown"``: every agent emits the marker
+(``Agent.system_prompt_semantics``), but an agent that has not declared which regime
+it implements says so explicitly rather than being silently absent. Absent still means
+one thing only — a run from before the marker existed.
+"""
+
+
 class LocalPluginConfig(TypedDict):
     """Vendor-neutral local plugin/skills source: a directory the agent scans for skills.
 
@@ -151,7 +165,9 @@ class BaseAgentConfig(BaseModel):
     system_prompt: str | None = Field(
         default=None,
         description=(
-            "Custom system prompt. Replaces the default system prompt. "
+            "Custom system prompt. Built-in agents layer it on top of their default system prompt "
+            "rather than replacing it; Claude Code can opt out via system_prompt_mode: replace. "
+            "Each agent's doc page (docs/agents/) states the exact mechanism. "
             "Supports inline text or multi-line YAML strings. "
             "Mutually exclusive with system_prompt_file."
         ),
@@ -184,6 +200,20 @@ class BaseAgentConfig(BaseModel):
 
         return [normalize_ignore_pattern_entry(v) for v in values]
 
+    @field_validator("system_prompt", mode="after")
+    @classmethod
+    def _blank_prompt_is_no_prompt(cls, v: str | None) -> str | None:
+        """Collapse an empty or whitespace-only ``system_prompt`` to ``None``.
+
+        Every agent branches on ``system_prompt is not None`` to decide whether a
+        prompt was configured, so a blank string is the one value that reads as
+        "configured" while carrying nothing — producing an empty *entire* system
+        prompt under ``replace``, and empty ``system_instructions`` on Antigravity.
+        Normalizing here fixes both, and makes ``check_replace_mode_has_prompt``
+        reject ``replace`` + blank instead of silently honoring it.
+        """
+        return v if v is None or v.strip() else None
+
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:
         """Ensure system_prompt and system_prompt_file are mutually exclusive."""
@@ -197,6 +227,15 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
 
+    system_prompt_mode: SystemPromptMode = Field(
+        default="append",
+        description=(
+            "How system_prompt combines with the Claude Code default prompt: 'append' layers it "
+            "after the SDK 'claude_code' preset, keeping the default's behavioral guidance; "
+            "'replace' sends it as the ENTIRE system prompt. Judge sub-agents force 'replace' so "
+            "the scoring instrument never carries the coding-agent persona."
+        ),
+    )
     claude_settings: str | dict[str, Any] | None = MergeField(
         strategy="deep",
         default=None,
@@ -243,6 +282,26 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
                     f"sdk_options key {key!r} is framework-managed; set it as a top-level AgentConfig field instead"
                 )
         return v
+
+    @model_validator(mode="after")
+    def check_replace_mode_has_prompt(self) -> Self:
+        """Reject ``system_prompt_mode: replace`` with no prompt to replace with.
+
+        Without a configured prompt the options builder would fall back to the
+        claude_code preset (the append regime) while run.json's
+        ``system_prompt_semantics`` marker could label the run 'replace' —
+        silently mis-bucketing trend dashboards. ``system_prompt_file`` counts:
+        the task loader inlines it into ``system_prompt`` at resolution time
+        (atomically — see ``resolve_agent_system_prompt``, which must never leave a
+        half-updated config for this validator to see). A blank prompt does NOT
+        count: ``_blank_prompt_is_no_prompt`` has already collapsed it to ``None``.
+        """
+        if self.system_prompt_mode == "replace" and self.system_prompt is None and self.system_prompt_file is None:
+            raise ValueError(
+                "system_prompt_mode='replace' requires system_prompt (or system_prompt_file) to be set — "
+                + "there is no prompt to replace the Claude Code default with"
+            )
+        return self
 
 
 class CodexAgentConfig(BaseAgentConfig):

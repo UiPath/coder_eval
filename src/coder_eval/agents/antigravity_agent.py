@@ -47,6 +47,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -231,6 +232,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     # The step loop has a between-steps guard where the cooperative
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
+
+    # Antigravity has always appended (TemplatedSystemInstructions wraps
+    # system_instructions around its own harness prompt), so its runs are
+    # comparable across the marker boundary.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
 
     def __init__(
         self,
@@ -747,6 +753,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Gemini model + thinking level for auditability."""
         return {
+            **super().get_environment_info(),
             "antigravity_model": self._effective_model(),
             "antigravity_thinking_level": self.config.thinking_level,
         }

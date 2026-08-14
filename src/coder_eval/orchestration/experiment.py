@@ -524,9 +524,10 @@ def resolve_task_files(
     """
     exp_dir = experiment_file.parent if experiment_file is not None else task_file.parent
 
-    # Resolve system_prompt_file (may be injected by variant as relative or absolute path)
-    if task.agent is not None and task.agent.system_prompt_file is not None:
-        resolve_agent_system_prompt(task.agent, exp_dir)
+    # Resolve system_prompt_file (may be injected by variant as relative or absolute path).
+    # Rebind: the resolver returns a new config so the prompt/file swap is atomic
+    # (see resolve_agent_system_prompt).
+    task.agent = resolve_agent_system_prompt(task.agent, exp_dir)
 
     # Resolve relative template_sources paths
     if task.sandbox.template_sources:

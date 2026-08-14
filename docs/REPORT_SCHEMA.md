@@ -137,6 +137,20 @@ The authoritative per-replicate record.
 `ClaudeAgentOptions` dump), `sandbox_path`, `task_config`
 (`{resolved, source_yaml, source_file, lineage}` — `lineage` maps each field to
 `{value, source, source_detail}` so you can trace which config layer set it).
+`environment_info.system_prompt_semantics` (`"append"` / `"replace"` /
+`"unknown"`) records the system-prompt regime the agent ran with. Every agent
+emits it — the base `Agent` supplies `"unknown"` for an agent that has not
+declared its regime (including out-of-tree plugin agents), so an absent key
+means one thing only: a run predating the marker. Those runs used
+replace-on-set / empty-on-unset semantics on Claude Code and are not
+score-comparable, so consumers should segment on it (absent ⇒ pre-append
+regime; `"unknown"` ⇒ current run, undeclared agent). Codex runs before the
+marker dropped `system_prompt` entirely and Antigravity always appended, so for
+those two the boundary is a reporting change, not a behavioral one.
+`sdk_options.system_prompt` is a `SystemPromptPreset` dict
+(`{type: "preset", preset: "claude_code", exclude_dynamic_sections: true, append?: str}`)
+on append-mode Claude Code runs and a plain string only in replace mode — it is
+no longer `str | null`, so consumers must not string-handle it unconditionally.
 
 **Telemetry/totals:** `total_token_usage` ([TokenUsage](#tokenusage)),
 `command_stats` (`CommandStatistics`), `total_assistant_turns`, `expected_commands` /

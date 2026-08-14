@@ -3,11 +3,13 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from coder_eval.models import (
     AgentConfig,
     AgentKind,
+    ClaudeCodeAgentConfig,
     SandboxConfig,
     TaskDefinition,
     TemplateDirSource,
@@ -15,6 +17,7 @@ from coder_eval.models import (
 )
 from coder_eval.orchestration.experiment import resolve_task_files
 from coder_eval.orchestration.task_loader import (
+    load_task,
     resolve_agent_system_prompt,
     resolve_initial_prompt_file,
 )
@@ -164,9 +167,9 @@ class TestResolveAgentSystemPrompt:
         prompt_file = tmp_path / "system.md"
         prompt_file.write_text("System prompt content\n")
         agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
-        resolve_agent_system_prompt(agent, tmp_path)
-        assert agent.system_prompt == "System prompt content"
-        assert agent.system_prompt_file is None
+        resolved = resolve_agent_system_prompt(agent, tmp_path)
+        assert resolved.system_prompt == "System prompt content"
+        assert resolved.system_prompt_file is None
 
     def test_missing_file_raises(self, tmp_path):
         agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="missing.md")
@@ -175,19 +178,163 @@ class TestResolveAgentSystemPrompt:
 
     def test_no_file_field_is_noop(self, tmp_path):
         agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="inline")
-        resolve_agent_system_prompt(agent, tmp_path)
-        assert agent.system_prompt == "inline"
+        assert resolve_agent_system_prompt(agent, tmp_path) is agent
 
     def test_none_agent_is_noop(self, tmp_path):
         """Passing None should not raise."""
-        resolve_agent_system_prompt(None, tmp_path)
+        assert resolve_agent_system_prompt(None, tmp_path) is None
 
     def test_multiline_content_stripped(self, tmp_path):
         prompt_file = tmp_path / "system.md"
         prompt_file.write_text("\n  Line 1\n  Line 2\n\n")
         agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
-        resolve_agent_system_prompt(agent, tmp_path)
-        assert agent.system_prompt == "Line 1\n  Line 2"
+        resolved = resolve_agent_system_prompt(agent, tmp_path)
+        assert resolved.system_prompt == "Line 1\n  Line 2"
+
+    def test_preserves_fields_set_for_the_merge_layer(self, tmp_path):
+        """The resolved copy must keep __pydantic_fields_set__: experiment.py builds the
+        task's merge layer with model_dump(exclude_unset=True), so a config that marked
+        every field as set would override variant and CLI layers with its defaults."""
+        prompt_file = tmp_path / "system.md"
+        prompt_file.write_text("content")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
+        resolved = resolve_agent_system_prompt(agent, tmp_path)
+        assert "model" not in resolved.model_fields_set
+        assert resolved.model_dump(exclude_unset=True).keys() <= {
+            "type",
+            "system_prompt",
+            "system_prompt_file",
+        }
+
+    @pytest.mark.parametrize("mode", ["append", "replace"])
+    def test_replace_mode_with_prompt_file_resolves(self, tmp_path, mode: str):
+        """Regression: the two prompt fields have no valid sequential assignment order
+        under validate_assignment, so a non-atomic swap raised on the intermediate
+        state — for 'replace' via check_replace_mode_has_prompt (both fields momentarily
+        None) and for either mode via check_prompt_exclusivity (both momentarily set)."""
+        prompt_file = tmp_path / "system.md"
+        prompt_file.write_text("You are a judge.")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md", system_prompt_mode=mode)
+        resolved = resolve_agent_system_prompt(agent, tmp_path)
+        assert resolved.system_prompt == "You are a judge."
+        assert resolved.system_prompt_file is None
+        assert resolved.system_prompt_mode == mode
+
+    def test_blank_file_resolves_to_no_prompt(self, tmp_path):
+        """A whitespace-only file is no prompt at all — same normalization inline
+        prompts get, so 'replace' can never send an empty entire system prompt."""
+        prompt_file = tmp_path / "system.md"
+        prompt_file.write_text("   \n\t\n")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
+        assert resolve_agent_system_prompt(agent, tmp_path).system_prompt is None
+
+    def test_blank_file_under_replace_is_rejected(self, tmp_path):
+        """...but under 'replace' that normalization leaves nothing to replace with.
+        model_copy skips validators, so check_replace_mode_has_prompt never sees the
+        (replace, None, None) end state and the run would silently downgrade to the
+        append preset. Reject at load, as the docs promise."""
+        prompt_file = tmp_path / "system.md"
+        prompt_file.write_text("\n   \n")
+        agent = parse_agent_config(
+            type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md", system_prompt_mode="replace"
+        )
+        with pytest.raises(ValueError, match="is empty; system_prompt_mode='replace' requires"):
+            resolve_agent_system_prompt(agent, tmp_path)
+
+
+def _write_task_with_agent(path: Path, agent: dict) -> Path:
+    """Write a minimal task YAML carrying the given ``agent:`` block."""
+    task_file = path / "t.yaml"
+    task_file.write_text(
+        yaml.dump(
+            {
+                "task_id": "t",
+                "description": "Test task",
+                "initial_prompt": "Do something",
+                "sandbox": {"driver": "tempdir"},
+                "success_criteria": [{"type": "file_exists", "path": "x.py", "description": "exists"}],
+                "agent": agent,
+            }
+        )
+    )
+    return task_file
+
+
+class TestSystemPromptMatrixThroughLoadTask:
+    """The system_prompt x system_prompt_file x system_prompt_mode matrix, exercised
+    through the real ``load_task`` entry point.
+
+    Construction-only coverage is what let a load-time crash ship green: the config
+    validated fine and only the loader's field swap blew up. These go through the
+    loader so the resolved end state is what gets asserted.
+    """
+
+    @pytest.mark.parametrize("mode", ["append", "replace"])
+    def test_prompt_file_is_inlined(self, tmp_path: Path, mode: str):
+        (tmp_path / "sp.md").write_text("You are a careful engineer.")
+        task_file = _write_task_with_agent(
+            tmp_path, {"type": "claude-code", "system_prompt_file": "sp.md", "system_prompt_mode": mode}
+        )
+
+        task, _ = load_task(task_file)
+
+        assert isinstance(task.agent, ClaudeCodeAgentConfig)
+        assert task.agent.system_prompt == "You are a careful engineer."
+        assert task.agent.system_prompt_file is None
+        assert task.agent.system_prompt_mode == mode
+
+    @pytest.mark.parametrize("mode", ["append", "replace"])
+    def test_inline_prompt_survives(self, tmp_path: Path, mode: str):
+        task_file = _write_task_with_agent(
+            tmp_path, {"type": "claude-code", "system_prompt": "Be terse.", "system_prompt_mode": mode}
+        )
+
+        task, _ = load_task(task_file)
+
+        assert isinstance(task.agent, ClaudeCodeAgentConfig)
+        assert task.agent.system_prompt == "Be terse."
+        assert task.agent.system_prompt_mode == mode
+
+    def test_replace_without_any_prompt_is_rejected(self, tmp_path: Path):
+        task_file = _write_task_with_agent(tmp_path, {"type": "claude-code", "system_prompt_mode": "replace"})
+
+        with pytest.raises(ValueError, match="system_prompt_mode='replace' requires"):
+            load_task(task_file)
+
+    def test_replace_with_blank_prompt_file_is_rejected(self, tmp_path: Path):
+        """The blank file is the only prompt this config had: a load-time error beats
+        a silent downgrade to the append preset at query time."""
+        (tmp_path / "sp.md").write_text("   \n")
+        task_file = _write_task_with_agent(
+            tmp_path, {"type": "claude-code", "system_prompt_file": "sp.md", "system_prompt_mode": "replace"}
+        )
+
+        with pytest.raises(ValueError, match="is empty; system_prompt_mode='replace' requires"):
+            load_task(task_file)
+
+    def test_both_prompt_fields_is_rejected(self, tmp_path: Path):
+        (tmp_path / "sp.md").write_text("prompt")
+        task_file = _write_task_with_agent(
+            tmp_path, {"type": "claude-code", "system_prompt": "inline", "system_prompt_file": "sp.md"}
+        )
+
+        with pytest.raises(ValueError, match="Only one of"):
+            load_task(task_file)
+
+    def test_neither_prompt_field_leaves_defaults(self, tmp_path: Path):
+        task_file = _write_task_with_agent(tmp_path, {"type": "claude-code"})
+
+        task, _ = load_task(task_file)
+
+        assert isinstance(task.agent, ClaudeCodeAgentConfig)
+        assert task.agent.system_prompt is None
+        assert task.agent.system_prompt_mode == "append"
+
+    def test_missing_prompt_file_names_the_path(self, tmp_path: Path):
+        task_file = _write_task_with_agent(tmp_path, {"type": "claude-code", "system_prompt_file": "nope.md"})
+
+        with pytest.raises(ValueError, match="system_prompt_file not found"):
+            load_task(task_file)
 
 
 def _make_task(agent: AgentConfig | None = None, template_sources: list | None = None) -> TaskDefinition:

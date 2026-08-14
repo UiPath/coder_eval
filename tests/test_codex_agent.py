@@ -125,6 +125,22 @@ class TestSandboxAlwaysFullAccess:
         assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
 
 
+class TestSystemPrompt:
+    """system_prompt travels as developer_instructions — injected on top of Codex's
+    base prompt, mirroring the append-only semantics of the other agents."""
+
+    def test_system_prompt_forwarded_as_developer_instructions(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, system_prompt="You are a coding agent."))
+
+        assert agent._build_thread_options()["developer_instructions"] == "You are a coding agent."
+
+    def test_no_system_prompt_omits_developer_instructions(self):
+        """No system_prompt -> the key is absent, leaving the SDK default untouched."""
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+
+        assert "developer_instructions" not in agent._build_thread_options()
+
+
 class TestCodexEnvironmentConfiguration:
     """Test _build_codex_env: only CODEX_API_KEY travels via env."""
 
@@ -315,10 +331,12 @@ class TestCustomProviderRouting:
 class TestCodexEnvironmentInfo:
     """get_environment_info surfaces resolved custom-endpoint routing for run artifacts."""
 
-    def test_no_base_url_emits_nothing(self, monkeypatch):
+    def test_no_base_url_emits_only_prompt_semantics(self, monkeypatch):
+        """Without a custom endpoint, only the cross-agent system-prompt marker is
+        emitted (Codex appends system_prompt as developer_instructions)."""
         monkeypatch.delenv("CODEX_BASE_URL", raising=False)
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
-        assert agent.get_environment_info() == {}
+        assert agent.get_environment_info() == {"system_prompt_semantics": "append"}
 
     def test_azure_routing_recorded(self, monkeypatch):
         """Host (not full URL), wire_api, api-version, and the deployment-name marker
@@ -329,6 +347,7 @@ class TestCodexEnvironmentInfo:
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="my-gpt5-deployment"))
         info = agent.get_environment_info()
         assert info == {
+            "system_prompt_semantics": "append",
             "codex_base_url_host": "my-res.openai.azure.com",
             "codex_wire_api": "responses",
             "codex_api_version": "2025-04-01-preview",

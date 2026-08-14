@@ -136,6 +136,11 @@ fair game: `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`,
 `plugins`, `system_prompt` / `system_prompt_file`, `setting_sources`,
 `claude_settings`, `sdk_options`.
 
+> **`system_prompt_mode` is a poor A/B lever.** A `replace` arm sends no default
+> Claude Code prompt *at all*, so the delta measures the missing behavioral guidance
+> (tool-call batching, conciseness), not your prompt text. To A/B prompt *content*,
+> vary `system_prompt` and leave both arms on `append`.
+
 > **Path-resolution gotcha.** Relative file paths in variant config resolve
 > against _different_ base directories depending on the field:
 >

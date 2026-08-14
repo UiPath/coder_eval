@@ -33,6 +33,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -664,6 +665,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
 
+    # Codex appends system_prompt as developer_instructions on top of its base
+    # prompt. Runs from before this marker existed silently DROPPED the field —
+    # dashboards must not pool system_prompt-setting tasks across that boundary.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+
     def __init__(
         self,
         config: CodexAgentConfig,
@@ -977,17 +983,21 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Codex routing so runs are auditable/comparable.
 
-        Only emits when a custom endpoint is configured (CODEX_BASE_URL). On a
-        custom endpoint the model is an operator-chosen alias (a deployment name
-        on Azure), so two operators' ``gpt-5-codex`` deployments are otherwise
-        indistinguishable in run artifacts. The host (not the full URL) is
-        recorded to avoid leaking any embedded credentials; the API key is never
-        recorded.
+        Always emits ``system_prompt_semantics`` (from the base). The routing keys
+        (``codex_base_url_host`` / ``codex_wire_api`` / ``codex_api_version`` /
+        ``codex_model_is_deployment``) are added only when a custom endpoint is
+        configured (CODEX_BASE_URL): on a custom endpoint the model is an
+        operator-chosen alias (a deployment name on Azure), so two operators'
+        ``gpt-5-codex`` deployments are otherwise indistinguishable in run
+        artifacts. The host (not the full URL) is recorded to avoid leaking any
+        embedded credentials; the API key is never recorded.
         """
+        info: dict[str, Any] = dict(super().get_environment_info())
         base_url = self._resolve_base_url()
         if not base_url:
-            return {}
+            return info
         return {
+            **info,
             "codex_base_url_host": urlparse(base_url).hostname or "",
             "codex_wire_api": _CODEX_WIRE_API,
             "codex_api_version": self._resolve_api_version() or "",
@@ -1315,6 +1325,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if effective_model:
             options["model"] = effective_model
             self._log.debug(f"Codex model pinned to {effective_model}")
+
+        # system_prompt maps to developer_instructions: injected ON TOP of Codex's
+        # base prompt, matching the append-only contract of the shared config field
+        # (Claude Code appends via the claude_code preset; Antigravity via
+        # TemplatedSystemInstructions). base_instructions (full replacement of the
+        # base prompt) is deliberately not exposed.
+        if self.config.system_prompt is not None:
+            options["developer_instructions"] = self.config.system_prompt
 
         permission_mode = self.config.permission_mode.value
         approval_mode_str = _CODEX_APPROVAL_MODE
