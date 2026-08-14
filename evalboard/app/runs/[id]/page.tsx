@@ -9,6 +9,8 @@ import {
     readRunTasks,
 } from "@/lib/runs";
 import { readRunReviewIndex, indexByTask, tagCountsForRun } from "@/lib/reviews";
+import { sourceById } from "@/lib/sources";
+import { scalarParam, withSource } from "@/app/_lib/source-param";
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
 import { RefreshButton } from "./refresh-button";
@@ -21,20 +23,25 @@ export const dynamic = "force-dynamic";
 
 export default async function RunPage({
     params,
+    searchParams,
 }: {
     params: Promise<{ id: string }>;
+    searchParams: Promise<{ src?: string | string[] }>;
 }) {
     const { id } = await params;
+    // Which container this run lives in. Unknown/absent coerces to the skills
+    // nightly, so every URL that predates the Scribe tab keeps resolving as-is.
+    const source = sourceById(scalarParam((await searchParams).src));
     const [summary, tasks, activation, analysis, reviewIndex, meta] =
         await Promise.all([
-            readRunSummary(id),
-            readRunTasks(id),
+            readRunSummary(id, source),
+            readRunTasks(id, source),
             // Nested activation sub-run rollup (null when the run has no
             // activation suite); drives the clickable activation metric card.
-            readActivationScore(id),
-            readRunAnalysis(id),
-            readRunReviewIndex(id),
-            readRunMeta(id),
+            readActivationScore(id, source),
+            readRunAnalysis(id, source),
+            readRunReviewIndex(id, source),
+            readRunMeta(id, source),
         ]);
     if (!summary || !tasks) notFound();
     // Mature-skipped tasks weren't executed this run, so they have no detail page
@@ -58,6 +65,8 @@ export default async function RunPage({
                 ),
             ],
             id,
+            undefined,
+            source,
         );
     } catch (err) {
         console.error(`findMatureSourceRuns failed for run ${id}:`, err);
@@ -83,9 +92,12 @@ export default async function RunPage({
                         OSS edition has no blob backend). See lib/edition.ts. */}
                     {isInternal && (
                         <div className="ml-auto flex items-center gap-2">
-                            <RefreshButton runId={id} />
+                            <RefreshButton runId={id} sourceId={source.id} />
                             <a
-                                href={`/api/download?run=${encodeURIComponent(id)}`}
+                                href={withSource(
+                                    `/api/download?run=${encodeURIComponent(id)}`,
+                                    source.id,
+                                )}
                                 className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
                                 download
                             >
@@ -128,6 +140,7 @@ export default async function RunPage({
                     reviewTagCounts={tagCounts}
                     matureSourceRuns={matureSourceRuns}
                     isInternal={isInternal}
+                    sourceId={source.id}
                 />
             </Suspense>
         </div>

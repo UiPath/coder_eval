@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { ActivationScore } from "@/lib/runs";
+import { withSource } from "@/app/_lib/source-param";
 
 function pct(v: number): string {
     return `${(v * 100).toFixed(0)}%`;
@@ -13,13 +14,15 @@ function pct(v: number): string {
 export function ActivationCard({
     runId,
     activation,
+    sourceId,
 }: {
     runId: string;
     activation: ActivationScore;
+    sourceId: string;
 }) {
     return (
         <Link
-            href={`/runs/${runId}/activation`}
+            href={withSource(`/runs/${runId}/activation`, sourceId)}
             className="block bg-white border border-gray-200 rounded-lg p-4 hover:border-studio-blue hover:bg-gray-50 transition-colors"
         >
             <div className="text-xs text-gray-500 uppercase tracking-wide">

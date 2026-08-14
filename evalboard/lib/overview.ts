@@ -12,6 +12,7 @@ import {
     type RunOverviewTask,
 } from "./runs";
 import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./reviews";
+import { DEFAULT_SOURCE, type Source } from "./sources";
 import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
@@ -201,7 +202,10 @@ export interface PerRun {
     title?: string | null;
 }
 
-async function loadPerRunForId(id: string): Promise<PerRun> {
+async function loadPerRunForId(
+    id: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<PerRun> {
     // readRunOverview / readRunReviewIndex swallow 404s and JSON parse errors,
     // but ensureRunSummary (called underneath) re-throws transient auth / IMDS /
     // 5xx errors. A single bad run must not tank the whole page — downgrade to
@@ -212,12 +216,15 @@ async function loadPerRunForId(id: string): Promise<PerRun> {
     let meta: RunMeta | null = null;
     try {
         [overview, reviewIndex, meta] = await Promise.all([
-            readRunOverview(id),
-            readRunReviewIndex(id),
-            readRunMeta(id),
+            readRunOverview(id, source),
+            readRunReviewIndex(id, source),
+            readRunMeta(id, source),
         ]);
     } catch (err) {
-        console.error(`[evalboard] loadPerRunForId(${id}) failed:`, err);
+        console.error(
+            `[evalboard] loadPerRunForId(${source.id}/${id}) failed:`,
+            err,
+        );
         return {
             id,
             overview: null,
@@ -264,13 +271,37 @@ async function loadPerRunForId(id: string): Promise<PerRun> {
 // run id keeps every entry cacheable and lets entries be reused across all
 // windows + the trends page. The cross-run aggregation downstream is cheap
 // in-memory work, so leaving it uncached costs nothing.
-const cachedLoadPerRun = unstable_cache(loadPerRunForId, ["evalboard-per-run"], {
-    revalidate: 300,
-});
+//
+// One cached loader per source, with `source.id` in the key parts. Run ids are
+// only unique WITHIN a container — both suites name runs `YYYY-MM-DD_HH-MM-SS`,
+// so a source-blind key would let a Scribe run and a skills run with the same
+// id serve each other's projection.
+type PerRunLoader = (id: string) => Promise<PerRun>;
 
-async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
-    const ids = await listRunIdsInWindow(window);
-    return mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+const perRunLoaders = new Map<string, PerRunLoader>();
+
+function cachedLoadPerRunFor(source: Source): PerRunLoader {
+    const existing = perRunLoaders.get(source.id);
+    if (existing) return existing;
+    const loader = unstable_cache(
+        (id: string) => loadPerRunForId(id, source),
+        ["evalboard-per-run", source.id],
+        { revalidate: 300 },
+    );
+    perRunLoaders.set(source.id, loader);
+    return loader;
+}
+
+async function loadWindowDataInner(
+    window: Window,
+    source: Source = DEFAULT_SOURCE,
+): Promise<PerRun[]> {
+    const ids = await listRunIdsInWindow(window, source);
+    return mapWithConcurrency(
+        ids,
+        FETCH_CONCURRENCY,
+        cachedLoadPerRunFor(source),
+    );
 }
 
 // Fetch the N most recent runs in PerRun shape. Recency-based (fixed count)
@@ -281,23 +312,32 @@ async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
 export function loadRecentRuns(
     limit: number,
     harness?: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<PerRun[]> {
-    return loadRecentRunsInner(limit, harness);
+    return loadRecentRunsInner(limit, harness, source);
 }
 
 async function loadRecentRunsInner(
     limit: number,
     harness?: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<PerRun[]> {
     // Trends is the daily-cadence view: only pipeline runs belong here. Prune
     // to date-shaped ids BEFORE slicing (cheap, no IO) so ad-hoc runs — whose
     // ids sort lexically above every `2026-…` daily id and would otherwise
     // crowd out the real "recent N" — never occupy a slot.
-    const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) != null);
+    const ids = (await listRunIds(source)).filter(
+        (id) => parseRunIdDate(id) != null,
+    );
     const matchesHarness = harness
         ? (r: PerRun) => normalizeHarness(r.overview?.harness) === harness
         : undefined;
-    return collectPipelineRuns(ids, limit, cachedLoadPerRun, matchesHarness);
+    return collectPipelineRuns(
+        ids,
+        limit,
+        cachedLoadPerRunFor(source),
+        matchesHarness,
+    );
 }
 
 // How many recent runs to scan when discovering which harnesses are active.
@@ -306,8 +346,14 @@ async function loadRecentRunsInner(
 // "delegate" shows up on its own).
 const HARNESS_DISCOVERY_COUNT = 12;
 
-async function listRecentHarnessesInner(): Promise<string[]> {
-    const perRun = await loadRecentRuns(HARNESS_DISCOVERY_COUNT);
+async function listRecentHarnessesInner(
+    source: Source = DEFAULT_SOURCE,
+): Promise<string[]> {
+    const perRun = await loadRecentRuns(
+        HARNESS_DISCOVERY_COUNT,
+        undefined,
+        source,
+    );
     const seen = new Set<string>();
     for (const r of perRun) {
         if (r.overview) seen.add(normalizeHarness(r.overview.harness));
@@ -317,13 +363,27 @@ async function listRecentHarnessesInner(): Promise<string[]> {
     return ordered.length > 0 ? ordered : [DEFAULT_HARNESS];
 }
 
+// One cached discovery per source, with `source.id` in the key parts — each
+// source has its own set of active harnesses, and the ids they're discovered
+// from collide across containers.
+const recentHarnessLoaders = new Map<string, () => Promise<string[]>>();
+
 // The harnesses present in recent runs, ordered for the switcher. Cached (and
 // shares the per-run cache with the aggregates), revalidated every 5 min.
-export const listRecentHarnesses = unstable_cache(
-    listRecentHarnessesInner,
-    ["recent-harnesses-v1"],
-    { revalidate: 300 },
-);
+export function listRecentHarnesses(
+    source: Source = DEFAULT_SOURCE,
+): Promise<string[]> {
+    let loader = recentHarnessLoaders.get(source.id);
+    if (!loader) {
+        loader = unstable_cache(
+            () => listRecentHarnessesInner(source),
+            ["recent-harnesses-v1", source.id],
+            { revalidate: 300 },
+        );
+        recentHarnessLoaders.set(source.id, loader);
+    }
+    return loader();
+}
 
 // A loaded run occupies a window slot only when it's usable downstream:
 // pipeline (non-adhoc) AND has a readable overview with at least one task.
@@ -511,10 +571,13 @@ function aggregateTagCounts(perRun: PerRun[]): {
 
 
 // Per-window assembly from the per-run cache. The expensive blob reads are
-// memoized per run inside cachedLoadPerRun; gathering them for a window is
+// memoized per run inside cachedLoadPerRunFor; gathering them for a window is
 // cheap, so this stays uncached (and avoids the 2MB whole-window cache cap).
-function loadWindowData(window: Window): Promise<PerRun[]> {
-    return loadWindowDataInner(window);
+function loadWindowData(
+    window: Window,
+    source: Source = DEFAULT_SOURCE,
+): Promise<PerRun[]> {
+    return loadWindowDataInner(window, source);
 }
 
 // Repo-provenance half of taskMatchesTag. Defined in the dependency-free
@@ -561,11 +624,12 @@ export async function getOverview(
     // harnesses as separate runs, so an unscoped chart interleaves incomparable
     // pass rates into one zigzag line. null = all harnesses (legacy behavior).
     harness: string | null = null,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<OverviewData> {
     // Ad-hoc runs never feed the daily chart or the tag rails — they're not
     // pipeline cadence. (Non-date-named ones are already pruned upstream by
     // listRunIdsInWindow; this also drops date-named runs flagged adhoc.)
-    const perRun = (await loadWindowData(window)).filter(
+    const perRun = (await loadWindowData(window, source)).filter(
         (r) =>
             !r.adhoc &&
             (harness == null ||
@@ -801,8 +865,9 @@ export async function getTagTaskBreakdown(
     window: Window,
     tag: string,
     harness: string | null = null,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<TagTaskRow[]> {
-    const perRun = (await loadWindowData(window)).filter(
+    const perRun = (await loadWindowData(window, source)).filter(
         (r) =>
             !r.adhoc &&
             (harness == null ||
@@ -937,10 +1002,13 @@ export async function getRunListing(
     // the chart's scope in getOverview, so the tiles, the charts, and the table
     // always describe the same set of runs. null = all harnesses.
     harness: string | null = null,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<RunListing> {
     // Ad-hoc ids aren't date-shaped, so this drops them (they have their own
     // section) without loading anything. Newest-first: ids are timestamps.
-    const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) != null);
+    const ids = (await listRunIds(source)).filter(
+        (id) => parseRunIdDate(id) != null,
+    );
     const needle = q?.trim().toLowerCase() || null;
     const hasFilter = tag != null || needle != null || harness != null;
     const isMatch = hasFilter
@@ -956,7 +1024,7 @@ export async function getRunListing(
     const loaded = await collectPipelineRuns(
         ids,
         limit + 1,
-        cachedLoadPerRun,
+        cachedLoadPerRunFor(source),
         isMatch,
         true,
     );
@@ -1035,8 +1103,17 @@ export function buildAdhocRows(
 // not the id, so we can't window by id and still show the most recent): the
 // ad-hoc set is small by construction (manual uploads only) and per-run reads
 // are memoized for 5 min, so a warm front page pays no extra IO.
-export async function getAdhocRunListing(limit: number | null): Promise<AdhocListing> {
-    const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) == null);
-    const perRun = await mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+export async function getAdhocRunListing(
+    limit: number | null,
+    source: Source = DEFAULT_SOURCE,
+): Promise<AdhocListing> {
+    const ids = (await listRunIds(source)).filter(
+        (id) => parseRunIdDate(id) == null,
+    );
+    const perRun = await mapWithConcurrency(
+        ids,
+        FETCH_CONCURRENCY,
+        cachedLoadPerRunFor(source),
+    );
     return buildAdhocRows(perRun, limit);
 }
