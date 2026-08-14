@@ -553,11 +553,25 @@ insurance against an armed suite, not a fix for anything already there.
 Read `<run>/<variant>/<suite>/suite.json`; its shape is documented in
 `${CLAUDE_PLUGIN_ROOT}/reference/run-layout.md`.
 
-**Group failures into named hypotheses, each pointing at specific rows.** *"It misses
-oblique requests because the description names the operation and never the symptom."*
-*"It fires on 'audit my dependencies' because the description claims audit vocabulary
-generally."* Not "improve the wording" — a hypothesis you cannot phrase as a claim about
-specific rows is not one you can test.
+**Group failures into named hypotheses, each pointing at specific rows.** Not "improve the
+wording" — a hypothesis you cannot phrase as a claim about specific rows is not one you can test.
+The per-track taxonomies below are the categories to phrase them in.
+
+**Read up to ~15 failing rows.** Below that you are generalizing from anecdote and the categories
+you name will not survive the next round; far above it you are re-reading the same category and
+paying attention you could have spent on the edit. Take them across categories rather than the
+first fifteen in the file — five misses and five misfires teach more than fifteen misses.
+
+`failed_samples[]` is **capped**, so on a suite with many failures it will not hand you fifteen —
+take the rest from the per-row `task.json` fallback each track's section below already names. A
+window sized to whatever the cap happened to leave is not a window.
+
+**Where the suite carries a reference solution, read it before proposing.** The task's
+`reference:` block, or a row field the criteria assert on such as the outcome template's
+`expected_snippet` — each says how the row was *meant* to be solved, which expected-vs-observed
+cannot. `${CLAUDE_PLUGIN_ROOT}/reference/proposal-prompt.md` carries the rule and its hazards
+(extract the procedure never the answer; and this is not a relaxation of the test-split blinding,
+which is a different rule). Most activation suites have no reference and this is a no-op there.
 
 ### Execution track
 
@@ -595,6 +609,34 @@ though the list is capped) and, when a row you need is not in it, the per-row
 `<run>/<variant>/<suite_id>/<row_id>/<NN>/task.json`. Pair each failing row with the prompt
 that produced it before drawing any conclusion — a hypothesis about wording that cannot
 name the requests it explains is not testable.
+
+**Four categories, and each implies a different edit** — the same way the execution list above
+does. Sort every failing row into one before writing anything; a row you cannot sort is a row you
+have not understood yet.
+
+- **Missed on vocabulary** — the request's words appear nowhere in the description, so nothing
+  matched. *Edit:* widen the trigger vocabulary to the words a user actually types, not the ones
+  the implementation uses.
+- **Missed because the symptom is unnamed** — the description names the *operation* and never the
+  *symptom* a user arrives with. *"It misses oblique requests because the description names the
+  operation and never the symptom."* *Edit:* name the complaint, not just the capability.
+- **Misfired on an overclaim** — the description claims a whole domain and collects requests it
+  cannot serve. *"It fires on 'audit my dependencies' because the description claims audit
+  vocabulary generally."* *Edit:* narrow the claim, or add the exclusion that bounds it.
+- **Misfired by stealing a sibling's request** — the row belongs to another skill in the same
+  repository, and this description won it. *Edit:* bound this description where the sibling's
+  territory begins — and read the paragraph below first, because that category is only visible
+  when the suite carries sibling rows.
+
+In **this skill's** confusion matrix the first two are false negatives and move **recall**, and the
+last two are false positives and move **precision**. A round that only ever fixes one side is
+trading F1 rather than raising it, which is the trade Stage B's promote-only-when list refuses.
+
+The fourth category is the one where that framing is not the whole story, and the difference is
+what the sibling guardrail is built on: annexation is a false positive *here*, but in the
+**sibling's** matrix the same row is a false negative — so it shows up as the sibling's
+`recall.yes` dropping, which is the number Stage B actually gates. Two matrices, one row, opposite
+signs.
 
 **Sibling-owned rows.** A suite may carry rows whose `expected_skill` names a *different*
 skill in the same repository, with one `skill_triggered` criterion stacked per skill —

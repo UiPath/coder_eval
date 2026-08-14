@@ -1415,6 +1415,153 @@ def _normalized(path: Path) -> str:
     return " ".join(path.read_text(encoding="utf-8").split())
 
 
+def _missing_tokens(text: str, tokens: tuple[tuple[str, str], ...]) -> list[str]:
+    """Every ``(token, why)`` pair whose token is absent from ``text``.
+
+    A module-level function rather than a loop inside its test, for the same reason
+    ``_wrong_skill_count_offenders`` below is one: a self-test can then run the REAL matcher
+    against hand-built text with a guarded sentence removed. A deletion sensor with no self-test
+    can be reverted to a no-op with every test still green — and "edit a shipped file to prove it"
+    is not a test, it is a thing someone did once.
+
+    ``text`` is expected to have come through :func:`_normalized`; these surfaces are hard-wrapped,
+    so a phrase routinely straddles a newline.
+    """
+    return [f"{token!r} — {why}" for token, why in tokens if token not in text]
+
+
+# The proposal shape's load-bearing instructions. At module level so the self-test can feed the
+# same tuple to `_missing_tokens` against mutated text.
+_PROPOSAL_TOKENS: tuple[tuple[str, str], ...] = (
+    (
+        "structurally different",
+        "without it a proposer converges on a reworded version of a theory that already failed",
+    ),
+    (
+        "blinded",
+        "a proposer that has seen the test split turns Stage C into a second train split, "
+        "undetectably — the confirmation still renders and no longer means what it says",
+    ),
+    (
+        "categories of user intent",
+        "the anti-overfit rule; adding the missed row's wording scores well on that row and nowhere else",
+    ),
+    # P3. A reference solution answers a question expected-vs-observed cannot: how the row was
+    # MEANT to be solved. Without the rule the proposer never opens the one artifact that carries
+    # a correct trajectory.
+    (
+        "gold solution",
+        "where a suite ships a reference, the proposer must study HOW the row was meant to be "
+        "solved — expected-vs-observed says only that it failed",
+    ),
+    # And its hazard, which is sharper here than anywhere else in the file: the content is right
+    # there and it is known-correct, which is exactly what makes pasting it tempting.
+    (
+        "never the answer",
+        "the gold-solution rule must say extract the PROCEDURE — writing the reference's content "
+        "into the candidate is memorization with a known-correct string, the worst kind",
+    ),
+    # P6. "Generalize to categories" says what to generalize TO; this says what the edit must then
+    # CONTAIN. A category with no technique cannot be executed.
+    (
+        "strategy specific to the failure's CATEGORY",
+        "each edit must carry a technique for its failure category, not an exhortation — "
+        "'name the symptom vocabulary' is a strategy, 'make it clearer' is a wish",
+    ),
+)
+
+
+# The PROCEDURE half of optimize-skill's instructions, asserted against `SKILL.md` alone.
+# Moving any of these into the method file would leave the step that must act on it silently
+# pointing elsewhere — the failure mode the method/procedure extraction itself could introduce.
+#
+# At module level, like `_PROPOSAL_TOKENS`, so `_missing_tokens` can be run against MUTATED
+# text by a committed self-test. A deletion sensor with no self-test can be reverted to a
+# no-op with every test still green.
+_SKILL_PROCEDURE_TOKENS: tuple[tuple[str, str], ...] = (
+    ("route to the execution track", "Step 2's routing decision"),
+    ("Never run both tracks in one round", "Step 3's one-variable-per-round rule"),
+    ("ONE dataset-backed task", "Step 4's hard constraint on the suite's shape"),
+    ("Invoke the skill from the prompt", "Step 4's activation-held-constant rule"),
+    ("Use the slash form", "Step 4's only way to reach a disable-model-invocation skill"),
+    ("Hand over the template itself", "Step 4's handover to /coder-eval:task"),
+    ("copied unchanged", "Step 8's snapshot must carry the sibling skills"),
+    ("/coder-eval:check-skill", "the sibling this skill hands control back to"),
+    ("round<N>-triage.yaml", "Step 9's per-stage experiment file"),
+    ("round<N>-gate.yaml", "Step 9's per-stage experiment file"),
+    ("round<N>-confirm.yaml", "Step 9's per-stage experiment file"),
+    # Step 10 drives a library rather than doing arithmetic by hand, so it must name the
+    # functions it calls. A paraphrase is a step nobody can execute.
+    ("activation_gate", "Step 10 must name the function that computes the verdict"),
+    ("holm_promote", "the family correction is a separate call; gating alone never promotes"),
+    ("render_markdown", "Step 10 must print the verdict block verbatim rather than paraphrasing it"),
+    ("criterion_index", "the gate keys on criterion POSITION; a description key pairs zero rows"),
+    # The fourth headline. A refusal means NO candidate could have promoted on this suite,
+    # so reporting it as an ordinary negative result is a claim about the candidates the
+    # data cannot support — and acting on it (hand back, add rows) is procedure.
+    (
+        "CANNOT SEPARATE AT THIS SIZE",
+        "Step 10 must name the refusal headline and say it is not a negative result",
+    ),
+    # The control arm had no invocation at all until the execution preflight needed its
+    # output — Step 8 described the snapshot and Step 9's file list never mentioned it.
+    # The "+0 runs" claim is false without a run directory to read.
+    ("round<N>-control.yaml", "Step 9's per-stage experiment file for the control arm"),
+    (
+        "--run-dir <runs>/control",
+        "Step 8 must give the control arm an actual invocation — the execution preflight "
+        "reads that run directory, so a snapshot with no run command buys nothing",
+    ),
+    (
+        "measure_execution_noise_floor",
+        "Step 8 must name the function that prices the execution track",
+    ),
+    # Two fronts, and WHICH one feeds a merge is procedure: the coverage front discards an
+    # arm that owns a single row, which is exactly the ingredient a merge is built from.
+    (
+        "instance-best",
+        "Step 10 must name GEPA's front beside the coverage one, and Step 8 must draw a "
+        "merge candidate's halves from it",
+    ),
+    (
+        "weighted_score",
+        "the execution preflight measures weighted_score, not f1.yes — an F1 floor prices a "
+        "gate that never reads F1 and comes back a meaningless 0.000",
+    ),
+    # The search loop's own experiment file. There is no --variant filter, so a round that
+    # runs one arm needs a file holding one arm — and it is the only file in Step 9's list
+    # that does, which is exactly why it is the one an agent would try to skip.
+    (
+        "round<N>-explore.yaml",
+        "Step 9 must name the search loop's one-variant experiment file; there is no "
+        "--variant filter, so the arm set can only be changed by authoring a file",
+    ),
+    # A search accept is an UNPAIRED train win. Without this distinction a fresh session
+    # reads one as a promotion and recommends text to the user that cleared no gate.
+    (
+        "lineage head",
+        "the search loop's pointer must stay distinct from the incumbent — a search accept "
+        "is an unpaired train win, and only Stage B plus Stage C advance what Step 12 diffs",
+    ),
+    # Step 7's activation taxonomy. The category a proposer cannot name from the counts
+    # alone: `details.confusion` says a false positive happened, and only the SIBLING rows
+    # say the request belonged to another skill. Losing it collapses two opposite edits
+    # (narrow the claim vs. bound the territory) into one "it misfires".
+    (
+        "stealing a sibling's request",
+        "Step 7's activation taxonomy must name the sibling-annexation category — it is "
+        "the misfire whose edit differs from an overclaim's, and the gate guards it",
+    ),
+    # The diagnostic window. `failed_samples[]` is capped, so a reader who does not know
+    # to fall through to the per-row task.json sizes the window to whatever the cap left.
+    (
+        "~15 failing rows",
+        "Step 7 must give the diagnostic window a NUMBER; below it the categories are "
+        "anecdote, and the capped failed_samples[] silently supplies a smaller one",
+    ),
+)
+
+
 def _wrong_skill_count_offenders(surfaces: dict[str, Path], *, count: int, auto: int) -> list[str]:
     """Every place a surface states a skill count other than the real one.
 
@@ -2444,80 +2591,14 @@ class TestPluginArtifacts:
             "one — on weighted_score, after the control arm — and the two claims cannot both stand."
         )
 
-        # The PROCEDURE half, asserted against `SKILL.md` alone. Moving any of these into
-        # the method file would leave the step that must act on it silently pointing
-        # elsewhere — which is the failure mode the extraction itself could introduce.
-        for token, why in (
-            ("route to the execution track", "Step 2's routing decision"),
-            ("Never run both tracks in one round", "Step 3's one-variable-per-round rule"),
-            ("ONE dataset-backed task", "Step 4's hard constraint on the suite's shape"),
-            ("Invoke the skill from the prompt", "Step 4's activation-held-constant rule"),
-            ("Use the slash form", "Step 4's only way to reach a disable-model-invocation skill"),
-            ("Hand over the template itself", "Step 4's handover to /coder-eval:task"),
-            ("copied unchanged", "Step 8's snapshot must carry the sibling skills"),
-            ("/coder-eval:check-skill", "the sibling this skill hands control back to"),
-            ("round<N>-triage.yaml", "Step 9's per-stage experiment file"),
-            ("round<N>-gate.yaml", "Step 9's per-stage experiment file"),
-            ("round<N>-confirm.yaml", "Step 9's per-stage experiment file"),
-            # Step 10 drives a library rather than doing arithmetic by hand, so it must name the
-            # functions it calls. A paraphrase is a step nobody can execute.
-            ("activation_gate", "Step 10 must name the function that computes the verdict"),
-            ("holm_promote", "the family correction is a separate call; gating alone never promotes"),
-            ("render_markdown", "Step 10 must print the verdict block verbatim rather than paraphrasing it"),
-            ("criterion_index", "the gate keys on criterion POSITION; a description key pairs zero rows"),
-            # The fourth headline. A refusal means NO candidate could have promoted on this suite,
-            # so reporting it as an ordinary negative result is a claim about the candidates the
-            # data cannot support — and acting on it (hand back, add rows) is procedure.
-            (
-                "CANNOT SEPARATE AT THIS SIZE",
-                "Step 10 must name the refusal headline and say it is not a negative result",
-            ),
-            # The control arm had no invocation at all until the execution preflight needed its
-            # output — Step 8 described the snapshot and Step 9's file list never mentioned it.
-            # The "+0 runs" claim is false without a run directory to read.
-            ("round<N>-control.yaml", "Step 9's per-stage experiment file for the control arm"),
-            (
-                "--run-dir <runs>/control",
-                "Step 8 must give the control arm an actual invocation — the execution preflight "
-                "reads that run directory, so a snapshot with no run command buys nothing",
-            ),
-            (
-                "measure_execution_noise_floor",
-                "Step 8 must name the function that prices the execution track",
-            ),
-            # Two fronts, and WHICH one feeds a merge is procedure: the coverage front discards an
-            # arm that owns a single row, which is exactly the ingredient a merge is built from.
-            (
-                "instance-best",
-                "Step 10 must name GEPA's front beside the coverage one, and Step 8 must draw a "
-                "merge candidate's halves from it",
-            ),
-            (
-                "weighted_score",
-                "the execution preflight measures weighted_score, not f1.yes — an F1 floor prices a "
-                "gate that never reads F1 and comes back a meaningless 0.000",
-            ),
-            # The search loop's own experiment file. There is no --variant filter, so a round that
-            # runs one arm needs a file holding one arm — and it is the only file in Step 9's list
-            # that does, which is exactly why it is the one an agent would try to skip.
-            (
-                "round<N>-explore.yaml",
-                "Step 9 must name the search loop's one-variant experiment file; there is no "
-                "--variant filter, so the arm set can only be changed by authoring a file",
-            ),
-            # A search accept is an UNPAIRED train win. Without this distinction a fresh session
-            # reads one as a promotion and recommends text to the user that cleared no gate.
-            (
-                "lineage head",
-                "the search loop's pointer must stay distinct from the incumbent — a search accept "
-                "is an unpaired train win, and only Stage B plus Stage C advance what Step 12 diffs",
-            ),
-        ):
-            assert token in skill, (
-                f"optimize-skill's SKILL.md lost {token!r} — {why}. This is PROCEDURE: it must stay "
-                f"in the skill, not move to reference/optimize-method.md"
-            )
-
+        # Every PROCEDURE token, checked through the same matcher the self-test exercises.
+        missing = _missing_tokens(skill, _SKILL_PROCEDURE_TOKENS)
+        assert not missing, (
+            "optimize-skill's SKILL.md lost:\n  "
+            + "\n  ".join(missing)
+            + "\n\nThese are PROCEDURE: they must stay in the skill, not move to "
+            "reference/optimize-method.md"
+        )
         # An extracted reference nothing points at is a deleted reference. Mirrors the
         # reference/task-rubric.md pointer sensor.
         assert "${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md" in skill, (
@@ -2710,26 +2791,41 @@ class TestPluginArtifacts:
         )
 
     def test_proposal_prompt_keeps_its_load_bearing_instructions(self):
-        # This file exists to stop three specific failures, and each is invisible in the output:
-        # a proposer that paraphrases its last attempt, one that has seen the test split, and one
-        # that fixes the row in front of it rather than the category it belongs to.
+        # This file exists to stop specific failures, each invisible in the output: a proposer that
+        # paraphrases its last attempt, one that has seen the test split, one that fixes the row in
+        # front of it rather than the category it belongs to, one that never opens the reference
+        # solution the suite ships, and one whose edits are exhortations rather than techniques.
         text = _normalized(PLUGIN_ROOT / "reference" / "proposal-prompt.md")
-        for token, why in (
-            (
-                "structurally different",
-                "without it a proposer converges on a reworded version of a theory that already failed",
-            ),
-            (
-                "blinded",
-                "a proposer that has seen the test split turns Stage C into a second train split, "
-                "undetectably — the confirmation still renders and no longer means what it says",
-            ),
-            (
-                "categories of user intent",
-                "the anti-overfit rule; adding the missed row's wording scores well on that row and nowhere else",
-            ),
-        ):
-            assert token in text, f"reference/proposal-prompt.md lost {token!r} — {why}"
+        missing = _missing_tokens(text, _PROPOSAL_TOKENS)
+        assert not missing, "reference/proposal-prompt.md lost:\n  " + "\n  ".join(missing)
+
+    @pytest.mark.parametrize(
+        ("surface", "tokens"),
+        [
+            ("reference/proposal-prompt.md", _PROPOSAL_TOKENS),
+            ("skills/optimize-skill/SKILL.md", _SKILL_PROCEDURE_TOKENS),
+        ],
+        ids=["proposal-prompt", "optimize-skill"],
+    )
+    def test_the_token_matcher_catches_a_removed_sentence(self, surface: str, tokens):
+        """The self-test: the REAL matcher, run against text with a guarded sentence removed.
+
+        The committed replacement for "delete it locally and check the test goes red" — which
+        proves nothing about the sensor a month later. **Every** token is exercised, in both
+        registries, so a pair that can never fail is caught here rather than shipping as
+        decoration: that is the failure class this whole file exists to prevent, and a deletion
+        sensor is the easiest place in the repo to introduce one.
+        """
+        text = _normalized(PLUGIN_ROOT / surface)
+        assert _missing_tokens(text, tokens) == []
+
+        for token, _why in tokens:
+            gutted = text.replace(token, "")
+            assert gutted != text, f"{token!r} is not actually present in {surface} — the sensor is decoration"
+            missing = _missing_tokens(gutted, tokens)
+            assert any(repr(token) in entry for entry in missing), (
+                f"removing {token!r} from {surface} did not make the matcher report it"
+            )
 
     def test_optimize_skill_snippet_names_the_public_gate_api(self):
         # A prose sensor cannot see a snippet drifting from the API it calls: the tokens stay

@@ -28,6 +28,31 @@ numbers agree with round one, and the loop spends money confirming a dead end.
 
 **The incumbent, exactly as it stands**, so a candidate is a diff and not a rewrite from memory.
 
+**The gold solution, where the suite carries one — and it is a different input from the two
+above.** The task's `reference:` block holds a reference solution for `reference_comparison`,
+`llm_judge` and `agent_judge`; a row may also carry the shape of a correct answer in a field its
+criteria assert on, as the bundled outcome template does with `expected_snippet`. Hand the
+proposer those, and ask a question the expected-vs-observed pair cannot answer: *how was this row
+meant to be solved?* Expected-vs-observed says the row failed and what came out instead. The
+reference says what a correct result looks like, and the transferable thing is the **procedure**
+that produces it — the step the incumbent never told the agent to take, the ordering it never said
+was load-bearing.
+
+**Giving it to the proposer is legitimate; giving it to the agent would not be.** `reference:` is
+hidden from the agent under test by design and never enters its prompts. The proposer is a
+different actor working between rounds, so the blinding that matters to it is the *test split*
+above — not the reference. Keep those two rules apart: relaxing the wrong one silently destroys
+the confirmation stage.
+
+Extract the procedure, never the answer. Writing the reference's content into the candidate is
+the memorization the rule below forbids, and it is especially tempting here because the content is
+sitting right there and it is *known correct*. A skill that carries one row's answer scores that
+row and teaches nothing.
+
+**Scoped, and a no-op where it does not apply.** Most activation suites carry no reference at all
+— `skill_triggered` grades an event, and there is nothing for a reference to be. Say so and move
+on; its absence is not a blocker and not something to go author.
+
 ## What the proposer is NOT given
 
 **The test rows, and any score computed on them.** The proposer is **blinded** to the test split.
@@ -52,6 +77,18 @@ tempting fix for a missed row is to add its wording. That scores well on the row
 for and nowhere else, which is overfitting in its purest form: the suite improves, the skill does
 not. Ask instead what *kind* of request the miss belongs to, and whether the edit would catch a
 request from that kind that nobody has written down yet.
+
+**A strategy specific to the failure's CATEGORY, carried on each edit.** The rule above says what
+to generalize *to*; this says what the edit must then contain. Classify each failure by the *kind*
+of error it is — the taxonomy in the skill's Step 7 names them per track — and require the edit to
+answer that kind with a technique, not with emphasis. "Name the symptom vocabulary a user would
+actually type" is a strategy; "make the description clearer" is a wish. "Give a worked example of
+the output shape" is a strategy; "be more specific" is a wish. The test is whether a reader could
+tell you had applied it by looking at the diff.
+
+The reason to insist is that a category and a technique fail differently, and only the pair is
+diagnostic: an edit that names its category but not its technique cannot be executed, and one that
+names its technique but not its category cannot be checked against the rows it claims to fix.
 
 **Never reproduce a train row's graded content verbatim.** The failing rows come with the strings
 their criteria assert on, and the cheapest way to make a row pass is to paste one into the
