@@ -3,7 +3,10 @@
 Agent-agnostic. Claude Code engages a skill via an explicit ``Skill`` tool call;
 Codex has no such tool — it auto-discovers skills under ``.agents/skills/`` and
 engages one by reading its ``SKILL.md`` / references off disk via shell. Both
-signals are detected here so the criterion scores identically across agents.
+signals are detected here so the criterion scores identically across agents, and
+both require the signal to have actually DELIVERED the body: a refused, in-flight
+or crash-force-closed ``Skill`` call, and a failed or unresolved
+``Read``/``Glob``/``Grep``, loaded nothing and are not engagement.
 """
 
 from __future__ import annotations
@@ -40,6 +43,14 @@ _NO = "no"
 # lookahead permits overlapping matches such as ``.../skills/skills/<name>/...``.
 _SKILL_PATH_RE = re.compile(r"(?=skills[\\/]+([A-Za-z0-9][A-Za-z0-9_-]*)[\\/]+)")
 
+# File-read tools whose FAILURE means nothing was loaded. ``Bash`` is deliberately absent:
+# ``cat skills/x/SKILL.md | grep foo`` exits 1 after genuinely reading the file, so a status
+# gate there would drop real Codex engagement. Antigravity IS covered — its tool map
+# (``antigravity_agent.py``) renames ``view_file``/``search_directory``/``find_file`` to
+# ``Read``/``Grep``/``Glob``, so its file-read engagement decides at the ToolEnd rather than
+# the ToolStart: one evaluation round later, not a lost signal.
+_FILE_READ_TOOLS = frozenset({"Read", "Glob", "Grep"})
+
 
 def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """All skill names engaged by ONE command, agent-agnostically (any-skill).
@@ -51,7 +62,7 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
       ``parameters['skill']``, optionally namespaced (e.g.
       ``plugin:uipath-agents``); the namespace is stripped via ``.split(":")[-1]``.
     - Codex (and any non-Claude agent): no ``Skill`` tool exists, so a skill is
-      engaged by reading its files off disk via shell. Both the repo layout
+      engaged by successfully reading its files off disk. Both the repo layout
       (``.../skills/<name>/...``) and the sandbox symlink
       (``.agents/skills/<name>/...``) contain the substring ``skills/<name>/``,
       matched here in any string parameter (Bash ``parameters['command']`` or a
@@ -63,31 +74,51 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """
     names: set[str] = set()
     if cmd.tool_name == "Skill":
-        # An ERRORED Skill call is not engagement. The most important case is a skill
-        # carrying ``disable-model-invocation: true``: the tool refuses it outright
-        # ("cannot be used with Skill tool due to disable-model-invocation"), the body is
-        # never loaded, and the agent proceeds on its own prior knowledge. Counting the
-        # attempt would report `yes` for a run in which the skill did not participate at
-        # all — and because the agent still produces plausible output, nothing downstream
-        # looks wrong. Observed on 24 of 24 rows of a real outcome suite, where it made an
-        # entire A/B round measure the model's background knowledge instead of the skill.
-        if cmd.result_status == "error":
+        # ALLOWLIST, not a denylist: engagement counts only on a SUCCESSFUL call. For the
+        # ``Skill`` tool the skill body IS the tool result, so anything other than a
+        # delivered result means nothing loaded. The three excluded states share that:
+        #   - "error"   — refused, typically ``disable-model-invocation: true`` ("cannot be
+        #                 used with Skill tool due to disable-model-invocation"). The agent
+        #                 proceeds on prior knowledge and still produces plausible output,
+        #                 so nothing downstream looks wrong. Observed on 24 of 24 rows of a
+        #                 real outcome suite, where it made an entire A/B round measure the
+        #                 model's background knowledge instead of the skill.
+        #   - None      — still in flight: the early-stop watcher evaluates on
+        #                 ``ToolStartEvent``, before any result exists.
+        #   - "unknown" — force-closed by a turn crash before any result arrived.
+        if cmd.result_status != "success":
             logger.debug(
-                "Skill call for %r errored (%s); not counting it as engagement",
+                "Skill call for %r did not deliver a body (result_status=%r, %s); not counting it as engagement",
                 cmd.parameters.get("skill"),
+                cmd.result_status,
                 (cmd.result_summary or "")[:120],
             )
         else:
             skill = cmd.parameters.get("skill", "")
             if isinstance(skill, str) and skill:
                 names.add(skill.split(":")[-1])
+        # This branch is AUTHORITATIVE for a ``Skill`` call — return rather than fall
+        # through to the file-read scan below, which would otherwise resurrect a call the
+        # gate just excluded the moment one of its own parameters contained a
+        # ``skills/<name>/``-shaped substring. That would restore the false `yes` and break
+        # the monotonicity the latch depends on.
+        return names
     # The file-read signal (Codex, or any agent reading a SKILL.md off disk) is scanned on
-    # every command regardless of tool, since it is a genuine engagement: the body really
-    # did reach the agent. This is deliberately NOT gated on result_status above — a failed
-    # *Skill tool call* loaded nothing, whereas a path reference means the file was opened.
-    for value in cmd.parameters.values():
-        if isinstance(value, str):
-            names.update(_SKILL_PATH_RE.findall(value))
+    # every non-``Skill`` command's string parameters, because the body really did reach
+    # the agent.
+    # It is gated only for the three tools whose failure means nothing was loaded: a failed
+    # or in-flight ``Read``/``Glob``/``Grep`` puts the path in ``parameters`` while loading
+    # nothing (a ``Grep`` that matched nothing exits non-zero and did not deliver a body
+    # either — that is intended, not collateral damage). ``None`` is excluded for these
+    # tools too: counting it would reintroduce the live/frozen divergence one branch over,
+    # with the watcher live-passing on the ToolStart of a ``Read`` that then ENOENTs.
+    # ``"unknown"`` still counts here — Codex reconstructs genuinely-executed calls with
+    # that status — and every other tool, ``Bash`` included, is ungated, because a non-zero
+    # exit does not imply the file was not read.
+    if not (cmd.tool_name in _FILE_READ_TOOLS and cmd.result_status in ("error", None)):
+        for value in cmd.parameters.values():
+            if isinstance(value, str):
+                names.update(_SKILL_PATH_RE.findall(value))
     return names
 
 
@@ -184,9 +215,17 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
           ``"pass"`` for a positive criterion (the expected skill loaded),
           ``"fail"`` for a distractor/negative one (a wrong skill loaded).
 
-        Because engagement is monotonic (a skill, once engaged, stays engaged), a
-        latched verdict never flips, so it agrees with ``_check_impl`` on the
-        frozen trajectory by construction — whether or not the run stopped early.
+        Latching is safe because engagement is computed only from RESOLVED
+        telemetry for the tools whose failure means nothing loaded (a ``Skill``
+        call must have succeeded; a ``Read``/``Glob``/``Grep`` must not have
+        failed or be in flight — see ``_engaged_skill_names``). A command's
+        contribution can therefore only go absent -> present as it resolves,
+        never present -> absent, so a latched verdict never flips and agrees with
+        ``_check_impl`` on the frozen trajectory — whether or not the run stopped
+        early. The cost is that a ``Skill`` engagement decides at its
+        ``ToolEndEvent`` rather than its ``ToolStartEvent``: one evaluation round
+        later, and no stop at all if the turn is cut between the two — in which
+        case the frozen check scores that call ``no`` as well, which is the point.
         A positive criterion can therefore only ever live-``pass`` and a
         distractor/negative one only ever live-``fail``; their *absence* is never
         decidable mid-run (see ``SkillTriggeredCriterion.live_decidable_polarities``

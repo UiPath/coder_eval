@@ -270,13 +270,16 @@ Five requirements specific to this track:
   the body loads; with it present, 24 of 24 rows failed silently.
 
   Do **not** try to route around it by telling the agent to locate and read the `SKILL.md`
-  itself. It is a reasonable idea — a file read counts as engagement and does load the body —
-  but the plugin sits at a host path the sandbox cannot discover. Tested: 0 of 2 rows found
-  the file, both scored zero.
+  itself. It is a reasonable idea — a *successful* file read counts as engagement and does
+  load the body — but the plugin sits at a host path the sandbox cannot discover. Tested: 0
+  of 2 rows found the file, both scored zero. (And a read that fails to find it is not
+  engagement either, so those rows score zero rather than reporting a phantom `yes`.)
 
   **Then confirm engagement is genuinely 1.0 before spending.** And confirm it against a
-  version of `skill_triggered` that ignores errored calls — an older one counted the refused
-  attempt as engagement, which is precisely what hid all of this.
+  version of `skill_triggered` that requires a **successful** call — an older one counted
+  the refused attempt as engagement, which is precisely what hid all of this. The current
+  rule is wider than "ignore errored calls": a call that is still in flight, or was
+  force-closed by a turn crash, delivered no body and does not count either.
 
   **Engagement below 1.0 on every row is the single biggest threat to an outcome round.**
   Three ways it slips, all silent:
@@ -295,8 +298,8 @@ Five requirements specific to this track:
   above all **read the engagement rate before the scores**. A round whose engagement is not
   1.0 on every row is measuring a mixture, and no amount of replicates fixes it.
 
-  One subtlety when you read it: `skill_triggered` counts **reading the skill's `SKILL.md`**
-  as engagement, not only a `Skill` call. A row can therefore report engaged while the
+  One subtlety when you read it: `skill_triggered` counts **successfully reading the skill's
+  `SKILL.md`** as engagement, not only a `Skill` call. A row can therefore report engaged while the
   command it actually issued named a different skill. Treat the criterion as necessary, not
   sufficient, and check the trajectory when a number surprises you.
 

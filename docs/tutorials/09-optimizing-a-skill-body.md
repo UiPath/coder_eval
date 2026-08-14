@@ -238,9 +238,12 @@ In order, because each one makes every number below it meaningless if it fails:
    scored row.
 3. **The Skill calls actually succeeded.** This is the one this round learned, and it is not
    the same as check 2. Grep a `task.json` for the tool's `result_status`; an errored call
-   means the body never loaded, whatever the criterion says. On an older criterion that
-   distinction was invisible, so it is worth confirming directly the first time you run a
-   suite:
+   means the body never loaded, whatever the criterion says. The criterion now requires
+   `success` for a `Skill` call to count as engagement — so on a current coder-eval this grep
+   *confirms* what check 2 already enforces rather than working around it, and it is what
+   tells you **why** a row reports `no` (refused, still in flight, or crash-force-closed to
+   `unknown`). On an older criterion the distinction was invisible, which is what hid the
+   whole failure here:
 
    ```bash
    jq -r '.iterations[].commands[] | select(.tool_name=="Skill")

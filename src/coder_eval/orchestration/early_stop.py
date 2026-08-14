@@ -415,12 +415,17 @@ class EarlyStopWatcher:
         the FIRST ``AgentStartEvent`` only (a retry's second AgentStart does not
         reset it).
 
-        The decision is evaluated on the tool *call* (``ToolStartEvent``): for an
-        observable criterion the verdict is fully determined by the call's inputs,
-        so latching here lets the agent's post-dispatch ``should_stop`` poll break
-        the loop before a cut-short turn can strip the result. The call is not in
-        the collector yet (it reduces commands from ``ToolEndEvent``), so it is
-        passed to ``_evaluate_impl`` as the in-flight command, reported at
+        The decision is evaluated on the tool *call* (``ToolStartEvent``), which
+        lets the agent's post-dispatch ``should_stop`` poll break the loop before a
+        cut-short turn can strip the result. Whether a given criterion can actually
+        decide there is **per-criterion, not global**: ``command_executed``'s
+        verdict is fully determined by the call's inputs, whereas
+        ``skill_triggered``'s is not — for the ``Skill`` tool the body is delivered
+        AS the result, so an in-flight call has engaged nothing and that criterion
+        deliberately stays undecided until its ``ToolEndEvent``. A new live
+        criterion must state which seam its verdict is decidable at. The call is
+        not in the collector yet (it reduces commands from ``ToolEndEvent``), so it
+        is passed to ``_evaluate_impl`` as the in-flight command, reported at
         ``tool_call_index + 1`` (it has no ``ToolEndEvent`` to count yet). The
         matching ``ToolEndEvent`` still evaluates, which covers a verdict that only
         becomes decidable once the result is known and is a no-op once a call has

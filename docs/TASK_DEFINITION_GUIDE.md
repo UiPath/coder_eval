@@ -1272,9 +1272,11 @@ Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, 
 
 ### `skill_triggered`
 
-Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` **and which succeeded** (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
+Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` **and which succeeded** (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that **successfully** reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
 
-> **An errored `Skill` call is not engagement**, and the distinction matters more than it sounds. The common cause is a skill carrying `disable-model-invocation: true`: the tool refuses the call outright (`cannot be used with Skill tool due to disable-model-invocation`), so the skill's body never loads and the agent continues on its own background knowledge — producing output plausible enough that nothing downstream looks wrong. Counting the attempt would report `yes` for a run the skill took no part in. The file-read signal is deliberately *not* gated this way: a refused call loaded nothing, whereas a path reference means the `SKILL.md` was actually opened.
+> **Only a successful `Skill` call is engagement**, and the distinction matters more than it sounds. The common cause of a failed one is a skill carrying `disable-model-invocation: true`: the tool refuses the call outright (`cannot be used with Skill tool due to disable-model-invocation`), so the skill's body never loads and the agent continues on its own background knowledge — producing output plausible enough that nothing downstream looks wrong. Counting the attempt would report `yes` for a run the skill took no part in. The same reasoning excludes a call that is still in flight or was force-closed by a turn crash: for the `Skill` tool the body IS the tool result, so anything short of a delivered result loaded nothing.
+>
+> The file-read signal is gated too, but only where a failure proves nothing was read: a `Read`, `Glob` or `Grep` that errored (or has not resolved yet) names the path in its parameters while loading nothing, so it does not count. `Bash` is deliberately left ungated — `cat skills/x/SKILL.md | grep foo` exits non-zero *after* genuinely reading the file, which is exactly how an agent with no `Skill` tool engages a skill.
 
 Observed label is `"yes"` when either signal is found, else `"no"`. Expected label is `"yes"` iff `expected_skill == skill_name`. **Binary scoring:** `1.0` when observed matches expected, else `0.0`.
 
@@ -1290,7 +1292,7 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `skill_name` | *required* | The skill to detect — a **successful** `Skill` call whose `skill` parameter matches, or a file read under `skills/<skill_name>/` |
+| `skill_name` | *required* | The skill to detect — a **successful** `Skill` call whose `skill` parameter matches, or a **successful** file read under `skills/<skill_name>/` |
 | `expected_skill` | *required* | The row's expected skill (after `${row.*}` substitution); empty string `""` for negative rows where the skill should **not** fire |
 
 **Requires agent telemetry.** This criterion reads `turn_records`, so it only works against a real agent run (not a static check). With no turn records it reports `score=0.0` and an `error`.

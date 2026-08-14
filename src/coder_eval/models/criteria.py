@@ -1172,9 +1172,14 @@ class SkillTriggeredCriterion(LiveSuccessCriterion):
     """Binary classifier: did the agent engage the target skill during the run?
 
     Agent-agnostic. Observed label is ``"yes"`` when ``turn_records`` show the
-    skill engaged under ``skill_name`` — Claude via an explicit ``Skill`` tool
-    call, or any agent without that tool (e.g. Codex) by reading the skill's
-    files off disk (a command parameter contains ``skills/<skill_name>/``).
+    skill engaged under ``skill_name`` — Claude via a **successful** ``Skill``
+    tool call (the body is delivered AS the tool result, so a refused, in-flight
+    or crash-force-closed call loaded nothing), or any agent without that tool
+    (e.g. Codex) by reading the skill's files off disk (a command parameter
+    contains ``skills/<skill_name>/``). A ``Read``/``Glob``/``Grep`` that failed
+    or has not resolved does not count — the path is in its parameters, but
+    nothing was loaded; ``Bash`` stays ungated, since ``cat … | grep`` exits
+    non-zero after genuinely reading the file.
     Otherwise ``"no"``. Expected label is ``"yes"`` iff ``expected_skill == skill_name``.
 
     Stack one criterion per skill against a single dataset labeled with
@@ -1201,7 +1206,10 @@ class SkillTriggeredCriterion(LiveSuccessCriterion):
         description="The row's expected skill (after substitution); empty string '' for negatives.",
     )
     skill_name: str = Field(
-        description="Only count Skill invocations whose 'skill' parameter matches this name.",
+        description=(
+            "Only count SUCCESSFUL Skill invocations whose 'skill' parameter matches this name "
+            "(or a successful file read under skills/<name>/)."
+        ),
     )
 
     def live_decidable_polarities(self) -> frozenset[LivePolarity]:
