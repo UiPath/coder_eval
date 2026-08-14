@@ -11,7 +11,7 @@ from typing import Any, ClassVar, NoReturn, Protocol
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
 from .models import AgentState as AgentState
-from .models import BaseAgentConfig, TurnRecord
+from .models import BaseAgentConfig, SystemPromptSemantics, TurnRecord
 from .streaming.callbacks import StreamCallback
 from .streaming.collector import EventCollector
 from .streaming.events import AgentEndStatus
@@ -85,6 +85,16 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     # ``cost_log_tags`` to agents that set this True, else a route-driven kwarg would
     # crash every agent (NoOp/Codex/Antigravity/plugins) whose ``__init__`` lacks it.
     supports_cost_log_tags: ClassVar[bool] = False
+
+    # How this agent combines a configured ``system_prompt`` with its own default
+    # prompt, recorded per run as ``environment_info.system_prompt_semantics``.
+    # Declared on the base (not only on the agents that implement a regime) so the
+    # marker is present on EVERY run: dashboards can then read "absent" as one thing
+    # only — a run from before the marker existed — instead of conflating it with a
+    # plugin agent that never declared. Agents whose regime is fixed set this
+    # ClassVar; an agent whose regime depends on its config (Claude Code) overrides
+    # ``get_environment_info`` and emits the resolved value instead.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "unknown"
 
     def _begin_turn(self) -> None:
         """Mark the start of a ``communicate()`` turn: reset the pending slot and
@@ -330,9 +340,14 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         Lets an agent surface non-default endpoint/model routing (e.g. a custom
         base URL or wire protocol) so runs are auditable and comparable across
         operators. The orchestrator merges this into ``environment_info`` after
-        the agent starts. Default: nothing to add.
+        the agent starts.
+
+        The base emits ``system_prompt_semantics`` (from the ClassVar of the same
+        name) so every agent — including out-of-tree SPI agents — records the
+        regime. Overrides should spread ``super().get_environment_info()`` rather
+        than returning a bare dict, or that guarantee is lost for that agent.
 
         Returns:
-            A flat dict of JSON-serializable keys to merge; empty by default.
+            A flat dict of JSON-serializable keys to merge.
         """
-        return {}
+        return {"system_prompt_semantics": self.system_prompt_semantics}

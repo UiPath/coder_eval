@@ -1,12 +1,13 @@
 """Tests for the agent implementations."""
 
+import logging
 import tempfile
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from claude_agent_sdk import ProcessError
+from claude_agent_sdk import ClaudeAgentOptions, ProcessError
 
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
@@ -181,11 +182,11 @@ async def _capture_sdk_options(
     *,
     env_path_prepend: list[str] | None = None,
     max_turns: int | None = None,
-) -> "list":
+) -> list[ClaudeAgentOptions]:
     """Run one communicate() turn with a mocked query() and return captured options list."""
     import tempfile
 
-    captured_options: list = []
+    captured_options: list[ClaudeAgentOptions] = []
 
     class ResultMessage:
         def __init__(self, session_id: str = "s-1") -> None:
@@ -375,6 +376,177 @@ async def test_claude_settings_none_default():
     captured_options = await _capture_sdk_options(agent)
 
     assert captured_options[0].settings is None
+
+
+def _transport_command(options: ClaudeAgentOptions) -> list[str]:
+    """Render captured ClaudeAgentOptions into the actual CLI argv.
+
+    The dict-shape assertions pin the values we set; this pins the argv half of
+    the SDK contract (which flag the transport emits) — the surface the original
+    replace-vs-append bug lived on — and survives an SDK TypedDict reshape.
+    Note ``exclude_dynamic_sections`` never reaches argv: the SDK sends it as a
+    control-protocol ``excludeDynamicSections`` initialize field, which this
+    helper cannot see.
+    """
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    options.cli_path = "claude"
+    return SubprocessCLITransport(prompt="x", options=options)._build_command()
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_appends_to_claude_code_preset():
+    """system_prompt keeps the Claude Code default prompt and appends via the SDK preset."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="You are a coding agent.")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "exclude_dynamic_sections": True,
+        "append": "You are a coding agent.",
+    }
+    cmd = _transport_command(captured_options[0])
+    assert "--append-system-prompt" in cmd
+    assert "--system-prompt" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_unset_sends_bare_preset():
+    """No system_prompt -> the bare claude_code preset, which the transport renders
+    as NO system-prompt flag (the CLI default). Passing None instead would emit
+    `--system-prompt \"\"` — an explicit EMPTY prompt that loses the default."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "exclude_dynamic_sections": True,
+    }
+    cmd = _transport_command(captured_options[0])
+    assert "--append-system-prompt" not in cmd
+    assert "--system-prompt" not in cmd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", "   \n\t "])
+async def test_blank_system_prompt_is_treated_as_unset(blank: str):
+    """A blank system_prompt is no prompt at all: it normalizes to None, so the bare
+    preset goes out with no `append` key rather than an empty appended section."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt=blank)
+    assert config.system_prompt is None
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "exclude_dynamic_sections": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_mode_replace_sends_plain_string():
+    """system_prompt_mode='replace' (the judge seam) sends the configured prompt as
+    the ENTIRE system prompt — no preset, no coding-agent persona."""
+    config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE, system_prompt="You are a strict grader.", system_prompt_mode="replace"
+    )
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].system_prompt == "You are a strict grader."
+    cmd = _transport_command(captured_options[0])
+    assert "--system-prompt" in cmd
+    assert "--append-system-prompt" not in cmd
+
+
+def test_environment_info_reports_system_prompt_semantics():
+    """The resolved system_prompt_mode lands in run.json (environment_info) so
+    trend dashboards can segment runs by prompt regime instead of pooling
+    pre-/post-append-semantics scores."""
+    default_agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+    assert default_agent.get_environment_info() == {"system_prompt_semantics": "append"}
+
+    judge_like = ClaudeCodeAgent(
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="grader", system_prompt_mode="replace")
+    )
+    assert judge_like.get_environment_info() == {"system_prompt_semantics": "replace"}
+
+
+def test_every_registered_agent_reports_prompt_semantics():
+    """REPORT_SCHEMA.md says an ABSENT marker means one thing only — a run from
+    before the marker existed. That holds only if every agent emits it, so the
+    base supplies 'unknown' for agents (in-tree NoOp, out-of-tree SPI) that
+    declare no regime."""
+    from coder_eval.agents.noop_agent import NoOpAgent
+
+    noop = NoOpAgent(parse_agent_config(type=AgentKind.NONE))
+    assert noop.get_environment_info()["system_prompt_semantics"] == "unknown"
+
+    class PluginAgent(NoOpAgent):
+        """Stand-in for an out-of-tree agent that overrides the hook."""
+
+        def get_environment_info(self) -> dict[str, object]:
+            return {**super().get_environment_info(), "plugin_endpoint": "example.invalid"}
+
+    assert PluginAgent(parse_agent_config(type=AgentKind.NONE)).get_environment_info() == {
+        "system_prompt_semantics": "unknown",
+        "plugin_endpoint": "example.invalid",
+    }
+
+
+def test_replace_mode_without_prompt_fails_open_and_warns(caplog):
+    """Defense in depth: the config validator rejects this pair at load, so reaching
+    the agent means a mutated or hand-built config. Fail OPEN to append — never send
+    an empty entire system prompt — and warn so the downgrade shows up in task.log
+    rather than only in run.json."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="x", system_prompt_mode="replace")
+    # Bypass validate_assignment the way only a hand-built/mutated config could.
+    object.__setattr__(config, "system_prompt", None)
+    agent = ClaudeCodeAgent(config)
+
+    with caplog.at_level(logging.WARNING):
+        assert agent._resolve_system_prompt() == {
+            "type": "preset",
+            "preset": "claude_code",
+            "exclude_dynamic_sections": True,
+        }
+
+    assert "falling back to the claude_code preset" in caplog.text
+    # Warned once per agent, not once per query: the resolver runs on every turn.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        agent._resolve_system_prompt()
+    assert "falling back to the claude_code preset" not in caplog.text
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_system_prompt_mode_replace_requires_a_non_blank_prompt(blank: str):
+    """The fourth cell of the mode x prompt matrix: 'replace' with no usable prompt is
+    rejected at config validation — otherwise the options builder would fall back to
+    the preset (append regime) while run.json recorded 'replace'. A blank prompt is
+    normalized to None first, so it is rejected here too rather than sending an empty
+    entire system prompt.
+
+    The system_prompt_file cell is covered end-to-end through load_task in
+    tests/test_resolve_task_files.py — asserting construction alone would not exercise
+    the loader's field swap, which is where this combination actually resolves.
+    """
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError, match="system_prompt_mode='replace' requires"):
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_mode="replace")
+
+    with pytest.raises(pydantic.ValidationError, match="system_prompt_mode='replace' requires"):
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt=blank, system_prompt_mode="replace")
 
 
 @pytest.mark.asyncio

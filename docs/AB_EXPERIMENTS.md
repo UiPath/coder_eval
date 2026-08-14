@@ -136,6 +136,11 @@ fair game: `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`,
 `plugins`, `system_prompt` / `system_prompt_file`, `setting_sources`,
 `claude_settings`, `sdk_options`.
 
+> **`system_prompt_mode` is a poor A/B lever.** A `replace` arm sends no default
+> Claude Code prompt *at all*, so the delta measures the missing behavioral guidance
+> (tool-call batching, conciseness), not your prompt text. To A/B prompt *content*,
+> vary `system_prompt` and leave both arms on `append`.
+
 > **Path-resolution gotcha.** Relative file paths in variant config resolve
 > against _different_ base directories depending on the field:
 >
@@ -161,7 +166,7 @@ defaults:
   agent:
     type: claude-code
     permission_mode: bypassPermissions
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 variants:
@@ -205,9 +210,9 @@ description: "Sonnet vs. Opus on the same tasks"
 
 variants:
   - variant_id: sonnet
-    agent: { model: claude-sonnet-4-6 }
+    agent: { model: claude-sonnet-5 }
   - variant_id: opus
-    agent: { model: claude-opus-4-7 }
+    agent: { model: claude-opus-5 }
 ```
 
 ## Recipe: A/B a Prompt

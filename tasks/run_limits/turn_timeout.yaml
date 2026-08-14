@@ -1,0 +1,29 @@
+task_id: run-limits-turn-timeout
+description: >-
+  Parity fixture for run_limits.turn_timeout. The prompt blocks far longer than
+  the timeout allows, so every harness must abort the turn on the watchdog. The
+  contrast with the max_turns fixture is the point: a timeout is a FAILURE with a
+  partial turn captured, while the turn cap is a clean stop.
+
+tags:
+  - run-limits
+  - timeout
+  - parity
+
+initial_prompt: |
+  Run the shell command `sleep 240` and wait for it to finish. When it returns,
+  report its exit code. Do not run it in the background, and do not shorten the
+  sleep.
+
+run_limits:
+  turn_timeout: 45
+  task_timeout: 180
+
+agent:
+  permission_mode: bypassPermissions
+
+success_criteria:
+  - type: file_exists
+    path: "never-created.txt"
+    description: "Never satisfied — the turn is expected to time out first"
+    weight: 1.0

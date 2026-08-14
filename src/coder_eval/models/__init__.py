@@ -14,6 +14,8 @@ from coder_eval.models.agent_config import (
     LocalPluginConfig,
     NoneAgentConfig,
     ResolvedAgentConfig,
+    SystemPromptMode,
+    SystemPromptSemantics,
     parse_agent_config,
 )
 
@@ -170,6 +172,7 @@ from coder_eval.models.sandbox import (
 # Tasks
 from coder_eval.models.tasks import (
     DEFAULT_SIMULATION_STOP_TOKEN,
+    DEFAULT_SIMULATOR_MODEL,
     NORMALIZED_CRITERION_ALIASES,
     REMOVED_CRITERION_TYPES,
     CriteriaCheckTiming,
@@ -216,6 +219,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "LocalPluginConfig",
     "NoneAgentConfig",
     "ResolvedAgentConfig",
+    "SystemPromptMode",
+    "SystemPromptSemantics",
     "parse_agent_config",
     # Enums
     "AgentKind",
@@ -344,6 +349,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     # Tasks
     "TaskDefinition",
     "DEFAULT_SIMULATION_STOP_TOKEN",
+    "DEFAULT_SIMULATOR_MODEL",
     "NORMALIZED_CRITERION_ALIASES",
     "REMOVED_CRITERION_TYPES",
     "CriteriaCheckTiming",
