@@ -385,6 +385,11 @@ hypothesis, phrased as a claim about specific rows: **the description never name
 regression or comparison between runs**, so requests about things getting *worse* find
 nothing to match.
 
+> As in Part 1, every number below was measured **before** the change this part ends with,
+> and for the same reason: the winner is committed, so it is the incumbent now.
+> [What you get running Part 2 today](#what-you-get-running-part-2-today) re-runs Stage A
+> against the committed suite and reports where it stops.
+
 Three candidates, one per hypothesis, each differing from the incumbent only in `analyze`'s
 frontmatter `description`, each a full seven-skill snapshot:
 
@@ -618,6 +623,74 @@ never measuring.
 confirmed in direction on the test split (1.000 vs 0.909), no sibling regression anywhere, and
 precision never off 1.000 in any run of either stage.
 
+### What you get running Part 2 today
+
+Re-running Stage A against the committed suite measures a **different incumbent** — the one
+this page promotes — and the answer it returns is Part 1's stop condition, arriving on the
+skill that used to be the counter-example to it.
+
+The re-run is the same shape as the original Stage A: four arms over the same 17-row train
+split, **68 agent runs**, $3.84 and 12 minutes on Sonnet. Only the arms' contents changed.
+`a-regression` won round 1 and is committed, so it *is* the incumbent; the candidate set is
+therefore fresh — two of round 1's hypotheses re-expressed against the new incumbent, plus
+one the first round had no reason to ask:
+
+| Arm | Hypothesis | chars |
+| --- | --- | --- |
+| `incumbent` | round 1's promoted `a-regression`, as committed at `4c7481c` | 269 |
+| `a-results` | users say "results" and "scores"; the description says "run" (round 1's `b-results`) | 281 |
+| `b-symptom` | lead the trigger clause with symptoms, not the operation (round 1's `c-symptom`) | 242 |
+| `c-compact` | the length is not load-bearing — same trigger tokens, 53 fewer characters | 216 |
+
+```bash
+export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round2-triage.yaml \
+  --split train -D run_limits.stop_early=false
+```
+
+| Arm | analyze recall | precision | F1 | completion | `task` precision |
+| --- | --- | --- | --- | --- | --- |
+| **incumbent** | 1.000 | 1.000 | **1.000** | 1.000 | 0.667 |
+| `c-compact` | 1.000 | 1.000 | **1.000** | 1.000 | 1.000 |
+| `a-results` | 0.750 | 1.000 | 0.857 | 1.000 | 1.000 |
+| `b-symptom` | 0.750 | 1.000 | 0.857 | 1.000 | 0.667 |
+
+`lint-tasks` held recall and precision at 1.000 in every arm, and every arm scored all 17
+rows — so unlike the original Stage A, nothing here was ranked against a shifting
+denominator.
+
+**The round stops at Stage A, and that is the result.** With the incumbent at F1 1.000,
+`min(candidate F1) > max(incumbent F1)` cannot be satisfied by anything: the best a candidate
+can do is tie. Stage B and Stage C were not run. Establishing that cost 68 runs against the
+`(3+1)×17 + 3×(2+1)×17 + 2×11×3` = **287** the full three stages would have — which is what
+Stage A is for.
+
+Three things to read off it:
+
+- **The headroom Part 2 found is closed, measured by the instrument that found it.** Part 1
+  caught `analyze` missing "what regressed" in every run; the promoted description takes all
+  four `analyze` train rows here, in the same suite, at precision 1.000. Part 1's re-run says
+  this from the other side; this says it against three live challengers.
+- **`c-compact` ties at 1.000 with 53 fewer characters, and a tie does not promote.** On F1
+  the gate is indifferent to it. It is still a real finding about a *different* budget: these
+  seven descriptions total 1,577 of the 1,600-character listing cap, and `c-compact` hands 53
+  back. Acting on that means gating on length with F1 held constant — a different comparison
+  with its own replicates, not this one's leftovers. As it stands it is a single run, which
+  is exactly the evidence Step 6 says not to ship on.
+- **One row separates every arm that differs, and it is `an-4`** — *"Compare last week's eval
+  results with this week's and tell me what got worse."* Both losing candidates drop it and
+  nothing else; all sixteen other rows are identical across all four arms. The suite's entire
+  discriminating power sits in one prompt, which is the small-suite cost Step 1 warned about
+  and the reason a 0.857 here should not be read as a candidate being meaningfully worse.
+
+And the page's own instability turned up again, in a form that settles it further. `hard-3`
+engaged `task` in the `incumbent` and `b-symptom` arms and not in `a-results` or `c-compact`
+— arms whose `task` description is **byte-identical**, since only `analyze`'s description
+varies. A difference across arms that cannot differ in the relevant text is not an effect of
+the arm. Two in four, where Part 1 measured two in three, and this time with the confound
+ruled out by construction rather than by repetition.
+
 ---
 
 ## Reference
@@ -629,7 +702,7 @@ for `analyze`, above. In summary:
 
 | Stage | What it does | Replicates |
 | --- | --- | --- |
-| **A — triage** | All candidates + incumbent, one invocation, `--split train`. Rank by F1, discard anything at or below the incumbent. Decides nothing. | one run |
+| **A — triage** | All candidates + incumbent, one invocation, `--split train`. Rank by F1, discard anything at or below the incumbent. Promotes nothing on its own — but when every candidate lands at or below, it ends the round there, which against a ceiling incumbent it always will. | one run |
 | **B — gate** | Survivors + incumbent, `--split train`, **three separate `coder-eval run` invocations**. Promote only on `min(candidate) > max(incumbent)`. | three runs |
 | **C — confirm** | Best survivor vs. incumbent only, `--split test --repeats 3`. Read the rendered `## Paired Comparison` block. | `--repeats 3` |
 
@@ -683,6 +756,12 @@ options are to rename the skill, or to measure it somewhere the collision is abs
 - **A ceiling baseline means stop.** `lint-tasks` was perfect, so the loop declined to spend
   224 runs chasing a number the gate makes unreachable. Then it found the real headroom next
   door.
+- **A tie is not a promotion — and a promoted change puts its own skill at that ceiling.**
+  Re-running Part 2's Stage A today measures the description this page shipped: F1 1.000, so
+  the best of three fresh candidates could only match it and the round ended at Stage A for
+  68 runs of the 287 all three stages would have cost. The gate is `>`, not `≥`, exactly so
+  that a coin-flip tie cannot ship a change — including one that is genuinely better on some
+  other axis, as `c-compact` is on length.
 - **Two agreeing runs are not evidence.** The `task` misfire reproduced on both splits and
   still turned out to be 2-in-3 variance. Only replicates told the difference — and it is
   still 2-in-3 today, on a later revision of the suite, which is about as clean a
