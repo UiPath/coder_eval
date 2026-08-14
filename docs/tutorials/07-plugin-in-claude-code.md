@@ -181,7 +181,7 @@ remove it, `/plugin uninstall`.
   experiment variants, and promotes one only when it beats run-to-run noise on rows it was
   never fitted to. It is the expensive one: a baseline plus three stages of agent runs, so
   it states the projected count and asks before each. Walked end to end in
-  [Tutorial 08](08-optimizing-a-skill.md) (description) and
+  [Tutorial 08](08-optimizing-a-skill-description.md) (description) and
   [Tutorial 09](09-optimizing-a-skill-body.md) (body).
 - [Claude Code plugin](../PLUGIN.md) — the reference page: every skill, what ships
   in the plugin, and the activation-budget mechanics in full.

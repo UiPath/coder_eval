@@ -399,6 +399,6 @@ whole method exists to prevent.
 
 ## Next
 
-- [Tutorial 08 — Optimizing a Skill Description](08-optimizing-a-skill.md) — the activation
+- [Tutorial 08 — Optimizing a Skill Description](08-optimizing-a-skill-description.md) — the activation
   track, and another honest stop.
 - [Plugin guide](../PLUGIN.md) — every skill the plugin ships.

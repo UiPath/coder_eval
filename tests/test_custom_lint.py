@@ -1847,7 +1847,7 @@ class TestPluginArtifacts:
             "ci": PLUGIN_ROOT / "skills" / "ci" / "SKILL.md",
             "docs/PLUGIN.md": self.REPO_ROOT / "docs" / "PLUGIN.md",
             "tutorial 07": self.REPO_ROOT / "docs" / "tutorials" / "07-plugin-in-claude-code.md",
-            "tutorial 08": self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md",
+            "tutorial 08": self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill-description.md",
             "tutorial 09": self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md",
         }
         for name, path in surfaces.items():
@@ -2603,7 +2603,9 @@ class TestPluginArtifacts:
         import json
         import re
 
-        page = (self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md").read_text(encoding="utf-8")
+        page = (self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill-description.md").read_text(
+            encoding="utf-8"
+        )
         rows_file = self.REPO_ROOT / "tasks" / "skills" / "lint-tasks-activation-rows.jsonl"
         rows = [json.loads(ln) for ln in rows_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
@@ -2644,7 +2646,7 @@ class TestPluginArtifacts:
         # with one confusion matrix — the per-replicate F1 the activation gate compares
         # would not exist, and the gate would silently compare a number against itself.
         # Now that the page shows real command lines, "simplifying" them is a one-line edit.
-        page = self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md"
+        page = self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill-description.md"
         lines = page.read_text(encoding="utf-8").splitlines()
 
         # Matched on heading TEXT at any level: pinning `###` broke the first time the page
