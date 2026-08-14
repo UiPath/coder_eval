@@ -166,7 +166,7 @@ agent:
     - "Read"
     - "Write"
     - "Bash"
-  model: "claude-sonnet-4-20250514"   # Optional: specific model
+  model: "claude-sonnet-5"            # Optional: specific model
   sdk_options:                        # Optional: Claude Code SDK pass-through
     effort: high                      # any non-framework-managed ClaudeAgentOptions field
 ```
@@ -616,11 +616,11 @@ Experiment variants can add `template_sources` that are **appended after** the t
 variants:
   - variant_id: baseline
     agent:
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-5"
 
   - variant_id: with-context-hint
     agent:
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-5"
     template_sources:
       - type: "starter_files"
         files:
@@ -1153,7 +1153,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
   max_turns: 5
   turn_timeout: 300
   agent:                              # Nested AgentConfig — same shape as task.agent
-    model: "claude-sonnet-4-6"
+    model: "claude-sonnet-5"
     permission_mode: "bypassPermissions"
     allowed_tools: ["Bash", "Read", "Grep", "Glob"]
     sdk_options: {effort: low}        # Optional SDK pass-through (e.g. effort)
@@ -1392,6 +1392,9 @@ simulation:
   # Sampling (variance analysis).
   n_trials: 3                          # Run N independent dialogs per (task, variant).
 
+  # Who plays the simulated user. Pinned, NOT inherited from the run's route.
+  model: anthropic.claude-sonnet-4-6
+
   # Criteria timing.
   check_criteria: every_turn           # One of: end_of_dialog | every_turn | both.
                                        # Required to be 'every_turn' or 'both' when
@@ -1410,8 +1413,9 @@ simulation:
 | `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
 | `n_trials` | `1` | Independent dialog trajectories per (task, variant). |
 | `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
+| `model` | `anthropic.claude-sonnet-4-6` | Model that plays the simulated user. Auto-translated to the run's backend (Bedrock inference profile / bare Anthropic alias), the same way [`llm_judge`](#llm_judge)'s `model` is. |
 
-The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute` — model/temperature/sampling are resolved at the route level (same `-b` flag as the coding agent), so they are not configured on this block.
+The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute`, so temperature and sampling are resolved at the route level (same `-b` flag as the coding agent) and are not configured on this block. The **model is not**: it is pinned by `model` above. Inheriting it from the route meant `BEDROCK_MODEL` decided who the simulated user was, so an A/B varying the subject model silently varied its interlocutor too. Hold `model` fixed across variants for the same reason you hold a judge model fixed — the simulator is part of the measuring instrument, not the thing being measured.
 
 **Semantics:**
 

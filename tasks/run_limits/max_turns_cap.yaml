@@ -1,0 +1,51 @@
+task_id: run-limits-max-turns-cap
+description: >-
+  Parity fixture for run_limits.max_turns. The prompt asks for far more
+  sequential tool calls than the cap allows, so every harness must stop at the
+  cap rather than running the prompt to completion. Run it with --type
+  claude-code / codex / antigravity and compare: the cap must produce a CLEAN
+  stop (max_turns_exhausted, criteria still checked), never a crash.
+
+tags:
+  - run-limits
+  - max-turns
+  - parity
+
+initial_prompt: |
+  Create 12 files in the current directory named step-01.txt through step-12.txt.
+  step-01.txt must contain just its own name. Every later file must contain the
+  contents of the PREVIOUS file, then its own name on a new line — so you have to
+  read step-N before you can write step-N+1.
+
+  Create them ONE AT A TIME. Run a separate shell command for each file. Do not
+  use a loop, do not combine several files into one command, and do not batch
+  multiple tool calls together. Work strictly in order, starting at step-01.txt.
+
+run_limits:
+  # Far below the 12 the prompt asks for, so the cap always decides the ending.
+  max_turns: 4
+  # Generous: this fixture must fail on the cap, never on the clock.
+  turn_timeout: 300
+  task_timeout: 600
+
+agent:
+  permission_mode: bypassPermissions
+
+success_criteria:
+  # The early files prove the agent really was working when the cap cut it off,
+  # which distinguishes "capped" from "never started".
+  - type: file_exists
+    path: "step-01.txt"
+    description: "First file was created before the cap fired"
+    weight: 1.0
+
+  # And this is the half that actually tests the cap. Without it the fixture
+  # passes on a harness that ignores max_turns entirely — the exact bug it exists
+  # to catch — because step-01.txt gets written either way. The chained contents
+  # in the prompt make each step depend on reading the one before it, so no amount
+  # of batching within a single agent-loop turn can reach step 12 inside a cap of
+  # 4; a run that produced the last file therefore ran uncapped.
+  - type: run_command
+    command: "test ! -f step-12.txt"
+    description: "The cap bound the run: the agent never reached the last file"
+    weight: 1.0
