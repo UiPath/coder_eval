@@ -39,9 +39,28 @@ tags: [activation]
 # `skill_name` below stays the BARE name even when a plugin namespaces the skill as
 # `plugin:skill` — the checker strips the namespace before comparing.
 agent:
+  # The discriminator is required for `setting_sources` to be in schema — it is a
+  # claude-code field, not a field on the shared agent base. Running this suite with
+  # `--type codex` therefore fails resolution and reports the task as skipped; a Codex
+  # user should drop both this line and `setting_sources` below.
+  type: "claude-code"
   plugins:
     - type: "local"
       path: "$SKILL_SOURCE_PATH"
+  # The agent must not need the host project's CLAUDE.md or settings — this measures the
+  # skill listing, and injecting a 20 KB project guide into every call is both expensive
+  # and a confound.
+  setting_sources: []
+
+# Activation is decided in the first assistant turn: either the skill is engaged or it is
+# not. Without caps the agent spends turns exploring a sandbox that deliberately holds no
+# eval files, and a row that times out is EXCLUDED from the confusion matrix rather than
+# scored — shrinking the denominator the metrics are computed over (watch `completion_rate`
+# in the rollup). Cap tightly: it buys signal, not just cost.
+run_limits:
+  max_turns: 2
+  turn_timeout: 120
+  task_timeout: 300
 
 dataset:
   paths:

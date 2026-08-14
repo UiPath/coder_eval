@@ -1611,11 +1611,39 @@ class TestPluginArtifacts:
                     f"{criterion.type!r} (available: {sorted(available)})"
                 )
 
+    def test_activation_template_caps_turns_and_isolates(self):
+        # The template preaches both of these and used to ship neither, so a user who copied
+        # it got the opposite of the advice they were reading.
+        #
+        # The cap is about SIGNAL, not only cost: activation is decided in the first
+        # assistant turn, and an uncapped row spends turns exploring a sandbox that
+        # deliberately holds no eval files. A row that times out is EXCLUDED from the
+        # confusion matrix rather than scored, so it never shows up as a bad number — only
+        # as a denominator that quietly shrank.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "activation.yaml")
+        limits = task.run_limits
+        assert limits is not None and limits.max_turns == 2, (
+            "the activation template must cap max_turns at 2, matching the worked example in "
+            "tasks/skills/lint-tasks-activation.yaml — activation is decided in the first "
+            "assistant turn, and an uncapped row erodes the confusion-matrix denominator"
+        )
+        assert limits.turn_timeout == 120 and limits.task_timeout == 300, (
+            "the activation template's timeouts must match the worked example key for key"
+        )
+        assert task.agent is not None and task.agent.setting_sources == [], (
+            "the activation template must set `agent.setting_sources: []`. This suite measures "
+            "the skill LISTING; inheriting the host project's CLAUDE.md injects a large project "
+            "guide into every call — expensive, and a confound on the thing being measured"
+        )
+
     def test_outcome_template_caps_cost(self):
-        # An outcome row is a FULL task run, so the template needs a per-row brake the
-        # activation template does not. An absolute floor, deliberately not a comparison
-        # against activation.yaml: that file ships no `run_limits:` block at all, so there
-        # is nothing to compare against.
+        # An outcome row is a FULL task run, so the template needs a per-row COST brake the
+        # activation template does not. Both templates now carry `run_limits:`, but they cap
+        # for opposite reasons — activation for signal (see the test above), outcome for
+        # spend — so this stays an ABSOLUTE floor rather than a comparison against the other
+        # file, which would encode a relationship that does not exist.
         from coder_eval.orchestration.task_loader import load_task
 
         task, _ = load_task(self.TEMPLATES / "outcome.yaml")
