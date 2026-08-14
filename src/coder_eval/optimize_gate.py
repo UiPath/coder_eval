@@ -522,6 +522,41 @@ def append_regression_rows(path: Path, rows: list[RegressionRow]) -> OptimizeMea
     return updated
 
 
+def regression_check(
+    corpus: list[RegressionRow], arm: ArmRowScores, *, threshold: float = 1.0
+) -> list[tuple[RegressionRow, float | None]]:
+    """Corpus rows this arm did not fully score — the promotions it would quietly undo.
+
+    The corpus is written on every promotion (:func:`append_regression_rows`) and, until this
+    function existed, read by nothing but that writer's own de-duplication. This is the read: a
+    candidate that re-loses a row an earlier promotion was built on is a regression however good
+    its aggregate looks, and an aggregate cannot show it.
+
+    One entry per corpus row that did not clear ``threshold``, in corpus order:
+
+    - ``(row, score)`` when the arm scored it below the bar — a measured loss.
+    - ``(row, None)`` when the arm has no score for it at all. **A hole is reported, never
+      skipped**, the same rule :func:`_dominates` applies to the row vector: not measuring a row is
+      not passing it. The two causes are indistinguishable from the corpus alone — the row errored
+      in this run, or it belongs to the skill's OTHER suite, since the corpus is per skill and a
+      skill may have both an activation and an outcome suite. Check which before reporting it.
+
+    Rows at or above ``threshold`` are absent, so an empty result is the clean answer.
+
+    ``threshold`` defaults to 1.0, which treats any partial score as a loss. That is right for the
+    binary activation criterion the corpus is usually written from; the parameter exists for a
+    fractional execution suite. Note that ``arm.row_scores`` values are means over replicates, so a
+    row that passed 2 of 3 replicates reads 0.667 and is reported at the default — correctly, since
+    a row that became flaky is a row the promotion no longer holds on.
+    """
+    findings: list[tuple[RegressionRow, float | None]] = []
+    for row in corpus:
+        score = arm.row_scores.get(row.row_id)
+        if score is None or score < threshold:
+            findings.append((row, score))
+    return findings
+
+
 def record_round_scores(path: Path, scores: RoundScores) -> OptimizeMeasurements:
     """Append one round's row vectors and Pareto front, replacing an entry for the same round.
 

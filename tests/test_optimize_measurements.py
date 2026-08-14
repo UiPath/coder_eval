@@ -28,6 +28,7 @@ from coder_eval.optimize_gate import (
     noise_floor_mde,
     record_noise_floor,
     record_round_scores,
+    regression_check,
 )
 from tests.test_optimize_gate import SUITE, _eval_result, _write_row
 
@@ -262,6 +263,28 @@ class TestRegressionCorpus:
         before = path.read_bytes()
         append_regression_rows(path, rows)
         assert path.read_bytes() == before
+
+    def test_the_corpus_survives_the_sidecar_and_is_readable_by_the_check(self, tmp_path: Path) -> None:
+        """Write, reload from disk, then READ — the loop the corpus existed without until now.
+
+        The corpus is the one thing in this file that is not reconstructible, so the round trip is
+        asserted against the real JSON rather than against the in-memory return value.
+        """
+        path = _path(tmp_path)
+        append_regression_rows(
+            path,
+            [
+                RegressionRow(row_id="pos-1", promoted_in_round=1, reason="oblique phrasing"),
+                RegressionRow(row_id="pos-2", promoted_in_round=1, reason="symptom vocabulary"),
+            ],
+        )
+        corpus = load_measurements(path).regression_corpus
+        assert [r.reason for r in corpus] == ["oblique phrasing", "symptom vocabulary"]
+
+        arm = ArmRowScores(variant_id="cand-a", row_scores={"pos-1": 1.0})
+        found = regression_check(corpus, arm)
+        # pos-2 is a HOLE on this arm, not a pass — it is what the round trip has to preserve.
+        assert [(row.row_id, row.reason, score) for row, score in found] == [("pos-2", "symptom vocabulary", None)]
 
 
 class TestNoiseFloorReuse:

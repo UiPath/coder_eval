@@ -11,6 +11,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -23,6 +24,7 @@ from coder_eval.models import (
     FinalStatus,
     GuardrailCheck,
     NoiseFloor,
+    RegressionRow,
     TokenUsage,
 )
 from coder_eval.optimize_gate import (
@@ -53,6 +55,7 @@ from coder_eval.optimize_gate import (
     noise_floor_mde,
     pareto_front,
     record_noise_floor,
+    regression_check,
     render_cost_quality,
     render_markdown,
     render_row_matrix,
@@ -809,6 +812,38 @@ def _write_scored_arm(tmp_path: Path, variant: str, per_row: dict[str, list[floa
                 _write_row(run_dir, variant, row_id, _scored_result(row_id, scores[i]))
         run_dirs.append(run_dir)
     return run_dirs
+
+
+class TestRegressionCheck:
+    """The corpus finally has a reader, and a hole is not a pass."""
+
+    _CORPUS: ClassVar[list[RegressionRow]] = [
+        RegressionRow(row_id="pos-1", promoted_in_round=1, reason="oblique phrasing"),
+        RegressionRow(row_id="pos-2", promoted_in_round=1, reason="symptom vocabulary"),
+        RegressionRow(row_id="pos-3", promoted_in_round=2, reason="negated request"),
+    ]
+
+    def test_names_the_lost_row_and_the_hole_but_not_the_kept_one(self) -> None:
+        arm = ArmRowScores(variant_id="cand", row_scores={"pos-1": 1.0, "pos-2": 0.5})
+        found = regression_check(self._CORPUS, arm)
+        assert [(row.row_id, score) for row, score in found] == [("pos-2", 0.5), ("pos-3", None)]
+
+    def test_an_empty_corpus_is_an_empty_result(self) -> None:
+        assert regression_check([], ArmRowScores(variant_id="cand", row_scores={"pos-1": 1.0})) == []
+
+    def test_an_arm_that_scored_nothing_reports_every_row_as_a_hole(self) -> None:
+        found = regression_check(self._CORPUS, ArmRowScores(variant_id="cand"))
+        assert [score for _row, score in found] == [None, None, None]
+
+    def test_the_threshold_reclassifies_a_partial_score(self) -> None:
+        # 2 of 3 replicates reads 0.667: a loss at the binary default, a pass on a fractional suite.
+        arm = ArmRowScores(variant_id="cand", row_scores={r.row_id: 2 / 3 for r in self._CORPUS})
+        assert len(regression_check(self._CORPUS, arm)) == 3
+        assert regression_check(self._CORPUS, arm, threshold=0.6) == []
+
+    def test_results_come_back_in_corpus_order(self) -> None:
+        arm = ArmRowScores(variant_id="cand", row_scores={"pos-2": 0.0, "pos-1": 0.0, "pos-3": 0.0})
+        assert [row.row_id for row, _score in regression_check(self._CORPUS, arm)] == ["pos-1", "pos-2", "pos-3"]
 
 
 class TestArmRowScores:

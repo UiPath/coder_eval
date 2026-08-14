@@ -980,6 +980,39 @@ excluded outright and named as the wiring problem it is.
 Record the matrix and the front in `measurements.json` (Step 11), so a later round can look back
 at which rows a discarded candidate actually won.
 
+#### Check the corpus before shortlisting
+
+The regression corpus is the list of rows an earlier promotion was built on (Step 11 writes it).
+Read it here, against the same `arms` you just printed — **a candidate that re-loses one of those
+rows is a regression however good its aggregate looks**, and an aggregate is exactly what cannot
+show it:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import load_measurements, regression_check
+
+# Defined here rather than reused from Step 6: that snippet is activation-only, so on the
+# execution track the name does not exist in this session.
+sidecar = Path(".optimize-skill/<skill>/measurements.json")
+
+corpus = load_measurements(sidecar).regression_corpus
+if not corpus:
+    print("no regression corpus yet — nothing to check")
+for arm in arms:
+    lost = regression_check(corpus, arm)
+    print(arm.variant_id, "clears the corpus" if not lost else
+          [(row.row_id, row.reason, score) for row, score in lost])
+```
+
+A `None` score is a **hole**, not a loss: the arm has no score for that row. Two causes, and the
+corpus cannot tell them apart — the row errored in this run, or it belongs to this skill's *other*
+suite, since the corpus is per skill. Check which before reporting it. A row scored below 1.0 is a
+measured loss; on a fractional execution suite pass `threshold=` to say what counts as one.
+
+This does not veto anything on its own. It tells you which shortlisted arm to look at first, and
+what to say about it at Step 12 if you promote it anyway.
+
 #### Cost as a second axis of the shortlist — not a second gate
 
 Two candidates at the same score are not the same candidate if one costs twice as much. Print the
@@ -1240,7 +1273,10 @@ activation, `weighted_score` for execution. They are different numbers on the sa
 model and row count, so both live in the sidecar at once and neither replaces the other.
 - **The regression corpus.** On promotion, append the rows that justified it, with why. That is
   what stops a later round from quietly undoing an earlier one: a candidate that re-loses a row
-  a previous promotion was built on is a regression, however good its aggregate looks.
+  a previous promotion was built on is a regression, however good its aggregate looks. **Writing
+  it is half the loop** — the other half is Step 10's `regression_check`, which reads it against
+  the next round's arms. Write a `reason` a later round can act on, because that is the string
+  that comes back beside the lost row.
 
 Each file has one job. Nothing reads `history.json` programmatically, and nothing narrates into
 `measurements.json`.
