@@ -932,6 +932,37 @@ def test_agent_settings_rows_system_prompt_preset_shapes():
     assert rows["System Prompt Mode"] == "replace"
 
 
+def test_agent_settings_rows_prefer_the_recorded_semantics_marker():
+    """The regime comes from run.json's system_prompt_semantics when the run has it,
+    so an append run is visibly an append run instead of being indistinguishable from
+    a pre-marker one. Wire-shape sniffing stays only as the fallback for older runs."""
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk.types import SystemPromptPreset
+
+    from coder_eval.reports import collect_agent_settings_rows
+    from coder_eval.utils import dump_dataclass
+
+    appended = dump_dataclass(
+        ClaudeAgentOptions(
+            system_prompt=SystemPromptPreset(
+                type="preset", preset="claude_code", exclude_dynamic_sections=True, append="Be terse."
+            )
+        )
+    )
+    rows = dict(collect_agent_settings_rows(appended, is_sdk=True, system_prompt_semantics="append"))
+    assert rows["System Prompt Mode"] == "append"
+
+    # An agent that persists a plain string but recorded 'append' (Codex-style
+    # developer_instructions) must not be mislabelled 'replace' by the fallback.
+    plain = dump_dataclass(ClaudeAgentOptions(system_prompt="Be terse."))
+    rows = dict(collect_agent_settings_rows(plain, is_sdk=True, system_prompt_semantics="append"))
+    assert rows["System Prompt Mode"] == "append"
+
+    # Pre-marker run: no marker to read, so the shape is all there is.
+    rows = dict(collect_agent_settings_rows(plain, is_sdk=True))
+    assert rows["System Prompt Mode"] == "replace"
+
+
 def test_generate_markdown_system_prompt_preset_not_dict_repr():
     """End-to-end: a preset-shaped sdk_options.system_prompt renders as prompt text
     in the Markdown report, and a bare preset (no configured prompt) keeps the
