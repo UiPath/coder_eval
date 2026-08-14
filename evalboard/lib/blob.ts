@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import type { ContainerClient } from "@azure/storage-blob";
+import type { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
 
 const ACCOUNT = "coderevaltests";
 
@@ -67,30 +67,62 @@ function isNotFound(err: unknown): boolean {
 // from a single deployment, so this can't be a single module-level client.
 const containerClients = new Map<string, ContainerClient>();
 
+// ...but ONE service client behind them all. getContainerClient is a pure
+// factory off it, so building a fresh BlobServiceClient (and a fresh
+// DefaultAzureCredential) per container would duplicate managed-identity token
+// acquisition for no benefit.
+let servicePromise: Promise<BlobServiceClient> | null = null;
+
 // The Azure SDK is loaded lazily (and lives under optionalDependencies) so
 // local-mode readers — and OSS users who `pnpm install --no-optional` — never
 // pull @azure/*. This only runs in remote mode, where every caller awaits it.
+async function getService(): Promise<BlobServiceClient> {
+    // Memoize the PROMISE, not the resolved client: concurrent first calls
+    // (every source's page can render at once) would otherwise each construct
+    // their own credential before the first one finished.
+    servicePromise ??= (async () => {
+        const { BlobServiceClient } = await import("@azure/storage-blob");
+        const { DefaultAzureCredential } = await import("@azure/identity");
+        const url = `https://${ACCOUNT}.blob.core.windows.net`;
+        return new BlobServiceClient(url, new DefaultAzureCredential());
+    })();
+    return servicePromise;
+}
+
 async function getContainer(container: string): Promise<ContainerClient> {
     const cached = containerClients.get(container);
     if (cached) return cached;
-    const { BlobServiceClient } = await import("@azure/storage-blob");
-    const { DefaultAzureCredential } = await import("@azure/identity");
-    const url = `https://${ACCOUNT}.blob.core.windows.net`;
-    const svc = new BlobServiceClient(url, new DefaultAzureCredential());
+    const svc = await getService();
     const client = svc.getContainerClient(container);
     containerClients.set(container, client);
     return client;
 }
 
+// Remote-only: local mode is resolved by listRunIds in runs.ts, which owns
+// RUNS_DIR and therefore the per-source root. Listing here off the bare
+// LOCAL_RUNS_DIR used to ignore `container` entirely, so /scribe reported the
+// SKILLS tree's run ids under an "aria-runs" label while every read resolved
+// under the -scribe sibling — the exact cross-container leak this module's
+// container threading exists to prevent, just on the local backend.
 export async function listRunIdsRemote(container: string): Promise<string[]> {
-    if (LOCAL_RUNS_DIR) return listRunIdsLocal(LOCAL_RUNS_DIR);
     const c = await getContainer(container);
     const ids: string[] = [];
-    for await (const item of c.listBlobsByHierarchy("/")) {
-        if (item.kind === "prefix") {
-            const id = item.name.replace(/\/$/, "");
-            if (id !== "latest") ids.push(id);
+    try {
+        for await (const item of c.listBlobsByHierarchy("/")) {
+            if (item.kind === "prefix") {
+                const id = item.name.replace(/\/$/, "");
+                if (id !== "latest") ids.push(id);
+            }
         }
+    } catch (err) {
+        // A container that hasn't been created yet 404s here, and with nothing
+        // catching it the page hits the root error boundary — which tells the
+        // viewer "this is usually transient" about a state that is permanent
+        // until someone creates the container. Empty is the honest answer; the
+        // caller's empty state says so. Only 404: auth failures, IMDS problems,
+        // and 5xx must still surface rather than render as "no runs".
+        if (!isNotFound(err)) throw err;
+        return [];
     }
     return ids.sort().reverse();
 }
@@ -98,7 +130,7 @@ export async function listRunIdsRemote(container: string): Promise<string[]> {
 // In local mode, only directories with a run.json count as runs — this drops
 // the `latest` symlink and any half-written run dirs that the eval framework
 // created but never populated.
-async function listRunIdsLocal(root: string): Promise<string[]> {
+export async function listRunIdsLocal(root: string): Promise<string[]> {
     const entries = await fs
         .readdir(root, { withFileTypes: true })
         .catch(() => []);

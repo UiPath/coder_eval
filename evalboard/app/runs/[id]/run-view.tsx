@@ -175,8 +175,12 @@ export function RunView({
     // this client component). Internal-only surfaces fall back to hidden.
     isInternal?: boolean;
     // Container this run came from. Every href built below carries it so a
-    // Scribe run's links don't land on a same-id skills run.
-    sourceId?: string;
+    // Scribe run's links don't land on a same-id skills run. REQUIRED, unlike
+    // the reader-side `source` defaults (which exist for URL back-compat):
+    // omitting it here is silent — withSource returns the href untouched and
+    // the links quietly point at the default source — so let tsc catch it at
+    // the one call site instead.
+    sourceId: string;
 }) {
     const router = useRouter();
     const pathname = usePathname();

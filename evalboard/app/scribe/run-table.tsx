@@ -3,9 +3,14 @@ import { fmtDuration, fmtRunTime, fmtUsd } from "@/lib/format";
 import { passClass } from "@/lib/pass-rate";
 import { type RunListingRow } from "@/lib/overview";
 import { SCRIBE_SOURCE } from "@/lib/sources";
+import { withSource } from "../_lib/source-param";
 import { TableScroll } from "../_components/scroll-table";
 
-function passPct(row: RunListingRow): number | null {
+// Ad-hoc rows carry a title from meta.json; canonical ones don't. One table
+// renders both — the columns are identical and only the run label differs.
+type ScribeRow = RunListingRow & { title?: string | null };
+
+function passPct(row: ScribeRow): number | null {
     if (row.tasksRun === 0) return null;
     return (row.tasksSucceeded / row.tasksRun) * 100;
 }
@@ -14,16 +19,22 @@ export function ScribeRunTable({
     rows,
     totalCandidates,
     showMoreHref,
+    heading = "Runs",
+    note,
+    emptyText = "No runs to show.",
 }: {
-    rows: RunListingRow[];
+    rows: ScribeRow[];
     totalCandidates: number;
     showMoreHref: string | null;
+    heading?: string;
+    note?: string;
+    emptyText?: string;
 }) {
     if (rows.length === 0) {
         return (
             <section className="border border-gray-200 rounded-lg bg-white p-4">
                 <p className="text-sm text-gray-500 py-6 text-center">
-                    No runs to show.
+                    {emptyText}
                 </p>
             </section>
         );
@@ -32,7 +43,14 @@ export function ScribeRunTable({
     return (
         <section className="space-y-2">
             <div className="flex items-baseline justify-between gap-3">
-                <h2 className="text-sm font-semibold text-gray-900">Runs</h2>
+                <div className="flex items-baseline gap-3 flex-wrap">
+                    <h2 className="text-sm font-semibold text-gray-900">
+                        {heading}
+                    </h2>
+                    {note && (
+                        <span className="text-xs text-gray-500">{note}</span>
+                    )}
+                </div>
                 <span className="text-xs text-gray-500 tabular-nums">
                     {rows.length} of {totalCandidates}
                 </span>
@@ -80,12 +98,18 @@ export function ScribeRunTable({
                                             are only unique within a container, so a
                                             source-blind /runs/<id> would resolve this
                                             id against the skills nightly's container
-                                            and could render a different run entirely. */}
+                                            and could render a different run entirely.
+                                            Built with withSource rather than by hand so
+                                            this href is covered by the same helper (and
+                                            the same tests) as every other one. */}
                                         <Link
-                                            href={`/runs/${row.id}?src=${SCRIBE_SOURCE.id}`}
+                                            href={withSource(
+                                                `/runs/${row.id}`,
+                                                SCRIBE_SOURCE.id,
+                                            )}
                                             className="font-mono text-studio-blue hover:underline"
                                         >
-                                            {fmtRunTime(row.id)}
+                                            {row.title ?? fmtRunTime(row.id)}
                                         </Link>
                                     </td>
                                     <td

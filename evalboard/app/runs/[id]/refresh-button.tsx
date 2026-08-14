@@ -12,7 +12,7 @@ export function RefreshButton({
     sourceId,
 }: {
     runId: string;
-    sourceId?: string;
+    sourceId: string;
 }) {
     const router = useRouter();
     const [pending, startTransition] = useTransition();

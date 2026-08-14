@@ -33,7 +33,9 @@ export const SKILLS_SOURCE: Source = {
 };
 
 // The Autopilot (aria/Composer) suite, uploaded by coder_eval_uipath's
-// `eval-runner-autopilot` — see that repo's .azure-pipelines/autopilot-eval-daily.yml.
+// `eval-runner-autopilot`. The pipeline is UiPath.Autopilot.Eval.Manual, defined in
+// that repo at .azure-pipelines/autopilot-eval-daily.yml — the file name predates the
+// pipeline, which is manual-trigger (`trigger: none`), not a nightly.
 // Named "Scribe" after the pipeline's Key Vault (coder-eval-proc-scribe).
 export const SCRIBE_SOURCE: Source = {
     id: "scribe",
@@ -65,9 +67,11 @@ export function sourceById(id: string | null | undefined): Source {
 export function runsDirFor(base: string, source: Source): string {
     if (source.id === DEFAULT_SOURCE.id) return base;
     // Suffix the final segment. Done with string ops rather than path.dirname +
-    // path.join to keep this module client-safe (see the note at the top);
-    // `base` is already an absolute resolved path in every real caller, since
-    // RUNS_DIR is resolved at module load in lib/runs.ts.
+    // path.join to keep this module client-safe (see the note at the top).
+    // `base` need not be absolute: RUNS_DIR resolves the LOCAL_RUNS_DIR and
+    // default-cache branches but passes EVALBOARD_RUNS_DIR through verbatim, so
+    // a relative base is a real input — the suffix works either way, which is
+    // why this is a plain string op and not a path operation.
     const trimmed = base.replace(/[/\\]+$/, "");
     return `${trimmed}-${source.id}`;
 }

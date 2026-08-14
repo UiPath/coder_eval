@@ -29,4 +29,20 @@ describe("withSource", () => {
             "/runs/r1/t?r=2&src=scribe",
         );
     });
+
+    test("keeps the param before a fragment, not inside it", () => {
+        // "#section?src=scribe" is fragment TEXT to a browser, not a query — the
+        // link would silently fall back to the default source and render a
+        // different container's run under the same id.
+        expect(withSource("/runs/r1#section", SCRIBE_SOURCE.id)).toBe(
+            "/runs/r1?src=scribe#section",
+        );
+        expect(withSource("/runs/r1?r=2#section", SCRIBE_SOURCE.id)).toBe(
+            "/runs/r1?r=2&src=scribe#section",
+        );
+        // The default source still returns the href byte-identical.
+        expect(withSource("/runs/r1#section", SKILLS_SOURCE.id)).toBe(
+            "/runs/r1#section",
+        );
+    });
 });

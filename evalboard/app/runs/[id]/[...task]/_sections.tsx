@@ -1454,7 +1454,7 @@ function ArtifactList({
 }: {
     runId: string;
     items: ArtifactRef[];
-    sourceId?: string;
+    sourceId: string;
 }) {
     return (
         <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg bg-white">
@@ -1494,7 +1494,7 @@ export function ArtifactsSection({
     artifacts: ArtifactRef[];
     // Artifact relPaths resolve under the source's cache dir, so /api/file needs
     // the same source the task detail was read with.
-    sourceId?: string;
+    sourceId: string;
 }) {
     const head = artifacts.slice(0, ARTIFACT_CAP);
     const rest = artifacts.slice(ARTIFACT_CAP);

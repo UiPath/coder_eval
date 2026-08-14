@@ -10,6 +10,7 @@ import {
     ensureTaskDir,
     isValidId,
     isValidTaskId,
+    listRunIdsLocal,
     listRunIdsRemote,
 } from "./blob";
 import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
@@ -601,6 +602,12 @@ export function extractComponentShas(
 export async function listRunIds(
     source: Source = DEFAULT_SOURCE,
 ): Promise<string[]> {
+    // Local mode resolves here rather than inside blob.ts because RUNS_DIR — and
+    // therefore the per-source root — lives in this module. Listing off the bare
+    // LOCAL_RUNS_DIR would return the DEFAULT source's ids for every source,
+    // while every read below resolves under runsDirFor(RUNS_DIR, source): the
+    // listing and the reads would disagree about which container they describe.
+    if (LOCAL_RUNS_DIR) return listRunIdsLocal(runsDirFor(RUNS_DIR, source));
     return listRunIdsRemote(source.container);
 }
 

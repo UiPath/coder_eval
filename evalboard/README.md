@@ -88,7 +88,17 @@ Two invariants worth preserving if you add a source:
 - **A run whose id is not date-shaped is invisible to the windowed views.**
   `getRunListing`, `loadRecentRunsInner`, `getOverview` and
   `listRunIdsInWindow` filter on `parseRunIdDate`, so such runs surface only in
-  the ad-hoc section.
+  the ad-hoc section. A new source's page therefore needs its OWN
+  `getAdhocRunListing` section, or ad-hoc uploads to that container land
+  nowhere reachable.
+- **Local mode is per-source too.** `listRunIds` resolves
+  `runsDirFor(RUNS_DIR, source)` when `EVALBOARD_LOCAL_RUNS_DIR` is set, so
+  `/scribe` reads `<local>-scribe`. Listing off the bare local dir instead —
+  which is what shipped first — returns the *default* source's ids for every
+  source while the readers resolve under the sibling, so the listing and the
+  reads disagree about which container they describe.
+  `lib/__tests__/source-isolation.test.ts` pins both halves; it's the only test
+  that exercises the reader layer, where the invariant above actually lives.
 
 ## Conventions
 

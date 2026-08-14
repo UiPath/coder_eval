@@ -18,7 +18,7 @@ export function ActivationCard({
 }: {
     runId: string;
     activation: ActivationScore;
-    sourceId?: string;
+    sourceId: string;
 }) {
     return (
         <Link

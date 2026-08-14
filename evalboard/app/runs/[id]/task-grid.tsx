@@ -73,7 +73,7 @@ function MatureTaskLink({
     t: TaskResultSummary;
     sourceRun: string;
     className: string;
-    sourceId?: string;
+    sourceId: string;
 }) {
     const [open, setOpen] = useState(false);
     const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
@@ -186,7 +186,7 @@ function TaskIdCell({
     t: TaskResultSummary;
     className: string;
     matureSourceRuns?: Record<string, string>;
-    sourceId?: string;
+    sourceId: string;
     // How many replicates (repeated runs) of this task exist in the run. When
     // >1 the row collapses to a single entry with a k/N ✓ badge; the per-run
     // detail is reachable from the task page's run selector (?r=NN).
@@ -469,7 +469,7 @@ export function TaskGrid({
     matureSourceRuns?: Record<string, string>;
     // Container this run came from; carried on every row link. Mature-source
     // runs are resolved within the same source, so they carry it too.
-    sourceId?: string;
+    sourceId: string;
 }) {
     const [sort, setSort] = useState<{
         key: SortKey;

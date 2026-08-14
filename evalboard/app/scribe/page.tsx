@@ -1,5 +1,6 @@
 import {
     avgRunSuccessRate,
+    getAdhocRunListing,
     getOverview,
     getRunListing,
 } from "@/lib/overview";
@@ -17,6 +18,10 @@ const WINDOW: Window = "30d";
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 500;
+
+// Ad-hoc runs are manual uploads (the pipeline's `adhoc` parameter), so the set
+// is small by construction — no paging, just a cap.
+const ADHOC_LIMIT = 20;
 
 function parseLimit(raw: string | string[] | undefined): number {
     const v = Array.isArray(raw) ? raw[0] : raw;
@@ -36,9 +41,14 @@ export default async function ScribePage({
     // Everything on this page reads SCRIBE_SOURCE's container (aria-runs), not
     // the skills nightly's. No harness selector: the aria suite runs on a single
     // harness (delegate-sdk), so a scope control would only ever have one entry.
-    const [overview, listing] = await Promise.all([
+    const [overview, listing, adhoc] = await Promise.all([
         getOverview(WINDOW, null, null, null, SCRIBE_SOURCE),
         getRunListing(null, null, limit, null, SCRIBE_SOURCE),
+        // The pipeline's `adhoc` parameter uploads under an 'adhoc-<id>' prefix.
+        // Those ids aren't date-shaped, so getRunListing filters them out — without
+        // this section they'd be uploaded and then unreachable, since /scribe is the
+        // only surface that reads this container.
+        getAdhocRunListing(ADHOC_LIMIT, SCRIBE_SOURCE),
     ]);
 
     const runsInWindow = overview.runs.length;
@@ -46,6 +56,11 @@ export default async function ScribePage({
     const shownCount = listing.rows.length;
     const hasMore = listing.hasMore && shownCount < MAX_LIMIT;
     const nextPageSize = Math.min(DEFAULT_LIMIT, MAX_LIMIT - shownCount);
+    // What the container actually holds, ad-hoc included. listing.totalCandidates
+    // counts only date-shaped ids (getRunListing filters before reporting it), so
+    // using it alone for a "runs in the container" tile understates the container
+    // and, at 0, would assert emptiness while ad-hoc runs sat in it.
+    const totalInContainer = listing.totalCandidates + adhoc.total;
 
     return (
         <div className="space-y-6">
@@ -88,11 +103,11 @@ export default async function ScribePage({
                     </div>
                     <div>
                         <div className="text-3xl font-semibold tabular-nums text-gray-900">
-                            {listing.totalCandidates}
+                            {totalInContainer}
                         </div>
                         <div className="text-xs text-gray-500">
-                            run{listing.totalCandidates === 1 ? "" : "s"} in the
-                            container
+                            pipeline run{totalInContainer === 1 ? "" : "s"}{" "}
+                            uploaded
                         </div>
                     </div>
                 </div>
@@ -104,12 +119,16 @@ export default async function ScribePage({
                         windowEnd={overview.windowEnd}
                     />
                 ) : (
-                    // An empty container and an empty window look the same in the
-                    // chart, so distinguish them: the first is "nothing uploaded
-                    // yet", which is the expected state before the pipeline's
-                    // storage credential is wired up.
+                    // "Nothing readable here" and "nothing recent" look identical
+                    // in the chart, so distinguish them. Deliberately phrased as
+                    // "no runs found" rather than asserting the container is
+                    // empty: this counts what evalboard could read and recognize,
+                    // and a run whose id isn't date-shaped (and isn't ad-hoc
+                    // either) would be invisible to both listings — so claiming
+                    // emptiness would be a stronger statement than the data
+                    // supports.
                     <p className="text-sm text-gray-500 py-8 text-center">
-                        {listing.totalCandidates === 0
+                        {totalInContainer === 0
                             ? `No runs found in the ${SCRIBE_SOURCE.container} container yet.`
                             : `No runs in the last ${WINDOW}.`}
                     </p>
@@ -125,6 +144,16 @@ export default async function ScribePage({
                         : null
                 }
             />
+
+            {adhoc.total > 0 && (
+                <ScribeRunTable
+                    rows={adhoc.rows}
+                    totalCandidates={adhoc.total}
+                    showMoreHref={null}
+                    heading="Ad-hoc runs"
+                    note="Queued with adhoc=true · excluded from the chart and the run list above"
+                />
+            )}
         </div>
     );
 }

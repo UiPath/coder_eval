@@ -60,14 +60,12 @@ describe("source in run-page hrefs", () => {
         );
     });
 
-    test("task links omit ?src for the default source and when unset", () => {
-        const { unmount } = render(
-            <TaskGrid runId="r1" tasks={[row("alpha")]} sourceId="skills" />,
-        );
-        expect(tableLink(/alpha/i)).toHaveAttribute("href", "/runs/r1/alpha");
-        unmount();
-
-        render(<TaskGrid runId="r1" tasks={[row("alpha")]} />);
+    test("task links omit ?src for the default source", () => {
+        // No "and when unset" case any more: `sourceId` is a REQUIRED prop, so
+        // omitting it is a compile error rather than a silent fallback to the
+        // default source. That's the point — the fallback was invisible both at
+        // build time and at runtime.
+        render(<TaskGrid runId="r1" tasks={[row("alpha")]} sourceId="skills" />);
         expect(tableLink(/alpha/i)).toHaveAttribute("href", "/runs/r1/alpha");
     });
 
@@ -121,7 +119,13 @@ describe("source in run-page hrefs", () => {
         );
         unmount();
 
-        render(<ActivationCard runId="r1" activation={ACTIVATION} />);
+        render(
+            <ActivationCard
+                runId="r1"
+                activation={ACTIVATION}
+                sourceId="skills"
+            />,
+        );
         expect(screen.getByRole("link")).toHaveAttribute(
             "href",
             "/runs/r1/activation",

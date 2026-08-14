@@ -21,6 +21,15 @@ export function scalarParam(
  */
 export function withSource(href: string, sourceId?: string | null): string {
     if (!sourceId || sourceId === DEFAULT_SOURCE.id) return href;
-    const sep = href.includes("?") ? "&" : "?";
-    return `${href}${sep}${SRC_PARAM}=${encodeURIComponent(sourceId)}`;
+    // Split the fragment off first: appending to "/runs/r1#section" would yield
+    // "#section?src=…", which a browser reads as fragment TEXT, not a query —
+    // so the link would silently fall back to the default source and render a
+    // different container's run. Latent today (no caller passes a fragment) but
+    // the failure is invisible, which is exactly the class of bug the source
+    // param exists to close.
+    const hash = href.indexOf("#");
+    const base = hash === -1 ? href : href.slice(0, hash);
+    const frag = hash === -1 ? "" : href.slice(hash);
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}${SRC_PARAM}=${encodeURIComponent(sourceId)}${frag}`;
 }
