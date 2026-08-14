@@ -526,3 +526,18 @@ with the two `action.yml` items above — one considered change to the action's 
       claim more generality than it has; defining "a formula" precisely enough to gate on is the
       part that is not cheap. CE039 does not reach it: that rule covers arithmetic-bearing
       TABLES, and this was a sentence. — caught in the same review.
+- [ ] A helper that takes caller-supplied keys must not index its own mappings directly.
+      `cost_latency_guardrails` did `rows[rid]`, which was safe while its only caller passed the
+      intersection of those maps — and became a `KeyError` the moment a second caller
+      (`execution_gate`) passed row ids derived from `experiment.json` instead. The general shape
+      is "a parameter documented as caller-supplied is used as a subscript into a parameter
+      documented as the callee's own data", which needs the two to be related by more than types;
+      an AST rule would either miss it or flag every legitimate lookup. — caught in the
+      optimize-gate v8/v2/v3/v5/v1/v4/v6 final review.
+- [ ] Two code paths computing the SAME metric over the same rows must apply the same
+      normalization. `activation_gate` balances per-row replicate counts before pooling for the
+      primary criterion — with a six-line comment about why — while `_sibling_checks` pooled raw,
+      so byte-identical arms differed by 0.1 of recall on a check that gates `promoted`. Detecting
+      "these two call sites should share a preprocessing step" is a semantic claim about intent,
+      not a pattern; the realistic guard is a unit test per metric asserting invariance to
+      replicate imbalance, which is what was added here. — caught in the same review.
