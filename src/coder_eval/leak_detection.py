@@ -54,9 +54,11 @@ def graded_strings(criterion: BaseSuccessCriterion, *, drop_type: bool) -> list[
 
     ``drop_type`` additionally removes the discriminator. CE036 leaves it in: a row PROMPT
     containing ``"skill_triggered"`` is itself worth flagging. ``candidate_leaks`` drops it,
-    because a skill BODY that discusses eval criteria mentions criterion type names legitimately
-    — measured against this repo, keeping it flagged ``optimize-skill``'s own body on
-    ``skill_triggered`` and on nothing else.
+    because a skill BODY that discusses eval criteria mentions criterion type names legitimately.
+    Measured against this repo: ``skill_triggered`` is the only type name either shipped suite
+    contributes at all, and it appears verbatim in FOUR shipped skill bodies — ``check-skill``,
+    ``lint-tasks``, ``task`` and ``optimize-skill`` itself. Keeping it would flag every one of
+    them, on a discriminator rather than on anything a criterion grades.
     """
     dumped = criterion.model_dump()
     dumped.pop("description", None)

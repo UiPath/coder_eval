@@ -2749,7 +2749,8 @@ class TestCandidateLeaks:
         assert candidate_leaks("nothing graded here at all", "", _ROWS) == []
 
     def test_an_empty_candidate_leaks_nothing(self) -> None:
-        # The emptied-body control snapshots to exactly this.
+        # Degenerate input returns empty rather than raising. (Not the emptied-body control, which
+        # keeps its frontmatter and is skipped by the skill's loop anyway.)
         assert candidate_leaks("", "", _ROWS) == []
 
     def test_empty_rows_return_empty_rather_than_raising(self) -> None:

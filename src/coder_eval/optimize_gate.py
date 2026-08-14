@@ -2079,10 +2079,11 @@ def candidate_leaks(
     that against the incumbent would re-report every span the head added, every round. Pass the
     arm the candidate was actually edited from.
 
-    **Three boundaries, stated so an empty result is not mistaken for a proof:**
+    **Four boundaries, stated so an empty result is not mistaken for a proof:**
 
     - It catches the VERBATIM form, as CE036 states of its own. A candidate that describes a train
-      row's content in other words is a semantic leak and needs a reader.
+      row's content in other words is a semantic leak and needs a reader. (Matching is
+      case-insensitive on both sides, so casing alone does not evade it.)
     - Containment is a **substring** test in both directions, so a graded value can be masked by an
       unrelated baseline substring that happens to contain it, and flagged for a subword
       occurrence. The :data:`~coder_eval.leak_detection.LEAK_MIN_CHARS` floor makes both unlikely
@@ -2092,6 +2093,13 @@ def candidate_leaks(
       baseline is itself a former candidate, so a memorized span that rode into a promotion
       alongside a genuine improvement is never flagged again. The proposer-side rule in
       ``reference/proposal-prompt.md`` is what covers that; this function cannot.
+    - **The gold solution is out of reach.** Only ``row.success_criteria`` is scanned.
+      ``TaskDefinition.reference`` — the reference solution ``reference_comparison`` / ``llm_judge``
+      / ``agent_judge`` score against — is a task-level field, and it may name a file or a whole
+      directory rather than carry its text, so scanning it would mean reading the filesystem from
+      what is otherwise a pure function. That matters more than it looks: ``proposal-prompt.md``
+      tells the proposer to *study* the reference, and calls copying it "especially tempting"
+      because the content is known-correct. This checker cannot see that copy. A reader has to.
 
     ``rows`` are the EXPANDED row-tasks of the TRAIN split only — passing the whole suite would
     flag content drawn from rows the candidate is entitled to be fitted to. (The five-string

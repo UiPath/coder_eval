@@ -445,10 +445,11 @@ class RoundScores(BaseModel):
     def _lineage_head_is_readable(self) -> RoundScores:
         """A named head must be an arm here, and an arm with scores to derive a number from.
 
-        Both states are otherwise silent at write time and fatal at read time: the next round's
-        search loop looks the head up in `arm_row_scores` and averages its `row_scores`, so an
-        absent arm surfaces as a `StopIteration` and an empty one as a `ZeroDivisionError` — in the
-        user's terminal, at round 3, from a sidecar written at round 2.
+        Both states are otherwise silent at write time and surface a round later, in the user's
+        terminal, from a sidecar written a round earlier. The next round's search loop looks the
+        head up in `arm_row_scores` and averages its `row_scores`, so an absent arm raises
+        `StopIteration`, and an empty one reaches the snippet's no-shared-rows exit — which blames
+        an unpinned `dataset.sample_seed` and sends the reader to the wrong problem entirely.
         """
         if self.lineage_head is None:
             return self

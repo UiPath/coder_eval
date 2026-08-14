@@ -2832,29 +2832,36 @@ class TestPluginArtifacts:
         # present, the skill stays readable, and the step fails at runtime in the user's terminal
         # after they have paid for three invocations. So assert both halves — the names are in the
         # skill AND they are importable from the module the skill tells the user to import.
-        import coder_eval.optimize_gate as gate
+        import importlib
 
         raw = (PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8")
         skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
 
         # Derived from the skill's own import lines rather than a list here, so a snippet that
         # starts importing something new is covered without anyone remembering to extend this.
-        imported: set[str] = set()
-        for block in re.findall(r"from coder_eval\.optimize_gate import \(([^)]*)\)", raw):
-            imported |= {n.strip().rstrip(",") for n in block.split() if n.strip().rstrip(",")}
-        for line in re.findall(r"from coder_eval\.optimize_gate import ([^(\n]+)", raw):
-            imported |= {n.strip() for n in line.split(",") if n.strip()}
+        #
+        # EVERY `coder_eval` module, not just `optimize_gate`: the snippets also import
+        # `expand_dataset` / `load_task` from `coder_eval.orchestration.task_loader` and models
+        # from `coder_eval.models`, and a rename there fails in the user's terminal after the runs
+        # are paid for — which is precisely the failure this sensor's own comment describes.
+        imported: dict[str, set[str]] = {}
+        for module, block in re.findall(r"from (coder_eval[\w.]*) import \(([^)]*)\)", raw):
+            imported.setdefault(module, set()).update(n.strip().rstrip(",") for n in block.split() if n.strip(" ,"))
+        for module, line in re.findall(r"from (coder_eval[\w.]*) import ([^(\n]+)", raw):
+            imported.setdefault(module, set()).update(n.strip() for n in line.split(",") if n.strip())
 
-        assert imported, (
+        assert "coder_eval.optimize_gate" in imported, (
             "optimize-skill's SKILL.md no longer imports anything from coder_eval.optimize_gate — "
             "either the snippets are gone or the import line changed shape and this sensor is blind"
         )
-        for name in sorted(imported):
-            assert hasattr(gate, name), (
-                f"optimize-skill's SKILL.md tells the user to import {name!r} from "
-                f"coder_eval.optimize_gate, which no longer exports it — the snippet would fail at "
-                f"runtime, after the user has paid for the runs it was meant to read"
-            )
+        for module, names in sorted(imported.items()):
+            loaded = importlib.import_module(module)
+            for name in sorted(names):
+                assert hasattr(loaded, name), (
+                    f"optimize-skill's SKILL.md tells the user to import {name!r} from "
+                    f"{module}, which no longer exports it — the snippet would fail at "
+                    f"runtime, after the user has paid for the runs it was meant to read"
+                )
 
         # The ones the procedure must NAME, even if a future snippet stops importing them inline.
         # This hardcoded list is the REAL guard: the derived half above only asserts that whatever

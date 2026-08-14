@@ -26,7 +26,12 @@ what it measured. Then the instruction that makes the history worth carrying:
 Without that line a proposer converges: round three produces a paraphrase of round one, the
 numbers agree with round one, and the loop spends money confirming a dead end.
 
-**The incumbent, exactly as it stands**, so a candidate is a diff and not a rewrite from memory.
+**The arm this candidate will be edited FROM, exactly as it stands**, so a candidate is a diff and
+not a rewrite from memory. On a multi-arm round that is the **incumbent**; on a search round it is
+the **lineage head**, which is the accumulated text the loop is carrying forward. Handing the
+proposer the incumbent on a search round silently discards everything the lineage accumulated and
+leaves the skill's own leak check — which diffs against *what the candidate was derived from* —
+with nothing coherent to compare against.
 
 **The gold solution, where the suite carries one — and it is a different input from the two
 above.** The task's `reference:` block holds a reference solution for `reference_comparison`,
@@ -35,7 +40,7 @@ criteria assert on, as the bundled outcome template does with `expected_snippet`
 proposer those, and ask a question the expected-vs-observed pair cannot answer: *how was this row
 meant to be solved?* Expected-vs-observed says the row failed and what came out instead. The
 reference says what a correct result looks like, and the transferable thing is the **procedure**
-that produces it — the step the incumbent never told the agent to take, the ordering it never said
+that produces it — the step the baseline never told the agent to take, the ordering it never said
 was load-bearing.
 
 **Giving it to the proposer is legitimate; giving it to the agent would not be.** `reference:` is
@@ -48,6 +53,12 @@ Extract the procedure, never the answer. Writing the reference's content into th
 the memorization the rule below forbids, and it is especially tempting here because the content is
 sitting right there and it is *known correct*. A skill that carries one row's answer scores that
 row and teaches nothing.
+
+**And this is the one leak no checker will catch for you.** `candidate_leaks` scans what the
+row's *criteria* assert on; the reference is a task-level field and is outside it, by that
+function's own stated boundaries. So the gold solution is simultaneously the most tempting thing
+to copy and the only one with no mechanical backstop. Re-read the candidate against the reference
+yourself before snapshotting it.
 
 **Scoped, and a no-op where it does not apply.** Most activation suites carry no reference at all
 — `skill_triggered` grades an event, and there is nothing for a reference to be. Say so and move

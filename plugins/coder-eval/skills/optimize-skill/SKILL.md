@@ -562,9 +562,12 @@ you name will not survive the next round; far above it you are re-reading the sa
 paying attention you could have spent on the edit. Take them across categories rather than the
 first fifteen in the file — five misses and five misfires teach more than fifteen misses.
 
-`failed_samples[]` is **capped**, so on a suite with many failures it will not hand you fifteen —
-take the rest from the per-row `task.json` fallback each track's section below already names. A
-window sized to whatever the cap happened to leave is not a window.
+**`failed_samples[]` is capped, and the cap costs you SPREAD rather than count.** The list holds the
+first N failing rows **in row order** — it stops collecting once it is full, so it is not a sample
+across the suite, it is a prefix of it. On a suite whose distractors sort last, a window taken from
+that list alone is fifteen misses and no misfires, which is the one shape the paragraph above says
+teaches least. Read the tail from the per-row `task.json` fallback each track's section below
+already names.
 
 **Where the suite carries a reference solution, read it before proposing.** The task's
 `reference:` block, or a row field the criteria assert on such as the outcome template's
@@ -740,8 +743,10 @@ Step 10 prints both and names the arms they disagree about.
 
 **"The previous round" means the previous MULTI-ARM round**, because a search round (Step 10) runs
 one arm and leaves no row matrix to draw a merge from. Where the last multi-arm round is more than
-a round or two back, run a fresh Stage A rather than merging on stale row assignments — that is
-what the return-to-breadth rule is for.
+a round or two back, run a fresh Stage A rather than merging on stale row assignments. Note this is
+a *separate* trigger from Step 10's return-to-breadth rule, which fires on two consecutive
+no-accept rounds: a lineage that keeps accepting never trips that one, and it is exactly the run
+whose row matrix goes stalest.
 
 Snapshot the incumbent the same way (`<round>-incumbent/`), siblings included, so every arm
 is mounted by the identical mechanism and the comparison has no confound.
@@ -782,11 +787,13 @@ def body(arm: Path) -> str:
     return (arm / "skills" / "<skill>" / "SKILL.md").read_text(encoding="utf-8")
 
 
-# The BASELINE is whatever these candidates were edited from — the `<round>-incumbent/` snapshot
-# on a multi-arm round, the lineage head's own snapshot dir on a search round.
-baseline = body(root / "<round>-incumbent")
+# The BASELINE is whatever these candidates were edited FROM. On a multi-arm round that is this
+# round's `<round>-incumbent/`; on a search round it is the LINEAGE HEAD's snapshot, which lives
+# under the round that produced it — so name that directory here rather than assuming this one.
+baseline_dir = root / "<round>-incumbent"
+baseline = body(baseline_dir)
 
-skip = {"<round>-incumbent", "<round>-control"}
+skip = {baseline_dir.name, "<round>-control"}
 for arm in sorted(p for p in root.glob("<round>-*") if p.is_dir() and p.name not in skip):
     print(arm.name, candidate_leaks(body(arm), baseline, train) or "clean")
 ```
@@ -1002,6 +1009,10 @@ file's cost table; the experiment files are the ones Step 9 named, one per stage
 | B — gate, execution track | `round<N>-gate.yaml` | one invocation, exactly two variants, `--split train --repeats 3` |
 | C — confirm | `round<N>-confirm.yaml` | exactly two variants, `--split test --repeats 3` |
 
+**The first row is not one of the three stages** — it is listed here because it is a thing you run
+and pay for, and this is the table you budget from. It gates nothing, corrects nothing and promotes
+nothing; the gate is still A → B → C.
+
 **Every stage runs the suite through the experiment.** The suite is the positional argument;
 the experiment carrying the arms is passed with `-e`. Passing the experiment file
 positionally instead would treat it as a task, which resolves to a skipped task and a green
@@ -1029,11 +1040,12 @@ Read the score to beat rather than recomputing it, so accept/revert is mechanica
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import arm_row_scores, load_measurements
+from coder_eval.optimize_gate import arm_row_scores, load_measurements, regression_check
 
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
 
-prior = [r for r in load_measurements(sidecar).round_scores if r.lineage_head is not None]
+measurements = load_measurements(sidecar)
+prior = [r for r in measurements.round_scores if r.lineage_head is not None]
 if not prior:
     raise SystemExit("no recorded lineage — run a multi-arm Stage A round first")
 last = max(prior, key=lambda r: r.round)
@@ -1046,17 +1058,25 @@ explored = arm_row_scores(
     criterion_index=0,  # omit on the execution track to read each row's weighted_score
 )[0]
 
-# Compare on the rows BOTH arms scored, and on nothing else.
+# Compare on the rows BOTH arms scored, and on nothing else. Empty first: no overlap at all is a
+# WIRING problem, and reporting it as a hole would send you looking for a flaky row instead.
 shared = sorted(set(head.row_scores) & set(explored.row_scores))
+if not shared:
+    raise SystemExit("the two rounds share no rows — pin dataset.sample_seed and re-run")
 missing = sorted(set(head.row_scores) - set(explored.row_scores))
 if missing:
     raise SystemExit(f"the candidate scored no result for {missing} — a hole is not a win")
-if not shared:
-    raise SystemExit("the two rounds share no rows — pin dataset.sample_seed and re-run")
 
 to_beat = sum(head.row_scores[r] for r in shared) / len(shared)
 score = sum(explored.row_scores[r] for r in shared) / len(shared)
-print(score, "beats" if score > to_beat else "does not beat", to_beat, f"over {len(shared)} rows")
+beats = score > to_beat
+print(score, "beats" if beats else "does not beat", to_beat, f"over {len(shared)} rows")
+
+# An aggregate cannot show a re-lost row, and a search accept advances the lineage. Check the
+# corpus BEFORE accepting, or the regression rides forward until the next multi-arm round.
+lost = regression_check(measurements.regression_corpus, explored)
+if beats and lost:
+    print("DO NOT ACCEPT until you have explained:", [(row.row_id, row.reason) for row, _ in lost])
 ```
 
 **Compare over the shared rows, and refuse rather than average around a hole.** The two means come
@@ -1065,9 +1085,15 @@ run you just paid for — so nothing guarantees they cover the same rows, and ev
 favours the candidate. A candidate that errored on the hardest rows scores a higher mean over the
 survivors; a head recorded from a halved Stage A pass 1 was measured on a stratified half while
 this command runs the full train split; and an unpinned `dataset.sample_seed` draws a different
-sample **across invocations** every time. Hence the two `SystemExit` guards above: a row the head
-scored and the candidate did not is a hole and never a win, which is the rule the Pareto front
-already applies, and no shared rows at all is a wiring problem rather than a result.
+sample **across invocations** every time. Hence the two `SystemExit` guards, in that order: no
+shared rows at all is a *wiring* problem, and a row the head scored and the candidate did not is a
+hole and never a win — the rule the Pareto front already applies.
+
+**And check the regression corpus before accepting, not at the next Stage A.** A search accept
+advances the lineage, so a row an earlier promotion was built on can be re-lost and carried forward
+unnoticed until the next multi-arm round. The aggregate above cannot show it — that is the whole
+premise of the corpus — and `regression_check` takes exactly the `ArmRowScores` the snippet already
+computed, so the check is free here.
 
 **Which number this is, stated exactly, because it is not the gate's.** `criterion_index=<n>` is
 the activation track and reads that criterion's per-row score — so the mean above is **accuracy**
@@ -1090,10 +1116,15 @@ hypothesis to gate, never a result. A round may accept here and promote nothing;
 not move when it does.
 
 **Which arm becomes the head on a round that ran no search loop.** After a multi-arm Stage A,
-record the best-scoring arm as `lineage_head` — **the incumbent included**, which is the right
-answer whenever no candidate beat it. It is a real choice rather than bookkeeping: it is the bar
-every later search round is accepted or reverted against, so recording an arm that merely tied
-moves that bar on an accident.
+record as `lineage_head` the arm with the highest **mean of `row_scores`** — **the incumbent
+included**, which is the right answer whenever no candidate beat it.
+
+Say the metric out loud, because this is the one place two rankings diverge: Stage A ranks on
+`metrics["f1.yes"]`, and `to_beat` above is a mean of `row_scores` (accuracy). Record the
+top-`f1.yes` arm and you have set the bar to a *different* arm's accuracy — after which a later
+candidate can "beat the head" while being worse than an arm measured in the very same round. It is
+a real choice rather than bookkeeping: recording an arm that merely tied moves that bar on an
+accident.
 
 **A head that later fails Stage B stays the head.** The gate refusing to promote is a statement
 about separation on replicated, corrected data — it does not refute the search result, and
@@ -1516,9 +1547,10 @@ record_round_scores(sidecar, RoundScores(
     round=1, arm_row_scores=arms,
     pareto_front=pareto_front(arms), instance_best_front=instance_best_front(arms),
     # The arm the next round's SEARCH LOOP is accepted or reverted against. On a multi-arm round
-    # like this one that is the best-scoring arm, the incumbent included; on a search round it is
-    # the candidate if it beat the head and the head otherwise, and None if there is no lineage
-    # yet. Not a promotion — see Step 8's two pointers.
+    # like this one that is the arm with the highest MEAN of row_scores — not the top f1.yes arm,
+    # which is a different ranking (Step 10) — the incumbent included; on a search round it is the
+    # candidate if it beat the head and the head otherwise, and None if there is no lineage yet.
+    # Not a promotion — see Step 8's two pointers.
     lineage_head="cand-a-widen-vocabulary",
 ))
 
