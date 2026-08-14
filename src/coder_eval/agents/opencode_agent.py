@@ -86,6 +86,11 @@ logger = logging.getLogger(__name__)
 # before the turn is crashed).
 _TERM_GRACE_SECONDS = 5.0
 
+# SIGKILL does not exist on Windows (where the process-group sweep is a no-op
+# anyway); resolve it dynamically so the module imports and typechecks on every
+# platform, falling back to SIGTERM for the direct-pid kill_sync path.
+_SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
+
 # How long to keep draining stdout/stderr after the CLI process has been reaped.
 # `opencode run` leaves a local server child holding the inherited pipes open, so
 # EOF never arrives on its own and every post-exit read must be bounded.
@@ -690,7 +695,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         proc = self._process
         if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(proc.pid, signal.SIGKILL)
+                os.kill(proc.pid, _SIGKILL)
         self._sweep_process_groups()
 
     def _sweep_process_groups(self) -> None:
@@ -708,7 +713,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             return
         for pgid in self._spawned_pgids:
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                os.killpg(pgid, signal.SIGKILL)
+                os.killpg(pgid, _SIGKILL)
         self._spawned_pgids.clear()
 
     def get_environment_info(self) -> dict[str, Any]:
@@ -907,6 +912,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             # `_iteration` left incremented because the orchestrator never reaches
             # `discard_pending_turn`. Same guard, same reasons, as CodexAgent.
             self._crash_turn(state, collector, f"OpenCode turn failed: {e!s}", cause=e)
+            raise  # unreachable (_crash_turn is NoReturn) — makes the no-fall-through explicit
         finally:
             if stderr_drain is not None:
                 stderr_drain.cancel()

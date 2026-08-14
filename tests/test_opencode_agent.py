@@ -176,7 +176,9 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/opencode")
-        monkeypatch.setattr(os, "killpg", lambda pgid, sig: captured["killpg"].append((pgid, sig)))
+        # raising=False: os.killpg does not exist on Windows, where the sweep is a
+        # no-op — the stub must still install so the fixture works on every platform.
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: captured["killpg"].append((pgid, sig)), raising=False)
         return captured
 
     return _install
@@ -925,7 +927,7 @@ class TestExternalCancel:
         await asyncio.sleep(0.05)  # let it spawn and read the first event
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task  # the await re-raises the cancellation; no value ever exists
 
         partial = agent.pending_turn
         assert partial is not None
@@ -936,6 +938,7 @@ class TestExternalCancel:
         assert ends[0].crash_reason == "turn cancelled"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process-group teardown (killpg/SIGKILL) is POSIX-only by design")
 class TestProcessGroupTeardown:
     async def test_spawn_uses_its_own_session(self, patch_exec, tmp_path):
         """Each invocation must be its own process group, so killpg can reap the
