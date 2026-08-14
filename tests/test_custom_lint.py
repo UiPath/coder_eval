@@ -5109,3 +5109,162 @@ def _string_leaves(node: object) -> list[str]:
     if isinstance(node, list):
         return [s for v in node for s in _string_leaves(v)]
     return []
+
+
+@pytest.mark.lint
+class TestCE039ComputedClaims:
+    """CE039: a prose surface's arithmetic must be checked by COMPUTING it, not by matching text.
+
+    Every other prose sensor in this file asserts a string is PRESENT. None asserts that what it
+    says is TRUE — and two false claims shipped past all of them in one change: "the statistic
+    cannot be computed from one run dir" (it can) and a successive-halving cost "saving" that is
+    arithmetically a premium.
+
+    The registry lives in `tests/lint/computed_claims.py`; this class runs it, and adds the
+    coverage rule that makes it a sensor CLASS rather than three more bespoke sensors — an
+    arithmetic-bearing table no registered claim names is a failure. Like CE026-CE031 and
+    CE033-CE038 it is a test class rather than a `BaseRule` in `tests/lint/runner.py`, which is an
+    AST walk over `src/**/*.py`.
+    """
+
+    def test_registered_claims_hold(self, tmp_path: Path):
+        from tests.lint.computed_claims import CLAIMS, evaluate_claims
+
+        failures = evaluate_claims(tmp_path)
+        assert not failures, (
+            "a registered computed claim about the optimize surfaces no longer holds:\n  "
+            + "\n  ".join(failures)
+            + "\n\nEach claim is RECOMPUTED from the prose, so this is the prose being wrong rather "
+            + "than a token having moved. Why each exists:\n  "
+            + "\n  ".join(f"{c.id}: {c.why}" for c in CLAIMS)
+        )
+
+    def test_every_arithmetic_table_is_covered(self):
+        # The coverage rule. A new table carrying arithmetic must be named by a claim that computes
+        # it, or it ships unchecked and nothing says so.
+        from tests.lint.computed_claims import COVERED_SURFACES, uncovered_tables
+
+        uncovered = [entry for surface in COVERED_SURFACES for entry in uncovered_tables(surface)]
+        assert not uncovered, (
+            f"arithmetic-bearing tables no ComputedClaim covers: {uncovered}. Register a claim in "
+            "tests/lint/computed_claims.py::CLAIMS whose `covers` names the table's header "
+            "signature and whose `check` RECOMPUTES what the table asserts — a table nobody "
+            "computes is exactly how a cost 'saving' that was really a premium shipped."
+        )
+
+    def test_arithmetic_tables_finds_exactly_the_known_tables(self):
+        # Pinned so a widened predicate is a visible diff rather than a quietly noisier gate.
+        from tests.lint.computed_claims import METHOD, SKILL, arithmetic_tables, table_signature
+
+        found = {
+            surface.name: [table_signature(t) for t in arithmetic_tables(surface.read_text(encoding="utf-8"))]
+            for surface in (METHOD, SKILL)
+        }
+        assert found == {
+            "optimize-method.md": ["Spend | Runs", "arms `A` | flat | halved | premium"],
+            "SKILL.md": [],
+        }, f"the arithmetic-table predicate now finds {found}"
+
+    def test_every_claim_surface_exists(self):
+        # A claim pointing at a deleted file is a claim that silently stops checking.
+        from tests.lint.computed_claims import CLAIMS
+
+        missing = sorted(c.id for c in CLAIMS if not c.surface.is_file())
+        assert not missing, f"claims registered against a file that no longer exists: {missing}"
+
+    def test_the_matcher_catches_a_wrong_cell(self, tmp_path: Path):
+        """The self-test. Runs the REAL halving checker against a hand-built table with a bad cell.
+
+        Mirrors `_wrong_skill_count_offenders`: a sensor with no self-test can be reverted to a
+        no-op with every test still green, which is the exact failure class this file exists to
+        prevent. Nothing transient, nothing to revert — the wrong table is built here.
+        """
+        from tests.lint.computed_claims import TIMES, _check_halving_premium
+
+        # TIMES is the surfaces' own multiplication sign, imported rather than typed: ruff's
+        # RUF001 flags the literal as ambiguous, and the normalizer under test is what makes it
+        # parseable in the first place.
+        good = (
+            "| arms `A` | flat | halved | premium |\n"
+            "| --- | --- | --- | --- |\n"
+            f"| 4 | `4 {TIMES} M_train` | `4 {TIMES} M_train` | **none** |\n"
+            f"| 5 | `5 {TIMES} M_train` | `5.5 {TIMES} M_train` | `M_train/2` |\n"
+        )
+        assert _check_halving_premium(good, tmp_path) == []
+
+        # A=5 halving costs half a train split; claiming **none** is the error v1 shipped.
+        wrong = good.replace(
+            f"| 5 | `5 {TIMES} M_train` | `5.5 {TIMES} M_train` | `M_train/2` |",
+            f"| 5 | `5 {TIMES} M_train` | `5.5 {TIMES} M_train` | **none** |",
+        )
+        failures = _check_halving_premium(wrong, tmp_path)
+        assert failures and any("premium" in f and "A=5" in f for f in failures), failures
+
+    def test_a_wrong_split_symbol_is_reported_not_raised(self, tmp_path: Path):
+        """A cell that PARSES but names an unexpected symbol must fail, not raise.
+
+        Found by mutating the shipped table: renaming Stage C's `M_test` to `M_holdout` — the exact
+        drift class this claim exists for — reached the evaluator and raised out of the lint test.
+        A rule that crashes on the drift it is for reads as a broken sensor rather than a wrong
+        table, so the caller catches it and names the symbol.
+        """
+        from tests.lint.computed_claims import METHOD, TIMES, _check_cost_table
+
+        text = METHOD.read_text(encoding="utf-8")
+        assert _check_cost_table(text, tmp_path) == []
+
+        renamed = text.replace(f"`6 {TIMES} M_test`", f"`6 {TIMES} M_holdout`", 1)
+        assert renamed != text, "the anchor moved — re-derive it from the cost table"
+        failures = _check_cost_table(renamed, tmp_path)
+        assert failures and any("M_holdout" in f for f in failures), failures
+
+    def test_the_coverage_rule_fails_on_an_unregistered_table(self, tmp_path: Path):
+        """The second self-test, and the committed replacement for "edit a shipped file to prove it".
+
+        Three tables, only two of whose signatures a claim covers; the third must be reported by
+        header.
+        """
+        from tests.lint.computed_claims import ComputedClaim, uncovered_tables
+
+        surface = tmp_path / "surface.md"
+        surface.write_text(
+            "| a | b |\n| --- | --- |\n| `2 * M` | x |\n\n"
+            "| c | d |\n| --- | --- |\n| `ceil(N/2)` | y |\n\n"
+            "| e | f |\n| --- | --- |\n| `N+1` | z |\n",
+            encoding="utf-8",
+        )
+        claims = [
+            ComputedClaim(id="c", surface=surface, why="", covers=("a | b", "c | d"), check=lambda _t, _p: []),
+        ]
+        uncovered = uncovered_tables(surface, claims)
+        assert len(uncovered) == 1 and "`e | f`" in uncovered[0], uncovered
+
+    def test_evaluate_expression_rejects_a_call_it_does_not_whitelist(self):
+        from tests.lint.computed_claims import evaluate_expression
+
+        with pytest.raises(ValueError, match="other than ceil"):
+            evaluate_expression("open('x')", {})
+        with pytest.raises(ValueError, match="disallowed"):
+            evaluate_expression("[1, 2]", {})
+
+    def test_evaluate_expression_names_an_unbound_symbol(self):
+        # Never a bare NameError from three frames down, where prose drift is indistinguishable
+        # from a parser bug.
+        from tests.lint.computed_claims import evaluate_expression
+
+        with pytest.raises(ValueError, match="M_holdout"):
+            evaluate_expression("2 * M_holdout", {"M_train": 1.0})
+
+    def test_evaluate_expression_handles_ceil_and_unicode_multiply(self):
+        from tests.lint.computed_claims import TIMES, evaluate_expression
+
+        expr = f"(N+1) {TIMES} M_train/2 + ceil((N+1)/2) {TIMES} M_train"
+        got = evaluate_expression(expr, {"N": 4.0, "M_train": 12.0})
+        assert got == 66.0
+
+    def test_parse_markdown_tables_skips_fenced_blocks(self):
+        from tests.lint.computed_claims import parse_markdown_tables
+
+        text = "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```\n| x | y |\n| --- | --- |\n| 3 | 4 |\n```\n"
+        tables = parse_markdown_tables(text)
+        assert [t.header for t in tables] == [["a", "b"]]

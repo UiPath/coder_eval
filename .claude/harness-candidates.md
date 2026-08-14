@@ -486,12 +486,24 @@ with the two `action.yml` items above — one considered change to the action's 
 
 - [ ] **"The ToolStart seam decides" is now a PER-CRITERION property, not a global invariant.** `command_executed`'s verdict is decidable from the tool call's inputs; `skill_triggered`'s is not (for the `Skill` tool the body is delivered AS the result, so an in-flight call engaged nothing). A new `LiveSuccessCriterion` must state which seam its `live_verdict` is decidable at, and a criterion that decides at the ToolStart on information only the result carries silently diverges from its own frozen check. Not mechanically detectable today: the property is about what a `live_verdict` implementation *reads*, which no AST rule can infer — a rule would have to know that `result_status` is the field distinguishing the two seams. A cheaper partial guard would be a test-level convention (every live criterion has a "not decided before the result" or "decided on the call" test), which is a sweep rather than a rule. — caught implementing Phase 1 of c/2026-08-13-optimize-skill-review-v2-fixes.md.
 
-- [ ] A prose claim in `plugins/` about `src/` behaviour that no sensor checks — the token sensors
+- [x] ~~A prose claim in `plugins/` about `src/` behaviour that no sensor checks — the token sensors
       check PRESENCE, never TRUTH. Shipped false twice in one change: "the gate cannot be computed
       from one run dir" (it can) and a halving cost saving that was arithmetically a premium. Only
       `test_optimize_skill_snippet_names_the_public_gate_api` checks a claim against the code, and
       each such sensor is bespoke — there is no general form. — caught in the optimize-skill gate
-      corrections review, 2026-08-13.
+      corrections review, 2026-08-13.~~ **CLOSED 2026-08-14 by CE039** (`tests/lint/computed_claims.py`
+      + `tests/test_custom_lint.py::TestCE039ComputedClaims`). The general form is a `ComputedClaim`
+      registry whose entries *compute* the claim, plus the coverage rule that makes it a class
+      rather than N bespoke sensors: an arithmetic-bearing table in the two optimize surfaces that
+      no registered claim names **fails**. Three claims shipped with it — `cost-table` (asserts
+      invariants of the cost model: halved is never cheaper than flat at any N in 2..32, activation
+      Stage B is exactly 3x Stage A per arm, the control row's paired figure is 2x its unpaired one,
+      and Stage C alone is priced in `M_test`), `halving-premium` (recomputes every cell and the
+      standing never-saves claim), and `interval-from-one-run-dir` (**behavioural** — builds a
+      one-run-dir fixture and asserts `activation_gate` returns an interval but no MDE, which is
+      the exact claim whose false version shipped). Both self-tests are committed: one proves the
+      real matcher catches a wrong `premium` cell, one proves the real coverage matcher reports an
+      unregistered table — neither needs a shipped file edited to demonstrate.
 - [ ] Changing a module-level statistical constant in `reports_stats.py` silently reddens
       `tests/_fixtures/report_snapshots/`, which no phase's scoped tests run. A blast-radius check
       ("these fixtures are downstream of these constants") is not obviously expressible without

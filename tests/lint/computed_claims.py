@@ -1,0 +1,511 @@
+"""CE039 — a prose surface's arithmetic must be CHECKED BY COMPUTING IT, not by matching text.
+
+The plugin carries ~50 prose sensors and every one of them asserts a string is **present**.
+None asserts that what it says is **true**, and two false claims shipped past all of them in a
+single change: *"the statistic cannot be computed from one run dir"* (it can — only the MDE and
+the per-invocation diagnostic cannot), and a successive-halving cost "saving" that is
+arithmetically a **premium**. Both read plausibly, both passed every token check, and both were
+caught by a human re-deriving the arithmetic.
+
+``test_optimize_skill_snippet_names_the_public_gate_api`` is the one existing sensor that checks a
+claim against the code — it imports the module and asserts every name the skill tells a user to
+import really exists. This module generalizes that shape into a registry, and adds the rule that
+makes it a sensor *class* rather than three more bespoke sensors: **an arithmetic-bearing table in
+the optimize surfaces that no registered claim names is a failure.** Without the coverage rule a
+new table ships unchecked and nothing says so.
+
+Three design choices, each load-bearing:
+
+* **``covers`` sits ON the claim**, not in a separate ``surface -> tables`` map beside ``CLAIMS``.
+  A separate map is two edits that can disagree — the same shape ``_floor_key``'s derivation from
+  ``NoiseFloor.model_fields`` exists to prevent. The coverage check derives its map from the
+  registry.
+* **One ``check(text, tmp)`` signature**, not a ``TextClaim`` / ``BehaviouralClaim`` pair. The
+  ``tmp`` argument lets a behavioural claim build a run-directory fixture and RUN the code; the
+  two text claims ignore it. A second dataclass and a union for one call site is ceremony.
+* **A restricted ``ast`` walk, never ``eval()``.** These expressions come from a checked-in file in
+  this repository, so the risk is theoretical — but the walk costs ten lines and removes the
+  question, and it gives a failure message naming the offending node instead of a traceback.
+
+Like CE026-CE031 and CE033-CE038 this is **not** a ``BaseRule`` in ``tests/lint/runner.py`` (that
+runner is an AST walk over ``src/**/*.py``); it reasons over Markdown and is wired as
+``tests/test_custom_lint.py::TestCE039ComputedClaims``.
+"""
+
+from __future__ import annotations
+
+import ast
+import math
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import NamedTuple
+
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "plugins" / "coder-eval"
+METHOD = PLUGIN_ROOT / "reference" / "optimize-method.md"
+SKILL = PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md"
+
+# The two surfaces CE039 demands coverage of. Both are read by an agent that spends money on what
+# they say, and both carry arithmetic a reader budgets from.
+COVERED_SURFACES = (METHOD, SKILL)
+
+
+class MarkdownTable(NamedTuple):
+    """One pipe table, with enough position to name it in a failure message."""
+
+    header: list[str]
+    rows: list[list[str]]
+    line: int  # 1-based line of the header row
+
+
+@dataclass(frozen=True)
+class ComputedClaim:
+    """One numeric or behavioural claim a prose surface makes, checked by COMPUTING it."""
+
+    id: str  # stable kebab-case id
+    surface: Path  # the file whose claim this is
+    why: str  # what shipped false, or what would
+    covers: tuple[str, ...]  # header signatures of the tables this claim checks
+    check: Callable[[str, Path], list[str]]  # (raw surface text, a tmp dir) -> failures; [] holds
+
+
+# --- markdown table parsing --------------------------------------------------
+
+
+# Written as escapes rather than literally: ruff's RUF001 flags these as ambiguous in source, and
+# it is right to — they are indistinguishable from `x` and `-` at a glance, which is precisely why
+# the prose has to be normalized before anything tries to parse it.
+TIMES = "\u00d7"  # MULTIPLICATION SIGN, as optimize-method.md writes it
+MINUS = "\u2212"  # MINUS SIGN
+EN_DASH = "\u2013"
+
+
+def _ascii(text: str) -> str:
+    """Normalize the typographic operators both surfaces use into ASCII.
+
+    ``optimize-method.md`` writes multiplication as U+00D7 and subtraction as U+2212. Parsing
+    would fail on both, and "the formula does not parse" is indistinguishable from "someone
+    deleted the formula" — which is a real failure this must not swallow.
+    """
+    return text.replace(TIMES, "*").replace(MINUS, "-").replace(EN_DASH, "-")
+
+
+def parse_markdown_tables(text: str) -> list[MarkdownTable]:
+    """Every pipe table in ``text``, skipping separator rows and anything inside a ``` fence.
+
+    Reads RAW text rather than ``_normalized`` text, deliberately: a table is a line structure and
+    collapsing whitespace destroys it. That is legal because
+    ``test_no_sensor_inlines_the_normalization_idiom`` is scoped to ``tests/test_custom_lint.py``
+    by its own ``Path(__file__)`` — do not "fix" this to use ``_normalized``.
+    """
+    tables: list[MarkdownTable] = []
+    header: list[str] | None = None
+    rows: list[list[str]] = []
+    header_line = 0
+    fenced = False
+
+    def _flush() -> None:
+        nonlocal header, rows
+        if header is not None and rows:
+            tables.append(MarkdownTable(header=header, rows=rows, line=header_line))
+        header, rows = None, []
+
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if line.startswith("```"):
+            fenced = not fenced
+            _flush()
+            continue
+        if fenced or not (line.startswith("|") and line.endswith("|")):
+            _flush()
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if all(set(c) <= set("-: ") and c for c in cells):
+            continue  # the ---|--- separator row
+        if header is None:
+            header, header_line = cells, lineno
+        else:
+            rows.append(cells)
+    _flush()
+    return tables
+
+
+def table_signature(table: MarkdownTable) -> str:
+    """The joined header cells — what ``covers`` names.
+
+    Stable under a body edit (a new row, a corrected figure) and changes when the table's SHAPE
+    changes, which is exactly when a claim written against it needs rewriting.
+    """
+    return " | ".join(table.header)
+
+
+# A backticked span holding an arithmetic operator or a ceil() call. `M_train/2` and
+# `(N+1) * M_train` (after normalization) both match; `metrics["f1.yes"]` and `--split train` do not.
+_ARITHMETIC_SPAN = re.compile(r"`([^`]*(?:[*+/]|ceil\()[^`]*)`")
+
+
+def _spans(cell: str) -> list[str]:
+    """Every arithmetic-bearing backticked span in a cell, in order.
+
+    A cell may carry more than one — the control-arm row prices the arm and the pair it is
+    compared against — so the expected side has to declare both, in order.
+    """
+    return [m.group(1).strip() for m in _ARITHMETIC_SPAN.finditer(_ascii(cell))]
+
+
+def arithmetic_tables(text: str) -> list[MarkdownTable]:
+    """The tables CE039 requires coverage of: any whose BODY carries an arithmetic span.
+
+    Deliberately tight. A table of stages, tracks or file names carries no arithmetic and demanding
+    a computed claim for it would make the rule noisy — which is how a coverage gate stops being
+    read. The count is pinned by a test so a widened predicate is a visible diff.
+    """
+    return [t for t in parse_markdown_tables(text) if any(_spans(cell) for row in t.rows for cell in row)]
+
+
+# --- the restricted expression evaluator -------------------------------------
+
+_ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Call, ast.Load)
+_ALLOWED_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub)
+
+
+def evaluate_expression(src: str, env: dict[str, float]) -> float:
+    """Evaluate one cost-table expression against a symbol assignment.
+
+    A restricted ``ast`` walk rather than ``eval()``: ten lines buys a whitelist and a failure
+    message that names the offending node type or the unbound symbol, instead of a ``NameError``
+    surfacing from three frames down where nobody can tell prose drift from a parser bug.
+    """
+    tree = ast.parse(_ascii(src).strip(), mode="eval")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.operator | ast.unaryop):
+            # `ast.walk` yields the operator as its own node, so the whitelist has to admit the
+            # allowed ones here rather than only via their parent BinOp/UnaryOp.
+            if not isinstance(node, _ALLOWED_OPS):
+                raise ValueError(f"{src!r} uses the disallowed operator {type(node).__name__}")
+            continue
+        if isinstance(node, ast.Call):
+            if not (isinstance(node.func, ast.Name) and node.func.id == "ceil"):
+                raise ValueError(f"{src!r} calls something other than ceil()")
+            continue
+        if not isinstance(node, _ALLOWED_NODES):
+            raise ValueError(f"{src!r} contains a disallowed {type(node).__name__} node")
+
+    def _compute(node: ast.AST) -> float:
+        match node:
+            case ast.Expression():
+                return _compute(node.body)
+            case ast.Constant(value=value) if isinstance(value, int | float):
+                return float(value)
+            case ast.Name(id=name):
+                if name not in env:
+                    raise ValueError(f"{src!r} references {name!r}, which is not one of {sorted(env)}")
+                return env[name]
+            case ast.UnaryOp(op=ast.USub(), operand=operand):
+                return -_compute(operand)
+            case ast.Call(args=[arg]):
+                return float(math.ceil(_compute(arg)))
+            case ast.BinOp(left=left, op=op, right=right):
+                lhs, rhs = _compute(left), _compute(right)
+                match op:
+                    case ast.Add():
+                        return lhs + rhs
+                    case ast.Sub():
+                        return lhs - rhs
+                    case ast.Mult():
+                        return lhs * rhs
+                    case _:
+                        return lhs / rhs
+        raise ValueError(f"{src!r} contains an unevaluatable {type(node).__name__} node")
+
+    return _compute(tree)
+
+
+# --- claim 1: the cost table's INVARIANTS -----------------------------------
+
+_COST_TABLE_SIGNATURE = "Spend | Runs"
+
+# Every row the cost table is allowed to have. Matched by EXACT label — a dict lookup, never a
+# prefix or substring test: "Stage A — triage" is a strict prefix of "Stage A — triage, halved …",
+# so a prefix matcher silently checks the halved row's formula against the flat row's invariant and
+# passes. That is a bug in the matcher masquerading as a green sensor, and exact lookup makes it
+# unrepresentable. A row here with no parseable formula, or a row in the table that is not here,
+# both fail — so the checked set and the rendered set cannot drift apart.
+_COST_ROWS = (
+    "Step 6 baseline",
+    "Control arm — execution track, **once per suite**",
+    "Stage A — triage",
+    "Stage A — triage, halved (an abandon point, NOT a saving)",
+    "Stage B — gate, activation track",
+    "Stage B — gate, execution track",
+    "Stage C — confirm",
+)
+
+
+def _cost_rows(text: str) -> dict[str, list[str]]:
+    """Row label -> its Runs cell's arithmetic spans, for the one table this claim covers."""
+    for table in parse_markdown_tables(text):
+        if table_signature(table) == _COST_TABLE_SIGNATURE:
+            return {row[0]: _spans(row[1]) for row in table.rows if len(row) >= 2}
+    return {}
+
+
+def _check_cost_table(text: str, _tmp: Path) -> list[str]:
+    """The cost table, checked against INVARIANTS OF THE COST MODEL rather than a retyped copy.
+
+    A mirror of the table's own formulas would only detect that someone edited it; it could never
+    detect that the table is WRONG, which is the whole point of CE039. So each invariant follows
+    from what the stages actually do, and each can fail on a genuinely mistaken table.
+    """
+    rows = _cost_rows(text)
+    failures: list[str] = []
+    if not rows:
+        return [f"the cost table ({_COST_TABLE_SIGNATURE}) is gone or changed shape — nothing to check"]
+
+    # A row whose formula was deleted or turned into prose is a FAILURE, not a skip.
+    missing = sorted(label for label in _COST_ROWS if not rows.get(label))
+    if missing:
+        failures.append(f"cost-table rows with no parseable Runs expression: {missing}")
+    unknown = sorted(set(rows) - set(_COST_ROWS))
+    if unknown:
+        failures.append(
+            f"cost-table rows no invariant covers: {unknown}. Add one to _COST_ROWS with the "
+            "property it must satisfy — an unchecked row is the drift this claim exists to catch."
+        )
+    if missing:
+        return failures
+
+    def _at(label: str, index: int, **env: float) -> float:
+        return evaluate_expression(rows[label][index], env)
+
+    try:
+        failures += _cost_invariants(rows, _at)
+    except ValueError as exc:
+        # A cell that PARSES but references an unexpected symbol (the `M_tune`/`M_holdout` class of
+        # drift) reaches the evaluator and raises. Reported as a failure with the symbol named,
+        # never as a traceback: a lint rule that crashes on the very drift it exists to catch reads
+        # as a broken sensor rather than as a wrong table.
+        failures.append(f"a cost-table expression could not be evaluated — {exc}")
+    return failures
+
+
+def _cost_invariants(rows: dict[str, list[str]], _at: Callable[..., float]) -> list[str]:
+    """The invariants themselves, split out so the caller owns the one place they can raise."""
+    failures: list[str] = []
+
+    # 1. Halving NEVER saves. v1's error #7, and the only honest way to sensor it is to compute it.
+    for n in range(2, 33):
+        flat = _at("Stage A — triage", 0, N=n, M_train=1.0)
+        halved = _at("Stage A — triage, halved (an abandon point, NOT a saving)", 0, N=n, M_train=1.0)
+        if halved < flat:
+            failures.append(f"the halved Stage A row is CHEAPER than the flat one at N={n} ({halved} < {flat})")
+            break
+
+    # 2. Stage B (activation) is 3x Stage A per arm — the three separate invocations, priced.
+    for count in (1, 3, 5):
+        stage_a = _at("Stage A — triage", 0, N=count, M_train=1.0)
+        stage_b = _at("Stage B — gate, activation track", 0, S=count, M_train=1.0)
+        if stage_b != 3.0 * stage_a:
+            failures.append(
+                f"Stage B (activation) is {stage_b} against Stage A's {stage_a} at N=S={count}; "
+                "it runs the same arm set through THREE separate invocations, so the ratio is 3"
+            )
+            break
+
+    # 3. The control arm's paired figure is exactly twice its unpaired one — one arm against a pair.
+    control = "Control arm — execution track, **once per suite**"
+    if len(rows[control]) < 2:
+        failures.append(f"the {control!r} row no longer prices both the arm and the pair")
+    else:
+        alone, paired = _at(control, 0, M_train=1.0), _at(control, 1, M_train=1.0)
+        if paired != 2.0 * alone:
+            failures.append(f"the control row prices the pair at {paired} against {alone} for the arm alone (want 2x)")
+
+    # 4. Stage B (execution) and Stage C carry the same coefficient on DIFFERENT split symbols —
+    #    both are 2 arms x 3 repeats. The symbol half is what catches the M_tune/M_holdout class of
+    #    drift that a name-only sensor catches only by accident.
+    #
+    #    Symbols FIRST, and then the arithmetic with both bound. A wrong symbol would otherwise
+    #    raise out of the evaluator before the check that names it precisely ever ran, and the
+    #    caller's catch-all would report "could not be evaluated" for a defect this can describe.
+    for label, symbol in (("Stage C — confirm", "M_test"), ("Stage B — gate, execution track", "M_train")):
+        if symbol not in _ascii(rows[label][0]):
+            failures.append(f"the {label!r} row no longer references {symbol}")
+    if "M_train" in _ascii(rows["Stage C — confirm"][0]):
+        failures.append("Stage C is priced in M_train — it confirms on the TEST split, and that is its whole point")
+
+    both = {"M_train": 1.0, "M_test": 1.0}
+    b_exec = _at("Stage B — gate, execution track", 0, **both)
+    c = _at("Stage C — confirm", 0, **both)
+    if b_exec != c:
+        failures.append(f"Stage B (execution) is {b_exec} and Stage C is {c}; both are 2 arms x 3 repeats")
+
+    return failures
+
+
+# --- claim 2: the halving premium table -------------------------------------
+
+_HALVING_SIGNATURE = "arms `A` | flat | halved | premium"
+
+
+def _coefficient(cell: str) -> float:
+    """The numeric coefficient a halving-table cell states, with ``**none**`` reading as 0.0."""
+    text = _ascii(cell).strip()
+    if "none" in text.lower():
+        return 0.0
+    spans = _spans(text)
+    return evaluate_expression(spans[0], {"M_train": 1.0}) if spans else float(text.strip("`"))
+
+
+def _check_halving_premium(text: str, _tmp: Path) -> list[str]:
+    """The halving table, RECOMPUTED — plus the standing claim that halving never saves.
+
+    ``halved = A/2 + ceil(A/2)`` against ``flat = A``, so ``premium = ceil(A/2) - A/2``: zero at an
+    even arm count and a half at an odd one. The first draft of this prose claimed a SAVING, which
+    is the defect the recomputation exists to catch.
+    """
+    table = next((t for t in parse_markdown_tables(text) if table_signature(t) == _HALVING_SIGNATURE), None)
+    if table is None:
+        return [f"the halving table ({_HALVING_SIGNATURE}) is gone or changed shape — nothing to check"]
+
+    failures: list[str] = []
+    for row in table.rows:
+        if len(row) < 4:
+            failures.append(f"the halving row {row!r} does not carry all four columns")
+            continue
+        arms = float(_ascii(row[0]).strip("` "))
+        want = {"flat": arms, "halved": arms / 2 + math.ceil(arms / 2), "premium": math.ceil(arms / 2) - arms / 2}
+        for column, cell in zip(("flat", "halved", "premium"), row[1:4], strict=True):
+            got = _coefficient(cell)
+            if got != want[column]:
+                failures.append(f"halving table A={arms:g}: {column} reads {got:g}, recomputes to {want[column]:g}")
+
+    # The standing claim, over a range the table does not enumerate.
+    for arms in range(2, 33):
+        if (math.ceil(arms / 2) - arms / 2) < 0:
+            failures.append(f"halving would SAVE at A={arms} — the surrounding prose says it never does")
+            break
+    return failures
+
+
+# --- claim 3: the behavioural one -------------------------------------------
+
+
+def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
+    """The prose says the INTERVAL alone could come from one run dir, but not the MDE. Run it.
+
+    This is the claim whose FALSE version shipped — "the statistic cannot be computed from one run
+    dir" — past every token sensor, because the tokens were all still there. The only way to check
+    it is to build the fixture and call the code.
+    """
+    from tests.test_optimize_gate import SUITE, _eval_result, _write_row
+
+    failures: list[str] = []
+    if "could be computed from a" not in " ".join(text.split()):
+        failures.append(
+            "the method file no longer says the interval COULD be computed from a single run "
+            "directory — the false version of this claim ('the statistic cannot be') shipped once"
+        )
+
+    from coder_eval.optimize_gate import activation_gate
+
+    def _gate(run_dirs: list[Path]):
+        return activation_gate(
+            incumbent_run_dirs=run_dirs,
+            candidate_run_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=200,
+        )
+
+    # One run dir, three replicates per row: enough for the interval, no null comparison for the MDE.
+    one = tmp / "one" / "run-0"
+    for replicate in range(3):
+        for row in range(4):
+            observed = "yes" if (row + replicate) % 3 else "no"
+            _write_row(one, "incumbent", f"r{row}", _eval_result(f"r{row}", [("yes", observed)]), replicate)
+            _write_row(one, "candidate", f"r{row}", _eval_result(f"r{row}", [("yes", "yes")]), replicate)
+    single = _gate([one])
+    if single.ci_low is None:
+        failures.append("the interval was NOT computable from one run directory, but the method file says it is")
+    if single.mde is not None:
+        failures.append("an MDE came back from one run directory, but the method file says a null split needs two")
+
+    # Two run dirs: the null comparison exists, so the MDE does too.
+    two = [tmp / "two" / f"run-{i}" for i in range(2)]
+    for i, run_dir in enumerate(two):
+        for row in range(4):
+            observed = "yes" if (row + i) % 3 else "no"
+            _write_row(run_dir, "incumbent", f"r{row}", _eval_result(f"r{row}", [("yes", observed)]))
+            _write_row(run_dir, "candidate", f"r{row}", _eval_result(f"r{row}", [("yes", "yes")]))
+    if _gate(two).mde is None:
+        failures.append("no MDE from TWO run directories — the method file prices the second invocation for exactly it")
+    return failures
+
+
+CLAIMS: list[ComputedClaim] = [
+    ComputedClaim(
+        id="cost-table",
+        surface=METHOD,
+        why=(
+            "the table a reader budgets a whole round from. Its symbols went stale once already "
+            "(M_tune/M_holdout after the splits were renamed) with no instruction deleted, so no "
+            "presence sensor could see it."
+        ),
+        covers=(_COST_TABLE_SIGNATURE,),
+        check=_check_cost_table,
+    ),
+    ComputedClaim(
+        id="halving-premium",
+        surface=METHOD,
+        why=(
+            "this table shipped claiming successive halving SAVES runs. It costs a premium at an "
+            "odd arm count and breaks even at an even one — arithmetic, and therefore checkable."
+        ),
+        covers=(_HALVING_SIGNATURE,),
+        check=_check_halving_premium,
+    ),
+    ComputedClaim(
+        id="interval-from-one-run-dir",
+        surface=METHOD,
+        why=(
+            "the false version — 'the statistic cannot be computed from one run dir' — shipped past "
+            "every token sensor because it deleted no token. Only running the code catches it."
+        ),
+        covers=(),
+        check=_check_interval_from_one_run_dir,
+    ),
+]
+
+
+def evaluate_claims(tmp: Path, claims: list[ComputedClaim] | None = None) -> list[str]:
+    """Every registered claim that does not hold, as ``"<id>: <failure>"`` strings."""
+    failures: list[str] = []
+    for claim in claims if claims is not None else CLAIMS:
+        text = claim.surface.read_text(encoding="utf-8")
+        failures += [f"{claim.id}: {failure}" for failure in claim.check(text, tmp / claim.id)]
+    return failures
+
+
+def uncovered_tables(surface: Path, claims: list[ComputedClaim] | None = None) -> list[str]:
+    """Arithmetic-bearing tables in ``surface`` that no claim registered against it names.
+
+    The coverage rule, and what makes CE039 a sensor CLASS rather than three bespoke sensors: a new
+    table carrying arithmetic fails until someone registers a claim that computes it.
+
+    The map is DERIVED from ``ComputedClaim.covers`` rather than kept beside ``CLAIMS`` — a
+    separate ``surface -> tables`` mapping would be two edits that can disagree.
+    """
+    registered = {
+        sig for claim in (claims if claims is not None else CLAIMS) if claim.surface == surface for sig in claim.covers
+    }
+    text = surface.read_text(encoding="utf-8")
+    return [
+        f"{surface.name}:{table.line} `{table_signature(table)}`"
+        for table in arithmetic_tables(text)
+        if table_signature(table) not in registered
+    ]
