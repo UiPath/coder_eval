@@ -249,6 +249,7 @@ _COST_ROWS = (
     "Control arm — execution track, **once per suite**",
     "Stage A — triage",
     "Stage A — triage, halved (an abandon point, NOT a saving)",
+    "Search loop — one round, rounds 2+",
     "Stage B — gate, activation track",
     "Stage B — gate, execution track",
     "Stage C — confirm",
@@ -352,6 +353,17 @@ def _cost_invariants(rows: dict[str, list[str]], _at: Callable[..., float]) -> l
     c = _at("Stage C — confirm", 0, **both)
     if b_exec != c:
         failures.append(f"Stage B (execution) is {b_exec} and Stage C is {c}; both are 2 arms x 3 repeats")
+
+    # 5. A search round is strictly cheaper than the SMALLEST possible Stage A (N=1: incumbent
+    #    plus one candidate). The plausible wrong edit is to co-run the incumbent "for a fair
+    #    comparison", which doubles the phase and deletes its reason to exist.
+    stage_a_floor = _at("Stage A — triage", 0, N=1, M_train=1.0)
+    search = _at("Search loop — one round, rounds 2+", 0, M_train=1.0)
+    if search >= stage_a_floor:
+        failures.append(
+            f"a search round costs {search} against Stage A's floor of {stage_a_floor} at one "
+            "candidate; the search loop runs ONE variant and reads the lineage head's recorded score"
+        )
 
     return failures
 

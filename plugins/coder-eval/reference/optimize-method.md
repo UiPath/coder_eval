@@ -19,6 +19,7 @@ State the projected run count before each stage and ask. With N candidates, S su
 | Control arm — execution track, **once per suite** | `3 × M_train` (`6 × M_train` with the incumbent it is paired against) — also buys the execution preflight |
 | Stage A — triage | `(N+1) × M_train` |
 | Stage A — triage, halved (an abandon point, NOT a saving) | `(N+1) × M_train/2 + ceil((N+1)/2) × M_train` |
+| Search loop — one round, rounds 2+ | `1 × M_train` |
 | Stage B — gate, activation track | `3 × (S+1) × M_train` |
 | Stage B — gate, execution track | `6 × M_train` per candidate gated |
 | Stage C — confirm | `6 × M_test` |
@@ -47,6 +48,42 @@ spending the rest of it.
 doubling it is the most expensive thing in the skill — and the floor it would buy is a floor on
 `f1.yes`, which the execution gate never reads. One baseline there. That track gets a floor too,
 on its own metric and from data it was already going to pay for; see the second preflight below.
+
+### The search loop — search, not a gate
+
+Round 1 runs the multi-arm Stage A. From round 2 a cheaper thing is available first: a **single
+lineage**. One candidate per round, run on the train split alone, accepted if its train score beats
+the score the lineage head recorded and reverted otherwise. That is the whole loop, and the table
+above prices one round of it at `1 × M_train` — a single arm, because the head's number is read
+back from the previous round's record rather than re-measured.
+
+**It bounds nothing.** The comparison is across invocations, unpaired and unbootstrapped, with no
+replicates and no correction — precisely the arithmetic the gate exists to distrust. So a search
+win is a *hypothesis to gate*, never a result. Nothing here promotes.
+
+**A search accept is not a promotion, and the two artifacts are distinct.** The **lineage head** is
+what the search loop works from, advanced by a search accept. The **incumbent** is what has passed
+Stage B and Stage C, advanced only by a promotion, and it is what the user is shown a diff
+against. Collapsing them would have the procedure recommending edits validated by an unpaired train
+comparison alone. A round can therefore accept a search candidate and promote nothing, and the
+incumbent must not move when it does.
+
+**Round 1 still runs the multi-arm Stage A**, and rounds 2+ return to it periodically, because the
+row matrix and the instance-best front are what a merge candidate is drawn from — a single-arm
+round produces no matrix at all.
+
+**And on the activation track the number it compares is not that gate's metric.** The comparison is
+a mean over the recorded per-row score vectors, which on a binary activation criterion is
+**accuracy** — while the gate compares `f1.yes`. Accuracy credits true negatives and F1 does not,
+so an arm that only becomes more conservative can win the search and lose the gate. On the
+execution track the two do coincide: per-row `weighted_score` is what the search loop and that
+gate both read. Either way the search number narrows and `f1.yes` decides, which is one more
+reason nothing here promotes.
+
+Two means from two invocations are also not automatically over the same rows — holes, a halved
+Stage A pass, an unpinned sample seed — and every way they diverge favours the candidate. So the
+comparison is taken over the rows both arms scored, and a row the head scored and the candidate did
+not is a hole rather than a win: the rule the coverage front already applies, applied here.
 
 ### Two preflights — price what the suite can see, on each track's own metric
 

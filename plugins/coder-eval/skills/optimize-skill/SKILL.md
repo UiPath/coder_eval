@@ -696,8 +696,25 @@ winning at least one row, so it retains an arm that owns a single row while bein
 overall — exactly the ingredient a merge wants, and exactly what the coverage front discards.
 Step 10 prints both and names the arms they disagree about.
 
+**"The previous round" means the previous MULTI-ARM round**, because a search round (Step 10) runs
+one arm and leaves no row matrix to draw a merge from. Where the last multi-arm round is more than
+a round or two back, run a fresh Stage A rather than merging on stale row assignments — that is
+what the return-to-breadth rule is for.
+
 Snapshot the incumbent the same way (`<round>-incumbent/`), siblings included, so every arm
 is mounted by the identical mechanism and the comparison has no confound.
+
+**Two pointers travel between rounds, and conflating them is how unvalidated text reaches the
+user.** The **lineage head** is what Step 10's search loop works from; it advances on a *search
+accept*, which is an unpaired train win over a recorded score. The **incumbent** is what has
+cleared Stage B and Stage C; it advances only on a *promotion*, it is what `<round>-incumbent/`
+snapshots, and it is what Step 12 diffs. A round that accepts a search candidate and promotes
+nothing therefore leaves the incumbent exactly where it was — write the round down that way.
+
+**Build cumulatively.** A later round **adds** a strategy for a named failure category rather than
+rewriting a body that is already performing. Each edit then stays an individually revertible hunk
+attributable to the rows that justified it, which is what makes a regression at round 4 something
+you can undo rather than something you have to re-derive.
 
 ### The control arm — execution track, once per suite
 
@@ -817,6 +834,12 @@ snapshots:
 A fourth appears only if you halve Stage A: `round<N>-triage-survivors.yaml`, the arms that
 survived the first pass.
 
+From round 2 there is one more, and it is the only file here holding **one variant**:
+`round<N>-explore.yaml`, the search loop's single candidate (Step 10). One variant is right there
+and wrong at Stage B, for a reason worth keeping straight: the search loop compares against a
+*recorded* score read back from `measurements.json`, so it needs no second arm in the run — while
+Stage B needs the paired block, which fires only for exactly two variants.
+
 On the execution track there is one more, `round<N>-control.yaml` — exactly two variants,
 `incumbent` and `control` (Step 8). It is the one file authored **once per suite** rather than
 once per round: the control is a property of the suite and the skill, so later rounds reuse its
@@ -873,6 +896,7 @@ file's cost table; the experiment files are the ones Step 9 named, one per stage
 
 | Stage | Experiment file | How it runs |
 | --- | --- | --- |
+| Search (rounds 2+) | `round<N>-explore.yaml` | one invocation, **one variant**, `--split train` |
 | A — triage | `round<N>-triage.yaml` | **two invocations** when halving (below), else one, all candidates + incumbent, `--split train` |
 | B — gate, activation track | `round<N>-gate.yaml` | **three separate invocations**, `--split train`, distinct `--run-dir` each |
 | B — gate, execution track | `round<N>-gate.yaml` | one invocation, exactly two variants, `--split train --repeats 3` |
@@ -886,6 +910,100 @@ run of zero rows.
 The two Stage B rows differ on purpose and the method file says why — do not unify them.
 Neither the promotion conditions nor the sign rule is restated here: read them there, at the
 moment you apply them, rather than from memory.
+
+### The search loop — one arm, one round, no gate
+
+**Rounds 2+ only.** Round 1 has no recorded lineage to work from, so it runs the multi-arm Stage A
+below. From round 2 you may instead run a **single lineage**: one candidate, on the train split,
+accepted if its train score beats the score the lineage head recorded and reverted otherwise. One
+arm rather than `N+1` — the method file's cost table prices a round of it at one train split,
+because the head's number is read back from `measurements.json` rather than re-measured.
+
+```bash
+coder-eval run <suite> -e <path to round<N>-explore.yaml> --split train \
+  --run-dir <runs>/round<N>-explore
+```
+
+Read the score to beat rather than recomputing it, so accept/revert is mechanical:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import arm_row_scores, load_measurements
+
+sidecar = Path(".optimize-skill/<skill>/measurements.json")
+
+prior = [r for r in load_measurements(sidecar).round_scores if r.lineage_head is not None]
+if not prior:
+    raise SystemExit("no recorded lineage — run a multi-arm Stage A round first")
+last = max(prior, key=lambda r: r.round)
+head = next(a for a in last.arm_row_scores if a.variant_id == last.lineage_head)
+
+explored = arm_row_scores(
+    run_dirs=[Path("<runs>/round<N>-explore")],
+    variant_ids=["<the round's one candidate>"],
+    suite_id="<the suite's task_id>",
+    criterion_index=0,  # omit on the execution track to read each row's weighted_score
+)[0]
+
+# Compare on the rows BOTH arms scored, and on nothing else.
+shared = sorted(set(head.row_scores) & set(explored.row_scores))
+missing = sorted(set(head.row_scores) - set(explored.row_scores))
+if missing:
+    raise SystemExit(f"the candidate scored no result for {missing} — a hole is not a win")
+if not shared:
+    raise SystemExit("the two rounds share no rows — pin dataset.sample_seed and re-run")
+
+to_beat = sum(head.row_scores[r] for r in shared) / len(shared)
+score = sum(explored.row_scores[r] for r in shared) / len(shared)
+print(score, "beats" if score > to_beat else "does not beat", to_beat, f"over {len(shared)} rows")
+```
+
+**Compare over the shared rows, and refuse rather than average around a hole.** The two means come
+from *different invocations* — the head's from an earlier round's record, the candidate's from the
+run you just paid for — so nothing guarantees they cover the same rows, and every way they diverge
+favours the candidate. A candidate that errored on the hardest rows scores a higher mean over the
+survivors; a head recorded from a halved Stage A pass 1 was measured on a stratified half while
+this command runs the full train split; and an unpinned `dataset.sample_seed` draws a different
+sample **across invocations** every time. Hence the two `SystemExit` guards above: a row the head
+scored and the candidate did not is a hole and never a win, which is the rule the Pareto front
+already applies, and no shared rows at all is a wiring problem rather than a result.
+
+**Which number this is, stated exactly, because it is not the gate's.** `criterion_index=<n>` is
+the activation track and reads that criterion's per-row score — so the mean above is **accuracy**
+over the shared rows, *not* the `metrics["f1.yes"]` that Stage A ranks on and Stage B gates on.
+Omitting `criterion_index` is the execution track and reads each row's `weighted_score`, which
+there *is* the gate's own metric. The two indices are not interchangeable, the same rule Step 6's
+preflight states.
+
+That gap is not academic: accuracy credits true negatives and `f1.yes` does not, so a candidate
+that merely becomes more conservative gains on every distractor row while shedding `recall.yes`.
+Before proposing a search-accepted arm as a Stage B survivor, read its `metrics["f1.yes"]` out of
+its own `suite.json` and record both numbers — a lineage that climbs on accuracy while F1 sits
+still is the shape to catch here rather than at the gate.
+
+**A search accept is NOT a promotion, and the two pointers are different things.** The **lineage
+head** is what this loop carries forward, advanced by an unpaired train win. The **incumbent** is
+what has cleared Stage B and Stage C, advanced only by a promotion, and it is what Step 12 diffs
+for the user. This comparison is across invocations, unpaired, unreplicated and uncorrected — a
+hypothesis to gate, never a result. A round may accept here and promote nothing; the incumbent does
+not move when it does.
+
+**Which arm becomes the head on a round that ran no search loop.** After a multi-arm Stage A,
+record the best-scoring arm as `lineage_head` — **the incumbent included**, which is the right
+answer whenever no candidate beat it. It is a real choice rather than bookkeeping: it is the bar
+every later search round is accepted or reverted against, so recording an arm that merely tied
+moves that bar on an accident.
+
+**A head that later fails Stage B stays the head.** The gate refusing to promote is a statement
+about separation on replicated, corrected data — it does not refute the search result, and
+rewinding the pointer would leave the loop unable to accumulate anything. What bounds the damage is
+the pair of rules below and in Step 13, not the pointer.
+
+**Return to breadth after two rounds with no accept.** Run a multi-arm Stage A round instead: a
+merge candidate is drawn from the instance-best front, the front is computed from the row matrix,
+and a single-arm round produces no matrix at all. Two consecutive no-accept search rounds is the
+signal that the lineage is exhausted and the breadth is what is missing.
 
 ### Stage A — halve first, when the suite is big enough
 
@@ -1235,6 +1353,13 @@ the regression corpus:
   instance-best front especially: it is the set a later round's merge candidate is drawn from, and
   it is precisely the arms the coverage front discards.
 
+  Record `lineage_head` on the same entry: the arm the search loop carries into the next round, or
+  `None` when the round accepted nothing. The **score to beat is derived** from that arm's
+  `row_scores` right here — never stored a second time, and never read out of `history.json`. That
+  is not a schema creeping into the ledger: it is a machine-read pointer, which is what
+  `measurements.json` is for, and the narrative of *why* the round accepted or reverted still
+  belongs in `history.json` where a schema would have to reject it.
+
 **Say in `history.json` whether the floor was reused or recomputed.** That is narrative, not a
 field: `measurements.json` is `extra="forbid"` and has nowhere to put it. It matters because a
 reused floor is an *earlier round's* measurement, so two rounds quoting the same MDE may be one
@@ -1290,6 +1415,11 @@ if floor is not None:
 record_round_scores(sidecar, RoundScores(
     round=1, arm_row_scores=arms,
     pareto_front=pareto_front(arms), instance_best_front=instance_best_front(arms),
+    # The arm the next round's SEARCH LOOP is accepted or reverted against. On a multi-arm round
+    # like this one that is the best-scoring arm, the incumbent included; on a search round it is
+    # the candidate if it beat the head and the head otherwise, and None if there is no lineage
+    # yet. Not a promotion — see Step 8's two pointers.
+    lineage_head="cand-a-widen-vocabulary",
 ))
 
 # On promotion only:
@@ -1328,11 +1458,25 @@ On the execution track, keep the diff **minimal and reviewable**. A body edit ch
 the skill instructs on every future invocation, including cases no row covered, so the user
 is approving reach beyond the measurement. Say which rows justified each hunk.
 
+**On a multi-round session the diff is cumulative** — the original against the final *promoted*
+text, with each hunk naming the round and the rows that justified it. It diffs the **incumbent**,
+never the lineage head: a search accept has cleared no gate, so text that only ever won an unpaired
+train comparison must not reach this step.
+
 **Report a negative result plainly when nothing promotes.** That is the common outcome. The
 honest version — "three candidates, none separated from the incumbent beyond run-to-run
 noise, here are the numbers" — is worth more than a promotion that will not reproduce.
 
 ## Step 13 — Stop rule
 
-Stop after two consecutive rounds that promote nothing. Continuing past that is fitting to
-the train set, and the test will eventually stop catching it.
+Stop after two consecutive **gated** rounds that promote nothing — rounds that actually reached
+Stage B. Continuing past that is fitting to the train set, and the test will eventually stop
+catching it.
+
+**A search round is not a gated round and does not count here.** It promotes nothing by
+construction, so counting it would end every session after two of the cheapest rounds available.
+It has its own budget instead: two consecutive search rounds with no accept sends you back to a
+multi-arm Stage A (Step 10). The two rules compose rather than cancel — a lineage that keeps
+accepting on the train split while the gated rounds keep promoting nothing is exactly the
+train-set fitting this rule exists to stop, and the count of gated rounds is what ends the session
+however busy the search loop looks.

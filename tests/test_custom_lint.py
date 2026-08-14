@@ -2497,6 +2497,21 @@ class TestPluginArtifacts:
                 "the execution preflight measures weighted_score, not f1.yes — an F1 floor prices a "
                 "gate that never reads F1 and comes back a meaningless 0.000",
             ),
+            # The search loop's own experiment file. There is no --variant filter, so a round that
+            # runs one arm needs a file holding one arm — and it is the only file in Step 9's list
+            # that does, which is exactly why it is the one an agent would try to skip.
+            (
+                "round<N>-explore.yaml",
+                "Step 9 must name the search loop's one-variant experiment file; there is no "
+                "--variant filter, so the arm set can only be changed by authoring a file",
+            ),
+            # A search accept is an UNPAIRED train win. Without this distinction a fresh session
+            # reads one as a promotion and recommends text to the user that cleared no gate.
+            (
+                "lineage head",
+                "the search loop's pointer must stay distinct from the incumbent — a search accept "
+                "is an unpaired train win, and only Stage B plus Stage C advance what Step 12 diffs",
+            ),
         ):
             assert token in skill, (
                 f"optimize-skill's SKILL.md lost {token!r} — {why}. This is PROCEDURE: it must stay "
@@ -2510,6 +2525,20 @@ class TestPluginArtifacts:
             "cost table, the gate rules and the sign rule are unreachable from the procedure "
             "that has to apply them"
         )
+
+        # The METHOD half, asserted against the method file alone — what a stage BOUNDS is
+        # track-invariant and is the thing that has to be right for a verdict to mean anything.
+        for token, why in (
+            (
+                "search, not a gate",
+                "the search loop bounds nothing: its comparison is across invocations, unpaired "
+                "and unbootstrapped, so a search win is a hypothesis to gate and never a promotion",
+            ),
+        ):
+            assert token in method, (
+                f"reference/optimize-method.md lost {token!r} — {why}. This is METHOD: it must stay "
+                f"in the reference, not move to the skill"
+            )
 
         # The paired-diff sign rule has to appear in BOTH gates that read the block —
         # Stage B (execution) and Stage C — because each is a separate decision point and a
@@ -5380,6 +5409,24 @@ class TestCE039ComputedClaims:
         assert renamed != text, "the anchor moved — re-derive it from the cost table"
         failures = _check_cost_table(renamed, tmp_path)
         assert failures and any("M_holdout" in f for f in failures), failures
+
+    def test_the_search_loop_may_not_be_priced_above_the_smallest_stage_a(self, tmp_path: Path):
+        """Invariant 5's self-test, in the shape of the split-symbol one above.
+
+        The search loop exists because it runs ONE arm; the plausible wrong edit is to co-run the
+        incumbent "for a fair comparison", which doubles the phase and deletes its reason to exist.
+        Priced at `4 x M_train` it would be dearer than a whole two-arm Stage A and the prose would
+        still read as a saving, so the invariant is computed rather than matched.
+        """
+        from tests.lint.computed_claims import METHOD, TIMES, _check_cost_table
+
+        text = METHOD.read_text(encoding="utf-8")
+        assert _check_cost_table(text, tmp_path) == []
+
+        overpriced = text.replace(f"`1 {TIMES} M_train`", f"`4 {TIMES} M_train`", 1)
+        assert overpriced != text, "the anchor moved — re-derive it from the cost table's search row"
+        failures = _check_cost_table(overpriced, tmp_path)
+        assert failures and any("search round costs" in f for f in failures), failures
 
     def test_the_coverage_rule_fails_on_an_unregistered_table(self, tmp_path: Path):
         """The second self-test, and the committed replacement for "edit a shipped file to prove it".

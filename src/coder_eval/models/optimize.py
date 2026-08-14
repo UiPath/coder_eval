@@ -7,7 +7,7 @@ is a typed value the skill prints, instead of arithmetic an agent performs by ha
 
 from __future__ import annotations
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 # The label whose F1 the activation gate reads. `skill_triggered` emits `yes` / `no`, and
@@ -431,6 +431,39 @@ class RoundScores(BaseModel):
             "merging, because it deliberately retains an arm that wins exactly one row."
         ),
     )
+    lineage_head: str | None = Field(
+        default=None,
+        description=(
+            "The arm the SEARCH LOOP carries into the next round, or None when the round accepted "
+            "nothing. NOT a promotion: a search accept is an unpaired train win, and only Stage B "
+            "plus Stage C advance the incumbent the skill diffs for the user. The score to beat is "
+            "derived from this arm's row_scores above rather than stored again here."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _lineage_head_is_readable(self) -> RoundScores:
+        """A named head must be an arm here, and an arm with scores to derive a number from.
+
+        Both states are otherwise silent at write time and fatal at read time: the next round's
+        search loop looks the head up in `arm_row_scores` and averages its `row_scores`, so an
+        absent arm surfaces as a `StopIteration` and an empty one as a `ZeroDivisionError` — in the
+        user's terminal, at round 3, from a sidecar written at round 2.
+        """
+        if self.lineage_head is None:
+            return self
+        head = next((a for a in self.arm_row_scores if a.variant_id == self.lineage_head), None)
+        if head is None:
+            raise ValueError(
+                f"lineage_head {self.lineage_head!r} is not one of this round's arms "
+                + f"{sorted(a.variant_id for a in self.arm_row_scores)}"
+            )
+        if not head.row_scores:
+            raise ValueError(
+                f"lineage_head {self.lineage_head!r} scored no rows, so the next round has no score "
+                + "to beat — record the round without a head instead"
+            )
+        return self
 
 
 class OptimizeMeasurements(BaseModel):

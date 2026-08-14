@@ -623,3 +623,88 @@ class TestInstanceBestFrontIsPersisted:
             encoding="utf-8",
         )
         assert load_measurements(path).round_scores[0].instance_best_front == []
+
+
+class TestLineageHeadIsPersisted:
+    """The search loop's carry-forward pointer — and everything it deliberately is NOT.
+
+    It names the arm rounds 2+ work from. It is not a promotion, and it stores no score: the
+    number to beat is derived from that arm's `row_scores`, so the two cannot disagree.
+    """
+
+    def _round(self, **overrides) -> RoundScores:
+        base = {
+            "round": 1,
+            "arm_row_scores": [ArmRowScores(variant_id="cand-a", row_scores={"r1": 1.0, "r2": 0.5})],
+            "pareto_front": ["cand-a"],
+        }
+        return RoundScores(**{**base, **overrides})
+
+    def test_defaults_to_none(self) -> None:
+        assert self._round().lineage_head is None
+
+    def test_round_trips_through_json(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        original = OptimizeMeasurements(skill="my-skill", round_scores=[self._round(lineage_head="cand-a")])
+        path.parent.mkdir(parents=True)
+        path.write_text(original.model_dump_json(), encoding="utf-8")
+
+        loaded = load_measurements(path)
+        assert loaded == original
+        assert loaded.round_scores[0].lineage_head == "cand-a"
+
+    def test_a_sidecar_written_before_the_field_loads_with_none(self, tmp_path: Path) -> None:
+        # `extra="forbid"` rejects UNKNOWN keys, not ABSENT optional ones — and the opposite belief
+        # is common enough to be worth pinning, since `load_measurements` RAISES on a malformed
+        # file rather than rebuilding one that carries an unreconstructible regression corpus.
+        path = _path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "skill": "my-skill",
+                    "round_scores": [
+                        {
+                            "round": 1,
+                            "arm_row_scores": [{"variant_id": "cand-a", "row_scores": {"r1": 0.5}}],
+                            "pareto_front": ["cand-a"],
+                            "instance_best_front": ["cand-a"],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert load_measurements(path).round_scores[0].lineage_head is None
+
+    def test_record_round_scores_preserves_it_and_replaces_the_round(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        record_round_scores(path, self._round(lineage_head="cand-a"))
+        # Preserved through the writer, not only through model_dump_json: a writer that dropped a
+        # non-None head would still pass a test whose only assertion is the replacement below.
+        assert load_measurements(path).round_scores[0].lineage_head == "cand-a"
+
+        updated = record_round_scores(path, self._round(lineage_head=None))
+        assert len(updated.round_scores) == 1, "re-recording a round must replace it, not accumulate"
+        assert updated.round_scores[0].lineage_head is None
+        assert load_measurements(path) == updated
+
+    def test_a_head_naming_an_absent_arm_is_rejected(self) -> None:
+        # Otherwise the next round's `next(a for a in ... if a.variant_id == head)` raises
+        # StopIteration in the user's terminal, from a sidecar written a round earlier.
+        with pytest.raises(ValueError, match="not one of this round's arms"):
+            self._round(lineage_head="cand-b")
+
+    def test_a_head_with_no_row_scores_is_rejected(self) -> None:
+        # And this one would be a ZeroDivisionError on the mean, one round later.
+        with pytest.raises(ValueError, match="scored no rows"):
+            self._round(
+                arm_row_scores=[ArmRowScores(variant_id="cand-a", row_scores={})],
+                lineage_head="cand-a",
+            )
+
+    def test_it_stores_no_score(self) -> None:
+        # The number to beat is DERIVED from the head's row_scores. A second declaration is a
+        # second thing that can disagree — the drift CE037/CE040 and `_floor_key` exist to prevent.
+        assert "lineage_score" not in RoundScores.model_fields
+        assert RoundScores.model_fields["lineage_head"].annotation == (str | None)
