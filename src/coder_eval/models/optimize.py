@@ -50,6 +50,17 @@ class GuardrailCheck(BaseModel):
         ),
     )
     ci_high: float | None = Field(default=None, description="Upper bound of that interval.")
+    rate: float | None = Field(
+        default=None,
+        description=(
+            "An optional SECOND reading for a check that has one, in the same spirit as "
+            "relative_change beside it — the check's own `name` says what it means. Today only the "
+            "sibling checks set it, to the ANNEXATION rate: of the sibling's true-yes rows, the "
+            "fraction the candidate turned into 'no' that the incumbent did not. It is a reading, "
+            "never a second gate — `passed` is decided by the recall drop alone. None wherever "
+            "there is no such quantity, including a sibling with no true instances to annex."
+        ),
+    )
     passed: bool = Field(description="False only on a measured breach; an unmeasurable check passes with a note.")
     note: str | None = Field(default=None, description="Why the check could not be evaluated, or what qualifies it.")
 
@@ -208,6 +219,15 @@ class ExecutionGateVerdict(BaseModel):
     confidence: float = Field(
         gt=0.0, lt=1.0, description="Interval width the paired t used, so the report cannot mislabel it."
     )
+    n_resamples: int = Field(
+        gt=0,
+        description=(
+            "Bootstrap draws used for the MDE and the cost/latency guardrails this verdict carries "
+            "— NOT for the primary statistic, which is an analytic paired t. Recorded for the same "
+            "reason ActivationGateVerdict records it: without it the same block can be produced at "
+            "two very different resolutions and read identically."
+        ),
+    )
     rows_paired: int = Field(description="Rows scored by BOTH arms — PairedComparison.task_count.")
     rows_excluded: int = Field(
         description=(
@@ -233,7 +253,17 @@ class ExecutionGateVerdict(BaseModel):
         default=None, description="The family-wise alpha holm_promote_execution applied. None until it has run."
     )
     promoted: bool | None = Field(
-        default=None, description="None means gated but undecided — holm_promote_execution has not been applied."
+        default=None,
+        description=(
+            "None means gated but undecided — holm_promote_execution has not been applied. "
+            "**It reports the PRIMARY statistic's decision only**: Holm rejecting, the difference "
+            "favouring the candidate, and the interval excluding zero. Guardrails and integrity "
+            "checks do NOT enter it — they gate in render_execution_markdown, which headlines "
+            "BLOCKED BY A GUARDRAIL over a True promoted. So never ship on this field alone: read "
+            "the rendered block, or check `all(c.passed for c in (*integrity_checks, *guardrails))` "
+            "beside it. (This differs from ActivationGateVerdict, where sibling checks are folded "
+            "into `promoted` and only the cost/latency guardrails stay advisory.)"
+        ),
     )
     mde: float | None = Field(
         default=None,

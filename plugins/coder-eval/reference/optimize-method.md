@@ -315,7 +315,12 @@ Promote only when all of these hold:
   improvement, it is a different trade.
 - **No sibling regression.** For every other `skill_triggered` criterion in the suite, its
   **`recall.yes`** must not drop. A candidate that wins by annexing a sibling's requests has
-  moved the failure, not fixed it.
+  moved the failure, not fixed it. The siblings are **derived from the run**, not declared —
+  every classification criterion other than the gated one is checked, because a guardrail
+  somebody has to remember to arm is one the tool does not have. The block reports an
+  **annexation rate** beside each sibling's recall: of that sibling's true-`yes` rows, the
+  fraction this candidate turned into `no` that the incumbent did not. That is a reading, and
+  the pass/fail is still the recall drop alone.
 
   Read `recall.yes`, not `precision.yes`, and the reason is worth keeping: annexation makes
   the sibling's criterion `expected=yes, observed=no` on that row — a false negative. That
@@ -477,10 +482,11 @@ family. Correct it **once**, with the same step-down the activation track uses, 
 verdict through `holm_promote_execution` in a single call. A round gating one candidate passes a
 family of one, which is the same call and costs nothing.
 
-Promote only when all of these hold — and **the rendered block reports every one of them**, so
-this list is the contract the code enforces rather than a checklist to work through by eye:
+Promote only when all of these hold. Each bullet says whether the rendered block reports it — most
+do, and the one that does not is the one you still have to check yourself:
 
-- **The paired mean difference favours the candidate and its 95% CI excludes zero.**
+- **The paired mean difference favours the candidate and its 95% CI excludes zero.** The block
+  reports this, with the sign already resolved as candidate minus incumbent.
 - **The PREDECLARED primary and its guardrails hold.** Before Stage B runs, name **one**
   primary criterion (or the suite score) plus the specific guardrail criteria allowed to veto
   a win, and record them in the ledger — before the numbers exist, which is what makes it a
@@ -491,14 +497,21 @@ this list is the contract the code enforces rather than a checklist to work thro
   regression is uncorrected multiple testing in the rejection direction — with enough
   criteria something always looks worse, so noisy criteria veto real wins and *which*
   criterion "regressed" is unstable from round to round.
+
+  **This is the one bullet the block does NOT report.** `execution_gate` carries no per-criterion
+  aggregates, precisely because which criteria to read is a predeclaration you made before the
+  numbers existed — the tool cannot know it, and a tool that scanned them all would be doing the
+  uncorrected multiple testing this bullet forbids. Read your predeclared criteria out of
+  `suite.json` yourself, and quote the predeclaration from the ledger beside them.
 - **`completion_rate` is equal across arms**, or the difference favours the incumbent. An
   eroded, asymmetric sample produces confident nonsense — a *p*-value computed over rows that
   vanished from one arm is not evidence. The block reports this as an integrity check, derived
   from the rows themselves rather than from `suite.json`'s `criterion_aggregates` — that list is
   *filtered*, so a position in it is not a position in `success_criteria`.
 - **Cost and latency have not materially regressed**, by the same bootstrap-derived guardrails
-  described above. They matter more here than on the activation track, not less: an outcome row
-  is a whole task run, so a body edit that sends the agent down a longer path moves real money.
+  described above; the block reports both. They matter more here than on the activation track, not
+  less: an outcome row is a whole task run, so a body edit that sends the agent down a longer path
+  moves real money.
 - The skill **actually engaged** on every scored row; otherwise part of the sample measured
   the absence of the thing under test. The block reports this too, as the engagement
   `recall.yes` integrity check.

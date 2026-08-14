@@ -5456,11 +5456,15 @@ class TestHolmRejectionsIsConfined:
     @staticmethod
     def _call_sites(tree: ast.AST) -> list[tuple[str, int]]:
         """(enclosing function name, line) for every `holm_rejections(...)` call in ``tree``."""
+        # INNERMOST wins. `ast.walk` is breadth-first, so a `setdefault` keyed on the outer
+        # function claims every descendant first — and a third call written inside a closure (the
+        # module already has one, `_verdict` inside `execution_gate`) would then report its
+        # enclosing function's allowed name and pass. Overwriting as we descend is what fixes it.
         enclosing: dict[int, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 for child in ast.walk(node):
-                    enclosing.setdefault(id(child), node.name)
+                    enclosing[id(child)] = node.name
         sites = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -5506,3 +5510,18 @@ class TestHolmRejectionsIsConfined:
         callers = sorted(name for name, _line in self._call_sites(ast.parse(source)))
         assert callers != sorted(self.ALLOWED)
         assert "_quietly_uncorrected" in callers
+
+    def test_a_call_hidden_in_a_closure_is_attributed_to_the_closure(self):
+        # The natural place a third call would be written: inside a helper nested in an ALLOWED
+        # function, where a breadth-first `setdefault` would report the allowed outer name.
+        source = textwrap.dedent(
+            """
+            def holm_promote(verdicts, alpha):
+                def _per_candidate(verdict):
+                    return holm_rejections([verdict.p], alpha)
+                return [_per_candidate(v) for v in verdicts]
+            """
+        )
+        callers = sorted(name for name, _line in self._call_sites(ast.parse(source)))
+        assert callers == ["_per_candidate"], callers
+        assert callers != sorted(self.ALLOWED)

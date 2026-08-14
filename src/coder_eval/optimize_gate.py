@@ -839,6 +839,61 @@ def measure_execution_noise_floor(
     return _floor_from_clusters([a for a, _b in halves], [b for _a, b in halves], mean, probe, measurements)
 
 
+def derive_sibling_indices(*rows_maps: dict[str, list[EvaluationResult]], primary_index: int) -> list[int]:
+    """Every position holding a ``ClassificationCriterionResult``, except the primary.
+
+    **Varargs, not one merged mapping.** ``activation_gate`` holds the two arms separately, and
+    ``{**incumbent_rows, **candidate_rows}`` would silently drop the incumbent's result list for
+    every row id present in both — which is every row in the common case, turning the intended
+    union into a candidate-only view. Taking both maps and unioning the derived index sets is the
+    fix, and it means a criterion present on one arm only is still found (and then reported by
+    ``_sibling_checks``' existing one-sided-arm note rather than blamed on the candidate).
+
+    Positions are ABSOLUTE positions in ``success_criteria_results``, so a non-classification
+    criterion sitting between two classification ones does not shift the ones after it. Counting
+    classification criteria instead is the implementation that gets that case wrong.
+
+    A single-criterion suite — the shipped ``activation.yaml`` — derives ``[]``, which is the
+    common case and is silent rather than noted: there is no sibling, so there is nothing to say.
+    """
+    found: set[int] = set()
+    for rows in rows_maps:
+        for results in rows.values():
+            for result in results:
+                found |= {
+                    index
+                    for index, criterion_result in enumerate(result.success_criteria_results)
+                    if isinstance(criterion_result, ClassificationCriterionResult)
+                }
+    return sorted(found - {primary_index})
+
+
+def _annexation_rate(incumbent_pairs: list[tuple[str, str]], candidate_pairs: list[tuple[str, str]]) -> float | None:
+    """Of the sibling's true-``yes`` observations, the fraction the candidate alone turned to ``no``.
+
+    A READING, not a gate — the same standing the cost/quality front has (see
+    :data:`COST_FRONT_ADVISORY`). ``_sibling_checks`` still passes or fails on the recall drop
+    alone; this number says how much of the sibling's territory the candidate took, which a recall
+    delta alone does not convey when the incumbent was already missing some of it.
+
+    ``None`` when the sibling has no true instances, since there is then nothing to annex and a
+    rate over an empty denominator would read as 0.0 — indistinguishable from "took nothing".
+
+    Paired positionally: the two arms' pair lists are built over the same rows in the same order by
+    the caller, and a length mismatch (which the balancing upstream prevents) truncates to the
+    shorter rather than inventing an alignment.
+    """
+    annexed = 0
+    total = 0
+    for (expected, incumbent_observed), (_e, candidate_observed) in zip(incumbent_pairs, candidate_pairs, strict=False):
+        if expected != TARGET_LABEL:
+            continue
+        total += 1
+        if incumbent_observed == TARGET_LABEL and candidate_observed != TARGET_LABEL:
+            annexed += 1
+    return annexed / total if total else None
+
+
 def _sibling_checks(
     *,
     incumbent_rows: dict[str, list[EvaluationResult]],
@@ -893,6 +948,8 @@ def _sibling_checks(
                     else None
                 ),
                 tolerance=tolerance,
+                # A READING beside the recall, never a second gate: `passed` below is unchanged.
+                rate=None if one_sided else _annexation_rate(incumbent_pairs, candidate_pairs),
                 passed=one_sided or not incumbent_pairs or candidate_recall >= incumbent_recall - tolerance,
                 note=note,
             )
@@ -908,7 +965,7 @@ def activation_gate(
     candidate_variant: str,
     suite_id: str,
     criterion_index: int,
-    sibling_indices: Sequence[int] = (),
+    sibling_indices: Sequence[int] | None = None,
     materiality: float = MATERIALITY_FLOOR,
     confidence: float = 0.95,
     seed: int = 0,
@@ -922,6 +979,14 @@ def activation_gate(
 
     ``criterion_index`` is the criterion's **position** in the suite's ``success_criteria`` list
     (0-based, counting from the top of the YAML).
+
+    ``sibling_indices`` has three states, and ``None`` and ``()`` are no longer the same thing:
+    ``None`` (the default) **derives** every other classification position from the run itself via
+    :func:`derive_sibling_indices`, ``()`` checks nothing, and an explicit sequence checks exactly
+    those. The default flipped because a guardrail nobody remembers to arm is a guardrail the tool
+    does not have — the shipped snippet passed ``()`` and told the reader to leave it that way, so
+    a suite that stacked sibling criteria was silently ungated against a candidate winning by
+    annexing them. Passing ``()`` is now how you turn the check off deliberately.
 
     Leaves ``promoted=None``. One gate knows nothing about the family it belongs to, and the Holm
     correction is a property of that family — pass every survivor's verdict through
@@ -1045,7 +1110,13 @@ def activation_gate(
             incumbent_rows=incumbent_rows,
             candidate_rows=candidate_rows,
             paired_row_ids=scored_row_ids,
-            sibling_indices=sibling_indices,
+            # Derived over the UNION of both arms' rows, so a criterion present on one arm only is
+            # still found and reported by the one-sided note rather than going unchecked.
+            sibling_indices=(
+                derive_sibling_indices(incumbent_rows, candidate_rows, primary_index=criterion_index)
+                if sibling_indices is None
+                else sibling_indices
+            ),
         ),
         # Over the rows the F1 comparison actually used, so a guardrail is never computed on a
         # different sample than the number it guards.
@@ -1311,12 +1382,31 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
 # ---------------------------------------------------------------------------
 
 
-def _completion_check(rows: dict[str, list[EvaluationResult]], row_ids: Sequence[str], arm: str) -> tuple[int, int]:
-    """(replicates that produced a score, replicates present) for one arm over ``row_ids``."""
-    present = [result for rid in row_ids for result in rows.get(rid, [])]
-    scored = [result for result in present if result.success_criteria_results]
-    logger.debug("completion for %s: %d scored of %d present", arm, len(scored), len(present))
-    return len(scored), len(present)
+def _completion_rates(
+    incumbent_rows: dict[str, list[EvaluationResult]], candidate_rows: dict[str, list[EvaluationResult]]
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """``((incumbent scored, attempted), (candidate scored, attempted))`` over the UNION of rows.
+
+    **The union, and a shared per-row denominator, are the whole point.** Computed over the paired
+    intersection instead, this check is blind to exactly the erosion it exists to catch: a row that
+    vanished from one arm leaves both the numerator and the denominator, and two arms measured on
+    different row sets both report 100%. Measured before this was fixed — an arm missing two of
+    eight rows reported ``8/8`` against ``8/8`` and passed.
+
+    So each row contributes ``max(len(incumbent), len(candidate))`` slots to BOTH arms' denominators
+    — what the row was worth if the run had completed — while only replicates that actually produced
+    a criterion result count toward an arm's numerator. A row an arm never ran, and a row it ran and
+    crashed, then read the same way, which is what the method's rule means by an eroded sample.
+    """
+    totals = {"incumbent": [0, 0], "candidate": [0, 0]}
+    for row_id in sorted(set(incumbent_rows) | set(candidate_rows)):
+        per_arm = {"incumbent": incumbent_rows.get(row_id, []), "candidate": candidate_rows.get(row_id, [])}
+        attempted = max(len(results) for results in per_arm.values())
+        for arm, results in per_arm.items():
+            totals[arm][0] += sum(1 for result in results if result.success_criteria_results)
+            totals[arm][1] += attempted
+    logger.debug("completion: incumbent %s, candidate %s", totals["incumbent"], totals["candidate"])
+    return (totals["incumbent"][0], totals["incumbent"][1]), (totals["candidate"][0], totals["candidate"][1])
 
 
 def _integrity_checks(
@@ -1369,8 +1459,10 @@ def _integrity_checks(
         else:
             incumbent_recall = _metric(incumbent_pairs, metric_name)
             candidate_recall = _metric(candidate_pairs, metric_name)
-            # Below the incumbent OR below 1.0: a row the skill never engaged on measured the
-            # ABSENCE of the thing under test, so it is not evidence about the candidate's body.
+            # The bar is 1.0 flat, not "no worse than the incumbent": a row the skill never engaged
+            # on measured the ABSENCE of the thing under test, so it is not evidence about the
+            # candidate's body however the incumbent did on it. (Recall is bounded above by 1.0, so
+            # `>= 1.0` already implies `>= incumbent` — spelling both would be a dead conjunct.)
             checks.append(
                 GuardrailCheck(
                     name=f"engagement {metric_name} [criterion {engagement_criterion_index}]",
@@ -1380,7 +1472,7 @@ def _integrity_checks(
                         (candidate_recall - incumbent_recall) / incumbent_recall if incumbent_recall else None
                     ),
                     tolerance=0.0,
-                    passed=candidate_recall >= incumbent_recall and candidate_recall >= 1.0,
+                    passed=candidate_recall >= 1.0,
                     note=(
                         None
                         if candidate_recall >= 1.0
@@ -1390,8 +1482,11 @@ def _integrity_checks(
                 )
             )
 
-    incumbent_scored, incumbent_present = _completion_check(incumbent_rows, row_ids, "incumbent")
-    candidate_scored, candidate_present = _completion_check(candidate_rows, row_ids, "candidate")
+    # Over the union of rows, NOT `row_ids`: the paired set cannot see a row that vanished from one
+    # arm, which is the erosion this check exists for.
+    (incumbent_scored, incumbent_present), (candidate_scored, candidate_present) = _completion_rates(
+        incumbent_rows, candidate_rows
+    )
     incumbent_rate = incumbent_scored / incumbent_present if incumbent_present else None
     candidate_rate = candidate_scored / candidate_present if candidate_present else None
     checks.append(
@@ -1458,9 +1553,60 @@ def execution_gate(
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
     notes: list[str] = []
+    if incumbent_variant == candidate_variant:
+        # Otherwise the sign resolves off the candidate, matches vid_a, and the block reports
+        # `vid_a - vid_b` labelled `candidate - incumbent` with both labels reading the same name
+        # — a confident, significant, sign-flipped verdict comparing an arm to the other arm while
+        # claiming to compare it to itself. Measured before this guard existed.
+        notes.append(
+            f"incumbent_variant and candidate_variant are both {incumbent_variant!r}, so there is no "
+            + "comparison to make and no sign to resolve. Nothing below is a result."
+        )
     incumbent_rows = load_arm_rows([run_dir], incumbent_variant, suite_id)
     candidate_rows = load_arm_rows([run_dir], candidate_variant, suite_id)
     row_ids = sorted(set(incumbent_rows) & set(candidate_rows))
+
+    # The statistic comes from `experiment.json` while every check comes from the on-disk row tree,
+    # so the two can disagree — and a valid experiment file beside a mistyped variant, suite or run
+    # directory renders as PROMOTED with every check a green `— -> —`. `activation_gate` carries
+    # this note for the same reason; without it the silent-zero failure mode is loud on one track
+    # and silent on the other.
+    for arm, variant_id, rows in (
+        ("incumbent", incumbent_variant, incumbent_rows),
+        ("candidate", candidate_variant, candidate_rows),
+    ):
+        if not rows:
+            notes.append(
+                f"the {arm} arm loaded ZERO rows: nothing matched "
+                + f"<run>/{variant_id}/{suite_id}/*/NN/task.json under {run_dir}. That is a wrong "
+                + "variant id, a wrong suite id or a wrong run directory — not a result. Every "
+                + "guardrail and integrity check below is unevaluated, and the paired statistic "
+                + "comes from experiment.json, which can still look fine. Fix the path first."
+            )
+
+    # Measured ONCE, before `_verdict` exists: it costs a bootstrap, every return path reports it,
+    # and the below-MDE note has to be written before the model is constructed (pydantic COPIES the
+    # notes list, so an append after construction is silently discarded — measured, and it is why
+    # `activation_gate` appends before its own return too).
+    measured = measure_execution_noise_floor(
+        run_dirs=[run_dir],
+        variant_id=incumbent_variant,
+        suite_id=suite_id,
+        model=resolve_model(incumbent_rows) or UNRESOLVED_MODEL,
+        confidence=confidence,
+        seed=seed,
+        n_resamples=n_resamples,
+    )
+    # `measured.mde if ... is not None`, never `measured.mde or None`: a floor of exactly 0.000 is a
+    # real answer (every replicate agreed), and truthiness would erase it.
+    mde = measured.mde if measured is not None else None
+
+    # The rows the CHECKS are computed over. Starts as the on-disk intersection and is narrowed to
+    # the rows `paired_comparison` actually paired once that is known: `cost_latency_guardrails`'
+    # own docstring states the contract — a guardrail must never be computed over a different
+    # sample than the number it guards — and the two sets genuinely differ when a row exists on
+    # disk for both arms but carries an empty score list on one.
+    check_row_ids = list(row_ids)
 
     def _verdict(**overrides) -> ExecutionGateVerdict:
         base = {
@@ -1468,44 +1614,33 @@ def execution_gate(
             "candidate_variant": candidate_variant,
             "suite_id": suite_id,
             "confidence": confidence,
+            "n_resamples": n_resamples,
             "rows_paired": 0,
             "rows_excluded": 0,
             "integrity_checks": _integrity_checks(
                 incumbent_rows=incumbent_rows,
                 candidate_rows=candidate_rows,
-                row_ids=row_ids,
+                row_ids=check_row_ids,
                 engagement_criterion_index=engagement_criterion_index,
             ),
             "guardrails": cost_latency_guardrails(
                 incumbent_rows=incumbent_rows,
                 candidate_rows=candidate_rows,
-                row_ids=row_ids,
+                row_ids=check_row_ids,
                 materiality=materiality,
                 seed=seed,
                 confidence=confidence,
                 n_resamples=n_resamples,
             ),
-            # `measured.mde if ... is not None`, never `measured.mde or None`: a floor of exactly
-            # 0.000 is a real answer (every replicate agreed), and truthiness would erase it.
-            "mde": (
-                measured.mde
-                if (
-                    measured := measure_execution_noise_floor(
-                        run_dirs=[run_dir],
-                        variant_id=incumbent_variant,
-                        suite_id=suite_id,
-                        model=resolve_model(incumbent_rows) or UNRESOLVED_MODEL,
-                        confidence=confidence,
-                        seed=seed,
-                        n_resamples=n_resamples,
-                    )
-                )
-                is not None
-                else None
-            ),
+            "mde": mde,
+            # Pydantic copies this list, so every note must already be in it. `_verdict` is
+            # therefore always the LAST thing a return path does.
             "notes": notes,
         }
         return ExecutionGateVerdict(**{**base, **overrides})
+
+    if incumbent_variant == candidate_variant:
+        return _verdict()
 
     experiment_json = run_dir / "experiment.json"
     if not experiment_json.is_file():
@@ -1564,6 +1699,22 @@ def execution_gate(
             + "candidate, so the difference is against whichever arm the file actually carries."
         )
 
+    # The rows the statistic was actually computed over — `paired_comparison`'s own rule, applied
+    # to the same scoped copy it was handed, so the checks below guard the number above rather than
+    # a neighbouring sample.
+    per_a, per_b = scoped_scores.get(comparison.vid_a, {}), scoped_scores.get(comparison.vid_b, {})
+    prefix = f"{suite_id}/"
+    check_row_ids = sorted(
+        task_id.removeprefix(prefix) for task_id in set(per_a) & set(per_b) if per_a[task_id] and per_b[task_id]
+    )
+    if comparison.excluded_count:
+        notes.append(
+            f"{comparison.excluded_count} row(s) scored for one arm only and were excluded from the "
+            + "pairing. An asymmetric sample produces confident nonsense — find out why before "
+            + "reading the interval, and note that the guardrails and integrity checks below are "
+            + "computed over the PAIRED rows, so they cannot see what is missing either."
+        )
+
     def _signed(value: float | None) -> float | None:
         return None if value is None else sign * value
 
@@ -1575,28 +1726,30 @@ def execution_gate(
             + "paired interval needs, so every statistic is reported as unavailable rather than fabricated."
         )
 
-    verdict = _verdict(
-        rows_paired=comparison.task_count,
-        rows_excluded=comparison.excluded_count,
-        mean_diff=_signed(comparison.mean_diff),
-        ci_low=bounds[0] if len(bounds) == 2 else None,
-        ci_high=bounds[1] if len(bounds) == 2 else None,
-        # Cohen's d carries the direction too, so it is signed with the rest.
-        effect_size=_signed(comparison.effect_size),
-        p_value=comparison.p_value,
-    )
-    if verdict.mean_diff is not None and verdict.effect_size is None:
+    mean_diff = _signed(comparison.mean_diff)
+    # Cohen's d carries the direction too, so it is signed with the rest.
+    effect_size = _signed(comparison.effect_size)
+    if mean_diff is not None and effect_size is None:
         notes.append(
             "the effect size is unavailable while the difference is not: Cohen's d is undefined at zero "
             + "variance, which is what two arms agreeing exactly on every row produce. Read the interval."
         )
-    if verdict.mde is not None and verdict.mean_diff is not None and abs(verdict.mean_diff) < verdict.mde:
+    if mde is not None and mean_diff is not None and abs(mean_diff) < mde:
         notes.append(
-            f"the observed difference ({verdict.mean_diff:.3f}) is smaller than this suite's minimum "
-            + f"detectable effect ({verdict.mde:.3f}) on weighted_score. An interval excluding zero is "
-            + "still reportable, but do not present it as a comfortable win."
+            f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum detectable "
+            + f"effect ({mde:.3f}) on weighted_score. An interval excluding zero is still reportable, but "
+            + "do not present it as a comfortable win — the suite cannot resolve a difference this size."
         )
-    return verdict
+
+    return _verdict(
+        rows_paired=comparison.task_count,
+        rows_excluded=comparison.excluded_count,
+        mean_diff=mean_diff,
+        ci_low=bounds[0] if len(bounds) == 2 else None,
+        ci_high=bounds[1] if len(bounds) == 2 else None,
+        effect_size=effect_size,
+        p_value=comparison.p_value,
+    )
 
 
 def holm_promote_execution(
@@ -1722,8 +1875,11 @@ def _render_checks(title: str, checks: list[GuardrailCheck]) -> list[str]:
             if check.ci_low is not None
             else ""
         )
+        # A second reading where the check has one. Omitted rather than printed as `—`: every
+        # check without a rate would otherwise carry a column that means nothing for it.
+        rate = f", rate {check.rate:.3f}" if check.rate is not None else ""
         note = f" — {check.note}" if check.note else ""
-        lines.append(f"  - {state} · {check.name}: {detail}{interval}{note}")
+        lines.append(f"  - {state} · {check.name}: {detail}{interval}{rate}{note}")
     return lines
 
 

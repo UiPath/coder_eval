@@ -1070,10 +1070,7 @@ verdicts = [
     activation_gate(
         incumbent_run_dirs=gate_dirs, candidate_run_dirs=gate_dirs,
         incumbent_variant="incumbent", candidate_variant=slug,
-        # sibling_indices ONLY if the suite stacks sibling skill_triggered criteria. A stock
-        # check-skill suite has one criterion, so leave it empty there — an index past the end
-        # renders a PASSING sibling line that looks like a check nobody actually performed.
-        suite_id="<the suite's task_id>", criterion_index=0, sibling_indices=(),
+        suite_id="<the suite's task_id>", criterion_index=0,
     )
     for slug in ("cand-a-widen-vocabulary", "cand-b-name-the-symptom")
 ]
@@ -1111,9 +1108,17 @@ two and they are not interchangeable:**
 The method file's Holm section carries the reasoning.
 
 **`criterion_index` is the criterion's POSITION** in the suite's `success_criteria:` list —
-0-based, counting from the top of the YAML file. Open the suite and count. `sibling_indices` are
-the positions of the other `skill_triggered` criteria whose `recall.yes` must not drop. Get the
-index wrong and the verdict says so, loudly, rather than quietly measuring the wrong criterion.
+0-based, counting from the top of the YAML file. Open the suite and count. Get it wrong and the
+verdict says so, loudly, rather than quietly measuring the wrong criterion.
+
+**The siblings are derived from the run, not declared.** Every other classification criterion in
+the suite is checked for a `recall.yes` drop automatically — a candidate must not win by annexing
+another skill's requests, and a guardrail you have to remember to arm is one the tool does not
+have. A stock `check-skill` suite has one criterion, so nothing is derived and nothing is printed.
+Pass `sibling_indices=()` to turn the check off deliberately, or an explicit list to narrow it.
+Each sibling line also reports an **annexation rate**: of that sibling's true-`yes` rows, the
+fraction this candidate turned into `no` that the incumbent did not. It is a reading — the check
+still passes or fails on the recall drop alone.
 
 Print the rendered block verbatim. It carries the interval, the p-value, the Holm alpha, the
 minimum detectable effect, the sibling checks, the cost and latency guardrails, and the

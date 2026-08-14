@@ -43,6 +43,7 @@ from coder_eval.optimize_gate import (
     _holm_threshold,
     _label_pairs,
     _median,
+    _render_checks,
     _row_cost_levels,
     _row_costs,
     activation_gate,
@@ -50,6 +51,7 @@ from coder_eval.optimize_gate import (
     cost_latency_guardrails,
     cost_quality_front,
     cost_quality_points,
+    derive_sibling_indices,
     execution_gate,
     holm_promote,
     holm_promote_execution,
@@ -2331,12 +2333,26 @@ class TestExecutionGateMde:
         assert _exec_gate(run_dir).mde == 0.0
 
     def test_a_difference_below_the_mde_is_noted(self, tmp_path: Path) -> None:
-        rows = {f"r{i}": [0.2, 0.9] for i in range(6)}
-        run_dir = _exec_run_dir(tmp_path, incumbent=rows, candidate={f"r{i}": [0.25, 0.9] for i in range(6)})
-        verdict = _exec_gate(run_dir)
-        assert verdict.mde is not None
-        if verdict.mean_diff is not None and abs(verdict.mean_diff) < verdict.mde:
-            assert any("minimum detectable effect" in note for note in verdict.notes)
+        # Wide within-row replicate spread gives a real floor; the arms differ by a hair. Both
+        # halves are asserted unconditionally — a guarded assertion is a silent no-op the moment
+        # the fixture drifts, which is how this test shipped vacuous the first time.
+        # The per-row split spreads must DIFFER, or the null half-split has no variance and the
+        # floor comes back a real 0.000 — which is what made the first version of this vacuous.
+        incumbent = {"r0": [0.1, 0.9], "r1": [0.3, 0.5], "r2": [0.0, 0.95], "r3": [0.45, 0.55], "r4": [0.2, 0.8]}
+        candidate = {row: [round(v + 0.02, 3) for v in values] for row, values in incumbent.items()}
+        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        assert verdict.mde is not None and verdict.mean_diff is not None
+        assert abs(verdict.mean_diff) < verdict.mde, "fixture drifted — the difference is no longer below the floor"
+        assert any("minimum detectable effect" in note for note in verdict.notes)
+
+    def test_a_missing_effect_size_is_explained_in_the_notes(self, tmp_path: Path) -> None:
+        # Two arms agreeing exactly on every row: zero variance, so Cohen's d is undefined while
+        # the other statistics are fine. The note has to REACH the verdict — pydantic copies the
+        # notes list, so a note appended after construction is silently discarded.
+        rows = {f"r{i}": [0.4, 0.6] for i in range(4)}
+        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=rows, candidate=dict(rows)))
+        assert verdict.mean_diff is not None and verdict.effect_size is None
+        assert any("Cohen's d is undefined" in note for note in verdict.notes)
 
 
 class TestHolmPromoteExecution:
@@ -2346,6 +2362,7 @@ class TestHolmPromoteExecution:
             "candidate_variant": "cand",
             "suite_id": EXEC_SUITE,
             "confidence": 0.95,
+            "n_resamples": _FAST_RESAMPLES,
             "rows_paired": 8,
             "rows_excluded": 0,
             "mean_diff": 0.2,
@@ -2424,11 +2441,184 @@ class TestRenderExecutionMarkdown:
         candidate = {**_WINNER["candidate"], "r3": [0.6, 0.2]}
         run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=candidate)
         decided = holm_promote_execution([_exec_gate(run_dir, n_resamples=_FAST_RESAMPLES)])[0]
-        if decided.promoted:
-            text = render_execution_markdown(decided)
-            assert "BLOCKED BY A GUARDRAIL" in text
-            assert "engagement" in text
+        # Unconditional: `promoted` must stay True for the BLOCKED headline to be reachable at all,
+        # so a guard here would turn the plan's required assertion into a silent no-op.
+        assert decided.promoted is True
+        text = render_execution_markdown(decided)
+        assert "BLOCKED BY A GUARDRAIL" in text
+        assert "engagement" in text
 
     def test_renders_a_missing_effect_size_as_a_dash(self, tmp_path: Path) -> None:
         verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER)).model_copy(update={"effect_size": None})
         assert "Cohen's d: —" in render_execution_markdown(verdict)
+
+
+class TestDeriveSiblingIndices:
+    """The guardrail stops being opt-in: `None` derives, `()` is now how you opt OUT."""
+
+    def test_skips_a_non_classification_criterion_between_two_classification_ones(self, tmp_path: Path) -> None:
+        # Positions are ABSOLUTE. A "count the classification criteria" implementation returns [1]
+        # here, which is the file_check — the exact case this test exists for.
+        result = _eval_result("r1", [("yes", "yes")])
+        basic = CriterionResult(criterion_type="file_check", description="f", score=1.0)
+        sibling = ClassificationCriterionResult(
+            criterion_type="skill_triggered",
+            description="sibling",
+            score=1.0,
+            expected_label="yes",
+            observed_label="yes",
+        )
+        results = [*result.success_criteria_results, basic, sibling]
+        stacked = result.model_copy(update={"success_criteria_results": results})
+        rows = {"r1": [stacked]}
+        assert derive_sibling_indices(rows, primary_index=0) == [2]
+        assert derive_sibling_indices(rows, primary_index=2) == [0]
+
+    def test_a_single_criterion_suite_derives_nothing(self) -> None:
+        rows = {"r1": [_eval_result("r1", [("yes", "yes")])]}
+        assert derive_sibling_indices(rows, primary_index=0) == []
+
+    def test_unions_both_arms_rather_than_letting_one_shadow_the_other(self) -> None:
+        # `{**incumbent, **candidate}` would drop the incumbent's list for every shared row id —
+        # which is every row in the common case — and derive from the candidate alone.
+        incumbent = {"r1": [_eval_result("r1", [("yes", "yes"), ("no", "no")])]}
+        candidate = {"r1": [_eval_result("r1", [("yes", "yes")])]}
+        assert derive_sibling_indices(incumbent, candidate, primary_index=0) == [1]
+        assert derive_sibling_indices(candidate, incumbent, primary_index=0) == [1]
+
+    def test_a_row_with_no_results_contributes_nothing_rather_than_truncating(self) -> None:
+        errored = _eval_result("r2", []).model_copy(update={"success_criteria_results": []})
+        rows = {"r1": [_eval_result("r1", [("yes", "yes"), ("no", "no")])], "r2": [errored]}
+        assert derive_sibling_indices(rows, primary_index=0) == [1]
+
+    def test_a_primary_past_the_end_does_not_raise(self) -> None:
+        rows = {"r1": [_eval_result("r1", [("yes", "yes"), ("no", "no")])]}
+        assert derive_sibling_indices(rows, primary_index=9) == [0, 1]
+
+
+class TestSiblingIndicesDefault:
+    """`None` derives, `()` checks nothing, an explicit sequence checks exactly those."""
+
+    @staticmethod
+    def _stacked(tmp_path: Path) -> list[Path]:
+        # Two classification criteria per row: the primary at 0, a sibling at 1 the candidate
+        # annexes on half of the sibling's true rows.
+        incumbent = {f"r{i}": [("yes", "yes"), ("yes", "yes")] for i in range(4)}
+        candidate = {f"r{i}": [("yes", "yes"), ("yes", "no" if i < 2 else "yes")] for i in range(4)}
+        return _shared_dirs(tmp_path, incumbent, candidate)
+
+    def test_the_default_derives_the_same_list_as_passing_it_explicitly(self, tmp_path: Path) -> None:
+        run_dirs = self._stacked(tmp_path)
+        derived = _gate(run_dirs)
+        explicit = _gate(run_dirs, sibling_indices=[1])
+        assert [c.name for c in derived.sibling_checks] == [c.name for c in explicit.sibling_checks]
+        assert derived.sibling_checks and "criterion 1" in derived.sibling_checks[0].name
+
+    def test_an_empty_tuple_still_checks_nothing(self, tmp_path: Path) -> None:
+        assert _gate(self._stacked(tmp_path), sibling_indices=()).sibling_checks == []
+
+    def test_a_single_criterion_suite_is_silent(self, tmp_path: Path) -> None:
+        incumbent, candidate = _tiny_suite(4, 4)
+        assert _gate(_shared_dirs(tmp_path, incumbent, candidate)).sibling_checks == []
+
+
+class TestAnnexationRate:
+    def test_reports_the_fraction_the_candidate_alone_lost(self, tmp_path: Path) -> None:
+        run_dirs = TestSiblingIndicesDefault._stacked(tmp_path)
+        check = _gate(run_dirs).sibling_checks[0]
+        # 4 true-yes sibling rows; the candidate turned 2 of them to "no" and the incumbent none.
+        assert check.rate == pytest.approx(0.5)
+        assert not check.passed  # the RECALL drop is what fails it, not the rate
+
+    def test_an_equal_arm_reports_zero_and_passes(self, tmp_path: Path) -> None:
+        rows = {f"r{i}": [("yes", "yes"), ("yes", "yes")] for i in range(4)}
+        check = _gate(_shared_dirs(tmp_path, rows, dict(rows))).sibling_checks[0]
+        assert check.rate == 0.0
+        assert check.passed
+
+    def test_a_sibling_with_no_true_instances_reports_none(self, tmp_path: Path) -> None:
+        rows = {f"r{i}": [("yes", "yes"), ("no", "no")] for i in range(4)}
+        check = _gate(_shared_dirs(tmp_path, rows, dict(rows))).sibling_checks[0]
+        assert check.rate is None
+        assert check.passed
+        assert check.note is not None and "nothing to regress" in check.note
+
+    def test_the_rate_changes_no_pass_fail_outcome(self, tmp_path: Path) -> None:
+        # A non-zero annexation the INCUMBENT more than offsets: recall does not drop, so the
+        # check passes while the rate is non-zero. The rate is a reading, never a second gate.
+        incumbent = {f"r{i}": [("yes", "yes"), ("yes", "yes" if i == 0 else "no")] for i in range(4)}
+        candidate = {f"r{i}": [("yes", "yes"), ("yes", "no" if i == 0 else "yes")] for i in range(4)}
+        check = _gate(_shared_dirs(tmp_path, incumbent, candidate)).sibling_checks[0]
+        assert check.rate == pytest.approx(0.25)
+        assert check.passed
+
+    def test_render_prints_the_rate_only_when_there_is_one(self, tmp_path: Path) -> None:
+        with_rate = _gate(TestSiblingIndicesDefault._stacked(tmp_path)).sibling_checks[0]
+        assert f"rate {with_rate.rate:.3f}" in "\n".join(_render_checks("Sibling checks", [with_rate]))
+
+        no_rate = GuardrailCheck(
+            name="cost (USD/row)", incumbent=1.0, candidate=1.0, relative_change=0.0, tolerance=0.25, passed=True
+        )
+        assert "rate" not in "\n".join(_render_checks("Guardrails", [no_rate]))
+
+
+class TestExecutionGateCannotBeQuietlyMisread:
+    """The three ways this gate could report a confident verdict about nothing."""
+
+    def test_a_missing_row_tree_is_named_even_when_the_experiment_file_is_fine(self, tmp_path: Path) -> None:
+        # The statistic comes from experiment.json and every CHECK comes from the row tree, so a
+        # mistyped variant/suite/run-dir leaves a perfectly good p beside four `— -> —` passes.
+        # Measured before the note existed: headline PROMOTED, every check green.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id="a-suite-that-was-never-run",
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert sum("loaded ZERO rows" in note for note in verdict.notes) == 2
+        assert any("not a result" in note for note in verdict.notes)
+
+    def test_the_same_variant_on_both_arms_reports_nothing(self, tmp_path: Path) -> None:
+        # Sign resolution keys on the candidate, so a duplicated id used to yield `vid_a - vid_b`
+        # labelled `candidate - incumbent` with both labels identical — a significant, sign-flipped
+        # verdict about an arm compared to itself.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="incumbent",
+            suite_id=EXEC_SUITE,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert (verdict.mean_diff, verdict.p_value, verdict.ci_low) == (None, None, None)
+        assert any("both 'incumbent'" in note for note in verdict.notes)
+
+    def test_a_row_that_vanished_from_one_arm_lowers_its_completion_rate(self, tmp_path: Path) -> None:
+        # Computed over the paired intersection, this check reported 8/8 against 8/8 and PASSED
+        # while two of the incumbent's rows were missing from the candidate entirely.
+        incumbent = {**_WINNER["incumbent"], "r5": [0.4, 0.5], "r6": [0.4, 0.5]}
+        run_dir = _exec_run_dir(tmp_path, incumbent=incumbent, candidate=_WINNER["candidate"])
+        verdict = _exec_gate(run_dir)
+        completion = next(c for c in verdict.integrity_checks if c.name == "completion_rate")
+        assert completion.incumbent == 1.0
+        assert completion.candidate is not None and completion.candidate < 1.0
+        assert not completion.passed
+        assert any("scored for one arm only" in note for note in verdict.notes)
+
+    def test_the_checks_are_computed_over_the_rows_the_statistic_paired(self, tmp_path: Path) -> None:
+        # A row on disk for both arms but carrying no score for one is IN the disk intersection and
+        # OUT of the pairing, so the two sets differ — and a guardrail must guard its own sample.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        raw = (run_dir / "experiment.json").read_text(encoding="utf-8")
+        result = ExperimentResult.model_validate_json(raw)
+        scores = {v: dict(per) for v, per in result.per_replicate_scores.items()}
+        scores["candidate"][f"{EXEC_SUITE}/r4"] = []
+        (run_dir / "experiment.json").write_text(
+            result.model_copy(update={"per_replicate_scores": scores}).model_dump_json(), encoding="utf-8"
+        )
+        verdict = _exec_gate(run_dir)
+        assert verdict.rows_paired == 3
+        assert verdict.rows_excluded == 1
+        assert any("scored for one arm only" in note for note in verdict.notes)
