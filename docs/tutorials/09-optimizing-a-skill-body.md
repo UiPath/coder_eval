@@ -53,7 +53,7 @@ dataset:
 ```
 
 ```json
-{"id": "pr-gate", "split": "train", "expected_skill": "ci", "scenario": "...", "expected_path": ".github/workflows/evals.yml", "expected_snippet": "minimum-task-score"}
+{"id": "pr-gate", "split": "train", "expected_skill": "ci", "scenario": "...", "expected_path": ".github/workflows/evals.yml", "expected_snippet": "minimum-task-score", "expected_snippet_2": "minimum-task-score"}
 ```
 
 Label every row or none. A *partly* labelled dataset is the one genuinely bad state: `--split`
@@ -110,10 +110,21 @@ success_criteria:
     path: "${row.expected_path}"
     includes:
       - "${row.expected_snippet}"
+      - "${row.expected_snippet_2}"
     suite_thresholds:
       mean: 0.7
       completion_rate: 1.0
 ```
+
+**Why two snippet slots when most rows need only one.** A scenario may ask for two things,
+and grading only the first lets a half-answer score full marks: `both-triggers` asks for a
+pull_request trigger *and* a weekly cron, and graded on `cron:` alone a schedule-only
+workflow scored 1.000 — while `cron:` is also what its sibling `schedule-weekly` grades, so
+the row discriminated nothing its sibling did not. Rows with a single requirement set
+`expected_snippet_2` to the **same value** as `expected_snippet`: two identical entries
+score `0/2` or `2/2`, numerically identical to a single include, so the uniform shape costs
+nothing. Every row must carry the field regardless — criteria are copied to every row, and a
+`${row.*}` naming a field some row lacks raises at expansion.
 
 Keep anything **constant** out of the gated criterion. `file_check` scores `found / total`
 over its `includes`, so folding a universal check into it puts a fixed contribution in every

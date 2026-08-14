@@ -80,11 +80,14 @@ counted by `expected_skill` — the field that actually decides a row's polarity
 
 > **The table describes the file as committed; Part 1's runs did not use it.** Part 1 was
 > run against an earlier 14-train-row revision, and the `analyze` rows were added later, in
-> Part 2, before the file was committed. So re-running Step 5 today gives **17 train rows**
-> and a different `analyze` baseline than the one printed below. Every result block on this
-> page names the revision it was computed at, for exactly this reason — and that is also
-> what reconciles Step 5's `analyze` recall of 0.000 (one row, unlucky) with Step 6's two
-> `analyze` train rows sitting at a stable 0.500.
+> Part 2, before the file was committed. Every result block on this page names the revision
+> it was computed at, which is what reconciles Step 5's `analyze` recall of 0.000 (one row,
+> unlucky) with Step 6's two `analyze` train rows sitting at a stable 0.500.
+>
+> Re-running Part 1 today gives different numbers for a second and more interesting reason:
+> the description Part 2 promotes is already committed, so a re-run measures the *improved*
+> skill. [What you get running Part 1 today](#what-you-get-running-part-1-today)
+> has the measured comparison.
 
 **Label sibling rows by what should *fire*, not by whose territory it is.** Two rows here
 ask for project setup — work that belongs to `init`, which sets
@@ -323,6 +326,53 @@ oblique *"Are my evals any good?"*. Across every run in this tutorial — two wi
 two splits, three sittings — it never missed a positive and never took a distractor. That is
 about as much as a suite this size can say, and it is enough to conclude the trim did no
 harm.
+
+### What you get running Part 1 today
+
+Every number above was measured **before** the change Part 2 ends with. Re-running Part 1
+against the committed suite therefore does *not* reproduce them, and the reason is the
+point of the whole page rather than a defect in it.
+
+Re-run, three times, on the committed 17-row train split — 51 agent runs, minutes on Sonnet:
+
+```bash
+export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  --split train -D run_limits.stop_early=false
+```
+
+| Skill | recall.yes | precision.yes | f1.yes (3 runs) |
+| --- | --- | --- | --- |
+| `lint-tasks` | 1.000 | 1.000 | **1.000, 1.000, 1.000** |
+| `analyze` | 1.000 | 1.000 | **1.000, 1.000, 1.000** |
+| `task` | 1.000 | 0.667 / 0.667 / 1.000 | 0.800, 0.800, 1.000 |
+
+`completion_rate` is 1.000 on all three; no row was excluded.
+
+Three things to read off it:
+
+- **`lint-tasks` is still at ceiling.** Part 1's finding holds on a suite 3 train rows
+  larger than the one that produced it, which is the strongest form the claim can take here.
+- **`analyze`'s headroom is gone — because Part 2 closed it.** The description this page
+  promotes is committed (`4c7481c`), so the skill a re-run measures is the *improved* one.
+  Recall on `analyze` reads 1.000 where Part 1 recorded 0.000. The suite also grew from 2
+  `analyze` train rows to 4, so both the instrument and the subject changed; what is not in
+  doubt is the direction, and that the fix shipped.
+- **`hard-3` is still unstable, at exactly the rate Step 6 measured.** The `task` sibling
+  takes that distractor in **2 of 3** runs — the same two-in-three the earlier sitting
+  found, months later and on a different revision of the suite. A single run would have
+  shown precision 1.000 or 0.667 and either would have looked like a fact.
+
+That last one is the page's own lesson arriving unprompted: the instability is a property
+of the row, not of the sitting that first caught it. It is also why the suite gate reports
+a failure on two of the three runs — `precision.yes` dips under its 0.7 floor — and why the
+honest baseline for this suite is a range, not a number.
+
+The **test** split (now 11 rows, up from 7), run once, tells the same story: `lint-tasks` 1.000 /
+1.000 / **1.000**, `analyze` likewise, and `task` at precision 0.500 on one misfire. So
+Step 7's conclusion — that `lint-tasks` holds at ceiling on rows it was never checked
+against — survives a suite half again as large, and the `task` misfire is visible on both
+halves, which is what makes it a property of the skill rather than of one split.
 
 ---
 
@@ -634,7 +684,15 @@ options are to rename the skill, or to measure it somewhere the collision is abs
   224 runs chasing a number the gate makes unreachable. Then it found the real headroom next
   door.
 - **Two agreeing runs are not evidence.** The `task` misfire reproduced on both splits and
-  still turned out to be 2-in-3 variance. Only replicates told the difference.
+  still turned out to be 2-in-3 variance. Only replicates told the difference — and it is
+  still 2-in-3 today, on a later revision of the suite, which is about as clean a
+  demonstration as this page could ask for that the instability belongs to the row rather
+  than to the sitting that caught it.
+- **A promoted change makes its own baseline unreproducible, and that is success.** Re-run
+  Part 1 against this repository now and `analyze` reads 1.000 where it read 0.000, because
+  the description this page promotes is committed. Numbers in a walkthrough date the moment
+  the walkthrough works; say which revision each was measured at rather than quietly
+  refreshing them.
 - **A test only confirms failure modes it contains.** The first one here was a flat tie
   because every regression-phrased row sat in the train half. Fresh rows, authored to test the
   hypothesis rather than to flatter the candidate, are the fix.

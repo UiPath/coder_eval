@@ -41,12 +41,18 @@ Code prompt, not in your shell:
 /plugin install coder-eval@coder-eval
 ```
 
-Verify by typing `/coder-eval:`. You should see six commands: `init`,
-`check-skill`, `task`, `lint-tasks`, `analyze`, `ci`. Three of them — `init`,
-`check-skill` and `task` — drive the same `coder-eval` CLI you would type by hand,
-so what they write is a normal file you can commit, diff and run in CI. The other
-three never invoke it: `analyze` reads a finished run directory, `ci` writes a
-workflow, and `lint-tasks` only reads task files and reports.
+Verify by typing `/coder-eval:`. You should see seven commands: `init`,
+`check-skill`, `task`, `optimize-skill`, `lint-tasks`, `analyze`, `ci`. Four of them
+— `init`, `check-skill`, `task` and `optimize-skill` — drive the same `coder-eval`
+CLI you would type by hand, so what they write is a normal file you can commit, diff
+and run in CI. The remaining three never invoke it: `analyze` reads a finished run
+directory, `ci` writes a workflow, and `lint-tasks` only reads task files and reports.
+
+Three of the seven are deliberately **not** model-invokable — `init`, `ci` and
+`optimize-skill` carry `disable-model-invocation: true`, so you reach them by typing the
+command rather than by describing the job. That matters most for `optimize-skill`: it
+spends real money across a baseline and three A/B stages, and is never something to start
+because a message happened to mention a skill's wording.
 
 ## 2. Scaffold a suite
 
@@ -170,6 +176,13 @@ remove it, `/plugin uninstall`.
 - `/coder-eval:ci` emits the CI workflow from [Tutorial 02](02-ci-pipeline.md) for
   you — least-privilege by default, and it provides the agent runtime (Node plus
   the Claude CLI) that the Action deliberately does not install.
+- `/coder-eval:optimize-skill` is the follow-on from step 5. `check-skill` tells you
+  *whether* a skill fires; this A/B-tests edits to its description — or to its body — as
+  experiment variants, and promotes one only when it beats run-to-run noise on rows it was
+  never fitted to. It is the expensive one: a baseline plus three stages of agent runs, so
+  it states the projected count and asks before each. Walked end to end in
+  [Tutorial 08](08-optimizing-a-skill.md) (description) and
+  [Tutorial 09](09-optimizing-a-skill-body.md) (body).
 - [Claude Code plugin](../PLUGIN.md) — the reference page: every skill, what ships
   in the plugin, and the activation-budget mechanics in full.
 - [Writing a task](04-writing-a-task.md) — the same authoring loop by hand, worth

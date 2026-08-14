@@ -69,7 +69,7 @@ What each block does:
   (default 1.0) and `pass_threshold` (default 0.9). `run_command` here only
   checks the exit code; it can also match stdout (`expected_stdout`) or read a
   continuous score from stdout — see the
-  [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) for all 14 criterion
+  [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) for all 15 criterion
   types and every field.
 
 ## 2. Validate without spending tokens
@@ -101,7 +101,7 @@ created are preserved under `runs/latest/<variant>/<task>/<NN>/` (`task.json`,
 
 ## Where to go deeper
 
-- **All 14 criterion types, weights, thresholds** → [Task Definition Guide](../TASK_DEFINITION_GUIDE.md)
+- **All 15 criterion types, weights, thresholds** → [Task Definition Guide](../TASK_DEFINITION_GUIDE.md)
 - **Stop a run early once the key criteria are decided** (an opt-in `stop_early:` block on a criterion; `run_limits.stop_early: false` is the run-level kill switch) → [Task Definition Guide → `stop_early`](../TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop)
 - **Fan one task out over a dataset of rows** → [Bring Your Own Dataset](../DATASETS.md)
 - **Full CLI & config reference** → [User Guide](../USER_GUIDE.md)

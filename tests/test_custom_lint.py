@@ -1262,7 +1262,17 @@ SKILL_DISABLE_MODEL_INVOCATION = {
 
 # The surfaces that must name every shipped skill, so a new one cannot ship
 # undocumented. Adding a surface is one edit here.
-SKILL_DOC_SURFACES = ("plugins/coder-eval/README.md", "docs/PLUGIN.md", "README.md", "CLAUDE.md")
+SKILL_DOC_SURFACES = (
+    "plugins/coder-eval/README.md",
+    "docs/PLUGIN.md",
+    "README.md",
+    "CLAUDE.md",
+    # The tutorial enumerates the commands a reader will see after installing, so a skill
+    # missing here is a skill they are told does not exist. Added after it shipped a stale
+    # "six commands" list omitting `optimize-skill`: the count sensor below already existed,
+    # but this file was not one of the surfaces it read.
+    "docs/tutorials/07-plugin-in-claude-code.md",
+)
 
 # Claude Code loads a listing of every skill's name and description into context.
 # The listing's character budget scales at ~1% of the model's context window and is
@@ -1333,7 +1343,10 @@ def _wrong_skill_count_offenders(surfaces: dict[str, Path], *, count: int, auto:
         offenders += [
             f"{name}: '{word} {noun}'"
             for word in wrong_total
-            for noun in ("skills", "slash commands")
+            # "commands" is how the tutorial phrases it, and its absence here is exactly
+            # why a stale "six commands" survived: the count was guarded in three
+            # phrasings, and the surface used a fourth.
+            for noun in ("skills", "slash commands", "commands")
             if f"{word} {noun}" in text
         ]
         offenders += [f"{name}: 'The other {word}'" for word in wrong_subset if f"The other {word}" in text]
@@ -2390,6 +2403,95 @@ class TestPluginArtifacts:
             if name not in (self.REPO_ROOT / surface).read_text(encoding="utf-8")
         ]
         assert not missing, f"{name} is not documented in {missing} — a shipped skill nobody can discover"
+
+    def test_tutorial_index_lists_every_tutorial(self):
+        # `docs/tutorials/README.md` is the index a reader lands on, and it is hand-written
+        # while the set of tutorials is a directory listing. mkdocs' nav is guarded by CE028,
+        # but nothing read this table — so a tutorial added without a row here is invisible
+        # to anyone who does not already know its filename.
+        tut_dir = self.REPO_ROOT / "docs" / "tutorials"
+        index = (tut_dir / "README.md").read_text(encoding="utf-8")
+        pages = sorted(p.name for p in tut_dir.glob("*.md") if p.name != "README.md")
+        missing = [name for name in pages if f"({name})" not in index]
+        assert not missing, (
+            f"docs/tutorials/README.md's table does not link {missing}. A tutorial nobody links "
+            f"is a tutorial nobody finds."
+        )
+
+    def test_tutorial_09_excerpts_match_the_committed_suite(self):
+        # Tutorial 09 quotes `tasks/skills/ci-outcome.yaml` and its rows file as excerpts.
+        # An excerpt is a derived surface: when the suite gained a second `includes` slot
+        # and an `expected_snippet_2` field, the page kept showing the old shape and a
+        # reader copying it would build a suite that raises at expansion. Compared against
+        # the real files rather than pinned, so the suite stays free to change.
+        import json
+        import re
+
+        page = (self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md").read_text(encoding="utf-8")
+        rows = [
+            json.loads(ln)
+            for ln in (self.REPO_ROOT / "tasks" / "skills" / "ci-outcome-rows.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if ln.strip()
+        ]
+        real_fields = set(rows[0])
+
+        # 1. The illustrative JSONL row must carry exactly the fields a real row does.
+        shown = [json.loads(m) for m in re.findall(r'^\{"id".*\}$', page, re.M)]
+        assert shown, "tutorial 09 no longer shows a sample dataset row; this sensor reads it"
+        for row in shown:
+            assert set(row) == real_fields, (
+                f"tutorial 09's sample row has fields {sorted(set(row))}, but a committed row has "
+                f"{sorted(real_fields)}. A reader copies that shape — a missing ${{row.*}} field "
+                f"raises at expansion."
+            )
+
+        # 2. Every ${row.*} the page's YAML excerpt references must exist on a real row.
+        referenced = set(re.findall(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}", page))
+        missing = referenced - real_fields
+        assert not missing, f"tutorial 09 references ${{row.{sorted(missing)}}}, which no committed row carries"
+
+        # 3. The excerpt must not UNDER-state the gated criterion: if the suite grades two
+        #    snippets, showing one teaches a shape that scores differently from the file.
+        suite = (self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml").read_text(encoding="utf-8")
+        for field in ("expected_snippet", "expected_snippet_2"):
+            if f"${{row.{field}}}" in suite:
+                assert f"${{row.{field}}}" in page, (
+                    f"the committed suite grades ${{row.{field}}} but tutorial 09's excerpt omits it"
+                )
+
+    def test_docs_state_the_right_criterion_type_count(self):
+        # Same drift class as the skill count below, one layer down: a hand-maintained
+        # number describing a set the registry derives. It had already rotted — three sites
+        # said 14 against a registry of 15 — and nothing noticed, because the only guarded
+        # surface was CLAUDE.md's heading, which happened to be right.
+        #
+        # Derived from the registry, never from a literal here: adding a criterion must not
+        # require editing this test, only the prose it points at.
+        import re
+
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+
+        init_criteria(validate=False)
+        count = len(CriterionRegistry.list_types())
+        # \b on the number, or "5 criterion types" matches inside a correct "15 criterion
+        # types" and the sensor reports a failure that is not there.
+        patterns = (r"\b(\d+) criterion types", r"\b(\d+) success criteria types", r"Success Criteria \((\d+) types\)")
+        offenders = []
+        for rel in (
+            "docs/TASK_DEFINITION_GUIDE.md",
+            "CLAUDE.md",
+            "README.md",
+            *sorted(str(p.relative_to(self.REPO_ROOT)) for p in (self.REPO_ROOT / "docs" / "tutorials").glob("*.md")),
+        ):
+            text = _normalized(self.REPO_ROOT / rel)
+            for pat in patterns:
+                offenders += [f"{rel}: {m.group(0)!r}" for m in re.finditer(pat, text) if int(m.group(1)) != count]
+        assert not offenders, (
+            f"the registry has {count} criterion types, but these surfaces state another count: "
+            f"{offenders}. The count is derived from `CriterionRegistry.list_types()` — update the prose."
+        )
 
     def test_skill_docs_surfaces_state_the_right_count(self):
         # The companion to the test above, which only checks that each NAME appears. These

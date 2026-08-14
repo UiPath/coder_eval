@@ -1,8 +1,9 @@
 ---
 description: >-
   Step-by-step Coder Eval tutorials — run your first AI coding-agent evaluation,
-  wire it into CI, browse results, write tasks, compare models, and isolate runs
-  in Docker.
+  wire it into CI, browse results, write tasks, compare models, isolate runs in
+  Docker, drive the whole loop from Claude Code, and A/B-test a skill's
+  description or body.
 ---
 
 # Tutorials

@@ -663,7 +663,7 @@ This pattern is especially useful for A/B testing whether additional context imp
 
 ## Success Criteria
 
-Every task needs at least one success criterion. The framework supports 14 criterion types.
+Every task needs at least one success criterion. The framework supports 15 criterion types.
 
 ### Continuous Scoring
 
