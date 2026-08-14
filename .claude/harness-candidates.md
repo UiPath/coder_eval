@@ -508,3 +508,21 @@ with the two `action.yml` items above — one considered change to the action's 
       `tests/_fixtures/report_snapshots/`, which no phase's scoped tests run. A blast-radius check
       ("these fixtures are downstream of these constants") is not obviously expressible without
       hardcoding the pairing it is meant to discover. — caught in the same review.
+- [ ] A note appended to a local list AFTER that list has been passed into a Pydantic model
+      constructor is silently discarded — pydantic COPIES the list during validation, so the
+      append mutates a detached object nobody reads. Cost a High finding in `execution_gate`
+      (the below-MDE warning and the zero-variance effect-size explanation never reached a
+      reader, on exactly the cases they exist for), and `activation_gate` avoids it only by
+      appending before its return. Mechanically detectable in principle — flag a `X.append(...)`
+      on a name previously passed as a constructor argument in the same function scope — but the
+      alias analysis to do it without false positives (the list may legitimately be rebuilt,
+      reassigned, or passed by `model_copy`) is not a 30-minute rule, and a noisy version of this
+      one would be ignored. — caught in the optimize-gate v8/v2/v3/v5/v1/v4/v6 review.
+- [ ] A prose surface must not restate a formula `src/` owns. The two optimize surfaces already
+      have sensors forbidding rendered CONSTANTS (`MATERIALITY_FLOOR`, `GATE_RESAMPLES`,
+      `DEFAULT_ALPHA`), but nothing stops a closed form being retyped into a paragraph — and one
+      was, with a wrong factor, in the same change (`2*(1-R/M)^M` and its limit). It is the
+      CE037/CE040 class one level up, in prose. A narrow `^M`-shaped detector is cheap but would
+      claim more generality than it has; defining "a formula" precisely enough to gate on is the
+      part that is not cheap. CE039 does not reach it: that rule covers arithmetic-bearing
+      TABLES, and this was a sentence. — caught in the same review.
