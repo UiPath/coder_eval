@@ -633,6 +633,14 @@ smallest edit that could plausibly fix the failing rows: a wholesale rewrite may
 better and teaches you nothing about *why*, and it cannot be partially reverted when one
 part of it turns out to regress a row that used to pass.
 
+**From round 2, a merge candidate is allowed — and it is the one candidate the Pareto front
+earns you.** Where two front arms won *different* rows in the previous round, propose an explicit
+combination of them, and **say which rows each half is drawn from**. That attribution is the
+whole difference between a merge and a rewrite: a merge you can partially revert when one half
+turns out to regress a row, and a rewrite you cannot. It still counts as one candidate embodying
+one hypothesis — "these two edits are independent and compose" is a hypothesis, and the row
+matrix is what makes it testable.
+
 Snapshot the incumbent the same way (`<round>-incumbent/`), siblings included, so every arm
 is mounted by the identical mechanism and the comparison has no confound.
 
@@ -755,6 +763,42 @@ The two Stage B rows differ on purpose and the method file says why — do not u
 Neither the promotion conditions nor the sign rule is restated here: read them there, at the
 moment you apply them, rather than from memory.
 
+### Stage A — print the row matrix, not just the ranking
+
+A suite average hides the shape of a result. Two candidates at the same mean can win on
+*disjoint* rows — which is a merge opportunity — or one can beat the other everywhere, which is a
+discard. Only the per-row vectors tell them apart, so print them:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import arm_row_scores, pareto_front, render_row_matrix
+
+arms = arm_row_scores(
+    run_dirs=[Path("<runs>/round1-triage")],
+    variant_ids=["incumbent", "cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
+    suite_id="<the suite's task_id>",
+    criterion_index=0,  # omit on the execution track to read each row's weighted_score
+)
+print(render_row_matrix(arms, pareto_front(arms)))
+```
+
+The **Pareto front** is the arms nothing else beat everywhere. Read it as the shortlist rather
+than the ranking: an arm on the front won something no other arm did, and an arm off it was beaten
+on every row it was measured on. Rows shown as `—` are missing from that arm and are excluded from
+the comparison rather than counted as zero, and a row **no** arm scores above zero is flagged —
+that is usually a broken row or an unmet fixture precondition, not four bad candidates.
+
+**One caveat on reading the front.** An arm is only beaten by an arm that scored *everything* it
+scored, so an arm can sit on the front partly because its holes made it uncoverable rather than
+because it won anything. That trade is deliberate — the front is a shortlist, and wrongly keeping
+an arm costs one more measurement while wrongly discarding one loses the only evidence on that
+row — but check the holes before reading the front as a ranking. An arm that scored **no** rows is
+excluded outright and named as the wiring problem it is.
+
+Record the matrix and the front in `measurements.json` (Step 11), so a later round can look back
+at which rows a discarded candidate actually won.
+
 ### Stage B, activation track — run the gate, do not do the arithmetic
 
 The three invocations are the ones the method file's Stage B block names — three
@@ -858,8 +902,8 @@ Its value is exactly the parts a schema would have to reject; the neighbouring v
 below invites the assumption that this one must now be structured too, and that assumption would
 destroy the thing worth keeping.
 
-**The validated sidecar is `measurements.json`, beside it.** Two things need to be machine-read
-rather than narrated, and only those two live there:
+**The validated sidecar is `measurements.json`, beside it.** Three things need to be machine-read
+rather than narrated, and only those live there:
 
 - **The round's noise floor**, recorded with the suite, the model and the row count it was
   measured at. A later round reuses it only when all three still match — a floor measured on
@@ -872,6 +916,10 @@ rather than narrated, and only those two live there:
   both halves of the null split, which is smaller than the suite when rows errored. If you record
   the suite size instead, a later lookup simply misses and recomputes: wrong in the safe
   direction, but say which number you recorded so the miss is legible.
+
+- **This round's row matrix and Pareto front** (Stage A, above). Vectors rather than an average,
+  and never truncated: being able to look back at which rows a *discarded* candidate won is the
+  whole reason to keep them, and it is what a merge candidate in a later round is built from.
 
 - **Whether this round reused a stored floor or recomputed one.** A reused floor is a measurement
   from an earlier round, and a reader comparing two rounds' MDEs needs to know when they are the
@@ -887,10 +935,12 @@ from coder_eval.optimize_gate import (
     load_arm_rows,
     load_measurements,
     measure_noise_floor,
+    pareto_front,
     record_noise_floor,
+    record_round_scores,
     resolve_model,
 )
-from coder_eval.models import RegressionRow
+from coder_eval.models import RegressionRow, RoundScores
 
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
 measurements = load_measurements(sidecar)
@@ -902,6 +952,8 @@ floor = measure_noise_floor(
 )
 if floor is not None:
     record_noise_floor(sidecar, floor)
+
+record_round_scores(sidecar, RoundScores(round=1, arm_row_scores=arms, pareto_front=pareto_front(arms)))
 
 # On promotion only:
 append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round=1, reason="...")])

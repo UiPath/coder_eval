@@ -32,12 +32,14 @@ from uuid import uuid4
 from coder_eval.criteria._classification_aggregate import classification_metrics
 from coder_eval.models import (
     ActivationGateVerdict,
+    ArmRowScores,
     ClassificationCriterionResult,
     EvaluationResult,
     GuardrailCheck,
     NoiseFloor,
     OptimizeMeasurements,
     RegressionRow,
+    RoundScores,
 )
 from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, cluster_bootstrap_diff_ci, holm_rejections, mean
 
@@ -383,6 +385,21 @@ def append_regression_rows(path: Path, rows: list[RegressionRow]) -> OptimizeMea
     if not fresh:
         return measurements
     updated = measurements.model_copy(update={"regression_corpus": [*measurements.regression_corpus, *fresh]})
+    _atomic_write(path, updated.model_dump_json(indent=2))
+    return updated
+
+
+def record_round_scores(path: Path, scores: RoundScores) -> OptimizeMeasurements:
+    """Append one round's row vectors and Pareto front, replacing an entry for the same round.
+
+    Replacement per round, like the noise-floor cache and unlike the regression corpus: re-running
+    a round supersedes its measurement rather than adding a second, contradictory one. The vectors
+    are stored whole and never truncated — being able to look back at which rows a DISCARDED
+    candidate won is the entire reason they are kept rather than an average.
+    """
+    measurements = load_measurements(path)
+    kept = [r for r in measurements.round_scores if r.round != scores.round]
+    updated = measurements.model_copy(update={"round_scores": [*kept, scores]})
     _atomic_write(path, updated.model_dump_json(indent=2))
     return updated
 
@@ -897,4 +914,125 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
     if verdict.notes:
         lines.append("- **Notes:**")
         lines += [f"  - {note}" for note in verdict.notes]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Per-row score vectors, the row x candidate matrix, and the Pareto front
+# ---------------------------------------------------------------------------
+
+
+def _row_score(result: EvaluationResult, criterion_index: int | None) -> float | None:
+    """The row's score for one arm: the criterion's score, or the row's weighted score."""
+    if criterion_index is None:
+        return result.weighted_score
+    if criterion_index >= len(result.success_criteria_results):
+        return None
+    return result.success_criteria_results[criterion_index].score
+
+
+def arm_row_scores(
+    *,
+    run_dirs: Sequence[Path],
+    variant_ids: Sequence[str],
+    suite_id: str,
+    criterion_index: int | None = None,
+) -> list[ArmRowScores]:
+    """Each arm's per-row score vector, averaged across replicates.
+
+    ``run_dirs`` is a LIST, like every other function here, because Stage A and Stage B are
+    separate invocations — a single-run-dir signature would silently compute the front off one
+    replicate. Replicates reduce to one number per (row, arm) by the **mean**, the same reduction
+    ``paired_comparison`` applies before pairing, so the two surfaces agree about what a row scored.
+
+    ``criterion_index=None`` reads the row's ``weighted_score`` (the execution track); an index
+    reads that criterion's score (the activation track). A row an arm produced no score for is
+    left ABSENT from the vector rather than recorded as 0.0 — see :func:`pareto_front`.
+    """
+    arms: list[ArmRowScores] = []
+    for variant_id in variant_ids:
+        rows = _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
+        scores: dict[str, float] = {}
+        for row_id, results in sorted(rows.items()):
+            values = [v for r in results if (v := _row_score(r, criterion_index)) is not None]
+            if values:
+                scores[row_id] = mean(values)
+        arms.append(ArmRowScores(variant_id=variant_id, row_scores=scores))
+    return arms
+
+
+def _dominates(a: ArmRowScores, b: ArmRowScores) -> bool:
+    """True when ``a`` covers every row ``b`` scored, matches it on all of them, and beats it on one.
+
+    Holes are handled by requiring **coverage**, and both halves of that matter:
+
+    - A missing cell is never read as 0.0. That would fabricate domination against the arm that
+      happens to have the hole, which is the opposite of what a hole means.
+    - An arm cannot dominate on the rows it happens to share while being ABSENT from a row the
+      other arm won. It has no evidence there, and "at least as good everywhere" is a claim about
+      everywhere the other arm was measured — so it is not entitled to make it.
+    """
+    scored_by_b = sorted(b.row_scores)
+    if not scored_by_b or not set(scored_by_b) <= set(a.row_scores):
+        return False
+    return all(a.row_scores[r] >= b.row_scores[r] for r in scored_by_b) and any(
+        a.row_scores[r] > b.row_scores[r] for r in scored_by_b
+    )
+
+
+def pareto_front(arms: list[ArmRowScores]) -> list[str]:
+    """Variant ids no other arm dominates on the row vector.
+
+    Identical arms all stay on the front (nothing is strictly better), which is itself the finding:
+    the candidates did not differ anywhere the suite could see. A single arm is its own front.
+
+    An arm that scored **no** rows is excluded rather than undominatable. Nothing can cover an
+    empty vector, so the domination rule alone would put a candidate that crashed on every row on
+    the front — rendered indistinguishably from one that won something nobody else did.
+    """
+    scored = [arm for arm in arms if arm.row_scores]
+    return [
+        arm.variant_id
+        for i, arm in enumerate(scored)
+        if not any(_dominates(other, arm) for j, other in enumerate(scored) if i != j)
+    ]
+
+
+def render_row_matrix(arms: list[ArmRowScores], pareto: list[str]) -> str:
+    """The row x candidate table, with the Pareto set marked and the holes made visible."""
+    if not arms:
+        return "_No arms to compare._"
+
+    row_ids = sorted({rid for arm in arms for rid in arm.row_scores})
+    header = " | ".join(f"**{a.variant_id}**" if a.variant_id in pareto else a.variant_id for a in arms)
+    lines = [
+        f"| row | {header} |",
+        "|" + "---|" * (len(arms) + 1),
+    ]
+    for row_id in row_ids:
+        cells = " | ".join(f"{a.row_scores[row_id]:.3f}" if row_id in a.row_scores else "—" for a in arms)
+        lines.append(f"| {row_id} | {cells} |")
+
+    lines.append("")
+    lines.append(f"Pareto front (**bold**): {', '.join(pareto) if pareto else 'none'}")
+
+    unscored = [a.variant_id for a in arms if not a.row_scores]
+    if unscored:
+        lines.append(
+            f"Arms that scored no rows at all and are therefore NOT on the front: {', '.join(unscored)}. "
+            + "That is a wiring or crash problem, not a result."
+        )
+
+    holes = [rid for rid in row_ids if any(rid not in a.row_scores for a in arms)]
+    if holes:
+        lines.append(
+            "Rows missing from at least one arm, shown as — and excluded from the domination "
+            + f"comparison rather than counted as 0.0: {', '.join(holes)}"
+        )
+    floored = [rid for rid in row_ids if all(a.row_scores.get(rid, 0.0) == 0.0 for a in arms)]
+    if floored:
+        lines.append(
+            f"Rows no arm scored above zero: {', '.join(floored)}. These contribute nothing to the "
+            + "front — usually a broken row or an unmet fixture precondition rather than N bad candidates."
+        )
     return "\n".join(lines)

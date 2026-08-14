@@ -15,6 +15,7 @@ import pytest
 
 from coder_eval.models import (
     ActivationGateVerdict,
+    ArmRowScores,
     ClassificationCriterionResult,
     CriterionResult,
     EvaluationResult,
@@ -26,12 +27,15 @@ from coder_eval.optimize_gate import (
     MATERIALITY_FLOOR,
     _label_pairs,
     activation_gate,
+    arm_row_scores,
     cost_latency_guardrails,
     holm_promote,
     load_arm_rows,
     load_suite_rows,
     noise_floor_mde,
+    pareto_front,
     render_markdown,
+    render_row_matrix,
     resolve_model,
 )
 from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES
@@ -772,3 +776,141 @@ class TestPromotionIsNotOverstated:
         text = render_markdown(holm_promote([self._verdict(guardrails=[passing])])[0])
         assert "**PROMOTED**" in text
         assert "BLOCKED" not in text
+
+
+def _scored_result(row_id: str, score: float) -> EvaluationResult:
+    """A row result carrying a weighted_score plus one criterion scoring the same."""
+    return _eval_result(row_id, [("yes", "yes" if score >= 0.5 else "no")]).model_copy(update={"weighted_score": score})
+
+
+def _write_scored_arm(tmp_path: Path, variant: str, per_row: dict[str, list[float]]) -> list[Path]:
+    """One arm whose row scores differ per run dir, so the replicate reduction is exercised."""
+    invocations = max(len(v) for v in per_row.values())
+    run_dirs = []
+    for i in range(invocations):
+        run_dir = tmp_path / f"run-{i}"
+        for row_id, scores in per_row.items():
+            if i < len(scores):
+                _write_row(run_dir, variant, row_id, _scored_result(row_id, scores[i]))
+        run_dirs.append(run_dir)
+    return run_dirs
+
+
+class TestArmRowScores:
+    def test_reads_every_row_and_variant(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run-0"
+        for variant, score in (("incumbent", 0.4), ("cand-a", 0.9)):
+            for row in ("r1", "r2"):
+                _write_row(run_dir, variant, row, _scored_result(row, score))
+
+        arms = arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent", "cand-a"], suite_id=SUITE)
+        assert [a.variant_id for a in arms] == ["incumbent", "cand-a"]
+        assert arms[0].row_scores == {"r1": 0.4, "r2": 0.4}
+        assert arms[1].row_scores == {"r1": 0.9, "r2": 0.9}
+
+    def test_averages_replicates_across_run_dirs(self, tmp_path: Path) -> None:
+        # A row scoring 0.0 and 1.0 in two run dirs reduces to 0.5 — not to whichever dir was
+        # read first, which is what a single-run-dir signature would have given.
+        run_dirs = _write_scored_arm(tmp_path, "incumbent", {"r1": [0.0, 1.0]})
+        arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
+        assert arms[0].row_scores == {"r1": 0.5}
+
+    def test_reads_a_criterion_score_when_given_an_index(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run-0"
+        _write_row(run_dir, "incumbent", "r1", _eval_result("r1", [("yes", "no"), ("yes", "yes")]))
+        by_criterion = arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent"], suite_id=SUITE, criterion_index=1)
+        assert by_criterion[0].row_scores == {"r1": 1.0}
+
+    def test_a_row_without_a_score_is_absent_not_zero(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run-0"
+        _write_row(run_dir, "incumbent", "r1", _scored_result("r1", 0.8))
+        _write_row(run_dir, "incumbent", "r2", _eval_result("r2", [("yes", "yes")]))  # weighted_score is None
+        arms = arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent"], suite_id=SUITE)
+        assert arms[0].row_scores == {"r1": 0.8}
+
+
+class TestParetoFront:
+    def _arm(self, name: str, **rows: float) -> ArmRowScores:
+        return ArmRowScores(variant_id=name, row_scores=rows)
+
+    def test_excludes_a_dominated_arm(self) -> None:
+        better = self._arm("cand-a", r1=1.0, r2=1.0)
+        worse = self._arm("cand-b", r1=0.5, r2=1.0)
+        assert pareto_front([better, worse]) == ["cand-a"]
+
+    def test_keeps_complementary_arms(self) -> None:
+        # Each wins a disjoint row set — the merge opportunity a suite average hides.
+        a = self._arm("cand-a", r1=1.0, r2=0.0)
+        b = self._arm("cand-b", r1=0.0, r2=1.0)
+        assert pareto_front([a, b]) == ["cand-a", "cand-b"]
+
+    def test_identical_arms_all_stay_on_the_front(self) -> None:
+        arms = [self._arm(f"cand-{n}", r1=0.7, r2=0.7) for n in "abc"]
+        assert pareto_front(arms) == ["cand-a", "cand-b", "cand-c"]
+
+    def test_a_single_arm_is_its_own_front(self) -> None:
+        assert pareto_front([self._arm("only", r1=0.1)]) == ["only"]
+
+    def test_empty_input(self) -> None:
+        assert pareto_front([]) == []
+
+    def test_a_hole_never_fabricates_domination(self) -> None:
+        # `full` beats `holed` on r1 and never scored r2 at all. It is NOT entitled to dominate:
+        # counting its missing cell as 0.0 would fabricate a loss for `holed` on a row it won, and
+        # ignoring the row entirely would let an arm dominate on the subset it happens to share.
+        # Domination requires COVERAGE of everything the other arm scored.
+        full = ArmRowScores(variant_id="full", row_scores={"r1": 1.0})
+        holed = ArmRowScores(variant_id="holed", row_scores={"r1": 0.5, "r2": 1.0})
+        assert pareto_front([full, holed]) == ["full", "holed"]
+
+    def test_an_arm_that_covers_everything_still_dominates(self) -> None:
+        # The other direction: coverage is a precondition, not a way to survive by scoring MORE.
+        covered = ArmRowScores(variant_id="covered", row_scores={"r1": 1.0, "r2": 1.0})
+        partial = ArmRowScores(variant_id="partial", row_scores={"r1": 0.5})
+        assert pareto_front([covered, partial]) == ["covered"]
+
+
+class TestRenderRowMatrix:
+    def test_renders_holes_as_dash_and_says_they_were_excluded(self) -> None:
+        arms = [
+            ArmRowScores(variant_id="incumbent", row_scores={"r1": 0.5}),
+            ArmRowScores(variant_id="cand-a", row_scores={"r1": 1.0, "r2": 1.0}),
+        ]
+        text = render_row_matrix(arms, pareto_front(arms))
+        assert "| r2 | — | 1.000 |" in text
+        assert "excluded from the domination" in text
+        assert "**cand-a**" in text
+
+    def test_flags_a_row_no_arm_scored(self) -> None:
+        arms = [
+            ArmRowScores(variant_id="a", row_scores={"r1": 0.0, "r2": 1.0}),
+            ArmRowScores(variant_id="b", row_scores={"r1": 0.0, "r2": 0.5}),
+        ]
+        text = render_row_matrix(arms, pareto_front(arms))
+        assert "Rows no arm scored above zero: r1" in text
+
+    def test_empty_arms_render_a_sentence_not_a_broken_table(self) -> None:
+        assert "No arms" in render_row_matrix([], [])
+
+
+class TestAnArmThatScoredNothing:
+    def test_is_not_on_the_front(self) -> None:
+        # Nothing can COVER an empty vector, so the domination rule alone would make a candidate
+        # that crashed on every row undominatable — and render it bold beside a real winner.
+        real = ArmRowScores(variant_id="real", row_scores={"r1": 0.9})
+        crashed = ArmRowScores(variant_id="crashed", row_scores={})
+        assert pareto_front([real, crashed]) == ["real"]
+
+    def test_is_named_in_the_matrix_as_a_wiring_problem(self) -> None:
+        arms = [
+            ArmRowScores(variant_id="real", row_scores={"r1": 0.9}),
+            ArmRowScores(variant_id="crashed", row_scores={}),
+        ]
+        text = render_row_matrix(arms, pareto_front(arms))
+        assert "scored no rows at all" in text
+        assert "not a result" in text
+        assert "**crashed**" not in text
+
+    def test_all_arms_empty_yields_an_empty_front(self) -> None:
+        arms = [ArmRowScores(variant_id=n, row_scores={}) for n in ("a", "b")]
+        assert pareto_front(arms) == []

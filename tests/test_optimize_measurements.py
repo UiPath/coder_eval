@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.models import NoiseFloor, OptimizeMeasurements, RegressionRow
+from coder_eval.models import ArmRowScores, NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores
 from coder_eval.optimize_gate import (
     MEASUREMENTS_FILENAME,
     append_regression_rows,
@@ -363,3 +363,34 @@ class TestNoiseFloorReuse:
             )
             == measured.mde
         )
+
+
+class TestRoundScores:
+    def test_round_scores_carry_arm_row_scores_through_json(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        original = OptimizeMeasurements(
+            skill="my-skill",
+            round_scores=[
+                RoundScores(
+                    round=1,
+                    arm_row_scores=[
+                        ArmRowScores(variant_id="incumbent", row_scores={"r1": 0.5, "r2": 1.0}),
+                        ArmRowScores(variant_id="cand-a", row_scores={"r1": 1.0, "r2": 0.0}),
+                    ],
+                    pareto_front=["incumbent", "cand-a"],
+                )
+            ],
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(original.model_dump_json(), encoding="utf-8")
+
+        loaded = load_measurements(path)
+        assert loaded == original
+        # The vectors are what a later round looks back at, so they must survive whole.
+        assert loaded.round_scores[0].arm_row_scores[1].row_scores == {"r1": 1.0, "r2": 0.0}
+
+    def test_round_scores_reject_unknown_keys(self) -> None:
+        with pytest.raises(ValueError):
+            OptimizeMeasurements.model_validate(
+                {"skill": "s", "round_scores": [{"round": 1, "arm_row_scores": [], "pareto": []}]}
+            )

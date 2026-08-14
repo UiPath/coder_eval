@@ -159,6 +159,42 @@ class RegressionRow(BaseModel):
     reason: str = Field(description="What this row demonstrated — why re-losing it would be a regression.")
 
 
+class ArmRowScores(BaseModel):
+    """One arm's score on each row — the vector a Pareto comparison needs.
+
+    A suite-level average hides the shape: two candidates at the same mean can win on disjoint
+    rows, which is a merge opportunity, or one can dominate outright, which is a discard. Only the
+    per-row vector distinguishes them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    variant_id: str = Field(min_length=1, description="The arm these scores belong to.")
+    row_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Row id -> score, averaged across replicates the way paired_comparison averages before "
+            "pairing. A row this arm produced no score for is ABSENT, never 0.0 — a hole is not a failure."
+        ),
+    )
+
+
+class RoundScores(BaseModel):
+    """One round's per-row vectors and the Pareto front computed from them.
+
+    Kept so a later round can look back at which rows a discarded candidate actually won. That is
+    the whole point of storing vectors rather than an average, so they are not truncated.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    round: int = Field(ge=0, description="Round number, matching the ledger's numbering.")
+    arm_row_scores: list[ArmRowScores] = Field(default_factory=list, description="One entry per arm.")
+    pareto_front: list[str] = Field(
+        default_factory=list, description="Variant ids not dominated on the row vector by any other arm."
+    )
+
+
 class OptimizeMeasurements(BaseModel):
     """The machine-read sidecar beside `history.json`: a noise-floor cache and a regression corpus.
 
@@ -185,4 +221,11 @@ class OptimizeMeasurements(BaseModel):
     )
     regression_corpus: list[RegressionRow] = Field(
         default_factory=list, description="Append-only, de-duplicated on row_id. Never rewritten."
+    )
+    round_scores: list[RoundScores] = Field(
+        default_factory=list,
+        description=(
+            "Per-round row vectors and Pareto fronts. Measurements, so they belong here beside the "
+            "noise floors rather than in the narrative ledger or in a third file."
+        ),
     )
