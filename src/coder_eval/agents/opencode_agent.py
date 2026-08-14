@@ -632,6 +632,11 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         self._plugin_tools_dir: str | None = None
         self._session_id: str | None = None
         self._process: asyncio.subprocess.Process | None = None
+        # Process-group ids (== the CLI's pid under start_new_session) of every
+        # invocation this agent spawned, swept on kill()/kill_sync()/stop() —
+        # `opencode run` leaves a server child alive after the CLI exits, and
+        # signaling only the CLI pid would orphan it (a slow leak across a batch).
+        self._spawned_pgids: list[int] = []
         self._state = AgentState.WORKING
 
     # --- lifecycle ---------------------------------------------------------
@@ -667,23 +672,41 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
 
     async def kill(self) -> None:
         proc = self._process
-        if proc is None or proc.returncode is not None:
-            return
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
-        with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS)
-        if proc.returncode is None:
+        if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+                proc.terminate()
+            with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+        self._sweep_process_groups()
 
     def kill_sync(self) -> None:
-        """SIGKILL the in-flight CLI by PID (called from the watchdog thread)."""
+        """SIGKILL the in-flight CLI and its process group (watchdog thread; must not await)."""
         proc = self._process
-        if proc is None or proc.returncode is not None:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(proc.pid, signal.SIGKILL)
+        self._sweep_process_groups()
+
+    def _sweep_process_groups(self) -> None:
+        """SIGKILL every process group this agent spawned (POSIX only).
+
+        Each invocation runs in its own session (``start_new_session``), so its
+        pgid is the CLI's pid and the group contains ONLY what that invocation
+        spawned — the lingering server child included, a shared daemon we did not
+        start excluded. The CLI itself gets SIGTERM-then-SIGKILL first (see
+        ``kill``); this reaps whatever survives it. Sessions are persisted on
+        disk by OpenCode, so killing a turn's server does not lose ``--session``
+        continuity.
+        """
+        if os.name != "posix":
             return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.kill(proc.pid, signal.SIGKILL)
+        for pgid in self._spawned_pgids:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(pgid, signal.SIGKILL)
+        self._spawned_pgids.clear()
 
     def get_environment_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {"opencode_model": self.config.model, "opencode_pure": self.config.pure}
@@ -776,8 +799,14 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 # read), which blows past StreamReader's default 64 KiB line cap and
                 # would raise ValueError mid-stream, killing the read loop.
                 limit=STDOUT_LINE_LIMIT_BYTES,
+                # Own session/process group, so teardown can killpg the lingering
+                # server child without touching anything this invocation didn't
+                # spawn. POSIX-only knob; harmless False elsewhere.
+                start_new_session=os.name == "posix",
             )
             self._process = proc
+            if os.name == "posix":
+                self._spawned_pgids.append(proc.pid)
             assert proc.stdout is not None
 
             # Drain stderr CONCURRENTLY, from the moment the CLI starts. Reading it
@@ -840,7 +869,15 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     read_task.cancel()
                 exit_waiter.cancel()
 
-            status = await self._settle_turn(proc, state, collector, stderr_drain, stopped_early=stopped_early)
+            status = await self._settle_turn(
+                proc,
+                state,
+                collector,
+                stderr_drain,
+                stopped_early=stopped_early,
+                deadline=deadline,
+                timeout=timeout,
+            )
             state.finalize(status)
             # Build BEFORE marking the turn clean: a failure in the reduction is a
             # failed turn, and `_end_turn_ok` would clear the rollback flag that
@@ -880,15 +917,36 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         stderr_drain: asyncio.Future[bytes] | None,
         *,
         stopped_early: bool,
+        deadline: float | None,
+        timeout: float | None,
     ) -> AgentEndStatus:
         """Reap the CLI once the read loop is done and decide the turn's end status.
 
         Raises ``AgentCrashError`` (via :meth:`_crash_turn`) when the stream carried
         a structured error, when the process died with neither a structured error
         nor an intentional stop, or when a clean exit recognized no events at all
-        (a zero-telemetry turn must not score — see the guard below).
+        (a zero-telemetry turn must not score — see the guard below). Raises
+        ``TurnTimeoutError`` when the turn deadline elapses while waiting for the
+        exit.
         """
-        await proc.wait()
+        # Bound the reap: the read loop can end at EOF with the CLI still alive
+        # (it closed its stream but never exited), and an unbounded wait here
+        # would outlive the turn deadline — the one window where `timeout` was
+        # previously unenforced. Give the exit the deadline's remainder, or a
+        # short fixed grace when no deadline is configured (post-EOF, a healthy
+        # CLI exits almost immediately).
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS if remaining is None else remaining)
+        except TimeoutError:
+            if remaining is not None:
+                await self._timeout_turn(state, collector, timeout or 0.0)
+            await self.kill()
+            self._crash_turn(
+                state,
+                collector,
+                f"OpenCode closed its event stream but did not exit within {_TERM_GRACE_SECONDS:.0f}s",
+            )
         # Collect what the concurrent reader drained. Bounded for the same reason as
         # the read loop: the inherited stderr pipe outlives the CLI, so waiting for
         # the reader's own EOF would block. Shielded so the timeout doesn't kill it

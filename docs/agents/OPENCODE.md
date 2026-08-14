@@ -201,12 +201,17 @@ with an error naming the unrecognized event types it saw instead.
 - **Cooperative stop is at event granularity.** `should_stop` is polled between
   events and honored by terminating the CLI, so `stop_early` works, but the cut
   lands on an event boundary rather than mid-tool.
-- **Pipe teardown.** `opencode run` leaves a local server child holding the
-  inherited stdout/stderr pipes, so EOF never arrives on its own. The agent races
-  each read against process exit and bounds the post-exit drain; this is why reads
-  are never left to block on EOF alone. stderr gets its own concurrent reader from
-  the moment the CLI starts — draining it only afterwards would let a full stderr
-  pipe block the child mid-write and stall stdout with it.
+- **Pipe and process teardown.** `opencode run` leaves a local server child
+  holding the inherited stdout/stderr pipes, so EOF never arrives on its own. The
+  agent races each read against process exit, bounds the post-exit drain, and
+  bounds the final reap by the turn deadline (a CLI that closes its stream but
+  never exits is cut as a timeout/crash, not waited out). stderr gets its own
+  concurrent reader from the moment the CLI starts — draining it only afterwards
+  would let a full stderr pipe block the child mid-write and stall stdout with it.
+  Each invocation runs in its own process group (`start_new_session`), and
+  `kill()` / `kill_sync()` / `stop()` sweep that group with SIGKILL, so the server
+  child is reaped rather than leaked across a batch; OpenCode persists sessions on
+  disk, so `--session` continuity survives the sweep.
 
 ## Troubleshooting
 

@@ -17,15 +17,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 from typing import Any
 
 import pytest
 
-from coder_eval.agents.opencode_agent import OpenCodeAgent, _unwrap
-from coder_eval.errors import AgentCrashError
+from coder_eval.agents.opencode_agent import OpenCodeAgent, _OpenCodeTurnState, _unwrap
+from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AssistantMessage, OpenCodeAgentConfig, PermissionMode
 from coder_eval.pricing import calculate_cost
-from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
+from coder_eval.streaming.events import (
+    AgentEndEvent,
+    AgentEndStatus,
+    AgentStartEvent,
+    ToolEndEvent,
+    ToolEndStatus,
+)
 
 
 SESSION = "ses_test123"
@@ -151,8 +159,13 @@ class _RunningProcess(_FakeProcess):
 
 @pytest.fixture
 def patch_exec(monkeypatch: pytest.MonkeyPatch):
-    """Patch subprocess spawn; return a dict capturing the argv used."""
-    captured: dict[str, Any] = {}
+    """Patch subprocess spawn; return a dict capturing the argv used.
+
+    Also stubs ``os.killpg`` (recording each call under ``captured["killpg"]``) so
+    the agent's process-group sweep can never signal a real group whose id happens
+    to collide with the fake pid.
+    """
+    captured: dict[str, Any] = {"killpg": []}
 
     def _install(proc: _FakeProcess) -> dict[str, Any]:
         async def fake_exec(*argv: str, **kwargs: Any) -> _FakeProcess:
@@ -163,6 +176,7 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/opencode")
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: captured["killpg"].append((pgid, sig)))
         return captured
 
     return _install
@@ -628,6 +642,16 @@ class _ExplodingProcess(_FakeProcess):
         raise ValueError("Separator is not found, and chunk exceed the limit")
 
 
+class _EventRecorder:
+    """Minimal ``StreamCallback``: records every event the agent emits."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def on_event(self, event: Any) -> None:
+        self.events.append(event)
+
+
 class TestUnexpectedErrorContract:
     """An unanticipated exception must still honor the pending-turn contract.
 
@@ -636,15 +660,6 @@ class TestUnexpectedErrorContract:
     of parked on ``pending_turn``, and ``_iteration`` left incremented because the
     orchestrator never reaches ``discard_pending_turn``.
     """
-
-    class _Recorder:
-        """Minimal ``StreamCallback``: records every event the agent emits."""
-
-        def __init__(self) -> None:
-            self.events: list[Any] = []
-
-        def on_event(self, event: Any) -> None:
-            self.events.append(event)
 
     async def test_stream_error_becomes_a_crash_with_partial_parked(self, patch_exec, tmp_path):
         stream = [
@@ -688,7 +703,7 @@ class TestUnexpectedErrorContract:
     async def test_terminal_event_is_emitted_exactly_once(self, patch_exec, tmp_path):
         """The protocol allows exactly one AgentEnd per communicate(), crash included."""
         patch_exec(_ExplodingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})]))
-        recorder = self._Recorder()
+        recorder = _EventRecorder()
 
         with pytest.raises(AgentCrashError):
             await _run(_agent(), tmp_path, stream_callback=recorder)
@@ -794,3 +809,221 @@ class TestCooperativeStop:
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=1)
         assert record.max_turns_exhausted is True
+
+
+class _HangingProcess(_FakeProcess):
+    """Emits nothing and never exits until it is signaled.
+
+    Models a CLI stuck mid-turn (a wedged provider call): no stdout, no exit —
+    the shape that must be cut by the turn deadline, not waited out.
+    """
+
+    def __init__(self, lines: list[str], **kwargs: Any) -> None:
+        super().__init__(lines, **kwargs)
+        self._exited = asyncio.Event()
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        await self._exited.wait()
+        return b""
+
+    async def read(self) -> bytes:
+        await self._exited.wait()
+        return self._stderr
+
+    async def wait(self) -> int:
+        await self._exited.wait()
+        self.returncode = self._final_returncode
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._exited.set()
+
+    def kill(self) -> None:
+        self._exited.set()
+
+
+class _EofNoExitProcess(_HangingProcess):
+    """Replays its lines, signals EOF — but never exits until killed.
+
+    Models a CLI that closed its stream during shutdown and then wedged: the one
+    window where the read loop is already done, so only a bounded reap in
+    ``_settle_turn`` stands between the turn and an unbounded hang.
+    """
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        return b""  # EOF — but the process is still alive
+
+
+class TestTimeoutContract:
+    async def test_deadline_raises_turn_timeout_with_partial_parked(self, patch_exec, tmp_path):
+        """A wedged CLI must yield TurnTimeoutError + a crashed partial record,
+        with exactly one terminal AgentEndEvent (status TIMEOUT) emitted."""
+        proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
+        patch_exec(proc)
+        agent = _agent()
+        recorder = _EventRecorder()
+
+        with pytest.raises(TurnTimeoutError):
+            await _run(agent, tmp_path, timeout=0.2, stream_callback=recorder)
+
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        assert proc.terminated is True  # the CLI was torn down, not abandoned
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert len(ends) == 1
+        assert ends[0].status is AgentEndStatus.TIMEOUT
+
+        await agent.discard_pending_turn()
+        assert agent._iteration == 0  # the failed turn's bump was rolled back
+
+    async def test_eof_without_exit_hits_the_deadline(self, patch_exec, tmp_path):
+        """Stream closed, process wedged: the post-EOF reap must be bounded by the
+        turn deadline instead of waiting for an exit that never comes."""
+        proc = _EofNoExitProcess(HAPPY_STREAM)
+        patch_exec(proc)
+        agent = _agent()
+
+        with pytest.raises(TurnTimeoutError):
+            await asyncio.wait_for(_run(agent, tmp_path, timeout=0.3), timeout=10)
+
+        # Everything parsed before the wedge survives on the partial record.
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        assert partial.token_usage is not None
+        assert partial.token_usage.output_tokens > 0
+
+    async def test_eof_without_exit_and_no_deadline_crashes(self, patch_exec, monkeypatch, tmp_path):
+        """With no turn deadline configured, the reap still gets a fixed grace —
+        a stream-closed-but-wedged CLI is a crash, not an indefinite hang."""
+        monkeypatch.setattr("coder_eval.agents.opencode_agent._TERM_GRACE_SECONDS", 0.1)
+        proc = _EofNoExitProcess(HAPPY_STREAM)
+        patch_exec(proc)
+
+        with pytest.raises(AgentCrashError, match="did not exit"):
+            await asyncio.wait_for(_run(_agent(), tmp_path), timeout=10)
+
+
+class TestExternalCancel:
+    async def test_cancel_parks_partial_and_reraises(self, patch_exec, tmp_path):
+        """The watchdog's CancelledError must not swallow captured telemetry: the
+        partial record is parked, the terminal event says CRASHED, and the
+        cancellation still propagates."""
+        proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
+        patch_exec(proc)
+        agent = _agent()
+        await agent.start(str(tmp_path))
+        recorder = _EventRecorder()
+
+        task = asyncio.ensure_future(agent.communicate("do the thing", stream_callback=recorder))
+        await asyncio.sleep(0.05)  # let it spawn and read the first event
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert len(ends) == 1
+        assert ends[0].status is AgentEndStatus.CRASHED
+        assert ends[0].crash_reason == "turn cancelled"
+
+
+class TestProcessGroupTeardown:
+    async def test_spawn_uses_its_own_session(self, patch_exec, tmp_path):
+        """Each invocation must be its own process group, so killpg can reap the
+        server child without touching anything this invocation didn't spawn."""
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+        assert captured["kwargs"]["start_new_session"] is (os.name == "posix")
+
+    async def test_stop_sweeps_the_spawned_group(self, patch_exec, tmp_path):
+        """`opencode run` leaves a server child holding the pipes; stop() must
+        SIGKILL the whole group or every task in a batch leaks one."""
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent()
+        await _run(agent, tmp_path)
+        assert captured["killpg"] == []  # a clean turn does not kill mid-run state
+
+        await agent.stop()
+        assert (4242, signal.SIGKILL) in captured["killpg"]
+
+    async def test_cooperative_stop_sweeps_the_group_too(self, patch_exec, tmp_path):
+        captured = patch_exec(_RunningProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path, should_stop=lambda: True)
+        assert (4242, signal.SIGKILL) in captured["killpg"]
+
+    async def test_kill_sync_signals_pid_and_group(self, patch_exec, monkeypatch, tmp_path):
+        """kill_sync runs on the watchdog's non-asyncio thread: plain os.kill on
+        the CLI plus a group sweep, no awaits."""
+        killed: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+        captured = patch_exec(_HangingProcess([]))
+        agent = _agent()
+        await agent.start(str(tmp_path))
+        proc = _HangingProcess([])
+        agent._process = proc  # type: ignore[assignment]
+        agent._spawned_pgids = [proc.pid]
+
+        agent.kill_sync()
+
+        assert (4242, signal.SIGKILL) in killed
+        assert (4242, signal.SIGKILL) in captured["killpg"]
+
+
+class TestToolFailureCapture:
+    @staticmethod
+    def _failing_tool(error: str) -> str:
+        return _evt(
+            "tool_use",
+            {
+                "id": "prt_2",
+                "messageID": "msg_1",
+                "type": "tool",
+                "tool": "bash",
+                "callID": "call_1",
+                "state": {"status": "error", "input": {"command": "ls /root"}, "error": error},
+            },
+        )
+
+    async def test_tool_error_is_captured_not_dropped(self, patch_exec, tmp_path):
+        recorder = _EventRecorder()
+        patch_exec(_FakeProcess([self._failing_tool("boom: command exploded")]))
+        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+
+        [cmd] = record.commands
+        assert cmd.result_status == "error"
+        assert cmd.error_message == "boom: command exploded"
+        [end] = [e for e in recorder.events if isinstance(e, ToolEndEvent)]
+        assert end.status is ToolEndStatus.ERROR
+
+    async def test_permission_denial_gets_its_own_status(self, patch_exec, tmp_path):
+        recorder = _EventRecorder()
+        patch_exec(_FakeProcess([self._failing_tool("Permission denied by policy")]))
+        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+
+        [cmd] = record.commands
+        assert cmd.result_status == "error"  # the persisted tri-state folds both
+        [end] = [e for e in recorder.events if isinstance(e, ToolEndEvent)]
+        assert end.status is ToolEndStatus.PERMISSION_DENIED
+
+    def test_orphan_result_is_never_dropped(self):
+        """A result with no matching call still surfaces as an `unknown` tool."""
+        state = _OpenCodeTurnState(task_id="t", iteration=1, user_input="x", model=None)
+        events: list[Any] = []
+        state.bind(events.append)
+
+        state._close_tool("ghost", status=ToolEndStatus.UNRESOLVED, summary=None, error="no result observed")
+
+        [event] = events
+        assert isinstance(event, ToolEndEvent)
+        assert event.tool.tool_name == "unknown"
+        assert event.tool.result_status == "unknown"
+        assert event.tool.error_message == "no result observed"
