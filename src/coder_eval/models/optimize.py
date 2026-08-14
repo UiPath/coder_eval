@@ -134,9 +134,11 @@ class ActivationGateVerdict(BaseModel):
         description=(
             "Paired rows whose two arms produced different pooled label multisets — the R that "
             "p_floor is computed from, and the quantity a refusal's remedy turns on. None when "
-            "there was no interval; 0 is the meaningful 'the arms agreed everywhere'. It is a RATE "
-            "that matters, not a count: below roughly 4 discordant rows in 10 the floor stays "
-            "coarse however many rows are added, because adding concordant rows RAISES it."
+            "there was no interval; 0 is the meaningful 'the arms agreed everywhere'. It is the "
+            "COUNT that binds, not the rate, and the count is almost flat in the suite size: 3 "
+            "discordant rows suffice at 8 paired rows and 4 at 10, 20 or 100 (see "
+            "optimize_gate.min_discordant_rows, which computes it). What does NOT help is adding "
+            "rows the arms agree on — at a fixed R that RAISES the floor."
         ),
     )
     gate_refusal: str | None = Field(

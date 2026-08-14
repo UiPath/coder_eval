@@ -1166,8 +1166,8 @@ class TestMinDiscordantRows:
 
     def test_an_unclearable_bar_returns_none_rather_than_n_rows(self) -> None:
         # Every row discordant leaves the estimator's own floor, so a threshold below THAT cannot
-        # be met at any R — and the caller must say "more rows AND more disagreement", not name a
-        # count that does not work.
+        # be met at any R — at any suite size, since that floor is a function of the draw count
+        # alone. The caller must send the reader to n_resamples, not to rows.
         assert min_discordant_rows(6, bootstrap_p_floor(2_000) / 2, 2_000) is None
 
 
@@ -1393,6 +1393,40 @@ class TestGateRefusal:
         assert refusal is not None
         assert "survivor(s) at alpha" in refusal
         assert "DISAGREE on" not in refusal
+
+    def test_an_unclearable_bar_does_not_prescribe_rows_that_cannot_work(self) -> None:
+        """When no discordant count clears the bar, rows are not the lever — and saying so is wrong.
+
+        `min_discordant_rows` returns None exactly when the floor at `R == M` — which collapses to
+        the estimator's own `2/(m+1)`, a function of the DRAW COUNT and of nothing about the suite
+        — is still above the threshold. So a message telling that reader to add rows sends them to
+        spend on something provably incapable of helping.
+        """
+        resamples = 200  # a coarse estimator floor, so the bar sits under it
+        verdict = ActivationGateVerdict(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=SUITE,
+            criterion_index=0,
+            confidence=0.95,
+            n_resamples=resamples,
+            rows_paired=6,
+            rows_excluded=0,
+            n_discordant=2,
+            incumbent_f1=0.0,
+            candidate_f1=1.0,
+            mean_diff=1.0,
+            ci_low=0.5,
+            ci_high=1.0,
+            p_value=0.001,
+            p_floor=0.4,
+        )
+        assert min_discordant_rows(6, DEFAULT_ALPHA / 8, resamples) is None
+        refusal = holm_promote([verdict] * 8)[0].gate_refusal
+        assert refusal is not None
+        assert f"{resamples} bootstrap draws" in refusal
+        assert "larger n_resamples" in refusal
+        assert "more rows AND more disagreement" not in refusal
 
     def test_max_family_zero_says_no_family_size_works(self) -> None:
         verdict = ActivationGateVerdict(

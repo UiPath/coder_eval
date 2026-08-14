@@ -237,8 +237,12 @@ def _discreteness_floor(n_rows: int, n_discordant: int, n_resamples: int) -> flo
 def min_discordant_rows(n_rows: int, threshold: float, n_resamples: int = GATE_RESAMPLES) -> int | None:
     """The smallest discordant-row count whose discreteness floor clears ``threshold``.
 
-    ``None`` when no count ``R <= n_rows`` clears it — including every ``n_rows <= 0``, where the
-    floor is 1.0 by definition and nothing can be below a threshold under it.
+    ``None`` when no count ``R <= n_rows`` clears it. There is exactly one way that happens on a
+    non-empty suite: at ``R == n_rows`` the analytic term is 0, so the floor collapses to the
+    estimator's own ``2/(n_resamples+1)`` — a number that depends on the draw count and on nothing
+    about the suite. A caller handed ``None`` should therefore raise ``n_resamples`` or shrink the
+    family, never buy rows. A suite of ``n_rows <= 0`` is ``None`` for the separate and more
+    mundane reason that there is no count of discordant rows to return.
 
     **The row count is not the lever, and that is the whole reason this function exists.** Holding
     ``R`` fixed and adding rows makes ``2*(1 - R/M)**M`` RISE toward ``2*e**(-R)``: at ``R = 3`` the
@@ -1182,10 +1186,16 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
                             + "rows they agree on makes this floor worse, not better"
                         )
                         if required is not None
+                        # `min_discordant_rows` returns None only when even EVERY row discordant
+                        # leaves the estimator's own 2/(m+1) above the bar — and that value
+                        # depends on the draw count alone, not on the suite. So "more rows" is
+                        # not merely insufficient here, it is irrelevant, and saying otherwise
+                        # would send a user to buy rows that provably cannot work.
                         else (
-                            f"no discordant count at {verdict.rows_paired} paired rows clears this bar "
-                            + "at all, so the row lever needs both more rows AND more disagreement among "
-                            + "them — adding rows the arms agree on makes this floor worse"
+                            f"no discordant count clears this bar at {verdict.rows_paired} rows or at "
+                            + f"any other: the bar sits below what {verdict.n_resamples} bootstrap "
+                            + "draws can resolve at all, so the levers are a larger n_resamples or a "
+                            + "smaller family — not rows"
                         )
                     )
                     remedy = f"{family_lever}, or {row_lever}."
