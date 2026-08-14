@@ -384,7 +384,8 @@ with the two `action.yml` items above — one considered change to the action's 
   `timeout is None`. Caught independently by two reviewers (`bai-uipath`, `uipreliga`)
   on the PR, both citing the exact same arithmetic mismatch. **Not promoted in this
   pass**, but a stronger candidate than most entries here: `uipreliga` proposed a
-  generic whole-tree rule (their CE035) — for every sleep-loop under
+  generic whole-tree rule (proposed as CE035, renumbered CE042 here — CE035 shipped as
+  the workflow-outputs resolver on the published-action branch) — for every sleep-loop under
   `src/coder_eval/agents/**`, assert its own cycle-count × interval either references a
   timeout-derived name or is provably below `experiments/default.yaml`'s baseline — that
   would catch this class of bug in ANY agent, not just this one (confirmed zero
