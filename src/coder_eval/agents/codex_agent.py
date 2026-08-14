@@ -33,6 +33,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -296,6 +297,7 @@ class _CodexTurnState:
         user_input: str,
         iteration: int,
         turn_start_time: float,
+        max_turns: int | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -307,8 +309,10 @@ class _CodexTurnState:
         self.user_input = user_input
         self.iteration = iteration
         self.turn_start_time = turn_start_time
+        self.max_turns = max_turns
         self.timeout_hit = False
         self.stopped_early_hit = False
+        self.max_turns_hit = False
         self.finalized = False
 
         # Live pump scratch (set during streaming).
@@ -433,6 +437,27 @@ class _CodexTurnState:
         self.open_blocks = []
         self.open_start_ms = None
         self.open_end_ms = None
+
+    @property
+    def ended_cleanly(self) -> bool:
+        """True once the pump broke on purpose (cooperative stop or the turn cap).
+
+        Both are non-crash terminations, so an exception raised while tearing the
+        stream down afterwards must not be escalated into a retry.
+        """
+        return self.stopped_early_hit or self.max_turns_hit
+
+    def max_turns_reached(self) -> bool:
+        """True once this turn has produced ``max_turns`` visible turns.
+
+        Delegates the count to the collector (``EventCollector.visible_turn_count``)
+        so Codex and Antigravity cap on one shared definition rather than each
+        agent's own scratch list — ``self.commands`` skips items whose telemetry the
+        SDK does not resolve, while the collector counts every emitted tool end,
+        which is exactly what lands in ``TurnRecord.commands``. Codex delivers one
+        SDK turn per ``communicate()``, so the SDK's own turn counter would cap at 1.
+        """
+        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
 
     def dispatch(self, notification: Any) -> bool:
         """Route a notification to its handler. Returns True on ``turn/completed``
@@ -657,6 +682,7 @@ class _CodexTurnState:
                 num_turns=1,
                 crashed=crashed,
                 crash_reason=crash_reason,
+                max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
             )
         )
@@ -672,6 +698,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
     # The notification pump has a between-items guard where the cooperative
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
+
+    # Codex appends system_prompt as developer_instructions on top of its base
+    # prompt. Runs from before this marker existed silently DROPPED the field —
+    # dashboards must not pool system_prompt-setting tasks across that boundary.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
 
     def __init__(
         self,
@@ -782,7 +813,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
             user_input: The message/prompt to send
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds
-            max_turns: Hard cap on inner-loop turns (unused for Codex single-turn)
+            max_turns: Hard cap on VISIBLE turns — tool calls, the unit
+                ``reports_stats.visible_turn_count`` counts — enforced in-stream on
+                the same pump boundary as the cooperative stop. Codex delivers one
+                SDK turn per ``communicate()``, so a native turn counter would cap
+                at 1; see docs/agents/HARNESS_PARITY.md.
             should_stop: Cooperative early-stop callback, polled after each
                 dispatched notification. When it returns True the pump breaks,
                 the in-flight turn is interrupted (best-effort) and the turn
@@ -829,6 +864,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             user_input=user_input,
             iteration=self._iteration,
             turn_start_time=turn_start_time,
+            max_turns=max_turns,
         )
 
         try:
@@ -876,12 +912,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 except Exception as e:
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
-                    if state.stopped_early_hit:
+                    if state.ended_cleanly:
                         # The turn already stopped cleanly; escalating to a crash
                         # would trigger the orchestrator's retry with the watcher's
                         # decision still latched → immediate stop-at-turn-0 on the
-                        # retry (wasted spend). Fall through to the clean tail.
-                        self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+                        # retry (wasted spend). A cap-break is the same shape: the
+                        # retry would burn the budget again and re-hit the cap.
+                        self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
                     else:
                         self._finalize_and_raise_crash(
                             state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
@@ -911,10 +948,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # and _format_turn_result. Without this, such errors escape as a bare
             # exception: the orchestrator never drains pending_turn and _iteration
             # stays incremented, violating the pending-turn contract.
-            if state.stopped_early_hit and not state.timeout_hit:
-                # Same retry-poisoning guard as the inner handler: a cooperative
-                # stop already happened, so finalize cleanly instead of crashing.
-                self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+            if state.ended_cleanly and not state.timeout_hit:
+                # Same retry-poisoning guard as the inner handler: the turn already
+                # ended cleanly (cooperative stop or turn cap), so finalize instead
+                # of crashing.
+                self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
             else:
                 self._finalize_and_raise_crash(
                     state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
@@ -924,8 +962,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._end_turn_ok()
 
         # The TurnRecord is the EventCollector's reduction of the emitted events.
-        # Precedence matches Claude: timeout (raised above) > stopped_early > completed.
-        status = AgentEndStatus.STOPPED_EARLY if state.stopped_early_hit else AgentEndStatus.COMPLETED
+        # Precedence matches Claude: timeout (raised above) > stopped_early >
+        # max_turns_exhausted > completed. stopped_early outranks the cap because an
+        # armed criterion deciding the outcome is the more specific reason to have
+        # cut the run, and the pump checks it first.
+        if state.stopped_early_hit:
+            status = AgentEndStatus.STOPPED_EARLY
+        elif state.max_turns_hit:
+            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+        else:
+            status = AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
@@ -978,17 +1024,21 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Codex routing so runs are auditable/comparable.
 
-        Only emits when a custom endpoint is configured (CODEX_BASE_URL). On a
-        custom endpoint the model is an operator-chosen alias (a deployment name
-        on Azure), so two operators' ``gpt-5-codex`` deployments are otherwise
-        indistinguishable in run artifacts. The host (not the full URL) is
-        recorded to avoid leaking any embedded credentials; the API key is never
-        recorded.
+        Always emits ``system_prompt_semantics`` (from the base). The routing keys
+        (``codex_base_url_host`` / ``codex_wire_api`` / ``codex_api_version`` /
+        ``codex_model_is_deployment``) are added only when a custom endpoint is
+        configured (CODEX_BASE_URL): on a custom endpoint the model is an
+        operator-chosen alias (a deployment name on Azure), so two operators'
+        ``gpt-5-codex`` deployments are otherwise indistinguishable in run
+        artifacts. The host (not the full URL) is recorded to avoid leaking any
+        embedded credentials; the API key is never recorded.
         """
+        info: dict[str, Any] = dict(super().get_environment_info())
         base_url = self._resolve_base_url()
         if not base_url:
-            return {}
+            return info
         return {
+            **info,
             "codex_base_url_host": urlparse(base_url).hostname or "",
             "codex_wire_api": _CODEX_WIRE_API,
             "codex_api_version": self._resolve_api_version() or "",
@@ -1317,6 +1367,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
             options["model"] = effective_model
             self._log.debug(f"Codex model pinned to {effective_model}")
 
+        # system_prompt maps to developer_instructions: injected ON TOP of Codex's
+        # base prompt, matching the append-only contract of the shared config field
+        # (Claude Code appends via the claude_code preset; Antigravity via
+        # TemplatedSystemInstructions). base_instructions (full replacement of the
+        # base prompt) is deliberately not exposed.
+        if self.config.system_prompt is not None:
+            options["developer_instructions"] = self.config.system_prompt
+
         permission_mode = self.config.permission_mode.value
         approval_mode_str = _CODEX_APPROVAL_MODE
 
@@ -1478,6 +1536,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     self._log.debug("Cooperative stop requested; ending notification pump at this boundary")
                     self._interrupt_active_turn()  # best-effort; stops server-side spend
                     break
+                # The turn cap shares this boundary: the notification that reached the
+                # cap is dispatched whole, the next is never pulled. Checked after the
+                # cooperative stop so an armed early-stop still reports as
+                # STOPPED_EARLY when both would fire on the same notification.
+                if state.max_turns_reached():
+                    state.max_turns_hit = True
+                    self._log.debug("max_turns (%s visible turns) reached; ending notification pump", state.max_turns)
+                    self._interrupt_active_turn()  # best-effort; stops server-side spend
+                    break
         finally:
             self._active_turn_handle = None
             # Close any orphan tool (item/started without item/completed), flush any
@@ -1488,7 +1555,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             with contextlib.suppress(Exception):
                 await self._run_async(stream.close)
 
-        if state.turn_result is None and not state.stopped_early_hit:
+        if state.turn_result is None and not state.ended_cleanly:
             raise RuntimeError("Turn did not complete (no turn/completed notification received)")
 
         # Belt-and-suspenders: if streaming surfaced no assistant transcript,
@@ -1500,8 +1567,21 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # and nest them under the spawning Agent call. The parent stream never
         # carries the child's commands (Limited persistence drops them), but its
         # rollout always persists the raw function_call/local_shell_call items.
-        # Skipped on a cooperative stop: children may have no rollout yet and the
-        # run is already decided — recovery adds nothing the armed gate uses.
+        #
+        # Runs on a turn-cap stop. Recovery is also what carries the children's
+        # TOKENS: it is the only writer of the ``parent_tool_use_id``-tagged
+        # messages that ``_fold_subagent_tokens`` sums into the turn total, so
+        # skipping it drops the child threads' spend from the run's cost entirely
+        # (Codex bills children on separate threads the parent total never sees).
+        # A cap is a routine ending, not an exceptional one, so paying ~2s of
+        # rollout polling beats under-reporting spend on every capped run that
+        # spawned a sub-agent. The recovered child calls land in the trajectory
+        # beyond the cap's count, the same way the force-closed orphan does;
+        # the cap bounds what the model was allowed to DO, not what the record is
+        # allowed to explain.
+        #
+        # Still skipped on a cooperative stop: an armed gate has already decided
+        # the run, children may have no rollout yet, and that path predates the cap.
         if state.spawned_children and not state.stopped_early_hit:
             await self._recover_subagent_tool_calls(
                 state.spawned_children,

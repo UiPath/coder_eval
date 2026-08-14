@@ -70,6 +70,19 @@ class TestSystemPrompt:
         )
         assert sim.system_prompt == "CUSTOM TEMPLATE BODY"
 
+    def test_persona_replaces_coding_agent_preset(self):
+        """The persona is the simulator's ENTIRE system prompt: the agent config
+        must use system_prompt_mode='replace' so the claude_code coding-agent
+        preset never prefixes the roleplay identity (which would contradict its
+        own "stay in character" instruction on every dialog-mode run)."""
+        sim = UserSimulator(
+            config=_sim_cfg(),
+            task_description="A task",
+            initial_prompt="Start",
+        )
+        assert sim._agent_config.system_prompt_mode == "replace"
+        assert sim._agent_config.system_prompt == sim.system_prompt
+
     def test_opener_wording_when_no_initial_prompt(self):
         sim = UserSimulator(
             config=_sim_cfg(persona="BA", goal="build dice roller"),

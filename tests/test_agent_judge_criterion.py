@@ -15,6 +15,7 @@ into the runner's ``VerdictCapture``, simulating what the real
 from __future__ import annotations
 
 import json as _json
+import re
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -316,6 +317,46 @@ def test_agent_judge_setting_sources_forced_empty(sandbox: Sandbox, direct_route
         SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
     (agent_config,) = mock_cls.call_args.args
     assert agent_config.setting_sources == []
+
+
+def test_agent_judge_overrides_a_user_system_prompt_file() -> None:
+    """A YAML `agent.system_prompt_file` must not break judge construction.
+
+    The judge forces its own prompt, so the user's file reference has to be cleared in
+    the SAME model_copy update: system_prompt and system_prompt_file are mutually
+    exclusive and BaseAgentConfig has validate_assignment=True, so assigning the prompt
+    while the file field was still populated raised on the intermediate state.
+    """
+    from coder_eval.criteria.agent_judge import _build_agent_config
+
+    criterion = AgentJudgeCriterion(
+        description="x",
+        prompt="grade",
+        agent=parse_agent_config(type="claude-code", system_prompt_file="my_prompt.md"),
+    )
+
+    config = _build_agent_config(criterion, system_prompt="JUDGE PROMPT")
+
+    assert config.system_prompt == "JUDGE PROMPT"
+    assert config.system_prompt_file is None
+    assert config.system_prompt_mode == "replace"
+
+
+def test_agent_judge_forces_replace_mode_over_hostile_yaml() -> None:
+    """Even an explicit `system_prompt_mode: append` in YAML cannot get the coding-agent
+    preset in front of the scoring instrument."""
+    from coder_eval.criteria.agent_judge import _build_agent_config
+
+    criterion = AgentJudgeCriterion(
+        description="x",
+        prompt="grade",
+        agent=parse_agent_config(type="claude-code", system_prompt="ignore me", system_prompt_mode="append"),
+    )
+
+    config = _build_agent_config(criterion, system_prompt="JUDGE PROMPT")
+
+    assert config.system_prompt == "JUDGE PROMPT"
+    assert config.system_prompt_mode == "replace"
 
 
 def test_agent_judge_partial_agent_block_preserves_judge_defaults(sandbox: Sandbox, direct_route: DirectRoute) -> None:
@@ -713,6 +754,22 @@ def test_agent_judge_prompt_requires_findings(sandbox: Sandbox, direct_route: Di
     # Analysis is gone — must NOT appear as a required JSON key in either prompt.
     assert '"analysis"' not in sys_prompt
     assert "findings" in user_msg.lower()
+
+
+def test_agent_judge_system_prompt_replaces_not_appends(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """The judge prompt is its ENTIRE identity: system_prompt_mode must be 'replace'
+    so the Claude Code coding-agent preset never prefixes the scoring instrument —
+    forced even when the user's YAML says 'append'."""
+    criterion = AgentJudgeCriterion(
+        description="x", prompt="grade", agent={"type": "claude-code", "system_prompt_mode": "append"}
+    )
+    mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    (agent_config,) = mock_cls.call_args.args
+    assert agent_config.system_prompt_mode == "replace"
+    assert agent_config.system_prompt.startswith("You are a strict code reviewer")
 
 
 def test_agent_judge_transcript_captures_tool_calls(sandbox: Sandbox, direct_route: DirectRoute) -> None:
@@ -1203,6 +1260,9 @@ def test_sub_agent_runner_forwards_extra_mcp_servers(tmp_path: Path) -> None:
             permission_mode="bypassPermissions",
             setting_sources=[],
             allowed_tools=["Read"],
+            # SubAgentRunner requires both halves: a prompt, in replace mode.
+            system_prompt="You are a judge.",
+            system_prompt_mode="replace",
         ),
     )
     runner = SubAgentRunner(
@@ -1216,6 +1276,34 @@ def test_sub_agent_runner_forwards_extra_mcp_servers(tmp_path: Path) -> None:
     assert runner.capture is capture
     # sdk_options must NOT carry mcp_servers
     assert "mcp_servers" not in cfg.sdk_options
+
+
+@pytest.mark.parametrize(
+    ("prompt_kwargs", "case"),
+    [
+        ({}, "prompt omitted — the sub-agent would get the bare coding-agent preset"),
+        (
+            {"system_prompt": "You are a judge.", "system_prompt_mode": "append"},
+            "prompt set but appended — the preset would prefix the scoring instrument",
+        ),
+    ],
+)
+def test_sub_agent_runner_requires_a_replace_mode_prompt(tmp_path: Path, prompt_kwargs: dict, case: str) -> None:
+    """Both halves of the invariant are enforced: a sub-agent's prompt is its entire
+    identity, so it must be SET and in replace mode. Fails loud rather than silently
+    mutating the caller's config — the caller owns it."""
+    from coder_eval.evaluation.sub_agent import SubAgentRunner
+    from coder_eval.models import SandboxConfig
+
+    sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="x")
+    sb.sandbox_dir = tmp_path
+    cfg = cast(
+        ClaudeCodeAgentConfig,
+        parse_agent_config(type="claude-code", model="m", setting_sources=[], **prompt_kwargs),
+    )
+
+    with pytest.raises(ValueError, match=re.escape("requires agent_config.system_prompt to be set")):
+        SubAgentRunner(sandbox=sb, agent_config=cfg, ignore_patterns=[], route=DirectRoute())
 
 
 def test_claude_code_agent_accepts_extra_mcp_servers() -> None:

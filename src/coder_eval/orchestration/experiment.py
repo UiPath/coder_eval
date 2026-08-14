@@ -524,9 +524,10 @@ def resolve_task_files(
     """
     exp_dir = experiment_file.parent if experiment_file is not None else task_file.parent
 
-    # Resolve system_prompt_file (may be injected by variant as relative or absolute path)
-    if task.agent is not None and task.agent.system_prompt_file is not None:
-        resolve_agent_system_prompt(task.agent, exp_dir)
+    # Resolve system_prompt_file (may be injected by variant as relative or absolute path).
+    # Rebind: the resolver returns a new config so the prompt/file swap is atomic
+    # (see resolve_agent_system_prompt).
+    task.agent = resolve_agent_system_prompt(task.agent, exp_dir)
 
     # Resolve relative template_sources paths
     if task.sandbox.template_sources:
@@ -695,7 +696,8 @@ def resolve_all_tasks(
                             )
                         )
         # Early-stop arming errors are a deliberate hard stop: they always
-        # propagate (never demoted to skipped) so a misarmed run fails loudly.
+        # propagate (never demoted to skipped) so a misconfigured run fails loudly
+        # instead of quietly shrinking the suite.
         except EarlyStopConfigError:
             raise
         # Narrow set, matching the load/expand block above: config-resolution
