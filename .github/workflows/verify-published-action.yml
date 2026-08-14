@@ -1,0 +1,572 @@
+name: Verify Published Action
+
+# Verifies the PUBLISHED composite of (moving major tag + action.yml pin + PyPI
+# wheel + Marketplace listing) actually resolves and runs.
+#
+# WHY THIS EXISTS SEPARATELY FROM pr-checks.yml. The `action-dogfood` job there
+# runs `uses: ./` with `version: local`, which proves the action's code in a PR
+# works. It never touches `v0` or PyPI, so it says nothing about the published
+# artifact. This workflow is the other half.
+#
+# WHY THIS IS NOT A PR GATE. The published artifact does not change when someone
+# opens a PR, so a PR-time job pulling `@v0` would re-test the PREVIOUS release on
+# every PR -- paying agent tokens each time and going red for reasons the PR author
+# cannot fix. That is how required checks get ignored. PR-time coverage stays as-is.
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    # Deliberately NOT filtered on `conclusion == 'success'`. The failure this
+    # workflow exists to catch -- publish-pypi failing after the release job pushed
+    # tags -- makes the Release run's conclusion `failure`. Gating on success would
+    # skip the check precisely when it matters most.
+    types: [completed]
+  # Catches drift a release cannot: a PyPI yank, the pinned setup-uv SHA, runner
+  # image changes, the @anthropic-ai/claude-code npm package, model deprecation, or
+  # the Marketplace listing being renamed/delisted.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize rather than cancel: a release-triggered run must not be killed by an
+  # overlapping nightly.
+  group: verify-published-action
+  cancel-in-progress: false
+
+jobs:
+  # TIER 1 -- free. No API spend, fully deterministic. This tier alone catches the
+  # tag/pin/PyPI desync, so it gates the paid tier below.
+  preflight:
+    name: Preflight (tag/pin/PyPI/Marketplace parity)
+    runs-on: uipath-ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history for tags)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      # Resolve the published triple from git alone: newest release tag, the moving
+      # major tag, and the `version:` pin baked into action.yml AT THAT TAG (not the
+      # working tree -- the tree is whatever main happens to be, which is not what
+      # consumers resolve).
+      - name: Check tag / pin parity
+        id: parity
+        run: |
+          set -euo pipefail
+
+          # Release tags are strictly vX.Y.Z; prereleases are never tagged.
+          # `|| true` is required, not defensive noise: under `pipefail` this pipeline
+          # exits non-zero when grep matches nothing (and, in theory, 141 if `head`
+          # closes the pipe early), so `set -e` would kill the step BEFORE the
+          # empty-check below — making its error message dead code. Any failure mode
+          # lands as an empty $NEWEST, which the check reports properly.
+          NEWEST=$(git tag -l 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -z "$NEWEST" ]; then echo "::error::no vX.Y.Z release tag found"; exit 1; fi
+          VERSION="${NEWEST#v}"
+          MAJOR="v${VERSION%%.*}"
+          echo "newest release tag: $NEWEST"
+          echo "moving major tag:   $MAJOR"
+
+          if ! git rev-parse -q --verify "refs/tags/$MAJOR" >/dev/null; then
+            echo "::error::moving major tag $MAJOR does not exist"; exit 1
+          fi
+
+          # The e2e job below hardcodes `uses: UiPath/coder_eval@v0` -- GitHub Actions
+          # forbids expressions in `uses:`, so it cannot be derived. Assert the major
+          # here so a 1.0.0 release fails loudly instead of silently leaving the paid
+          # tier testing a stale major forever.
+          if [ "$MAJOR" != "v0" ]; then
+            echo "::error::major tag is now $MAJOR, but the e2e job below pins @v0. Bump the \`uses:\` in this workflow AND every doc surface that hardcodes the major: README.md, docs/CI_GATE.md, docs/tutorials/02-ci-pipeline.md (CE026 checks the Marketplace slug, not the major, so it will not catch them)."
+            exit 1
+          fi
+
+          # The pin baked into action.yml AT the major tag -- what @v0 consumers
+          # actually install. Anchor mirrors release.yml's sed and
+          # tests/test_action_version_pin.py.
+          PIN=$(git show "$MAJOR:action.yml" \
+            | sed -nE 's/^[[:space:]]*default: "([0-9]+\.[0-9]+\.[0-9]+)"[[:space:]]+# <-- kept in sync.*/\1/p')
+          if [ -z "$PIN" ]; then
+            echo "::error::could not read the version pin from action.yml at $MAJOR (the '# <-- kept in sync' anchor may have been detached)"
+            exit 1
+          fi
+          echo "action.yml pin at $MAJOR: $PIN"
+
+          # Does the major tag lag the newest release tag? Since release.yml's
+          # `promote` job moves $MAJOR only AFTER publish-pypi succeeds, lag is a
+          # LEGITIMATE transient state (publish-pypi still awaiting the `pypi`
+          # environment approval, or having failed) -- NOT automatically a defect, and
+          # in the failed case @v0 consumers are perfectly healthy on the previous
+          # release. So this only classifies; the "Classify major-tag lag" step below
+          # decides, once it knows whether the newest version reached PyPI. Failing
+          # here would redden a healthy published artifact and pre-empt the accurate
+          # diagnostic, which is how a check earns being ignored.
+          MAJOR_SHA=$(git rev-parse "refs/tags/$MAJOR^{commit}")
+          NEWEST_SHA=$(git rev-parse "refs/tags/$NEWEST^{commit}")
+          if [ "$MAJOR_SHA" = "$NEWEST_SHA" ]; then
+            LAGGING=false
+            # Same commit, so the pin there MUST be the newest version. A mismatch means
+            # the release's action.yml sed/amend silently didn't take -- always a bug.
+            if [ "$PIN" != "$VERSION" ]; then
+              echo "::error::action.yml at $MAJOR pins coder-eval==$PIN but that same commit is release $VERSION -- release.yml's pin bump did not take, so @$MAJOR consumers install the wrong version"
+              exit 1
+            fi
+          else
+            LAGGING=true
+            echo "note: $MAJOR ($MAJOR_SHA) lags newest release $NEWEST ($NEWEST_SHA) -- classifying below"
+          fi
+
+          {
+            echo "pin=$PIN"
+            echo "newest=$VERSION"
+            echo "major=$MAJOR"
+            echo "lagging=$LAGGING"
+          } >> "$GITHUB_OUTPUT"
+          echo "parity OK: @$MAJOR promises coder-eval==$PIN (newest release $VERSION, lagging=$LAGGING)"
+
+      # THE CONSUMER CONTRACT, and the hard gate of this tier: whatever version @v0's
+      # action.yml promises must be installable. This is what breaks a stranger's
+      # pipeline when it is false, so it is checked against the PIN rather than the
+      # newest tag. Retried because a release-triggered run can land seconds after the
+      # upload, before the index/CDN has propagated -- without the wait this would
+      # flake red on every release, which is how a check earns being ignored.
+      - name: Verify @v0's pinned version is installable from PyPI
+        env:
+          PIN: ${{ steps.parity.outputs.pin }}
+        run: |
+          set -euo pipefail
+          URL="https://pypi.org/pypi/coder-eval/${PIN}/json"
+          CODE=000
+          for attempt in 1 2 3 4 5 6; do
+            # No `|| echo 000`: curl's own `-w '%{http_code}'` already prints 000 on a
+            # transport failure, so appending another would yield the literal "000000"
+            # and defeat every comparison below. `|| true` only absorbs curl's non-zero
+            # exit under `set -e`.
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL" || true)
+            if [ "$CODE" = "200" ]; then
+              echo "coder-eval==${PIN} is on PyPI -- @v0 consumers can install."
+              exit 0
+            fi
+            echo "attempt $attempt: PyPI returned $CODE for ${PIN}; waiting for propagation..."
+            sleep 20
+          done
+
+          # Only a DEFINITIVE answer from PyPI may be reported as a stranded pin. A
+          # transport failure or a throttle/outage means we learned nothing, and saying
+          # "re-run publish-pypi" there sends the operator to re-publish a version that
+          # is already there (an upload PyPI answers 400 on). Same split the Marketplace
+          # probe below performs -- these two steps must not disagree about a code.
+          #   000     -> curl itself failed (DNS/network/TLS).
+          #   403/429 -> throttled or bot-blocked by the CDN, not an answer about the file.
+          #   5xx     -> PyPI/Fastly transient.
+          # Still RED either way: this tier's whole job is to prove the pin resolves, and
+          # an unproven pin must gate the paid tier. Only the diagnosis differs.
+          if [ "$CODE" = "000" ] || [ "$CODE" = "403" ] || [ "$CODE" = "429" ] || [ "$CODE" -ge 500 ] 2>/dev/null; then
+            echo "::error title=PyPI check inconclusive::could not get a definitive answer from $URL after 6 attempts (HTTP $CODE -- transport failure, throttling, or a PyPI-side transient). This does NOT mean coder-eval==${PIN} is missing; re-run this workflow. Do NOT re-publish on the strength of this."
+            exit 1
+          fi
+          echo "::error title=Stranded action.yml pin::coder-eval==${PIN} is NOT on PyPI (HTTP $CODE), but @v0 points at an action.yml that installs it. Every 'uses: UiPath/coder_eval@v0' consumer fails at install. Re-run the Release workflow's publish-pypi job, then its promote job."
+          exit 1
+
+      # Only runs when the major tag lags. Distinguishes the two causes, which need
+      # opposite verdicts -- the whole reason the parity step above does not fail on lag.
+      - name: Classify major-tag lag
+        if: steps.parity.outputs.lagging == 'true'
+        env:
+          PIN: ${{ steps.parity.outputs.pin }}
+          NEWEST: ${{ steps.parity.outputs.newest }}
+        run: |
+          set -euo pipefail
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/coder-eval/${NEWEST}/json" || true)
+          if [ "$CODE" = "200" ]; then
+            # The newest version IS published, so `promote` should have moved the tag
+            # and did not. Consumers are stuck an entire release behind: actionable.
+            echo "::error title=promote did not run::coder-eval==${NEWEST} is on PyPI but @v0 still promises ${PIN}. The Release workflow's promote job was skipped or failed -- re-run it to move the major tag."
+            exit 1
+          fi
+          # Same transient split as the step above -- a 403/429/5xx is not evidence that
+          # ${NEWEST} is unpublished, so it must not be classified as either verdict.
+          if [ "$CODE" = "000" ] || [ "$CODE" = "403" ] || [ "$CODE" = "429" ] || [ "$CODE" -ge 500 ] 2>/dev/null; then
+            echo "::warning title=Lag classification inconclusive::PyPI returned $CODE (transport failure, throttling, or transient), so whether ${NEWEST} was published is unknown; @v0 still promises ${PIN}, which the previous step verified is installable."
+            exit 0
+          fi
+          # Newest is tagged but unpublished => publish-pypi never completed (failed, or
+          # still awaiting the `pypi` environment approval). @v0 consumers are HEALTHY on
+          # ${PIN}; the release is merely incomplete. The Release run is red for this
+          # already, so warn rather than duplicating a red on a working artifact.
+          echo "::warning title=Release incomplete::${NEWEST} is tagged but not on PyPI (HTTP $CODE), so @v0 correctly still promises ${PIN}. Consumers are unaffected. Finish the release by re-running publish-pypi (and promote), or this lag will persist."
+
+      # Catches the listing being renamed or delisted. The slug is derived from
+      # action.yml's `name:` rather than hardcoded -- and note GitHub does NOT
+      # convert underscores to hyphens: `coder_eval` is the live slug (verified;
+      # `coder-eval` 404s). tests/lint/action_docs.py (CE026) keeps the docs links
+      # consistent with the same `name:`.
+      - name: Verify Marketplace listing resolves
+        env:
+          # The MAJOR tag, not the newest version tag: this reads what `@v0`
+          # consumers resolve, and it is the only one guaranteed to exist here. (The
+          # newest version tag can lag being promoted -- see the parity step -- and in
+          # that state no Release was cut for it, so the live listing still reflects
+          # the major tag's commit anyway.)
+          TAG_REF: ${{ steps.parity.outputs.major }}
+        run: |
+          set -euo pipefail
+          NAME=$(git show "${TAG_REF}:action.yml" \
+            | sed -nE 's/^name:[[:space:]]*(.+)$/\1/p' | head -1 \
+            | sed -E 's/^["'"'"']//; s/["'"'"']$//')
+          if [ -z "$NAME" ]; then echo "::error::could not read \`name:\` from action.yml"; exit 1; fi
+          # Slug derivation, kept on ONE line and anchored: tests/test_verify_published_workflow.py
+          # extracts this exact line and asserts it agrees with the tested slugger
+          # (tests/lint/action_docs.py::marketplace_slug, which CE026 uses for the doc links)
+          # over a table of names. A second, weaker slugger here would 404 on any `name:`
+          # carrying punctuation or a double space. DO NOT reflow onto multiple lines.
+          # slug-derivation-anchor
+          SLUG=$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/-/g; s/[^a-z0-9._-]//g')
+          URL="https://github.com/marketplace/actions/${SLUG}"
+          echo "listing name: $NAME -> $URL"
+
+          CODE=000
+          for attempt in 1 2 3; do
+            # See the PyPI step: curl already prints 000 on transport failure, so
+            # `|| echo 000` would produce the literal "000000" and make the transient
+            # branch below unreachable for the commonest transient of all.
+            CODE=$(curl -sSL -o /dev/null -w '%{http_code}' "$URL" || true)
+            [ "$CODE" = "200" ] && break
+            echo "attempt $attempt: $CODE"
+            sleep 10
+          done
+
+          if [ "$CODE" = "200" ]; then
+            echo "Marketplace listing resolves."
+          # Inconclusive, NOT proof of delisting — warn and move on. Only 404 (and
+          # other 4xx) is treated as a real signal. This split is what keeps the
+          # check from crying wolf:
+          #   000 -> curl itself failed (DNS/network/TLS); we learned nothing.
+          #   403 -> GitHub commonly serves this to unauthenticated/bot page fetches
+          #          from CI runners; it means "not shown to you", not "not there".
+          #   429/5xx -> rate-limited or GitHub-side transient.
+          elif [ "$CODE" = "000" ] || [ "$CODE" = "403" ] || [ "$CODE" = "429" ] || [ "$CODE" -ge 500 ] 2>/dev/null; then
+            echo "::warning title=Marketplace check inconclusive::GitHub returned $CODE for $URL (network failure, throttling, or transient), not treating as delisted."
+          else
+            echo "::error title=Marketplace listing missing::$URL returned $CODE. The listing may have been renamed or delisted, or action.yml's \`name:\` changed without the listing following."
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
+
+      # Proves the wheel is installable and the console script works -- the exact two
+      # things the composite action does before it runs anything. Keyed on the PIN,
+      # not the newest release: the pin is the consumer contract, and under the
+      # legitimate lagging state (see the parity step) the newest version may not be
+      # on PyPI at all while `@v0` consumers are perfectly healthy on the pin.
+      - name: Install @v0's pinned version from PyPI and smoke the CLI
+        env:
+          PIN: ${{ steps.parity.outputs.pin }}
+        run: |
+          set -euo pipefail
+          uv tool install "coder-eval==${PIN}"
+          coder-eval --help > /dev/null
+          echo "coder-eval==${PIN} installs and runs."
+
+  # TIER 2 -- costs cents. Consumes the action exactly as a stranger would:
+  # `uses: UiPath/coder_eval@v0` with the default `version:` (never `local`), no repo
+  # checkout, and a task YAML written inline rather than one from this repo. That
+  # makes it a real consumer simulation instead of a self-referential run, and it
+  # doubles as a live proof that the documented agent-runtime prerequisite steps
+  # still work.
+  e2e:
+    name: End-to-end (published action, real API)
+    needs: preflight
+    # Skip the paid tier for a Release run that cannot have changed the published
+    # artifact: a PRERELEASE dispatch comes from a non-default branch and by design
+    # never tags, never moves the major tag, and never cuts a Release. The free tier
+    # still runs. Schedule/dispatch events have no workflow_run context, so the first
+    # clause lets them through.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == github.event.repository.default_branch
+    # Stock `ubuntu-latest` ON PURPOSE, not the managed pool the rest of CI moved to:
+    # this job exists to reproduce what an external consumer gets, and the documented
+    # consumer snippet (docs/tutorials/02-ci-pipeline.md, mirrored by `action-dogfood`)
+    # says `ubuntu-latest`. A bulk `runs-on:` migration must not sweep this up.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # No actions/checkout on purpose: a consumer's workspace does not contain this
+      # repo. Everything the run needs is written below or installed by the action.
+      # (The default experiment resolves from packaged resources, not the repo.)
+
+      # The prerequisite steps the README/docs tell consumers to add. The action is
+      # agent-agnostic and installs no agent runtime.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+      # ACCEPTED RISK, deliberate: this install is UNPINNED, and the job forwards
+      # ANTHROPIC_API_KEY into the run below on a shared GitHub-hosted runner -- so a
+      # compromised publish of @anthropic-ai/claude-code executes with the key in its
+      # environment, unattended, nightly. Pinning would defeat a stated purpose of this
+      # workflow (the header lists that package as drift this nightly exists to catch),
+      # and the same unpinned install already appears five times in pr-checks.yml, so a
+      # pin here would buy nothing while the PR path stayed open. Recorded rather than
+      # silently carried; revisit together with pr-checks.yml if the repo ever adopts a
+      # pinned agent-runtime install.
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Write a consumer task YAML
+        run: |
+          set -euo pipefail
+          mkdir -p tasks
+          cat > tasks/published_smoke.yaml <<'YAML'
+          task_id: "published_action_smoke"
+          description: "Minimal task proving the published action installs and drives an agent."
+          initial_prompt: "Create a file named hello.txt in the current working directory containing exactly the single line: hello from the published action"
+          tags: [smoke]
+
+          agent:
+            type: "claude-code"
+            permission_mode: "acceptEdits"
+            allowed_tools: ["Read", "Write", "Bash"]
+            # No host CLAUDE.md/settings to inherit here, but pinned explicitly so the
+            # run is isolated and cheap regardless of the runner's state.
+            setting_sources: []
+
+          # This is the repo's only UNATTENDED, PAID run: a nightly cron with a live
+          # ANTHROPIC_API_KEY and no human watching. Every RunLimits cap defaults to
+          # None, so without this block the only bound is the job's `timeout-minutes`,
+          # which cancels the runner and leaves NO run.json for the gate below to read
+          # -- the failure is both maximally expensive and minimally diagnosable. These
+          # caps are ~10x what the one-file task needs; tripping the spend or wall-clock
+          # one produces a COST_BUDGET_EXCEEDED / TIMEOUT row that the gate's run-limit
+          # branch prints and fails on (both statuses report as "failed", so nothing else
+          # in the gate would). MAX_TURNS_EXHAUSTED is the one deliberate exception: it is
+          # the classic model-quality outcome, tolerated like an unmet criterion.
+          run_limits:
+            max_turns: 5
+            task_timeout: 300
+            max_usd: 0.25
+
+          success_criteria:
+            - type: "file_exists"
+              path: "hello.txt"
+              description: "The agent must create hello.txt."
+          YAML
+          echo "--- task YAML:"; cat tasks/published_smoke.yaml
+
+      # continue-on-error, because this step's exit code is NOT the gate. The action
+      # exits with coder-eval's own code (action.yml combines them), and coder-eval
+      # exits 1 on any failed task -- so a model flake failing `file_exists` would
+      # redden this workflow even with minimum-task-score at 0.0, which does not
+      # neutralize that path. This check must answer "does the published action still
+      # work", not "is the model still good": the verification step below gates on
+      # ARTIFACTS instead. A genuine model/credential outage still surfaces there, via
+      # the zero-token assertion.
+      - name: Run the published action
+        id: run
+        continue-on-error: true
+        uses: UiPath/coder_eval@v0   # major asserted by the preflight job above
+        with:
+          # `version:` intentionally omitted -- the whole point is to exercise the
+          # default pin baked into action.yml at the v0 tag.
+          tasks: tasks/published_smoke.yaml
+          model: claude-haiku-4-5-20251001
+          run-dir: runs/verify-published
+          junit-path: runs/verify-published/junit.xml
+          minimum-task-score: "0.0"
+          env: |
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+
+      # THE ACTUAL GATE: the action's mechanics, not the model's answer.
+      - name: Verify action mechanics
+        env:
+          # Asserted against the LITERAL paths passed in the `with:` block above, not
+          # against steps.run.outputs.*. The action step is continue-on-error, and
+          # whether a composite action's `outputs:` mapping still propagates when an
+          # embedded step exits non-zero is not a documented guarantee -- if it does
+          # not, keying the file checks off the outputs would turn every model flake
+          # into "action did not set the junit-path output" and defeat the whole
+          # artifact-gate design. Output wiring is still checked below, but separately
+          # and only where it is meaningful.
+          RUNDIR: runs/verify-published
+          JUNIT: runs/verify-published/junit.xml
+          OUT_JUNIT: ${{ steps.run.outputs.junit-path }}
+          OUT_RUNDIR: ${{ steps.run.outputs.run-dir }}
+          STEP_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -euo pipefail
+          echo "action step outcome: $STEP_OUTCOME (not the gate by itself -- see below)"
+
+          # 1. The JUnit report exists at the requested path (well-formedness and a
+          #    non-vacuous testcase count are asserted in the Python block below, where
+          #    the task_results row count it must match is already parsed).
+          if [ ! -f "$JUNIT" ]; then
+            echo "::error::no JUnit report at $JUNIT. If the action failed during install, the pinned version is probably not installable -- check the preflight job's PyPI result."
+            exit 1
+          fi
+
+          # 1b. Output wiring, as its own assertion with its own message. Only hard-fail
+          #     when the step went green, where propagation is guaranteed; otherwise a
+          #     MISSING output is ambiguous (broken action vs. runner not mapping outputs
+          #     of a failed composite) and must not be reported as a broken contract. A
+          #     PRESENT-but-wrong output is not ambiguous at all, though -- no runner
+          #     behavior invents a wrong path -- so it is still checked, as a warning, so
+          #     the wiring contract is never silently unasserted.
+          if [ "$STEP_OUTCOME" = "success" ]; then
+            [ "$OUT_JUNIT" = "$JUNIT" ] || { echo "::error::action's junit-path output is '$OUT_JUNIT', expected '$JUNIT'"; exit 1; }
+            [ "$OUT_RUNDIR" = "$RUNDIR" ] || { echo "::error::action's run-dir output is '$OUT_RUNDIR', expected '$RUNDIR'"; exit 1; }
+            echo "outputs wired correctly."
+          else
+            if [ -z "$OUT_JUNIT" ] || [ -z "$OUT_RUNDIR" ]; then
+              echo "::warning::action step was red and its outputs are empty; cannot tell whether the action failed to set them or the runner does not map outputs of a failed composite. Artifact checks below are authoritative."
+            fi
+            if [ -n "$OUT_JUNIT" ] && [ "$OUT_JUNIT" != "$JUNIT" ]; then
+              echo "::warning::action step was red and its junit-path output is '$OUT_JUNIT', expected '$JUNIT' -- a non-empty wrong value is not explained by output mapping, so the action's output wiring is probably broken."
+            fi
+            if [ -n "$OUT_RUNDIR" ] && [ "$OUT_RUNDIR" != "$RUNDIR" ]; then
+              echo "::warning::action step was red and its run-dir output is '$OUT_RUNDIR', expected '$RUNDIR' -- see above."
+            fi
+          fi
+
+          # 3. run.json -- the consumer contract -- exists and describes a real run
+          #    that reached the model. Non-zero tokens prove the credential passthrough
+          #    and the agent runtime actually worked, WITHOUT asserting output quality.
+          [ -f "$RUNDIR/run.json" ] || { echo "::error::run.json missing in $RUNDIR"; exit 1; }
+          RUN_JSON="$RUNDIR/run.json" python3 <<'PY'
+          import json, os, sys, xml.etree.ElementTree as ET
+
+          # Error categories that mean the failure is UPSTREAM of the published action --
+          # the model/API was unavailable. Those must not be reported as broken wiring:
+          # this check answers "does the published action still work", not "is the model
+          # available right now". Everything else (auth, billing, config, sandbox/install,
+          # or no category at all) IS the published action's problem and stays a hard error.
+          UNREACHABLE = {"agent_api_error", "agent_rate_limit", "agent_timeout"}
+
+          # `agent_crash` is deliberately NOT in the set above. It is the categorizer's
+          # catch-all last resort (errors/categorization.py: any AgentCrashError that
+          # matched no more specific rule), so it is exactly what a MISSING OR BROKEN
+          # `claude` CLI produces -- the failure this gate exists to catch, arriving under
+          # the label that would excuse it. It is tolerable only once the run has proven
+          # the runtime works at all, i.e. after the zero-token check below has passed;
+          # a crash mid-run with tokens already billed is a plausible transient.
+          TOLERABLE_AFTER_TOKENS = UNREACHABLE | {"agent_crash"}
+
+          data = json.load(open(os.environ["RUN_JSON"], encoding="utf-8"))
+          rows = data.get("task_results") or []
+          if not rows:
+              print("::error::run.json contains no task_results -- the action produced no run")
+              sys.exit(1)
+
+          # The JUnit report must describe the same run, not merely be parseable: an empty
+          # but well-formed <testsuites/> passed the old parse-only check. Trusted,
+          # self-generated input (our writer emits no DTDs/entities), so stdlib ET is fine.
+          # `>=` not `==`: reports_junit.py also emits synthetic `skipped` / `suite-gates`
+          # testsuites, which only ever ADD cases.
+          cases = len(list(ET.parse(os.environ["JUNIT"]).getroot().iter("testcase")))
+          if cases < len(rows):
+              print(f"::error::JUnit report has {cases} <testcase> element(s) for {len(rows)} task_results row(s) "
+                    "-- the action's JUnit conversion is broken for consumers")
+              sys.exit(1)
+          # Key is "status" (eval_result_to_task_dict writes FinalStatus there); there is
+          # no "final_status" key in run.json rows, and reading one would silently
+          # evaluate to None and make the exit-contract assertion below dead code.
+          statuses = [r.get("status") for r in rows]
+          categories = [r.get("error_category") for r in rows]
+          tokens = sum(r.get("total_tokens") or 0 for r in rows)
+          for r in rows:
+              print(f"  {r.get('task_id')}: status={r.get('status')} "
+                    f"score={r.get('weighted_score')} tokens={r.get('total_tokens')} "
+                    f"error_category={r.get('error_category')}")
+
+          # Zero tokens means no generation was ever billed. That IS the wiring signal
+          # this gate exists for -- but `total_tokens` is also empty when every turn died
+          # before a usage record existed (a sustained 429/529, a sandbox-setup failure),
+          # which is upstream and not actionable by us. On a daily cron the transient case
+          # will eventually occur, and sending the operator to audit credential
+          # passthrough for an Anthropic outage is how a check earns being ignored. So
+          # discriminate on the category run.json already records per row.
+          if tokens <= 0:
+              if any(c in UNREACHABLE for c in categories):
+                  print("::warning::no tokens consumed, but the run reports an upstream failure "
+                        f"(error_category={[c for c in categories if c in UNREACHABLE]}) -- the model/API was "
+                        "unavailable, which says nothing about the published action. Inconclusive, not a "
+                        "wiring failure; re-run to confirm.")
+                  sys.exit(0)
+              print("::error::no tokens consumed across any task and no upstream error category "
+                    f"(statuses={statuses}, categories={categories}) -- the agent never reached the model "
+                    "(credential passthrough, agent runtime, or backend wiring is broken)")
+              sys.exit(1)
+
+          # A harness/environment error is NOT a model flake, and must not be tolerated as
+          # one just because the step is continue-on-error. FinalStatus.ERROR and
+          # BUILD_FAILED are exactly the statuses models/enums.py maps to the "error"
+          # reporting category -- i.e. something broke around the agent rather than the
+          # agent doing poorly -- so they are a "published action is broken" signal unless
+          # the category says the cause was upstream.
+          harness_errors = [
+              (s, c) for s, c in zip(statuses, categories, strict=True)
+              if s in {"ERROR", "BUILD_FAILED"} and c not in TOLERABLE_AFTER_TOKENS
+          ]
+          if harness_errors:
+              print(f"::error::task(s) failed with a harness/environment error, not a model flake: "
+                    f"{harness_errors} -- the published action's install, sandbox, or agent wiring is broken")
+              sys.exit(1)
+
+          # Run-limit breaches. models/enums.py maps TIMEOUT and both budget statuses to
+          # the "failed" reporting category -- the same bucket as an ordinary criterion
+          # FAILURE -- so without this branch a tripped cap falls through every check
+          # above AND the exit-contract check below (which only demands green when every
+          # status is SUCCESS), and the repo's one unattended, paid run goes silently
+          # GREEN after burning its cost cap. That is the exact failure the caps were
+          # added to make visible.
+          #
+          # These are not "the model did poorly": the caps in the task YAML are ~10x what
+          # writing one file needs, so reaching one means the run went off the rails -- a
+          # looping agent, a hung turn, an action feeding a different task. Deliberately
+          # NOT excused by error_category, unlike the zero-token symptom above: a
+          # task-level timeout is always categorized agent_timeout (TaskTimeoutError is an
+          # EvaluationTimeoutError, which errors/categorization.py maps typed and first),
+          # so excusing the UNREACHABLE set here would make this branch dead code on its
+          # most likely member. An outage announces itself as an API/rate-limit row long
+          # before it spends 25 cents; and a red here is re-runnable, whereas a green here
+          # is undetectable.
+          RUN_LIMIT_BREACH = {"TIMEOUT", "TOKEN_BUDGET_EXCEEDED", "COST_BUDGET_EXCEEDED"}
+          breaches = [(s, c) for s, c in zip(statuses, categories, strict=True) if s in RUN_LIMIT_BREACH]
+          if breaches:
+              print(f"::error::task(s) tripped a run limit: {breaches} -- the caps in the task YAML are "
+                    "~10x what this one-file task needs, so a healthy run cannot reach one. Read the "
+                    "uploaded run dir before re-running; this is an unattended paid job.")
+              sys.exit(1)
+
+          # Exit-contract check, conditional on the model having actually performed.
+          # Ignoring the step's exit code entirely (see the continue-on-error rationale
+          # above) would also hide a REGRESSION in the action's own exit logic -- e.g. a
+          # broken score gate failing the step even though every task succeeded. That is
+          # precisely a "published action is broken" signal and must be caught. So:
+          # tolerate a red step when any task under-performed (model flake, not our bug),
+          # but require green when all of them succeeded.
+          if all(s == "SUCCESS" for s in statuses) and os.environ.get("STEP_OUTCOME") != "success":
+              print("::error::every task reported SUCCESS but the published action step exited "
+                    f"non-zero (outcome={os.environ.get('STEP_OUTCOME')!r}) -- the action's exit-code "
+                    "contract or its score gate is broken for consumers")
+              sys.exit(1)
+
+          print(f"published action mechanics OK: {len(rows)} task row(s), {tokens} tokens consumed, "
+                f"statuses={statuses}")
+          PY
+
+      # `always()`, not `failure()`: the action step is continue-on-error, so the routine
+      # tolerated-red case the gate is designed around (a model flake failing
+      # `file_exists`) leaves the JOB green -- and `failure()` would then discard the run
+      # dir that is the only evidence explaining the flake.
+      - name: Upload run
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: verify-published-runs
+          path: runs/verify-published/
+          retention-days: 7
