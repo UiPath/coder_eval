@@ -11,6 +11,7 @@ import {
     type TagCount,
 } from "./overview";
 import { DEFAULT_HARNESS } from "./harness";
+import { DEFAULT_SOURCE, type Source } from "./sources";
 import { taskCarriesRepoTag } from "./tags";
 import type { ComponentSha } from "./runs";
 
@@ -230,26 +231,43 @@ export interface TrendsPageData extends TrendsData {
 async function aggregateTaskTrendsInner(
     limit: number,
     harness: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<TrendsPageData> {
-    const perRun = await loadRecentRuns(limit, harness);
+    const perRun = await loadRecentRuns(limit, harness, source);
     return { ...aggregate(perRun), tagCounts: aggregateTaskTagCounts(perRun) };
 }
 
-const cachedAggregate = unstable_cache(
-    aggregateTaskTrendsInner,
-    // v3: the cached shape gained tagCounts and the args gained `harness` — the
-    // key bump keeps a stale pre-deploy payload from being served into new code.
-    // (harness is part of the auto-generated key too, so each harness caches
-    // independently.)
-    ["aggregate-task-trends-v3"],
-    { revalidate: 300 },
-);
+// One cached aggregate per source, with `source.id` in the key parts. Run ids
+// repeat across containers (both suites name runs `YYYY-MM-DD_HH-MM-SS`), so a
+// source-blind key would serve one source's trends under another.
+const aggregateLoaders = new Map<
+    string,
+    (limit: number, harness: string) => Promise<TrendsPageData>
+>();
+
+function cachedAggregateFor(source: Source) {
+    const existing = aggregateLoaders.get(source.id);
+    if (existing) return existing;
+    const loader = unstable_cache(
+        (limit: number, harness: string) =>
+            aggregateTaskTrendsInner(limit, harness, source),
+        // v3: the cached shape gained tagCounts and the args gained `harness` — the
+        // key bump keeps a stale pre-deploy payload from being served into new code.
+        // (harness is part of the auto-generated key too, so each harness caches
+        // independently.)
+        ["aggregate-task-trends-v3", source.id],
+        { revalidate: 300 },
+    );
+    aggregateLoaders.set(source.id, loader);
+    return loader;
+}
 
 export function aggregateTaskTrends(
     limit: number = TRENDS_RECENT_RUN_COUNT,
     harness: string = DEFAULT_HARNESS,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<TrendsPageData> {
-    return cachedAggregate(limit, harness);
+    return cachedAggregateFor(source)(limit, harness);
 }
 
 // Predicate matching getOverview's tag scoping logic, but operating on the
@@ -272,8 +290,9 @@ export async function historyForTaskInner(
     taskId: string,
     limit: number,
     harness: string = DEFAULT_HARNESS,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<TaskHistoryEntry[]> {
-    const perRun = await loadRecentRuns(limit, harness);
+    const perRun = await loadRecentRuns(limit, harness, source);
     const out: TaskHistoryEntry[] = [];
     for (const { id, overview, reviewTagsByTask } of perRun) {
         if (!overview) continue;
@@ -298,18 +317,37 @@ export async function historyForTaskInner(
     return out;
 }
 
-const cachedHistory = unstable_cache(
-    historyForTaskInner,
-    // v2: gained the `harness` arg (auto-keyed), so a task's history caches
-    // per harness rather than serving one harness's rows under another.
-    ["history-for-task-v2"],
-    { revalidate: 300 },
-);
+// One cached history per source, with `source.id` in the key parts — same
+// id-collision hazard as cachedAggregateFor.
+const historyLoaders = new Map<
+    string,
+    (
+        taskId: string,
+        limit: number,
+        harness: string,
+    ) => Promise<TaskHistoryEntry[]>
+>();
+
+function cachedHistoryFor(source: Source) {
+    const existing = historyLoaders.get(source.id);
+    if (existing) return existing;
+    const loader = unstable_cache(
+        (taskId: string, limit: number, harness: string) =>
+            historyForTaskInner(taskId, limit, harness, source),
+        // v2: gained the `harness` arg (auto-keyed), so a task's history caches
+        // per harness rather than serving one harness's rows under another.
+        ["history-for-task-v2", source.id],
+        { revalidate: 300 },
+    );
+    historyLoaders.set(source.id, loader);
+    return loader;
+}
 
 export function historyForTask(
     taskId: string,
     limit: number = TRENDS_RECENT_RUN_COUNT,
     harness: string = DEFAULT_HARNESS,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<TaskHistoryEntry[]> {
-    return cachedHistory(taskId, limit, harness);
+    return cachedHistoryFor(source)(taskId, limit, harness);
 }

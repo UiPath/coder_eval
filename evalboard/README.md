@@ -42,6 +42,9 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
 - `/watchlist` — what needs attention, ranked over the recent-runs window: tasks
   and skills scored on failures, regressions and turn-budget pressure
   (`lib/watchlist.ts`).
+- `/scribe` — the Autopilot (aria/Composer) suite, run by `coder_eval_uipath`'s
+  `UiPath.Autopilot.Eval.Manual` pipeline. This is the one surface that reads a
+  **different blob container** (`aria-runs`, not `runs`) — see *Sources* below.
 - `/runs/latest` — shortcut that redirects to the newest run id.
 - `/runs/<run-id>` — run summary (pass rate, cost, duration) + one row per task.
   A "Download run (.zip)" button bundles the whole run folder.
@@ -56,12 +59,43 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
 `task_results[].task_id` (e.g., `skill-flow-calculator`) and equals the
 subdir name under `<run-id>/default/`.
 
+## Sources
+
+A **source** is one blob container of runs, surfaced as its own tab
+(`lib/sources.ts`). One deployment serves all of them — the container is a
+runtime dimension threaded through the data layer as a trailing
+`source: Source = DEFAULT_SOURCE` parameter, not a build-time env var:
+
+| Source | Container | Surface |
+|--------|-----------|---------|
+| `skills` (default) | `runs` | Everything not listed below |
+| `scribe` | `aria-runs` | `/scribe` |
+
+Non-default sources are selected by a `?src=<id>` query param, which every
+run-scoped page and API route reads. An absent or unrecognised `src` resolves to
+the default source (`sourceById` coerces rather than throwing, so a stray param
+in a shared link degrades to the skills dashboard instead of an error page).
+
+Two invariants worth preserving if you add a source:
+
+- **Run ids are only unique within a container.** Every suite names runs
+  `YYYY-MM-DD_HH-MM-SS`, so the same id routinely exists in two containers. This
+  is why each source gets its own cache dir (`runsDirFor`), why `lib/blob.ts`
+  scopes its in-flight dedupe keys by container, and why `unstable_cache` keys
+  in `lib/overview.ts` and `lib/trends.ts` all carry `source.id`. Drop any one of
+  those and one source starts serving another's data for a colliding id — with no
+  error.
+- **A run whose id is not date-shaped is invisible to the windowed views.**
+  `getRunListing`, `loadRecentRunsInner`, `getOverview` and
+  `listRunIdsInWindow` filter on `parseRunIdDate`, so such runs surface only in
+  the ad-hoc section.
+
 ## Conventions
 
-- `/api/file?run=<id>&path=<relpath>` serves `.flow`, `.uipx`, etc. with
-  path-traversal guard (`resolveSafePath`).
-- `/api/download?run=<id>[&task=<id>]` streams a zip of a task folder (with
-  `task`) or the whole run (without). Files are gathered by `collectTaskFiles`
+- `/api/file?run=<id>&path=<relpath>[&src=<source>]` serves `.flow`, `.uipx`,
+  etc. with path-traversal guard (`resolveSafePath`).
+- `/api/download?run=<id>[&task=<id>][&src=<source>]` streams a zip of a task
+  folder (with `task`) or the whole run (without). Files are gathered by `collectTaskFiles`
   / `collectRunFiles`, which reuse the `walkArtifacts` noise filter, and zipped
   by `lib/zip.ts` (a dependency-free DEFLATE writer).
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red

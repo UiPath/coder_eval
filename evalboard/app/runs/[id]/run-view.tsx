@@ -159,6 +159,7 @@ export function RunView({
     reviewTagCounts,
     matureSourceRuns,
     isInternal = false,
+    sourceId,
 }: {
     runId: string;
     tasks: TaskResultSummary[];
@@ -173,6 +174,9 @@ export function RunView({
     // Edition gate (passed from the server page — process.env isn't readable in
     // this client component). Internal-only surfaces fall back to hidden.
     isInternal?: boolean;
+    // Container this run came from. Every href built below carries it so a
+    // Scribe run's links don't land on a same-id skills run.
+    sourceId?: string;
 }) {
     const router = useRouter();
     const pathname = usePathname();
@@ -466,7 +470,11 @@ export function RunView({
                     }
                 />
                 {activation && (
-                    <ActivationCard runId={runId} activation={activation} />
+                    <ActivationCard
+                        runId={runId}
+                        activation={activation}
+                        sourceId={sourceId}
+                    />
                 )}
                 <Metric
                     label="Total cost"
@@ -591,6 +599,7 @@ export function RunView({
                 reviewSelectedSet={selectedReviewSet}
                 onToggleReviewTag={toggleReviewTag}
                 matureSourceRuns={matureSourceRuns}
+                sourceId={sourceId}
             />
         </div>
     );

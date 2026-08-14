@@ -4,7 +4,6 @@ import { randomBytes } from "node:crypto";
 import type { ContainerClient } from "@azure/storage-blob";
 
 const ACCOUNT = "coderevaltests";
-const CONTAINER = "runs";
 
 // When set, evalboard reads runs from this local directory and never touches
 // blob — listing comes from the filesystem and ensure* becomes a no-op.
@@ -64,24 +63,28 @@ function isNotFound(err: unknown): boolean {
     );
 }
 
-let containerClient: ContainerClient | null = null;
+// One client per container — evalboard serves several sources (see lib/sources.ts)
+// from a single deployment, so this can't be a single module-level client.
+const containerClients = new Map<string, ContainerClient>();
 
 // The Azure SDK is loaded lazily (and lives under optionalDependencies) so
 // local-mode readers — and OSS users who `pnpm install --no-optional` — never
 // pull @azure/*. This only runs in remote mode, where every caller awaits it.
-async function getContainer(): Promise<ContainerClient> {
-    if (containerClient) return containerClient;
+async function getContainer(container: string): Promise<ContainerClient> {
+    const cached = containerClients.get(container);
+    if (cached) return cached;
     const { BlobServiceClient } = await import("@azure/storage-blob");
     const { DefaultAzureCredential } = await import("@azure/identity");
     const url = `https://${ACCOUNT}.blob.core.windows.net`;
     const svc = new BlobServiceClient(url, new DefaultAzureCredential());
-    containerClient = svc.getContainerClient(CONTAINER);
-    return containerClient;
+    const client = svc.getContainerClient(container);
+    containerClients.set(container, client);
+    return client;
 }
 
-export async function listRunIdsRemote(): Promise<string[]> {
+export async function listRunIdsRemote(container: string): Promise<string[]> {
     if (LOCAL_RUNS_DIR) return listRunIdsLocal(LOCAL_RUNS_DIR);
-    const c = await getContainer();
+    const c = await getContainer(container);
     const ids: string[] = [];
     for await (const item of c.listBlobsByHierarchy("/")) {
         if (item.kind === "prefix") {
@@ -123,6 +126,7 @@ async function exists(p: string): Promise<boolean> {
 }
 
 async function downloadBlob(
+    container: string,
     blobName: string,
     destRoot: string,
 ): Promise<void> {
@@ -135,7 +139,7 @@ async function downloadBlob(
     // each other's temp file.
     const tmpPath = `${localPath}.${randomBytes(6).toString("hex")}.tmp`;
     try {
-        const c = await getContainer();
+        const c = await getContainer(container);
         await c.getBlobClient(blobName).downloadToFile(tmpPath);
         await fs.rename(tmpPath, localPath);
     } catch (err) {
@@ -146,6 +150,11 @@ async function downloadBlob(
 
 // Collapse concurrent fetches of the same run so we don't hammer blob
 // or race on the same files.
+//
+// Every key is container-scoped: run ids are only unique within a container
+// (the skills and aria suites both name runs `YYYY-MM-DD_HH-MM-SS`), so a
+// container-blind key would let a fetch for one source satisfy a concurrent
+// fetch for a different source's identically-named run.
 const inFlight = new Map<string, Promise<void>>();
 
 function dedupe(key: string, fn: () => Promise<void>): Promise<void> {
@@ -157,17 +166,18 @@ function dedupe(key: string, fn: () => Promise<void>): Promise<void> {
 }
 
 export async function ensureRunSummary(
+    container: string,
     runId: string,
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`summary:${runId}`, async () => {
+    return dedupe(`summary:${container}:${runId}`, async () => {
         // Only 404 is "run not uploaded yet" — readers observe an absent
         // file on disk. Auth, network, and IMDS failures must propagate so
         // they don't masquerade as "not found" in the UI.
         try {
-            await downloadBlob(`${runId}/run.json`, destRoot);
+            await downloadBlob(container, `${runId}/run.json`, destRoot);
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }
@@ -178,14 +188,19 @@ export async function ensureRunSummary(
 // rollup) lives at <runId>/activation/run.json. The activation card and page read
 // it via this fetch; absent (404) on runs without an activation suite.
 export async function ensureActivationSummary(
+    container: string,
     runId: string,
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`activation:${runId}`, async () => {
+    return dedupe(`activation:${container}:${runId}`, async () => {
         try {
-            await downloadBlob(`${runId}/activation/run.json`, destRoot);
+            await downloadBlob(
+                container,
+                `${runId}/activation/run.json`,
+                destRoot,
+            );
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }
@@ -193,14 +208,15 @@ export async function ensureActivationSummary(
 }
 
 export async function ensureRunAnalysis(
+    container: string,
     runId: string,
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`analysis:${runId}`, async () => {
+    return dedupe(`analysis:${container}:${runId}`, async () => {
         try {
-            await downloadBlob(`${runId}/analysis.md`, destRoot);
+            await downloadBlob(container, `${runId}/analysis.md`, destRoot);
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }
@@ -211,14 +227,15 @@ export async function ensureRunAnalysis(
 // `dashboard upload --title/--description/--adhoc`. Absent on pipeline runs
 // and any run uploaded before this feature — 404 is swallowed like analysis.
 export async function ensureRunMeta(
+    container: string,
     runId: string,
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`meta:${runId}`, async () => {
+    return dedupe(`meta:${container}:${runId}`, async () => {
         try {
-            await downloadBlob(`${runId}/meta.json`, destRoot);
+            await downloadBlob(container, `${runId}/meta.json`, destRoot);
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }
@@ -226,14 +243,15 @@ export async function ensureRunMeta(
 }
 
 export async function ensureRunReviewIndex(
+    container: string,
     runId: string,
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`review-index:${runId}`, async () => {
+    return dedupe(`review-index:${container}:${runId}`, async () => {
         try {
-            await downloadBlob(`${runId}/review_index.json`, destRoot);
+            await downloadBlob(container, `${runId}/review_index.json`, destRoot);
         } catch (err) {
             if (!isNotFound(err)) throw err;
         }
@@ -246,18 +264,19 @@ export async function ensureRunReviewIndex(
 // skipped for the same reason as ensureTaskDir — no page reads them and they
 // dwarf the real deliverables.
 export async function ensureRunDir(
+    container: string,
     runId: string,
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`run:${runId}`, async () => {
-        const c = await getContainer();
+    return dedupe(`run:${container}:${runId}`, async () => {
+        const c = await getContainer(container);
         const ops: Promise<void>[] = [];
         const prefix = `${runId}/`;
         for await (const blob of c.listBlobsFlat({ prefix })) {
             if (blob.name.includes("/.venv/")) continue;
-            ops.push(downloadBlob(blob.name, destRoot));
+            ops.push(downloadBlob(container, blob.name, destRoot));
         }
         await Promise.all(ops);
     });
@@ -267,6 +286,7 @@ export async function ensureRunDir(
 // detail page so opening a deep link to a 50-task run doesn't pull every
 // task's artifacts.
 export async function ensureTaskDir(
+    container: string,
     runId: string,
     taskId: string,
     destRoot: string,
@@ -274,14 +294,15 @@ export async function ensureTaskDir(
     assertValidId(runId, "runId");
     assertValidTaskId(taskId, "taskId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`task:${runId}/${taskId}`, async () => {
+    return dedupe(`task:${container}:${runId}/${taskId}`, async () => {
         // Activation cases live in the nested sub-run (<runId>/activation/...),
         // so their row + per-case dir come from there; skills tasks from the
         // top-level run. Fetch the matching run.json for the row lookup.
         const activation = taskId.startsWith("skill-activation/");
-        if (activation) await ensureActivationSummary(runId, destRoot);
-        else await ensureRunSummary(runId, destRoot);
-        const c = await getContainer();
+        if (activation)
+            await ensureActivationSummary(container, runId, destRoot);
+        else await ensureRunSummary(container, runId, destRoot);
+        const c = await getContainer(container);
         const ops: Promise<void>[] = [];
         // `listBlobsFlat` recurses, so both the flat legacy layout
         // (`default/<task>/task.json`) and the nested replicate layout
@@ -297,7 +318,7 @@ export async function ensureTaskDir(
             // so skipping it keeps task-detail loads from stalling on the
             // initial prefetch.
             if (blob.name.includes("/.venv/")) continue;
-            ops.push(downloadBlob(blob.name, destRoot));
+            ops.push(downloadBlob(container, blob.name, destRoot));
         }
         await Promise.all(ops);
     });

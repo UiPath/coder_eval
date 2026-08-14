@@ -23,6 +23,7 @@ import {
     turnsCellClasses,
 } from "@/lib/turns";
 import { ChipButton } from "./chips";
+import { withSource } from "@/app/_lib/source-param";
 import { TableScroll } from "@/app/_components/scroll-table";
 import {
     type ColHelp,
@@ -67,10 +68,12 @@ function MatureTaskLink({
     t,
     sourceRun,
     className,
+    sourceId,
 }: {
     t: TaskResultSummary;
     sourceRun: string;
     className: string;
+    sourceId?: string;
 }) {
     const [open, setOpen] = useState(false);
     const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
@@ -149,7 +152,10 @@ function MatureTaskLink({
                             run {sourceLabel}.
                         </p>
                         <Link
-                            href={`/runs/${sourceRun}/${t.taskId}`}
+                            href={withSource(
+                                `/runs/${sourceRun}/${t.taskId}`,
+                                sourceId,
+                            )}
                             onClick={() => setOpen(false)}
                             className="mt-2 inline-flex items-center gap-1 font-medium text-studio-blue hover:underline"
                         >
@@ -174,11 +180,13 @@ function TaskIdCell({
     matureSourceRuns,
     replicateCount = 1,
     replicatePassCount = 0,
+    sourceId,
 }: {
     runId: string;
     t: TaskResultSummary;
     className: string;
     matureSourceRuns?: Record<string, string>;
+    sourceId?: string;
     // How many replicates (repeated runs) of this task exist in the run. When
     // >1 the row collapses to a single entry with a k/N ✓ badge; the per-run
     // detail is reachable from the task page's run selector (?r=NN).
@@ -194,6 +202,7 @@ function TaskIdCell({
                     t={t}
                     sourceRun={sourceRun}
                     className={className}
+                    sourceId={sourceId}
                 />
             );
         }
@@ -209,10 +218,12 @@ function TaskIdCell({
     // For a collapsed replicate row, link to the SAME replicate the row's
     // status/score/cost describe (the representative), not implicitly to
     // replicate 0 — so clicking a green "Passed" row lands on the passing run.
-    const href =
+    const href = withSource(
         replicateCount > 1
             ? `/runs/${runId}/${t.taskId}?r=${t.replicateIndex ?? 0}`
-            : `/runs/${runId}/${t.taskId}`;
+            : `/runs/${runId}/${t.taskId}`,
+        sourceId,
+    );
     return (
         <Link href={href} className={className}>
             {humanizeTaskId(t.taskId)}
@@ -443,6 +454,7 @@ export function TaskGrid({
     reviewSelectedSet,
     onToggleReviewTag,
     matureSourceRuns,
+    sourceId,
 }: {
     runId: string;
     tasks: TaskResultSummary[];
@@ -455,6 +467,9 @@ export function TaskGrid({
     // taskId → earlier run where a mature-skipped task last executed (run B). A
     // mature row with an entry links out; one without stays non-clickable.
     matureSourceRuns?: Record<string, string>;
+    // Container this run came from; carried on every row link. Mature-source
+    // runs are resolved within the same source, so they carry it too.
+    sourceId?: string;
 }) {
     const [sort, setSort] = useState<{
         key: SortKey;
@@ -708,6 +723,7 @@ export function TaskGrid({
                                         replicatePassCount={
                                             replicatePassCounts.get(t.taskId) ?? 0
                                         }
+                                        sourceId={sourceId}
                                     />
                                     <TaskTagChips
                                         t={t}
@@ -848,6 +864,7 @@ export function TaskGrid({
                                         replicatePassCount={
                                             replicatePassCounts.get(t.taskId) ?? 0
                                         }
+                                    sourceId={sourceId}
                                 />
                                 <span className="shrink-0">
                                     {t.matureSkipped ? (

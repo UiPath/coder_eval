@@ -12,6 +12,7 @@ import {
     isValidTaskId,
     listRunIdsRemote,
 } from "./blob";
+import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
 import { messageCostUsd } from "./pricing";
 
@@ -21,6 +22,9 @@ import { messageCostUsd } from "./pricing";
 //   2. EVALBOARD_RUNS_DIR — blob-mode cache override, used when process.cwd()
 //      is read-only (e.g., App Service Run From Package).
 //   3. ./runs-remote — default blob-mode cache.
+//
+// This is the BASE cache dir. Every run-scoped read resolves it per source via
+// runsDirFor(RUNS_DIR, source), since run ids collide across containers.
 export const RUNS_DIR = LOCAL_RUNS_DIR
     ? path.resolve(LOCAL_RUNS_DIR)
     : (process.env.EVALBOARD_RUNS_DIR ??
@@ -594,12 +598,16 @@ export function extractComponentShas(
 
 // ---------- Readers ----------
 
-export async function listRunIds(): Promise<string[]> {
-    return listRunIdsRemote();
+export async function listRunIds(
+    source: Source = DEFAULT_SOURCE,
+): Promise<string[]> {
+    return listRunIdsRemote(source.container);
 }
 
-export async function latestRunId(): Promise<string | null> {
-    const ids = await listRunIds();
+export async function latestRunId(
+    source: Source = DEFAULT_SOURCE,
+): Promise<string | null> {
+    const ids = await listRunIds(source);
     return ids[0] ?? null;
 }
 
@@ -612,20 +620,26 @@ async function readJson<T>(p: string): Promise<T | null> {
     }
 }
 
-async function readRunJson(id: string): Promise<RawRunJson | null> {
-    await ensureRunSummary(id, RUNS_DIR);
-    return readJson<RawRunJson>(path.join(RUNS_DIR, id, "run.json"));
+async function readRunJson(
+    id: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<RawRunJson | null> {
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureRunSummary(source.container, id, dir);
+    return readJson<RawRunJson>(path.join(dir, id, "run.json"));
 }
 
 // The activation suite is a nested sub-run: its self-contained run.json (enriched
 // cases + the per-skill rollup) lives at <id>/activation/run.json, separate from
 // the skills run.json so the latter stays exactly what coder-eval wrote. Null when
 // the run has no activation suite.
-async function readActivationRunJson(id: string): Promise<RawRunJson | null> {
-    await ensureActivationSummary(id, RUNS_DIR);
-    return readJson<RawRunJson>(
-        path.join(RUNS_DIR, id, "activation", "run.json"),
-    );
+async function readActivationRunJson(
+    id: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<RawRunJson | null> {
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureActivationSummary(source.container, id, dir);
+    return readJson<RawRunJson>(path.join(dir, id, "activation", "run.json"));
 }
 
 // Activation cases run in the nested sub-run, so their per-case dirs (and row
@@ -639,10 +653,15 @@ function isActivationTaskId(taskId: string): boolean {
 // Filesystem base for a task's content (before the optional `00` replicate dir):
 // activation cases under <id>/activation/default/<taskId>, skills tasks under
 // <id>/default/<taskId>.
-function taskContentBase(runId: string, taskId: string): string {
+function taskContentBase(
+    runId: string,
+    taskId: string,
+    source: Source = DEFAULT_SOURCE,
+): string {
+    const dir = runsDirFor(RUNS_DIR, source);
     return isActivationTaskId(taskId)
-        ? path.join(RUNS_DIR, runId, "activation", "default", taskId)
-        : path.join(RUNS_DIR, runId, "default", taskId);
+        ? path.join(dir, runId, "activation", "default", taskId)
+        : path.join(dir, runId, "default", taskId);
 }
 
 // Resolve the skill (primary grouping axis) for a task. Two-stage fallback:
@@ -694,8 +713,11 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
     };
 }
 
-export async function readRunSummary(id: string): Promise<RunSummary | null> {
-    const data = await readRunJson(id);
+export async function readRunSummary(
+    id: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<RunSummary | null> {
+    const data = await readRunJson(id, source);
     if (!data) return null;
     const taskResults = data.task_results ?? [];
     const totalCost = taskResults.reduce(
@@ -760,8 +782,9 @@ export function tallyModels(rows: RawTaskResult[]): {
 
 export async function readRunTasks(
     id: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<TaskResultSummary[] | null> {
-    const data = await readRunJson(id);
+    const data = await readRunJson(id, source);
     if (!data) return null;
     return (data.task_results ?? []).filter((t) => t.task_id).map(toTaskRow);
 }
@@ -788,11 +811,12 @@ export async function findMatureSourceRuns(
         listIds?: () => Promise<string[]>;
         readRun?: (id: string) => Promise<RawRunJson | null>;
     },
+    source: Source = DEFAULT_SOURCE,
 ): Promise<Record<string, string>> {
     const out: Record<string, string> = {};
     if (matureTaskIds.length === 0) return out;
-    const listIds = deps?.listIds ?? listRunIds;
-    const readRun = deps?.readRun ?? readRunJson;
+    const listIds = deps?.listIds ?? (() => listRunIds(source));
+    const readRun = deps?.readRun ?? ((id: string) => readRunJson(id, source));
 
     // listRunIds() is newest-first; scan strictly-older runs (those after the
     // source's index) so the first executed row we hit is the most recent one.
@@ -819,8 +843,9 @@ export async function findMatureSourceRuns(
 // and the activation page's score header.
 export async function readActivationScore(
     id: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<ActivationScore | null> {
-    const data = await readActivationRunJson(id);
+    const data = await readActivationRunJson(id, source);
     return mapActivation(data?.activation);
 }
 
@@ -830,8 +855,9 @@ export async function readActivationScore(
 // the dashboard bakes onto each row.
 export async function readActivationTasks(
     id: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<ActivationCaseRow[] | null> {
-    const data = await readActivationRunJson(id);
+    const data = await readActivationRunJson(id, source);
     if (!data) return null;
     return (data.task_results ?? [])
         .filter((t) => t.task_id)
@@ -962,8 +988,9 @@ function mostCommonAgentType(rows: RawTaskResult[]): string | null {
 
 export async function readRunOverview(
     id: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<RunOverview | null> {
-    const data = await readRunJson(id);
+    const data = await readRunJson(id, source);
     if (!data) return null;
     const taskResults = data.task_results ?? [];
     const tasks: RunOverviewTask[] = taskResults
@@ -1919,10 +1946,11 @@ async function resolveTaskContentDir(
 export async function readTaskReplicates(
     runId: string,
     taskId: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<number[]> {
     const data = isActivationTaskId(taskId)
-        ? await readActivationRunJson(runId)
-        : await readRunJson(runId);
+        ? await readActivationRunJson(runId, source)
+        : await readRunJson(runId, source);
     const indices = (data?.task_results ?? [])
         .filter((t) => t.task_id === taskId)
         .map((t) => t.replicate_index ?? 0);
@@ -1933,15 +1961,17 @@ export async function readTaskDetail(
     runId: string,
     taskId: string,
     replicate = 0,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<TaskDetail | null> {
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureTaskDir(source.container, runId, taskId, dir);
 
     // Activation cases live in the nested activation sub-run; skills tasks in the
     // top-level run. Read the row from whichever run.json owns this task so the
     // trace (linked from the activation page) still resolves.
     const data = isActivationTaskId(taskId)
-        ? await readActivationRunJson(runId)
-        : await readRunJson(runId);
+        ? await readActivationRunJson(runId, source)
+        : await readRunJson(runId, source);
     // Repeated runs share a task_id, so match on (task_id, replicate_index).
     // Legacy rows carry no replicate_index (null) → treated as replicate 0, so
     // an old single-result run still resolves at replicate 0.
@@ -1954,7 +1984,7 @@ export async function readTaskDetail(
     if (!rawTask) return null;
     const row = toTaskRow(rawTask);
 
-    const taskDir = taskContentBase(runId, taskId);
+    const taskDir = taskContentBase(runId, taskId, source);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const task = await readJson<{
         final_status?: string;
@@ -1993,12 +2023,12 @@ export async function readTaskDetail(
 
     const artifactRoot = path.join(contentDir, "artifacts");
     // relPath is stored relative to the run root so the /api/file route can
-    // resolve it against RUNS_DIR/<runId> without needing to know the task
+    // resolve it against the source's <cacheDir>/<runId> without needing to know the task
     // subdir. New layout yields `default/<task_id>/00/artifacts/...`; flat
     // layout yields `default/<task_id>/artifacts/...`. `resolveSafePath`
     // validates parts[0] and parts[1], so both shapes pass the check.
     const artifactPrefix = path.relative(
-        path.join(RUNS_DIR, runId),
+        path.join(dir, runId),
         artifactRoot,
     );
     const artifacts = sortArtifacts(
@@ -2150,10 +2180,14 @@ function sumMessageTokens(messages: MessageEvent[]): TokenTotals {
     };
 }
 
-export async function readRunAnalysis(runId: string): Promise<string | null> {
-    await ensureRunAnalysis(runId, RUNS_DIR);
+export async function readRunAnalysis(
+    runId: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<string | null> {
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureRunAnalysis(source.container, runId, dir);
     return fs
-        .readFile(path.join(RUNS_DIR, runId, "analysis.md"), "utf-8")
+        .readFile(path.join(dir, runId, "analysis.md"), "utf-8")
         .catch(() => null);
 }
 
@@ -2174,11 +2208,13 @@ interface RawRunMeta {
     adhoc?: boolean;
 }
 
-export async function readRunMeta(runId: string): Promise<RunMeta | null> {
-    await ensureRunMeta(runId, RUNS_DIR);
-    const raw = await readJson<RawRunMeta>(
-        path.join(RUNS_DIR, runId, "meta.json"),
-    );
+export async function readRunMeta(
+    runId: string,
+    source: Source = DEFAULT_SOURCE,
+): Promise<RunMeta | null> {
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureRunMeta(source.container, runId, dir);
+    const raw = await readJson<RawRunMeta>(path.join(dir, runId, "meta.json"));
     if (!raw) return null;
     return {
         title: raw.title ?? null,
@@ -2192,9 +2228,15 @@ export async function readLogTail(
     taskId: string,
     replicate = 0,
     maxBytes = 200_000,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<string> {
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = taskContentBase(runId, taskId);
+    await ensureTaskDir(
+        source.container,
+        runId,
+        taskId,
+        runsDirFor(RUNS_DIR, source),
+    );
+    const taskDir = taskContentBase(runId, taskId, source);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "task.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
@@ -2217,9 +2259,15 @@ export async function readConversationLog(
     taskId: string,
     replicate = 0,
     maxBytes = 200_000,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<string> {
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = taskContentBase(runId, taskId);
+    await ensureTaskDir(
+        source.container,
+        runId,
+        taskId,
+        runsDirFor(RUNS_DIR, source),
+    );
+    const taskDir = taskContentBase(runId, taskId, source);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "conversation.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
@@ -2267,10 +2315,16 @@ export function parseConversation(raw: string): ConversationTurn[] {
 export async function collectTaskFiles(
     runId: string,
     taskId: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<{ relPath: string; abs: string }[] | null> {
     if (!isValidId(runId) || !isValidTaskId(taskId)) return null;
-    await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = taskContentBase(runId, taskId);
+    await ensureTaskDir(
+        source.container,
+        runId,
+        taskId,
+        runsDirFor(RUNS_DIR, source),
+    );
+    const taskDir = taskContentBase(runId, taskId, source);
     const refs = await walkArtifacts(taskDir);
     if (refs.length === 0) return null;
     return refs.map((r) => ({ relPath: r.relPath, abs: path.join(taskDir, r.relPath) }));
@@ -2282,10 +2336,12 @@ export async function collectTaskFiles(
 // meta.json, …). Returns null for an invalid id or a missing/empty run dir.
 export async function collectRunFiles(
     runId: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<{ relPath: string; abs: string }[] | null> {
     if (!isValidId(runId)) return null;
-    await ensureRunDir(runId, RUNS_DIR);
-    const runDir = path.join(RUNS_DIR, runId);
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureRunDir(source.container, runId, dir);
+    const runDir = path.join(dir, runId);
     const refs = await walkArtifacts(runDir);
     if (refs.length === 0) return null;
     return refs.map((r) => ({ relPath: r.relPath, abs: path.join(runDir, r.relPath) }));
@@ -2294,19 +2350,21 @@ export async function collectRunFiles(
 export async function resolveSafePath(
     runId: string,
     relPath: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<string | null> {
     if (!isValidId(runId)) return null;
+    const dir = runsDirFor(RUNS_DIR, source);
     // Artifact URLs embed the task subdir in relPath
     // (`default/<task-id>/artifacts/...`) — extract it so the narrow fetch
     // hits the right blobs without pulling the whole run.
     const parts = relPath.split("/");
     if (parts[0] === "default" && parts[1]) {
         if (!isValidId(parts[1])) return null;
-        await ensureTaskDir(runId, parts[1], RUNS_DIR);
+        await ensureTaskDir(source.container, runId, parts[1], dir);
     } else {
-        await ensureRunSummary(runId, RUNS_DIR);
+        await ensureRunSummary(source.container, runId, dir);
     }
-    const base = path.join(RUNS_DIR, runId);
+    const base = path.join(dir, runId);
     const baseReal = await fs.realpath(base).catch(() => null);
     if (!baseReal) return null;
     const candidate = path.resolve(baseReal, relPath);

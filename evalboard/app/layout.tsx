@@ -8,6 +8,16 @@ export const metadata = {
     title: "Coder Evalboard",
 };
 
+// Header nav. Every entry is internal-only today (the public OSS edition hides
+// the whole block — see lib/edition.ts); the routes themselves stay reachable.
+const NAV: readonly { href: string; label: string }[] = [
+    { href: "/path-to-ga", label: "Path to GA" },
+    { href: "/watchlist", label: "Watchlist" },
+    { href: "/trends", label: "Trends" },
+    // The Autopilot/aria suite, read from its own blob container — see lib/sources.ts.
+    { href: "/scribe", label: "Scribe" },
+];
+
 export default function RootLayout({ children }: { children: ReactNode }) {
     return (
         <html lang="en">
@@ -40,30 +50,18 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                             <SearchBox className="w-full max-w-xl" />
                         </Suspense>
                     </div>
-                    {/* Watchlist + Trends are internal-only surfaces; the public
-                        OSS edition hides these nav links (see lib/edition.ts). The
-                        routes themselves are left intact. */}
                     {isInternal && (
-                        <div className="ml-auto sm:ml-0 flex items-center gap-4 text-sm shrink-0">
-                            <a
-                                href="/path-to-ga"
-                                className="text-gray-700 hover:text-studio-blue"
-                            >
-                                Path to GA
-                            </a>
-                            <a
-                                href="/watchlist"
-                                className="text-gray-700 hover:text-studio-blue"
-                            >
-                                Watchlist
-                            </a>
-                            <a
-                                href="/trends"
-                                className="text-gray-700 hover:text-studio-blue"
-                            >
-                                Trends
-                            </a>
-                        </div>
+                        <nav className="ml-auto sm:ml-0 flex items-center gap-4 text-sm shrink-0">
+                            {NAV.map((item) => (
+                                <a
+                                    key={item.href}
+                                    href={item.href}
+                                    className="text-gray-700 hover:text-studio-blue"
+                                >
+                                    {item.label}
+                                </a>
+                            ))}
+                        </nav>
                     )}
                 </header>
                 <main className="px-4 sm:px-6 lg:px-8 py-6 max-w-[1400px] mx-auto">

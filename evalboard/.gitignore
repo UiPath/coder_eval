@@ -4,6 +4,10 @@ out
 *.tsbuildinfo
 .env*.local
 runs-remote/
+# Per-source blob caches (runs-remote-scribe/, …). Each source gets a sibling of
+# the base cache dir — see runsDirFor in lib/sources.ts — and the bare
+# `runs-remote/` rule above does not match those.
+runs-remote-*/
 runs-local/
 coverage/
 

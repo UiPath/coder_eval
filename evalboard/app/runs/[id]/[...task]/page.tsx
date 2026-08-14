@@ -9,6 +9,8 @@ import {
     replicateDirName,
 } from "@/lib/runs";
 import { readTaskReview } from "@/lib/reviews";
+import { sourceById } from "@/lib/sources";
+import { scalarParam, withSource } from "@/app/_lib/source-param";
 import { fmtCompact, fmtRunTime, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { ChipButton } from "../chips";
@@ -34,10 +36,13 @@ export default async function TaskPage({
     searchParams,
 }: {
     params: Promise<{ id: string; task: string[] }>;
-    searchParams: Promise<{ r?: string }>;
+    searchParams: Promise<{ r?: string; src?: string | string[] }>;
 }) {
     const { id, task: taskSegments } = await params;
-    const { r } = await searchParams;
+    const { r, src } = await searchParams;
+    // Which container this run lives in. Unknown/absent coerces to the skills
+    // nightly, so every URL that predates the Scribe tab keeps resolving as-is.
+    const source = sourceById(scalarParam(src));
     const taskId = taskSegments.join("/");
     // Replicate index from ?r=NN — repeated runs of one task share this task
     // path, so the query param is what selects which replicate's <NN>/ dir to
@@ -46,12 +51,12 @@ export default async function TaskPage({
     const parsedR = Number(r);
     const replicate =
         r != null && Number.isInteger(parsedR) && parsedR >= 0 ? parsedR : 0;
-    const task = await readTaskDetail(id, taskId, replicate);
+    const task = await readTaskDetail(id, taskId, replicate, source);
     if (!task) notFound();
 
     // Replicate indices available for this task — drives the run selector below.
     // [0] (or fewer) for a non-repeated task, so the selector self-hides.
-    const replicates = await readTaskReplicates(id, taskId);
+    const replicates = await readTaskReplicates(id, taskId, source);
 
     // variant is always "default" here; the replicate selects the <NN>/ dir.
     // readTaskReview returns null for older runs that predate the review feature.
@@ -60,18 +65,22 @@ export default async function TaskPage({
         "default",
         taskId,
         replicateDirName(replicate),
+        source,
     );
 
-    const log = await readLogTail(id, taskId, replicate);
+    const log = await readLogTail(id, taskId, replicate, undefined, source);
     const conversation = parseConversation(
-        await readConversationLog(id, taskId, replicate),
+        await readConversationLog(id, taskId, replicate, undefined, source),
     );
     const { flowDebug } = task;
 
     return (
         <div className="space-y-6">
             <nav className="text-sm text-gray-500 flex items-center gap-2 flex-wrap">
-                <Link href={`/runs/${id}`} className="hover:text-studio-blue">
+                <Link
+                    href={withSource(`/runs/${id}`, source.id)}
+                    className="hover:text-studio-blue"
+                >
                     ← Run {fmtRunTime(id)}
                 </Link>
                 <span className="text-gray-300">/</span>
@@ -101,7 +110,10 @@ export default async function TaskPage({
                             return (
                                 <Link
                                     key={ri}
-                                    href={`/runs/${id}/${taskId}?r=${ri}`}
+                                    href={withSource(
+                                        `/runs/${id}/${taskId}?r=${ri}`,
+                                        source.id,
+                                    )}
                                     // Keep the scroll position when switching runs
                                     // — Next scrolls to top on nav by default.
                                     scroll={false}
@@ -131,9 +143,12 @@ export default async function TaskPage({
                         OSS edition). See lib/edition.ts. */}
                     {isInternal && (
                         <a
-                            href={`/api/download?run=${encodeURIComponent(
-                                id,
-                            )}&task=${encodeURIComponent(taskId)}`}
+                            href={withSource(
+                                `/api/download?run=${encodeURIComponent(
+                                    id,
+                                )}&task=${encodeURIComponent(taskId)}`,
+                                source.id,
+                            )}
                             className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
                             download
                         >
@@ -309,7 +324,11 @@ export default async function TaskPage({
                     finalAssistantText={task.finalAssistantText}
                 />
             )}
-            <ArtifactsSection runId={id} artifacts={task.artifacts} />
+            <ArtifactsSection
+                runId={id}
+                artifacts={task.artifacts}
+                sourceId={source.id}
+            />
             <LogTailSection log={log} />
         </div>
     );
