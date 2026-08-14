@@ -937,6 +937,39 @@ excluded outright and named as the wiring problem it is.
 Record the matrix and the front in `measurements.json` (Step 11), so a later round can look back
 at which rows a discarded candidate actually won.
 
+#### Cost as a second axis of the shortlist — not a second gate
+
+Two candidates at the same score are not the same candidate if one costs twice as much. Print the
+quality × cost plane beside the row matrix:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import cost_quality_front, cost_quality_points, render_cost_quality
+
+points = cost_quality_points(
+    run_dirs=[Path("<runs>/round1-triage")],
+    variant_ids=["incumbent", "cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
+    suite_id="<the suite's task_id>",
+    criterion_index=0,  # omit on the execution track to read each row's weighted_score
+)
+print(render_cost_quality(points, cost_quality_front(points)))
+```
+
+**This front is advisory, and that word is load-bearing.** Promotion is unchanged: the primary
+statistic must still separate and every guardrail must still hold. Stage B's cost guardrail is a
+**veto** and this is an **objective** — adding the second did not weaken the first, and a cheaper
+arm here is never a promotion this tool makes.
+
+So a cheaper-but-slightly-worse candidate is something to **present to the user** at Step 12, with
+both numbers, and let them decide. Do not talk yourself into promoting it because the front looks
+appealing: a candidate that fails the gate has not been shown to be better at any price.
+
+Two readings that are correct rather than bugs. An arm with **no recorded cost** is excluded and
+named, because an unmeasured cost is not a free one. And the **control arm sits on this front by
+construction** — it is cheap and bad, so nothing dominates it — which is why the block's standing
+sentence tells you to read the front with the arms you are actually choosing between.
+
 ### Stage B, activation track — run the gate, do not do the arithmetic
 
 The three invocations are the ones the method file's Stage B block names — three

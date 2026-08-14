@@ -400,6 +400,15 @@ the evidence. A guardrail with nothing to measure — no turn reported a
 cost — passes with a stated reason rather than silently, because a missing measurement must never
 read as a pass on the merits.
 
+**Cost is a veto here and an objective elsewhere, and the two must not be confused.** The
+guardrail above **gates**: a candidate that materially increases what a row costs does not
+promote, whatever its F1 did. Stage A additionally renders a quality × cost front, which is
+**advisory**: it is the second axis of a shortlist, it shows which trades exist, and it decides
+nothing. Adding the second did not weaken the first — the promote-only-when list below is
+unchanged, and a cheaper arm on that front is a trade to offer the user, **never a promotion** the
+tool makes. Read that front with the arms you are actually choosing between: the emptied-body
+control arm is cheap and bad, so nothing dominates it and it sits there by construction.
+
 **Be precise about what this bounds, because it is easy to claim more.** The interval now bounds
 *row-sampling variation and run noise together* — resampling rows is what adds the first, and
 pooling each drawn row's replicates is what keeps the second. What it still does not do is

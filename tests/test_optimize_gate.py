@@ -26,16 +26,23 @@ from coder_eval.models import (
     TokenUsage,
 )
 from coder_eval.optimize_gate import (
+    COST_FRONT_ADVISORY,
     GATE_MAX_FAMILY,
     GATE_P_PRECISION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
+    CostQualityPoint,
     _discreteness_floor,
     _holm_threshold,
     _label_pairs,
+    _median,
+    _row_cost_levels,
+    _row_costs,
     activation_gate,
     arm_row_scores,
     cost_latency_guardrails,
+    cost_quality_front,
+    cost_quality_points,
     holm_promote,
     instance_best_front,
     load_arm_rows,
@@ -45,6 +52,7 @@ from coder_eval.optimize_gate import (
     noise_floor_mde,
     pareto_front,
     record_noise_floor,
+    render_cost_quality,
     render_markdown,
     render_row_matrix,
     resolve_model,
@@ -1651,3 +1659,205 @@ class TestInstanceBestFront:
             arms, pareto_front(arms), instance_best=None
         )
         assert "Instance-best" not in render_row_matrix(arms, pareto_front(arms))
+
+
+def _cost_quality_arm(tmp_path: Path, variant: str, per_row: dict[str, tuple[float, float | None]]) -> Path:
+    """One arm's rows as (weighted_score, cost) pairs. A None cost records no cost at all."""
+    run_dir = tmp_path / "run-0"
+    for row_id, (score, cost) in per_row.items():
+        result = _costed_result(row_id, [("yes", "yes")], cost=cost, duration=10.0)
+        _write_row(run_dir, variant, row_id, result.model_copy(update={"weighted_score": score}))
+    return run_dir
+
+
+class TestCostQualityFront:
+    """Cost as a second AXIS of the shortlist — never a second gate."""
+
+    def _points(self, tmp_path: Path, arms: dict[str, dict[str, tuple[float, float | None]]]):
+        for variant, per_row in arms.items():
+            _cost_quality_arm(tmp_path, variant, per_row)
+        return cost_quality_points(
+            run_dirs=[tmp_path / "run-0"], variant_ids=list(arms), suite_id=SUITE, criterion_index=None
+        )
+
+    def test_keeps_a_cheaper_slightly_worse_arm(self, tmp_path: Path) -> None:
+        # The headline case: 2% worse and 40% cheaper is a trade worth showing the user.
+        points = self._points(
+            tmp_path,
+            {
+                "incumbent": {f"r{i}": (0.90, 1.00) for i in range(6)},
+                "cand-cheap": {f"r{i}": (0.88, 0.60) for i in range(6)},
+            },
+        )
+        assert cost_quality_front(points) == ["incumbent", "cand-cheap"]
+
+    def test_drops_a_dearer_and_worse_arm(self, tmp_path: Path) -> None:
+        points = self._points(
+            tmp_path,
+            {
+                "incumbent": {f"r{i}": (0.90, 1.00) for i in range(6)},
+                "cand-bad": {f"r{i}": (0.70, 1.50) for i in range(6)},
+            },
+        )
+        assert cost_quality_front(points) == ["incumbent"]
+
+    def test_a_free_arm_is_on_the_front_not_excluded(self, tmp_path: Path) -> None:
+        # A zero cost is a real coordinate — a free model is legitimately the cheapest arm there
+        # is. A truthiness test would exclude it, which is the register_pricing rule restated.
+        points = self._points(
+            tmp_path,
+            {
+                "paid": {f"r{i}": (0.90, 1.00) for i in range(6)},
+                "free": {f"r{i}": (0.40, 0.0) for i in range(6)},
+            },
+        )
+        assert next(p for p in points if p.variant_id == "free").cost_per_row == 0.0
+        assert cost_quality_front(points) == ["paid", "free"]
+
+    def test_an_arm_with_no_recorded_cost_is_excluded_and_named(self, tmp_path: Path) -> None:
+        points = self._points(
+            tmp_path,
+            {
+                "measured": {f"r{i}": (0.90, 1.00) for i in range(6)},
+                "costless": {f"r{i}": (0.95, None) for i in range(6)},
+            },
+        )
+        assert next(p for p in points if p.variant_id == "costless").cost_per_row is None
+        front = cost_quality_front(points)
+        assert front == ["measured"]
+        text = render_cost_quality(points, front)
+        assert "costless" in text
+        assert "An unmeasured cost is not a free one" in text
+
+    def test_identical_costs_degenerate_to_the_quality_maxima(self, tmp_path: Path) -> None:
+        points = self._points(
+            tmp_path,
+            {
+                "best": {f"r{i}": (0.90, 1.00) for i in range(6)},
+                "mid": {f"r{i}": (0.70, 1.00) for i in range(6)},
+                "worst": {f"r{i}": (0.50, 1.00) for i in range(6)},
+            },
+        )
+        assert cost_quality_front(points) == ["best"]
+
+    def test_identical_quality_degenerates_to_the_cheapest(self, tmp_path: Path) -> None:
+        points = self._points(
+            tmp_path,
+            {
+                "dear": {f"r{i}": (0.80, 2.00) for i in range(6)},
+                "cheap": {f"r{i}": (0.80, 0.50) for i in range(6)},
+            },
+        )
+        assert cost_quality_front(points) == ["cheap"]
+
+    def test_a_single_arm_is_its_own_front(self, tmp_path: Path) -> None:
+        points = self._points(tmp_path, {"only": {f"r{i}": (0.5, 1.0) for i in range(4)}})
+        assert cost_quality_front(points) == ["only"]
+
+    def test_empty_input(self) -> None:
+        assert cost_quality_front([]) == []
+        assert "No arms" in render_cost_quality([], [])
+
+    def test_a_crashed_arm_cannot_take_the_front_on_the_rows_it_skipped(self, tmp_path: Path) -> None:
+        """Both coordinates must be averaged over the SAME rows — the ones the arm actually scored.
+
+        A crashed row produces no criterion results, so `_row_score` returns None and quality
+        excludes it — but the row still burned tokens, so an unrestricted cost median includes it.
+        Measured before the fix: an arm completing 1 of 6 rows at a perfect score took the whole
+        front and knocked the incumbent off it, rendered as two clean numbers with nothing showing
+        the other five rows were missing. This is the failure `_dominates`'s coverage rule and
+        `render_row_matrix`'s `—` cells exist to prevent one screen earlier.
+        """
+        run_dir = tmp_path / "run-0"
+        for row in range(6):
+            good = _costed_result(f"r{row}", [("yes", "yes")], cost=1.0, duration=10.0)
+            _write_row(run_dir, "incumbent", f"r{row}", good.model_copy(update={"weighted_score": 0.9}))
+            # The candidate finished r0 and crashed the rest: no criterion results, cost still recorded.
+            if row == 0:
+                _write_row(run_dir, "crashy", f"r{row}", good.model_copy(update={"weighted_score": 1.0}))
+            else:
+                crashed = _costed_result(f"r{row}", [], cost=1.0, duration=10.0)
+                _write_row(run_dir, "crashy", f"r{row}", crashed.model_copy(update={"weighted_score": 0.0}))
+
+        points = cost_quality_points(
+            run_dirs=[run_dir], variant_ids=["incumbent", "crashy"], suite_id=SUITE, criterion_index=None
+        )
+        by_id = {p.variant_id: p for p in points}
+        assert (by_id["incumbent"].n_rows, by_id["crashy"].n_rows) == (6, 1)
+        # The incumbent must stay on the front: an arm measured on one row is not entitled to a
+        # claim about "everywhere", so it cannot displace one measured on six. Both stay — the
+        # crashed arm is shown with its row count rather than silently dropped or silently believed.
+        assert cost_quality_front(points) == ["incumbent", "crashy"]
+        # And the render must SAY the arm is standing on less evidence.
+        text = render_cost_quality(points, cost_quality_front(points))
+        assert "crashy (1/6)" in text
+        assert "may be the missing rows rather than a real trade" in text
+
+    def test_a_non_finite_coordinate_is_excluded_not_undominatable(self) -> None:
+        # Every >=/<= against NaN is False, so a NaN arm would be undominatable and render in bold
+        # as a live trade. Same guard, same reason, as instance_best_front.
+        nan = float("nan")
+        points = [
+            CostQualityPoint(variant_id="good", score=1.0, cost_per_row=0.1, n_rows=6),
+            CostQualityPoint(variant_id="broken", score=0.5, cost_per_row=nan, n_rows=6),
+        ]
+        assert cost_quality_front(points) == ["good"]
+
+    def test_render_renders_the_advisory_constant(self, tmp_path: Path) -> None:
+        # The sensor for the "advisory only, the gate is unchanged" decision. Verbatim, so the
+        # claim cannot drift between the render and the two prose surfaces.
+        points = self._points(tmp_path, {"only": {f"r{i}": (0.5, 1.0) for i in range(4)}})
+        assert COST_FRONT_ADVISORY in render_cost_quality(points, cost_quality_front(points))
+
+    def test_the_control_arm_sits_on_the_front_by_construction(self, tmp_path: Path) -> None:
+        # Cheap and bad is undominated, so the emptied-body control is on the front — which is why
+        # the standing advisory tells the reader to read it with the arms they are choosing between.
+        points = self._points(
+            tmp_path,
+            {
+                "incumbent": {f"r{i}": (0.90, 1.00) for i in range(6)},
+                "control": {f"r{i}": (0.05, 0.10) for i in range(6)},
+            },
+        )
+        assert "control" in cost_quality_front(points)
+        assert "The control arm is cheap and bad" in render_cost_quality(points, cost_quality_front(points))
+
+
+class TestOneRowCostDefinition:
+    def test_cost_quality_points_agree_with_the_guardrail_about_a_row_cost(self, tmp_path: Path) -> None:
+        """Both surfaces print the same number, because both route through _row_cost_levels.
+
+        This is the test that stops a second definition of "what a row cost" from appearing — the
+        CE037-class defect this repo already added a lint rule for in the F1 direction.
+        """
+        per_row = {f"r{i}": (0.8, 0.5 + 0.1 * i) for i in range(8)}
+        _cost_quality_arm(tmp_path, "incumbent", per_row)
+        _cost_quality_arm(tmp_path, "candidate", per_row)
+        run_dir = tmp_path / "run-0"
+
+        points = cost_quality_points(
+            run_dirs=[run_dir], variant_ids=["incumbent", "candidate"], suite_id=SUITE, criterion_index=None
+        )
+        check = _cost_check(
+            cost_latency_guardrails(
+                incumbent_rows=load_arm_rows([run_dir], "incumbent", SUITE),
+                candidate_rows=load_arm_rows([run_dir], "candidate", SUITE),
+                n_resamples=200,
+            )
+        )
+        incumbent = next(p for p in points if p.variant_id == "incumbent")
+        assert incumbent.cost_per_row == pytest.approx(check.incumbent)
+
+    def test_row_cost_levels_is_the_only_row_cost_reduction(self) -> None:
+        # Called directly and compared against the guardrail's reported level on a fixture with
+        # UNEVEN replicate counts, so the shared reduction is exercised rather than assumed.
+        rows = _cost_rows({"r0": [1.0, 3.0], "r1": [2.0], "r2": [4.0, 4.0, 4.0]})
+        levels = _row_cost_levels([_row_costs(rows[rid]) for rid in sorted(rows)])
+        assert levels == [2.0, 2.0, 4.0]
+
+        check = _cost_check(cost_latency_guardrails(incumbent_rows=rows, candidate_rows=rows, n_resamples=200))
+        assert check.incumbent == pytest.approx(_median(levels))
+
+    def test_an_empty_cluster_is_absent_not_zero(self) -> None:
+        # `mean([])` is 0.0, so an unfiltered empty cluster would read as "this row cost nothing".
+        assert _row_cost_levels([[1.0], [], [3.0]]) == [1.0, 3.0]

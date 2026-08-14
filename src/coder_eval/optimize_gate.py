@@ -28,6 +28,7 @@ import statistics as _stats
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 from uuid import uuid4
 
 from coder_eval.criteria._classification_aggregate import classification_metrics
@@ -252,6 +253,24 @@ def _median(values: list[float]) -> float | None:
     return _stats.median(values) if values else None
 
 
+def _row_cost_levels(clusters: Sequence[list[float]]) -> list[float]:
+    """One value per row: the mean over that row's measured replicates. Empty rows are absent.
+
+    The single definition of "what a row measured", called by :func:`cost_latency_guardrails` — for
+    **both** its cost and its latency clusters — and by :func:`cost_quality_points`. Two
+    implementations of it is the CE037-class defect this repo already has a lint rule for, and one
+    definition is what makes the agreement test between those two surfaces writable at all. Named
+    for cost because that is the reduction the two surfaces have to agree about; latency rides the
+    same arithmetic.
+
+    Takes CLUSTERS rather than the raw row mapping, because that is the shape both callers actually
+    share: the guardrail reduces clusters it has already paired and balanced between two arms, and
+    the N-arm view reduces one arm's clusters directly. A signature taking the row mapping could
+    only serve the second, which would leave the duplication in place.
+    """
+    return [mean(c) for c in clusters if c]
+
+
 def cost_latency_guardrails(
     *,
     incumbent_rows: dict[str, list[EvaluationResult]],
@@ -293,14 +312,14 @@ def cost_latency_guardrails(
 
         incumbent_clusters = [inc for inc, _c in comparable]
         candidate_clusters = [cand for _i, cand in comparable]
-        incumbent_median = _median([mean(c) for c in incumbent_clusters])
-        candidate_median = _median([mean(c) for c in candidate_clusters])
+        incumbent_median = _median(_row_cost_levels(incumbent_clusters))
+        candidate_median = _median(_row_cost_levels(candidate_clusters))
         # The floor scales by the incumbent's MEAN, because the interval it is compared against is
         # an interval on the difference of means. Scaling a mean-difference by a median is a unit
         # mismatch on any skewed distribution — and per-row cost is strongly right-skewed, so a
         # uniform 10% increase measured as FAIL against a 25% floor. The medians stay as the
         # reported level, which is the robust thing to READ; the mean is what is being tested.
-        incumbent_mean = mean([mean(c) for c in incumbent_clusters]) if incumbent_clusters else 0.0
+        incumbent_mean = mean(_row_cost_levels(incumbent_clusters)) if incumbent_clusters else 0.0
 
         if incumbent_median is None or candidate_median is None:
             checks.append(
@@ -1468,4 +1487,180 @@ def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_b
             f"Rows no arm scored above zero: {', '.join(floored)}. These contribute nothing to the "
             + "front — usually a broken row or an unmet fixture precondition rather than N bad candidates."
         )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Quality x cost — a second axis of the shortlist, never a second gate
+# ---------------------------------------------------------------------------
+
+
+# The one declaration of what this front is and is not. Rendered by render_cost_quality and
+# asserted against both prose surfaces by a sensor that IMPORTS it — the same shape as the
+# MATERIALITY_FLOOR sensor, so the claim cannot exist in three files at three vintages.
+COST_FRONT_ADVISORY = (
+    "This front is advisory. Promotion is unchanged: the primary statistic must separate and "
+    "every guardrail must hold, so a cheaper arm here is a trade to offer the user, never a "
+    "promotion this tool makes. The control arm is cheap and bad, so it sits on this front by "
+    "construction — read the front with the arms you are actually choosing between."
+)
+
+
+class CostQualityPoint(NamedTuple):
+    """One arm's position on the quality x cost plane.
+
+    A NamedTuple rather than a Pydantic model because it is computed and rendered, never
+    persisted — the same call the module already makes for ``ArmRowScores`` in the other direction
+    (that one IS persisted, in ``RoundScores``, which is why it is a model).
+    """
+
+    variant_id: str
+    score: float | None  # mean of the arm's per-row scores; None when it scored nothing
+    cost_per_row: float | None  # median of the arm's per-row mean cost; None when nothing recorded
+    n_rows: int = 0  # rows BOTH coordinates are reduced over — an arm with fewer is on less evidence
+
+
+def cost_quality_points(
+    *,
+    run_dirs: Sequence[Path],
+    variant_ids: Sequence[str],
+    suite_id: str,
+    criterion_index: int | None = None,
+) -> list[CostQualityPoint]:
+    """Each arm's mean row score against its median per-row cost.
+
+    Quality reuses :func:`arm_row_scores`, so this view and the row matrix cannot disagree about
+    what a row scored. Cost reuses :func:`_row_cost_levels`, so it and the guardrail cannot
+    disagree about what a row cost.
+
+    **BOTH coordinates are reduced over the same rows: the ones the arm actually scored.** Cost is
+    read only for those rows, not for every row the arm has on disk. Without that restriction an
+    arm that CRASHED most of its rows is described by two different samples — its quality averaged
+    over the handful it completed, its cost over all of them, holes included, because a crashed row
+    still records a `total_cost_usd`. Reproduced before the fix: an arm completing 1 of 6 rows at a
+    perfect score took the whole front and knocked the incumbent off it, rendered as two clean
+    numbers with nothing to show the other five rows were missing. ``n_rows`` reports the count so
+    the render can say which arms are standing on less evidence, exactly as `_dominates` requires
+    row coverage and `render_row_matrix` prints `—`.
+
+    ``cost_per_row`` is the **median** over those rows — the same reduction
+    ``GuardrailCheck.incumbent`` reports, so the two surfaces print the same number. Parity is
+    close but not exact by construction, and the two reasons are worth knowing: the guardrail
+    balances replicate counts *pairwise between two arms* before reducing, and it reduces over the
+    rows BOTH arms scored (or the explicit ``row_ids`` the gate hands it) rather than over one
+    arm's own. An N-arm view can do neither. Where every arm scored every row with equal replicate
+    counts — the ordinary case — they agree exactly.
+
+    ``criterion_index=None`` reads each row's ``weighted_score`` (the execution track); an index
+    reads that criterion's score (the activation track). The same switch ``arm_row_scores``
+    already has, rather than a second track parameter.
+    """
+    arms = arm_row_scores(
+        run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
+    )
+    points: list[CostQualityPoint] = []
+    for arm in arms:
+        rows = load_arm_rows(run_dirs, arm.variant_id, suite_id)
+        scored_ids = sorted(arm.row_scores)
+        levels = _row_cost_levels([_row_costs(rows.get(rid, [])) for rid in scored_ids])
+        points.append(
+            CostQualityPoint(
+                variant_id=arm.variant_id,
+                score=mean(list(arm.row_scores.values())) if arm.row_scores else None,
+                cost_per_row=_median(levels),
+                n_rows=len(scored_ids),
+            )
+        )
+    return points
+
+
+def cost_quality_front(points: list[CostQualityPoint]) -> list[str]:
+    """Variant ids no other arm beats on BOTH quality and cost.
+
+    An arm is dominated when another scores at least as well AND costs at most as much, with at
+    least one of the two strict — **and was measured on at least as many rows.** Ties therefore all
+    stay, matching :func:`pareto_front`.
+
+    That last clause is the aggregate form of the coverage precondition :func:`_dominates` applies
+    to the row vector, and it is load-bearing for the same reason. Without it an arm that CRASHED
+    on five of six rows and scored 1.0 on the sixth dominates an incumbent that scored 0.9 on all
+    six at the same cost — measured, and it knocked the incumbent off the front entirely. An arm
+    standing on less evidence is not entitled to a claim about "everywhere"; it stays on the front
+    itself, where :func:`render_cost_quality` names its row count, rather than displacing an arm
+    that was actually measured.
+
+    An arm missing either coordinate is **excluded**, mirroring how ``pareto_front`` treats an arm
+    with an empty vector: a point with no cost is not a free point, it is an unmeasured one, and
+    putting it on the front would render it indistinguishable from the genuinely cheapest arm.
+    :func:`render_cost_quality` names the excluded arms rather than dropping them silently.
+
+    A **zero** cost is a real coordinate, not a missing measurement — a free model is legitimately
+    the cheapest arm there is. So the test is ``is not None``, never truthiness, the same rule
+    ``register_pricing`` states for an all-zero rate.
+
+    A **non-finite** coordinate is excluded for the opposite reason: every ``>=`` / ``<=`` against
+    NaN is False, so a NaN arm is undominatable and would render in bold as a live trade. The same
+    guard, for the same reason, as :func:`instance_best_front`.
+    """
+    # Narrowed to plain floats up front rather than suppressing the comparison's type error: the
+    # filter IS the exclusion rule, so making it produce a non-optional shape is what keeps the
+    # rule and the types saying the same thing.
+    measured = [
+        (p.variant_id, p.score, p.cost_per_row, p.n_rows)
+        for p in points
+        if p.score is not None
+        and p.cost_per_row is not None
+        and math.isfinite(p.score)
+        and math.isfinite(p.cost_per_row)
+    ]
+    return [
+        variant_id
+        for i, (variant_id, score, cost, n_rows) in enumerate(measured)
+        if not any(
+            other_rows >= n_rows
+            and other_score >= score
+            and other_cost <= cost
+            and (other_score > score or other_cost < cost)
+            for j, (_o_id, other_score, other_cost, other_rows) in enumerate(measured)
+            if i != j
+        )
+    ]
+
+
+def render_cost_quality(points: list[CostQualityPoint], front: list[str]) -> str:
+    """The quality x cost table, with the front in bold and the advisory rendered from its constant."""
+    if not points:
+        return "_No arms to compare._"
+
+    lines = [
+        "| arm | rows | mean row score | median cost/row (USD) |",
+        "|---|---|---|---|",
+    ]
+    for point in points:
+        name = f"**{point.variant_id}**" if point.variant_id in front else point.variant_id
+        lines.append(f"| {name} | {point.n_rows} | {_fmt(point.score)} | {_fmt(point.cost_per_row, '.4f')} |")
+
+    lines.append("")
+    lines.append(f"Cost/quality front (**bold**): {', '.join(front) if front else 'none'}")
+
+    # An arm scoring fewer rows than the best-covered one is standing on less evidence, and BOTH of
+    # its coordinates are averages over that smaller sample. Named for the same reason
+    # `render_row_matrix` prints `—`: a partly-crashed arm can look like a clean trade otherwise.
+    covered = max((p.n_rows for p in points), default=0)
+    thin = [f"{p.variant_id} ({p.n_rows}/{covered})" for p in points if 0 < p.n_rows < covered]
+    if thin:
+        lines.append(
+            f"Arms scored on fewer rows than the best-covered arm: {', '.join(thin)}. Both of their "
+            + "coordinates are averages over that smaller sample, so a favourable position here may "
+            + "be the missing rows rather than a real trade — check the row matrix before reading it."
+        )
+
+    excluded = [p.variant_id for p in points if p.score is None or p.cost_per_row is None]
+    if excluded:
+        lines.append(
+            f"Arms missing a coordinate and therefore NOT on the front: {', '.join(excluded)}. "
+            + "An unmeasured cost is not a free one, so they are excluded rather than placed at zero."
+        )
+    lines.append("")
+    lines.append(COST_FRONT_ADVISORY)
     return "\n".join(lines)

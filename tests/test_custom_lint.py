@@ -2702,6 +2702,33 @@ class TestPluginArtifacts:
             "bootstrap-derived and carry no figure, or the prose drifts the moment the constant moves."
         )
 
+    def test_optimize_surfaces_call_the_cost_front_advisory(self):
+        # Derived from the constant exactly as the MATERIALITY_FLOOR sensor is, so the claim cannot
+        # exist in three files at three vintages. Asserted PER SURFACE rather than against the
+        # concatenation: both carry it today, so a pair-wide check would stay green if either
+        # section were deleted whole — and the procedure half is what an agent acts on.
+        from coder_eval.optimize_gate import COST_FRONT_ADVISORY
+
+        # A distinctive substring of the constant rather than the whole sentence: the prose is
+        # hard-wrapped and pitched at a reader, so it paraphrases around this anchor.
+        anchor = "advisory"
+        assert anchor in COST_FRONT_ADVISORY, "the advisory constant no longer contains its own anchor word"
+        for name in ("reference/optimize-method.md", "skills/optimize-skill/SKILL.md"):
+            surface = _normalized(PLUGIN_ROOT / name)
+            assert anchor in surface, (
+                f"{name} no longer describes the cost/quality front as {anchor!r}. It is a REPORTED "
+                "view: promotion still requires the primary statistic to separate and every "
+                "guardrail to hold, and prose that loses that reads as a licence to promote past "
+                "the cost veto."
+            )
+            # A phrase unique to the NEW paragraphs. `"guardrail"` would have been vacuous —
+            # it appears 7x in the method file and 12x in the skill already, so deleting the whole
+            # cost-front section would have left the assertion green.
+            assert "never a promotion" in surface, (
+                f"{name} no longer distinguishes the cost VETO from the cost OBJECTIVE — without "
+                "it a reader takes the front for a second gate and promotes past the guardrail"
+            )
+
     def test_optimize_surfaces_quote_no_resample_count(self):
         # Same rule as the tolerance above, one constant along. GATE_RESAMPLES is DERIVED from
         # GATE_P_PRECISION / GATE_MAX_FAMILY / DEFAULT_ALPHA, so a figure typed into the prose is a
