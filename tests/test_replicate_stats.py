@@ -1,10 +1,13 @@
 """Unit tests for replicate statistics helpers in reports_stats."""
 
+import random
+
 import pytest
 
 from coder_eval.reports_stats import (
     BOOTSTRAP_RESAMPLES,
     bootstrap_mean_ci,
+    bootstrap_p_floor,
     cluster_bootstrap_diff_ci,
     cohens_d,
     holm_rejections,
@@ -286,14 +289,83 @@ class TestClusterBootstrapDiffCi:
         b = [[float(i) * 0.5] for i in range(10)]
         assert cluster_bootstrap_diff_ci(a, b, _mean, seed=7) == cluster_bootstrap_diff_ci(a, b, _mean, seed=7)
 
-    def test_p_value_is_clamped_to_the_resample_resolution(self):
-        # Perfectly separated arms: no draw can produce a diff <= 0, so the raw p is 0 and
-        # must come back bounded by the resolution rather than reported as zero.
+    def test_p_value_uses_the_phipson_smyth_estimator(self):
+        # Perfectly separated arms: no draw can produce a diff <= 0, so the naive count is 0.
+        # The unbiased estimator adds the observed statistic to both numerator and denominator,
+        # so the two-sided p comes back at 2/(m+1) — STRICTLY LARGER than the 1/m the old clamp
+        # reported. That understatement is the defect, so the direction is part of the assertion.
         a = [[1.0] for _ in range(10)]
         b = [[0.0] for _ in range(10)]
         result = cluster_bootstrap_diff_ci(a, b, _mean)
         assert result is not None
-        assert result[3] == 1.0 / BOOTSTRAP_RESAMPLES
+        assert result[3] == pytest.approx(2.0 / (BOOTSTRAP_RESAMPLES + 1))
+        assert result[3] > 1.0 / BOOTSTRAP_RESAMPLES
+
+    def test_p_value_denominator_is_the_draw_count_plus_one(self):
+        """The one test a naive count wearing a (b+1)/(m+1)-shaped FLOOR would fail.
+
+        Every other test here uses a degenerate fixture — no null draws, or nothing but null
+        draws — and on those `max(2/(m+1), 2*b/m)` is indistinguishable from the real estimator.
+        This fixture has an intermediate tail count (b_le = 185 of 2,000 draws), where the two
+        forms diverge in the fourth digit: 2*186/2001 = 0.185907 against 2*185/2000 = 0.185.
+        Both halves are asserted — the exact value, and the structural property that the
+        denominator is `m + 1` rather than `m`.
+        """
+        rng = random.Random(11)
+        a = [[rng.gauss(0.55, 0.3)] for _ in range(20)]
+        b = [[rng.gauss(0.45, 0.3)] for _ in range(20)]
+        result = cluster_bootstrap_diff_ci(a, b, _mean)
+        assert result is not None
+        p = result[3]
+
+        b_le = 185  # the null-draw count this seed produces; the estimator adds one to it
+        assert p == pytest.approx(2.0 * (b_le + 1) / (BOOTSTRAP_RESAMPLES + 1))
+        assert p != pytest.approx(2.0 * b_le / BOOTSTRAP_RESAMPLES), "a naive b/m count, floored, would land here"
+        # p is an exact multiple of 2/(m+1) and NOT of 2/m — the denominator, pinned structurally.
+        assert (p * (BOOTSTRAP_RESAMPLES + 1) / 2.0) == pytest.approx(round(p * (BOOTSTRAP_RESAMPLES + 1) / 2.0))
+        assert (p * BOOTSTRAP_RESAMPLES / 2.0) != pytest.approx(round(p * BOOTSTRAP_RESAMPLES / 2.0))
+
+    def test_identical_arms_report_p_one(self):
+        # Every diff is exactly 0.0, so it counts in BOTH tails: 2*(m+1)/(m+1) = 2.0, which the
+        # min(1.0, ...) clamp brings back to 1.0. The clamp is load-bearing well beyond this
+        # fixture: an exact even split with no ties at all gives 2*(m/2+1)/(m+1) > 1 too, so it
+        # binds on ordinary near-null data and must not be deleted once "the tie case is handled".
+        clusters = [[float(i)] for i in range(6)]
+        result = cluster_bootstrap_diff_ci(clusters, [list(c) for c in clusters], _mean)
+        assert result is not None
+        assert result[3] == 1.0
+
+    def test_p_value_never_zero_at_a_single_resample(self):
+        a = [[1.0] for _ in range(10)]
+        b = [[0.0] for _ in range(10)]
+        result = cluster_bootstrap_diff_ci(a, b, _mean, n_resamples=1)
+        assert result is not None
+        assert result[3] == 1.0
+
+    def test_p_value_is_monotone_in_the_null_count(self):
+        # Two fixtures whose null-draw counts differ: the tied arms produce a null on every draw,
+        # the separated arms on none. A p that did not move with the count would mean the `min`
+        # picked the wrong tail.
+        separated = cluster_bootstrap_diff_ci([[1.0] for _ in range(10)], [[0.0] for _ in range(10)], _mean)
+        tied = cluster_bootstrap_diff_ci([[1.0] for _ in range(10)], [[1.0] for _ in range(10)], _mean)
+        assert separated is not None and tied is not None
+        assert tied[3] > separated[3]
+
+    @pytest.mark.parametrize("n_resamples", [0, -1, -5])
+    def test_bootstrap_p_floor_refuses_a_draw_count_the_estimator_would_reject(self, n_resamples):
+        # 2/(0+1) = 2.0 is a "p floor" above 1.0, which would make every p read as AT the floor.
+        # The two bootstraps refuse the same input for the same reason; so does this.
+        with pytest.raises(ValueError, match="n_resamples must be"):
+            bootstrap_p_floor(n_resamples)
+
+    @pytest.mark.parametrize("n_resamples", [1, 7, 500, BOOTSTRAP_RESAMPLES])
+    def test_bootstrap_p_floor_matches_what_the_estimator_can_actually_return(self, n_resamples):
+        # What makes the exported helper trustworthy enough for the gate to decide against.
+        a = [[1.0] for _ in range(10)]
+        b = [[0.0] for _ in range(10)]
+        result = cluster_bootstrap_diff_ci(a, b, _mean, n_resamples=n_resamples)
+        assert result is not None
+        assert result[3] == pytest.approx(bootstrap_p_floor(n_resamples))
 
     def test_unequal_within_cluster_counts_are_legal(self):
         # A row that errored on one invocation contributes fewer observations, not an error.

@@ -229,9 +229,21 @@ def cluster_bootstrap_diff_ci[T](
     produced nothing for a row simply contributes nothing to that arm's pool. Only the
     *number* of clusters has to match.
 
-    ``p_value`` is the standard two-sided bootstrap p, ``2 * min(P(diff <= 0), P(diff >= 0))``,
-    clamped to ``[1 / n_resamples, 1.0]`` — a p of exactly 0 is bounded below by the resample
-    resolution, not established as zero.
+    ``p_value`` applies Phipson & Smyth's ``(b + 1) / (m + 1)`` correction (arXiv 1603.05766) to
+    each tail count rather than the naive ``b / m``, so a p can never read as zero and the floor
+    is a property of the estimator instead of a clamp bolted on after it — see
+    :func:`bootstrap_p_floor`. The naive count understates by about ``1/m``, and it understates
+    most exactly where the decision is tightest. Scoped claim, deliberately: Phipson & Smyth prove
+    *unbiasedness* for a PERMUTATION p, whose draws come from the null; these draws come from the
+    bootstrap distribution, which is centred on the observed difference. So this is the same
+    correction applied to a bootstrap tail count — sound and conservative — not a proof of
+    unbiasedness here.
+
+    The enclosing ``min(1.0, ...)`` is load-bearing and binds on ordinary data, not just on
+    identical arms: a draw whose diff is exactly 0.0 counts in BOTH tails, so tied arms raise the
+    raw value to 2.0 — but even with no ties at all an exact even split gives
+    ``2*(m/2 + 1)/(m + 1) > 1``. A p at the floor is a resolution statement — the smallest value
+    this many draws can express — not a measurement of zero.
 
     Same contract as :func:`bootstrap_mean_ci`: ``ValueError`` for a ``confidence`` outside
     (0, 1) or a non-positive ``n_resamples``, and ``random.Random(seed)`` for determinism.
@@ -265,10 +277,31 @@ def cluster_bootstrap_diff_ci[T](
     ci_low = diffs[int(alpha * n_resamples)]
     ci_high = diffs[int((1.0 - alpha) * n_resamples) - 1]
 
-    p_le = sum(1 for d in diffs if d <= 0.0) / n_resamples
-    p_ge = sum(1 for d in diffs if d >= 0.0) / n_resamples
-    p_value = min(1.0, max(1.0 / n_resamples, 2.0 * min(p_le, p_ge)))
+    # Phipson & Smyth's (b+1)/(m+1) correction (arXiv 1603.05766): a resampled p must never read
+    # as zero, and a naive count b/m understates it by about 1/m. The +1/+1 floors the two-sided
+    # p at bootstrap_p_floor(m) without a separate clamp — the clamp this replaces was the right
+    # instinct with the wrong formula, and it floored HALF as high.
+    # One division rather than two: min((b+1)/(m+1)) == min(b+1)/(m+1).
+    b_le = sum(1 for d in diffs if d <= 0.0)
+    b_ge = sum(1 for d in diffs if d >= 0.0)
+    p_value = min(1.0, 2.0 * min(b_le + 1, b_ge + 1) / (n_resamples + 1))
     return (point_diff, ci_low, ci_high, p_value)
+
+
+def bootstrap_p_floor(n_resamples: int) -> float:
+    """The smallest two-sided p :func:`cluster_bootstrap_diff_ci` can return at this draw count.
+
+    A property of the ``(b+1)/(m+1)`` estimator, so it lives beside it: a consumer that re-derived
+    it would be a second declaration that goes stale the moment the estimator changes — which is
+    exactly what the ``1/n_resamples`` figure scattered through the gate became.
+
+    Raises ``ValueError`` below one draw, matching the two bootstraps above rather than returning
+    the ``2.0`` the arithmetic would give at zero — a "p floor" above 1.0 would make every p read
+    as at the floor, which is precisely the silent wrong answer those two refuse.
+    """
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples must be >= 1, got {n_resamples!r}")
+    return 2.0 / (n_resamples + 1)
 
 
 def holm_rejections(p_values: list[float], alpha: float = 0.05) -> list[bool]:
