@@ -13,7 +13,9 @@ tags:
 
 initial_prompt: |
   Create 12 files in the current directory named step-01.txt through step-12.txt.
-  Each file must contain its own name and nothing else.
+  step-01.txt must contain just its own name. Every later file must contain the
+  contents of the PREVIOUS file, then its own name on a new line — so you have to
+  read step-N before you can write step-N+1.
 
   Create them ONE AT A TIME. Run a separate shell command for each file. Do not
   use a loop, do not combine several files into one command, and do not batch
@@ -35,4 +37,15 @@ success_criteria:
   - type: file_exists
     path: "step-01.txt"
     description: "First file was created before the cap fired"
+    weight: 1.0
+
+  # And this is the half that actually tests the cap. Without it the fixture
+  # passes on a harness that ignores max_turns entirely — the exact bug it exists
+  # to catch — because step-01.txt gets written either way. The chained contents
+  # in the prompt make each step depend on reading the one before it, so no amount
+  # of batching within a single agent-loop turn can reach step 12 inside a cap of
+  # 4; a run that produced the last file therefore ran uncapped.
+  - type: run_command
+    command: "test ! -f step-12.txt"
+    description: "The cap bound the run: the agent never reached the last file"
     weight: 1.0
