@@ -1798,10 +1798,36 @@ class TestCostQualityFront:
         # as a live trade. Same guard, same reason, as instance_best_front.
         nan = float("nan")
         points = [
-            CostQualityPoint(variant_id="good", score=1.0, cost_per_row=0.1, n_rows=6),
-            CostQualityPoint(variant_id="broken", score=0.5, cost_per_row=nan, n_rows=6),
+            CostQualityPoint(variant_id="good", score=1.0, cost_per_row=0.1, row_ids=frozenset("abcdef")),
+            CostQualityPoint(variant_id="broken", score=0.5, cost_per_row=nan, row_ids=frozenset("abcdef")),
         ]
         assert cost_quality_front(points) == ["good"]
+
+    def test_coverage_is_a_set_test_not_a_count(self) -> None:
+        """Two arms on disjoint row sets of equal size must not dominate each other.
+
+        A count-based precondition (`other_rows >= n_rows`) reads as satisfied in BOTH directions
+        here, so whichever arm is better on the two aggregate numbers takes the front — while
+        neither has a single row of evidence about where the other was measured. `_dominates`
+        gates on set coverage for exactly this reason, and the aggregate rule has to agree with it.
+        """
+        disjoint = [
+            CostQualityPoint(variant_id="rows-abc", score=0.9, cost_per_row=1.0, row_ids=frozenset("abc")),
+            CostQualityPoint(variant_id="rows-xyz", score=0.5, cost_per_row=2.0, row_ids=frozenset("xyz")),
+        ]
+        assert cost_quality_front(disjoint) == ["rows-abc", "rows-xyz"]
+
+        # Same numbers, but now the better arm COVERS the other's rows — it may dominate.
+        covering = [
+            CostQualityPoint(variant_id="rows-abcxyz", score=0.9, cost_per_row=1.0, row_ids=frozenset("abcxyz")),
+            CostQualityPoint(variant_id="rows-xyz", score=0.5, cost_per_row=2.0, row_ids=frozenset("xyz")),
+        ]
+        assert cost_quality_front(covering) == ["rows-abcxyz"]
+
+    def test_the_point_reports_the_rows_it_was_measured_on(self, tmp_path: Path) -> None:
+        points = self._points(tmp_path, {"only": {f"r{i}": (0.5, 1.0) for i in range(4)}})
+        assert points[0].row_ids == frozenset({"r0", "r1", "r2", "r3"})
+        assert points[0].n_rows == 4  # the derived count the render shows
 
     def test_render_renders_the_advisory_constant(self, tmp_path: Path) -> None:
         # The sensor for the "advisory only, the gate is unchanged" decision. Verbatim, so the

@@ -159,8 +159,8 @@ nothing is being gated on.
 
 **Two fronts are computed over the row matrix, and the project keeps both because they answer
 different questions.** The **coverage** front is the arms no other arm dominates on the row vector
-— the right rule for *discarding*, since an arm off it was beaten on every row it was measured on
-and knows nothing the others do not. The **instance-best** front is the arms achieving the highest
+— the right rule for *discarding*, since an arm off it was matched or beaten on every row it was
+measured on (and beaten on at least one), so it knows nothing the others do not. The **instance-best** front is the arms achieving the highest
 score on at least one row — GEPA's definition, and the right rule for *merging*, because it
 deliberately retains an arm that owns a single row while being dominated overall, which is exactly
 the ingredient a merge is built from and exactly what a coverage rule drops.

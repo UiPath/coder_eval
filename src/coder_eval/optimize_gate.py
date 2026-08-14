@@ -1391,7 +1391,8 @@ def instance_best_front(arms: list[ArmRowScores]) -> list[str]:
 
     A DIFFERENT set from :func:`pareto_front`, and the difference is the point. Ours is
     "not dominated on the row vector", which is the right rule for **discarding**: an arm off it
-    was beaten on every row it was measured on. GEPA's is the right rule for **merging**, because
+    was matched or beaten on every row it was measured on. GEPA's is the right rule for **merging**,
+    because
     it deliberately retains an arm that wins exactly one row — precisely the raw material a merge
     candidate is built from, and precisely what a coverage rule can drop.
 
@@ -1520,7 +1521,15 @@ class CostQualityPoint(NamedTuple):
     variant_id: str
     score: float | None  # mean of the arm's per-row scores; None when it scored nothing
     cost_per_row: float | None  # median of the arm's per-row mean cost; None when nothing recorded
-    n_rows: int = 0  # rows BOTH coordinates are reduced over — an arm with fewer is on less evidence
+    # The rows BOTH coordinates are reduced over — the identities, not just how many. `_dominates`
+    # gates domination on set COVERAGE, and a count cannot express that: two arms measured on four
+    # rows each, disjoint, would each look entitled to dominate the other.
+    row_ids: frozenset[str] = frozenset()
+
+    @property
+    def n_rows(self) -> int:
+        """How many rows this arm was measured on — what the render shows."""
+        return len(self.row_ids)
 
 
 def cost_quality_points(
@@ -1571,7 +1580,7 @@ def cost_quality_points(
                 variant_id=arm.variant_id,
                 score=mean(list(arm.row_scores.values())) if arm.row_scores else None,
                 cost_per_row=_median(levels),
-                n_rows=len(scored_ids),
+                row_ids=frozenset(scored_ids),
             )
         )
     return points
@@ -1581,16 +1590,21 @@ def cost_quality_front(points: list[CostQualityPoint]) -> list[str]:
     """Variant ids no other arm beats on BOTH quality and cost.
 
     An arm is dominated when another scores at least as well AND costs at most as much, with at
-    least one of the two strict — **and was measured on at least as many rows.** Ties therefore all
+    least one of the two strict — **and covers every row it was measured on.** Ties therefore all
     stay, matching :func:`pareto_front`.
 
-    That last clause is the aggregate form of the coverage precondition :func:`_dominates` applies
-    to the row vector, and it is load-bearing for the same reason. Without it an arm that CRASHED
-    on five of six rows and scored 1.0 on the sixth dominates an incumbent that scored 0.9 on all
-    six at the same cost — measured, and it knocked the incumbent off the front entirely. An arm
-    standing on less evidence is not entitled to a claim about "everywhere"; it stays on the front
-    itself, where :func:`render_cost_quality` names its row count, rather than displacing an arm
-    that was actually measured.
+    That last clause is the same coverage precondition :func:`_dominates` applies to the row
+    vector, and it is load-bearing for the same reason. Without it an arm that CRASHED on five of
+    six rows and scored 1.0 on the sixth dominates an incumbent that scored 0.9 on all six at the
+    same cost — measured, and it knocked the incumbent off the front entirely. An arm standing on
+    less evidence is not entitled to a claim about "everywhere"; it stays on the front itself,
+    where :func:`render_cost_quality` names its row count, rather than displacing an arm that was
+    actually measured.
+
+    Coverage is a SET test, not a count. Two arms measured on four rows each, on disjoint rows,
+    each have "at least as many" as the other and would each be entitled to dominate — while
+    neither has any evidence about where the other was measured. Comparing the row ids is what
+    makes the aggregate rule agree with the row-vector one it is modelled on.
 
     An arm missing either coordinate is **excluded**, mirroring how ``pareto_front`` treats an arm
     with an empty vector: a point with no cost is not a free point, it is an unmeasured one, and
@@ -1609,7 +1623,7 @@ def cost_quality_front(points: list[CostQualityPoint]) -> list[str]:
     # filter IS the exclusion rule, so making it produce a non-optional shape is what keeps the
     # rule and the types saying the same thing.
     measured = [
-        (p.variant_id, p.score, p.cost_per_row, p.n_rows)
+        (p.variant_id, p.score, p.cost_per_row, p.row_ids)
         for p in points
         if p.score is not None
         and p.cost_per_row is not None
@@ -1618,13 +1632,13 @@ def cost_quality_front(points: list[CostQualityPoint]) -> list[str]:
     ]
     return [
         variant_id
-        for i, (variant_id, score, cost, n_rows) in enumerate(measured)
+        for i, (variant_id, score, cost, row_ids) in enumerate(measured)
         if not any(
-            other_rows >= n_rows
+            row_ids <= other_ids
             and other_score >= score
             and other_cost <= cost
             and (other_score > score or other_cost < cost)
-            for j, (_o_id, other_score, other_cost, other_rows) in enumerate(measured)
+            for j, (_o_id, other_score, other_cost, other_ids) in enumerate(measured)
             if i != j
         )
     ]

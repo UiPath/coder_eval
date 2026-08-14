@@ -738,7 +738,10 @@ It measures `weighted_score`, not `f1.yes`, because that is what this track's ga
 precondition failed, so read the warning rather than treating `None` as a floor of zero.
 
 **The fallback, priced.** A user who skipped the control arm has no run directory with two or more
-replicates per row, so the floor costs an extra `--repeats 2` baseline — `+M_train` runs. That is
+replicates per row, so the floor costs one more single-replicate baseline — `+M_train` runs, not
+`2 × M_train`, because `measure_execution_noise_floor` pools replicates **across** the run
+directories you hand it before splitting: a second baseline gives every row its second replicate,
+which is all the null split needs. That is
 one more reason to run the control arm first.
 
 ## Step 9 — Materialize as an experiment
@@ -913,15 +916,17 @@ print(render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_fr
 
 The **Pareto front** is the arms nothing else beat everywhere. Read it as the shortlist rather
 than the ranking: an arm on the front was not beaten everywhere by any other arm, and an arm off it
-was beaten on every row it was measured on. **Being on it does not mean the arm won anything** —
+was matched or beaten on every row it was measured on, and beaten on at least one. (Matched-or-
+beaten, not beaten outright — an arm can be dropped while tying on all but a single row.) **Being
+on it does not mean the arm won anything** —
 that is the instance-best front below, and conflating the two is how a merge gets built from the
 wrong set. Rows shown as `—` are missing from that arm and are excluded from
 the comparison rather than counted as zero, and a row **no** arm scores above zero is flagged —
 that is usually a broken row or an unmet fixture precondition, not four bad candidates.
 
 **Two fronts print, and they answer different questions.** The Pareto (coverage) front is the set
-to **discard from**: an arm off it was beaten on every row it was measured on, so there is nothing
-it uniquely knows. The **instance-best** front — GEPA's definition, the arms achieving the highest
+to **discard from**: an arm off it was matched or beaten on every row it was measured on, so there
+is nothing it uniquely knows. The **instance-best** front — GEPA's definition, the arms achieving the highest
 score on at least one row — is the set to **merge from**, because it deliberately keeps an arm that
 wins exactly one row, which is precisely the raw material a merge candidate is built from and
 precisely what a coverage rule drops.
