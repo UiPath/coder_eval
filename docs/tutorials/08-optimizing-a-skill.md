@@ -29,8 +29,8 @@ it actually produced — including the part where the first attempt measured not
 test rows, baseline it, read the confusion matrix, and decide whether to spend anything.
 For `lint-tasks` the answer turns out to be no — about 20 agent runs settle it. The suite
 then points at a sibling that *does* have headroom, `analyze`, and the full three-stage A/B
-runs against that: roughly 350 further runs, ending in a promotion that survives the
-test.
+runs against that: **407 further runs** — the sum of the per-stage counts in the headings
+below, three Stage C attempts included — ending in a promotion that survives the test.
 
 All of it on Sonnet. Never Opus for a suite this size.
 
@@ -68,7 +68,7 @@ Do not hand-author it. Run the sibling skill:
 /coder-eval:check-skill lint-tasks
 ```
 
-That produces a task YAML plus a JSONL row file. The suite used here has **21 rows**,
+That produces a task YAML plus a JSONL row file. The committed suite has **28 rows**,
 counted by `expected_skill` — the field that actually decides a row's polarity:
 
 | Kind | `expected_skill` | Total | train | test |
@@ -76,7 +76,15 @@ counted by `expected_skill` — the field that actually decides a row's polarity
 | Positive | `lint-tasks` | 8 | 5 | 3 |
 | Distractor | `""` | 9 | 6 | 3 |
 | Sibling-owned | `task` | 3 | 2 | 1 |
-| Sibling-owned | `analyze` | 1 | 1 | 0 |
+| Sibling-owned | `analyze` | 8 | 4 | 4 |
+
+> **The table describes the file as committed; Part 1's runs did not use it.** Part 1 was
+> run against an earlier 14-train-row revision, and the `analyze` rows were added later, in
+> Part 2, before the file was committed. So re-running Step 5 today gives **17 train rows**
+> and a different `analyze` baseline than the one printed below. Every result block on this
+> page names the revision it was computed at, for exactly this reason — and that is also
+> what reconciles Step 5's `analyze` recall of 0.000 (one row, unlucky) with Step 6's two
+> `analyze` train rows sitting at a stable 0.500.
 
 **Label sibling rows by what should *fire*, not by whose territory it is.** Two rows here
 ask for project setup — work that belongs to `init`, which sets
@@ -217,7 +225,7 @@ nothing.
 error naming the splits that exist, so it cannot pass silently — but a *partial* row loss still
 can, and only the count shows it.
 
-Result, 14 train rows:
+Result (**14 train rows — the revision these runs used**; the committed file has 17):
 
 | Skill | recall.yes | precision.yes | f1.yes |
 | --- | --- | --- | --- |
@@ -237,13 +245,15 @@ Python code"* — the two probes designed to catch it over-claiming.
 promotion gate — `min(candidate F1) > max(incumbent F1)` — cannot be satisfied by any
 candidate. Running the three A/B stages anyway, on this suite with three candidates and two
 survivors, would have cost `(3+1)×14 + 3×(2+1)×14 + 6×7` = **224 further agent runs** to
-chase a number that is not reachable.
+chase a number that is not reachable. (Arithmetic at the 14-train / 7-test revision these
+runs used — every stage count on this page is computed at the revision that stage actually
+ran against, which is why they do not all divide the same way.)
 
 The first finding is therefore about the change that prompted this: **the 66-character trim
 was safe.** That is now measured rather than assumed.
 
 The second finding is that **a ceiling result is as much a statement about the suite as about
-the description.** Fourteen well-separated rows could not distinguish a good description from
+the description.** Those fourteen well-separated rows could not distinguish a good description from
 a better one. If you need to tell those apart, the fix is more rows and harder ones — not a
 looser gate.
 
@@ -280,7 +290,9 @@ ranges.** Had this been a candidate description rather than an incumbent's quirk
 agreeing runs would have "proved" an improvement worth shipping. Report what replicates;
 treat anything else as a hypothesis.
 
-Note what the same three runs said about `analyze`:
+Note what the same three runs said about `analyze` (still the 14-train-row revision — two
+`analyze` rows then, four in the committed file, which is why re-running today gives a
+different baseline):
 
 ```
 an-1     expected=analyze   ['analyze', 'analyze', 'analyze']
@@ -442,10 +454,11 @@ precision.
 One incumbent invocation dropped a row and was excluded from the gate rather than averaged
 in. A gate computed over a shifting denominator is not a gate.
 
-#### Stage C, and a test split that could not answer the question
+#### Stage C, and a test split that could not answer the question (54 runs)
 
 The winner went to test as a **two-variant** experiment at `--repeats 3`, which is the one
-place `--repeats` is correct:
+place `--repeats` is correct. This attempt ran against the **9-row** test half — before the
+two fresh rows below were written — so 2 arms × 9 rows × 3 replicates = 54 runs:
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
@@ -476,7 +489,7 @@ exercise the failure mode, at promotion time, when you know what needs confirmin
 Write them as requests a real user would send, and commit to whatever they say — rows
 authored to flatter a candidate confirm nothing.
 
-#### And then the infrastructure lied to us
+#### And then the infrastructure lied to us (66 runs)
 
 The re-run returned a result that looked publishable and was worthless:
 
@@ -484,7 +497,10 @@ The re-run returned a result that looked publishable and was worthless:
 **Paired mean diff (incumbent - a-regression)**: +0.162 [95% CI +0.011, +0.312], d = 0.72, p = 0.038
 ```
 
-Read the sign: that says the **incumbent** was better, significantly. It is an artifact.
+Read the sign: that says the **incumbent** was better, significantly. (The header subtracts
+in variant declaration order, not better-minus-worse — with `incumbent` declared first, a
+candidate win reads negative. `/coder-eval:optimize-skill`'s Stage B and Stage C state the
+full rule; never resolve a direction from memory.) It is an artifact.
 `completion_rate` gives it away — `a-regression` lost 11 of 33 rows, the incumbent 6:
 
 ```
@@ -505,7 +521,7 @@ computed over an eroded, asymmetric sample is not evidence of anything.** This i
 `completion_rate` is a gateable metric, and why the first thing to read in a rollup is the
 denominator, not the effect. The run was discarded, not interpreted.
 
-#### Stage C, run properly
+#### Stage C, run properly (66 runs)
 
 With budget restored, the same experiment ran again over the 11-row test. Erosion this
 time was one row against `a-regression` and none against the incumbent — near-symmetric, and

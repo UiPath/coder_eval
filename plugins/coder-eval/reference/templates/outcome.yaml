@@ -12,6 +12,13 @@
 # Replace every `my-skill` with the bare name of the skill under test (the directory name
 # of its SKILL.md), every `/my-plugin:my-skill` with its real slash command, and rewrite
 # outcome-rows.jsonl as real scenarios. Every REPLACE: marker is a placeholder.
+#
+# SIZING: the four rows in outcome-rows.jsonl are the illustrative MINIMUM, not a target.
+# A split halves each side, so four rows leave a two-row test half — exactly the token test
+# `/coder-eval:optimize-skill` warns against, which confirms nothing while reading as if it
+# did. Write as many real scenarios as the skill has distinct jobs before running a stage.
+# (The disclaimer lives here rather than beside the rows because a JSONL cannot carry a
+# comment — the same reason activation.yaml carries its twin of this note.)
 task_id: "my-skill-outcome"
 description: "Given that `my-skill` fired, does the agent produce the right outcome?"
 tags: [outcome]

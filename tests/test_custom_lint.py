@@ -1720,6 +1720,30 @@ class TestPluginArtifacts:
             "asserts only engagement is an activation suite with a bigger bill"
         )
 
+        # Every row must supply every ${row.*} field the criteria reference. Criteria are
+        # copied to EVERY row, so a field only some rows carry raises KeyError mid-expansion
+        # — a failure that costs nothing here and a whole stage's setup at run time. This is
+        # also what makes a second `includes` slot safe to add: it is only optional-looking.
+        import json
+        import re
+
+        referenced = set(
+            re.findall(
+                r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}",
+                (self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml").read_text(),
+            )
+        )
+        rows = [
+            json.loads(line)
+            for line in (sample.parent / "ci-outcome-rows.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        for row in rows:
+            missing = referenced - set(row)
+            assert not missing, (
+                f"row {row.get('id')!r} is missing {sorted(missing)}, referenced as ${{row.*}} in the suite"
+            )
+
     def test_checked_in_outcome_fixture_lets_the_skill_act(self):
         # The fixture is load-bearing, and every way it can be wrong is SILENT at full cost.
         # `ci` stops outright on a repo with no `.github/`, so a fixture missing it scores
@@ -2420,6 +2444,53 @@ class TestPluginArtifacts:
                 "user of an unnamed skill is told nothing about needing the CLI and meets a "
                 "bare `command not found` mid-task."
             )
+
+    def test_tutorial_08_row_table_matches_the_committed_jsonl(self):
+        # The page's Step-1 table claimed 21 rows against a file holding 28, with the
+        # `analyze` row count off by seven — added in Part 2 and never back-propagated. A
+        # reader sizing their own suite from that table sizes it from a number that has not
+        # been true for two revisions, and nothing in the build noticed.
+        #
+        # Derived, not duplicated: the JSONL is the source and the table is the surface, so
+        # this compares the two rather than pinning either.
+        import collections
+        import json
+        import re
+
+        page = (self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md").read_text(encoding="utf-8")
+        rows_file = self.REPO_ROOT / "tasks" / "skills" / "lint-tasks-activation-rows.jsonl"
+        rows = [json.loads(ln) for ln in rows_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+        actual = collections.Counter(r["expected_skill"] for r in rows)
+        by_split = collections.Counter((r["expected_skill"], r.get("split")) for r in rows)
+
+        # | Kind | `expected_skill` | Total | train | test |
+        table = re.findall(
+            r"^\|\s*(?:Positive|Distractor|Sibling-owned)\s*\|\s*`([^`]*)`\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|",
+            page,
+            re.M,
+        )
+        assert table, "tutorial 08's Step-1 row table is gone or reshaped; this sensor reads it by column"
+
+        stated_total = 0
+        for raw_skill, total, train, test in table:
+            skill = "" if raw_skill == '""' else raw_skill
+            stated_total += int(total)
+            assert (int(total), int(train), int(test)) == (
+                actual[skill],
+                by_split[(skill, "train")],
+                by_split[(skill, "test")],
+            ), (
+                f"tutorial 08's table says {skill!r} has {total} rows ({train} train / {test} test); "
+                f"{rows_file.name} has {actual[skill]} ({by_split[(skill, 'train')]}/{by_split[(skill, 'test')]}). "
+                "Recompute the table from the file — a reader sizes their own suite from it."
+            )
+        assert stated_total == len(rows), (
+            f"tutorial 08's table rows sum to {stated_total}; the committed JSONL has {len(rows)} rows"
+        )
+        assert f"**{len(rows)} rows**" in page, (
+            f"tutorial 08 no longer states the committed row count as **{len(rows)} rows** in prose"
+        )
 
     def test_tutorial_08_shows_stage_b_as_three_separate_invocations(self):
         # The single most dangerous edit in this whole area. Suite rollups are keyed on

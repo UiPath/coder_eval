@@ -271,6 +271,12 @@ Five requirements specific to this track:
   everything but the text under test. Verified: with the flag removed the call succeeds and
   the body loads; with it present, 24 of 24 rows failed silently.
 
+  **Say what this costs in external validity.** Results therefore apply to the
+  flag-removed configuration. If you ship with the flag kept, the body only ever loads via
+  explicit `/name` invocation, so re-check that path before promoting. The removal is still
+  the right experimental design — it is the only way to hold engagement constant across
+  arms — but the reader of your ledger must know which configuration was measured.
+
   Do **not** try to route around it by telling the agent to locate and read the `SKILL.md`
   itself. It is a reasonable idea — a *successful* file read counts as engagement and does
   load the body — but the plugin sits at a host path the sandbox cannot discover. Tested: 0
@@ -769,9 +775,16 @@ and every subsequent number in the ledger corroborates it.
 Promote only when all of these hold:
 
 - **The paired mean difference favours the candidate and its 95% CI excludes zero.**
-- **No criterion regressed.** Compare per-criterion aggregates, not just the suite score: a
-  candidate that lifts the average while breaking a row that used to pass has traded, and on
-  a body edit that trade is usually the thing you least want.
+- **The PREDECLARED primary and its guardrails hold.** Before Stage B runs, name **one**
+  primary criterion (or the suite score) plus the specific guardrail criteria allowed to veto
+  a win, and record them in the ledger — before the numbers exist, which is what makes it a
+  predeclaration rather than a claim. Then evaluate only those. The reason to compare
+  per-criterion aggregates at all is unchanged: a candidate that lifts the average while
+  breaking a row that used to pass has traded, and on a body edit that trade is usually the
+  thing you least want. But scanning *every* per-criterion aggregate post hoc for a
+  regression is uncorrected multiple testing in the rejection direction — with enough
+  criteria something always looks worse, so noisy criteria veto real wins and *which*
+  criterion "regressed" is unstable from round to round.
 - **`completion_rate` is equal across arms**, or the difference favours the incumbent. An
   eroded, asymmetric sample produces confident nonsense — a *p*-value computed over rows that
   vanished from one arm is not evidence.
@@ -814,10 +827,14 @@ rather than implying a stronger result than was obtained.
 ## Step 11 — Ledger
 
 Append to `.optimize-skill/<skill>/history.json`: round, **track**, candidate slug,
-hypothesis, the train numbers (per-invocation F1 on activation; the paired block on
-execution), the test numbers, per-criterion or sibling movement, `completion_rate` per
-arm, verdict, and the run ids. Append-only — never rewrite an earlier round. An existing
+hypothesis, **the predeclared primary criterion and its guardrails** (written before the
+stage runs — see Stage B), the train numbers (per-invocation F1 on activation; the paired
+block on execution), the test numbers, per-criterion or sibling movement, `completion_rate`
+per arm, verdict, and the run ids. Append-only — never rewrite an earlier round. An existing
 directory means read `history.json` first and continue the numbering.
+
+Writing the primary down *before* the numbers exist is what separates a predeclaration from
+a rationalization, and it is the only part of this ledger that has to be recorded early.
 
 Recording the track is what keeps the history readable: two rounds with the same skill name
 and incomparable metrics are otherwise indistinguishable a month later.
