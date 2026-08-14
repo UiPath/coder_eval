@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import yaml
@@ -14,6 +14,7 @@ from coder_eval.models import (
     AgentKind,
     ClassificationCriterionResult,
     ClassificationMatchCriterion,
+    CriterionAggregate,
     CriterionResult,
     EvaluationResult,
     FinalStatus,
@@ -579,3 +580,133 @@ def test_example_yaml_loads_via_pydantic() -> None:
     assert task.task_id == "sentiment-classification"
     assert task.dataset is not None
     assert task.dataset.paths == ["datasets/sentiment.jsonl"]
+
+
+class TestClassificationMetricsExtraction:
+    """`classification_metrics()` is the single F1 implementation (CE037), and extracting it
+    out of `overlay_classification_metrics` must not have moved a single number."""
+
+    # Captured by running the PRE-extraction implementation against the fixture below. This
+    # is the behaviour-preservation guarantee: every dataset-backed classification suite's
+    # aggregate() and suite_thresholds gating flows through this code.
+    _EXPECTED_METRICS: ClassVar[dict[str, float]] = {
+        "accuracy": 0.5,
+        "count": 7.0,
+        "f1.maybe": 0.0,
+        "f1.no": 0.4,
+        "f1.yes": 0.6666666666666666,
+        "macro_f1": 0.35555555555555557,
+        "mean": 0.5,
+        "micro_f1": 0.5,
+        "precision.maybe": 0.0,
+        "precision.no": 0.3333333333333333,
+        "precision.yes": 0.6666666666666666,
+        "recall.maybe": 0.0,
+        "recall.no": 0.5,
+        "recall.yes": 0.6666666666666666,
+        "weighted_f1": 0.4666666666666666,
+    }
+    _EXPECTED_DETAILS: ClassVar[dict[str, Any]] = {
+        "note": "base",
+        "labels": ["maybe", "no", "yes"],
+        "per_label": [
+            {"label": "maybe", "precision": 0.0, "recall": 0.0, "f1": 0.0, "support": 1},
+            {"label": "no", "precision": 0.3333333333333333, "recall": 0.5, "f1": 0.4, "support": 2},
+            {
+                "label": "yes",
+                "precision": 0.6666666666666666,
+                "recall": 0.6666666666666666,
+                "f1": 0.6666666666666666,
+                "support": 3,
+            },
+        ],
+        "confusion": [
+            {"expected": "maybe", "observed": "no", "count": 1},
+            {"expected": "no", "observed": "no", "count": 1},
+            {"expected": "no", "observed": "yes", "count": 1},
+            {"expected": "yes", "observed": "no", "count": 1},
+            {"expected": "yes", "observed": "yes", "count": 2},
+        ],
+        "total_pairs": 6,
+    }
+
+    _PAIRS: ClassVar[list[tuple[str, str]]] = [
+        ("yes", "yes"),
+        ("yes", "no"),
+        ("no", "no"),
+        ("no", "yes"),
+        ("yes", "yes"),
+        ("maybe", "no"),
+    ]
+
+    def _base(self) -> CriterionAggregate:
+        return CriterionAggregate(
+            criterion_type="skill_triggered",
+            description="d",
+            rows_total=7,
+            rows_excluded=0,
+            metrics={"count": 7.0, "mean": 0.5},
+            passed=True,
+            details={"note": "base"},
+        )
+
+    def test_overlay_is_byte_identical_after_extraction(self) -> None:
+        from coder_eval.criteria._classification_aggregate import overlay_classification_metrics
+
+        per_row: list[CriterionResult] = [
+            ClassificationCriterionResult(
+                criterion_type="skill_triggered",
+                description="d",
+                score=1.0 if e == o else 0.0,
+                expected_label=e,
+                observed_label=o,
+            )
+            for e, o in self._PAIRS
+        ]
+        # A non-classification result on the same row set must still be filtered out.
+        per_row.append(CriterionResult(criterion_type="skill_triggered", description="d", score=0.5))
+
+        out = overlay_classification_metrics(self._base(), per_row)
+        assert out.metrics == self._EXPECTED_METRICS
+        assert out.details == self._EXPECTED_DETAILS
+
+    def test_overlay_with_no_classification_rows_returns_base_unchanged(self) -> None:
+        from coder_eval.criteria._classification_aggregate import overlay_classification_metrics
+
+        base = self._base()
+        out = overlay_classification_metrics(base, [CriterionResult(criterion_type="x", description="d", score=1.0)])
+        assert out is base
+
+    def test_classification_metrics_empty_pairs_returns_none(self) -> None:
+        from coder_eval.criteria._classification_aggregate import classification_metrics
+
+        assert classification_metrics([]) is None
+
+    def test_classification_metrics_div_by_zero_convention(self) -> None:
+        """A label with no predictions yields 0.0 — not NaN, not an exception."""
+        from coder_eval.criteria._classification_aggregate import classification_metrics
+
+        cm = classification_metrics([("a", "b"), ("a", "b")])
+        assert cm is not None
+        assert cm.metrics["precision.a"] == 0.0
+        assert cm.metrics["recall.a"] == 0.0
+        assert cm.metrics["f1.a"] == 0.0
+
+    def test_classification_metrics_metric_accessor_returns_zero_for_an_absent_key(self) -> None:
+        """The 0.0 convention is owned here, so no consumer spells a default at its call site."""
+        from coder_eval.criteria._classification_aggregate import classification_metrics
+
+        cm = classification_metrics([("no", "no")])
+        assert cm is not None
+        assert "f1.yes" not in cm.metrics
+        assert cm.metric("f1.yes") == 0.0
+        assert cm.metric("f1.no") == cm.metrics["f1.no"]
+
+    def test_classification_metrics_carries_labels_confusion_and_per_label(self) -> None:
+        from coder_eval.criteria._classification_aggregate import classification_metrics
+
+        cm = classification_metrics(self._PAIRS)
+        assert cm is not None
+        assert cm.labels == ["maybe", "no", "yes"]
+        assert [s.label for s in cm.per_label] == ["maybe", "no", "yes"]
+        assert sum(c.count for c in cm.confusion) == len(self._PAIRS)

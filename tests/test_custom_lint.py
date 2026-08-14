@@ -423,6 +423,58 @@ class TestCE021GuardedEvaluationResultParse:
 
 
 @pytest.mark.lint
+class TestCE037SingleF1Implementation:
+    """CE037 flags a second `2 * p * r / (p + r)` anywhere but the canonical module.
+
+    A second F1 implementation agrees with the first on ordinary input and diverges exactly
+    where a class has no predictions — so the gate would silently disagree with the numbers
+    the run itself reported.
+    """
+
+    _F1 = "f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "<test>"):
+        import ast
+
+        from tests.lint.rules.ce037_single_f1_implementation import SingleF1Implementation
+
+        return SingleF1Implementation(filepath).check(ast.parse(src))
+
+    def test_flags_a_second_f1_implementation(self):
+        assert self._run(self._F1)
+
+    def test_flags_an_unguarded_copy(self):
+        # A copy that drops the ternary guard is still a second implementation — and the more
+        # dangerous one, since it raises instead of applying the 0.0 convention.
+        assert self._run("f1 = 2 * p * r / (p + r)")
+
+    def test_flags_a_parenthesized_numerator(self):
+        assert self._run("f1 = 2 * (p * r) / (p + r)")
+
+    def test_flags_attribute_and_subscript_operands(self):
+        # The same formula spelled off an object or a metrics dict — the shapes a consumer
+        # reading `suite.json` would most plausibly write.
+        assert self._run("f1 = 2 * self.precision * self.recall / (self.precision + self.recall)")
+        assert self._run('f1 = 2 * m["precision"] * m["recall"] / (m["precision"] + m["recall"])')
+
+    def test_does_not_claim_to_catch_algebraic_rewrites(self):
+        # Pins the rule's documented boundary: it catches the copy-paste shape, not every way
+        # of computing F1. A test asserting otherwise would misrepresent what `make lint` proves.
+        assert not self._run("f1 = tp / (tp + 0.5 * (fp + fn))")
+        assert not self._run("f1 = 2 / (1 / p + 1 / r)")
+
+    def test_allows_the_canonical_module(self):
+        assert not self._run(self._F1, filepath="/repo/src/coder_eval/criteria/_classification_aggregate.py")
+
+    def test_ignores_an_unrelated_division(self):
+        assert not self._run("x = 2 * a * b / (c + d)")
+        assert not self._run("x = 3 * p * r / (p + r)")
+        assert not self._run("x = (p + r) / 2")
+        assert not self._run("x = 2 * p * r / (p * r)")
+
+
+@pytest.mark.lint
 class TestCE022SimulationDialogLoopStatementCap:
     """CE022 bounds the regrowth of the noqa'd _simulation_dialog_loop.
 

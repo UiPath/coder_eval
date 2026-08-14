@@ -3,8 +3,11 @@
 import pytest
 
 from coder_eval.reports_stats import (
+    BOOTSTRAP_RESAMPLES,
     bootstrap_mean_ci,
+    cluster_bootstrap_diff_ci,
     cohens_d,
+    holm_rejections,
     paired_t_ci,
     paired_t_test,
     student_t_critical,
@@ -206,3 +209,141 @@ class TestCohensD:
         d = cohens_d(a, b)
         assert d is not None
         assert d > 50  # very large effect
+
+
+def _mean(values: list[float]) -> float:
+    """Statistic under test for the cluster bootstrap — 0.0 for an empty pool, matching the
+    div-by-zero convention every real statistic here uses."""
+    return sum(values) / len(values) if values else 0.0
+
+
+def _f1_yes(pairs: list[tuple[str, str]]) -> float:
+    """`f1.yes` through the criterion layer's own routine, exactly as the gate computes it."""
+    from coder_eval.criteria._classification_aggregate import classification_metrics
+
+    cm = classification_metrics(pairs)
+    return cm.metric("f1.yes") if cm else 0.0
+
+
+class TestClusterBootstrapDiffCi:
+    """Resamples ROWS, not observations: within-row replicates are not independent, so
+    drawing them individually would understate the interval."""
+
+    def test_paired_draw_uses_same_indices(self):
+        # Identical arms ⇒ every draw cancels EXACTLY, so the interval has zero width. The
+        # zero width is the whole assertion: an UNPAIRED implementation (two independent
+        # index vectors) still gives point_diff 0.0 and still contains 0 — measured at
+        # [-2.25, 2.25] on this fixture — so a `lo <= 0 <= hi` check would pass on the very
+        # bug this test exists to catch.
+        clusters = [[float(i), float(i) + 0.5] for i in range(8)]
+        result = cluster_bootstrap_diff_ci(clusters, [list(c) for c in clusters], _mean)
+        assert result is not None
+        point_diff, lo, hi, _p = result
+        assert point_diff == 0.0
+        assert (lo, hi) == (0.0, 0.0)
+
+    def test_separated_arms_ci_excludes_zero(self):
+        # Candidate f1.yes = 1.0 (every row engages), incumbent = 0.4 (3 of 12 engage).
+        candidate = [[("yes", "yes")] for _ in range(12)]
+        incumbent = [[("yes", "yes")] if i < 3 else [("yes", "no")] for i in range(12)]
+        assert abs(_f1_yes([p for c in incumbent for p in c]) - 0.4) < 1e-12
+
+        result = cluster_bootstrap_diff_ci(candidate, incumbent, _f1_yes)
+        assert result is not None
+        point_diff, lo, _hi, _p = result
+        assert abs(point_diff - 0.6) < 1e-12
+        assert lo > 0.0
+
+    def test_tied_arms_ci_contains_zero(self):
+        rng_pairs = [("yes", "yes"), ("yes", "no"), ("no", "no")]
+        arm_a = [[rng_pairs[i % 3]] for i in range(12)]
+        arm_b = [[rng_pairs[(i + 1) % 3]] for i in range(12)]
+        result = cluster_bootstrap_diff_ci(arm_a, arm_b, _f1_yes)
+        assert result is not None
+        _diff, lo, hi, p = result
+        assert lo <= 0.0 <= hi
+        assert p > 0.05
+
+    def test_rejects_misaligned_lengths(self):
+        with pytest.raises(ValueError, match="aligned by index"):
+            cluster_bootstrap_diff_ci([[1.0], [2.0]], [[1.0]], _mean)
+
+    @pytest.mark.parametrize("confidence", [0.0, 1.0, -0.1, 1.5])
+    def test_rejects_bad_confidence(self, confidence):
+        with pytest.raises(ValueError, match="confidence must be in"):
+            cluster_bootstrap_diff_ci([[1.0], [2.0]], [[1.0], [2.0]], _mean, confidence=confidence)
+
+    def test_rejects_non_positive_n_resamples(self):
+        with pytest.raises(ValueError, match="n_resamples must be"):
+            cluster_bootstrap_diff_ci([[1.0], [2.0]], [[1.0], [2.0]], _mean, n_resamples=0)
+
+    def test_fewer_than_two_clusters_returns_none(self):
+        assert cluster_bootstrap_diff_ci([], [], _mean) is None
+        assert cluster_bootstrap_diff_ci([[1.0]], [[0.0]], _mean) is None
+
+    def test_is_deterministic_for_a_seed(self):
+        a = [[float(i)] for i in range(10)]
+        b = [[float(i) * 0.5] for i in range(10)]
+        assert cluster_bootstrap_diff_ci(a, b, _mean, seed=7) == cluster_bootstrap_diff_ci(a, b, _mean, seed=7)
+
+    def test_p_value_is_clamped_to_the_resample_resolution(self):
+        # Perfectly separated arms: no draw can produce a diff <= 0, so the raw p is 0 and
+        # must come back bounded by the resolution rather than reported as zero.
+        a = [[1.0] for _ in range(10)]
+        b = [[0.0] for _ in range(10)]
+        result = cluster_bootstrap_diff_ci(a, b, _mean)
+        assert result is not None
+        assert result[3] == 1.0 / BOOTSTRAP_RESAMPLES
+
+    def test_unequal_within_cluster_counts_are_legal(self):
+        # A row that errored on one invocation contributes fewer observations, not an error.
+        a = [[1.0, 1.0], [1.0], [1.0, 1.0, 1.0], [1.0]]
+        b = [[0.0], [0.0, 0.0], [0.0], [0.0]]
+        result = cluster_bootstrap_diff_ci(a, b, _mean)
+        assert result is not None
+        assert abs(result[0] - 1.0) < 1e-12
+
+    def test_a_cluster_empty_on_one_side_contributes_nothing(self):
+        # Legal input — the caller counts the eroded rows. The empty cluster contributes no
+        # observation to arm a's pool, so the arms' means stay identical rather than the
+        # hole reading as a 0.0 sample.
+        a = [[1.0], [], [1.0], [1.0]]
+        b = [[1.0], [1.0], [1.0], [1.0]]
+        result = cluster_bootstrap_diff_ci(a, b, _mean)
+        assert result is not None
+        assert result[0] == 0.0
+
+    def test_statistic_errors_propagate(self):
+        def _boom(_values: list[float]) -> float:
+            raise RuntimeError("degenerate resample")
+
+        with pytest.raises(RuntimeError, match="degenerate resample"):
+            cluster_bootstrap_diff_ci([[1.0], [2.0]], [[1.0], [2.0]], _boom)
+
+
+class TestHolmRejections:
+    def test_order_and_stepdown(self):
+        # 0.001 <= 0.05/3 rejects; 0.04 > 0.05/2 stops the step-down, so the third is not
+        # tested at all even though 0.04 <= 0.05.
+        assert holm_rejections([0.001, 0.04, 0.04], alpha=0.05) == [True, False, False]
+
+    def test_rejections_come_back_in_input_order(self):
+        assert holm_rejections([0.04, 0.001, 0.04], alpha=0.05) == [False, True, False]
+
+    def test_is_more_powerful_than_bonferroni(self):
+        # Bonferroni would reject only p=0.001 (0.02 > 0.05/3); Holm rejects both.
+        assert holm_rejections([0.001, 0.02, 0.9], alpha=0.05) == [True, True, False]
+
+    def test_empty_and_single(self):
+        assert holm_rejections([]) == []
+        assert holm_rejections([0.049], alpha=0.05) == [True]
+        assert holm_rejections([0.051], alpha=0.05) == [False]
+
+    @pytest.mark.parametrize("alpha", [0.0, 1.0, -0.5, 2.0])
+    def test_rejects_bad_alpha(self, alpha):
+        with pytest.raises(ValueError, match="alpha must be in"):
+            holm_rejections([0.01], alpha=alpha)
+
+    def test_rejects_non_finite_p_values(self):
+        with pytest.raises(ValueError, match="must all be finite"):
+            holm_rejections([0.01, float("nan")])

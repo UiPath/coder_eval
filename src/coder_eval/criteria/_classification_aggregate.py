@@ -9,6 +9,7 @@ of the baseline stats already computed by ``BaseCriterion.aggregate``.
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import NamedTuple
 
 from coder_eval.models import (
     ClassificationCriterionResult,
@@ -19,36 +20,49 @@ from coder_eval.models import (
 )
 
 
-def overlay_classification_metrics(
-    base: CriterionAggregate,
-    per_row_results: list[CriterionResult],
-) -> CriterionAggregate:
-    """Merge accuracy / recall / F1 / confusion into an existing aggregate.
+class ClassificationMetrics(NamedTuple):
+    """Everything :func:`classification_metrics` derives from a list of label pairs."""
 
-    Reads ``(expected_label, observed_label)`` pairs from rows that produced
-    a ``ClassificationCriterionResult`` and layers the following onto the
-    base aggregate:
+    metrics: dict[str, float]
+    per_label: list[ClassLabelStats]
+    confusion: list[ConfusionEntry]
+    labels: list[str]
 
-      - ``accuracy``, ``macro_f1``, ``weighted_f1``, ``micro_f1``
-      - ``precision.<label>``, ``recall.<label>``, ``f1.<label>`` per label
-      - ``details.labels``, ``details.per_label``, ``details.confusion``,
-        ``details.total_pairs`` for markdown rendering
+    def metric(self, name: str) -> float:
+        """A metric by name, applying this module's div-by-zero convention to an ABSENT key.
 
-    When no row emitted classification labels, returns ``base`` unchanged
-    (so users can still threshold on baseline mean / min / etc.).
+        A label that never appears in either position produces no ``f1.<label>`` entry at all,
+        which is the same *situation* as a zero denominator and must read the same way: 0.0.
+        Consumers must call this rather than ``.metrics[name]`` or ``.metrics.get(name, 0.0)``:
+        the 0.0 convention is owned by this module, and a default spelled at the call site is a
+        second declaration of it that can drift. This particular rule is a convention, enforced
+        by review — CE037 guards the *arithmetic* next door, not this accessor.
+        """
+        return self.metrics.get(name, 0.0)
 
-    Div-by-zero convention: precision / recall / F1 are 0.0 when the
-    denominator is 0 (no predictions for a class, or no true instances).
+
+def classification_metrics(pairs: list[tuple[str, str]]) -> ClassificationMetrics | None:
+    """Accuracy / per-label precision, recall, F1 / micro + macro + weighted F1 / confusion.
+
+    **The single implementation of that arithmetic in this package** — CE037 fails the build on
+    a second one anywhere under ``src/coder_eval/``. A consumer that re-derives F1 from the
+    confusion counts inherits a div-by-zero convention that can drift from this one, and would
+    then disagree with the gate the run itself applied.
+
+    Pure ``pairs -> metrics``: it takes no base aggregate, so callers outside the criterion layer
+    (the optimize gate's bootstrap resamples label pairs directly) reach the same numbers.
+    Returns ``None`` for empty ``pairs`` — there is nothing to measure, which is distinct from
+    measuring zero.
+
+    Div-by-zero convention: precision / recall / F1 are 0.0 when the denominator is 0 (no
+    predictions for a class, or no true instances). :meth:`ClassificationMetrics.metric` extends
+    the same convention to a metric name that is absent entirely.
     """
-    pairs: list[tuple[str, str]] = [
-        (r.expected_label, r.observed_label) for r in per_row_results if isinstance(r, ClassificationCriterionResult)
-    ]
     if not pairs:
-        return base
+        return None
 
     labels = sorted({lbl for pair in pairs for lbl in pair})
-    # Start from baseline stats; classification overlays on top.
-    metrics: dict[str, float] = dict(base.metrics)
+    metrics: dict[str, float] = {}
     per_label_stats: list[ClassLabelStats] = []
     micro_tp = micro_fp = micro_fn = 0
 
@@ -93,12 +107,49 @@ def overlay_classification_metrics(
         conf_counts[(e, o)] += 1
     confusion = [ConfusionEntry(expected=e, observed=o, count=cnt) for (e, o), cnt in sorted(conf_counts.items())]
 
+    return ClassificationMetrics(metrics=metrics, per_label=per_label_stats, confusion=confusion, labels=labels)
+
+
+def overlay_classification_metrics(
+    base: CriterionAggregate,
+    per_row_results: list[CriterionResult],
+) -> CriterionAggregate:
+    """Merge accuracy / recall / F1 / confusion into an existing aggregate.
+
+    Reads ``(expected_label, observed_label)`` pairs from rows that produced
+    a ``ClassificationCriterionResult`` and layers the following onto the
+    base aggregate:
+
+      - ``accuracy``, ``macro_f1``, ``weighted_f1``, ``micro_f1``
+      - ``precision.<label>``, ``recall.<label>``, ``f1.<label>`` per label
+      - ``details.labels``, ``details.per_label``, ``details.confusion``,
+        ``details.total_pairs`` for markdown rendering
+
+    When no row emitted classification labels, returns ``base`` unchanged
+    (so users can still threshold on baseline mean / min / etc.).
+
+    Div-by-zero convention: precision / recall / F1 are 0.0 when the
+    denominator is 0 (no predictions for a class, or no true instances).
+
+    The arithmetic itself lives in :func:`classification_metrics`; this function
+    only pairs it with the base aggregate the criterion layer already computed.
+    """
+    pairs: list[tuple[str, str]] = [
+        (r.expected_label, r.observed_label) for r in per_row_results if isinstance(r, ClassificationCriterionResult)
+    ]
+    cm = classification_metrics(pairs)
+    if cm is None:
+        return base
+
+    # Baseline stats first; classification overlays on top.
+    metrics = {**base.metrics, **cm.metrics}
+
     details = dict(base.details)
     details.update(
         {
-            "labels": labels,
-            "per_label": [s.model_dump() for s in per_label_stats],
-            "confusion": [c.model_dump() for c in confusion],
+            "labels": cm.labels,
+            "per_label": [s.model_dump() for s in cm.per_label],
+            "confusion": [c.model_dump() for c in cm.confusion],
             "total_pairs": len(pairs),
         }
     )

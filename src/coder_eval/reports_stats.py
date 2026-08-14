@@ -11,6 +11,7 @@ import logging
 import math
 import random
 import statistics as _stats
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -163,9 +164,15 @@ def fmt_p(p: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+# One resample count for every bootstrap in the codebase. Raising the former 1,000
+# default only tightens Monte-Carlo error, so no report becomes less accurate — and the
+# magic number stops existing in two places at two values.
+BOOTSTRAP_RESAMPLES = 2000
+
+
 def bootstrap_mean_ci(
     values: list[float],
-    n_resamples: int = 1000,
+    n_resamples: int = BOOTSTRAP_RESAMPLES,
     confidence: float = 0.95,
     seed: int = 0,
 ) -> tuple[float, float, float]:
@@ -195,6 +202,101 @@ def bootstrap_mean_ci(
     lo = resampled_means[int(alpha * n_resamples)]
     hi = resampled_means[int((1.0 - alpha) * n_resamples) - 1]
     return (m, lo, hi)
+
+
+def cluster_bootstrap_diff_ci[T](
+    clusters_a: list[list[T]],
+    clusters_b: list[list[T]],
+    statistic: Callable[[list[T]], float],
+    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> tuple[float, float, float, float] | None:
+    """Paired cluster bootstrap for ``statistic(a) - statistic(b)``.
+
+    Returns ``(point_diff, ci_low, ci_high, p_value)``, or ``None`` with fewer than 2
+    clusters — an interval over one cluster is a fabrication, not a wide interval.
+
+    ``clusters_a`` and ``clusters_b`` are **aligned by index**: cluster ``i`` is the same
+    unit (a dataset row, say) measured under each arm. A length mismatch is a wiring bug
+    rather than a degraded input, so it raises. Each draw samples cluster *indices* with
+    replacement **once** and applies them to both arms — that shared index vector is what
+    makes the comparison paired — then pools the drawn clusters' observations and applies
+    ``statistic`` to each arm's flattened pool. Resampling observations individually instead
+    would treat within-cluster replicates as independent and understate the interval.
+
+    Clusters need not be the same length as each other, or even non-empty: an arm that
+    produced nothing for a row simply contributes nothing to that arm's pool. Only the
+    *number* of clusters has to match.
+
+    ``p_value`` is the standard two-sided bootstrap p, ``2 * min(P(diff <= 0), P(diff >= 0))``,
+    clamped to ``[1 / n_resamples, 1.0]`` — a p of exactly 0 is bounded below by the resample
+    resolution, not established as zero.
+
+    Same contract as :func:`bootstrap_mean_ci`: ``ValueError`` for a ``confidence`` outside
+    (0, 1) or a non-positive ``n_resamples``, and ``random.Random(seed)`` for determinism.
+    An exception from ``statistic`` propagates: a swallowed statistic error would silently
+    narrow the interval below what the data supports.
+    """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}")
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples must be >= 1, got {n_resamples!r}")
+    if len(clusters_a) != len(clusters_b):
+        raise ValueError(
+            f"clusters_a and clusters_b must be aligned by index, got {len(clusters_a)} and {len(clusters_b)} clusters"
+        )
+    n = len(clusters_a)
+    if n < 2:
+        return None
+
+    point_diff = statistic([obs for c in clusters_a for obs in c]) - statistic([obs for c in clusters_b for obs in c])
+
+    rng = random.Random(seed)
+    diffs: list[float] = []
+    for _ in range(n_resamples):
+        drawn = [rng.randrange(n) for _ in range(n)]
+        pooled_a = [obs for i in drawn for obs in clusters_a[i]]
+        pooled_b = [obs for i in drawn for obs in clusters_b[i]]
+        diffs.append(statistic(pooled_a) - statistic(pooled_b))
+    diffs.sort()
+
+    alpha = (1.0 - confidence) / 2.0
+    ci_low = diffs[int(alpha * n_resamples)]
+    ci_high = diffs[int((1.0 - alpha) * n_resamples) - 1]
+
+    p_le = sum(1 for d in diffs if d <= 0.0) / n_resamples
+    p_ge = sum(1 for d in diffs if d >= 0.0) / n_resamples
+    p_value = min(1.0, max(1.0 / n_resamples, 2.0 * min(p_le, p_ge)))
+    return (point_diff, ci_low, ci_high, p_value)
+
+
+def holm_rejections(p_values: list[float], alpha: float = 0.05) -> list[bool]:
+    """Holm-Bonferroni step-down over a family of p-values. Rejections come back in INPUT order.
+
+    Order the ``S`` p-values ascending and reject the ``i``-th (1-indexed) only while
+    ``p_(i) <= alpha / (S - i + 1)`` *and* every earlier one was rejected — the step-down is
+    what makes Holm uniformly more powerful than Bonferroni while controlling the same
+    family-wise error rate.
+
+    The correction is a property of the FAMILY: calling this with a one-element list
+    correctly degenerates to ``p <= alpha``, and dividing alpha by the family size at a single
+    gate would be plain Bonferroni, not Holm. Empty input returns ``[]``.
+
+    Raises ``ValueError`` for an ``alpha`` outside (0, 1) or a non-finite p-value.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
+    if any(not math.isfinite(p) for p in p_values):
+        raise ValueError(f"p_values must all be finite, got {p_values!r}")
+
+    total = len(p_values)
+    rejections = [False] * total
+    for rank, i in enumerate(sorted(range(total), key=lambda k: p_values[k])):
+        if p_values[i] > alpha / (total - rank):
+            break
+        rejections[i] = True
+    return rejections
 
 
 def wilson_interval(successes: int, n: int, confidence: float = 0.95) -> tuple[float, float]:
