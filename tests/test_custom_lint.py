@@ -4234,52 +4234,36 @@ class TestCE035SplitLabelsAllOrNothing:
             f"nothing in the run reporting it. Label the remaining rows (do not exempt)."
         )
 
-    def _task_from_rows(self, tmp_path: Path, rows: list[dict], split_field: str = "split"):
-        """A minimal dataset-backed task over inline rows."""
-        from coder_eval.models import Dataset, FileExistsCriterion, TaskDefinition
-
-        return TaskDefinition(
-            task_id="t",
-            description="split-label fixture",
-            initial_prompt="${row.id}",
-            success_criteria=[FileExistsCriterion(description="d", path="out.txt")],
-            dataset=Dataset(rows=rows, split_field=split_field),
-        )
-
     def test_detects_a_partly_labelled_dataset(self, tmp_path: Path):
-        task = self._task_from_rows(
-            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}, {"id": "c"}]
-        )
+        task = _dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": "test"}, {"id": "c"}])
         assert self._offenders(task, tmp_path) == "2 of 3 rows carry a split label"
 
     def test_fully_labelled_dataset_is_not_flagged(self, tmp_path: Path):
-        task = self._task_from_rows(tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}])
+        task = _dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": "test"}])
         assert self._offenders(task, tmp_path) is None
 
     def test_fully_unlabelled_dataset_is_not_flagged(self, tmp_path: Path):
         # Legal and safe: `--split` then does not apply to this task at all.
-        task = self._task_from_rows(tmp_path, [{"id": "a"}, {"id": "b"}])
+        task = _dataset_task([{"id": "a"}, {"id": "b"}])
         assert self._offenders(task, tmp_path) is None
 
     def test_zero_counts_as_a_label(self, tmp_path: Path):
         # A falsy 0 is a real label, not a missing value — the split filter compares via
         # str(), so `--split 0` selects it. Treating it as unlabelled would make a fully
         # labelled dataset read as partly labelled.
-        task = self._task_from_rows(tmp_path, [{"id": "a", "split": 0}, {"id": "b", "split": 1}])
+        task = _dataset_task([{"id": "a", "split": 0}, {"id": "b", "split": 1}])
         assert self._offenders(task, tmp_path) is None
 
     def test_explicit_null_and_empty_string_count_as_unlabelled(self, tmp_path: Path):
         # Pins the (None, "") convention. A half-labelled JSONL carries explicit nulls, and
         # an empty string is the same "no value here" state.
-        task = self._task_from_rows(
-            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": None}, {"id": "c", "split": ""}]
-        )
+        task = _dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": None}, {"id": "c", "split": ""}])
         assert self._offenders(task, tmp_path) == "1 of 3 rows carry a split label"
 
     def test_rule_keys_on_the_configured_split_field(self, tmp_path: Path):
         # Not the literal "split". A dataset naming its field anything else would otherwise
         # read as fully unlabelled and pass no matter how it was labelled.
-        task = self._task_from_rows(tmp_path, [{"id": "a", "fold": "train"}, {"id": "b"}], split_field="fold")
+        task = _dataset_task([{"id": "a", "fold": "train"}, {"id": "b"}], split_field="fold")
         assert self._offenders(task, tmp_path) == "1 of 2 rows carry a split label"
 
     def test_expand_dataset_keeps_exactly_the_rows_the_convention_names(self, tmp_path: Path):
@@ -4299,10 +4283,23 @@ class TestCE035SplitLabelsAllOrNothing:
             {"id": "d", "split": None},
             {"id": "e", "split": ""},
         ]
-        task = self._task_from_rows(tmp_path, rows)
+        task = _dataset_task(rows)
         for split, expected in (("train", {"a"}), ("test", {"b"}), ("0", {"c"})):
             kept = {t.task_id.split("/")[-1] for t in expand_dataset(task, tmp_path, split=split)}
             assert kept == expected, f"split={split!r}: expand_dataset kept {kept}, expected {expected}"
+
+
+# Fields naming WHERE an artifact goes, not WHAT it must contain. A prompt may say
+# "write it to .github/workflows/evals.yml" — that removes filename nondeterminism from
+# the measurement without revealing the graded behaviour. `skill_name` is a locator for
+# the same reason: it names WHICH skill must engage, while the graded thing is the
+# engagement EVENT, which no prompt can supply. The outcome pattern this plugin
+# prescribes puts the skill name in every prompt by design.
+CE036_LOCATOR_FIELDS = ("path", "agent_file", "file_path", "command", "skill_name")
+
+# Shorter values collide by chance ("ci", "0.7"); a leak worth flagging is a substantive
+# string the author put in both places.
+CE036_MIN_LEAK_CHARS = 12
 
 
 @pytest.mark.lint
@@ -4320,23 +4317,28 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
     with a recursive wildcard" while grading an explicit glob). That form needs a reader, and
     is what `lint-tasks` and code review are for. Guarding the blunt case is still worth it:
     it is the easy mistake, and it is silent.
+
+    One deliberate collision, documented rather than exempted: a literal (non-regex)
+    `command_executed.command_pattern` of >= CE036_MIN_LEAK_CHARS echoed verbatim in a
+    prompt IS flagged. That is correct — a pattern asserting *what ran* is graded
+    behaviour, not a locator. The `command` exemption covers `run_command.command`, the
+    command the CHECKER runs, which is a different field on a different criterion. No
+    in-repo task has the collision, so exempting `command_pattern` would be an unused
+    exemption weakening a real check.
     """
 
-    @pytest.mark.parametrize(
-        "path",
-        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
-        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
-    )
-    def test_repo_task_prompts_do_not_contain_the_graded_string(self, path: Path):
+    @classmethod
+    def _offenders(cls, task, task_file_dir: Path) -> list[str]:
+        """Every verbatim leak in the task's expanded rows.
 
-        from coder_eval.orchestration.task_loader import expand_dataset, load_task
-
-        task, _ = load_task(path)
-        if task.dataset is None:
-            pytest.skip("no dataset: block — nothing is row-substituted")
+        The rule's whole detection body lives here so the fixtures below and the repo scan
+        exercise the SAME code. Split, the repo scan would keep passing identically whether
+        or not the rule could still detect anything.
+        """
+        from coder_eval.orchestration.task_loader import expand_dataset
 
         offenders: list[str] = []
-        for row in expand_dataset(task, path.parent):
+        for row in expand_dataset(task, task_file_dir):
             prompt = (row.initial_prompt or "").lower()
             if not prompt:
                 continue
@@ -4345,24 +4347,154 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
                 # it is a label, routinely echoes the scenario, and grades nothing.
                 dumped = criterion.model_dump()
                 dumped.pop("description", None)
-                # Location fields are exempt, and the distinction is the whole rule: a
-                # prompt MAY say WHERE to write ("call it .github/workflows/evals.yml"),
-                # which removes the agent's filename choice from the measurement without
-                # revealing anything graded. It may not say WHAT the artifact must contain.
-                for locator in ("path", "agent_file", "file_path", "command"):
+                for locator in CE036_LOCATOR_FIELDS:
                     dumped.pop(locator, None)
                 for value in _string_leaves(dumped):
-                    # Short values collide by chance ("ci", "0.7"); a leak worth flagging is
-                    # a substantive string the author put in both places.
-                    if len(value) >= 12 and value.lower() in prompt:
+                    if len(value) >= CE036_MIN_LEAK_CHARS and value.lower() in prompt:
                         offenders.append(f"{row.task_id}: prompt contains {value!r} ({criterion.type})")
+        return offenders
 
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_task_prompts_do_not_contain_the_graded_string(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        if task.dataset is None:
+            pytest.skip("no dataset: block — nothing is row-substituted")
+
+        offenders = self._offenders(task, path.parent)
         assert not offenders, (
             f"{path}: the prompt hands the agent the exact string a criterion grades it on, so "
             f"the row scores well whether or not the behaviour under test happened — and an "
             f"A/B arm that DELETED that behaviour would still pass. Describe the situation and "
             f"let the skill or the agent supply the method.\n\n" + "\n".join(f"  {o}" for o in offenders)
         )
+
+    def test_detects_a_leaking_row(self, tmp_path: Path):
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="Write a workflow that sets minimum-task-score to 0.8",
+            criteria=[FileCheckCriterion(description="d", path="out.yml", includes=["minimum-task-score"])],
+        )
+        offenders = self._offenders(task, tmp_path)
+        assert len(offenders) == 1 and "minimum-task-score" in offenders[0]
+
+    def test_locator_fields_are_exempt(self, tmp_path: Path):
+        # Naming WHERE the artifact goes removes filename nondeterminism from the
+        # measurement; it reveals nothing about what the artifact must contain.
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="Write it to .github/workflows/evals.yml",
+            criteria=[FileCheckCriterion(description="d", path=".github/workflows/evals.yml")],
+        )
+        assert self._offenders(task, tmp_path) == []
+
+    def test_skill_name_is_exempt(self, tmp_path: Path):
+        # THE regression this exemption exists for. `skill_name` names WHICH skill must
+        # engage; the graded thing is the engagement EVENT, which no prompt can supply —
+        # and the outcome-suite pattern this plugin prescribes puts the skill name in every
+        # prompt by design. Without the exemption, the first repo-committed outcome suite
+        # for a skill whose name reaches the length floor fails CE036 on its own engagement
+        # criterion.
+        from coder_eval.models import SkillTriggeredCriterion
+
+        assert len("optimize-skill") >= CE036_MIN_LEAK_CHARS, "fixture no longer exercises the floor"
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="Use the optimize-skill skill to improve this description",
+            criteria=[SkillTriggeredCriterion(description="d", skill_name="optimize-skill", expected_skill="")],
+        )
+        assert self._offenders(task, tmp_path) == []
+
+    @pytest.mark.parametrize(("delta", "flagged"), [(-1, False), (0, True)])
+    def test_the_length_floor_is_inclusive(self, tmp_path: Path, delta: int, flagged: bool):
+        # Both sides of the `>=`, which is the part a refactor actually breaks. The strings
+        # are DERIVED from CE036_MIN_LEAK_CHARS rather than spelled out: a hardcoded 11 and
+        # 12 would be a second declaration of the same number, which is the drift this
+        # fixture exists to prevent. (The literal VALUE of the floor is not pinned here on
+        # purpose — it is a tuning knob; what must not move silently is the comparison.)
+        from coder_eval.models import FileCheckCriterion
+
+        value = "x" * (CE036_MIN_LEAK_CHARS + delta)
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt=f"The answer is {value}",
+            criteria=[FileCheckCriterion(description="d", path="out.yml", includes=[value])],
+        )
+        assert bool(self._offenders(task, tmp_path)) is flagged
+
+    def test_description_is_not_scanned(self, tmp_path: Path):
+        # `description` is a label. It routinely echoes the scenario and grades nothing, so
+        # scanning it would flag every well-named criterion in the repo.
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="emit the deployment manifest",
+            criteria=[FileCheckCriterion(description="emit the deployment manifest", path="out.yml")],
+        )
+        assert self._offenders(task, tmp_path) == []
+
+    def test_nested_string_leaves_are_scanned(self, tmp_path: Path):
+        # Pins `_string_leaves`' recursion: a leak in the SECOND entry of a list must be
+        # caught, or a rule that only looked at scalar fields would pass this repo's suites
+        # while missing every `includes:` leak — the commonest shape there is.
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="the file must mention permissions-boundary",
+            criteria=[
+                FileCheckCriterion(description="d", path="out.yml", includes=["harmless", "permissions-boundary"])
+            ],
+        )
+        offenders = self._offenders(task, tmp_path)
+        assert len(offenders) == 1 and "permissions-boundary" in offenders[0]
+
+    def test_ce036_exemption_list_matches_claude_md(self):
+        # CE036_LOCATOR_FIELDS is the single source; CLAUDE.md's CE036 sentence is derived.
+        # Both directions, because the list already drifted once: CLAUDE.md named three of
+        # the four fields the code exempted, and nothing noticed. The repo automates exactly
+        # this class elsewhere (CE028 for the docs indexes, CE033 for the plugin reference).
+        import re
+
+        text = _normalized(Path(__file__).parent.parent / "CLAUDE.md")
+        sentence = next((s for s in text.split(". ") if "Location fields" in s), None)
+        assert sentence is not None, "CLAUDE.md no longer states CE036's exemption list"
+        backticked = set(re.findall(r"`([a-z_]+)`", sentence))
+        assert set(CE036_LOCATOR_FIELDS) <= backticked, (
+            f"CLAUDE.md's CE036 sentence omits {sorted(set(CE036_LOCATOR_FIELDS) - backticked)}"
+        )
+        assert backticked <= set(CE036_LOCATOR_FIELDS), (
+            f"CLAUDE.md's CE036 sentence names {sorted(backticked - set(CE036_LOCATOR_FIELDS))} as exempt, "
+            f"which the rule does not exempt"
+        )
+
+
+def _dataset_task(rows: list[dict], *, prompt: str = "${row.id}", criteria=None, split_field: str = "split"):
+    """A minimal dataset-backed task over inline rows, for the CE035/CE036 fixtures.
+
+    One builder for both rules: CE035 needs varying rows, CE036 varying prompts AND
+    criteria, and a per-class copy would fork the moment either grew a parameter.
+    Inline ``rows`` deliberately — no JSONL file, so the fixtures never touch disk.
+    """
+    from coder_eval.models import Dataset, FileExistsCriterion, TaskDefinition
+
+    return TaskDefinition(
+        task_id="t",
+        description="dataset-rule fixture",
+        initial_prompt=prompt,
+        success_criteria=criteria or [FileExistsCriterion(description="d", path="out.txt")],
+        dataset=Dataset(rows=rows, split_field=split_field),
+    )
 
 
 def _string_leaves(node: object) -> list[str]:
