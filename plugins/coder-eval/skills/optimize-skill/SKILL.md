@@ -1035,21 +1035,26 @@ coder-eval run <suite> -e <path to round<N>-explore.yaml> --split train \
   --run-dir <runs>/round<N>-explore
 ```
 
-Read the score to beat rather than recomputing it, so accept/revert is mechanical:
+Read the score to beat rather than recomputing it, and let the library decide, so accept/revert is
+mechanical:
 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import arm_row_scores, load_measurements, regression_check
+from coder_eval.optimize_gate import (
+    arm_row_scores,
+    lineage_head_scores,
+    load_measurements,
+    render_search_comparison,
+    search_compare,
+)
 
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
-
 measurements = load_measurements(sidecar)
-prior = [r for r in measurements.round_scores if r.lineage_head is not None]
-if not prior:
+
+head = lineage_head_scores(measurements)
+if head is None:
     raise SystemExit("no recorded lineage — run a multi-arm Stage A round first")
-last = max(prior, key=lambda r: r.round)
-head = next(a for a in last.arm_row_scores if a.variant_id == last.lineage_head)
 
 explored = arm_row_scores(
     run_dirs=[Path("<runs>/round<N>-explore")],
@@ -1058,42 +1063,32 @@ explored = arm_row_scores(
     criterion_index=0,  # omit on the execution track to read each row's weighted_score
 )[0]
 
-# Compare on the rows BOTH arms scored, and on nothing else. Empty first: no overlap at all is a
-# WIRING problem, and reporting it as a hole would send you looking for a flaky row instead.
-shared = sorted(set(head.row_scores) & set(explored.row_scores))
-if not shared:
-    raise SystemExit("the two rounds share no rows — pin dataset.sample_seed and re-run")
-missing = sorted(set(head.row_scores) - set(explored.row_scores))
-if missing:
-    raise SystemExit(f"the candidate scored no result for {missing} — a hole is not a win")
-
-to_beat = sum(head.row_scores[r] for r in shared) / len(shared)
-score = sum(explored.row_scores[r] for r in shared) / len(shared)
-beats = score > to_beat
-print(score, "beats" if beats else "does not beat", to_beat, f"over {len(shared)} rows")
-
-# An aggregate cannot show a re-lost row, and a search accept advances the lineage. Check the
-# corpus BEFORE accepting, or the regression rides forward until the next multi-arm round.
-lost = regression_check(measurements.regression_corpus, explored)
-if beats and lost:
-    print("DO NOT ACCEPT until you have explained:", [(row.row_id, row.reason) for row, _ in lost])
+print(render_search_comparison(
+    search_compare(head, explored, corpus=measurements.regression_corpus)
+))
 ```
 
-**Compare over the shared rows, and refuse rather than average around a hole.** The two means come
-from *different invocations* — the head's from an earlier round's record, the candidate's from the
-run you just paid for — so nothing guarantees they cover the same rows, and every way they diverge
-favours the candidate. A candidate that errored on the hardest rows scores a higher mean over the
-survivors; a head recorded from a halved Stage A pass 1 was measured on a stratified half while
-this command runs the full train split; and an unpinned `dataset.sample_seed` draws a different
-sample **across invocations** every time. Hence the two `SystemExit` guards, in that order: no
-shared rows at all is a *wiring* problem, and a row the head scored and the candidate did not is a
-hole and never a win — the rule the Pareto front already applies.
+**Print that block verbatim into the ledger, and act on `.accepted`.** Do not re-derive the
+comparison by hand: `search_compare` applies four guards that are easy to leave out and silent
+when they are, and it is tested where a snippet you adapt is not.
 
-**And check the regression corpus before accepting, not at the next Stage A.** A search accept
-advances the lineage, so a row an earlier promotion was built on can be re-lost and carried forward
-unnoticed until the next multi-arm round. The aggregate above cannot show it — that is the whole
-premise of the corpus — and `regression_check` takes exactly the `ArmRowScores` the snippet already
-computed, so the check is free here.
+- **It compares over the rows BOTH arms scored, and nothing else.** The head's vector was recorded
+  in an earlier round and the candidate's comes from the run you just paid for, so nothing
+  guarantees they cover the same rows — and every way they diverge favours the candidate.
+- **No overlap at all is reported as a wiring fault, before holes are.** A head recorded from a
+  halved Stage A pass 1 was measured on a stratified half while this command runs the full train
+  split, and an unpinned `dataset.sample_seed` draws a different sample **across invocations**
+  every time. Calling that a hole would send you hunting a flaky row.
+- **A hole refuses rather than averaging around it**, and reports no score at all — a candidate
+  that errored on the hardest rows would otherwise score a higher mean over the survivors. It is
+  the rule the Pareto front already applies.
+- **A corpus regression blocks an otherwise-winning candidate.** A search accept advances the
+  lineage, so a row an earlier promotion was built on would be re-lost and carried forward until
+  the next multi-arm round noticed. The aggregate cannot show that — the whole premise of the
+  corpus — and the check is free here because the arm is already in hand.
+
+A tie does not win. Advancing the head on a tie moves the bar every later round is judged against,
+on an accident.
 
 **Which number this is, stated exactly, because it is not the gate's.** `criterion_index=<n>` is
 the activation track and reads that criterion's per-row score — so the mean above is **accuracy**

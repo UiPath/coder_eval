@@ -31,7 +31,9 @@ from coder_eval.models import (
     FinalStatus,
     GuardrailCheck,
     NoiseFloor,
+    OptimizeMeasurements,
     RegressionRow,
+    RoundScores,
     SkillTriggeredCriterion,
     TaskDefinition,
     TokenUsage,
@@ -62,6 +64,7 @@ from coder_eval.optimize_gate import (
     holm_promote,
     holm_promote_execution,
     instance_best_front,
+    lineage_head_scores,
     load_arm_rows,
     load_suite_rows,
     measure_execution_noise_floor,
@@ -75,7 +78,9 @@ from coder_eval.optimize_gate import (
     render_execution_markdown,
     render_markdown,
     render_row_matrix,
+    render_search_comparison,
     resolve_model,
+    search_compare,
 )
 from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, DEFAULT_ALPHA, bootstrap_p_floor, holm_rejections
 
@@ -2809,3 +2814,146 @@ class TestCandidateLeaks:
         # One value, read from the constant. A parameter would be a second declaration of a
         # number CE036 and this function must agree on.
         assert "min_chars" not in inspect.signature(candidate_leaks).parameters
+
+
+def _arm(variant: str, scores: dict[str, float]) -> ArmRowScores:
+    return ArmRowScores(variant_id=variant, row_scores=scores)
+
+
+class TestLineageHeadScores:
+    """The head lookup, which the skill's snippet used to do with a bare `next()`/`max()`."""
+
+    def _measurements(self, *rounds: RoundScores) -> OptimizeMeasurements:
+        return OptimizeMeasurements(skill="my-skill", round_scores=list(rounds))
+
+    def test_none_when_no_round_recorded_a_head(self) -> None:
+        rounds = RoundScores(round=1, arm_row_scores=[_arm("a", {"r1": 1.0})])
+        assert lineage_head_scores(self._measurements(rounds)) is None
+
+    def test_none_on_an_empty_sidecar(self) -> None:
+        assert lineage_head_scores(self._measurements()) is None
+
+    def test_takes_the_highest_round_that_named_one(self) -> None:
+        # Highest ROUND, not last-in-list: the sidecar replaces per round, so ordering is a
+        # write-order artefact while `round` is the real sequence.
+        early = RoundScores(round=3, arm_row_scores=[_arm("a", {"r1": 1.0})], lineage_head="a")
+        late = RoundScores(round=7, arm_row_scores=[_arm("b", {"r1": 0.5})], lineage_head="b")
+        head = lineage_head_scores(self._measurements(late, early))
+        assert head is not None and head.variant_id == "b"
+
+    def test_skips_a_later_round_that_accepted_nothing(self) -> None:
+        # A round with no accept leaves the head where it was; it must not blank the lineage.
+        kept = RoundScores(round=2, arm_row_scores=[_arm("a", {"r1": 1.0})], lineage_head="a")
+        quiet = RoundScores(round=3, arm_row_scores=[_arm("b", {"r1": 0.5})])
+        head = lineage_head_scores(self._measurements(kept, quiet))
+        assert head is not None and head.variant_id == "a"
+
+
+class TestSearchCompare:
+    """The search loop's accept/revert decision, which used to be arithmetic in a markdown block.
+
+    Every guard here was previously a line an agent had to copy faithfully.
+    """
+
+    _HEAD: ClassVar[dict[str, float]] = {"r1": 1.0, "r2": 0.0, "r3": 1.0, "r4": 0.0}  # mean 0.5
+
+    def test_a_better_candidate_is_accepted(self) -> None:
+        result = search_compare(_arm("head", self._HEAD), _arm("cand", {"r1": 1.0, "r2": 1.0, "r3": 1.0, "r4": 0.0}))
+        assert result.beats and result.accepted
+        assert result.head_score == 0.5 and result.candidate_score == 0.75
+        assert result.shared_rows == ("r1", "r2", "r3", "r4")
+        assert result.blocker is None
+
+    def test_a_worse_candidate_is_not_accepted(self) -> None:
+        result = search_compare(_arm("head", self._HEAD), _arm("cand", dict.fromkeys(self._HEAD, 0.0)))
+        assert not result.beats and not result.accepted
+        assert result.blocker is None, "losing is an ordinary result, not a blocked one"
+
+    def test_a_tie_is_not_a_win(self) -> None:
+        # Strictly greater. A tie that advanced the head would move the bar on an accident, and
+        # the next round would then have to beat a number nothing earned.
+        result = search_compare(_arm("head", self._HEAD), _arm("cand", dict(self._HEAD)))
+        assert result.head_score == result.candidate_score
+        assert not result.beats and not result.accepted
+
+    def test_no_shared_rows_is_a_wiring_blocker_not_a_hole(self) -> None:
+        # Checked BEFORE holes: no overlap at all is a wiring fault, and reporting it as a hole
+        # sends the reader looking for a flaky row instead of an unpinned sample seed.
+        result = search_compare(_arm("head", self._HEAD), _arm("cand", {"other": 1.0}))
+        assert not result.accepted and result.head_score is None and result.candidate_score is None
+        assert result.blocker is not None and "sample_seed" in result.blocker
+
+    def test_a_hole_refuses_rather_than_averaging_around_it(self) -> None:
+        # The candidate errored on r2 — its mean over the survivors would be 1.0 and would "win".
+        result = search_compare(_arm("head", self._HEAD), _arm("cand", {"r1": 1.0, "r3": 1.0, "r4": 1.0}))
+        assert not result.accepted and result.holes == ("r2",)
+        assert result.head_score is None, "a refused comparison must report no number to misread"
+        assert result.blocker is not None and "r2" in result.blocker
+
+    def test_a_row_only_the_candidate_scored_is_not_a_hole(self) -> None:
+        # Holes are asymmetric on purpose: an extra row the head never measured cannot make the
+        # candidate look better, because the comparison runs over the intersection either way.
+        result = search_compare(_arm("head", self._HEAD), _arm("cand", {**self._HEAD, "r5": 1.0}))
+        assert result.holes == () and result.blocker is None
+        assert result.shared_rows == ("r1", "r2", "r3", "r4")
+
+    def test_a_corpus_regression_blocks_an_otherwise_winning_candidate(self) -> None:
+        # THE reason the corpus is read here rather than at the next Stage A: an accept advances
+        # the lineage, so a re-lost row rides forward until a multi-arm round notices.
+        corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
+        result = search_compare(
+            _arm("head", self._HEAD),
+            _arm("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
+            corpus=corpus,
+        )
+        assert result.beats, "the aggregate really does improve — that is what makes this dangerous"
+        assert not result.accepted
+        assert [row.row_id for row, _ in result.regressions] == ["r1"]
+        assert result.blocker is not None and "oblique phrasing" in result.blocker
+
+    def test_a_corpus_row_the_candidate_holds_does_not_block(self) -> None:
+        corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
+        result = search_compare(
+            _arm("head", self._HEAD),
+            _arm("cand", {"r1": 1.0, "r2": 1.0, "r3": 1.0, "r4": 0.0}),
+            corpus=corpus,
+        )
+        assert result.accepted and result.regressions == () and result.blocker is None
+
+    def test_the_corpus_threshold_is_forwarded(self) -> None:
+        # A fractional execution suite needs a bar other than 1.0; the parameter exists for it.
+        corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="partial credit is fine")]
+        candidate = _arm("cand", {"r1": 0.8, "r2": 1.0, "r3": 1.0, "r4": 1.0})
+        assert not search_compare(_arm("head", self._HEAD), candidate, corpus=corpus).accepted
+        assert search_compare(_arm("head", self._HEAD), candidate, corpus=corpus, threshold=0.5).accepted
+
+    def test_a_losing_candidate_is_not_blocked_by_the_corpus(self) -> None:
+        # It already failed on the score; adding a corpus blocker would misreport WHY.
+        corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
+        result = search_compare(_arm("head", self._HEAD), _arm("cand", dict.fromkeys(self._HEAD, 0.0)), corpus=corpus)
+        assert not result.beats and not result.accepted and result.blocker is None
+
+    def test_an_empty_head_is_a_blocker_not_a_crash(self) -> None:
+        # `RoundScores`' validator makes this unreachable through the sidecar, but the function
+        # is public and must not divide by zero on a hand-built arm.
+        result = search_compare(_arm("head", {}), _arm("cand", {"r1": 1.0}))
+        assert not result.accepted and result.blocker is not None
+
+
+class TestRenderSearchComparison:
+    def test_an_accepted_comparison_names_both_numbers_and_the_row_count(self) -> None:
+        block = render_search_comparison(
+            search_compare(_arm("head", {"r1": 0.0, "r2": 1.0}), _arm("cand", {"r1": 1.0, "r2": 1.0}))
+        )
+        assert "ACCEPT" in block and "0.500" in block and "1.000" in block and "2" in block
+
+    def test_a_blocked_comparison_leads_with_the_blocker(self) -> None:
+        block = render_search_comparison(search_compare(_arm("head", {"r1": 1.0}), _arm("cand", {"other": 1.0})))
+        assert "sample_seed" in block
+        assert "ACCEPT" not in block.replace("DO NOT ACCEPT", "")
+
+    def test_it_says_a_search_accept_is_not_a_promotion(self) -> None:
+        # The block is printed into a ledger a human reads later, and this is the one thing that
+        # must not be inferred from a green word.
+        block = render_search_comparison(search_compare(_arm("head", {"r1": 0.0}), _arm("cand", {"r1": 1.0})))
+        assert "not a promotion" in block.lower()

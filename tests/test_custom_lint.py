@@ -2866,7 +2866,7 @@ class TestPluginArtifacts:
         # The ones the procedure must NAME, even if a future snippet stops importing them inline.
         # This hardcoded list is the REAL guard: the derived half above only asserts that whatever
         # the skill imports exists, so deleting a whole snippet leaves it green on the others.
-        for name in ("activation_gate", "holm_promote", "render_markdown", "candidate_leaks"):
+        for name in ("activation_gate", "holm_promote", "render_markdown", "candidate_leaks", "search_compare"):
             assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
 
     def test_optimize_method_quotes_no_tolerance_numbers(self):
