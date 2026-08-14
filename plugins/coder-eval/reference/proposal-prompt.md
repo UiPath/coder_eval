@@ -53,6 +53,24 @@ for and nowhere else, which is overfitting in its purest form: the suite improve
 not. Ask instead what *kind* of request the miss belongs to, and whether the edit would catch a
 request from that kind that nobody has written down yet.
 
+**Never reproduce a train row's graded content verbatim.** The failing rows come with the strings
+their criteria assert on, and the cheapest way to make a row pass is to paste one into the
+candidate. It is overfitting at its most literal — the row passes whether or not the behaviour
+under test happened, and an A/B arm that *deleted* that behaviour would pass it too. Write the
+*procedure* that produces the content, never the content.
+
+**Validation, before the candidate is snapshotted.** Review every generated candidate for train-row
+content it reproduces word for word. The mechanical half is
+`coder_eval.optimize_gate.candidate_leaks(candidate_text, baseline_text, train_rows)`, which
+reports the substantive spans the candidate adds and the text it was edited from lacks; the skill's
+Step 8 runs it.
+
+**The reader's half is not optional, and it covers two things the checker cannot.** A candidate
+that describes a row's graded content in different words leaks just as much and nothing sees it.
+And because the check is a *diff*, a leak that once rode into a promotion is part of the baseline
+from then on and is never reported again — so the round that introduces a span is the only round
+that can catch it mechanically. Read the candidate, not just the checker's output.
+
 ## Track-specific constraints
 
 **Activation track — budget the length before writing.** Every natural fix here lengthens the

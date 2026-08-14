@@ -716,6 +716,64 @@ rewriting a body that is already performing. Each edit then stays an individuall
 attributable to the rows that justified it, which is what makes a regression at round 4 something
 you can undo rather than something you have to re-derive.
 
+### Check the candidates for memorized train text — before Stage A is paid for
+
+A candidate that reproduces a train row's graded content verbatim scores well on that row whether
+or not the behaviour under test happened, and it teaches the skill nothing. It is the same defect
+CE036 catches in a task file, pointed the other way, and it is static — no runs, so read it here
+rather than after a stage:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import candidate_leaks
+from coder_eval.orchestration.task_loader import expand_dataset, load_task
+
+suite = Path("<the suite yaml>")
+task, _ = load_task(suite)
+train = expand_dataset(task, suite.parent, split="train")
+
+root = Path(".optimize-skill/<skill>")
+
+
+def body(arm: Path) -> str:
+    return (arm / "skills" / "<skill>" / "SKILL.md").read_text(encoding="utf-8")
+
+
+# The BASELINE is whatever these candidates were edited from — the `<round>-incumbent/` snapshot
+# on a multi-arm round, the lineage head's own snapshot dir on a search round.
+baseline = body(root / "<round>-incumbent")
+
+skip = {"<round>-incumbent", "<round>-control"}
+for arm in sorted(p for p in root.glob("<round>-*") if p.is_dir() and p.name not in skip):
+    print(arm.name, candidate_leaks(body(arm), baseline, train) or "clean")
+```
+
+`expand_dataset` takes `split=` natively — pass the **train** split and only the train split.
+Scanning the whole suite would flag content drawn from rows the candidate is entitled to be fitted
+to, and scanning the test rows would tell you about a split the proposer is blinded to.
+
+**Diff against what the candidate was DERIVED from, which is not always the incumbent.** From
+round 2 a search-loop candidate is built on the **lineage head** (Step 10), and diffing that
+against the incumbent re-reports every span the head added since the last promotion, on every
+round — exactly the wolf-crying the diff exists to prevent. Pass the arm you actually edited.
+
+**Whatever the baseline says is not something this candidate memorized.** Measured on this repo's
+own shipped `ci` skill, an absolute scan flags five strings on the train split that are simply the
+output contract its suite grades; a checker that fires on the shipped skill on its first run is one
+you learn to ignore. The cost of the diff is that a span already in the baseline stays invisible —
+right while the baseline is the user's untouched skill, weaker once the baseline is itself a former
+candidate, which is why `proposal-prompt.md` puts the rule on the *proposer* as well.
+
+**A hit is a reason to rewrite the candidate, not to abandon it.** Replace the span with a
+synthetic placeholder, or generalize it to the *category* of request it belongs to — the same rule
+`proposal-prompt.md` states about wording. And a clean result is not a proof: this catches the
+**verbatim** form only, exactly as CE036 does. A candidate that describes a train row's graded
+content in other words is a semantic leak, and that still needs you to read it.
+
+This is a different question from Stage A's `#### Check the corpus before shortlisting`, which asks
+whether an arm *re-lost a measured row* — that one needs run results and therefore sits at Stage A.
+
 ### The control arm — execution track, once per suite
 
 On the execution track, snapshot one more: `<round>-control/`, identical to the incumbent except

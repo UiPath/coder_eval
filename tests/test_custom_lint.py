@@ -2760,8 +2760,10 @@ class TestPluginArtifacts:
                 f"runtime, after the user has paid for the runs it was meant to read"
             )
 
-        # The three the procedure must NAME, even if a future snippet stops importing them inline.
-        for name in ("activation_gate", "holm_promote", "render_markdown"):
+        # The ones the procedure must NAME, even if a future snippet stops importing them inline.
+        # This hardcoded list is the REAL guard: the derived half above only asserts that whatever
+        # the skill imports exists, so deleting a whole snippet leaves it green on the others.
+        for name in ("activation_gate", "holm_promote", "render_markdown", "candidate_leaks"):
             assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
 
     def test_optimize_method_quotes_no_tolerance_numbers(self):
@@ -5057,19 +5059,6 @@ class TestCE035SplitLabelsAllOrNothing:
             assert kept == expected, f"split={split!r}: expand_dataset kept {kept}, expected {expected}"
 
 
-# Fields naming WHERE an artifact goes, not WHAT it must contain. A prompt may say
-# "write it to .github/workflows/evals.yml" — that removes filename nondeterminism from
-# the measurement without revealing the graded behaviour. `skill_name` is a locator for
-# the same reason: it names WHICH skill must engage, while the graded thing is the
-# engagement EVENT, which no prompt can supply. The outcome pattern this plugin
-# prescribes puts the skill name in every prompt by design.
-CE036_LOCATOR_FIELDS = ("path", "agent_file", "file_path", "command", "skill_name")
-
-# Shorter values collide by chance ("ci", "0.7"); a leak worth flagging is a substantive
-# string the author put in both places.
-CE036_MIN_LEAK_CHARS = 12
-
-
 @pytest.mark.lint
 class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
     """CE036 — a dataset row's prompt must not contain the value a criterion grades it on.
@@ -5087,12 +5076,16 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
     it is the easy mistake, and it is silent.
 
     One deliberate collision, documented rather than exempted: a literal (non-regex)
-    `command_executed.command_pattern` of >= CE036_MIN_LEAK_CHARS echoed verbatim in a
+    `command_executed.command_pattern` of >= LEAK_MIN_CHARS echoed verbatim in a
     prompt IS flagged. That is correct — a pattern asserting *what ran* is graded
     behaviour, not a locator. The `command` exemption covers `run_command.command`, the
     command the CHECKER runs, which is a different field on a different criterion. No
     in-repo task has the collision, so exempting `command_pattern` would be an unused
     exemption weakening a real check.
+
+    The detection PRIMITIVE lives in `coder_eval.leak_detection`, shared with
+    `optimize_gate.candidate_leaks`, which asks the same question pointed the other way. The
+    containment direction below is all this rule adds to it.
     """
 
     @classmethod
@@ -5102,7 +5095,11 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
         The rule's whole detection body lives here so the fixtures below and the repo scan
         exercise the SAME code. Split, the repo scan would keep passing identically whether
         or not the rule could still detect anything.
+
+        `drop_type=False`: unlike a skill body, a row PROMPT containing "skill_triggered" is
+        itself worth flagging.
         """
+        from coder_eval.leak_detection import graded_strings
         from coder_eval.orchestration.task_loader import expand_dataset
 
         offenders: list[str] = []
@@ -5111,14 +5108,8 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
             if not prompt:
                 continue
             for criterion in row.success_criteria:
-                # Every string the criterion asserts CONTENT on. `description` is excluded:
-                # it is a label, routinely echoes the scenario, and grades nothing.
-                dumped = criterion.model_dump()
-                dumped.pop("description", None)
-                for locator in CE036_LOCATOR_FIELDS:
-                    dumped.pop(locator, None)
-                for value in _string_leaves(dumped):
-                    if len(value) >= CE036_MIN_LEAK_CHARS and value.lower() in prompt:
+                for value in graded_strings(criterion, drop_type=False):
+                    if value.lower() in prompt:
                         offenders.append(f"{row.task_id}: prompt contains {value!r} ({criterion.type})")
         return offenders
 
@@ -5172,9 +5163,10 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
         # prompt by design. Without the exemption, the first repo-committed outcome suite
         # for a skill whose name reaches the length floor fails CE036 on its own engagement
         # criterion.
+        from coder_eval.leak_detection import LEAK_MIN_CHARS
         from coder_eval.models import SkillTriggeredCriterion
 
-        assert len("optimize-skill") >= CE036_MIN_LEAK_CHARS, "fixture no longer exercises the floor"
+        assert len("optimize-skill") >= LEAK_MIN_CHARS, "fixture no longer exercises the floor"
         task = _dataset_task(
             [{"id": "a"}],
             prompt="Use the optimize-skill skill to improve this description",
@@ -5185,13 +5177,14 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
     @pytest.mark.parametrize(("delta", "flagged"), [(-1, False), (0, True)])
     def test_the_length_floor_is_inclusive(self, tmp_path: Path, delta: int, flagged: bool):
         # Both sides of the `>=`, which is the part a refactor actually breaks. The strings
-        # are DERIVED from CE036_MIN_LEAK_CHARS rather than spelled out: a hardcoded 11 and
+        # are DERIVED from LEAK_MIN_CHARS rather than spelled out: a hardcoded 11 and
         # 12 would be a second declaration of the same number, which is the drift this
         # fixture exists to prevent. (The literal VALUE of the floor is not pinned here on
         # purpose — it is a tuning knob; what must not move silently is the comparison.)
+        from coder_eval.leak_detection import LEAK_MIN_CHARS
         from coder_eval.models import FileCheckCriterion
 
-        value = "x" * (CE036_MIN_LEAK_CHARS + delta)
+        value = "x" * (LEAK_MIN_CHARS + delta)
         task = _dataset_task(
             [{"id": "a"}],
             prompt=f"The answer is {value}",
@@ -5212,7 +5205,7 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
         assert self._offenders(task, tmp_path) == []
 
     def test_nested_string_leaves_are_scanned(self, tmp_path: Path):
-        # Pins `_string_leaves`' recursion: a leak in the SECOND entry of a list must be
+        # Pins `leak_detection.string_leaves`' recursion: a leak in the SECOND entry of a list must be
         # caught, or a rule that only looked at scalar fields would pass this repo's suites
         # while missing every `includes:` leak — the commonest shape there is.
         from coder_eval.models import FileCheckCriterion
@@ -5228,21 +5221,23 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
         assert len(offenders) == 1 and "permissions-boundary" in offenders[0]
 
     def test_ce036_exemption_list_matches_claude_md(self):
-        # CE036_LOCATOR_FIELDS is the single source; CLAUDE.md's CE036 sentence is derived.
+        # LEAK_LOCATOR_FIELDS is the single source; CLAUDE.md's CE036 sentence is derived.
         # Both directions, because the list already drifted once: CLAUDE.md named three of
         # the four fields the code exempted, and nothing noticed. The repo automates exactly
         # this class elsewhere (CE028 for the docs indexes, CE033 for the plugin reference).
         import re
 
+        from coder_eval.leak_detection import LEAK_LOCATOR_FIELDS
+
         text = _normalized(Path(__file__).parent.parent / "CLAUDE.md")
         sentence = next((s for s in text.split(". ") if "Location fields" in s), None)
         assert sentence is not None, "CLAUDE.md no longer states CE036's exemption list"
         backticked = set(re.findall(r"`([a-z_]+)`", sentence))
-        assert set(CE036_LOCATOR_FIELDS) <= backticked, (
-            f"CLAUDE.md's CE036 sentence omits {sorted(set(CE036_LOCATOR_FIELDS) - backticked)}"
+        assert set(LEAK_LOCATOR_FIELDS) <= backticked, (
+            f"CLAUDE.md's CE036 sentence omits {sorted(set(LEAK_LOCATOR_FIELDS) - backticked)}"
         )
-        assert backticked <= set(CE036_LOCATOR_FIELDS), (
-            f"CLAUDE.md's CE036 sentence names {sorted(backticked - set(CE036_LOCATOR_FIELDS))} as exempt, "
+        assert backticked <= set(LEAK_LOCATOR_FIELDS), (
+            f"CLAUDE.md's CE036 sentence names {sorted(backticked - set(LEAK_LOCATOR_FIELDS))} as exempt, "
             f"which the rule does not exempt"
         )
 
@@ -5263,17 +5258,6 @@ def _dataset_task(rows: list[dict], *, prompt: str = "${row.id}", criteria=None,
         success_criteria=criteria or [FileExistsCriterion(description="d", path="out.txt")],
         dataset=Dataset(rows=rows, split_field=split_field),
     )
-
-
-def _string_leaves(node: object) -> list[str]:
-    """Every string in a nested dict/list, flattened."""
-    if isinstance(node, str):
-        return [node]
-    if isinstance(node, dict):
-        return [s for v in node.values() for s in _string_leaves(v)]
-    if isinstance(node, list):
-        return [s for v in node for s in _string_leaves(v)]
-    return []
 
 
 @pytest.mark.lint

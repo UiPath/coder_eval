@@ -18,6 +18,7 @@ from typing import ClassVar
 
 import pytest
 
+from coder_eval.leak_detection import LEAK_MIN_CHARS
 from coder_eval.models import (
     ActivationGateVerdict,
     ArmRowScores,
@@ -26,10 +27,13 @@ from coder_eval.models import (
     EvaluationResult,
     ExecutionGateVerdict,
     ExperimentResult,
+    FileCheckCriterion,
     FinalStatus,
     GuardrailCheck,
     NoiseFloor,
     RegressionRow,
+    SkillTriggeredCriterion,
+    TaskDefinition,
     TokenUsage,
 )
 from coder_eval.optimize_gate import (
@@ -49,6 +53,7 @@ from coder_eval.optimize_gate import (
     _sibling_checks,
     activation_gate,
     arm_row_scores,
+    candidate_leaks,
     cost_latency_guardrails,
     cost_quality_front,
     cost_quality_points,
@@ -2700,3 +2705,106 @@ class TestGuardrailsNeverRaiseOnACallerSuppliedRow:
         verdict = _exec_gate(run_dir)
         assert sum("loaded ZERO rows" in note for note in verdict.notes) == 2
         assert [c.passed for c in verdict.guardrails] == [True, True]
+
+
+def _leak_row(row_id: str, criteria: list) -> TaskDefinition:
+    """One expanded train row — what `expand_dataset` hands `candidate_leaks`."""
+    return TaskDefinition(
+        task_id=f"{SUITE}/{row_id}",
+        description="leak fixture",
+        initial_prompt="do the thing",
+        success_criteria=criteria,
+    )
+
+
+# The real shape: a criterion asserting a substantive string on a file the row expects.
+_GRADED = "minimum-task-score"
+_ROWS = [_leak_row("r1", [FileCheckCriterion(description="d", path="out.yml", includes=[_GRADED])])]
+
+
+class TestCandidateLeaks:
+    """The anti-memorization preflight. It is a DIFF, and every test here is about that."""
+
+    def test_flags_a_span_the_candidate_adds(self) -> None:
+        findings = candidate_leaks(f"set {_GRADED} in the workflow", "an incumbent that says nothing", _ROWS)
+        assert len(findings) == 1
+        assert _GRADED in findings[0] and "r1" in findings[0] and "file_check" in findings[0]
+
+    def test_returns_nothing_when_the_baseline_already_says_it(self) -> None:
+        """THE false-positive regression, and the reason this function takes a baseline.
+
+        Measured against this repo's own `tasks/skills/ci-outcome.yaml`, an absolute scan flags the
+        shipped `ci` skill on five strings that are simply the output contract its suite grades. A
+        checker that fires on the shipped skill on its first run is one users learn to ignore.
+
+        Built as candidate = baseline + unrelated prose rather than as the degenerate
+        candidate == baseline: that is the real shape (a candidate is an EDIT of its baseline), and
+        it proves the containment is per-span rather than a whole-text equality.
+        """
+        baseline = f"The workflow must set {_GRADED} to the project's floor."
+        assert candidate_leaks(baseline, baseline, _ROWS) == []
+        assert candidate_leaks(baseline + "\n\nAlso prefer the smallest edit that could work.", baseline, _ROWS) == []
+
+    def test_a_clean_candidate_is_clean(self) -> None:
+        assert candidate_leaks("nothing graded here at all", "", _ROWS) == []
+
+    def test_an_empty_candidate_leaks_nothing(self) -> None:
+        # The emptied-body control snapshots to exactly this.
+        assert candidate_leaks("", "", _ROWS) == []
+
+    def test_empty_rows_return_empty_rather_than_raising(self) -> None:
+        assert candidate_leaks(f"a body mentioning {_GRADED}", "", []) == []
+
+    def test_an_empty_baseline_flags_everything_present(self) -> None:
+        # Correct rather than noisy: a baseline with no body cannot have contributed anything.
+        assert len(candidate_leaks(f"we set {_GRADED} here", "", _ROWS)) == 1
+
+    def test_identical_findings_are_de_duplicated(self) -> None:
+        # `tasks/skills/ci-outcome.yaml` really carries `includes: [x, x]` on one row, and before
+        # this the real train split produced 14 lines for 5 distinct spans — noise in a check whose
+        # design rationale is not firing more than it has to.
+        rows = [_leak_row("r1", [FileCheckCriterion(description="d", path="o.yml", includes=[_GRADED, _GRADED])])]
+        assert len(candidate_leaks(f"we set {_GRADED} here", "", rows)) == 1
+
+    def test_matching_is_case_insensitive(self) -> None:
+        # Both consumers lower-case both sides; disagreeing about that would make "a leak" mean
+        # two different things in the two rules that share this primitive.
+        assert len(candidate_leaks(f"we set {_GRADED.upper()} here", "", _ROWS)) == 1
+
+    def test_a_locator_value_in_the_candidate_does_not_flag(self) -> None:
+        # Naming WHERE an artifact goes removes filename nondeterminism from the measurement
+        # without revealing what is graded, so a body that names the path is not memorizing.
+        rows = [_leak_row("r1", [FileCheckCriterion(description="d", path=".github/workflows/evals.yml")])]
+        assert candidate_leaks("write it to .github/workflows/evals.yml", "", rows) == []
+
+    def test_the_skills_own_name_does_not_flag(self) -> None:
+        # CE036's `skill_name` exemption, pointed the other way: an outcome suite names the skill
+        # in every row by design, and the skill's own body names itself constantly.
+        #
+        # The floor guard is the whole test. A name shorter than LEAK_MIN_CHARS returns [] whether
+        # or not `skill_name` is exempt, so without it this passes on a rule that exempts nothing.
+        # CE036's twin carries the identical assertion for the identical reason.
+        assert len("optimize-skill") >= LEAK_MIN_CHARS, "fixture no longer exercises the floor"
+        rows = [
+            _leak_row("r1", [SkillTriggeredCriterion(description="d", skill_name="optimize-skill", expected_skill="")])
+        ]
+        assert candidate_leaks("This is the optimize-skill skill and it does things", "", rows) == []
+
+    def test_the_criterion_type_does_not_flag(self) -> None:
+        """`drop_type=True`, and it was found by measurement rather than by reasoning.
+
+        Without it, `optimize-skill`'s own body — which discusses eval criteria at length — flags
+        on `skill_triggered`, the criterion's DISCRIMINATOR rather than any graded content. A pure
+        false positive on any skill whose body discusses evaluation.
+        """
+        rows = [_leak_row("r1", [SkillTriggeredCriterion(description="d", skill_name="s", expected_skill="")])]
+        assert candidate_leaks("stack a skill_triggered criterion on every row", "", rows) == []
+
+    def test_a_leak_nested_in_a_list_is_caught(self) -> None:
+        rows = [_leak_row("r1", [FileCheckCriterion(description="d", path="o.yml", includes=["harmless-xx", _GRADED])])]
+        assert len(candidate_leaks(f"body mentioning {_GRADED}", "", rows)) == 1
+
+    def test_it_takes_no_min_chars_parameter(self) -> None:
+        # One value, read from the constant. A parameter would be a second declaration of a
+        # number CE036 and this function must agree on.
+        assert "min_chars" not in inspect.signature(candidate_leaks).parameters

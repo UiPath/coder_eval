@@ -32,6 +32,7 @@ from typing import NamedTuple
 from uuid import uuid4
 
 from coder_eval.criteria._classification_aggregate import classification_metrics
+from coder_eval.leak_detection import graded_strings
 from coder_eval.models import (
     TARGET_LABEL,
     ActivationGateVerdict,
@@ -45,6 +46,7 @@ from coder_eval.models import (
     OptimizeMeasurements,
     RegressionRow,
     RoundScores,
+    TaskDefinition,
 )
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
@@ -2052,6 +2054,63 @@ def arm_row_scores(
                 scores[row_id] = mean(values)
         arms.append(ArmRowScores(variant_id=variant_id, row_scores=scores))
     return arms
+
+
+def candidate_leaks(
+    candidate_text: str,
+    baseline_text: str,
+    rows: Sequence[TaskDefinition],
+) -> list[str]:
+    """Train-row content a candidate reproduces verbatim AND its baseline does not.
+
+    A preflight, not part of any verdict: it needs no runs, so it is read at proposal time, before
+    Stage A is paid for. Distinct from ``regression_check`` beside it, which asks whether an arm
+    *re-lost a measured row* and therefore cannot be answered without run results.
+
+    **A DIFF, not an absolute scan, and the difference is what makes it usable.** Measured against
+    this repo's own ``tasks/skills/ci-outcome.yaml`` on its TRAIN split, an absolute scan flags the
+    shipped ``ci`` skill on five strings — ``minimum-task-score``, ``persist-credentials: false``
+    and three more — none of which is memorization: that body legitimately documents the output
+    contract its suite grades. A checker that fires on the shipped skill on its first run is one
+    users learn to ignore. What is worth flagging is what a candidate NEWLY absorbs.
+
+    ``baseline_text`` is **the text this candidate was derived from**, which is not always the
+    incumbent: from round 2 a search-loop candidate is built on the *lineage head*, and diffing
+    that against the incumbent would re-report every span the head added, every round. Pass the
+    arm the candidate was actually edited from.
+
+    **Three boundaries, stated so an empty result is not mistaken for a proof:**
+
+    - It catches the VERBATIM form, as CE036 states of its own. A candidate that describes a train
+      row's content in other words is a semantic leak and needs a reader.
+    - Containment is a **substring** test in both directions, so a graded value can be masked by an
+      unrelated baseline substring that happens to contain it, and flagged for a subword
+      occurrence. The :data:`~coder_eval.leak_detection.LEAK_MIN_CHARS` floor makes both unlikely
+      rather than impossible.
+    - **A span already in the baseline is invisible from here on.** That is right while the
+      baseline is the user's shipped skill, which is the measured case above — but from round 2 the
+      baseline is itself a former candidate, so a memorized span that rode into a promotion
+      alongside a genuine improvement is never flagged again. The proposer-side rule in
+      ``reference/proposal-prompt.md`` is what covers that; this function cannot.
+
+    ``rows`` are the EXPANDED row-tasks of the TRAIN split only — passing the whole suite would
+    flag content drawn from rows the candidate is entitled to be fitted to. (The five-string
+    figure above is the train split's; the whole suite gives seven.)
+
+    Findings are de-duplicated, preserving order. A suite may assert the same string twice on a
+    row — this repo's own does — and repeating the line says nothing the first one did not, in a
+    check whose entire design rationale is not firing more than it has to.
+    """
+    candidate = candidate_text.lower()
+    baseline = baseline_text.lower()
+    findings: list[str] = []
+    for row in rows:
+        for criterion in row.success_criteria:
+            for value in graded_strings(criterion, drop_type=True):
+                lowered = value.lower()
+                if lowered in candidate and lowered not in baseline:
+                    findings.append(f"{row.task_id}: candidate adds {value!r} ({criterion.type})")
+    return list(dict.fromkeys(findings))
 
 
 def _dominates(a: ArmRowScores, b: ArmRowScores) -> bool:
