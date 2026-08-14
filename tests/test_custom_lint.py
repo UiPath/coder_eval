@@ -2456,6 +2456,38 @@ class TestPluginArtifacts:
             "optimize-skill names `skill-check` — that command does not exist; the sibling is `check-skill`"
         )
 
+    def test_optimize_skill_points_at_the_proposal_prompt(self):
+        # An extracted reference nothing points at is a deleted reference. Mirrors the
+        # optimize-method.md and task-rubric.md pointer sensors.
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        assert "${CLAUDE_PLUGIN_ROOT}/reference/proposal-prompt.md" in skill, (
+            "optimize-skill's SKILL.md no longer points at reference/proposal-prompt.md, so the "
+            "shape of the proposal — the trajectories, the anti-repetition history and the test "
+            "blinding — is unreachable from the step that has to generate candidates"
+        )
+
+    def test_proposal_prompt_keeps_its_load_bearing_instructions(self):
+        # This file exists to stop three specific failures, and each is invisible in the output:
+        # a proposer that paraphrases its last attempt, one that has seen the test split, and one
+        # that fixes the row in front of it rather than the category it belongs to.
+        text = _normalized(PLUGIN_ROOT / "reference" / "proposal-prompt.md")
+        for token, why in (
+            (
+                "structurally different",
+                "without it a proposer converges on a reworded version of a theory that already failed",
+            ),
+            (
+                "blinded",
+                "a proposer that has seen the test split turns Stage C into a second train split, "
+                "undetectably — the confirmation still renders and no longer means what it says",
+            ),
+            (
+                "categories of user intent",
+                "the anti-overfit rule; adding the missed row's wording scores well on that row and nowhere else",
+            ),
+        ):
+            assert token in text, f"reference/proposal-prompt.md lost {token!r} — {why}"
+
     def test_optimize_skill_snippet_names_the_public_gate_api(self):
         # A prose sensor cannot see a snippet drifting from the API it calls: the tokens stay
         # present, the skill stays readable, and the step fails at runtime in the user's terminal

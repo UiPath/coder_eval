@@ -195,6 +195,12 @@ directories, so every file a skill reads travels with it under `reference/`:
   gates use different machinery, and the paired-diff sign rule. Split out of `SKILL.md` for
   the same reason as `task-rubric.md` — the method is identical on both tracks, so it lives
   once and the skill keeps the procedure.
+- `proposal-prompt.md` — the shape of `optimize-skill`'s candidate-generation prompt: which
+  failing rows and trajectories the proposer is handed, every previous attempt with the
+  instruction to try something structurally different, and the test split it stays blinded to.
+  Split out for the same reason again — it is the proposal, not the method and not the
+  procedure, and a proposer given only scores writes plausible rewrites instead of answers to
+  specific failures.
 - `cli-setup.md` — how the CLI-driving skills handle a missing `coder-eval`
   binary: offer the install, ask first, verify it worked.
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads: what is *inside*

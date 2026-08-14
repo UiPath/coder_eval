@@ -556,6 +556,12 @@ to hand back to `/coder-eval:check-skill` to add them.
 
 ## Step 8 — Propose 3–5 candidates
 
+**Generate them against `${CLAUDE_PLUGIN_ROOT}/reference/proposal-prompt.md`** — the shape of the
+proposal itself: which failing rows and trajectories the proposer is handed, every previous
+attempt with the instruction not to repeat it, and the test split it must stay blinded to. A
+proposer given only scores writes plausible rewrites; that file is what makes it answer specific
+failures instead.
+
 One candidate per hypothesis. Each candidate is a snapshot of **the whole skills
 directory**, not of one skill:
 
