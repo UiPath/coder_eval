@@ -36,9 +36,12 @@ class GuardrailCheck(BaseModel):
     )
     tolerance: float = Field(
         description=(
-            "How much movement is tolerated before the check fails. Units differ by check and the "
-            "check's own name says which: cost/latency scale it by the incumbent's mean (a RELATIVE "
-            "materiality floor), while a sibling recall check reads it as an ABSOLUTE drop in recall."
+            "The bar this check is decided against. Its meaning differs by check and the check's "
+            "own name says which: cost/latency scale it by the incumbent's mean (a RELATIVE "
+            "materiality floor), a sibling recall check reads it as an ABSOLUTE permitted drop, and "
+            "the execution track's engagement check reads it as an ABSOLUTE FLOOR the candidate "
+            "must reach (1.0 — a row the skill never engaged on is not evidence about its body, "
+            "however the incumbent did on it), not as a permitted movement."
         )
     )
     ci_low: float | None = Field(
@@ -164,7 +167,14 @@ class ActivationGateVerdict(BaseModel):
         default=None, description="The family-wise alpha holm_promote applied. None until it has run."
     )
     promoted: bool | None = Field(
-        default=None, description="None means gated but undecided — holm_promote has not been applied."
+        default=None,
+        description=(
+            "None means gated but undecided — holm_promote has not been applied. It folds the "
+            "SIBLING checks in (a candidate that moved the failure has not fixed it) but leaves the "
+            "cost/latency guardrails advisory, which the skill's prose gates on. Note this differs "
+            "from ExecutionGateVerdict.promoted, which folds in neither — so do not carry a habit "
+            "from one gate to the other; read each field's own description."
+        ),
     )
     range_non_overlap: bool = Field(
         default=False,

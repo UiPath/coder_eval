@@ -46,6 +46,7 @@ from coder_eval.optimize_gate import (
     _render_checks,
     _row_cost_levels,
     _row_costs,
+    _sibling_checks,
     activation_gate,
     arm_row_scores,
     cost_latency_guardrails,
@@ -2622,3 +2623,80 @@ class TestExecutionGateCannotBeQuietlyMisread:
         assert verdict.rows_paired == 3
         assert verdict.rows_excluded == 1
         assert any("scored for one arm only" in note for note in verdict.notes)
+
+
+class TestTheSiblingCheckIsBalancedLikeThePrimaryOne:
+    """A replicate imbalance must not move a sibling's recall — the check gates `promoted`."""
+
+    @staticmethod
+    def _rows(replicates: int, *, annexed: bool = False) -> dict[str, list[EvaluationResult]]:
+        # Criterion 0 is the primary; criterion 1 is the sibling, true-yes on both rows.
+        sibling = ("yes", "no") if annexed else ("yes", "yes")
+        return {
+            "r1": [_eval_result("r1", [("yes", "yes"), sibling])] * replicates,
+            "r2": [_eval_result("r2", [("yes", "yes"), ("yes", "yes")])] * replicates,
+        }
+
+    def test_identical_labels_read_identically_despite_an_extra_replicate(self) -> None:
+        # Before balancing: recall 0.5 vs 0.6 on byte-identical labels, purely from one row's
+        # extra replicate — and the sibling check is folded into `promoted`.
+        check = _sibling_checks(
+            incumbent_rows=self._rows(2),
+            candidate_rows={**self._rows(2), "r1": self._rows(3)["r1"]},
+            paired_row_ids=["r1", "r2"],
+            sibling_indices=[1],
+        )[0]
+        assert check.incumbent == check.candidate
+        assert check.passed
+
+    def test_the_annexation_rate_is_aligned_within_a_row_not_across_the_flattened_list(self) -> None:
+        # An unbalanced row used to shift every later row's alignment, so a candidate that annexed
+        # half the sibling's true rows rendered `rate` 0.000 — "took nothing".
+        incumbent = {
+            "r1": [_eval_result("r1", [("yes", "yes"), ("yes", "yes")])] * 3,
+            "r2": [_eval_result("r2", [("yes", "yes"), ("yes", "yes")])] * 2,
+        }
+        candidate = {
+            "r1": [_eval_result("r1", [("yes", "yes"), ("yes", "yes")])] * 2,
+            "r2": [_eval_result("r2", [("yes", "yes"), ("yes", "no")])] * 2,
+        }
+        check = _sibling_checks(
+            incumbent_rows=incumbent, candidate_rows=candidate, paired_row_ids=["r1", "r2"], sibling_indices=[1]
+        )[0]
+        # 4 balanced true-yes observations; the candidate turned r2's 2 into "no".
+        assert check.rate == pytest.approx(0.5)
+        assert not check.passed
+
+    def test_a_one_sided_sibling_is_still_detected_after_balancing(self) -> None:
+        # Balancing trims a one-sided row to nothing, so PRESENCE must be read from the untrimmed
+        # pools or the "results on one arm only" note disappears.
+        incumbent = {"r1": [_eval_result("r1", [("yes", "yes"), ("yes", "yes")])]}
+        candidate = {"r1": [_eval_result("r1", [("yes", "yes")])]}
+        check = _sibling_checks(
+            incumbent_rows=incumbent, candidate_rows=candidate, paired_row_ids=["r1"], sibling_indices=[1]
+        )[0]
+        assert check.note is not None and "one arm only" in check.note
+        assert check.passed and check.rate is None
+
+
+class TestGuardrailsNeverRaiseOnACallerSuppliedRow:
+    def test_a_row_id_absent_from_the_arms_is_skipped_not_indexed(self) -> None:
+        # `execution_gate` passes the rows `paired_comparison` paired, which come from
+        # experiment.json — an id named there but missing on disk used to raise a KeyError out of
+        # the skill's inline snippet, discarding the wrong-path note composed just above it.
+        checks = cost_latency_guardrails(incumbent_rows={}, candidate_rows={}, row_ids=["ghost-row"])
+        assert [c.passed for c in checks] == [True, True]
+        assert all(c.note is not None and "not evaluated" in c.note for c in checks)
+
+    def test_an_unfanned_single_task_suite_returns_a_noted_verdict(self, tmp_path: Path) -> None:
+        # `scoped_scores` keeps `task_id == suite_id`, so `removeprefix` leaves the SUITE id as the
+        # row id — which no row directory is named. The contract is a noted verdict, not a raise.
+        run_dir = tmp_path / "round1-gate"
+        _experiment_json(
+            run_dir,
+            ["incumbent", "candidate"],
+            {"incumbent": {EXEC_SUITE: [0.4, 0.5]}, "candidate": {EXEC_SUITE: [0.8, 0.9]}},
+        )
+        verdict = _exec_gate(run_dir)
+        assert sum("loaded ZERO rows" in note for note in verdict.notes) == 2
+        assert [c.passed for c in verdict.guardrails] == [True, True]

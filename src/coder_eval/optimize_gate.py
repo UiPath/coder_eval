@@ -337,7 +337,13 @@ def cost_latency_guardrails(
         # cost-less on one arm pools to `[]`, `mean([])` reads 0.0, and the interval says that arm
         # cost nothing (measured: a 10x cost increase passing with ci_low = -0.1). Without the
         # second, an interrupted invocation reweights the comparison exactly as it does for F1.
-        paired = [(extract(incumbent_rows[rid]), extract(candidate_rows[rid])) for rid in ids]
+        # `.get`, not `[]`: `row_ids` is caller-supplied and need not be the intersection of these
+        # two maps. `execution_gate` passes the rows `paired_comparison` paired, which come from
+        # `experiment.json` — a row named there but missing from the on-disk tree (a skipped
+        # malformed `task.json`, or an unfanned single-task suite) used to raise a KeyError out of
+        # the skill's inline snippet, discarding the carefully-composed wrong-path note above it.
+        # A row with no measurement on one arm already falls through to the note-and-None path.
+        paired = [(extract(incumbent_rows.get(rid, [])), extract(candidate_rows.get(rid, []))) for rid in ids]
         measured = sum(1 for inc, _c in paired if inc), sum(1 for _i, cand in paired if cand)
         comparable = [(inc[: min(len(inc), len(cand))], cand[: min(len(inc), len(cand))]) for inc, cand in paired]
         comparable = [(inc, cand) for inc, cand in comparable if inc and cand]
@@ -868,7 +874,35 @@ def derive_sibling_indices(*rows_maps: dict[str, list[EvaluationResult]], primar
     return sorted(found - {primary_index})
 
 
-def _annexation_rate(incumbent_pairs: list[tuple[str, str]], candidate_pairs: list[tuple[str, str]]) -> float | None:
+def _balanced_sibling_pairs(
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    paired_row_ids: Sequence[str],
+    index: int,
+) -> list[tuple[list[tuple[str, str]], list[tuple[str, str]]]]:
+    """Per row, the two arms' label pairs at ``index``, TRIMMED to a common replicate count.
+
+    The same balancing :func:`activation_gate` applies to the primary criterion, for the same
+    reason and now on the same footing: a row's weight in an arm's recall is its observation count,
+    so an arm that contributed 3 replicates for a row while the other contributed 2 has silently
+    reweighted the comparison. Measured on the sibling check before this existed — two arms with
+    byte-identical labels on every row and every replicate read `recall.yes` 0.5 against 0.6 purely
+    from one row's extra replicate, and the sibling check is folded into ``promoted``.
+
+    Kept PER ROW rather than flattened, because the annexation rate has to pair the two arms'
+    observations positionally: flattening first lets one unbalanced row shift the alignment of
+    every row after it.
+    """
+    per_row: list[tuple[list[tuple[str, str]], list[tuple[str, str]]]] = []
+    for row_id in paired_row_ids:
+        incumbent = _label_pairs(incumbent_rows.get(row_id, []), index)
+        candidate = _label_pairs(candidate_rows.get(row_id, []), index)
+        keep = min(len(incumbent), len(candidate))
+        per_row.append((incumbent[:keep], candidate[:keep]))
+    return per_row
+
+
+def _annexation_rate(per_row: list[tuple[list[tuple[str, str]], list[tuple[str, str]]]]) -> float | None:
     """Of the sibling's true-``yes`` observations, the fraction the candidate alone turned to ``no``.
 
     A READING, not a gate — the same standing the cost/quality front has (see
@@ -879,18 +913,22 @@ def _annexation_rate(incumbent_pairs: list[tuple[str, str]], candidate_pairs: li
     ``None`` when the sibling has no true instances, since there is then nothing to annex and a
     rate over an empty denominator would read as 0.0 — indistinguishable from "took nothing".
 
-    Paired positionally: the two arms' pair lists are built over the same rows in the same order by
-    the caller, and a length mismatch (which the balancing upstream prevents) truncates to the
-    shorter rather than inventing an alignment.
+    Takes the pairs **per row and already balanced** (:func:`_balanced_sibling_pairs`) because the
+    two arms' observations are matched positionally *within* a row. Over one flattened list an
+    unbalanced row shifts every later row's alignment: measured, a candidate that annexed half the
+    sibling's true rows rendered a rate of 0.000 — "took nothing" — which is worse than no reading.
     """
     annexed = 0
     total = 0
-    for (expected, incumbent_observed), (_e, candidate_observed) in zip(incumbent_pairs, candidate_pairs, strict=False):
-        if expected != TARGET_LABEL:
-            continue
-        total += 1
-        if incumbent_observed == TARGET_LABEL and candidate_observed != TARGET_LABEL:
-            annexed += 1
+    for incumbent_pairs, candidate_pairs in per_row:
+        for (expected, incumbent_observed), (_e, candidate_observed) in zip(
+            incumbent_pairs, candidate_pairs, strict=True
+        ):
+            if expected != TARGET_LABEL:
+                continue
+            total += 1
+            if incumbent_observed == TARGET_LABEL and candidate_observed != TARGET_LABEL:
+                annexed += 1
     return annexed / total if total else None
 
 
@@ -919,17 +957,23 @@ def _sibling_checks(
     checks: list[GuardrailCheck] = []
     metric_name = f"recall.{TARGET_LABEL}"
     for index in sibling_indices:
-        incumbent_pairs = [p for rid in paired_row_ids for p in _label_pairs(incumbent_rows[rid], index)]
-        candidate_pairs = [p for rid in paired_row_ids for p in _label_pairs(candidate_rows[rid], index)]
+        # PRESENCE is read from the untrimmed pools — "this arm produced no results here at all" is
+        # an arm-level fact, and balancing would erase it by trimming a one-sided row to nothing.
+        # The METRICS are read from the balanced ones, so an extra replicate cannot move recall.
+        raw_incumbent = [p for rid in paired_row_ids for p in _label_pairs(incumbent_rows.get(rid, []), index)]
+        raw_candidate = [p for rid in paired_row_ids for p in _label_pairs(candidate_rows.get(rid, []), index)]
+        per_row = _balanced_sibling_pairs(incumbent_rows, candidate_rows, paired_row_ids, index)
+        incumbent_pairs = [p for inc, _c in per_row for p in inc]
+        candidate_pairs = [p for _i, cand in per_row for p in cand]
         incumbent_recall = _metric(incumbent_pairs, metric_name)
         candidate_recall = _metric(candidate_pairs, metric_name)
 
         note: str | None = None
-        one_sided = bool(incumbent_pairs) != bool(candidate_pairs)
-        if not incumbent_pairs and not candidate_pairs:
+        one_sided = bool(raw_incumbent) != bool(raw_candidate)
+        if not raw_incumbent and not raw_candidate:
             note = f"criterion {index} produced no classification results on either arm — not evaluated"
         elif one_sided:
-            missing = "candidate" if incumbent_pairs else "incumbent"
+            missing = "candidate" if raw_incumbent else "incumbent"
             note = (
                 f"criterion {index} produced results on one arm only (the {missing} arm has none) — that is a "
                 + "difference between the snapshots, not a regression, so it is reported rather than gated on"
@@ -940,8 +984,8 @@ def _sibling_checks(
         checks.append(
             GuardrailCheck(
                 name=f"sibling {metric_name} [criterion {index}]",
-                incumbent=incumbent_recall if incumbent_pairs else None,
-                candidate=candidate_recall if candidate_pairs else None,
+                incumbent=incumbent_recall if raw_incumbent else None,
+                candidate=candidate_recall if raw_candidate else None,
                 relative_change=(
                     (candidate_recall - incumbent_recall) / incumbent_recall
                     if incumbent_recall and not one_sided
@@ -949,8 +993,8 @@ def _sibling_checks(
                 ),
                 tolerance=tolerance,
                 # A READING beside the recall, never a second gate: `passed` below is unchanged.
-                rate=None if one_sided else _annexation_rate(incumbent_pairs, candidate_pairs),
-                passed=one_sided or not incumbent_pairs or candidate_recall >= incumbent_recall - tolerance,
+                rate=None if one_sided else _annexation_rate(per_row),
+                passed=one_sided or not raw_incumbent or candidate_recall >= incumbent_recall - tolerance,
                 note=note,
             )
         )
@@ -1471,7 +1515,8 @@ def _integrity_checks(
                     relative_change=(
                         (candidate_recall - incumbent_recall) / incumbent_recall if incumbent_recall else None
                     ),
-                    tolerance=0.0,
+                    # An absolute FLOOR, not a permitted drop — see GuardrailCheck.tolerance.
+                    tolerance=1.0,
                     passed=candidate_recall >= 1.0,
                     note=(
                         None
@@ -1905,7 +1950,8 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
     elif verdict.gate_refusal is not None:
         headline = f"CANNOT SEPARATE AT THIS SIZE — {verdict.gate_refusal}"
     elif verdict.promoted and failed_guardrails:
-        # `promoted` is the PRIMARY statistic's decision; the guardrails gate in the procedure. A
+        # `promoted` here already includes the sibling checks; what it does NOT include is the
+        # cost/latency guardrails, which gate in the procedure. A
         # bare "PROMOTED" over a failing guardrail is the misread this line exists to prevent —
         # the reader prints the block and ships a candidate that doubled what a row costs.
         headline = (
