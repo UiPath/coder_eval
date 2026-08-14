@@ -87,7 +87,8 @@ crashed, crash_reason}`) — the full transcript is in `task.json`.
 ### Missing cost is never fatal
 
 Pricing degrades; the evaluation does not. A model absent from the rate card, a turn
-the backend never priced, a hard-killed task that lost its in-flight spend: each one
+the backend never priced, a hard-killed task that lost its in-flight spend (keyed on
+`forced_kill`, since such a task may finalize `SUCCESS`): each one
 lowers a total and sets `cost_complete: false`. None of them raises, none of them
 books a zero, and none of them changes a run's exit code.
 
@@ -290,6 +291,15 @@ String enum values and their reporting category:
 | `MAX_TURNS_EXHAUSTED` | failed | `M` |
 | `TOKEN_BUDGET_EXCEEDED` | failed | `#` |
 | `COST_BUDGET_EXCEEDED` | failed | `$` |
+
+`TIMEOUT` is the **fallback** status for a structural timeout, not a synonym for
+"this run timed out". A hard-killed run is graded against whatever the agent
+produced, so one that already satisfied its criteria serializes as `SUCCESS`
+with `error_message` cleared. To ask "did this task blow its budget?", read the
+durable `forced_kill` flag on the row, not the status. A turn-level timeout also
+now lands as `TIMEOUT` (category `failed`) rather than the `ERROR` (category
+`error`) it produced before it had a dedicated handler — it moves between
+`tasks_error` and `tasks_failed`, and between `<error>` and `<failure>` in JUnit.
 | `ERROR` | error | `!` |
 | `BUILD_FAILED` | error | `B` |
 

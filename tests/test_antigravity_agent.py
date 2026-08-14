@@ -881,17 +881,26 @@ async def test_communicate_handles_two_sequential_background_jobs(monkeypatch):
 
 
 async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
-    """A pathological, never-closing background job must not poll forever --
-    the hard _MAX_BACKGROUND_POLLS cap bounds it independent of the turn budget."""
+    """A pathological, never-closing background job must not poll forever.
+
+    With no configured turn_timeout the flat _MAX_BACKGROUND_POLL_WALL_SECONDS
+    backstop is the sole bound (a parallel cycle cap was removed: it overrode
+    large configured timeouts and bounded nothing the deadline didn't). Drive
+    it with a fake clock that only the poll sleeps advance, so the assertion is
+    on the real exit condition rather than on a cycle count.
+    """
     from coder_eval.agents import antigravity_agent
 
-    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 3)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 15.0)
     sleep_calls: list[float] = []
+    fake_now = [0.0]
 
     async def _record_sleep(seconds: float) -> None:
         sleep_calls.append(seconds)
+        fake_now[0] += seconds
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+    monkeypatch.setattr(antigravity_agent.time, "monotonic", lambda: fake_now[0])
 
     never_closing = [
         _step(
@@ -908,7 +917,8 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
     agent = _agent_with_steps([never_closing])
     tr = await agent.communicate("do it forever")
 
-    assert len(sleep_calls) == 3  # exactly _MAX_BACKGROUND_POLLS, not infinite
+    # 15s budget / 5s per cycle = 3 cycles, then the deadline stops it.
+    assert len(sleep_calls) == 3
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
     assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
 
@@ -919,7 +929,7 @@ async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(m
     the poll loop's own graceful path -- force-close the orphan, grade normally
     -- instead of the ThreadedWatchdog cutting the whole turn at `timeout` first.
 
-    Pre-fix, `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS` (120 *
+    Pre-fix, the poll budget (120 *
     5s = 600s) was DOUBLE the 300s default, so the watchdog always won that race
     and this exact scenario -- a tool call spuriously left ACTIVE with no real
     background job behind it, confirmed live in the final validation run -- burned
@@ -984,12 +994,12 @@ class _WatchdogFiresLater:
 async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(monkeypatch):
     """A watchdog timeout landing BETWEEN poll cycles (state.timeout_hit flips
     to True while the loop is sleeping) must stop the loop on its next condition
-    check, not burn through the rest of _MAX_BACKGROUND_POLLS waiting for a
+    check, not burn through the rest of the poll budget waiting for a
     cancellation that may not land on this coroutine right away (final-review
     finding: the loop condition must read the flag the watchdog already set)."""
     from coder_eval.agents import antigravity_agent
 
-    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 50)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 250.0)
     monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
 
     sleep_calls: list[float] = []
@@ -1810,7 +1820,7 @@ async def test_communicate_raises_timeout_when_connection_never_produces_a_singl
     from coder_eval.errors import TurnTimeoutError
 
     monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 2)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 0.05)
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
 
     conversation = _AlwaysEmptyConversation()
@@ -1838,7 +1848,7 @@ def test_per_step_timeout_is_not_aliased_to_the_poll_interval():
     revision did this) meant any ordinary foreground tool call or thinking
     burst lasting longer than the poll interval (5s) got misclassified as
     "looks orphaned", feeding false step_fetch_timed_out cycles into
-    poll_deadline/_MAX_BACKGROUND_POLLS and materially shrinking the usable
+    poll_deadline and materially shrinking the usable
     turn budget for completely normal work. The two constants measure
     different things (how often to re-check an idle connection vs. how long a
     genuinely in-progress step-fetch may go quiet) and must be tuned
@@ -1888,15 +1898,9 @@ def test_background_poll_budget_still_covers_the_worst_observed_backgrounded_job
     # this budget is actually achievable rather than being eaten by whatever
     # the turn already spent.
     assert antigravity_agent._MAX_BACKGROUND_POLL_WALL_SECONDS >= _WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS
-    # The cycle cap must not be the tighter of the two on that path, or it
-    # silently becomes the real budget (17 * 5s = 85s was exactly that bug).
-    empty_poll_budget_seconds = (
-        antigravity_agent._MAX_BACKGROUND_POLLS * antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
-    )
-    assert empty_poll_budget_seconds >= _WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS, (
-        f"empty-poll budget is {empty_poll_budget_seconds:g}s, below the "
-        f"{_WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS:g}s worst observed backgrounded job"
-    )
+    # ...and that budget must buy enough 5s idle cycles to outlast the job.
+    cycles = antigravity_agent._MAX_BACKGROUND_POLL_WALL_SECONDS / antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
+    assert cycles >= _WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS / antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
 
     # Configured-timeout path: document the achievable budget at the repo
     # default. This asserts the CURRENT limitation, so raising the default (or

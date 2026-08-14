@@ -21,9 +21,6 @@ Registered targets (file, function, cap):
 - ``orchestrator.py::_simulation_dialog_loop`` (cap 128; 122 CE022-stmts ≙ 124
   ruff-stmts) — sequential dialog driver, irreducible without a state-object
   rewrite (2026-06-23 decompose-god-functions plan, Phase 5).
-- ``orchestrator.py::run`` (cap 76; 70 CE022-stmts ≙ 86 ruff-stmts) — the
-  exception-handling ladder around the evaluation loop; the
-  forced-kill-grading fix (2026-08-14) pushed it over ruff's ceiling.
 - ``antigravity_agent.py::communicate`` (cap 81; 77 CE022-stmts ≙ 82
   ruff-stmts) — the poll-loop-plus-finalize driver; the
   ``step_fetch_timed_out`` post-loop branch (2026-08-14) pushed it over
@@ -66,7 +63,6 @@ class NoqaPlr0915StatementCap(BaseRule):
     # sibling like ``x_orchestrator.py`` can't accidentally match.
     _TARGETS: tuple[tuple[str, str, int], ...] = (
         ("orchestrator.py", "_simulation_dialog_loop", 128),
-        ("orchestrator.py", "run", 76),
         ("antigravity_agent.py", "communicate", 81),
     )
 

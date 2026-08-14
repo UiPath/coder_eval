@@ -755,6 +755,76 @@ async def test_grade_after_forced_kill_skips_regrade_when_already_graded(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_over_budget_grading_is_awaited_before_sandbox_teardown(tmp_path) -> None:
+    """Regression test (code-review finding): the 60s grading budget must not
+    let a live criterion race sandbox cleanup.
+
+    check_all_async offloads each criterion to asyncio.to_thread, which is NOT
+    cancellable -- on expiry the awaiting coroutine raises but the worker keeps
+    running, and a run_command criterion's subprocess would still be writing
+    into the directory run()'s finally is about to move or rmtree.
+    """
+    from coder_eval import orchestrator as orchestrator_module
+
+    monkeypatch_budget = 0.05
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+    finished: list[str] = []
+
+    async def slow_check_all_async(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        finished.append("criteria-done")
+        return [CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+
+    orchestrator.success_checker.check_all_async = slow_check_all_async  # type: ignore[union-attr]
+
+    with (
+        patch.object(orchestrator_module, "_GRADE_AFTER_FORCED_KILL_TIMEOUT_SECONDS", monkeypatch_budget),
+        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+    ):
+        await orchestrator._grade_after_forced_kill(fallback_status=FinalStatus.TIMEOUT)
+        # Budget expired, so the verdict fell back...
+        assert orchestrator.result.final_status == FinalStatus.TIMEOUT
+        assert finished == []
+        # ...but the criterion is still running and must be drained first.
+        assert orchestrator._pending_grade is not None
+        await orchestrator._await_pending_grade()
+
+    assert finished == ["criteria-done"]
+    assert orchestrator._pending_grade is None
+
+
+@pytest.mark.asyncio
+async def test_grade_after_forced_kill_marks_the_run_even_when_it_upgrades_to_success(tmp_path) -> None:
+    """Regression test (code-review finding): a hard-killed run must stay
+    identifiable after the status upgrade.
+
+    Once grading can turn a TIMEOUT into SUCCESS, `final_status` is no longer a
+    usable proxy for "this run blew its structural budget". Consumers key real
+    decisions off that question -- `reports_experiment._cost_complete` returns
+    False for a hard kill because the in-flight turn's spend was lost, the
+    error_log_tail allowlist keeps the only evidence of the kill, and telemetry
+    needs to count breaches. All of them read `forced_kill`, which must survive
+    the upgrade.
+    """
+    from coder_eval.reports_experiment import _cost_complete
+
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+    orchestrator.success_checker.check_all_async = AsyncMock(  # type: ignore[union-attr]
+        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+    )
+
+    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+        await orchestrator._grade_after_forced_kill(fallback_status=FinalStatus.TIMEOUT)
+
+    assert orchestrator.result.final_status == FinalStatus.SUCCESS
+    assert orchestrator.result.forced_kill is True
+    # ...and the cost-completeness contract still holds despite the SUCCESS.
+    assert _cost_complete(orchestrator.result) is False
+
+
+@pytest.mark.asyncio
 async def test_grade_after_forced_kill_keeps_the_fallback_status_when_grading_is_cancelled(tmp_path) -> None:
     """Regression test (code-review finding): a BaseException during grading
     must not leave the row at the constructor default.

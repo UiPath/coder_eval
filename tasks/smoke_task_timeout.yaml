@@ -26,10 +26,12 @@ agent:
   allowed_tools: ["Bash"]
 
 success_criteria:
-  # If the orchestrator's task_timeout watchdog fires, this criterion never
-  # runs (sandbox never reaches the check phase). The bucket-level assertion
-  # in CI checks tasks_failed == EXPECTED_SMOKE_FAIL_FAILED to verify the
-  # task is counted as a failure (not a success or an error).
+  # The task_timeout watchdog fires, and the orchestrator then GRADES what the
+  # agent produced (see _grade_after_forced_kill) rather than discarding it --
+  # so this criterion IS evaluated. It fails because the file never exists,
+  # which is what keeps the task in the failed bucket. The bucket-level
+  # assertion in CI checks tasks_failed == EXPECTED_SMOKE_FAIL_FAILED to verify
+  # the task is counted as a failure (not a success or an error).
   - type: "file_exists"
     path: "should_never_be_checked.txt"
-    description: "Placeholder; task_timeout fires before the criterion is evaluated."
+    description: "Never created, so grading after the forced kill fails and the task stays in the failed bucket."

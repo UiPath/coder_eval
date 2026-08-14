@@ -439,13 +439,6 @@ class TestCE022SimulationDialogLoopStatementCap:
         src = f"def _simulation_dialog_loop(self, initial_prompt, sandbox_dir):\n{body}"
         assert len(self._run(src)) == 1
 
-    def test_flags_oversized_run(self):
-        """orchestrator.py::run is a registered target too (added by the
-        forced-kill-grading fix's # noqa: PLR0915)."""
-        violations = self._run(self._padded_loop("run", 200))
-        assert len(violations) == 1
-        assert violations[0].rule_id == "CE022"
-
     def test_flags_oversized_communicate_in_antigravity_agent(self):
         """antigravity_agent.py::communicate is a registered target too (added
         by the step_fetch_timed_out post-loop branch's # noqa: PLR0915)."""
@@ -453,9 +446,9 @@ class TestCE022SimulationDialogLoopStatementCap:
         assert len(violations) == 1
         assert violations[0].rule_id == "CE022"
 
-    def test_ignores_run_outside_orchestrator(self):
-        """A same-named `run` in a different file is not a registered target."""
-        assert not self._run(self._padded_loop("run", 200), path="src/coder_eval/other.py")
+    def test_ignores_communicate_outside_its_registered_file(self):
+        """A same-named `communicate` in a different file is not a target."""
+        assert not self._run(self._padded_loop("communicate", 200), path="src/coder_eval/other.py")
 
     def test_flags_an_unregistered_noqa_plr0915(self, tmp_path):
         """The "register your new noqa in _TARGETS" contract is self-enforcing.
@@ -489,7 +482,7 @@ class TestCE022SimulationDialogLoopStatementCap:
 
         from tests.lint.rules.ce022_dialog_loop_statement_cap import NoqaPlr0915StatementCap
 
-        registered = "def run(self):  # noqa: PLR0915\n    x = 1\n"
+        registered = "def _simulation_dialog_loop(self):  # noqa: PLR0915\n    x = 1\n"
         f = tmp_path / "orchestrator.py"
         f.write_text(registered)
         assert not _with_source(NoqaPlr0915StatementCap(str(f)), registered).check(ast.parse(registered))

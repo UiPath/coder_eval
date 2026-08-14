@@ -100,8 +100,8 @@ _BACKGROUND_POLL_INTERVAL_SECONDS = 5.0
 _RECEIVE_STEPS_REENTRY_RETRIES = 5
 
 # Bounds a single receive_steps() step-fetch so communicate()'s poll loop can
-# re-check its own bounds (has_orphaned_tool_call, poll_deadline,
-# _MAX_BACKGROUND_POLLS) even while the connection is genuinely non-idle and a
+# re-check its own bounds (has_orphaned_tool_call, poll_deadline)
+# even while the connection is genuinely non-idle and a
 # fetch would otherwise block unboundedly (confirmed against the installed SDK:
 # a single receive_steps() call has no internal timeout) -- see _drain().
 #
@@ -114,8 +114,8 @@ _RECEIVE_STEPS_REENTRY_RETRIES = 5
 # running, a model still generating with no incremental signal) may go quiet
 # before being treated as suspicious. Aliasing it to 5s meant an ordinary tool
 # call or thinking burst lasting longer than 5s between SDK-visible steps
-# routinely tripped this "looks orphaned" signal, feeding _POLL_DEADLINE and
-# _MAX_BACKGROUND_POLLS with false cycles and materially shrinking the
+# routinely tripped this "looks orphaned" signal, feeding poll_deadline
+# with false cycles and materially shrinking the
 # effective turn budget for completely normal work (round-4 review finding,
 # confirmed against the installed SDK's queue-based receive_steps()). 30s is
 # generous enough that ordinary latency should never trip it, while still
@@ -147,43 +147,44 @@ _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS = 30.0
 # evaluated, a strict regression for that input class.
 _POLL_DEADLINE_TIMEOUT_FRACTION = 0.8
 
-# Cap on poll *cycles* per turn, and the wall-clock backstop that runs beside
-# it. BOTH bound the loop; whichever trips first wins. They exist because a
-# poll cycle's cost is bimodal, and a single bound cannot cover both modes:
+# Wall-clock backstop on the background-work poll loop for a task that sets no
+# run_limits.turn_timeout/task_timeout at all (timeout=None), since
+# _POLL_DEADLINE_TIMEOUT_FRACTION has nothing to multiply in that case. It is
+# the SOLE bound on that path; with a timeout configured, 0.8 * timeout
+# replaces it entirely.
 #
-#   - Backgrounded job (the case this loop exists for): the connection is IDLE
-#     with an empty step queue, so the installed SDK's receive_steps() returns
+# 600s is ~2x the 60-300s worst backgrounded-job duration observed in the
+# confirmed-broken tasks that motivated d3f1432, and it covers both cost modes
+# a poll cycle has:
+#   - idle (the case this loop exists for): the connection is idle with an
+#     empty step queue, so the installed SDK's receive_steps() returns
 #     immediately (`if self.is_idle and self._processor.step_queue.empty():
-#     return`, connections/local/local_connection.py) -- _drain() comes back
-#     instantly with step_fetch_timed_out=False and the cycle costs just
-#     _BACKGROUND_POLL_INTERVAL_SECONDS = 5s. _MAX_BACKGROUND_POLLS is what
-#     bounds this mode: 120 * 5s = 600s, ~2x the 60-300s worst backgrounded-job
-#     duration observed in the confirmed-broken tasks that motivated d3f1432.
-#     A code-review round derived this cap from a 35s worst-case cycle instead
-#     (17 * 35s) -- that arithmetic does not apply to THIS mode, and cut the
-#     real budget to 85s, re-opening the exact bug d3f1432 fixed (the turn
-#     graded on work that had not happened yet). tests/test_antigravity_agent.py
-#     ::test_background_poll_budget_still_covers_the_worst_observed_backgrounded_job
-#     pins the product in seconds so it cannot silently regress again.
+#     return`, connections/local/local_connection.py) and the cycle costs just
+#     _BACKGROUND_POLL_INTERVAL_SECONDS = 5s -> 120 cycles inside the budget.
+#   - wedged: genuinely non-idle, every re-drain burns the full
+#     _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS, so a cycle costs 30 + 5 = 35s
+#     -> ~17 cycles. Bounding this in wall-clock time rather than in cycles is
+#     the whole point: a cycle COUNT tuned for one mode is wrong for the other
+#     (a cap of 17 derived from the 35s cycle cut the idle budget to 85s and
+#     re-opened d3f1432's bug; a cap of 120 tuned for the idle mode overrode
+#     large configured timeouts). One clock, both modes.
 #
-#   - Wedged connection: genuinely non-idle, every re-drain burns the full
-#     _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS before giving up, so a cycle
-#     costs 30 + 5 = 35s and the cycle cap alone would allow 120 * 35s = 70
-#     minutes. _MAX_BACKGROUND_POLL_WALL_SECONDS bounds this mode directly in
-#     wall-clock time, and applies only when the task set no turn_timeout (with
-#     one configured, _POLL_DEADLINE_TIMEOUT_FRACTION * timeout is tighter and
-#     wins). 600s keeps the same ~10-minute ceiling the cycle cap used to imply.
+# tests/test_antigravity_agent.py
+# ::test_background_poll_budget_still_covers_the_worst_observed_backgrounded_job
+# pins the budget in seconds so it cannot silently regress again.
 #
 # Deliberately NOT "break after N consecutive empty polls" instead: the real
 # SDK's receive_steps() returns identically empty whether a backgrounded job is
 # still genuinely running OR will never resolve at all (confirmed live against
 # the installed SDK) -- there is no signal that tells these two cases apart
-# except waiting. A consecutive-empty-count small enough to matter would also
-# abort real slow jobs (the confirmed cases needed up to ~60 consecutive 5s-
-# empty polls before succeeding); one large enough to be safe barely improves
-# over this flat cap. A flat, data-grounded cap is the honest option.
-_MAX_BACKGROUND_POLLS = 120
+# except waiting.
 _MAX_BACKGROUND_POLL_WALL_SECONDS = 600.0
+
+# Wall-clock cap on the best-effort server-side cancel issued when the poll
+# budget is exhausted. That exit means the connection never produced a clean
+# turn end, so a cancel() -- itself a send on that connection -- is exactly the
+# call most likely to hang, and it runs outside the ThreadedWatchdog block.
+_CANCEL_TIMEOUT_SECONDS = 10.0
 
 # Antigravity builtin tool name -> canonical Claude-ish tool name, so cross-agent
 # success criteria (command_executed / commands_efficiency / skill_triggered) and
@@ -552,7 +553,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         except TimeoutError:
                             # This one step-fetch took too long -- not an error. Return
                             # control to communicate()'s poll loop so ITS bounds
-                            # (poll_deadline, _MAX_BACKGROUND_POLLS, state.timeout_hit)
+                            # (poll_deadline, state.timeout_hit)
                             # get a chance to run, instead of staying frozen inside
                             # this single call with no way to check elapsed time.
                             state.step_fetch_timed_out = True
@@ -713,11 +714,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         and not state.max_turns_hit
                         and not state.timeout_hit
                         and (state.has_orphaned_tool_call() or state.step_fetch_timed_out)
-                        # Both bounds apply; whichever trips first wins. The
-                        # cycle cap sizes the cheap idle-poll mode (5s/cycle),
-                        # the deadline sizes the expensive wedged mode
-                        # (35s/cycle) -- see _MAX_BACKGROUND_POLLS' comment.
-                        and poll_count < _MAX_BACKGROUND_POLLS
+                        # ONE bound: the deadline. A parallel cycle cap was
+                        # tried and removed -- it silently overrode a large
+                        # configured turn_timeout (a task asking for 960s of
+                        # polling got 120*5s = 600s), and on the timeout=None
+                        # path it expired at the same instant as the wall-clock
+                        # backstop anyway, so it bounded nothing the deadline
+                        # didn't already bound.
                         and time.monotonic() < poll_deadline
                     ):
                         poll_count += 1
@@ -755,8 +758,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             if timeout
                             else f"wall-clock backstop ({_MAX_BACKGROUND_POLL_WALL_SECONDS:g}s)"
                         )
-                        if poll_count >= _MAX_BACKGROUND_POLLS:
-                            bound = f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
                         msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
                         self._log.warning(msg, bound, poll_count)
 
@@ -813,11 +814,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # max_turns exit above -- nothing legitimate is in flight here
                 # (no orphaned tool call), so there's no reason to leave the
                 # harness running while the orchestrator grades the sandbox.
+                # Bounded: this branch has just declared the connection
+                # unresponsive, and cancel() bottoms out in a send on that same
+                # connection -- outside the ThreadedWatchdog block, so nothing
+                # else would stop it hanging.
                 with contextlib.suppress(Exception):
-                    await conversation.cancel()
+                    await asyncio.wait_for(conversation.cancel(), timeout=_CANCEL_TIMEOUT_SECONDS)
                 # This branch is reachable with `timeout` either set
-                # (exhausted via poll_deadline) or None (exhausted via
-                # _MAX_BACKGROUND_POLLS) -- report the configured timeout when
+                # (exhausted via poll_deadline) or None (exhausted via the
+                # wall-clock backstop) -- report the configured timeout when
                 # there is one, else the real elapsed wall-clock time, instead
                 # of a nonsense "after 0s" for the timeout=None case.
                 elapsed = time.monotonic() - turn_start_time
@@ -953,7 +958,7 @@ class _AntigravityTurnState:
         # needs a TOOL step specifically to have gone ACTIVE. OR'd into
         # communicate()'s poll-loop entry condition so a merely-slow-but-real
         # step (first or mid-stream) retries under the existing
-        # poll_deadline/_MAX_BACKGROUND_POLLS bound instead of being mistaken
+        # poll_deadline bound instead of being mistaken
         # for a turn that produced nothing; also consulted after the poll
         # loop exits to raise a timeout instead of silently finalizing as
         # COMPLETED when nothing ever settled (see communicate()'s post-loop

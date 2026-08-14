@@ -53,15 +53,18 @@ def _cost_complete(result: EvaluationResult) -> bool:
     1. A turn burned tokens the rate card could not price. The card is the fallback
        for anything the backend did not price itself, so with no rate those tokens
        book no money.
-    2. The task was hard-killed by the task-level timeout. Keyed on the status
-       rather than on emptiness: the watchdog fires while the evaluation loop is
-       running, so a TIMEOUT row always lost an in-flight turn, even one that
-       completed earlier turns that do carry costs.
+    2. The task was hard-killed by a structural timeout. Keyed on the durable
+       ``forced_kill`` flag rather than on the status or on emptiness: the
+       watchdog fires while the evaluation loop is running, so a hard-killed row
+       always lost an in-flight turn, even one that completed earlier turns that
+       do carry costs. NOT keyed on ``final_status is TIMEOUT`` -- such a run is
+       graded after the kill and can finalize SUCCESS, which would silently flip
+       this flag to True for exactly the rows it is meant to catch.
 
     True for a row that burned nothing: an error before the agent ran genuinely
     cost zero, and a slow setup failure is as free as a fast one.
     """
-    if result.final_status is FinalStatus.TIMEOUT:
+    if result.forced_kill or result.final_status is FinalStatus.TIMEOUT:
         return False
     return all(
         usage.total_cost_usd is not None
@@ -194,6 +197,10 @@ def eval_result_to_task_dict(
         "sdk_options": result.sdk_options,
         "installed_tools": result.environment_info.get("installed_tools"),
         "max_turns_exhausted": result.max_turns_exhausted,
+        # Structural-breach marker kept beside the status: a hard-killed run is
+        # graded after the kill and may serialize as SUCCESS, so consumers need
+        # this to answer "did this task blow its timeout?" at all.
+        "forced_kill": result.forced_kill,
         "expected_turns_overage": list(overage) if overage is not None else None,
         "total_turns": total_turns,
         # Documented "visible turns" (tool calls + final reply) — the canonical

@@ -1,6 +1,7 @@
 """Main orchestrator for coordinating task evaluation."""
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -84,6 +85,12 @@ _WAIT_FOR_GRACE_SECONDS = 2.0
 # fallback_status like any other grading failure -- best-effort, never worse
 # than not grading at all.
 _GRADE_AFTER_FORCED_KILL_TIMEOUT_SECONDS = 60.0
+
+# Wall-clock cap on the pre-grading agent quiesce. kill() cancels and tears down
+# the harness connection -- the same connection that may be wedged on the path
+# that got us here -- and it runs after run()'s watchdog has exited, so without
+# this it is an unbounded await on an already-blown budget.
+_QUIESCE_TIMEOUT_SECONDS = 15.0
 
 
 async def _pump_stream(
@@ -272,6 +279,10 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "Driver": driver,
         "EarlyStopped": result.early_stop is not None,
         "EarlyStopReason": (result.early_stop.reason.value if result.early_stop is not None else ""),
+        # Independent of Status: a hard-killed run is graded after the kill and
+        # may report SUCCESS, so "how many tasks blew their structural budget?"
+        # is not answerable from Status/Category alone.
+        "ForcedKill": result.forced_kill,
     }
     return "CoderEval.Task.End", props
 
@@ -417,6 +428,10 @@ class Orchestrator:
         # persists only that last call's judge cost, silently dropping every
         # earlier turn's. Keyed by (position, criterion_type).
         self._judge_usage_accum: dict[tuple[int, str], TokenUsage] = {}
+        # In-flight forced-kill grading task, when its 60s budget expired while
+        # criteria were still running on worker threads. Awaited before sandbox
+        # teardown so cleanup can never race a live criterion.
+        self._pending_grade: asyncio.Task[list[CriterionResult]] | None = None
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
         # exactly once per task even if _check_run_limits fires every turn.
@@ -442,7 +457,7 @@ class Orchestrator:
             return str(self.task.agent.type)
         return AgentKind.NONE.value
 
-    async def run(self) -> EvaluationResult:  # noqa: PLR0915 — pre-existing exception-handling ladder; the new TurnTimeoutError handler pushed it over the cap. Decomposing run()'s handler ladder is out of scope for this fix.
+    async def run(self) -> EvaluationResult:
         """Run the complete evaluation.
 
         Returns:
@@ -549,47 +564,13 @@ class Orchestrator:
                 # Re-raise cancellation to allow proper task cancellation
                 raise
             except TaskTimeoutError as e:
-                self.result.error_message = str(e)
-
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),
-                    component="orchestrator.task_timeout",
-                    agent_name=self._agent_name,
-                )
-
-                logger.error(f"Task timed out: {e}")
-
-                # Recover the turn in flight when the watchdog killed the agent.
-                # Nothing else on this path does: the cancel arrives as a
-                # BaseException, so it never reaches the retry executor's
-                # per-attempt hook that drains the slot on a turn-level timeout.
-                await self._drain_killed_turn()
-
-                # The kill was correct; discarding a real, complete result isn't.
-                # Grade whatever the agent produced before falling back to the
-                # dedicated TIMEOUT status (not generic ERROR).
-                await self._grade_after_forced_kill(fallback_status=FinalStatus.TIMEOUT)
+                # drain: the task-level cancel arrives as a BaseException, so it
+                # never reaches the retry executor's per-attempt hook that
+                # salvages the in-flight turn. A TurnTimeoutError is already
+                # drained by _on_attempt_failure inside _communicate_with_retry.
+                await self._handle_forced_kill(e, component="orchestrator.task_timeout", drain=True)
             except TurnTimeoutError as e:
-                self.result.error_message = str(e)
-
-                self.result.error_details = create_error_context(
-                    error=e,
-                    task_id=self.task.task_id,
-                    attempt=max(self.result.iteration_count, 1),
-                    component="orchestrator.turn_timeout",
-                    agent_name=self._agent_name,
-                )
-
-                logger.error(f"Turn timed out: {e}")
-
-                # No _drain_killed_turn() here: the partial turn for a
-                # TurnTimeoutError is already salvaged by
-                # _on_attempt_failure's _drain_pending_turn() inside
-                # _communicate_with_retry, which runs before this exception
-                # reaches run().
-                await self._grade_after_forced_kill(fallback_status=FinalStatus.TIMEOUT)
+                await self._handle_forced_kill(e, component="orchestrator.turn_timeout", drain=False)
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
                 # statuses so per-task records preserve the failure mode.
@@ -653,13 +634,18 @@ class Orchestrator:
                         type(e).__name__,
                         e,
                     )
+                await self._await_pending_grade()
                 await self._cleanup()
                 # Capture the sanitised log tail AFTER teardown so any errors
                 # logged during post-run / cleanup also land in the report,
                 # but BEFORE _finalize_result so task.json includes the field.
                 # Allowlist non-success terminal statuses; SUCCESS and
                 # MAX_TURNS_EXHAUSTED skip the tail to keep task.json compact.
-                if self.result.final_status in {
+                # forced_kill is allowlisted independently of the status: such a
+                # run is graded after the kill and may finalize SUCCESS, and the
+                # tail is the only in-task.json evidence of the kill once
+                # error_message/error_details are cleared on that upgrade.
+                if self.result.forced_kill or self.result.final_status in {
                     FinalStatus.ERROR,
                     FinalStatus.TIMEOUT,
                     FinalStatus.FAILURE,
@@ -707,6 +693,32 @@ class Orchestrator:
         except Exception:
             logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
 
+    async def _handle_forced_kill(self, e: TaskTimeoutError | TurnTimeoutError, *, component: str, drain: bool) -> None:
+        """Shared terminal handling for both structural-timeout exceptions.
+
+        They differ only in the error-context ``component`` and whether the
+        in-flight turn still needs draining; everything else -- the message, the
+        log, and the salvage grading pass that finalizes SUCCESS or TIMEOUT --
+        is identical, so it lives here once rather than as two near-copies in
+        ``run()``'s handler ladder.
+        """
+        assert self.result is not None
+        self.result.error_message = str(e)
+        self.result.error_details = create_error_context(
+            error=e,
+            task_id=self.task.task_id,
+            attempt=max(self.result.iteration_count, 1),
+            component=component,
+            agent_name=self._agent_name,
+        )
+        logger.error(f"{'Task' if drain else 'Turn'} timed out: {e}")
+        if drain:
+            await self._drain_killed_turn()
+        # The kill was correct; discarding a real, complete result isn't. Grade
+        # what the agent produced before falling back to the dedicated TIMEOUT
+        # status (not generic ERROR).
+        await self._grade_after_forced_kill(fallback_status=FinalStatus.TIMEOUT)
+
     async def _grade_after_forced_kill(self, *, fallback_status: FinalStatus) -> None:
         """Attempt success-criteria grading against whatever the agent produced
         before a forced-kill timeout, instead of unconditionally discarding it.
@@ -746,6 +758,12 @@ class Orchestrator:
         # the row would persist with the constructor default (FAILURE) while
         # error_message says the task timed out.
         self.result.final_status = fallback_status
+        # Durable, status-independent record that this run was hard-killed.
+        # final_status alone cannot carry it: the grading below may upgrade to
+        # SUCCESS, and consumers that key structural questions off the status
+        # (reports_experiment._cost_complete, telemetry, the error_log_tail
+        # allowlist) would then read a killed run as an ordinary clean one.
+        self.result.forced_kill = True
         # Quiesce the agent before reading the sandbox. On a TurnTimeoutError
         # the agent raised at its own internal deadline and NOTHING has stopped
         # the harness yet: the watchdog's kill_sync() is intent-only on
@@ -756,10 +774,25 @@ class Orchestrator:
         # into the sandbox while check_all_async reads it, making the verdict
         # nondeterministic in both directions. Best-effort and suppressed:
         # failing to quiesce is never a reason to skip grading.
+        #
+        # RESIDUAL (not closed by this): on Antigravity the harness backgrounds
+        # any command over ~10s -- that is why the poll loop exists -- and
+        # cancelling the conversation does not reap a detached shell job. So a
+        # criterion can still read a tree a backgrounded build is mutating.
+        # result.forced_kill marks such runs so a mid-write verdict is at least
+        # distinguishable from a settled one.
         if self.agent is not None:
             try:
-                await self.agent.kill()
-            except Exception:
+                # Bounded: kill() bottoms out in a cancel/teardown on the very
+                # connection that may be wedged, and run()'s watchdog has
+                # already exited by the time this runs, so nothing else would
+                # stop it hanging. Catch BaseException, not Exception: the
+                # task-timeout watchdog queues a task.cancel() and this is
+                # often the first real suspension point after the handler
+                # begins, so a CancelledError landing here must not skip the
+                # grading pass this quiesce exists to protect.
+                await asyncio.wait_for(self.agent.kill(), timeout=_QUIESCE_TIMEOUT_SECONDS)
+            except BaseException:
                 # Warning, not debug: grading is about to read a sandbox that
                 # may still be under a live agent's control, so a failed
                 # quiesce is real context for an unexpected verdict.
@@ -794,15 +827,28 @@ class Orchestrator:
                 task_file=self.task_file,
                 cached_reference=self._reference_code,
             )
-            criteria_results = await asyncio.wait_for(
+            # Shielded + tracked, NOT a bare wait_for. check_all_async offloads
+            # each criterion to asyncio.to_thread, which is NOT cancellable: on
+            # expiry the awaiting coroutine raises but the worker thread keeps
+            # running its criterion -- including a run_command criterion's
+            # subprocess inside the sandbox that run()'s finally is about to
+            # move or rmtree. SubAgentRunner documents and handles this exact
+            # hazard the same way. The shield lets the budget bound how long we
+            # WAIT for the verdict; _await_pending_grade (called before cleanup)
+            # bounds when the sandbox may be torn down.
+            grade = asyncio.ensure_future(
                 self.success_checker.check_all_async(
                     self.task.success_criteria,
                     reference_code=reference_code,
                     reference_dir=reference_dir,
                     turn_records=self.result.iterations,
-                ),
-                timeout=_GRADE_AFTER_FORCED_KILL_TIMEOUT_SECONDS,
+                )
             )
+            self._pending_grade = grade
+            criteria_results = await asyncio.wait_for(
+                asyncio.shield(grade), timeout=_GRADE_AFTER_FORCED_KILL_TIMEOUT_SECONDS
+            )
+            self._pending_grade = None
             # Fold this pass's judge slice into the dialog-wide total before
             # storing, so a mid-dialog forced kill doesn't drop the judge cost
             # of every earlier turn (no-op outside simulation: the accumulator
@@ -834,6 +880,29 @@ class Orchestrator:
                 exc_info=True,
             )
             self.result.final_status = fallback_status
+
+    async def _await_pending_grade(self) -> None:
+        """Let an over-budget grading pass finish before the sandbox is torn down.
+
+        ``_grade_after_forced_kill`` stops WAITING for the verdict at
+        ``_GRADE_AFTER_FORCED_KILL_TIMEOUT_SECONDS``, but its criteria run on
+        ``asyncio.to_thread`` workers that a cancellation cannot stop. Deleting
+        or moving the sandbox out from under one is a real corruption risk (a
+        ``run_command`` criterion may still be writing), so wait here -- bounded
+        by the criteria's own timeouts -- before ``_cleanup()``. Best-effort:
+        never raises, and the late verdict is intentionally discarded, since the
+        status was already decided from the fallback.
+        """
+        grade = self._pending_grade
+        if grade is None:
+            return
+        self._pending_grade = None
+        logger.warning(
+            "[%s] Waiting for an over-budget grading pass to finish before sandbox teardown",
+            self.task.task_id,
+        )
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await grade
 
     def _log_graded_after_forced_kill(self, criteria_results: list[CriterionResult]) -> None:
         """Human-readable pass tally for ``_grade_after_forced_kill``.
@@ -1795,6 +1864,11 @@ class Orchestrator:
         # gates strict-AND over every gating criterion, exactly like an unarmed
         # run — arming a criterion (e.g. adding a decide_within fail-fast
         # timeout) must never change the verdict of a run it didn't cut.
+        # Single source of the gate rule: _gate_passed. The per-branch logging
+        # stays here (it is about THIS loop's trajectory), but the decision
+        # itself must not be a second hand-maintained copy -- a FIRED-ONLY gate
+        # that drifted between the two call sites would be silently wrong.
+        all_passed = self._gate_passed()
         if self.result.early_stop is not None:
             # One gate for every early-stopped run, no per-reason branches: a
             # decision-budget stop is just a fail-stop whose deciding criterion
@@ -1805,12 +1879,6 @@ class Orchestrator:
             # tool ends exactly like the agent's EventCollector does (see
             # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
             # correct whether the watcher fired on a pass, a fail, or a timeout.
-            gate_threshold = (
-                self.task.run_limits.stop_early_gate_threshold
-                if self.task.run_limits is not None
-                else DEFAULT_STOP_EARLY_GATE_THRESHOLD
-            )
-            all_passed = self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
             armed_count = sum(1 for c in self.task.success_criteria if c.is_stop_armed)
             logger.info(
                 "Early-stopped run (%s): gating on %d armed criteria (%d advisory, not gated).",
@@ -1818,13 +1886,11 @@ class Orchestrator:
                 armed_count,
                 total_count - armed_count,
             )
-        else:
-            if self._early_stop_watcher is not None:
-                if self._early_stop_watcher.disarmed:
-                    logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
-                else:
-                    logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
-            all_passed = self.result.all_criteria_passed(self.task.success_criteria)
+        elif self._early_stop_watcher is not None:
+            if self._early_stop_watcher.disarmed:
+                logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
+            else:
+                logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
 
         # Reuse the model method for weighted score (single source of truth)
         self.result.calculate_weighted_score(self.task.success_criteria)
