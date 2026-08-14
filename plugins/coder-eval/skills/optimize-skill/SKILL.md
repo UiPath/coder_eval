@@ -833,6 +833,72 @@ directory means read `history.json` first and continue the numbering.
 Writing the primary down *before* the numbers exist is what separates a predeclaration from
 a rationalization, and it is the only part of this ledger that has to be recorded early.
 
+**`history.json` stays free-form prose. Do not schematize it.** Write it as you always have —
+whatever the round actually taught, including the readings that turned out to be wrong and why.
+Its value is exactly the parts a schema would have to reject; the neighbouring validated file
+below invites the assumption that this one must now be structured too, and that assumption would
+destroy the thing worth keeping.
+
+**The validated sidecar is `measurements.json`, beside it.** Two things need to be machine-read
+rather than narrated, and only those two live there:
+
+- **The round's noise floor**, recorded with the suite, the model and the row count it was
+  measured at. A later round reuses it only when all three still match — a floor measured on
+  another model, or before the suite grew, is not this suite's floor. The model comes from
+  `resolve_model` on the loaded rows and from nowhere else: it returns `None` for a mixed-model
+  suite, and a `None` model never caches and never matches, which is the intended behaviour
+  rather than a failure.
+
+  `n_rows` is the number of rows the floor was **actually measured over** — rows that scored in
+  both halves of the null split, which is smaller than the suite when rows errored. If you record
+  the suite size instead, a later lookup simply misses and recomputes: wrong in the safe
+  direction, but say which number you recorded so the miss is legible.
+
+- **Whether this round reused a stored floor or recomputed one.** A reused floor is a measurement
+  from an earlier round, and a reader comparing two rounds' MDEs needs to know when they are the
+  same number rather than two agreeing ones.
+
+Both are one call each:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import (
+    append_regression_rows,
+    load_arm_rows,
+    load_measurements,
+    measure_noise_floor,
+    record_noise_floor,
+    resolve_model,
+)
+from coder_eval.models import RegressionRow
+
+sidecar = Path(".optimize-skill/<skill>/measurements.json")
+measurements = load_measurements(sidecar)
+
+rows = load_arm_rows(baseline_dirs, "default", suite_id)
+floor = measure_noise_floor(
+    run_dirs=baseline_dirs, variant_id="default", suite_id=suite_id, criterion_index=0,
+    model=resolve_model(rows) or "(unresolved)", measurements=measurements,
+)
+if floor is not None:
+    record_noise_floor(sidecar, floor)
+
+# On promotion only:
+append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round=1, reason="...")])
+```
+
+**Use `measure_noise_floor`, not `noise_floor_mde`, when you intend to record.** It returns the
+whole keyed record — including `n_rows`, the count of rows scored in both halves of the split,
+which is smaller than the suite whenever a row errored and which you cannot obtain any other way.
+Record the suite's row count instead and the entry never matches its own lookup again.
+- **The regression corpus.** On promotion, append the rows that justified it, with why. That is
+  what stops a later round from quietly undoing an earlier one: a candidate that re-loses a row
+  a previous promotion was built on is a regression, however good its aggregate looks.
+
+Each file has one job. Nothing reads `history.json` programmatically, and nothing narrates into
+`measurements.json`.
+
 Recording the track is what keeps the history readable: two rounds with the same skill name
 and incomparable metrics are otherwise indistinguishable a month later.
 

@@ -22,12 +22,23 @@ layer's own routine (CE037), so the gate cannot disagree with the numbers the ru
 from __future__ import annotations
 
 import logging
+import os
 import statistics as _stats
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from coder_eval.criteria._classification_aggregate import classification_metrics
-from coder_eval.models import ActivationGateVerdict, ClassificationCriterionResult, EvaluationResult, GuardrailCheck
+from coder_eval.models import (
+    ActivationGateVerdict,
+    ClassificationCriterionResult,
+    EvaluationResult,
+    GuardrailCheck,
+    NoiseFloor,
+    OptimizeMeasurements,
+    RegressionRow,
+)
 from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, cluster_bootstrap_diff_ci, holm_rejections, mean
 
 
@@ -263,6 +274,119 @@ def cost_latency_guardrails(
     return checks
 
 
+MEASUREMENTS_FILENAME = "measurements.json"
+
+
+def _atomic_write(path: Path, payload: str) -> None:
+    """Write via a temp file in the same directory, then ``os.replace``.
+
+    A process crash mid-write cannot leave a truncated file behind, and a failed replace cleans up
+    after itself rather than leaving a temp sibling for the next reader to wonder about.
+
+    Two limits, stated rather than defended against, because this is a local single-agent artifact:
+    the read-modify-write around this call is **not** locked, so two concurrent writers lose one
+    set of changes — tolerable for the noise-floor cache, which recomputes, and a real (accepted)
+    loss for the regression corpus, which does not. And ``os.replace`` follows a symlink at
+    ``path``, replacing the link rather than its target.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def load_measurements(path: Path) -> OptimizeMeasurements:
+    """Read the sidecar. A missing file is empty; a malformed one RAISES.
+
+    A corrupt cache is not silently rebuilt. A silently-rebuilt cache is indistinguishable from a
+    correct one, and the regression corpus it carries is not reconstructible from anything else —
+    so the failure has to be loud, with the path in the message.
+
+    The file lives at ``.optimize-skill/<skill>/measurements.json``, so its ``skill`` field must
+    match the parent directory name. A mismatch means the file was copied by hand from another
+    skill, and merging it would quietly attribute one skill's measurements to another.
+    """
+    skill = path.parent.name
+    if not path.exists():
+        return OptimizeMeasurements(skill=skill)
+    try:
+        measurements = OptimizeMeasurements.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"malformed optimize measurements at {path}: {exc}") from exc
+    if measurements.skill != skill:
+        raise ValueError(
+            f"optimize measurements at {path} belong to skill {measurements.skill!r}, "
+            + f"but the path says {skill!r} — the file was copied rather than written here"
+        )
+    return measurements
+
+
+# Every NoiseFloor field except the measurement itself. Derived from the model rather than
+# listed twice, so a new key field cannot be added to NoiseFloor and forgotten here — which is
+# the mistake that turns a cache into a source of foreign numbers.
+_FLOOR_MEASUREMENT_FIELDS = frozenset({"mde", "computed_at"})
+
+
+def _floor_key(floor: NoiseFloor) -> tuple[object, ...]:
+    return tuple(getattr(floor, name) for name in NoiseFloor.model_fields if name not in _FLOOR_MEASUREMENT_FIELDS)
+
+
+def record_noise_floor(path: Path, floor: NoiseFloor) -> OptimizeMeasurements:
+    """Cache a measured floor, replacing any entry measured under identical conditions.
+
+    Replacement rather than append, because this file is a cache plus a corpus — not a record of
+    what happened. That is exactly the distinction that keeps the narrative ledger free-form and
+    append-only next door.
+    """
+    measurements = load_measurements(path)
+    key = _floor_key(floor)
+    kept = [f for f in measurements.noise_floors if _floor_key(f) != key]
+    updated = measurements.model_copy(update={"noise_floors": [*kept, floor]})
+    _atomic_write(path, updated.model_dump_json(indent=2))
+    return updated
+
+
+def lookup_noise_floor(measurements: OptimizeMeasurements, probe: NoiseFloor) -> NoiseFloor | None:
+    """The cached floor measured under conditions identical to ``probe``, else ``None``.
+
+    ``probe`` is a fully-populated :class:`NoiseFloor` whose ``mde`` and ``computed_at`` are
+    ignored — passing the record you are about to write is what makes it impossible to look up on
+    a subset of the key and be handed a number from a different measurement.
+
+    Scans newest-first, so a hand-edited file carrying two entries for one key resolves to the
+    later of them rather than the stale one.
+    """
+    key = _floor_key(probe)
+    for floor in reversed(measurements.noise_floors):
+        if _floor_key(floor) == key:
+            return floor
+    return None
+
+
+def append_regression_rows(path: Path, rows: list[RegressionRow]) -> OptimizeMeasurements:
+    """Append to the corpus, de-duplicated on ``row_id``.
+
+    Append-only: re-promoting a row already in the corpus is a no-op, never a duplicate entry and
+    never a rewrite of why it was added the first time.
+    """
+    measurements = load_measurements(path)
+    seen = {row.row_id for row in measurements.regression_corpus}
+    fresh: list[RegressionRow] = []
+    for row in rows:
+        if row.row_id not in seen:
+            seen.add(row.row_id)
+            fresh.append(row)
+    if not fresh:
+        return measurements
+    updated = measurements.model_copy(update={"regression_corpus": [*measurements.regression_corpus, *fresh]})
+    _atomic_write(path, updated.model_dump_json(indent=2))
+    return updated
+
+
 def noise_floor_mde(
     *,
     run_dirs: Sequence[Path],
@@ -272,6 +396,8 @@ def noise_floor_mde(
     confidence: float = 0.95,
     seed: int = 0,
     n_resamples: int = BOOTSTRAP_RESAMPLES,
+    measurements: OptimizeMeasurements | None = None,
+    model: str | None = None,
 ) -> float | None:
     """The smallest F1 difference this suite at this size can resolve — the minimum detectable effect.
 
@@ -283,6 +409,59 @@ def noise_floor_mde(
     Returns ``None`` — never a fabricated number — with fewer than 2 invocations or fewer than 2
     rows scored in both halves. An odd invocation count splits unevenly (3 → 2/1), which widens the
     interval and therefore reports a CONSERVATIVE floor: the safe direction.
+
+    Pass ``measurements`` and ``model`` together to reuse a stored floor instead of recomputing.
+    ``model`` comes from :func:`resolve_model` and from nothing else; a ``None`` model never
+    caches and never matches, so a mixed-model suite always recomputes.
+
+    To RECORD what this measured, call :func:`measure_noise_floor` instead — it returns the whole
+    keyed record, including the row count, which this function does not expose.
+    """
+    measured = measure_noise_floor(
+        run_dirs=run_dirs,
+        variant_id=variant_id,
+        suite_id=suite_id,
+        criterion_index=criterion_index,
+        confidence=confidence,
+        seed=seed,
+        n_resamples=n_resamples,
+        measurements=measurements,
+        model=model or _UNRESOLVED_MODEL,
+    )
+    return measured.mde if measured is not None else None
+
+
+# Placeholder used when the caller did not resolve a model. It can never collide with a real model
+# id, and a floor carrying it is deliberately never cached — see measure_noise_floor.
+_UNRESOLVED_MODEL = "(unresolved)"
+
+
+def measure_noise_floor(
+    *,
+    run_dirs: Sequence[Path],
+    variant_id: str,
+    suite_id: str,
+    criterion_index: int,
+    model: str,
+    confidence: float = 0.95,
+    seed: int = 0,
+    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    measurements: OptimizeMeasurements | None = None,
+) -> NoiseFloor | None:
+    """The noise floor as a fully-keyed record, ready to hand to :func:`record_noise_floor`.
+
+    Returns everything the cache keys on — including ``n_rows``, the count of rows scored in BOTH
+    halves of the split, which is smaller than the suite whenever a row errored. That number is
+    why this function exists: a caller that recorded the suite's row count instead would miss its
+    own cache entry forever, silently.
+
+    ``None`` — never a fabricated number — with fewer than 2 invocations or fewer than 2 rows
+    scored in both halves. An odd invocation count splits unevenly (3 → 2/1), which widens the
+    interval and therefore reports a CONSERVATIVE floor: the safe direction.
+
+    Pass ``measurements`` to reuse a stored floor rather than recomputing; the lookup happens after
+    the rows are loaded, because the row count is part of the key. Loading is cheap, the bootstrap
+    is not.
     """
     if len(run_dirs) < 2:
         return None
@@ -298,6 +477,24 @@ def noise_floor_mde(
     if len(scored) < 2:
         return None
 
+    probe = NoiseFloor(
+        suite_id=suite_id,
+        variant_id=variant_id,
+        model=model,
+        criterion_index=criterion_index,
+        n_rows=len(scored),
+        n_invocations=len(run_dirs),
+        confidence=confidence,
+        mde=0.0,
+        computed_at=datetime.now(UTC),
+    )
+    # An unresolved model must never hit the cache: borrowing a floor measured on another model
+    # would be worse than the bootstrap it saves.
+    if measurements is not None and model != _UNRESOLVED_MODEL:
+        cached = lookup_noise_floor(measurements, probe)
+        if cached is not None:
+            return cached
+
     bootstrap = cluster_bootstrap_diff_ci(
         [a for a, _b in scored],
         [b for _a, b in scored],
@@ -309,7 +506,7 @@ def noise_floor_mde(
     if bootstrap is None:
         return None
     _diff, ci_low, ci_high, _p = bootstrap
-    return (ci_high - ci_low) / 2.0
+    return probe.model_copy(update={"mde": (ci_high - ci_low) / 2.0})
 
 
 def _sibling_checks(

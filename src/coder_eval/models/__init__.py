@@ -117,6 +117,9 @@ from coder_eval.models.mutations import (
 from coder_eval.models.optimize import (
     ActivationGateVerdict,
     GuardrailCheck,
+    NoiseFloor,
+    OptimizeMeasurements,
+    RegressionRow,
 )
 
 # Results
@@ -349,6 +352,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     # Optimize gate
     "ActivationGateVerdict",
     "GuardrailCheck",
+    "NoiseFloor",
+    "OptimizeMeasurements",
+    "RegressionRow",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
     "DEFAULT_STOP_EARLY_GATE_THRESHOLD",

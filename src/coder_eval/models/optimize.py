@@ -7,7 +7,7 @@ is a typed value the skill prints, instead of arithmetic an agent performs by ha
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class GuardrailCheck(BaseModel):
@@ -113,4 +113,76 @@ class ActivationGateVerdict(BaseModel):
     )
     notes: list[str] = Field(
         default_factory=list, description="Everything the reader needs to distrust or qualify the numbers above."
+    )
+
+
+class NoiseFloor(BaseModel):
+    """A cached minimum detectable effect, keyed on everything that changes its value.
+
+    **Every field above `mde` is part of the key**, because each one demonstrably moves the number:
+    measured on one suite over the same 10 rows, the floor came out 0.402 at two invocations, 0.168
+    at four and 0.000 at six. Key on a subset and a later round is served a floor from a different
+    measurement — and since the floor decides whether a round runs at all, borrowing one either
+    kills a real win or blesses an effect the suite cannot resolve. A miss just recomputes, which
+    costs a bootstrap over data already on disk.
+
+    `variant_id` is in the key for a mundane reason that makes it the likeliest trip: the incumbent
+    variant is renamed round to round while suite, model and row count stay put.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    suite_id: str = Field(min_length=1, description="Suite the floor was measured on (the pre-fan-out task_id).")
+    variant_id: str = Field(min_length=1, description="Arm the null comparison split. Renamed per round, so keyed.")
+    model: str = Field(
+        min_length=1, description="Model the rows ran under. Sourced ONLY from optimize_gate.resolve_model."
+    )
+    criterion_index: int = Field(ge=0, description="Criterion position the floor was measured on.")
+    n_rows: int = Field(ge=0, description="Rows scored in BOTH halves of the split — not the suite's row count.")
+    n_invocations: int = Field(ge=0, description="Invocations the null comparison was split across.")
+    confidence: float = Field(gt=0.0, lt=1.0, description="Interval width used. A wider interval is a wider floor.")
+    mde: float = Field(
+        ge=0.0, le=1.0, description="The half-width: the smallest difference this suite can resolve. An F1 difference."
+    )
+    computed_at: AwareDatetime = Field(
+        description="When it was measured, so a stale cache is legible rather than silent. Timezone-aware."
+    )
+
+
+class RegressionRow(BaseModel):
+    """A row whose behaviour a past promotion justified, kept so a later round cannot silently undo it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_id: str = Field(description="Dataset row id. The corpus is de-duplicated on this.")
+    promoted_in_round: int = Field(ge=0, description="Round whose promotion this row helped justify.")
+    reason: str = Field(description="What this row demonstrated — why re-losing it would be a regression.")
+
+
+class OptimizeMeasurements(BaseModel):
+    """The machine-read sidecar beside `history.json`: a noise-floor cache and a regression corpus.
+
+    **Deliberately NOT the ledger.** `.optimize-skill/<skill>/history.json` stays free-form,
+    append-only and agent-written, because its value is exactly the narrative a schema would have
+    to reject — the superseded readings, the calibration notes, the record of why a four-way exact
+    tie turned out to be total non-engagement rather than a ceiling. A model tight enough to
+    validate that file would have made it unwritable in the first place. So the two things that
+    genuinely need to be machine-read live here instead, and each file has one job.
+
+    ``extra="forbid"`` is right here, where every field is machine-written: a typo must not become
+    a permanent cache miss, and the regression corpus is not reconstructible. Pydantic does NOT
+    propagate ``model_config`` into nested models, so :class:`NoiseFloor` and
+    :class:`RegressionRow` declare it themselves — that is where the corpus actually lives.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill: str = Field(
+        min_length=1, description="Skill these measurements belong to. Must match the parent directory name."
+    )
+    noise_floors: list[NoiseFloor] = Field(
+        default_factory=list, description="Cache, replaced in place per (suite_id, model, n_rows)."
+    )
+    regression_corpus: list[RegressionRow] = Field(
+        default_factory=list, description="Append-only, de-duplicated on row_id. Never rewritten."
     )

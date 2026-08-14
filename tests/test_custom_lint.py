@@ -2495,18 +2495,31 @@ class TestPluginArtifacts:
         # skill AND they are importable from the module the skill tells the user to import.
         import coder_eval.optimize_gate as gate
 
+        raw = (PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8")
         skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
-        for name in ("activation_gate", "holm_promote", "render_markdown", "noise_floor_mde"):
-            assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
+
+        # Derived from the skill's own import lines rather than a list here, so a snippet that
+        # starts importing something new is covered without anyone remembering to extend this.
+        imported: set[str] = set()
+        for block in re.findall(r"from coder_eval\.optimize_gate import \(([^)]*)\)", raw):
+            imported |= {n.strip().rstrip(",") for n in block.split() if n.strip().rstrip(",")}
+        for line in re.findall(r"from coder_eval\.optimize_gate import ([^(\n]+)", raw):
+            imported |= {n.strip() for n in line.split(",") if n.strip()}
+
+        assert imported, (
+            "optimize-skill's SKILL.md no longer imports anything from coder_eval.optimize_gate — "
+            "either the snippets are gone or the import line changed shape and this sensor is blind"
+        )
+        for name in sorted(imported):
             assert hasattr(gate, name), (
-                f"optimize-skill's SKILL.md tells the user to import {name!r} from coder_eval."
-                f"optimize_gate, which no longer exports it — the snippet would fail at runtime"
+                f"optimize-skill's SKILL.md tells the user to import {name!r} from "
+                f"coder_eval.optimize_gate, which no longer exports it — the snippet would fail at "
+                f"runtime, after the user has paid for the runs it was meant to read"
             )
 
-        assert "from coder_eval.optimize_gate import" in skill, (
-            "optimize-skill's snippet no longer shows the import line, so a reader cannot tell which "
-            "module the functions come from"
-        )
+        # The three the procedure must NAME, even if a future snippet stops importing them inline.
+        for name in ("activation_gate", "holm_promote", "render_markdown"):
+            assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
 
     def test_optimize_method_quotes_no_tolerance_numbers(self):
         # The guardrails are bootstrap-derived; the ONE tolerance constant lives in the module.
