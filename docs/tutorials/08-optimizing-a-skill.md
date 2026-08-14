@@ -213,8 +213,9 @@ before a later sibling misfire is observable, and authoritative precision needs 
 trajectory. A stock `check-skill` suite arms nothing, so on that suite this flag changes
 nothing.
 
-**Check the resolved row count, not just the exit code.** A mistyped split (`--split holdou`)
-is reported as a skipped task and the run still **exits 0** — a green run over zero rows.
+**Check the resolved row count.** A mistyped split (`--split holdou`) now aborts the run with an
+error naming the splits that exist, so it cannot pass silently — but a *partial* row loss still
+can, and only the count shows it.
 
 Result, 14 train rows:
 

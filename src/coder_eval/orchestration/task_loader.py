@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import re
@@ -29,6 +30,28 @@ _SMOKE_SAMPLE_SEED = 0
 _ROW_VAR_PATTERN = re.compile(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}")
 _ROW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+logger = logging.getLogger(__name__)
+
+
+class SplitSelectorError(ValueError):
+    """A CLI ``--split`` selector eliminated every row of a labelled dataset.
+
+    Distinct from the other dataset errors on purpose. Those describe a malformed
+    FILE and are demoted to ``skipped_tasks`` so one bad task cannot abort a suite;
+    this one describes a malformed INVOCATION — the user asked for a split that does
+    not exist — and there is no per-task isolation argument for it, because the same
+    selector is applied to every task in the run. Demoted, it produces a yellow
+    warning and exit 0: a CI gate that ran zero evals and reported success.
+
+    That the abort is run-wide is the point, not a side effect: ``--split`` is global
+    to the invocation, so one labelled suite with no matching row means the selector
+    itself is wrong, and finishing the other suites would hide it.
+
+    A ``ValueError`` subclass so every existing ``except ValueError`` caller keeps
+    working; ``resolve_all_tasks`` re-raises it explicitly and the CLI turns it into
+    a ``typer.BadParameter``.
+    """
 
 
 def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
@@ -457,18 +480,23 @@ def expand_dataset(
             unlabelled when the field is absent, ``None``, or ``""``. A task
             whose rows are all unlabelled passes through unfiltered (``--split``
             is global to the invocation, so an unlabelled task in a multi-task
-            run must not fail); partial labelling keeps the matching rows and
-            drops the unlabelled ones; a *labelled* task with no matching row
-            raises. Note the raise is caught by ``resolve_all_tasks`` into
-            ``skipped_tasks``, so at the run level a mistyped split name is a
-            skipped suite rather than an aborted run.
+            run must not fail); partial labelling keeps the matching rows, drops
+            the unlabelled ones and logs a WARNING naming the drop count; a
+            *labelled* task with no matching row raises ``SplitSelectorError``.
+            That one is NOT demoted to ``skipped_tasks`` — ``resolve_all_tasks``
+            re-raises it, so a mistyped split name aborts the run instead of
+            producing a green run of zero rows.
 
     Returns:
         Expanded list of TaskDefinitions. Length is 1 when dataset is None.
 
     Raises:
-        ValueError: Empty dataset, duplicate row ids, missing id_field,
-            malformed row id, or a labelled dataset with no row in ``split``.
+        ValueError: Empty dataset, duplicate row ids, missing id_field, or a
+            malformed row id — all malformed-FILE errors, which
+            ``resolve_all_tasks`` demotes to ``skipped_tasks``.
+        SplitSelectorError: A labelled dataset has no row in ``split``. A
+            ``ValueError`` subclass, but ``resolve_all_tasks`` re-raises this one
+            (it describes a malformed INVOCATION, not a malformed file).
         FileNotFoundError: Dataset path does not exist.
     """
     if task.dataset is None:
@@ -493,9 +521,26 @@ def expand_dataset(
         # value, so they cannot drift apart into two definitions of "labelled".
         labelled = [(r, label) for r in rows if (label := row_split_label(r, field)) is not None]
         if labelled:
-            rows = [r for r, label in labelled if label == split]
+            # A PARTLY labelled dataset is the dangerous state: the unlabelled rows are
+            # dropped (the safe direction), so the run succeeds and every metric is
+            # computed over a smaller suite than the file suggests. Say so. Guarded on an
+            # actual drop, not on --split being set — a fully labelled dataset drops
+            # nothing and must stay quiet, or the warning becomes noise and gets ignored.
+            matching = [r for r, label in labelled if label == split]
+            if len(labelled) != len(rows):
+                logger.warning(
+                    "Task '%s': --split %r kept %d of %d rows; %d row(s) carry no %r label and were "
+                    + "DROPPED. Every metric below is computed over the smaller set.",
+                    task.task_id,
+                    split,
+                    len(matching),
+                    len(rows),
+                    len(rows) - len(labelled),
+                    field,
+                )
+            rows = matching
             if not rows:
-                raise ValueError(
+                raise SplitSelectorError(
                     f"Dataset for task '{task.task_id}' has no rows in split {split!r} "
                     + f"(split_field={field!r}); labelled splits present: "
                     + f"{sorted({label for _, label in labelled})}"

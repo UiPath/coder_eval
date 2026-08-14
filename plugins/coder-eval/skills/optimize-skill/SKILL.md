@@ -402,9 +402,9 @@ already scarce sample; it confirms nothing and reads as if it did. Keep every ro
 and author **fresh test rows at promotion time**, when you know which single candidate needs
 confirming.
 
-  Note what follows: with every row labelled `train`, a later `--split test` matches nothing,
-  which is reported as a skipped task and a green run of zero rows. Write the fresh rows
-  first, then run Stage C.
+  Note what follows: with every row labelled `train`, a later `--split test` matches nothing
+  and aborts the run with an error naming the splits that exist. That is better for this
+  advice, not worse — you cannot miss it. Write the fresh rows first, then run Stage C.
 
 **Rows *partly* labelled** → finish the labelling before running anything. This is the
 dangerous state, because it does not look like one: `--split` keeps the matching rows and
@@ -418,8 +418,9 @@ coder-eval run <suite> --split train -D run_limits.stop_early=false
 ```
 
 **Check the resolved row count, not just the exit code.** A mistyped split name (`--split
-holdou`) is reported as a skipped task and the run still exits 0 — a green run of zero rows.
-If the count is zero or lower than the train rows you expect, that is a wiring problem, not a
+holdou`) aborts the run outright, naming the splits that exist — but a *partial* row loss does
+not, and that is what the count catches: a half-labelled dataset silently drops its unlabelled
+rows. If the count is lower than the train rows you expect, that is a wiring problem, not a
 result.
 
 On `stop_early`: a suite that arms it can pass-stop a run before a later sibling misfire is

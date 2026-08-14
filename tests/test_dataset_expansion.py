@@ -18,7 +18,7 @@ from coder_eval.models import (
 )
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.experiment import resolve_all_tasks
-from coder_eval.orchestration.task_loader import expand_dataset
+from coder_eval.orchestration.task_loader import SplitSelectorError, expand_dataset
 
 
 def _base_task_dict() -> dict[str, Any]:
@@ -328,6 +328,40 @@ class TestExpandDatasetSplit:
         ]
         expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="train")
         assert [t.row_id for t in expanded] == ["a"]
+
+    def test_partial_labelling_warns_with_the_drop_count(self, tmp_path: Path, caplog) -> None:
+        # Dropping the unlabelled rows is the safe direction, but it must not be SILENT:
+        # every metric below is then computed over a smaller suite than the file suggests.
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": "train"},
+            {"id": "b", "prompt": "p", "expected": "e"},
+        ]
+        with caplog.at_level("WARNING", logger="coder_eval.orchestration.task_loader"):
+            expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="train")
+        assert len(caplog.records) == 1
+        assert "1 row(s) carry no" in caplog.text
+
+    def test_fully_labelled_split_warns_nothing(self, tmp_path: Path, caplog) -> None:
+        # The first of the two negatives, and they matter more than the positive: a warning
+        # that fires when nothing was dropped trains the reader to ignore it.
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": "train"},
+            {"id": "b", "prompt": "p", "expected": "e", "split": "test"},
+        ]
+        with caplog.at_level("WARNING", logger="coder_eval.orchestration.task_loader"):
+            expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="train")
+        assert caplog.records == []
+
+    def test_partial_labelling_without_a_split_warns_nothing(self, tmp_path: Path, caplog) -> None:
+        # No selector, no drop — the state is only dangerous when --split acts on it.
+        rows = [
+            {"id": "a", "prompt": "p", "expected": "e", "split": "train"},
+            {"id": "b", "prompt": "p", "expected": "e"},
+        ]
+        with caplog.at_level("WARNING", logger="coder_eval.orchestration.task_loader"):
+            expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path)
+        assert [t.row_id for t in expanded] == ["a", "b"]
+        assert caplog.records == []
 
     def test_labelled_but_unmatched_raises_listing_available_splits(self, tmp_path: Path) -> None:
         task = _make_task_with_dataset(rows=self._split_rows())
@@ -739,26 +773,73 @@ class TestResolveAllTasksIntegration:
             "plain/row-2",
         ]
 
-    def test_unmatched_split_demotes_the_suite_to_a_skipped_task(self, tmp_path: Path) -> None:
-        # A labelled suite with no row in the requested split raises out of
-        # expand_dataset, but resolve_all_tasks catches ValueError and records a
-        # SkippedTask rather than aborting — so the run reports it in run.json's
-        # skipped_tasks instead of failing. Pinned because the reason string is the
-        # ONLY place a mistyped --split selector surfaces: nothing else distinguishes
-        # it from an empty run.
+    def test_unmatched_split_aborts_instead_of_demoting_to_a_skipped_task(self, tmp_path: Path) -> None:
+        # A labelled suite with no row in the requested split ABORTS the run. It used to
+        # demote to a SkippedTask like any load failure, which produced the worst outcome
+        # in the whole split workflow: one yellow line, zero evals run, exit 0 — a CI gate
+        # reporting success for a one-character typo. The other dataset errors describe a
+        # malformed FILE and stay demoted (one bad task must not abort a suite); this one
+        # describes a malformed INVOCATION, and the same selector applies to every task in
+        # the run, so there is no per-task isolation argument for it.
+        #
+        # The message is still the only place a user learns what they should have typed,
+        # so both halves stay pinned.
         task_file = self._write_split_suite(tmp_path, "labelled", ["train", "test"])
         default_exp, experiment = self._make_experiment(["v1"])
 
+        with pytest.raises(SplitSelectorError) as exc:
+            resolve_all_tasks(
+                task_files=[task_file],
+                experiment=experiment,
+                default_experiment=default_exp,
+                config=BatchRunConfig(run_dir=tmp_path / "runs", split="holdou"),
+            )
+        assert "no rows in split 'holdou'" in str(exc.value)
+        assert "'test', 'train'" in str(exc.value)
+
+    def test_split_selector_error_is_a_value_error(self) -> None:
+        # Every existing `except ValueError` caller depends on this, including the CLI
+        # seam in run_command.py that turns it into a typer.BadParameter.
+        assert issubclass(SplitSelectorError, ValueError)
+
+    def test_unlabelled_task_in_a_multi_task_run_is_unaffected(self, tmp_path: Path) -> None:
+        # Guards the `if labelled:` placement: the abort must fire only for a task that
+        # CARRIES split labels. A suite with none passes through unfiltered even while a
+        # sibling suite is being filtered by the same selector.
+        labelled = self._write_split_suite(tmp_path, "labelled", ["train", "test"])
+        plain = self._write_split_suite(tmp_path, "plain", [None, None])
+        default_exp, experiment = self._make_experiment(["v1"])
+
         resolved, skipped = resolve_all_tasks(
-            task_files=[task_file],
+            task_files=[labelled, plain],
             experiment=experiment,
             default_experiment=default_exp,
-            config=BatchRunConfig(run_dir=tmp_path / "runs", split="holdou"),
+            config=BatchRunConfig(run_dir=tmp_path / "runs", split="train"),
         )
-        assert resolved == []
-        assert len(skipped) == 1
-        assert "no rows in split 'holdou'" in skipped[0].reason
-        assert "'test', 'train'" in skipped[0].reason
+        assert skipped == []
+        assert sorted(rt.task.task_id for rt in resolved) == ["labelled/row-0", "plain/row-0", "plain/row-1"]
+
+    def test_unmatched_split_surfaces_as_a_cli_bad_parameter(self, tmp_path: Path) -> None:
+        # The CLI seam, at the cheaper of the two levels: `run_command.py` wraps its
+        # resolve_all_tasks call in `except ValueError -> typer.BadParameter`, and a full
+        # `coder-eval run` invocation would need credentials and a sandbox. typer.BadParameter
+        # exits **2**, not 1 — do not "fix" a later assertion to 1.
+        import typer
+
+        task_file = self._write_split_suite(tmp_path, "labelled", ["train", "test"])
+        default_exp, experiment = self._make_experiment(["v1"])
+
+        with pytest.raises(typer.BadParameter) as exc:
+            try:
+                resolve_all_tasks(
+                    task_files=[task_file],
+                    experiment=experiment,
+                    default_experiment=default_exp,
+                    config=BatchRunConfig(run_dir=tmp_path / "runs", split="holdou"),
+                )
+            except ValueError as e:  # exactly what cli/run_command.py does
+                raise typer.BadParameter(str(e)) from e
+        assert "'test', 'train'" in str(exc.value)
 
     def test_non_dataset_task_unaffected(self, tmp_path: Path) -> None:
         task_file = self._write_task_yaml(tmp_path, "plain", with_dataset=False)

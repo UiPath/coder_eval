@@ -305,7 +305,8 @@ def run_command(
             "(default field: split) matches this name — e.g. --split train / --split test. "
             "Applied BEFORE --sample / --sample-per-stratum, so a sampled split keeps a "
             "predictable size. Tasks whose rows are all unlabelled are unaffected; a "
-            "labelled task with no row in this split is reported in skipped_tasks."
+            "labelled task with no row in this split aborts the run with an error naming "
+            "the splits that exist."
         ),
     ),
     repeats: int | None = typer.Option(

@@ -457,14 +457,21 @@ with the two `action.yml` items above — one considered change to the action's 
   depend on, mirroring how CE030 pins doc/schema parity.
 ## From the split-field / optimize-skill plan (2026-08-12)
 
-- [ ] **A run whose every task is skipped exits 0 — a green run of zero tasks.** When
-  `resolve_all_tasks` demotes every task to `skipped_tasks` (a load failure, `skip: true`,
-  or now a `--split` selector matching no labelled row), the run reports success: nothing
+- [ ] **A run whose every task is skipped exits 0 — a green run of zero tasks.** *(Narrow case
+  CLOSED 2026-08-13: a `--split` selector that matches no labelled row now raises
+  `SplitSelectorError` out of `expand_dataset`, which `resolve_all_tasks` re-raises and the CLI
+  turns into a `typer.BadParameter` — exit 2. The GENERAL case below stays open: `skip: true`,
+  load failures and tag filters that match nothing all keep today's exit-0 behaviour, because
+  making those fatal changes exit semantics for deliberate quarantine workflows and needs its own
+  decision plus tests per case.)* When
+  `resolve_all_tasks` demotes every task to `skipped_tasks` (a load failure or `skip: true` —
+  no longer a `--split` typo, see above), the run reports success: nothing
   failed, so the exit gate in `cli/run_command.py` — which keys only on failed/errored tasks
-  and suite gates — passes. Verified directly: `coder-eval run <suite> --split holdou`
-  prints one yellow "1 task file(s) skipped" line and exits 0. This is pre-existing, but
-  `--split` makes it reachable by a one-character CLI typo rather than a broken file, and
-  the whole point of a test confirmation is that you trust its verdict. Not guarded, and
+  and suite gates — passes. Verified directly before the narrow fix: `coder-eval run <suite>
+  --split holdou` printed one yellow "1 task file(s) skipped" line and exited 0. `--split` was
+  what made it reachable by a one-character CLI typo rather than a broken file, and
+  the whole point of a test confirmation is that you trust its verdict. Still unguarded for
+  the remaining paths, and
   not a five-minute fix: making an all-skipped run non-green changes exit semantics for
   every skipped-task path (including deliberate `skip: true` suites and tag filters that
   match nothing), so it needs a decision about which of those should be fatal, plus tests

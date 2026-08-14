@@ -231,8 +231,9 @@ coder-eval run tasks/skills/ci-outcome.yaml --split train -D run_limits.stop_ear
 
 In order, because each one makes every number below it meaningless if it fails:
 
-1. **The resolved row count is what you expect.** A mistyped split is reported as a skipped
-   task and the run still exits 0 — a green run of zero rows.
+1. **The resolved row count is what you expect.** A mistyped split now aborts the run with an
+   error naming the splits that exist, so it cannot slip through — but a *partial* row loss
+   (a half-labelled dataset) still can, and only the count shows it.
 2. **Engagement passes on every row.** Not most rows. A row where the skill never ran measures
    nothing, and Stage B's own promotion rule requires the skill to have engaged on every
    scored row.
