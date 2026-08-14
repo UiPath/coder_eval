@@ -1033,7 +1033,9 @@ interval as evidence either way. **Read the message before choosing a remedy, be
 two and they are not interchangeable:**
 
 - The usual one names the largest family size that could still promote. Hand back and say the
-  suite is too small for the family you gated — gate fewer survivors, or add rows.
+  suite is too small for the family you gated — gate fewer survivors, or add rows **the arms
+  disagree on**; the block names how many this suite has and how many would clear the bar. Adding
+  rows the arms agree on makes the floor worse, so do not report "add rows" without that number.
 - If it says the **arms produced identical labels on every scored row**, that is a finding about
   the candidate, not the suite. More rows cannot help: the two snapshots behaved the same way
   everywhere the suite could look. Check the candidate actually differs from the incumbent, and

@@ -234,6 +234,29 @@ def _discreteness_floor(n_rows: int, n_discordant: int, n_resamples: int) -> flo
     return min(1.0, max(bootstrap_p_floor(n_resamples), 2.0 * concordant_fraction**n_rows))
 
 
+def min_discordant_rows(n_rows: int, threshold: float, n_resamples: int = GATE_RESAMPLES) -> int | None:
+    """The smallest discordant-row count whose discreteness floor clears ``threshold``.
+
+    ``None`` when no count ``R <= n_rows`` clears it — including every ``n_rows <= 0``, where the
+    floor is 1.0 by definition and nothing can be below a threshold under it.
+
+    **The row count is not the lever, and that is the whole reason this function exists.** Holding
+    ``R`` fixed and adding rows makes ``2*(1 - R/M)**M`` RISE toward ``2*e**(-R)``: at ``R = 3`` the
+    floor is 0.047 over 8 rows, 0.056 over 10 and 0.078 over 20, so a user told to "add rows" after
+    a refusal can buy rows and end up strictly worse off. Only rows the two arms actually DISAGREE
+    on lower it. This is what the refusal quotes and what the skill's pre-spend sizing rule prints,
+    so the number a reader acts on is computed rather than typed into prose.
+
+    Calls :func:`_discreteness_floor` rather than restating ``2*(1 - R/M)**M``. One declaration of
+    the floor is the same rule CE040 enforces for the estimator's — a consumer that spelled it
+    inline would keep answering from the old formula after the floor moved.
+    """
+    for n_discordant in range(1, n_rows + 1):
+        if _discreteness_floor(n_rows, n_discordant, n_resamples) <= threshold:
+            return n_discordant
+    return None
+
+
 def _holm_threshold(family_p_values: list[float], p: float, alpha: float) -> float:
     """The Holm threshold ``p`` is decided against, given its rank in the family.
 
@@ -973,6 +996,7 @@ def activation_gate(
         "confidence": confidence,
         "n_resamples": n_resamples,
         "p_floor": _discreteness_floor(len(scored_row_ids), n_discordant, n_resamples),
+        "n_discordant": n_discordant,
         "rows_paired": len(scored_row_ids),
         "rows_excluded": len(unpaired) + unscored_count,
         "sibling_checks": _sibling_checks(
@@ -1022,6 +1046,9 @@ def activation_gate(
         # passed at the return: both returns splat this dict, so a second `p_floor=` would be a
         # duplicate-keyword TypeError.
         verdict_kwargs["p_floor"] = None
+        # And `None` rather than the 0 or 1 a single row would compute: 0 is the meaningful "the
+        # arms agreed on every row", which is a finding. "There was no comparison" is not.
+        verdict_kwargs["n_discordant"] = None
         return ActivationGateVerdict(
             **verdict_kwargs,
             incumbent_f1=None,
@@ -1132,12 +1159,36 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
                     "snapshots you think they were."
                 )
             else:
+                # TWO levers, and the second one is not "more rows". `2*(1-R/M)**M` RISES with M at
+                # a fixed R, so a reader told to add rows can buy concordant ones and land strictly
+                # worse off (measured: R=3 floors at 0.047 over 8 rows, 0.056 over 10, 0.078 over
+                # 20). The lever is the DISCORDANT count, and `min_discordant_rows` owns it — the
+                # number is computed here, never quoted from prose.
                 max_family = math.floor(alpha / verdict.p_floor)
-                remedy = (
-                    f"Gate at most {max_family} survivor(s) at alpha={alpha}, or add rows."
+                family_lever = (
+                    f"Gate at most {max_family} survivor(s) at alpha={alpha}"
                     if max_family >= 1
-                    else "No family size works at this alpha — the answer is more rows, not fewer candidates."
+                    else f"No family size works at alpha={alpha}, not even a family of one"
                 )
+                if verdict.n_discordant is None:
+                    # Never a sentence about a count the verdict does not carry.
+                    remedy = f"{family_lever}."
+                else:
+                    required = min_discordant_rows(verdict.rows_paired, threshold, verdict.n_resamples)
+                    row_lever = (
+                        (
+                            f"raise the rows the two arms DISAGREE on from {verdict.n_discordant} to "
+                            + f"{required} at the current {verdict.rows_paired} paired rows — adding "
+                            + "rows they agree on makes this floor worse, not better"
+                        )
+                        if required is not None
+                        else (
+                            f"no discordant count at {verdict.rows_paired} paired rows clears this bar "
+                            + "at all, so the row lever needs both more rows AND more disagreement among "
+                            + "them — adding rows the arms agree on makes this floor worse"
+                        )
+                    )
+                    remedy = f"{family_lever}, or {row_lever}."
                 # Rank-scoped, deliberately. `p_floor` is a property of the SUITE and identical
                 # across the family, but `threshold` depends on rank — so where the floor sits
                 # between alpha/S and alpha/(S-1) a worse-ranked sibling is NOT refused and may
@@ -1267,7 +1318,12 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
         f"**{headline}**",
         "",
         f"- Suite `{verdict.suite_id}`, criterion index {verdict.criterion_index} (position in `success_criteria`)",
-        f"- Rows paired: {verdict.rows_paired} · excluded: {verdict.rows_excluded}",
+        # The discordant count sits beside the paired one because it is what `p_floor` below is
+        # computed from — a reader handed a floor without it cannot see the quantity that moves it.
+        (
+            f"- Rows paired: {verdict.rows_paired} · discordant: {_fmt(verdict.n_discordant, 'd')} "
+            + f"· excluded: {verdict.rows_excluded}"
+        ),
         f"- f1.yes: incumbent {_fmt(verdict.incumbent_f1)} -> candidate {_fmt(verdict.candidate_f1)}",
         (
             f"- Paired cluster bootstrap (candidate - incumbent): {_fmt(verdict.mean_diff)} "

@@ -49,6 +49,7 @@ from coder_eval.optimize_gate import (
     load_suite_rows,
     measure_execution_noise_floor,
     measure_noise_floor,
+    min_discordant_rows,
     noise_floor_mde,
     pareto_front,
     record_noise_floor,
@@ -1124,6 +1125,52 @@ class TestDiscretenessFloor:
         assert _discreteness_floor(4, 9, 2000) == pytest.approx(bootstrap_p_floor(2000))
 
 
+class TestMinDiscordantRows:
+    """The lever a refusal names: how many rows the arms must DISAGREE on, not how many rows.
+
+    Every expectation is a literal verified against the shipped module, and `alpha` is bound from
+    `DEFAULT_ALPHA` rather than spelled `0.05` — the same rule the prose sensors enforce on the
+    surfaces, applied to the tests that pin them.
+    """
+
+    def test_reproduces_the_sizing_figures(self) -> None:
+        assert min_discordant_rows(8, DEFAULT_ALPHA) == 3
+        assert min_discordant_rows(10, DEFAULT_ALPHA) == 4
+        assert min_discordant_rows(20, DEFAULT_ALPHA) == 4
+        assert min_discordant_rows(20, DEFAULT_ALPHA / 5) == 5
+        assert min_discordant_rows(6, 0.001) == 5
+
+    def test_returns_the_smallest_count_that_clears(self) -> None:
+        # The contract is "smallest", so the answer must clear and its predecessor must not.
+        for n_rows, threshold in ((8, DEFAULT_ALPHA), (10, DEFAULT_ALPHA), (20, DEFAULT_ALPHA / 5)):
+            required = min_discordant_rows(n_rows, threshold)
+            assert required is not None
+            assert _discreteness_floor(n_rows, required, GATE_RESAMPLES) <= threshold
+            assert _discreteness_floor(n_rows, required - 1, GATE_RESAMPLES) > threshold
+
+    def test_the_row_count_is_not_the_lever(self) -> None:
+        # Holding R fixed and ADDING rows makes the floor rise, which is why "add rows" is the
+        # wrong remedy and this function exists. Same shape as the docstring's worked figures.
+        floors = [_discreteness_floor(m, 3, GATE_RESAMPLES) for m in (8, 10, 20)]
+        assert floors == sorted(floors) and floors[0] < floors[-1]
+
+    def test_no_rows_clears_nothing(self) -> None:
+        assert min_discordant_rows(0, DEFAULT_ALPHA) is None
+        assert min_discordant_rows(-3, DEFAULT_ALPHA) is None
+
+    def test_a_threshold_above_one_is_cleared_by_a_single_row(self) -> None:
+        # The floor is clamped at 1.0, so any threshold at or above it is met by R = 1. Not
+        # special-cased into None, which would report "impossible" for the trivially possible.
+        assert min_discordant_rows(10, 1.0) == 1
+        assert min_discordant_rows(10, 1.5) == 1
+
+    def test_an_unclearable_bar_returns_none_rather_than_n_rows(self) -> None:
+        # Every row discordant leaves the estimator's own floor, so a threshold below THAT cannot
+        # be met at any R — and the caller must say "more rows AND more disagreement", not name a
+        # count that does not work.
+        assert min_discordant_rows(6, bootstrap_p_floor(2_000) / 2, 2_000) is None
+
+
 class TestHolmThreshold:
     def test_returns_alpha_over_s_for_the_smallest_and_alpha_for_the_largest(self) -> None:
         family = [0.001, 0.01, 0.04]
@@ -1296,6 +1343,57 @@ class TestGateRefusal:
         assert "This candidate could not have promoted" in decided.gate_refusal
         assert "No candidate can promote here" not in decided.gate_refusal
 
+    def test_the_remedy_names_the_discordant_count_that_would_clear_the_bar(self, tmp_path: Path) -> None:
+        """10 rows, 3 discordant: the floor (0.056) exceeds alpha, and "add rows" is FALSE here.
+
+        At R = 3 fixed, buying rows raises the floor. The honest remedy names the discordant count
+        — 4 at this row count — beside the 3 the suite actually has.
+        """
+        decided = self._gated(tmp_path, positives=3, distractors=7, family=1)[0]
+        assert decided.n_discordant == 3
+        refusal = decided.gate_refusal
+        assert refusal is not None
+        required = min_discordant_rows(10, DEFAULT_ALPHA, self._REFUSAL_RESAMPLES)
+        assert required == 4
+        assert f"from {decided.n_discordant} to {required}" in refusal
+        assert "makes this floor worse" in refusal
+        # The sentence this replaces: unconditionally true only when the added rows are discordant.
+        assert "the answer is more rows, not fewer candidates" not in refusal
+
+    def test_the_identical_arms_message_carries_none_of_the_row_remedy(self, tmp_path: Path) -> None:
+        # The R = 0 branch owns its own diagnosis; the discordance remedy must not leak into it.
+        rows = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(8)}
+        decided = holm_promote([_gate(_shared_dirs(tmp_path, rows, dict(rows)))] * 2)[0]
+        assert decided.n_discordant == 0
+        assert decided.gate_refusal is not None
+        assert "DISAGREE on" not in decided.gate_refusal
+        assert "identical labels on every one of the 8 scored rows" in decided.gate_refusal
+
+    def test_a_verdict_without_a_discordant_count_says_nothing_about_one(self) -> None:
+        # `n_discordant` is None on the no-interval path, and a remedy must never invent it.
+        verdict = ActivationGateVerdict(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=SUITE,
+            criterion_index=0,
+            confidence=0.95,
+            n_resamples=GATE_RESAMPLES,
+            rows_paired=6,
+            rows_excluded=0,
+            incumbent_f1=0.0,
+            candidate_f1=1.0,
+            mean_diff=1.0,
+            ci_low=0.5,
+            ci_high=1.0,
+            p_value=0.01,
+            p_floor=0.03125,
+        )
+        # A family of two: the floor (0.031) exceeds alpha/2, so the refusal fires.
+        refusal = holm_promote([verdict, verdict])[0].gate_refusal
+        assert refusal is not None
+        assert "survivor(s) at alpha" in refusal
+        assert "DISAGREE on" not in refusal
+
     def test_max_family_zero_says_no_family_size_works(self) -> None:
         verdict = ActivationGateVerdict(
             incumbent_variant="incumbent",
@@ -1343,7 +1441,30 @@ class TestPFloorOnTheVerdict:
         verdict = _gate(_shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
         assert verdict.p_value is None
         assert verdict.p_floor is None
+        # `None`, not 0: "the arms agreed everywhere" is a finding, "there was no comparison" is not.
+        assert verdict.n_discordant is None
         assert holm_promote([verdict])[0].gate_refusal is None
+
+    def test_the_gate_records_the_count_the_floor_came_from(self, tmp_path: Path) -> None:
+        incumbent, candidate = _tiny_suite(3, 7)
+        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        assert (verdict.rows_paired, verdict.n_discordant) == (10, 3)
+        assert verdict.p_floor == pytest.approx(_discreteness_floor(10, 3, _FAST_RESAMPLES))
+
+    def test_all_rows_discordant_records_the_row_count(self, tmp_path: Path) -> None:
+        incumbent, candidate = _tiny_suite(4, 0)
+        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        assert verdict.n_discordant == verdict.rows_paired == 4
+
+    def test_render_prints_the_discordant_count_beside_the_paired_one(self, tmp_path: Path) -> None:
+        # The quantity `p_floor` is computed from, visible without having to trigger a refusal.
+        incumbent, candidate = _tiny_suite(3, 7)
+        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        assert "Rows paired: 10 · discordant: 3 · excluded: 0" in render_markdown(verdict)
+
+    def test_render_shows_a_dash_when_there_was_no_comparison(self, tmp_path: Path) -> None:
+        verdict = _gate(_shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
+        assert "discordant: —" in render_markdown(verdict)
 
     def test_render_reports_both_floors(self, tmp_path: Path) -> None:
         incumbent, candidate = _tiny_suite(6, 6)

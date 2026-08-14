@@ -128,6 +128,17 @@ class ActivationGateVerdict(BaseModel):
             "it exceeds it, no candidate can promote however good it is."
         ),
     )
+    n_discordant: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Paired rows whose two arms produced different pooled label multisets — the R that "
+            "p_floor is computed from, and the quantity a refusal's remedy turns on. None when "
+            "there was no interval; 0 is the meaningful 'the arms agreed everywhere'. It is a RATE "
+            "that matters, not a count: below roughly 4 discordant rows in 10 the floor stays "
+            "coarse however many rows are added, because adding concordant rows RAISES it."
+        ),
+    )
     gate_refusal: str | None = Field(
         default=None,
         description=(

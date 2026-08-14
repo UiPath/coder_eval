@@ -371,8 +371,13 @@ reporting it as "not promoted" would be a claim about the candidates that the da
 
 **Read which refusal you got, because there are two and their remedies are opposite.** The usual
 one names the largest family size that could still promote, so the honest options are visible:
-gate fewer survivors, or **add rows**. More rounds will not help — the floor falls out of the row
-count and the discordance rate, not out of luck, so re-running the same suite reproduces it.
+gate fewer survivors, or **add rows the two arms actually disagree on**. That second lever is
+narrower than it looks, and the block states it as a number because getting it wrong costs money:
+holding the discordant count fixed and adding rows makes the floor **worse**, not better, so a
+user who buys agreeing rows after a refusal ends up further from promoting than before. The block
+names the discordant count this suite has and the one that would clear its bar; act on that pair,
+not on the row total. More rounds will not help either — the floor falls out of the row count and
+the discordance rate, not out of luck, so re-running the same suite reproduces it.
 
 The other says the two arms produced **identical labels on every scored row**. That is a finding
 about the candidate rather than the suite: with nothing discordant the floor is 1.0 at any suite
