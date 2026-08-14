@@ -2119,7 +2119,17 @@ class TestPluginArtifacts:
         # every one of these instructions is something a well-meaning edit would "simplify"
         # away, leaving a skill that still reads plausibly and measures nothing. Same
         # deletion-sensor shape as the lint-tasks read-only guard above.
-        text = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        # TWO surfaces, and which one a token belongs to is the reviewable part of the
+        # split. `SKILL.md` holds the PROCEDURE — which suite, which files, which commands,
+        # in what order — so a procedure token asserted anywhere else would mean the step
+        # that needs it no longer states it. `reference/optimize-method.md` holds the
+        # track-invariant METHOD — the cost table, what each stage bounds, why the two gates
+        # differ, the sign rule — which is identical on both tracks and is what has to be
+        # right for a verdict to mean anything. Tokens that may legitimately live in either
+        # are asserted against the concatenation.
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        method = _normalized(PLUGIN_ROOT / "reference" / "optimize-method.md")
+        text = skill + " " + method
 
         # The single most important invariant. Suite rollups pool replicates, so --repeats
         # writes ONE pooled suite.json and the per-replicate F1 the Stage B gate reads would
@@ -2270,6 +2280,35 @@ class TestPluginArtifacts:
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
 
+        # The PROCEDURE half, asserted against `SKILL.md` alone. Moving any of these into
+        # the method file would leave the step that must act on it silently pointing
+        # elsewhere — which is the failure mode the extraction itself could introduce.
+        for token, why in (
+            ("route to the execution track", "Step 2's routing decision"),
+            ("Never run both tracks in one round", "Step 3's one-variable-per-round rule"),
+            ("ONE dataset-backed task", "Step 4's hard constraint on the suite's shape"),
+            ("Invoke the skill from the prompt", "Step 4's activation-held-constant rule"),
+            ("Use the slash form", "Step 4's only way to reach a disable-model-invocation skill"),
+            ("Hand over the template itself", "Step 4's handover to /coder-eval:task"),
+            ("copied unchanged", "Step 8's snapshot must carry the sibling skills"),
+            ("/coder-eval:check-skill", "the sibling this skill hands control back to"),
+            ("round<N>-triage.yaml", "Step 9's per-stage experiment file"),
+            ("round<N>-gate.yaml", "Step 9's per-stage experiment file"),
+            ("round<N>-confirm.yaml", "Step 9's per-stage experiment file"),
+        ):
+            assert token in skill, (
+                f"optimize-skill's SKILL.md lost {token!r} — {why}. This is PROCEDURE: it must stay "
+                f"in the skill, not move to reference/optimize-method.md"
+            )
+
+        # An extracted reference nothing points at is a deleted reference. Mirrors the
+        # reference/task-rubric.md pointer sensor.
+        assert "${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md" in skill, (
+            "optimize-skill's SKILL.md no longer points at reference/optimize-method.md, so the "
+            "cost table, the gate rules and the sign rule are unreachable from the procedure "
+            "that has to apply them"
+        )
+
         # The paired-diff sign rule has to appear in BOTH gates that read the block —
         # Stage B (execution) and Stage C — because each is a separate decision point and a
         # reader lands on one or the other. Counted rather than `in text`: a presence check
@@ -2278,10 +2317,15 @@ class TestPluginArtifacts:
         # variant_ids[0]/[1]), so with `incumbent` declared first a candidate win is NEGATIVE
         # — and a reversed reading promotes the arm that lost, with every later number in the
         # ledger corroborating it.
+        # Counted against the METHOD file, because both decision points moved there together
+        # (Stage B and Stage C are adjacent sections of it). The reason for TWO is unchanged
+        # by the move: each stage is a separate decision point a reader lands on
+        # independently, so a cross-reference from one to the other is not good enough.
         for phrase, expected in (("variant declaration order", 2), ("a candidate win reads negative", 2)):
-            assert text.count(phrase) >= expected, (
-                f"optimize-skill states {phrase!r} {text.count(phrase)} time(s); both the execution "
-                f"Stage B gate and Stage C must carry the paired-diff sign rule, so it needs {expected}"
+            assert method.count(phrase) >= expected, (
+                f"reference/optimize-method.md states {phrase!r} {method.count(phrase)} time(s); both "
+                f"the execution Stage B gate and Stage C must carry the paired-diff sign rule, so it "
+                f"needs {expected}"
             )
 
         # The cost table's symbols must match the prose that defines them. It shipped

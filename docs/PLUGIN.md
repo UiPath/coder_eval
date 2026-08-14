@@ -190,6 +190,11 @@ directories, so every file a skill reads travels with it under `reference/`:
   writes and `lint-tasks` applies to task files already on disk: could this task pass for
   the wrong reason, does it grade behavior or a self-report, do its fixtures reset and
   clean up.
+- `optimize-method.md` — the track-invariant method behind `optimize-skill`'s three stages:
+  the cost table, what each stage does and does not bound, why the activation and execution
+  gates use different machinery, and the paired-diff sign rule. Split out of `SKILL.md` for
+  the same reason as `task-rubric.md` — the method is identical on both tracks, so it lives
+  once and the skill keeps the procedure.
 - `cli-setup.md` — how the CLI-driving skills handle a missing `coder-eval`
   binary: offer the install, ask first, verify it worked.
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads: what is *inside*
