@@ -13,6 +13,14 @@
 # of its SKILL.md), every `/my-plugin:my-skill` with its real slash command, and rewrite
 # outcome-rows.jsonl as real scenarios. Every REPLACE: marker is a placeholder.
 #
+# BEFORE OPTIMIZING A BODY, ESTABLISH IT IS WORTH OPTIMIZING. Run this suite ONCE PER SUITE
+# with a CONTROL ARM beside the incumbent: the same snapshot with the target skill's SKILL.md
+# BODY EMPTIED, frontmatter kept. Emptying rather than removing is what holds activation
+# constant — remove the skill and the listing changes too, so the arms differ in two ways at
+# once and attribute neither. If the incumbent does not beat that control, the body is not
+# doing measurable work here and optimizing its wording measures nothing. The hard stop and
+# its reasoning live in the optimize-skill plugin's reference/optimize-method.md.
+#
 # SIZING: the four rows in outcome-rows.jsonl are the illustrative MINIMUM, not a target.
 # A split halves each side, so four rows leave a two-row test half — exactly the token test
 # `/coder-eval:optimize-skill` warns against, which confirms nothing while reading as if it

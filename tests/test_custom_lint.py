@@ -2456,6 +2456,59 @@ class TestPluginArtifacts:
             "optimize-skill names `skill-check` — that command does not exist; the sibling is `check-skill`"
         )
 
+    def test_optimize_skill_documents_the_no_skill_control(self):
+        # The control answers the question every later round assumes the answer to. Losing it
+        # means rounds of wording changes measured against a body that does nothing here.
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        method = _normalized(PLUGIN_ROOT / "reference" / "optimize-method.md")
+
+        # Asserted per SURFACE, not against the concatenation: both files carry the control today,
+        # so a pair-wide check would stay green if the whole Step 8 subsection were deleted — and
+        # the procedure is the half an agent actually executes.
+        for surface, name in ((skill, "SKILL.md"), (method, "reference/optimize-method.md")):
+            for token, why in (
+                ("control arm", "the arm that establishes the body does measurable work at all"),
+                (
+                    "body is emptied",
+                    "removing the skill instead changes the LISTING, so the control would differ in "
+                    "two ways at once and attribute neither — the intuitive simplification is wrong",
+                ),
+                (
+                    "once per suite",
+                    "the control is a property of the suite, not the round; re-running it every "
+                    "round is pure spend, and the cost table prices it as a one-off",
+                ),
+            ):
+                assert token in surface, f"optimize-skill's {name} lost {token!r} — {why}"
+
+    def test_outcome_template_still_loads_after_the_control_comment(self):
+        # The control note is a COMMENT, and this is the inertness sensor: the comment is present
+        # AND the template still parses to the same structure through the real loader and expander.
+        # Without the first half it would be a copy of test_outcome_template_shape, green whether
+        # or not the thing it is named for exists.
+        template = PLUGIN_ROOT / "reference" / "templates" / "outcome.yaml"
+        raw = template.read_text(encoding="utf-8")
+        # Comment markers stripped and whitespace collapsed, so a rewrap cannot defeat the check.
+        prose = " ".join(raw.replace("#", " ").split())
+        for token in ("CONTROL ARM", "BODY EMPTIED", "ONCE PER SUITE"):
+            assert token in prose, (
+                f"the bundled outcome template no longer says {token!r}, so a user starting from it "
+                "is never told to establish that the body does measurable work before optimizing it"
+            )
+        # And it stayed a comment: every line mentioning it must be one.
+        offenders = [ln for ln in raw.splitlines() if "CONTROL ARM" in ln or "EMPTIED" in ln]
+        assert offenders and all(ln.lstrip().startswith("#") for ln in offenders), (
+            f"the control note is no longer comment-only ({offenders}) — it must not change the "
+            "parsed template, which is what the shape assertion below verifies"
+        )
+        _assert_outcome_suite_shape(
+            PLUGIN_ROOT / "reference" / "templates" / "outcome.yaml",
+            expected_rows=4,
+            expected_split_counts={"train": 2, "test": 2},
+            skill_name="my-skill",
+            invocation="my-plugin:my-skill",
+        )
+
     def test_optimize_skill_points_at_the_proposal_prompt(self):
         # An extracted reference nothing points at is a deleted reference. Mirrors the
         # optimize-method.md and task-rubric.md pointer sensors.

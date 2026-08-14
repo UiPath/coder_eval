@@ -16,6 +16,7 @@ State the projected run count before each stage and ask. With N candidates, S su
 | Spend | Runs |
 | --- | --- |
 | Step 6 baseline | `M_train`, or `2 × M_train` on the activation track |
+| Control arm — execution track, **once per suite** | `3 × M_train` (`6 × M_train` with the incumbent it is paired against) |
 | Stage A — triage | `(N+1) × M_train` |
 | Stage B — gate, activation track | `3 × (S+1) × M_train` |
 | Stage B — gate, execution track | `6 × M_train` per candidate gated |
@@ -70,6 +71,37 @@ preflight did not happen.
 argument; the experiment carrying the arms is passed with `-e`. Passing the experiment file
 positionally instead would treat it as a task, which resolves to a skipped task and a green
 run of zero rows.
+
+### Before optimizing a body, establish it is worth optimizing
+
+**Execution track only, and once per suite rather than once per round.** Add a **control arm**
+beside the incumbent: a snapshot identical in every respect except that the target skill's
+`SKILL.md` **body is emptied**. Then ask the question every round after this one assumes the
+answer to — *does the body do anything at all on this suite?*
+
+**Empty the body; do not remove the skill.** Removing it changes the listing the model chooses
+from, which changes activation, which means the control differs from the incumbent in two ways at
+once and attributes neither. Keeping the frontmatter holds the listing constant and varies only
+the instructions under test — which is the whole comparison. It also keeps `skill_triggered`
+observing engagement normally, so a control row that scores badly is visibly a *body* failure
+rather than a skill that never ran.
+
+Gate it with the same machinery Stage B uses on this track — incumbent and control as a
+two-variant experiment at `--repeats 3`, which is why the table prices the pair at `6 × M_train`
+and the control's own share at `3 × M_train` — and apply the hard stop:
+
+> **If the incumbent does not beat the control, with a confidence interval excluding zero, stop.**
+> The body is not doing measurable work on this suite. Optimizing its wording is optimizing
+> something the measurement cannot see, and every round after this one would be noise dressed as
+> a result. Fix the skill's premise, or fix the suite, rather than its phrasing.
+
+Two readings that are correct rather than bugs. A skill whose body is its entire value scores the
+control near the floor — that is the finding, and it says the round is worth running. And on a
+suite that also grades engagement, the control scores engagement `1.0` and the outcome criteria
+near the floor: exactly right, and precisely the separation the emptied-body design buys.
+
+Record the control's numbers once and reuse them. It is a property of the suite and the skill, not
+of the round, so re-running it every round is pure spend.
 
 ### Stage A — triage (cheap)
 

@@ -636,6 +636,25 @@ part of it turns out to regress a row that used to pass.
 Snapshot the incumbent the same way (`<round>-incumbent/`), siblings included, so every arm
 is mounted by the identical mechanism and the comparison has no confound.
 
+### The control arm — execution track, once per suite
+
+On the execution track, snapshot one more: `<round>-control/`, identical to the incumbent except
+that the target skill's `SKILL.md` **body is emptied** — frontmatter kept, everything under it
+deleted. It answers the question every later round assumes: *does this body do measurable work on
+this suite at all?*
+
+**Empty the body rather than removing the skill**, and the difference is not pedantic: removing it
+changes the listing, which changes activation, so the control would differ from the incumbent in
+two ways at once. Keeping the frontmatter holds activation constant and varies only the
+instructions under test — and leaves `skill_triggered` observing engagement normally, so a bad
+control score reads as a body failure rather than as a skill that never ran.
+
+Run it **once per suite, not once per round** — it is a property of the suite and the skill, not
+of the round — and record its numbers in the ledger so later rounds reuse them instead of
+re-spending. `${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md` carries the hard stop that
+follows from it: if the incumbent does not beat the control with a confidence interval excluding
+zero, stop and fix the skill's premise rather than its wording.
+
 ## Step 9 — Materialize as an experiment
 
 One variant per candidate, plus `incumbent`. **Reachability uses `agent.plugins`, the same
