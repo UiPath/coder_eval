@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { ensureRunReviewIndex } from "./blob";
 import { RUNS_DIR, listRunIds } from "./runs";
+import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import type {
     Review,
     ReviewIndex,
@@ -22,9 +23,11 @@ export { WINDOWS } from "./reviews-types";
 // Returns null when the digest is absent (older runs predate the feature).
 export async function readRunReviewIndex(
     runId: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<ReviewIndex | null> {
-    await ensureRunReviewIndex(runId, RUNS_DIR);
-    const p = path.join(RUNS_DIR, runId, "review_index.json");
+    const dir = runsDirFor(RUNS_DIR, source);
+    await ensureRunReviewIndex(source.container, runId, dir);
+    const p = path.join(dir, runId, "review_index.json");
     let raw: string;
     try {
         raw = await fs.readFile(p, "utf-8");
@@ -45,9 +48,10 @@ export async function readTaskReview(
     variantId: string,
     taskId: string,
     replicate: string,
+    source: Source = DEFAULT_SOURCE,
 ): Promise<Review | null> {
     const p = path.join(
-        RUNS_DIR,
+        runsDirFor(RUNS_DIR, source),
         runId,
         variantId,
         taskId,
@@ -117,10 +121,13 @@ export function parseRunIdDate(runId: string): Date | null {
     return Number.isFinite(t) ? new Date(t) : null;
 }
 
-export async function listRunIdsInWindow(window: Window): Promise<string[]> {
+export async function listRunIdsInWindow(
+    window: Window,
+    source: Source = DEFAULT_SOURCE,
+): Promise<string[]> {
     const days = WINDOW_DAYS[window];
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const ids = await listRunIds();
+    const ids = await listRunIds(source);
     return ids.filter((id) => {
         const t = parseRunIdDate(id);
         return t != null && t.getTime() >= cutoff;

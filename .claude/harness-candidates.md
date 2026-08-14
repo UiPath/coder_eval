@@ -187,7 +187,7 @@ harness once for all of them.
   mechanizable guard; the durable lesson is: when a test names a narrowing, construct
   the fixture so the row SURVIVES every other rule, or the assertion proves nothing.
 
-- [ ] **CE034 — runner-label registry + dogfood runner parity** over
+- [ ] **CE038 — runner-label registry + dogfood runner parity** over
   `.github/workflows/*.yml`. Two clauses: (a) every label a job can land on must appear
   in `.github/actionlint.yaml`'s `self-hosted-runner.labels` or a stock GitHub-hosted
   allowlist — including *both* branches of an expression-valued `runs-on:`, which
@@ -247,7 +247,7 @@ harness once for all of them.
 
 ## From the PR #82 review follow-up (2026-08-10)
 
-- [ ] **CE035 — documented `coder-eval` invocations must be executable as written.**
+- [ ] **CE039 — documented `coder-eval` invocations must be executable as written.**
   `init/SKILL.md` told the agent to run `coder-eval plan <task-directory>` and
   "iterate until it exits 0", which the CLI rejects outright (`plan` takes files;
   a directory argument exits 1 with a hint) — an unreachable loop condition
@@ -260,12 +260,12 @@ harness once for all of them.
   that duplicates the CLI signature. Deferred on that split — caught in the PR #82
   review, fixed by hand in `init/SKILL.md`.
 
-- [ ] **Documented-CLI live smoke.** The behavioural counterpart to CE035: in a
+- [ ] **Documented-CLI live smoke.** The behavioural counterpart to CE039: in a
   `-m live`/`-m slow` test, materialize a fixture repo with one task YAML and
   execute every fenced `coder-eval …` command extracted from the shipped skills
   and docs, asserting exit 0 (or an explicitly-expected non-zero). This is the
   only form that proves argument shape rather than command existence. Not
-  statically reachable, hence separate from CE035 — proposed in the PR #82 review.
+  statically reachable, hence separate from CE039 — proposed in the PR #82 review.
 
 ## From the 2026-08-11 plugin generic-adopter run
 
@@ -384,7 +384,8 @@ with the two `action.yml` items above — one considered change to the action's 
   `timeout is None`. Caught independently by two reviewers (`bai-uipath`, `uipreliga`)
   on the PR, both citing the exact same arithmetic mismatch. **Not promoted in this
   pass**, but a stronger candidate than most entries here: `uipreliga` proposed a
-  generic whole-tree rule (their CE035) — for every sleep-loop under
+  generic whole-tree rule (proposed as CE035, renumbered CE042 here — CE035 shipped as
+  the workflow-outputs resolver on the published-action branch) — for every sleep-loop under
   `src/coder_eval/agents/**`, assert its own cycle-count × interval either references a
   timeout-derived name or is provably below `experiments/default.yaml`'s baseline — that
   would catch this class of bug in ANY agent, not just this one (confirmed zero
@@ -514,3 +515,66 @@ Deferred (not fixed this pass):
   `_TARGETS` (`_carries_suppression`), covered by
   `test_flags_an_unregistered_noqa_plr0915` and a negative test for a
   registered target and a body-only PLR0915 mention.
+
+## From 2026-08-04 published-action verification review
+
+- [ ] **CE041 — `VAR=$(… | grep …)` under `set -e` followed by an emptiness check
+  is a dead diagnostic.** With `set -euo pipefail`, a pipeline whose `grep` matches
+  nothing exits 1, so the assignment aborts the step *before* the
+  `if [ -z "$VAR" ]; then echo "::error::…"` branch that was written to report it —
+  the operator gets a bare exit 1 with no message. Also applies to `head -1`
+  closing the pipe early (SIGPIPE 141). Fix is `|| true` on the substitution,
+  letting the emptiness check own every failure mode. Detectable by matching
+  `\w+=\$\(.*\|\s*(grep|head)\b` inside a `run:` body whose script sets `-e`, then
+  requiring `|| true`/`|| :` on the same logical line. Caught by a reviewer in
+  `verify-published-action.yml`; **`actionlint` + shellcheck do NOT flag it**
+  (verified against the exact snippet), so the actionlint candidate above does not
+  subsume this one.
+- [ ] **CE036 — ban the skipped-green job gate.** Fail a job-level `if:` in
+  `.github/workflows/**` whose only discriminator is an emptiness/equality test on
+  `needs.<job>.outputs.<key>`. A lost output on a partial "Re-run failed jobs" resolves
+  the job to SKIPPED-**green**, so an operator sees a green re-run while nothing ran.
+  Fixed by hand twice now: `promote` was designed around the hazard, and
+  `publish-pypi`'s `if: needs.release.outputs.version != ''` (dead *and* dangerous — a
+  skipped publish also skipped `promote`) was removed in the follow-up review. CE035
+  catches the *typo* class; this catches the *shape*. Escape hatch: inline
+  `# noqa: CE036 — <reason>` for value-driven gates that cannot strand a release.
+- [ ] **CE037 — `if: failure()` is wrong in a job containing a `continue-on-error`
+  step.** Require `always()` (or a reference to the tolerated step's
+  `steps.<id>.outcome`) on diagnostic/upload steps in such a job. Fixed by hand in
+  `verify-published-action.yml`: the run dir was discarded in exactly the tolerated-red
+  case the gate is designed around, because a tolerated red leaves the job green and
+  `failure()` never fires. Pure YAML shape check, ~30 lines.
+- [ ] **CE040 — cap inline `run:` bodies; oversized decision logic belongs in
+  `.github/scripts/`.** `verify-published-action.yml`'s parity step (~70 lines, 7
+  decision points) and its e2e gate (~66 lines, switching from bash to a `python3`
+  heredoc mid-step) are 10-20-branch units invisible to `make check`, `make lint`,
+  `pyright` and coverage — which is the structural reason the `steps.parity.outputs.version`
+  bug survived to `main`. Analogous to CE022's statement cap; composes with CE032/CE033.
+  Deferred as a refactor, not a fix: extraction touches all 423 lines of a workflow that
+  cannot be exercised before merge, and CE035 + `tests/test_verify_published_workflow.py`
+  now cover the specific failure classes. Precedent for the extraction:
+  `.github/scripts/release_notes.py` + `tests/test_release_notes.py`.
+- [ ] **Exercise the Action's score gate in the FAILING direction.** Both
+  consumer-simulating jobs pass `minimum-task-score: "0.0"`
+  (`verify-published-action.yml`'s `e2e`, `pr-checks.yml`'s `action-dogfood`), so the gate
+  is only ever proven to *pass*. The new exit-contract assertion catches a gate that
+  wrongly fails; nothing catches one that wrongly passes — the direction that silently
+  disables every consumer's quality gate. Needs a second invocation with an unmeetable
+  score floor, i.e. a second paid agent run per nightly; deferred on cost, and better
+  placed in `action-dogfood` (PR-time, already paying) than in the cron.
+- [ ] **Extend CE026's `REQUIRED_PREREQ_TOKENS` anchor to the `e2e` job.** The lint pins
+  the documented Node + `@anthropic-ai/claude-code` prerequisite steps to a single
+  executable reference (`action-dogfood` in `pr-checks.yml`, via
+  `tests/lint/action_docs.py::DOGFOOD_JOB`). `verify-published-action.yml`'s `e2e` job is
+  now a third copy of the same two steps — and the truer consumer proof (no checkout,
+  published action, default pin) — so the two can drift while the docs follow only one.
+- [ ] **Runtime-key parity for `run.json` consumers outside `src/`.** The e2e gate in
+  `verify-published-action.yml` reads `task_results[*].status` / `weighted_score` /
+  `total_tokens`, and `action.yml`'s score gate reads `weighted_score` / `task_id`.
+  These are string keys in shell/YAML that no test or type-checker binds to
+  `eval_result_to_task_dict` (`reports_experiment.py`), so renaming a key there
+  silently turns an external gate into a no-op — a reviewer here proposed
+  `final_status`, which does not exist in `run.json` and would have made a new
+  assertion dead on arrival. Guard: assert the key set that non-Python consumers
+  depend on, mirroring how CE030 pins doc/schema parity.

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { NextResponse } from "next/server";
 import { collectRunFiles, collectTaskFiles } from "@/lib/runs";
+import { sourceById } from "@/lib/sources";
 import { createZip, type ZipEntry } from "@/lib/zip";
 
 export const dynamic = "force-dynamic";
@@ -8,19 +9,21 @@ export const dynamic = "force-dynamic";
 // Bundle a task folder, or a whole run, into a zip download.
 //   ?run=<id>&task=<id>  → just that task's folder (default/<taskId>/)
 //   ?run=<id>            → the entire run folder (run.json + every task dir)
-// minus the usual scaffolding noise. In blob mode the collect* helpers fetch
-// the needed blobs first, so this mirrors what the page would load.
+// minus the usual scaffolding noise, from the container named by ?src (the
+// skills nightly when absent). In blob mode the collect* helpers fetch the
+// needed blobs first, so this mirrors what the page would load.
 export async function GET(req: Request) {
     const url = new URL(req.url);
     const runId = url.searchParams.get("run");
     const taskId = url.searchParams.get("task");
+    const source = sourceById(url.searchParams.get("src"));
     if (!runId) {
         return new NextResponse("missing run", { status: 400 });
     }
 
     const files = taskId
-        ? await collectTaskFiles(runId, taskId)
-        : await collectRunFiles(runId);
+        ? await collectTaskFiles(runId, taskId, source)
+        : await collectRunFiles(runId, source);
     if (!files) {
         return new NextResponse("not found", { status: 404 });
     }

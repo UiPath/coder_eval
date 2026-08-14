@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { LOCAL_RUNS_DIR } from "@/lib/blob";
 import { RUNS_DIR, clearRunCacheDir } from "@/lib/runs";
+import { runsDirFor, sourceById } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +12,7 @@ export const dynamic = "force-dynamic";
 // stay stale forever. This is the manual escape hatch. Single-run only by
 // design — orphan cleanup for deleted/renamed runs is out of scope.
 //
-//   POST /api/refresh?run=<run-id>
+//   POST /api/refresh?run=<run-id>[&src=<source-id>]
 export async function POST(req: Request) {
     // Local mode points RUNS_DIR at the real coder_eval runs dir (the source of
     // truth, not a cache); deleting from it would destroy run data.
@@ -21,14 +22,19 @@ export async function POST(req: Request) {
             { status: 400 },
         );
     }
-    const runId = new URL(req.url).searchParams.get("run");
+    const params = new URL(req.url).searchParams;
+    const runId = params.get("run");
     if (!runId) {
         return NextResponse.json({ error: "missing run" }, { status: 400 });
     }
+    // Each source caches into its own subtree, and a run id can exist in more
+    // than one; clearing the base dir would evict a DIFFERENT run and leave the
+    // requested one stale forever.
+    const source = sourceById(params.get("src"));
     // clearRunCacheDir is the single id validator (rejects separators, `.`,
     // `..`); a false return means the id was unsafe, never "not found" — an
     // uncached run deletes to a harmless no-op.
-    if (!(await clearRunCacheDir(RUNS_DIR, runId))) {
+    if (!(await clearRunCacheDir(runsDirFor(RUNS_DIR, source), runId))) {
         return NextResponse.json({ error: "invalid run" }, { status: 400 });
     }
     // Re-download is lazy on next render. The run page is force-dynamic and

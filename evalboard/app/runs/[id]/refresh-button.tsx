@@ -2,17 +2,30 @@
 
 import { useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { withSource } from "@/app/_lib/source-param";
 
 // Drops this run's cached blob copy via /api/refresh, then soft-refreshes the
 // route so the re-downloaded data renders. Use after editing a run's title or
 // description in storage — the disk cache otherwise serves the old copy.
-export function RefreshButton({ runId }: { runId: string }) {
+export function RefreshButton({
+    runId,
+    sourceId,
+}: {
+    runId: string;
+    sourceId: string;
+}) {
     const router = useRouter();
     const [pending, startTransition] = useTransition();
 
     const refresh = () =>
         startTransition(async () => {
-            await fetch(`/api/refresh?run=${encodeURIComponent(runId)}`, {
+            // Without the source the route would evict the same-id run out of
+            // the DEFAULT source's cache instead of this one's.
+            const url = withSource(
+                `/api/refresh?run=${encodeURIComponent(runId)}`,
+                sourceId,
+            );
+            await fetch(url, {
                 method: "POST",
             });
             router.refresh();

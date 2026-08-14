@@ -9,6 +9,7 @@ import {
     test,
     vi,
 } from "vitest";
+import { SCRIBE_SOURCE, runsDirFor } from "@/lib/sources";
 
 // RUNS_DIR and LOCAL_RUNS_DIR are module-level consts read from env at import
 // time, so each scenario sets env, resets the module registry, then imports a
@@ -18,12 +19,14 @@ async function loadPost() {
     return (await import("../route")).POST;
 }
 
-function post(runId?: string): Request {
+function post(runId?: string, src?: string): Request {
     const base = "http://test/api/refresh";
     const url =
         runId === undefined
             ? base
-            : `${base}?run=${encodeURIComponent(runId)}`;
+            : `${base}?run=${encodeURIComponent(runId)}${
+                  src ? `&src=${encodeURIComponent(src)}` : ""
+              }`;
     return new Request(url, { method: "POST" });
 }
 
@@ -112,6 +115,57 @@ describe("POST /api/refresh", () => {
 
             expect(res.status).toBe(204);
             await expect(fs.access(runDir)).rejects.toThrow();
+        });
+
+        // Run ids collide across sources (both suites name runs
+        // YYYY-MM-DD_HH-MM-SS), so the source decides WHICH cached copy is
+        // evicted. Getting this wrong deletes a run nobody asked about and
+        // leaves the requested one stale forever.
+        describe("per-source cache dir", () => {
+            const RUN = "2026-06-01_04-04-22";
+            let scribeCache: string;
+            let skillsRun: string;
+            let scribeRun: string;
+
+            beforeEach(async () => {
+                scribeCache = runsDirFor(cache, SCRIBE_SOURCE);
+                skillsRun = path.join(cache, RUN);
+                scribeRun = path.join(scribeCache, RUN);
+                for (const d of [skillsRun, scribeRun]) {
+                    await fs.mkdir(d, { recursive: true });
+                    await fs.writeFile(path.join(d, "meta.json"), "{}\n");
+                }
+            });
+            afterEach(async () => {
+                await fs.rm(scribeCache, { recursive: true, force: true });
+            });
+
+            test("src=scribe evicts the scribe copy and leaves skills alone", async () => {
+                const POST = await loadPost();
+                const res = await POST(post(RUN, "scribe"));
+
+                expect(res.status).toBe(204);
+                await expect(fs.access(scribeRun)).rejects.toThrow();
+                await expect(fs.access(skillsRun)).resolves.toBeUndefined();
+            });
+
+            test("no src evicts the skills copy and leaves scribe alone", async () => {
+                const POST = await loadPost();
+                const res = await POST(post(RUN));
+
+                expect(res.status).toBe(204);
+                await expect(fs.access(skillsRun)).rejects.toThrow();
+                await expect(fs.access(scribeRun)).resolves.toBeUndefined();
+            });
+
+            test("unknown src falls back to the default source", async () => {
+                const POST = await loadPost();
+                const res = await POST(post(RUN, "nope"));
+
+                expect(res.status).toBe(204);
+                await expect(fs.access(skillsRun)).rejects.toThrow();
+                await expect(fs.access(scribeRun)).resolves.toBeUndefined();
+            });
         });
     });
 });
