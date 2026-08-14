@@ -197,8 +197,11 @@ as every other agent.
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead
    of finalizing on an idle step stream, so slow work does complete — but the wait is
-   bounded by 80% of `turn_timeout`, and a job that outlives it is force-closed as
-   `result_status: unknown` and graded as an ordinary low score rather than a timeout.
+   bounded by 80% of `turn_timeout` (600s when the task sets no timeout). What happens
+   at that bound depends on what is in flight: a job still ACTIVE is force-closed as
+   `result_status: unknown` and graded as an ordinary low score rather than a timeout;
+   a connection that never produced a clean turn end with nothing ACTIVE raises a real
+   `TurnTimeoutError` instead, so the orchestrator's grading path runs.
    Measured in [Run-Limit Parity](HARNESS_PARITY.md).
 
 ## Running in Docker

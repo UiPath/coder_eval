@@ -9,6 +9,17 @@ class BaseRule(ast.NodeVisitor, ABC):
 
     id: str = ""
 
+    #: Physical source lines of the tree being checked. ``runner.check_file``
+    #: assigns this after construction (a CLASS attribute rather than an
+    #: ``__init__`` parameter so the many rules that override ``__init__``
+    #: keep working unchanged). A rule needing raw text -- comments are absent
+    #: from the AST, so ``# noqa`` markers are only visible here -- must read
+    #: this instead of re-opening ``filepath``: a rule fed a synthetic tree
+    #: with a real-looking path would otherwise scan an unrelated file, a
+    #: silent false positive that also depends on the process's cwd. ``None``
+    #: means the caller supplied only a path; degrade to doing nothing.
+    source_lines: list[str] | None = None
+
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
         self.violations: list[Violation] = []

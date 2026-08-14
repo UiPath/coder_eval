@@ -69,9 +69,12 @@ The signals a capped run leaves behind, on every backend:
 
 On Claude Code and Codex a `turn_timeout` breach is a *failure*: the watchdog fires
 at the deadline, the partial turn is preserved on `pending_turn`, and the turn is
-marked `crashed`.
+marked `crashed`. The orchestrator then attempts success-criteria grading against
+whatever was salvaged (`_grade_after_forced_kill`) before falling back to
+`FinalStatus.TIMEOUT` if criteria don't pass.
 
-Antigravity stops earlier and more gently, for the reason in the next section.
+Antigravity's poll loop (next section) can exit two ways, and only one of them
+stops earlier and more gently than the other two backends.
 
 ## Antigravity backgrounds anything over 10 seconds
 
@@ -84,23 +87,43 @@ What coder_eval does about it: the turn polls for the backgrounded result rather
 than finalizing the moment the step stream goes idle, so slow work does finish and
 its real exit code reaches the model. Without that poll, a command over the 10s
 boundary left the tool call unresolved and the turn was graded on work that had not
-happened yet.
+happened yet. Each individual step-fetch inside a poll cycle is itself bounded (30s)
+so a genuinely non-idle connection can't block the whole poll loop — see
+`_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS` in `antigravity_agent.py`.
 
-The wait is bounded by **80% of `turn_timeout`** (or 120 five-second cycles when the
-task sets no timeout), not by `turn_timeout` itself. A job that outlives that bound
-is force-closed as unresolved and the turn is graded on everything else, where
-Claude Code and Codex instead raise a turn timeout and mark the turn crashed.
+The wait is bounded by **80% of `turn_timeout`**, not by `turn_timeout` itself; a
+task that sets no timeout falls back to a flat **600s** wall-clock backstop. A
+second bound, **120 poll cycles**, applies in parallel — whichever trips first
+wins. Two bounds because a cycle's cost is bimodal: against a genuinely
+backgrounded job the connection is idle and `receive_steps()` returns
+immediately, so a cycle costs only the 5s poll interval (120 x 5s = 600s, ~2x
+the worst 60-300s job observed in the tasks that motivated the poll loop);
+against a wedged connection every re-drain burns the full 30s per-step timeout,
+so a deadline rather than the cycle count is what bounds it (the flat 600s backstop
+when the task set no `turn_timeout`; otherwise the tighter `0.8 x turn_timeout`). What happens when the bound is hit
+depends on whether a tool call is still open:
 
-So the residual divergence is the terminal signal, not whether slow work completes:
-a long `npm install` or build runs to completion here the way it does on the other
-two, but a command that never finishes reads as an ordinary low score rather than a
-timeout.
+- **An orphaned tool call still ACTIVE**: force-closed as unresolved and the turn is
+  graded on everything else — the graceful path, and the residual divergence from
+  Claude Code/Codex: a long `npm install` or build runs to completion here the way
+  it does on the other two, but a command that never finishes reads as an ordinary
+  low score rather than a timeout.
+- **Nothing ACTIVE at all** (the connection never produced a clean end and no tool
+  call is in flight to explain the silence): Antigravity now raises a turn timeout
+  and marks the turn crashed too, same as Claude Code and Codex, so the
+  orchestrator's forced-kill grading path gets a chance to run instead of the turn
+  silently finalizing as an ordinary, unmarked completion.
 
 ## Timeouts are not turn caps
 
-A timeout is a *failure* (partial turn captured, error status); the turn cap is a
-*clean stop*. Conflating them is the mistake this page exists to prevent: a task
-whose cap fires should not look like a task whose harness hung.
+Both now evaluate success criteria — a timeout runs
+`Orchestrator._grade_after_forced_kill` against whatever the agent produced, so a
+timed-out task that already satisfied its criteria finalizes `SUCCESS` rather than
+being discarded. What still separates them is the DEFAULT status when criteria do
+not pass (`TIMEOUT` vs `MAX_TURNS_EXHAUSTED`) and the `crashed` mark on the partial
+turn: a cap is a clean stop mid-trajectory, a timeout means the harness was cut off.
+Conflating them is the mistake this page exists to prevent: a task whose cap fires
+should not look like a task whose harness hung.
 
 ## Reproducing
 

@@ -75,6 +75,16 @@ logger = logging.getLogger(__name__)
 # wins the race against the asyncio cancel path (which doesn't).
 _WAIT_FOR_GRACE_SECONDS = 2.0
 
+# Wall-clock cap on _grade_after_forced_kill's grading pass: this runs AFTER the
+# ThreadedWatchdog/task_timeout has already fired (or a turn_timeout already
+# elapsed), so it must not itself become an unbounded tail on an already-blown
+# budget -- an agent_judge criterion spawns a fresh sub-agent and an llm_judge
+# criterion makes a real API call, either of which could otherwise run for
+# minutes past the configured limit. On expiry this falls back to the caller's
+# fallback_status like any other grading failure -- best-effort, never worse
+# than not grading at all.
+_GRADE_AFTER_FORCED_KILL_TIMEOUT_SECONDS = 60.0
+
 
 async def _pump_stream(
     stream: asyncio.StreamReader | None,
@@ -394,6 +404,19 @@ class Orchestrator:
         # stop_early: block and the kill switch is not thrown; None otherwise,
         # so the default path is entirely unaffected).
         self._early_stop_watcher: EarlyStopWatcher | None = None
+        # len(result.iterations) at the moment success_criteria_results was last
+        # written, so _grade_after_forced_kill can tell a grade that covers the
+        # whole recorded trajectory from a stale mid-dialog snapshot (the
+        # simulation path re-grades every turn under check_criteria:
+        # every_turn/both). None = never graded.
+        self._graded_iteration_count: int | None = None
+        # Dialog-wide per-judge token accumulator. Owned by the Orchestrator
+        # rather than being a local of _simulation_dialog_loop so the
+        # forced-kill grading path can fold ITS judge slice into the same
+        # running total -- otherwise a mid-dialog timeout re-grades and
+        # persists only that last call's judge cost, silently dropping every
+        # earlier turn's. Keyed by (position, criterion_type).
+        self._judge_usage_accum: dict[tuple[int, str], TokenUsage] = {}
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
         # exactly once per task even if _check_run_limits fires every turn.
@@ -419,7 +442,7 @@ class Orchestrator:
             return str(self.task.agent.type)
         return AgentKind.NONE.value
 
-    async def run(self) -> EvaluationResult:
+    async def run(self) -> EvaluationResult:  # noqa: PLR0915 — pre-existing exception-handling ladder; the new TurnTimeoutError handler pushed it over the cap. Decomposing run()'s handler ladder is out of scope for this fix.
         """Run the complete evaluation.
 
         Returns:
@@ -526,8 +549,6 @@ class Orchestrator:
                 # Re-raise cancellation to allow proper task cancellation
                 raise
             except TaskTimeoutError as e:
-                # Task-level timeout gets a dedicated status (not generic ERROR)
-                self.result.final_status = FinalStatus.TIMEOUT
                 self.result.error_message = str(e)
 
                 self.result.error_details = create_error_context(
@@ -545,6 +566,30 @@ class Orchestrator:
                 # BaseException, so it never reaches the retry executor's
                 # per-attempt hook that drains the slot on a turn-level timeout.
                 await self._drain_killed_turn()
+
+                # The kill was correct; discarding a real, complete result isn't.
+                # Grade whatever the agent produced before falling back to the
+                # dedicated TIMEOUT status (not generic ERROR).
+                await self._grade_after_forced_kill(fallback_status=FinalStatus.TIMEOUT)
+            except TurnTimeoutError as e:
+                self.result.error_message = str(e)
+
+                self.result.error_details = create_error_context(
+                    error=e,
+                    task_id=self.task.task_id,
+                    attempt=max(self.result.iteration_count, 1),
+                    component="orchestrator.turn_timeout",
+                    agent_name=self._agent_name,
+                )
+
+                logger.error(f"Turn timed out: {e}")
+
+                # No _drain_killed_turn() here: the partial turn for a
+                # TurnTimeoutError is already salvaged by
+                # _on_attempt_failure's _drain_pending_turn() inside
+                # _communicate_with_retry, which runs before this exception
+                # reaches run().
+                await self._grade_after_forced_kill(fallback_status=FinalStatus.TIMEOUT)
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
                 # statuses so per-task records preserve the failure mode.
@@ -661,6 +706,176 @@ class Orchestrator:
             )
         except Exception:
             logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
+
+    async def _grade_after_forced_kill(self, *, fallback_status: FinalStatus) -> None:
+        """Attempt success-criteria grading against whatever the agent produced
+        before a forced-kill timeout, instead of unconditionally discarding it.
+
+        Called from the ``TaskTimeoutError`` and ``TurnTimeoutError`` handlers
+        in ``run()``, after any turn salvage has already happened. By that
+        point ``self.success_checker``/``self.sandbox`` are set up in
+        ``_setup()`` (which ran before either exception could be raised) and
+        ``self.result.iterations`` holds whatever partial turn was recovered.
+
+        If a completed grading pass already covers the WHOLE recorded
+        trajectory (``self._graded_iteration_count == len(result.iterations)``
+        -- e.g. the belt-and-suspenders ``TaskTimeoutError`` at the end of
+        ``run()`` firing after ``_evaluation_loop`` already graded), this
+        re-derives the status from those existing results instead of re-running
+        ``check_all_async``: re-grading would double-spend any
+        ``llm_judge``/``agent_judge`` criterion for no new information.
+        The iteration-count guard is what makes that shortcut sound -- the
+        simulation dialog loop rewrites ``success_criteria_results`` on every
+        turn under ``check_criteria: every_turn``/``both``, so a non-empty
+        results list alone does NOT mean the grade covers the turns that
+        actually blew the budget.
+
+        Best-effort, mirroring ``_drain_killed_turn``: never raises. It commits
+        ``fallback_status`` synchronously before its first ``await`` and only
+        ever UPGRADES that to ``SUCCESS``, so the status is correct even if a
+        ``BaseException`` (which ``except Exception`` does not catch) unwinds
+        the method mid-grade.
+        """
+        if self.result is None:
+            return
+        # Commit the fallback FIRST, before any await. Everything below is
+        # best-effort and can only UPGRADE this to SUCCESS. Setting it eagerly
+        # is what keeps the status correct when a BaseException (Ctrl-C, a
+        # batch-level task cancel) arrives during one of the awaits below --
+        # `except Exception` deliberately doesn't catch those, so without this
+        # the row would persist with the constructor default (FAILURE) while
+        # error_message says the task timed out.
+        self.result.final_status = fallback_status
+        # Quiesce the agent before reading the sandbox. On a TurnTimeoutError
+        # the agent raised at its own internal deadline and NOTHING has stopped
+        # the harness yet: the watchdog's kill_sync() is intent-only on
+        # Antigravity (async cancel/disconnect), _communicate_attempt's
+        # agent.kill() only runs on the outer wait_for backstop, and
+        # _cleanup()/stop() happens in run()'s finally -- i.e. AFTER this
+        # grading pass. A backgrounded `npm run build` would still be writing
+        # into the sandbox while check_all_async reads it, making the verdict
+        # nondeterministic in both directions. Best-effort and suppressed:
+        # failing to quiesce is never a reason to skip grading.
+        if self.agent is not None:
+            try:
+                await self.agent.kill()
+            except Exception:
+                # Warning, not debug: grading is about to read a sandbox that
+                # may still be under a live agent's control, so a failed
+                # quiesce is real context for an unexpected verdict.
+                logger.warning(
+                    "[%s] Could not quiesce the agent before grading; criteria may race live writes",
+                    self.task.task_id,
+                    exc_info=True,
+                )
+        # Everything below runs inside the try: the gate helpers raise
+        # ValueError on a results/criteria length mismatch, and this method's
+        # contract (like _drain_killed_turn's) is to never propagate out of
+        # run()'s timeout handler.
+        try:
+            # A hard-killed run never reaches _evaluation_loop's own
+            # self.result.early_stop assignment (only set after a successful
+            # _communicate_with_retry return), so record the watcher's decision
+            # here -- otherwise _gate_passed always takes the unarmed branch even
+            # when an armed criterion actually cut this run.
+            if self.result.early_stop is None and self._early_stop_watcher is not None:
+                self.result.early_stop = self._early_stop_watcher.info
+            if self.result.success_criteria_results and self._graded_iteration_count == len(self.result.iterations):
+                self.result.final_status = FinalStatus.SUCCESS if self._gate_passed() else fallback_status
+                if self.result.final_status == FinalStatus.SUCCESS:
+                    self.result.error_message = None
+                    self.result.error_details = None
+                return
+            if self.success_checker is None or self.sandbox is None:
+                self.result.final_status = fallback_status
+                return
+            reference_code, reference_dir, self._reference_code = load_reference(
+                task=self.task,
+                task_file=self.task_file,
+                cached_reference=self._reference_code,
+            )
+            criteria_results = await asyncio.wait_for(
+                self.success_checker.check_all_async(
+                    self.task.success_criteria,
+                    reference_code=reference_code,
+                    reference_dir=reference_dir,
+                    turn_records=self.result.iterations,
+                ),
+                timeout=_GRADE_AFTER_FORCED_KILL_TIMEOUT_SECONDS,
+            )
+            # Fold this pass's judge slice into the dialog-wide total before
+            # storing, so a mid-dialog forced kill doesn't drop the judge cost
+            # of every earlier turn (no-op outside simulation: the accumulator
+            # is empty and each result keeps its own usage).
+            self._accumulate_judge_usage(criteria_results, self._judge_usage_accum)
+            self.result.success_criteria_results = criteria_results
+            self._graded_iteration_count = len(self.result.iterations)
+            all_passed = self._gate_passed()
+            self.result.calculate_weighted_score(self.task.success_criteria)
+            self._emit_criteria_event(criteria_results)
+            if all_passed:
+                # A genuinely successful, correctly-graded run must not carry
+                # the timeout exception's message/traceback forward -- the plan
+                # calls for "SUCCESS (plain, no special marker)", and a stale
+                # error_message/error_details would mislead report rendering.
+                self.result.final_status = FinalStatus.SUCCESS
+                self.result.error_message = None
+                self.result.error_details = None
+            else:
+                self.result.final_status = fallback_status
+            # Logged last, and suppressed on its own: a length mismatch in this
+            # human-readable tally must not discard the status decision above.
+            self._log_graded_after_forced_kill(criteria_results)
+        except Exception:
+            logger.warning(
+                "[%s] Could not grade after forced kill; falling back to %s",
+                self.task.task_id,
+                fallback_status,
+                exc_info=True,
+            )
+            self.result.final_status = fallback_status
+
+    def _log_graded_after_forced_kill(self, criteria_results: list[CriterionResult]) -> None:
+        """Human-readable pass tally for ``_grade_after_forced_kill``.
+
+        Isolated (and failure-suppressed) so a ``zip(..., strict=True)`` length
+        mismatch in a log line can never undo the status its caller already
+        committed.
+        """
+        try:
+            passed_count = sum(
+                1
+                for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
+                if r.score >= c.pass_threshold
+            )
+        except ValueError:
+            logger.warning("[%s] Graded after forced kill (tally unavailable)", self.task.task_id)
+            return
+        logger.info(
+            "[%s] Graded after forced kill: %d/%d criteria passed",
+            self.task.task_id,
+            passed_count,
+            len(criteria_results),
+        )
+
+    def _gate_passed(self) -> bool:
+        """FIRED-ONLY gate selection, mirroring ``_evaluation_loop``'s exact rule.
+
+        The weighted armed gate applies iff the early-stop watcher actually cut
+        this run (``self.result.early_stop is not None``); otherwise every
+        gating criterion must pass (strict-AND), same as an unarmed run. Shared
+        by ``_grade_after_forced_kill``'s fresh-grade and already-graded paths
+        so both honor the same contract CLAUDE.md documents for `stop_early`.
+        """
+        assert self.result is not None
+        if self.result.early_stop is not None:
+            gate_threshold = (
+                self.task.run_limits.stop_early_gate_threshold
+                if self.task.run_limits is not None
+                else DEFAULT_STOP_EARLY_GATE_THRESHOLD
+            )
+            return self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
+        return self.result.all_criteria_passed(self.task.success_criteria)
 
     def _finalize_result(self, start_time: float) -> None:
         """Finalize the evaluation result: scores, telemetry, and persistence."""
@@ -1505,6 +1720,7 @@ class Orchestrator:
                 turn_records=self.result.iterations,
             )
             self.result.success_criteria_results = criteria_results
+            self._graded_iteration_count = len(self.result.iterations)
             return self.result.all_criteria_passed(self.task.success_criteria)
 
         # Working directory context prepended to every prompt (including feedback).
@@ -1563,6 +1779,7 @@ class Orchestrator:
             turn_records=self.result.iterations,
         )
         self.result.success_criteria_results = criteria_results
+        self._graded_iteration_count = len(self.result.iterations)
 
         # Determine if all criteria passed their thresholds. all_passed is
         # single-sourced via the model gate; passed_count/total_count are kept
@@ -1685,6 +1902,7 @@ class Orchestrator:
         )
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
         self.result.success_criteria_results = criteria_results
+        self._graded_iteration_count = len(self.result.iterations)
         self.result.calculate_weighted_score(self.task.success_criteria)
         return criteria_results
 
@@ -1904,7 +2122,7 @@ class Orchestrator:
             # each turn's judge slice into this accumulator (see
             # ``_accumulate_judge_usage``) to avoid dropping earlier judge calls.
             # Keyed by (position, criterion_type) — a stable criterion identity.
-            judge_usage_accum: dict[tuple[int, str], TokenUsage] = {}
+            judge_usage_accum = self._judge_usage_accum
 
             # turns_completed advances in lockstep with the agent's _iteration:
             # one _communicate_with_retry call per sim turn keeps partials
