@@ -553,3 +553,50 @@ class TestTargetLabelMoved:
         from coder_eval.models import TARGET_LABEL
 
         assert NoiseFloor.model_fields["metric"].default == f"f1.{TARGET_LABEL}"
+
+
+class TestInstanceBestFrontIsPersisted:
+    """The merge shortlist is what a LATER round is built from, so it has to survive to disk."""
+
+    def test_round_scores_round_trips_the_instance_best_front(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        original = OptimizeMeasurements(
+            skill="my-skill",
+            round_scores=[
+                RoundScores(
+                    round=1,
+                    arm_row_scores=[ArmRowScores(variant_id="cand-a", row_scores={"r1": 1.0, "r2": 0.3})],
+                    pareto_front=["incumbent", "cand-a"],
+                    instance_best_front=["cand-a", "cand-b"],
+                )
+            ],
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(original.model_dump_json(), encoding="utf-8")
+
+        loaded = load_measurements(path)
+        assert loaded == original
+        # The two fronts are stored SEPARATELY — the whole point is that they differ.
+        assert loaded.round_scores[0].pareto_front != loaded.round_scores[0].instance_best_front
+
+    def test_round_scores_written_before_the_field_still_load(self, tmp_path: Path) -> None:
+        # RoundScores is extra="forbid", so the default is what keeps an existing sidecar readable
+        # through a load_measurements that RAISES rather than rebuilding.
+        path = _path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "skill": "my-skill",
+                    "round_scores": [
+                        {
+                            "round": 1,
+                            "arm_row_scores": [{"variant_id": "cand-a", "row_scores": {"r1": 0.5}}],
+                            "pareto_front": ["cand-a"],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert load_measurements(path).round_scores[0].instance_best_front == []

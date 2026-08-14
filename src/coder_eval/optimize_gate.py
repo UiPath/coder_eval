@@ -1365,8 +1365,52 @@ def pareto_front(arms: list[ArmRowScores]) -> list[str]:
     ]
 
 
-def render_row_matrix(arms: list[ArmRowScores], pareto: list[str]) -> str:
-    """The row x candidate table, with the Pareto set marked and the holes made visible."""
+def instance_best_front(arms: list[ArmRowScores]) -> list[str]:
+    """Variant ids achieving the highest score on at least one row — GEPA's frontier definition.
+
+    A DIFFERENT set from :func:`pareto_front`, and the difference is the point. Ours is
+    "not dominated on the row vector", which is the right rule for **discarding**: an arm off it
+    was beaten on every row it was measured on. GEPA's is the right rule for **merging**, because
+    it deliberately retains an arm that wins exactly one row — precisely the raw material a merge
+    candidate is built from, and precisely what a coverage rule can drop.
+
+    Neither contains the other. Measured on a four-arm fixture:
+    ``A={r1:0.5, r2:0.5}``, ``B={r1:1.0, r2:0.4}``, ``C={r1:0.4, r2:1.0}``, ``D={r1:1.0, r2:0.3}``
+    gives coverage ``[A, B, C]`` and instance-best ``[B, C, D]``. ``A`` is dominated by nobody yet
+    wins nothing; ``D`` ties a row's maximum yet is dominated outright by ``B``.
+
+    The maximum on a row is taken over the arms that SCORED it — a hole is never a zero, exactly as
+    in :func:`_dominates` — so an arm that alone measured a row is trivially the best on it.
+
+    Ties all qualify: an arm equal to the best on a row achieved the best on it, which mirrors
+    :func:`pareto_front` keeping identical arms. Exact ``==`` is the right comparison and a
+    tolerance would silently widen the front — every score comes from the same ``mean(values)``
+    reduction over the same replicates, so equal scores are equal for a reason, not by luck.
+
+    An arm that scored no rows is excluded for the same reason it is there: nothing about an empty
+    vector is a win. Returns in input order, matching :func:`pareto_front`.
+    """
+    scored = [arm for arm in arms if arm.row_scores]
+    best: dict[str, float] = {}
+    for arm in scored:
+        for row_id, value in arm.row_scores.items():
+            # Non-finite values are skipped when SEEDING the maximum. `value > nan` is False, so a
+            # single NaN landing in a row would pin that row's maximum at NaN forever — and then
+            # `v == best[r]` is False for every arm, dropping not just the NaN arm but the arm that
+            # genuinely won the row. Nothing produces one today (`_row_score` returns means of
+            # scores bounded [0, 1]), which is exactly why it would be silent.
+            if math.isfinite(value) and (row_id not in best or value > best[row_id]):
+                best[row_id] = value
+    return [arm.variant_id for arm in scored if any(v == best.get(r) for r, v in arm.row_scores.items())]
+
+
+def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_best: list[str] | None = None) -> str:
+    """The row x candidate table, with the Pareto set marked and the holes made visible.
+
+    ``instance_best`` is keyword-only and optional so the existing two-positional-argument form
+    keeps working byte-for-byte. When given, the block names both fronts AND the arms they disagree
+    about — a reader shown two lists learns nothing; the diff is the finding.
+    """
     if not arms:
         return "_No arms to compare._"
 
@@ -1382,6 +1426,27 @@ def render_row_matrix(arms: list[ArmRowScores], pareto: list[str]) -> str:
 
     lines.append("")
     lines.append(f"Pareto front (**bold**): {', '.join(pareto) if pareto else 'none'}")
+    if instance_best is not None:
+        listed = ", ".join(instance_best) if instance_best else "none"
+        lines.append(f"Instance-best front (GEPA's, the merge shortlist): {listed}")
+        only_coverage = [v for v in pareto if v not in instance_best]
+        only_instance = [v for v in instance_best if v not in pareto]
+        if only_coverage or only_instance:
+            parts = []
+            if only_coverage:
+                parts.append(f"on coverage without winning any row: {', '.join(only_coverage)}")
+            if only_instance:
+                parts.append(f"wins a row despite being dominated overall: {', '.join(only_instance)}")
+            lines.append(
+                "The two fronts disagree, which is the interesting case rather than an inconsistency: "
+                + "; ".join(parts)
+                + ". Coverage is the set to DISCARD from; instance-best is the set to MERGE from."
+            )
+        elif pareto or instance_best:
+            # Only when there is something to agree ABOUT. With both fronts empty every arm
+            # crashed, and "both fronts agree" would read as a result immediately above the line
+            # saying it is a wiring problem.
+            lines.append("Both fronts agree on these arms.")
 
     unscored = [a.variant_id for a in arms if not a.row_scores]
     if unscored:

@@ -287,6 +287,14 @@ class RoundScores(BaseModel):
     pareto_front: list[str] = Field(
         default_factory=list, description="Variant ids not dominated on the row vector by any other arm."
     )
+    instance_best_front: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Variant ids achieving the highest score on at least one row (GEPA's frontier), which is "
+            "a DIFFERENT set from pareto_front: ours is the right set for discarding, this one for "
+            "merging, because it deliberately retains an arm that wins exactly one row."
+        ),
+    )
 
 
 class OptimizeMeasurements(BaseModel):

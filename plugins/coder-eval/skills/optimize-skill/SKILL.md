@@ -648,13 +648,18 @@ smallest edit that could plausibly fix the failing rows: a wholesale rewrite may
 better and teaches you nothing about *why*, and it cannot be partially reverted when one
 part of it turns out to regress a row that used to pass.
 
-**From round 2, a merge candidate is allowed — and it is the one candidate the Pareto front
-earns you.** Where two front arms won *different* rows in the previous round, propose an explicit
-combination of them, and **say which rows each half is drawn from**. That attribution is the
-whole difference between a merge and a rewrite: a merge you can partially revert when one half
-turns out to regress a row, and a rewrite you cannot. It still counts as one candidate embodying
-one hypothesis — "these two edits are independent and compose" is a hypothesis, and the row
-matrix is what makes it testable.
+**From round 2, a merge candidate is allowed — and it is the one candidate the row matrix earns
+you.** Where two arms won *different* rows in the previous round, propose an explicit combination
+of them, and **say which rows each half is drawn from**. That attribution is the whole difference
+between a merge and a rewrite: a merge you can partially revert when one half turns out to regress
+a row, and a rewrite you cannot. It still counts as one candidate embodying one hypothesis —
+"these two edits are independent and compose" is a hypothesis, and the row matrix is what makes it
+testable.
+
+**Draw the halves from the instance-best front, not the Pareto one.** That is the set defined by
+winning at least one row, so it retains an arm that owns a single row while being dominated
+overall — exactly the ingredient a merge wants, and exactly what the coverage front discards.
+Step 10 prints both and names the arms they disagree about.
 
 Snapshot the incumbent the same way (`<round>-incumbent/`), siblings included, so every arm
 is mounted by the identical mechanism and the comparison has no confound.
@@ -890,7 +895,7 @@ discard. Only the per-row vectors tell them apart, so print them:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import arm_row_scores, pareto_front, render_row_matrix
+from coder_eval.optimize_gate import arm_row_scores, instance_best_front, pareto_front, render_row_matrix
 
 arms = arm_row_scores(
     run_dirs=[Path("<runs>/round1-triage")],
@@ -898,14 +903,29 @@ arms = arm_row_scores(
     suite_id="<the suite's task_id>",
     criterion_index=0,  # omit on the execution track to read each row's weighted_score
 )
-print(render_row_matrix(arms, pareto_front(arms)))
+print(render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms)))
 ```
 
 The **Pareto front** is the arms nothing else beat everywhere. Read it as the shortlist rather
-than the ranking: an arm on the front won something no other arm did, and an arm off it was beaten
-on every row it was measured on. Rows shown as `—` are missing from that arm and are excluded from
+than the ranking: an arm on the front was not beaten everywhere by any other arm, and an arm off it
+was beaten on every row it was measured on. **Being on it does not mean the arm won anything** —
+that is the instance-best front below, and conflating the two is how a merge gets built from the
+wrong set. Rows shown as `—` are missing from that arm and are excluded from
 the comparison rather than counted as zero, and a row **no** arm scores above zero is flagged —
 that is usually a broken row or an unmet fixture precondition, not four bad candidates.
+
+**Two fronts print, and they answer different questions.** The Pareto (coverage) front is the set
+to **discard from**: an arm off it was beaten on every row it was measured on, so there is nothing
+it uniquely knows. The **instance-best** front — GEPA's definition, the arms achieving the highest
+score on at least one row — is the set to **merge from**, because it deliberately keeps an arm that
+wins exactly one row, which is precisely the raw material a merge candidate is built from and
+precisely what a coverage rule drops.
+
+Neither set contains the other, so **an arm on one and not the other is the interesting case, not
+an inconsistency to tidy away.** An arm on coverage but not instance-best was never beaten
+outright yet never won anything — a safe, unremarkable candidate. An arm on instance-best but not
+coverage is dominated overall yet owns a row, which is a merge ingredient rather than a promotion.
+The rendered block names the arms the two disagree about; read that line rather than the two lists.
 
 **One caveat on reading the front.** An arm is only beaten by an arm that scored *everything* it
 scored, so an arm can sit on the front partly because its holes made it uncoverable rather than
@@ -1073,6 +1093,7 @@ from pathlib import Path
 from coder_eval.optimize_gate import (
     UNRESOLVED_MODEL,
     append_regression_rows,
+    instance_best_front,
     load_arm_rows,
     load_measurements,
     measure_noise_floor,
@@ -1094,7 +1115,10 @@ floor = measure_noise_floor(
 if floor is not None:
     record_noise_floor(sidecar, floor)
 
-record_round_scores(sidecar, RoundScores(round=1, arm_row_scores=arms, pareto_front=pareto_front(arms)))
+record_round_scores(sidecar, RoundScores(
+    round=1, arm_row_scores=arms,
+    pareto_front=pareto_front(arms), instance_best_front=instance_best_front(arms),
+))
 
 # On promotion only:
 append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round=1, reason="...")])

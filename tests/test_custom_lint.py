@@ -2435,6 +2435,13 @@ class TestPluginArtifacts:
                 "measure_execution_noise_floor",
                 "Step 8 must name the function that prices the execution track",
             ),
+            # Two fronts, and WHICH one feeds a merge is procedure: the coverage front discards an
+            # arm that owns a single row, which is exactly the ingredient a merge is built from.
+            (
+                "instance-best",
+                "Step 10 must name GEPA's front beside the coverage one, and Step 8 must draw a "
+                "merge candidate's halves from it",
+            ),
             (
                 "weighted_score",
                 "the execution preflight measures weighted_score, not f1.yes — an F1 floor prices a "

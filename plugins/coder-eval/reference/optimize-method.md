@@ -157,6 +157,19 @@ the same rows means something dropped mid-run.
 This decides nothing — it only narrows. Replicate pooling is irrelevant here because
 nothing is being gated on.
 
+**Two fronts are computed over the row matrix, and the project keeps both because they answer
+different questions.** The **coverage** front is the arms no other arm dominates on the row vector
+— the right rule for *discarding*, since an arm off it was beaten on every row it was measured on
+and knows nothing the others do not. The **instance-best** front is the arms achieving the highest
+score on at least one row — GEPA's definition, and the right rule for *merging*, because it
+deliberately retains an arm that owns a single row while being dominated overall, which is exactly
+the ingredient a merge is built from and exactly what a coverage rule drops.
+
+Neither set contains the other, and an arm in one and not the other is the finding rather than a
+contradiction: on the coverage front alone means never beaten and never a winner; on instance-best
+alone means dominated overall yet uniquely good somewhere. Collapsing them into one list would
+lose whichever question you were not asking.
+
 #### Successive halving — narrow cheaply, then rank properly
 
 Stage A pays full price for arms that were never going to survive. **Successive halving** runs it

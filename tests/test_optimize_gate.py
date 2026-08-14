@@ -37,6 +37,7 @@ from coder_eval.optimize_gate import (
     arm_row_scores,
     cost_latency_guardrails,
     holm_promote,
+    instance_best_front,
     load_arm_rows,
     load_suite_rows,
     measure_execution_noise_floor,
@@ -1549,3 +1550,104 @@ class TestEveryMissingFloorSaysWhy:
         with caplog.at_level(logging.WARNING):
             assert _execution_floor(_weighted_arm(tmp_path, "incumbent", {"r0": [0.1, 0.2]})) is None
         assert "carry 2+ replicates" in caplog.text
+
+
+class TestInstanceBestFront:
+    """GEPA's frontier, beside ours. Neither set contains the other, and that is the point."""
+
+    def _arm(self, name: str, **rows: float) -> ArmRowScores:
+        return ArmRowScores(variant_id=name, row_scores=rows)
+
+    def _four_arms(self) -> list[ArmRowScores]:
+        # The fixture from the docstring: A is dominated by nobody yet wins nothing; D ties a row's
+        # maximum yet is dominated outright by B.
+        return [
+            self._arm("A", r1=0.5, r2=0.5),
+            self._arm("B", r1=1.0, r2=0.4),
+            self._arm("C", r1=0.4, r2=1.0),
+            self._arm("D", r1=1.0, r2=0.3),
+        ]
+
+    def test_the_two_fronts_diverge_in_both_directions(self) -> None:
+        arms = self._four_arms()
+        assert pareto_front(arms) == ["A", "B", "C"]
+        assert instance_best_front(arms) == ["B", "C", "D"]
+
+    def test_keeps_a_single_row_winner(self) -> None:
+        # The whole reason a merge reads this set rather than the coverage one.
+        arms = [self._arm("broad", r1=0.9, r2=0.9, r3=0.9), self._arm("narrow", r1=0.1, r2=0.1, r3=1.0)]
+        assert pareto_front(arms) == ["broad", "narrow"]
+        assert instance_best_front(arms) == ["broad", "narrow"]
+        # And when the narrow arm IS dominated, coverage drops it while instance-best keeps it.
+        arms = [self._arm("broad", r1=0.9, r2=0.9, r3=1.0), self._arm("narrow", r1=0.1, r2=0.1, r3=1.0)]
+        assert pareto_front(arms) == ["broad"]
+        assert instance_best_front(arms) == ["broad", "narrow"]
+
+    def test_excludes_an_arm_that_scored_nothing(self) -> None:
+        real = self._arm("real", r1=0.9)
+        crashed = ArmRowScores(variant_id="crashed", row_scores={})
+        assert instance_best_front([real, crashed]) == ["real"]
+
+    def test_counts_a_row_only_one_arm_scored(self) -> None:
+        # A hole is not a zero, so the max is over the arms that MEASURED the row — an arm alone on
+        # a row is trivially best on it. That is the "wins a row nobody else measured" case a merge
+        # wants to see.
+        alone = self._arm("alone", r1=0.1, r2=0.2)
+        other = self._arm("other", r1=0.9)
+        assert instance_best_front([alone, other]) == ["alone", "other"]
+
+    def test_keeps_every_tied_arm(self) -> None:
+        arms = [self._arm(f"cand-{n}", r1=0.7, r2=0.7) for n in "abc"]
+        assert instance_best_front(arms) == ["cand-a", "cand-b", "cand-c"]
+        assert pareto_front(arms) == instance_best_front(arms)
+
+    def test_empty_input(self) -> None:
+        assert instance_best_front([]) == []
+
+    def test_render_row_matrix_names_the_disagreement(self) -> None:
+        arms = self._four_arms()
+        text = render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms))
+        assert "Instance-best front (GEPA's, the merge shortlist): B, C, D" in text
+        assert "Pareto front (**bold**): A, B, C" in text
+        # The diff is the finding — two bare lists teach a reader nothing.
+        assert "on coverage without winning any row: A" in text
+        assert "wins a row despite being dominated overall: D" in text
+        assert "DISCARD" in text and "MERGE" in text
+
+    def test_render_row_matrix_says_so_when_the_fronts_agree(self) -> None:
+        arms = [self._arm("a", r1=1.0, r2=0.0), self._arm("b", r1=0.0, r2=1.0)]
+        text = render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms))
+        assert "Both fronts agree on these arms." in text
+
+    def test_a_non_finite_score_does_not_poison_the_rows_maximum(self) -> None:
+        """A NaN must not drop the arm that genuinely won the row.
+
+        `value > nan` is False, so an unguarded max latches NaN from whichever arm set it first —
+        and then `v == best[r]` is False for EVERY arm, so the real winner falls off the merge
+        shortlist silently. `pareto_front` degrades the other way (NaN comparisons are False in
+        both directions, so nothing dominates and everything stays), which would leave the two
+        fronts disagreeing for a reason the render then narrates as a finding.
+        """
+        nan = float("nan")
+        arms = [
+            self._arm("winner", r1=1.0, r2=0.5),
+            ArmRowScores(variant_id="broken", row_scores={"r1": nan, "r2": 0.1}),
+        ]
+        assert instance_best_front(arms) == ["winner"]
+
+    def test_render_says_nothing_about_agreement_when_no_arm_scored(self) -> None:
+        # Both fronts empty is every arm having crashed. "Both fronts agree" would read as a
+        # result, directly above the line calling it a wiring problem.
+        arms = [ArmRowScores(variant_id=n, row_scores={}) for n in ("a", "b")]
+        text = render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms))
+        assert "Both fronts agree" not in text
+        assert "scored no rows at all" in text
+
+    def test_render_row_matrix_without_instance_best_is_unchanged(self) -> None:
+        # Byte-identical to today's output when the new keyword is omitted — the sole existing call
+        # site in SKILL.md passes two positional arguments and must keep working.
+        arms = self._four_arms()
+        assert render_row_matrix(arms, pareto_front(arms)) == render_row_matrix(
+            arms, pareto_front(arms), instance_best=None
+        )
+        assert "Instance-best" not in render_row_matrix(arms, pareto_front(arms))
