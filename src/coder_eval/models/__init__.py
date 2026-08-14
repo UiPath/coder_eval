@@ -113,6 +113,12 @@ from coder_eval.models.mutations import (
     apply_prompt_mutations,
 )
 
+# Optimize gate
+from coder_eval.models.optimize import (
+    ActivationGateVerdict,
+    GuardrailCheck,
+)
+
 # Results
 from coder_eval.models.results import (
     ClassificationCriterionResult,
@@ -340,6 +346,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "eval_result_total_cost",
     "judge_cost_usd",
     "simulator_cost_usd",
+    # Optimize gate
+    "ActivationGateVerdict",
+    "GuardrailCheck",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
     "DEFAULT_STOP_EARLY_GATE_THRESHOLD",
