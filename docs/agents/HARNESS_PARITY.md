@@ -49,14 +49,21 @@ is the number to distrust.
 
 The signals a capped run leaves behind, on every backend:
 
-- `final_status` is a completed status, not an error. The cap is an ordinary
-  end-of-run, so criteria are still checked against whatever the agent produced.
+- Criteria are still checked against whatever the agent produced, because the cap is
+  an ordinary end-of-run rather than an error. So a capped run that nonetheless
+  satisfies its criteria finishes as `SUCCESS`; one that does not finishes as
+  `MAX_TURNS_EXHAUSTED` (reporting category `failed`, icon `M`). Never `ERROR`,
+  and never retried.
 - `max_turns_exhausted: true` on the task record.
-- On Codex and Antigravity, the count of *resolved* tool calls equals the cap.
-- A tool call already in flight when the cap fires is force-closed and recorded with
-  `result_status: unknown` rather than dropped, so the trajectory shows what was
-  interrupted. That can leave one more *recorded* command than the cap; the resolved
-  count still matches it.
+- On Codex and Antigravity, the count of *resolved* tool calls the model itself
+  issued equals the cap. Two things can add a further *recorded* command, and
+  neither means the cap leaked:
+    - A tool call already in flight when the cap fires is force-closed and recorded
+      with `result_status: unknown` rather than dropped, so the trajectory shows what
+      was interrupted.
+    - On Codex, a sub-agent's inner tool calls are recovered from its rollout after
+      the pump stops, so the child's work and its tokens still reach the record. The
+      cap bounds what the model was allowed to do, not what the record may explain.
 
 ## What a timeout looks like
 
