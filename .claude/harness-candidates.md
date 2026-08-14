@@ -541,3 +541,22 @@ with the two `action.yml` items above — one considered change to the action's 
       "these two call sites should share a preprocessing step" is a semantic claim about intent,
       not a pattern; the realistic guard is a unit test per metric asserting invariance to
       replicate imbalance, which is what was added here. — caught in the same review.
+- [ ] A prose surface's claim about a NUMERIC CONSTANT in the code must be checked by reading the
+      constant. `SKILL.md` shipped "`failed_samples[]` is capped, so it will not hand you fifteen"
+      while `_FAILED_SAMPLE_LIMIT = 20` — the cap is *larger* than the number the sentence budgets
+      against, so the stated consequence was the reverse of the real one. CE039 cannot reach it:
+      that rule covers arithmetic-bearing TABLES, and this was a sentence naming a bare number.
+      A `ComputedClaim` could bind this one instance, but the general rule ("every number in these
+      surfaces that shadows a constant is derived from it") needs a way to know WHICH constant a
+      given number refers to, which is the part that is not cheap. — caught in the ReAPO
+      optimize-skill final review, by a fact-checker that ran the code rather than read it.
+- [ ] The exempt-locator list is criterion-agnostic and is now read by a second consumer pointing
+      the other way. `LEAK_LOCATOR_FIELDS` omits `llm_judge.files` / `agent_judge.files`,
+      `cli_called.log` and `uipath_eval.eval_set`, all locators by the module's own definition.
+      For CE036 that is pre-existing scope; for `candidate_leaks` it is a NEW false-positive
+      channel in a checker whose whole design rationale is not firing more than it has to (a body
+      that names its own output path gets flagged). Not done here because widening the list also
+      weakens the shipped CE036 rule and changes its derived CLAUDE.md sentence — a separate
+      decision, not a refactor. The mechanical half is easy: derive the list from every criterion
+      field whose name matches a locator vocabulary, and fail when a criterion grows a
+      location-shaped field nobody classified. — caught in the same review.
