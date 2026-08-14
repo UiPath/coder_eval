@@ -891,6 +891,23 @@ forgotten call read as an honest negative result. (One exception, and it is not 
 sample too small to support any statistic comes back NOT PROMOTED outright, because there is no
 p-value for a family decision to correct.)
 
+**There is a fourth headline, and it is not a negative result: `CANNOT SEPARATE AT THIS SIZE`.**
+It means the smallest p this suite can express is larger than the Holm threshold for that
+candidate's rank — so that candidate could not have promoted however good it was. Do not report it
+as "not promoted", do not re-run the round hoping for a different draw, and do not read the
+interval as evidence either way. **Read the message before choosing a remedy, because there are
+two and they are not interchangeable:**
+
+- The usual one names the largest family size that could still promote. Hand back and say the
+  suite is too small for the family you gated — gate fewer survivors, or add rows.
+- If it says the **arms produced identical labels on every scored row**, that is a finding about
+  the candidate, not the suite. More rows cannot help: the two snapshots behaved the same way
+  everywhere the suite could look. Check the candidate actually differs from the incumbent, and
+  that each arm mounted the snapshot you think it did — a wrong `plugins:` path gives exactly this
+  shape.
+
+The method file's Holm section carries the reasoning.
+
 **`criterion_index` is the criterion's POSITION** in the suite's `success_criteria:` list —
 0-based, counting from the top of the YAML file. Open the suite and count. `sibling_indices` are
 the positions of the other `skill_triggered` criteria whose `recall.yes` must not drop. Get the

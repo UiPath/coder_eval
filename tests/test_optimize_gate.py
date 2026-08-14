@@ -24,7 +24,12 @@ from coder_eval.models import (
     TokenUsage,
 )
 from coder_eval.optimize_gate import (
+    GATE_MAX_FAMILY,
+    GATE_P_PRECISION,
+    GATE_RESAMPLES,
     MATERIALITY_FLOOR,
+    _discreteness_floor,
+    _holm_threshold,
     _label_pairs,
     activation_gate,
     arm_row_scores,
@@ -38,7 +43,7 @@ from coder_eval.optimize_gate import (
     render_row_matrix,
     resolve_model,
 )
-from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES
+from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, DEFAULT_ALPHA, bootstrap_p_floor, holm_rejections
 
 
 SUITE = "my-skill-activation"
@@ -118,6 +123,13 @@ def _shared_dirs(
     return run_dirs
 
 
+# The gate's real default is GATE_RESAMPLES (20,000), which is what a promotion decision needs and
+# what ~80 tests in this file do NOT: at four bootstraps per call it would take the file from ~3s to
+# ~35s. So the helper passes a small count, resample-sensitive tests pass their own, and
+# `test_gate_defaults_to_the_gate_resample_count` is the one test that exercises the signature.
+_FAST_RESAMPLES = 400
+
+
 def _gate(run_dirs: list[Path], **kwargs) -> ActivationGateVerdict:
     return activation_gate(
         incumbent_run_dirs=run_dirs,
@@ -125,7 +137,7 @@ def _gate(run_dirs: list[Path], **kwargs) -> ActivationGateVerdict:
         incumbent_variant="incumbent",
         candidate_variant="candidate",
         suite_id=SUITE,
-        **{"criterion_index": 0, **kwargs},
+        **{"criterion_index": 0, "n_resamples": _FAST_RESAMPLES, **kwargs},
     )
 
 
@@ -333,7 +345,7 @@ class TestActivationGate:
         incumbent, candidate = self._clear_win()
         verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate), confidence=0.90)
         assert verdict.confidence == 0.90
-        assert verdict.n_resamples == BOOTSTRAP_RESAMPLES
+        assert verdict.n_resamples == _FAST_RESAMPLES
         assert "90% CI" in render_markdown(verdict)
 
     def test_is_deterministic_for_a_seed(self, tmp_path: Path) -> None:
@@ -1005,3 +1017,320 @@ class TestAnErroredRowIsAHoleNotAZero:
         assert arms[1].row_scores == {"r0": 0.5}, "the errored row must be ABSENT, not 0.0"
         assert pareto_front(arms) == ["a", "b"]
         assert "| r1 | 0.500 | — |" in render_row_matrix(arms, pareto_front(arms))
+
+
+class TestGateResampleCount:
+    """The gate decides on the p; a report renders it. The two counts are deliberately different."""
+
+    def test_gate_defaults_to_the_gate_resample_count(self, tmp_path: Path) -> None:
+        # The one test that exercises the SIGNATURE default — everything else passes a small count.
+        incumbent = {f"r{i}": [("yes", "yes" if i < 3 else "no")] for i in range(12)}
+        candidate = {f"r{i}": [("yes", "yes")] for i in range(12)}
+        verdict = activation_gate(
+            incumbent_run_dirs=_shared_dirs(tmp_path, incumbent, candidate),
+            candidate_run_dirs=_shared_dirs(tmp_path / "b", incumbent, candidate),
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+        assert verdict.n_resamples == GATE_RESAMPLES
+        assert GATE_RESAMPLES > BOOTSTRAP_RESAMPLES
+
+    def test_gate_resamples_is_derived_from_its_inputs(self) -> None:
+        # Recomputed, so the constant cannot be hand-edited away from its own derivation.
+        import math
+
+        assert math.ceil(2.0 / (GATE_P_PRECISION**2 * (DEFAULT_ALPHA / GATE_MAX_FAMILY))) == GATE_RESAMPLES
+
+    def test_every_gate_default_uses_the_gate_resample_count(self) -> None:
+        """The guardrail against a future gate function inheriting the report-grade default.
+
+        Derived from the module rather than a list here: a new public callable that takes
+        `n_resamples` is covered without anyone remembering to extend this.
+        """
+        import inspect
+
+        import coder_eval.optimize_gate as gate
+
+        offenders = []
+        for name in dir(gate):
+            if name.startswith("_"):
+                continue
+            obj = getattr(gate, name)
+            if not callable(obj) or getattr(obj, "__module__", None) != gate.__name__:
+                continue
+            try:
+                param = inspect.signature(obj).parameters.get("n_resamples")
+            except (TypeError, ValueError):  # not introspectable
+                continue
+            if param is not None and param.default is not GATE_RESAMPLES:
+                offenders.append(f"{name}(n_resamples={param.default!r})")
+        assert not offenders, (
+            f"{offenders} default to something other than GATE_RESAMPLES. Everything in this module "
+            "feeds a promotion decision, and BOOTSTRAP_RESAMPLES is the report-grade count — at 2,000 "
+            "draws a perfect 8-row candidate's p straddles its own Holm threshold across seeds."
+        )
+
+    def test_alpha_is_declared_once(self) -> None:
+        import inspect
+
+        assert inspect.signature(holm_promote).parameters["alpha"].default == DEFAULT_ALPHA
+        assert inspect.signature(holm_rejections).parameters["alpha"].default == DEFAULT_ALPHA
+        for module in ("optimize_gate.py", "reports_stats.py"):
+            source = (Path(__file__).parent.parent / "src" / "coder_eval" / module).read_text(encoding="utf-8")
+            literals = [ln for ln in source.splitlines() if "0.05" in ln and "DEFAULT_ALPHA = " not in ln]
+            assert not literals, f"{module} still spells 0.05 outside DEFAULT_ALPHA: {literals}"
+
+
+class TestDiscretenessFloor:
+    def test_matches_the_closed_form(self) -> None:
+        # 2*(1-R/M)^M: the probability a resample draws NO discordant row, doubled for two tails.
+        assert _discreteness_floor(6, 3, 20_000) == pytest.approx(2 * 0.5**6)
+        assert _discreteness_floor(8, 4, 20_000) == pytest.approx(2 * 0.5**8)
+        assert _discreteness_floor(12, 6, 20_000) == pytest.approx(2 * 0.5**12)
+
+    def test_is_bounded_by_the_estimator_floor(self) -> None:
+        # Every row discordant -> the analytic term is 0, so the arithmetic's own floor wins.
+        assert _discreteness_floor(40, 40, 2000) == pytest.approx(bootstrap_p_floor(2000))
+
+    def test_of_identical_arms_is_one(self) -> None:
+        # Zero discordant rows: (1-0)^M = 1, doubled and clamped. Two identical arms cannot be
+        # separated at any alpha, and that is the honest reading rather than a bug.
+        assert _discreteness_floor(6, 0, 20_000) == 1.0
+
+    def test_no_rows_is_one(self) -> None:
+        assert _discreteness_floor(0, 0, 20_000) == 1.0
+
+    def test_more_discordant_than_rows_does_not_go_negative(self) -> None:
+        assert _discreteness_floor(4, 9, 2000) == pytest.approx(bootstrap_p_floor(2000))
+
+
+class TestHolmThreshold:
+    def test_returns_alpha_over_s_for_the_smallest_and_alpha_for_the_largest(self) -> None:
+        family = [0.001, 0.01, 0.04]
+        assert _holm_threshold(family, 0.001, 0.05) == pytest.approx(0.05 / 3)
+        assert _holm_threshold(family, 0.04, 0.05) == pytest.approx(0.05)
+
+    def test_ties_take_the_strictest_rank(self) -> None:
+        # sorted().index() returns the FIRST occurrence, so every tied verdict is decided against
+        # alpha/S. Conservative in the refusal direction, which is the right way to be wrong here.
+        assert _holm_threshold([0.01] * 4, 0.01, 0.05) == pytest.approx(0.05 / 4)
+
+
+def _tiny_suite(positives: int, distractors: int) -> tuple[dict, dict]:
+    """A suite the incumbent misses entirely and the candidate gets perfect, plus shared distractors."""
+    incumbent = {f"p{i}": [("yes", "no")] for i in range(positives)}
+    candidate = {f"p{i}": [("yes", "yes")] for i in range(positives)}
+    for i in range(distractors):
+        incumbent[f"d{i}"] = [("no", "no")]
+        candidate[f"d{i}"] = [("no", "no")]
+    return incumbent, candidate
+
+
+class TestGateRefusal:
+    """A suite that structurally cannot separate is REFUSED, not reported as a negative result."""
+
+    # Resample-sensitive, so an explicit count rather than the helper's — but 2,000 rather than the
+    # real GATE_RESAMPLES, because what these assert is the ANALYTIC term. At 6 rows / 3 discordant
+    # the floor is 2*(1-3/6)^6 = 0.03125, and it dominates the estimator's 2/(m+1) for any m above
+    # 63; 20,000 draws would compute the identical floor and take ten times as long.
+    _REFUSAL_RESAMPLES = 2_000
+
+    def _gated(self, tmp_path: Path, positives: int, distractors: int, family: int, **kwargs):
+        incumbent, candidate = _tiny_suite(positives, distractors)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        verdicts = [_gate(run_dirs, n_resamples=self._REFUSAL_RESAMPLES, **kwargs) for _ in range(family)]
+        return holm_promote(verdicts)
+
+    def test_six_row_suite_refuses_rather_than_reporting_a_negative(self, tmp_path: Path) -> None:
+        # 6 rows, 3 discordant -> floor 0.031, against a family-of-2 Holm threshold of 0.025.
+        decided = self._gated(tmp_path, positives=3, distractors=3, family=2)
+        for verdict in decided:
+            assert verdict.gate_refusal is not None
+            assert verdict.promoted is False
+            assert "1 survivor(s)" in verdict.gate_refusal
+            text = render_markdown(verdict)
+            assert "CANNOT SEPARATE AT THIS SIZE" in text
+            assert "NOT PROMOTED" not in text
+
+    def test_a_healthy_suite_does_not_refuse(self, tmp_path: Path) -> None:
+        decided = self._gated(tmp_path, positives=6, distractors=6, family=2)
+        for verdict in decided:
+            assert verdict.gate_refusal is None
+            assert verdict.promoted is True
+
+    def test_a_refused_suite_stays_refused_across_seeds(self, tmp_path: Path) -> None:
+        """Without `and refusal is None` this fails on roughly half the seeds.
+
+        `p_floor` bounds the p's EXPECTATION, so a realized p dips below it about half the time.
+        The guard, not the seed, is what decides.
+        """
+        for seed in range(8):
+            decided = self._gated(tmp_path / f"s{seed}", positives=3, distractors=3, family=2, seed=seed)
+            assert [v.promoted for v in decided] == [False, False], f"seed {seed} promoted an unpromotable suite"
+
+    def test_refusal_does_not_outrank_undecided(self) -> None:
+        # Holm never ran, so there is no threshold for the floor to be refused against.
+        verdict = ActivationGateVerdict(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=SUITE,
+            criterion_index=0,
+            confidence=0.95,
+            n_resamples=GATE_RESAMPLES,
+            rows_paired=6,
+            rows_excluded=0,
+            incumbent_f1=0.0,
+            candidate_f1=1.0,
+            mean_diff=1.0,
+            ci_low=0.5,
+            ci_high=1.0,
+            p_value=0.03,
+            p_floor=0.9,
+        )
+        text = render_markdown(verdict)
+        assert "UNDECIDED" in text
+        assert "CANNOT SEPARATE" not in text
+
+    def test_refusal_ranks_above_a_failing_guardrail(self, tmp_path: Path) -> None:
+        # Reading a guardrail presupposes a statistic that separated, which a refused suite's
+        # did not — so the refusal is the headline.
+        failing = GuardrailCheck(
+            name="cost (USD/row)",
+            incumbent=1.0,
+            candidate=2.0,
+            relative_change=1.0,
+            tolerance=MATERIALITY_FLOOR,
+            ci_low=0.6,
+            ci_high=1.4,
+            passed=False,
+        )
+        incumbent, candidate = _tiny_suite(3, 3)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        base = _gate(run_dirs, n_resamples=self._REFUSAL_RESAMPLES)
+        decided = holm_promote([base.model_copy(update={"guardrails": [failing]})] * 2)
+        text = render_markdown(decided[0])
+        assert "CANNOT SEPARATE AT THIS SIZE" in text
+        assert "BLOCKED BY A GUARDRAIL" not in text
+
+    def test_a_refused_verdict_is_never_promoted(self) -> None:
+        # The Monte-Carlo undershoot, constructed directly: p BELOW p_floor, floor above the bar.
+        verdict = ActivationGateVerdict(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=SUITE,
+            criterion_index=0,
+            confidence=0.95,
+            n_resamples=GATE_RESAMPLES,
+            rows_paired=6,
+            rows_excluded=0,
+            incumbent_f1=0.0,
+            candidate_f1=1.0,
+            mean_diff=1.0,
+            ci_low=0.5,
+            ci_high=1.0,
+            p_value=0.0001,
+            p_floor=0.03125,
+        )
+        decided = holm_promote([verdict, verdict])[0]
+        assert decided.promoted is False
+        assert decided.gate_refusal is not None
+        text = render_markdown(decided)
+        assert "CANNOT SEPARATE AT THIS SIZE" in text
+        assert "**PROMOTED**" not in text
+
+    def test_the_refusal_is_not_duplicated_into_notes(self, tmp_path: Path) -> None:
+        decided = self._gated(tmp_path, positives=3, distractors=3, family=2)[0]
+        assert decided.gate_refusal is not None
+        assert not any("cannot express a p below" in note for note in decided.notes)
+        # And the ordinary negative-result note is suppressed too — it would contradict the headline.
+        assert not any("ordinary negative result" in note for note in decided.notes)
+
+    def test_identical_arms_are_diagnosed_as_the_candidate_not_the_suite(self, tmp_path: Path) -> None:
+        """Zero discordant rows is a DIFFERENT finding, and the remedy is not "add rows".
+
+        `2*(1-R/M)**M` shrinks with M only when the discordance RATE is non-zero, so at R=0 the
+        floor is 1.0 at every suite size — no number of extra rows changes it. Telling an operator
+        to buy more rows for a candidate that behaved identically to the incumbent is the
+        misdiagnosis this branch exists to prevent, and it is the most common degenerate outcome
+        in this workflow (a wrong `plugins:` path gives exactly this shape).
+        """
+        rows = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(8)}
+        verdict = _gate(_shared_dirs(tmp_path, rows, dict(rows)))
+        assert verdict.p_floor == 1.0
+        decided = holm_promote([verdict, verdict])[0]
+        assert decided.promoted is False
+        assert decided.gate_refusal is not None
+        assert "identical labels on every one of the 8 scored rows" in decided.gate_refusal
+        assert "adding rows cannot change it" in decided.gate_refusal
+        # And NOT the suite-size remedy, which would be false here.
+        assert "survivor(s) at alpha" not in decided.gate_refusal
+        assert "the answer is more rows" not in decided.gate_refusal
+        assert "CANNOT SEPARATE AT THIS SIZE" in render_markdown(decided)
+
+    def test_the_refusal_is_rank_scoped_not_a_claim_about_every_candidate(self, tmp_path: Path) -> None:
+        # `p_floor` is a property of the SUITE and identical across the family, but `threshold`
+        # depends on rank — so a worse-ranked sibling can escape the refusal and promote. A
+        # message claiming "no candidate can promote here" would contradict its own block.
+        decided = self._gated(tmp_path, positives=3, distractors=3, family=2)[0]
+        assert decided.gate_refusal is not None
+        assert "This candidate could not have promoted" in decided.gate_refusal
+        assert "No candidate can promote here" not in decided.gate_refusal
+
+    def test_max_family_zero_says_no_family_size_works(self) -> None:
+        verdict = ActivationGateVerdict(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=SUITE,
+            criterion_index=0,
+            confidence=0.95,
+            n_resamples=GATE_RESAMPLES,
+            rows_paired=4,
+            rows_excluded=0,
+            incumbent_f1=0.0,
+            candidate_f1=1.0,
+            mean_diff=1.0,
+            ci_low=0.5,
+            ci_high=1.0,
+            p_value=0.01,
+            p_floor=0.5,  # alpha/0.5 < 1
+        )
+        decided = holm_promote([verdict])[0]
+        assert decided.gate_refusal is not None
+        assert "No family size works" in decided.gate_refusal
+
+
+class TestPFloorOnTheVerdict:
+    def test_the_gate_sets_it_from_the_discordant_rows(self, tmp_path: Path) -> None:
+        incumbent, candidate = _tiny_suite(3, 3)
+        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        assert verdict.p_floor == pytest.approx(_discreteness_floor(6, 3, _FAST_RESAMPLES))
+
+    def test_a_row_whose_replicates_are_reordered_is_concordant(self, tmp_path: Path) -> None:
+        # Multiset comparison, not sequence: the same pairs in a different replicate order is the
+        # same row on both arms, and counting it discordant would understate the floor.
+        run_dirs = []
+        for i in range(2):
+            run_dir = tmp_path / f"run-{i}"
+            for arm, order in (("incumbent", 0), ("candidate", 1)):
+                for row in range(4):
+                    labels = [("yes", "yes")] if (i == order) else [("yes", "no")]
+                    _write_row(run_dir, arm, f"r{row}", _eval_result(f"r{row}", labels))
+            run_dirs.append(run_dir)
+        verdict = _gate(run_dirs)
+        assert verdict.p_floor == pytest.approx(_discreteness_floor(4, 0, _FAST_RESAMPLES))
+
+    def test_no_interval_means_no_floor(self, tmp_path: Path) -> None:
+        verdict = _gate(_shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
+        assert verdict.p_value is None
+        assert verdict.p_floor is None
+        assert holm_promote([verdict])[0].gate_refusal is None
+
+    def test_render_reports_both_floors(self, tmp_path: Path) -> None:
+        incumbent, candidate = _tiny_suite(6, 6)
+        verdict = holm_promote([_gate(_shared_dirs(tmp_path, incumbent, candidate))])[0]
+        text = render_markdown(verdict)
+        assert f"estimator {bootstrap_p_floor(_FAST_RESAMPLES):.4f}" in text
+        assert verdict.p_floor is not None
+        assert f"this suite {verdict.p_floor:.4f}" in text

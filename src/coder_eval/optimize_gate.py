@@ -22,6 +22,7 @@ layer's own routine (CE037), so the gate cannot disagree with the numbers the ru
 from __future__ import annotations
 
 import logging
+import math
 import os
 import statistics as _stats
 from collections.abc import Sequence
@@ -41,7 +42,13 @@ from coder_eval.models import (
     RegressionRow,
     RoundScores,
 )
-from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, cluster_bootstrap_diff_ci, holm_rejections, mean
+from coder_eval.reports_stats import (
+    DEFAULT_ALPHA,
+    bootstrap_p_floor,
+    cluster_bootstrap_diff_ci,
+    holm_rejections,
+    mean,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +69,27 @@ TARGET_LABEL = "yes"
 # repo's runs/ tree (cost 0.27, duration 0.23) are close enough that two numbers would be false
 # precision, and the bootstrap already handles the difference in spread.
 MATERIALITY_FLOOR = 0.25
+
+# How precisely the bootstrap must resolve the threshold it decides against: the Monte-Carlo
+# standard error of the p may be at most this fraction of that threshold.
+GATE_P_PRECISION = 0.10
+
+# The survivor count the gate is sized to decide. Holm's strictest threshold is alpha/S, so this
+# is what sets the resolution requirement. Five is a full Stage A shortlist.
+GATE_MAX_FAMILY = 5
+
+# DERIVED, not picked. The bootstrap p is 2*Bin(m, p/2)/m, so SE(p_hat) ~= sqrt(2p/m); requiring
+# that error to be at most a fraction k of the threshold it is decided against gives
+# m >= 2 / (k^2 * p), evaluated at the strictest Holm threshold p = alpha / S.
+#
+# Measured against the real machinery on an 8-row fixture (true p ~ 0.0078, 20 seeds): predicted
+# SE 0.00088 at m=20,000 against an observed 0.00101 — the closed form is accurate to ~15% and
+# errs high, which is the safe direction. At m=2,000 the same fixture's p ranges 0.005-0.019
+# across seeds, straddling the alpha/4 threshold it is compared against.
+#
+# Separate from reports_stats.BOOTSTRAP_RESAMPLES because a GATE decides on the p while a REPORT
+# renders it: everything here that feeds a promotion decision uses this count.
+GATE_RESAMPLES = math.ceil(2.0 / (GATE_P_PRECISION**2 * (DEFAULT_ALPHA / GATE_MAX_FAMILY)))
 
 
 def load_suite_rows(run_dir: Path, variant_id: str, suite_id: str) -> dict[str, list[EvaluationResult]]:
@@ -180,6 +208,48 @@ def _row_durations(results: list[EvaluationResult]) -> list[float]:
     return [result.duration_seconds for result in results]
 
 
+def _discreteness_floor(n_rows: int, n_discordant: int, n_resamples: int) -> float:
+    """The smallest two-sided p this suite at this size can be EXPECTED to produce.
+
+    A resample that draws NONE of the discordant rows gives both arms a byte-identical pooled
+    pair multiset, so the difference is exactly 0.0 and the draw counts in BOTH tails. That
+    happens with probability ``(1 - R/M)**M``, and the two-sided p doubles it. Floored in turn
+    by the estimator's own ``2/(n_resamples+1)``, since a bound below the arithmetic's own
+    resolution is not a real bound (via :func:`reports_stats.bootstrap_p_floor`, never a second
+    copy of ``2/(m+1)``).
+
+    **It bounds the p's EXPECTATION, not every realization** — and the difference decides how
+    the caller must use it. Measured across 30 seeds, a realized p falls below this value about
+    half the time (6-row perfect candidate at 20,000 draws: 16/30), exactly as a bound on the
+    mean predicts. So a suite whose floor exceeds its Holm threshold must be REFUSED rather
+    than allowed to promote on whichever draw happened to dip; a p below what the suite can be
+    expected to express is Monte-Carlo noise, not evidence.
+
+    Tight in practice, which is what makes refusing on it safe: against the real machinery it
+    is within 0.5% of the measured mean at 6 and 8 rows, for both perfect and imperfect
+    candidates (6-row, 3 discordant, perfect candidate: predicts 0.03125, measures 0.03095;
+    6-row, 2 discordant: predicts 0.17558, measures 0.17538).
+    """
+    if n_rows <= 0:
+        return 1.0
+    concordant_fraction = max(0.0, min(1.0, 1.0 - n_discordant / n_rows))
+    return min(1.0, max(bootstrap_p_floor(n_resamples), 2.0 * concordant_fraction**n_rows))
+
+
+def _holm_threshold(family_p_values: list[float], p: float, alpha: float) -> float:
+    """The Holm threshold ``p`` is decided against, given its rank in the family.
+
+    One declaration, called by both the negative-result note and the refusal check, so the two
+    can never disagree about the bar.
+
+    Ties take the FIRST occurrence's rank (``sorted(...).index``), which hands every tied verdict
+    the strictest threshold ``alpha/S``. Four identical candidates is the measured real case, and
+    conservative is the right direction for a refusal — a suite refused on the strictest rank
+    would also have been refused on a looser one.
+    """
+    return alpha / max(1, len(family_p_values) - sorted(family_p_values).index(p))
+
+
 def _median(values: list[float]) -> float | None:
     """The median, or ``None`` for an empty sample — distinct from a median that happens to be 0.0."""
     return _stats.median(values) if values else None
@@ -193,7 +263,7 @@ def cost_latency_guardrails(
     materiality: float = MATERIALITY_FLOOR,
     seed: int = 0,
     confidence: float = 0.95,
-    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    n_resamples: int = GATE_RESAMPLES,
 ) -> list[GuardrailCheck]:
     """Cost and latency guardrails, derived from the measured spread rather than a fixed percentage.
 
@@ -430,7 +500,7 @@ def noise_floor_mde(
     criterion_index: int,
     confidence: float = 0.95,
     seed: int = 0,
-    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    n_resamples: int = GATE_RESAMPLES,
     measurements: OptimizeMeasurements | None = None,
     model: str | None = None,
 ) -> float | None:
@@ -484,7 +554,7 @@ def measure_noise_floor(
     model: str,
     confidence: float = 0.95,
     seed: int = 0,
-    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    n_resamples: int = GATE_RESAMPLES,
     measurements: OptimizeMeasurements | None = None,
 ) -> NoiseFloor | None:
     """The noise floor as a fully-keyed record, ready to hand to :func:`record_noise_floor`.
@@ -623,7 +693,7 @@ def activation_gate(
     materiality: float = MATERIALITY_FLOOR,
     confidence: float = 0.95,
     seed: int = 0,
-    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    n_resamples: int = GATE_RESAMPLES,
 ) -> ActivationGateVerdict:
     """Gate ONE candidate against the incumbent with a paired cluster bootstrap over rows.
 
@@ -735,6 +805,12 @@ def activation_gate(
             + "pairs with observed='no'."
         )
 
+    # A row is DISCORDANT when the arms' pooled pair multisets differ — `sorted`, not `==`, so a
+    # row whose two arms carry the same pairs in a different replicate order counts as concordant.
+    # Only discordant rows can move a resample's difference off exactly 0.0, which is what makes
+    # `_discreteness_floor` a valid bound on the smallest p this suite can be expected to express.
+    n_discordant = sum(1 for rid in scored_row_ids if sorted(balanced[rid][0]) != sorted(balanced[rid][1]))
+
     verdict_kwargs = {
         "incumbent_variant": incumbent_variant,
         "candidate_variant": candidate_variant,
@@ -742,6 +818,7 @@ def activation_gate(
         "criterion_index": criterion_index,
         "confidence": confidence,
         "n_resamples": n_resamples,
+        "p_floor": _discreteness_floor(len(scored_row_ids), n_discordant, n_resamples),
         "rows_paired": len(scored_row_ids),
         "rows_excluded": len(unpaired) + unscored_count,
         "sibling_checks": _sibling_checks(
@@ -787,6 +864,10 @@ def activation_gate(
             f"only {len(scored_row_ids)} row(s) scored on both arms — fewer than the 2 an interval needs, "
             + "so every statistic is reported as unavailable rather than fabricated."
         )
+        # No interval, so there is nothing for a floor to be a floor ON. Overwritten rather than
+        # passed at the return: both returns splat this dict, so a second `p_floor=` would be a
+        # duplicate-keyword TypeError.
+        verdict_kwargs["p_floor"] = None
         return ActivationGateVerdict(
             **verdict_kwargs,
             incumbent_f1=None,
@@ -843,7 +924,7 @@ def activation_gate(
     )
 
 
-def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> list[ActivationGateVerdict]:
+def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_ALPHA) -> list[ActivationGateVerdict]:
     """Decide the whole survivor family at once, and record the decision on each verdict.
 
     With ``S`` survivors gated against the same incumbent on the same rows, the family-wise error
@@ -858,6 +939,12 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> 
 
     Promotion also requires the difference to favour the candidate and every sibling check to
     hold. The cost/latency guardrails stay advisory here — the skill's prose gates on them.
+
+    **A suite whose discreteness floor exceeds its Holm threshold is REFUSED, not rejected.** The
+    corrected threshold can sit below what the suite's own row count can express, and then no
+    candidate can promote however good it is — reporting that as an ordinary negative result is a
+    claim about the candidates that the data cannot support. Such a verdict comes back with
+    ``gate_refusal`` set and ``promoted=False``, and renders as its own headline.
     """
     family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
     rejections = holm_rejections([p for _i, p in family], alpha)
@@ -871,6 +958,44 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> 
             decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
             continue
 
+        threshold = _holm_threshold([p for _i, p in family], verdict.p_value, alpha)
+        # A floor above the bar the p is decided against means the gate structurally cannot
+        # separate here — a statement about the SUITE, not about this candidate.
+        refusal: str | None = None
+        if verdict.p_floor is not None and verdict.p_floor > threshold:
+            # A floor of exactly 1.0 is the ZERO-DISCORDANT case and nothing else: `2*(1-R/M)**M`
+            # reaches 1.0 only at R = 0 (for R >= 1 it peaks at 0.5, at M = 2). It is a different
+            # finding with a different remedy — the arms behaved identically, so the discordance
+            # RATE is zero and `(1-R/M)**M` does not shrink with M however many rows are added.
+            # Telling that operator to buy more rows is the misdiagnosis this branch exists to stop.
+            if verdict.p_floor >= 1.0:
+                refusal = (
+                    f"the two arms produced identical labels on every one of the {verdict.rows_paired} "
+                    "scored rows, so there is nothing for any test to separate — at any family size, "
+                    "at any alpha, and at any number of rows. That is a result about this candidate "
+                    "rather than about the suite: adding rows cannot change it. Check the candidate "
+                    "actually differs from the incumbent, and that both arms were wired to the "
+                    "snapshots you think they were."
+                )
+            else:
+                max_family = math.floor(alpha / verdict.p_floor)
+                remedy = (
+                    f"Gate at most {max_family} survivor(s) at alpha={alpha}, or add rows."
+                    if max_family >= 1
+                    else "No family size works at this alpha — the answer is more rows, not fewer candidates."
+                )
+                # Rank-scoped, deliberately. `p_floor` is a property of the SUITE and identical
+                # across the family, but `threshold` depends on rank — so where the floor sits
+                # between alpha/S and alpha/(S-1) a worse-ranked sibling is NOT refused and may
+                # still promote. Claiming "no candidate can promote here" would contradict it.
+                refusal = (
+                    f"this suite cannot express a p below {verdict.p_floor:.4f} at {verdict.rows_paired} "
+                    f"paired rows, and the Holm threshold for this rank in a family of {len(family)} is "
+                    f"{threshold:.4f}. This candidate could not have promoted however good it is — the "
+                    f"bar sits below what the suite can measure — so this is NOT a negative result "
+                    f"about it. {remedy}"
+                )
+
         siblings_hold = all(check.passed for check in verdict.sibling_checks)
         favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
         # The interval must exclude zero as well as the corrected test rejecting. Holm is the
@@ -878,7 +1003,12 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> 
         # keeps "promote when the interval excludes zero" literally true, which is how the method
         # file states the rule and how anyone reading the rendered block will check it.
         excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
-        promoted = i in rejected_at and favours_candidate and siblings_hold and excludes_zero
+        # `refusal is None` is LOAD-BEARING, not belt-and-braces. `p_floor` bounds the p's
+        # EXPECTATION, so a realized p dips below it on roughly half of all seeds (measured: 16 of
+        # 30 on the 6-row fixture at 20,000 draws). Without this conjunction an unpromotable suite
+        # promotes on a coin-flip AND carries a refusal — two contradictory claims in one block,
+        # and the defect this whole field exists to fix, reborn.
+        promoted = i in rejected_at and favours_candidate and siblings_hold and excludes_zero and refusal is None
         if i in rejected_at and favours_candidate and siblings_hold and not excludes_zero:
             notes.append(
                 "not promoted: the Holm-corrected test rejects but the confidence interval still "
@@ -891,8 +1021,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> 
             )
         if i in rejected_at and not favours_candidate:
             notes.append("not promoted: the interval separates in the incumbent's favour.")
-        threshold = alpha / max(1, len(family) - sorted(p for _i, p in family).index(verdict.p_value))
-        if i not in rejected_at:
+        if i not in rejected_at and refusal is None:
             notes.append(
                 f"not promoted: p = {verdict.p_value:.4f} did not clear the Holm threshold for its rank "
                 + f"in a family of {len(family)} (alpha={alpha}). This is the ordinary negative result — "
@@ -902,17 +1031,25 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> 
         # threshold can sit BELOW what the bootstrap can express, and then no candidate can ever
         # promote however good it is. Measured: 4 perfect candidates at 8 rows flip from all-rejected
         # to all-promoted between 2,000 and 20,000 resamples on identical data.
-        if verdict.p_value <= 5.0 / verdict.n_resamples:
+        estimator_floor = bootstrap_p_floor(verdict.n_resamples)
+        if verdict.p_value <= 5.0 * estimator_floor:
             notes.append(
                 f"p = {verdict.p_value:.4f} is at or near this bootstrap's resolution floor "
-                + f"(1/{verdict.n_resamples} = {1.0 / verdict.n_resamples:.4f}), and the Holm threshold for "
+                + f"({estimator_floor:.4f} at {verdict.n_resamples} draws), and the Holm threshold for "
                 + f"this rank is {threshold:.4f}. Where the threshold approaches the floor the decision is "
                 + "being made by the resample count rather than by the data — re-run the gate with a larger "
                 + "n_resamples before believing either answer. A small suite has its own coarser floor: with "
-                + "few positive rows the smallest achievable p is bounded well above 1/n_resamples."
+                + "few positive rows the smallest achievable p is bounded well above the estimator's."
             )
         notes.append(f"Holm applied across a family of {len(family)} at alpha={alpha}.")
-        decided.append(verdict.model_copy(update={"promoted": promoted, "holm_alpha": alpha, "notes": notes}))
+        # The refusal lives on `gate_refusal` and NOT in `notes`: notes is the "everything the
+        # reader needs to distrust the numbers" channel, a refusal is a headline, and duplicating
+        # it would print the same sentence twice in one block.
+        decided.append(
+            verdict.model_copy(
+                update={"promoted": promoted, "holm_alpha": alpha, "gate_refusal": refusal, "notes": notes}
+            )
+        )
     return decided
 
 
@@ -941,13 +1078,24 @@ def _render_checks(title: str, checks: list[GuardrailCheck]) -> list[str]:
 def render_markdown(verdict: ActivationGateVerdict) -> str:
     """The block the skill prints verbatim, numbers and all.
 
-    A verdict whose ``promoted`` is ``None`` renders as **UNDECIDED**, not as a non-promotion.
-    Silently reading ``None`` as "not promoted" would let a forgotten :func:`holm_promote` call
-    look like an honest negative result — which is the failure this whole gate exists to prevent.
+    Four headlines, in this precedence, and each is a different claim:
+
+    - **UNDECIDED** — ``promoted`` is ``None``, so :func:`holm_promote` never ran. It outranks
+      everything below because a verdict Holm never saw has no threshold to be refused against.
+      Silently reading ``None`` as "not promoted" would let a forgotten call look like an honest
+      negative result — the failure this whole gate exists to prevent.
+    - **CANNOT SEPARATE AT THIS SIZE** — ``gate_refusal`` is set: the suite's discreteness floor
+      exceeds the Holm threshold, so no candidate could promote however good it is. It outranks
+      NOT PROMOTED because it is a statement about the suite, not about this candidate.
+    - **BLOCKED BY A GUARDRAIL** — the statistic separated but a guardrail failed. Below the
+      refusal, since reading a guardrail presupposes a statistic that separated.
+    - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
     """
     failed_guardrails = [check.name for check in verdict.guardrails if not check.passed]
     if verdict.promoted is None:
         headline = "UNDECIDED — holm_promote has not been applied, so this verdict decides nothing"
+    elif verdict.gate_refusal is not None:
+        headline = f"CANNOT SEPARATE AT THIS SIZE — {verdict.gate_refusal}"
     elif verdict.promoted and failed_guardrails:
         # `promoted` is the PRIMARY statistic's decision; the guardrails gate in the procedure. A
         # bare "PROMOTED" over a failing guardrail is the misread this line exists to prevent —
@@ -970,8 +1118,16 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
         (
             f"- Paired cluster bootstrap (candidate - incumbent): {_fmt(verdict.mean_diff)} "
             + f"{verdict.confidence:.0%} CI [{_fmt(verdict.ci_low)}, {_fmt(verdict.ci_high)}], "
-            + f"p = {_fmt(verdict.p_value, '.4f')} over {verdict.n_resamples} draws "
-            + f"(p floors at {1.0 / verdict.n_resamples:.4f})"
+            + f"p = {_fmt(verdict.p_value, '.4f')} over {verdict.n_resamples} draws"
+        ),
+        # TWO floors, and the second is the one that decides. The estimator's is a property of the
+        # draw count; this suite's is a property of its discordant rows, sits above it, and is what
+        # holm_promote compares against the corrected threshold. Neither formula is spelled here —
+        # `bootstrap_p_floor` owns one and `_discreteness_floor` the other, and a formula retyped
+        # into a display string is a second declaration that cannot be kept honest.
+        (
+            f"- p floors: estimator {bootstrap_p_floor(verdict.n_resamples):.4f} "
+            + f"at {verdict.n_resamples} draws · this suite {_fmt(verdict.p_floor, '.4f')}"
         ),
         f"- Holm alpha: {_fmt(verdict.holm_alpha, '.3f')}",
         f"- Interval excludes zero: {verdict.ci_low is not None and verdict.ci_low > 0.0}",

@@ -2363,6 +2363,19 @@ class TestPluginArtifacts:
             # a row costs for +0.02 F1 is a trade, not a win.
             ("median cost per row", "the cost guardrail — a body edit that doubles spend must not promote silently"),
             ("median latency per row", "the latency half of the same guardrail"),
+            # The refusal rule. Without it the tool reports "not promoted" on a suite where no
+            # candidate could ever promote — the same overclaim UNDECIDED exists to prevent, one
+            # state further along.
+            (
+                "REFUSES rather than reporting a negative result",
+                "the method file must state that a floor above the Holm threshold is a refusal, "
+                "not an ordinary negative result",
+            ),
+            (
+                "add rows",
+                "a refusal's remedy is more rows or a smaller family — never another round on the "
+                "same suite, which reproduces the floor exactly",
+            ),
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
 
@@ -2387,6 +2400,13 @@ class TestPluginArtifacts:
             ("holm_promote", "the family correction is a separate call; gating alone never promotes"),
             ("render_markdown", "Step 10 must print the verdict block verbatim rather than paraphrasing it"),
             ("criterion_index", "the gate keys on criterion POSITION; a description key pairs zero rows"),
+            # The fourth headline. A refusal means NO candidate could have promoted on this suite,
+            # so reporting it as an ordinary negative result is a claim about the candidates the
+            # data cannot support — and acting on it (hand back, add rows) is procedure.
+            (
+                "CANNOT SEPARATE AT THIS SIZE",
+                "Step 10 must name the refusal headline and say it is not a negative result",
+            ),
         ):
             assert token in skill, (
                 f"optimize-skill's SKILL.md lost {token!r} — {why}. This is PROCEDURE: it must stay "
@@ -2632,6 +2652,23 @@ class TestPluginArtifacts:
             "The guardrail tolerance is owned by coder_eval.optimize_gate; describe the guardrail as "
             "bootstrap-derived and carry no figure, or the prose drifts the moment the constant moves."
         )
+
+    def test_optimize_surfaces_quote_no_resample_count(self):
+        # Same rule as the tolerance above, one constant along. GATE_RESAMPLES is DERIVED from
+        # GATE_P_PRECISION / GATE_MAX_FAMILY / DEFAULT_ALPHA, so a figure typed into the prose is a
+        # second declaration of a number the module computes — and the derivation is exactly the
+        # kind of thing that gets retuned once and then disagrees with two markdown files forever.
+        from coder_eval.optimize_gate import GATE_RESAMPLES
+
+        forbidden = {f"{GATE_RESAMPLES:d}", f"{GATE_RESAMPLES:,d}"}
+        for name in ("reference/optimize-method.md", "skills/optimize-skill/SKILL.md"):
+            surface = _normalized(PLUGIN_ROOT / name)
+            present = sorted(f for f in forbidden if f in surface)
+            assert not present, (
+                f"{name} quotes {present} — the rendered value of GATE_RESAMPLES, which the module "
+                "derives from two stated requirements. The rendered verdict block reports the draw "
+                "count it actually used; read it from there rather than restating it here."
+            )
 
     def test_skill_listing_budget_is_bounded(self):
         # See SKILL_LISTING_BUDGET_CHARS for why a plugin should self-limit here.

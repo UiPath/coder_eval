@@ -169,6 +169,11 @@ def fmt_p(p: float | None) -> str:
 # magic number stops existing in two places at two values.
 BOOTSTRAP_RESAMPLES = 2000
 
+# The family-wise error rate every correction in this codebase controls at. One declaration:
+# `holm_rejections` and `optimize_gate.holm_promote` both default to it, and `GATE_RESAMPLES` is
+# DERIVED from it — three uses that were three literals before the derivation forced the question.
+DEFAULT_ALPHA = 0.05
+
 
 def bootstrap_mean_ci(
     values: list[float],
@@ -304,7 +309,7 @@ def bootstrap_p_floor(n_resamples: int) -> float:
     return 2.0 / (n_resamples + 1)
 
 
-def holm_rejections(p_values: list[float], alpha: float = 0.05) -> list[bool]:
+def holm_rejections(p_values: list[float], alpha: float = DEFAULT_ALPHA) -> list[bool]:
     """Holm-Bonferroni step-down over a family of p-values. Rejections come back in INPUT order.
 
     Order the ``S`` p-values ascending and reject the ``i``-th (1-indexed) only while

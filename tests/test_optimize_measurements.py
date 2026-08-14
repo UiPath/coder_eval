@@ -18,6 +18,7 @@ import pytest
 
 from coder_eval.models import ArmRowScores, NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores
 from coder_eval.optimize_gate import (
+    GATE_RESAMPLES,
     MEASUREMENTS_FILENAME,
     UNRESOLVED_MODEL,
     append_regression_rows,
@@ -283,7 +284,18 @@ class TestNoiseFloorReuse:
         )
 
     def _stored(self, mde: float, **overrides) -> OptimizeMeasurements:
-        fields = {"suite_id": SUITE, "n_rows": 10, "n_invocations": 4, "mde": mde, **overrides}
+        # `n_resamples` is DERIVED from the gate's own default rather than spelled: it is a key
+        # field, so an entry written at any other count is a legitimate miss — which is exactly
+        # what happened to every floor cached before GATE_RESAMPLES existed, and is the safe
+        # direction (a miss recomputes from data already on disk).
+        fields = {
+            "suite_id": SUITE,
+            "n_rows": 10,
+            "n_invocations": 4,
+            "n_resamples": GATE_RESAMPLES,
+            "mde": mde,
+            **overrides,
+        }
         return OptimizeMeasurements(skill="my-skill", noise_floors=[_floor(**fields)])
 
     def test_measure_returns_the_whole_keyed_record(self, tmp_path: Path) -> None:

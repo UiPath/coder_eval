@@ -314,6 +314,33 @@ with a family of one the step-down degenerates to plain `p ≤ alpha`, and "scal
 survivor count" at each gate is Bonferroni — strictly more conservative, and not the test you
 said you ran. A single-candidate round is the same call with a family of one.
 
+##### When the corrected threshold sits below what the suite can express
+
+The correction tightens the bar as the family grows, and a small suite has a **floor** on how
+small a p it can produce at all. Both are real, and they can cross.
+
+The floor is a counting fact, not a property of the bootstrap's precision. A resample that
+happens to draw **none** of the rows the two arms disagree on hands both arms a byte-identical
+pool, so that draw's difference is exactly zero and it counts in *both* tails. With `M` paired
+rows of which `R` differ, that happens often enough to bound the smallest p the suite can be
+expected to report — and on a small suite with few disagreeing rows the bound is coarse. The tool
+computes it, reports it beside the estimator's own floor, and compares it against the Holm
+threshold for this candidate's rank.
+
+**Where the floor exceeds that threshold, the tool REFUSES rather than reporting a negative
+result**, and the rendered block says `CANNOT SEPARATE AT THIS SIZE`. Read that as what it is: no
+candidate could have promoted here, however good it was. It is a statement about the suite, and
+reporting it as "not promoted" would be a claim about the candidates that the data cannot support.
+
+A refusal names the largest family size that could still promote on this suite, so the honest
+options are visible: gate fewer survivors, or **add rows**. More rounds will not help — the floor
+is a property of the row count, so re-running the same suite reproduces it exactly. And because
+the floor bounds the p's *expectation* rather than every draw, a refused verdict is forced to
+`promoted = False`: a realized p that happened to dip below the floor is Monte-Carlo noise, not
+evidence, and promoting on it would make the verdict depend on the seed.
+
+Carry no number here. The floor is data-dependent and the resample count is owned by the module.
+
 #### Cost and latency guardrails
 
 Both tracks carry them, and they are **derived from the measured spread, not from a percentage

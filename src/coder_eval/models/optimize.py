@@ -72,7 +72,12 @@ class ActivationGateVerdict(BaseModel):
         gt=0.0, lt=1.0, description="Interval width the bootstrap used, so the report cannot mislabel it."
     )
     n_resamples: int = Field(
-        gt=0, description="Bootstrap draws. It floors the p-value at 1/n, so a p AT that floor means below resolution."
+        gt=0,
+        description=(
+            "Bootstrap draws. The estimator's own floor is 2/(n+1) — see reports_stats."
+            "bootstrap_p_floor — so a p AT that floor is a resolution statement, not a measurement. "
+            "This suite's own discreteness floor sits above it; p_floor is the one that decides."
+        ),
     )
     rows_paired: int = Field(description="Rows scored on BOTH arms — the clusters the bootstrap resampled.")
     rows_excluded: int = Field(
@@ -93,7 +98,34 @@ class ActivationGateVerdict(BaseModel):
         )
     )
     p_value: float | None = Field(
-        description="Two-sided bootstrap p, clamped below by the resample resolution. None when unpaired."
+        description=(
+            "Two-sided bootstrap p under the Phipson & Smyth (b+1)/(m+1) correction, so it is "
+            "floored at 2/(n_resamples+1) by the estimator itself rather than by a clamp — and "
+            "floored again, higher, by what this suite's discordant-row count can express "
+            "(p_floor). None when unpaired."
+        )
+    )
+    p_floor: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        # Bounded like NoiseFloor.mde beside it, and for a sharper reason than tidiness: the
+        # refusal fires on `p_floor > threshold`, and NaN > anything is False — so a non-finite
+        # value would silently DISABLE the gate's refusal rather than failing loudly.
+        description=(
+            "The smallest two-sided p this suite at this size can express: 2*(1-R/M)^M for M paired "
+            "rows of which R are discordant, floored at the bootstrap's own 2/(n_resamples+1). None "
+            "when there was no interval. Compared against the Holm threshold by holm_promote — where "
+            "it exceeds it, no candidate can promote however good it is."
+        ),
+    )
+    gate_refusal: str | None = Field(
+        default=None,
+        description=(
+            "Set by holm_promote when the suite's discreteness floor exceeds this candidate's Holm "
+            "threshold, i.e. the gate structurally CANNOT separate. Renders as its own headline: a "
+            "refusal is not a negative result, and reporting it as one is the defect this field fixes."
+        ),
     )
     holm_alpha: float | None = Field(
         default=None, description="The family-wise alpha holm_promote applied. None until it has run."
