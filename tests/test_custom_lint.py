@@ -2777,20 +2777,30 @@ class TestPluginArtifacts:
             )
 
     def test_optimize_surfaces_quote_no_resample_count(self):
-        # Same rule as the tolerance above, one constant along. GATE_RESAMPLES is DERIVED from
+        # Same rule as the tolerance above, two constants along. GATE_RESAMPLES is DERIVED from
         # GATE_P_PRECISION / GATE_MAX_FAMILY / DEFAULT_ALPHA, so a figure typed into the prose is a
         # second declaration of a number the module computes — and the derivation is exactly the
         # kind of thing that gets retuned once and then disagrees with two markdown files forever.
+        #
+        # DEFAULT_ALPHA rides the same sensor rather than a third near-identical one. The sizing
+        # table put it at risk: it needs the Holm threshold in a cell, and the honest way to write
+        # that is `alpha/S` bound to the constant by the CE039 claim — not a retyped `0.05/5`.
         from coder_eval.optimize_gate import GATE_RESAMPLES
+        from coder_eval.reports_stats import DEFAULT_ALPHA
 
-        forbidden = {f"{GATE_RESAMPLES:d}", f"{GATE_RESAMPLES:,d}"}
+        forbidden = {
+            f"{GATE_RESAMPLES:d}": "GATE_RESAMPLES, which the module derives from two stated requirements",
+            f"{GATE_RESAMPLES:,d}": "GATE_RESAMPLES, which the module derives from two stated requirements",
+            f"{DEFAULT_ALPHA:g}": "DEFAULT_ALPHA, which reports_stats owns",
+        }
         for name in ("reference/optimize-method.md", "skills/optimize-skill/SKILL.md"):
             surface = _normalized(PLUGIN_ROOT / name)
             present = sorted(f for f in forbidden if f in surface)
             assert not present, (
-                f"{name} quotes {present} — the rendered value of GATE_RESAMPLES, which the module "
-                "derives from two stated requirements. The rendered verdict block reports the draw "
-                "count it actually used; read it from there rather than restating it here."
+                f"{name} quotes {present} — the rendered value of "
+                + "; ".join(forbidden[f] for f in present)
+                + ". Write the symbol (`alpha`) and let the block or the CE039 claim bind it; the "
+                + "rendered verdict reports the values it actually used."
             )
 
     def test_skill_listing_budget_is_bounded(self):
@@ -5285,7 +5295,7 @@ class TestCE039ComputedClaims:
         }
         assert found == {
             "optimize-method.md": ["Spend | Runs", "arms `A` | flat | halved | premium"],
-            "SKILL.md": [],
+            "SKILL.md": ["survivors gated `S` | Holm threshold | discordant rows needed at 8 paired rows | at 20"],
         }, f"the arithmetic-table predicate now finds {found}"
 
     def test_every_claim_surface_exists(self):
@@ -5322,6 +5332,33 @@ class TestCE039ComputedClaims:
         )
         failures = _check_halving_premium(wrong, tmp_path)
         assert failures and any("premium" in f and "A=5" in f for f in failures), failures
+
+    def test_the_sizing_matcher_catches_a_wrong_cell(self, tmp_path: Path):
+        """The sizing claim's self-test, in the same shape as the halving one above.
+
+        The table a user sizes a suite from is exactly the kind that goes stale plausibly: every
+        cell is a small integer, and a wrong one reads like a right one. So the checker is run here
+        against a hand-built table with one cell moved.
+        """
+        from tests.lint.computed_claims import _check_sizing_table
+
+        good = (
+            "| survivors gated `S` | Holm threshold | discordant rows needed at 8 paired rows | at 20 |\n"
+            "| --- | --- | --- | --- |\n"
+            "| 1 | `alpha/1` | 3 | 4 |\n"
+            "| 5 | `alpha/5` | 4 | 5 |\n"
+        )
+        assert _check_sizing_table(good, tmp_path) == []
+
+        # One row understated: a user reads "3 disagreeing rows is enough at S=5" and sizes for it.
+        wrong = good.replace("| 5 | `alpha/5` | 4 | 5 |", "| 5 | `alpha/5` | 3 | 5 |")
+        failures = _check_sizing_table(wrong, tmp_path)
+        assert failures and any("S=5 at 8 rows" in f for f in failures), failures
+
+        # And a threshold column that stops being alpha/S is caught before any count is compared —
+        # otherwise a table could pass by having both halves wrong in agreement.
+        skewed = good.replace("| 5 | `alpha/5` | 4 | 5 |", "| 5 | `alpha/2` | 4 | 5 |")
+        assert any("not alpha/S" in f for f in _check_sizing_table(skewed, tmp_path))
 
     def test_a_wrong_split_symbol_is_reported_not_raised(self, tmp_path: Path):
         """A cell that PARSES but names an unexpected symbol must fail, not raise.

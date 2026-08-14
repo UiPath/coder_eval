@@ -504,6 +504,39 @@ Then apply it: **if the gain you are hoping for is smaller than the MDE, hand ba
 suite is too small to see it.** More rows, not more rounds. This is the cheapest stage there is
 and it is the one that can stop you paying for the rest.
 
+#### Activation track only — how many rows must the arms DISAGREE on?
+
+The MDE is one of two things this suite can fail on. The other is **discreteness**: if the gate
+cannot express a p below the Holm threshold you will decide against, no candidate promotes however
+good it is, and Stage B says `CANNOT SEPARATE AT THIS SIZE` after you have paid for it. That
+requirement is knowable now, and it is not a row count — it is how many rows the two arms end up
+**disagreeing** on. Print it before proposing anything:
+
+```python
+from coder_eval.optimize_gate import min_discordant_rows
+from coder_eval.reports_stats import DEFAULT_ALPHA
+
+survivors = 3  # how many candidates you plan to gate at Stage B
+rows = 12  # paired rows on the train split
+print(min_discordant_rows(rows, DEFAULT_ALPHA / survivors))
+```
+
+| survivors gated `S` | Holm threshold | discordant rows needed at 8 paired rows | at 20 |
+| --- | --- | --- | --- |
+| 1 | `alpha/1` | 3 | 4 |
+| 3 | `alpha/3` | 4 | 5 |
+| 5 | `alpha/5` | 4 | 5 |
+
+**Four to five rows where the arms actually disagree — three on the smallest suites — essentially
+regardless of suite size.** That
+is a sharper instruction than "aim for 8–12 of each", and it is the one to hand back with: a suite
+whose candidate changes the verdict on two or three rows cannot promote at any row count, because
+**adding rows the arms agree on makes the floor worse, not better**. Buying rows is only a remedy
+when the new rows are ones the candidate is expected to change.
+
+**Execution track: skip this.** The paired *t* is continuous, so it has no discreteness floor to
+refuse against — the same reason Step 6's second baseline is activation-only.
+
 **Check the resolved row count, not just the exit code.** A mistyped split name (`--split
 holdou`) aborts the run outright, naming the splits that exist — but a *partial* row loss does
 not, and that is what the count catches: a half-labelled dataset silently drops its unlabelled

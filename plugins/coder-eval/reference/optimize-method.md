@@ -332,8 +332,10 @@ Promote only when all of these hold:
   arm.** The verdict is never reported without the numbers behind it.
 
 Why replicates rather than a fixed threshold: each arm's spread measures the noise floor
-for *this* suite at *this* size. A hardcoded "≥ 0.05 F1" would be far too lax on a six-row
-suite and needlessly strict on a forty-row one. **Do not introduce one.**
+for *this* suite at *this* size. A hardcoded "≥ 0.1 F1" would be far too lax on a six-row
+suite and needlessly strict on a forty-row one. **Do not introduce one.** (The figure here is
+deliberately not alpha's: an F1 threshold and a significance level are different quantities, and
+this file states one of them symbolically for exactly that reason.)
 
 #### The Holm correction, which is a property of the FAMILY
 

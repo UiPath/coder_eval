@@ -401,7 +401,72 @@ def _check_halving_premium(text: str, _tmp: Path) -> list[str]:
     return failures
 
 
-# --- claim 3: the behavioural one -------------------------------------------
+# --- claim 3: the pre-spend sizing table -------------------------------------
+
+_SIZING_SIGNATURE = "survivors gated `S` | Holm threshold | discordant rows needed at 8 paired rows | at 20"
+
+# The row counts the last two columns are computed at, pulled out of the HEADER rather than typed
+# here: the header is what a reader budgets against, so if someone re-columns the table to 12 and 30
+# the claim must follow them there instead of silently checking the old pair.
+_ROW_COUNT = re.compile(r"(\d+)")
+
+
+def _check_sizing_table(text: str, _tmp: Path) -> list[str]:
+    """The skill's pre-spend sizing table, RECOMPUTED from the gate's own helper.
+
+    Every cell is arithmetic: the threshold column is ``alpha/S`` evaluated against
+    ``DEFAULT_ALPHA``, and the two count columns are :func:`min_discordant_rows` at the row counts
+    the header names. So a stale figure here — the kind that ships when the floor's estimator moves
+    — is a failure rather than a plausible-looking number a user sizes a suite from.
+
+    It also checks the STANDING claim the prose makes beside the table ("four to five rows,
+    essentially regardless of suite size"), over a range the table does not enumerate. A mirror of
+    the table alone could only detect an edit; this can detect that the table is wrong.
+    """
+    from coder_eval.optimize_gate import min_discordant_rows
+    from coder_eval.reports_stats import DEFAULT_ALPHA
+
+    table = next((t for t in parse_markdown_tables(text) if table_signature(t) == _SIZING_SIGNATURE), None)
+    if table is None:
+        return [f"the sizing table ({_SIZING_SIGNATURE}) is gone or changed shape — nothing to check"]
+
+    row_counts = [int(m.group(1)) for cell in table.header[2:] if (m := _ROW_COUNT.search(cell))]
+    if len(row_counts) != len(table.header) - 2:
+        return [f"the sizing table's count columns no longer name their row counts: {table.header[2:]}"]
+
+    failures: list[str] = []
+    for row in table.rows:
+        if len(row) != len(table.header):
+            failures.append(f"the sizing row {row!r} does not carry every column")
+            continue
+        survivors = float(_ascii(row[0]).strip("` "))
+        spans = _spans(row[1])
+        if not spans:
+            failures.append(f"the S={survivors:g} row states its Holm threshold as prose, not as `alpha/S`")
+            continue
+        # Symbolic, so the claim binds it to DEFAULT_ALPHA rather than to a retyped 0.05.
+        threshold = evaluate_expression(spans[0], {"alpha": DEFAULT_ALPHA})
+        if threshold != DEFAULT_ALPHA / survivors:
+            failures.append(f"sizing table S={survivors:g}: the threshold cell evaluates to {threshold}, not alpha/S")
+            continue
+        for cell, n_rows in zip(row[2:], row_counts, strict=True):
+            want = min_discordant_rows(n_rows, threshold)
+            got = _ascii(cell).strip("` ")
+            if got != (str(want) if want is not None else "none"):
+                failures.append(f"sizing table S={survivors:g} at {n_rows} rows reads {got!r}, recomputes to {want}")
+
+    # The standing claim, over sizes the table does not list. If this ever fails the PROSE is what
+    # needs rewriting — the number stopped being flat in the row count.
+    across = {min_discordant_rows(m, DEFAULT_ALPHA / s) for m in range(8, 25) for s in (1, 3, 5)}
+    if not across <= {3, 4, 5}:
+        failures.append(
+            f"the requirement is no longer 'four to five rows regardless of suite size' — it ranges "
+            f"over {sorted(x for x in across if x is not None)} across 8-24 rows and 1-5 survivors"
+        )
+    return failures
+
+
+# --- claim 4: the behavioural one -------------------------------------------
 
 
 def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
@@ -479,6 +544,17 @@ CLAIMS: list[ComputedClaim] = [
         ),
         covers=(_HALVING_SIGNATURE,),
         check=_check_halving_premium,
+    ),
+    ComputedClaim(
+        id="sizing-table",
+        surface=SKILL,
+        why=(
+            "a user sizes a suite from this table BEFORE spending, and its numbers move with the "
+            "floor's estimator. A stale cell here reads as a smaller suite being enough and is "
+            "paid for at Stage B, where the gate refuses."
+        ),
+        covers=(_SIZING_SIGNATURE,),
+        check=_check_sizing_table,
     ),
     ComputedClaim(
         id="interval-from-one-run-dir",
