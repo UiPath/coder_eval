@@ -228,6 +228,19 @@ class TestResolveAgentSystemPrompt:
         agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
         assert resolve_agent_system_prompt(agent, tmp_path).system_prompt is None
 
+    def test_blank_file_under_replace_is_rejected(self, tmp_path):
+        """...but under 'replace' that normalization leaves nothing to replace with.
+        model_copy skips validators, so check_replace_mode_has_prompt never sees the
+        (replace, None, None) end state and the run would silently downgrade to the
+        append preset. Reject at load, as the docs promise."""
+        prompt_file = tmp_path / "system.md"
+        prompt_file.write_text("\n   \n")
+        agent = parse_agent_config(
+            type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md", system_prompt_mode="replace"
+        )
+        with pytest.raises(ValueError, match="is empty; system_prompt_mode='replace' requires"):
+            resolve_agent_system_prompt(agent, tmp_path)
+
 
 def _write_task_with_agent(path: Path, agent: dict) -> Path:
     """Write a minimal task YAML carrying the given ``agent:`` block."""
@@ -286,6 +299,17 @@ class TestSystemPromptMatrixThroughLoadTask:
         task_file = _write_task_with_agent(tmp_path, {"type": "claude-code", "system_prompt_mode": "replace"})
 
         with pytest.raises(ValueError, match="system_prompt_mode='replace' requires"):
+            load_task(task_file)
+
+    def test_replace_with_blank_prompt_file_is_rejected(self, tmp_path: Path):
+        """The blank file is the only prompt this config had: a load-time error beats
+        a silent downgrade to the append preset at query time."""
+        (tmp_path / "sp.md").write_text("   \n")
+        task_file = _write_task_with_agent(
+            tmp_path, {"type": "claude-code", "system_prompt_file": "sp.md", "system_prompt_mode": "replace"}
+        )
+
+        with pytest.raises(ValueError, match="is empty; system_prompt_mode='replace' requires"):
             load_task(task_file)
 
     def test_both_prompt_fields_is_rejected(self, tmp_path: Path):

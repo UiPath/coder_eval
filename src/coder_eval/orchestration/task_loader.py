@@ -248,6 +248,7 @@ def resolve_agent_system_prompt[T: AgentConfig | BaseAgentConfig | None](agent_c
 
     Raises:
         FileNotFoundError: If ``system_prompt_file`` does not exist.
+        ValueError: If the file is blank under ``system_prompt_mode: replace``.
     """
     if agent_config is None or agent_config.system_prompt_file is None:
         return agent_config
@@ -260,6 +261,16 @@ def resolve_agent_system_prompt[T: AgentConfig | BaseAgentConfig | None](agent_c
     # _blank_prompt_is_no_prompt applies to inline prompts (model_copy skips
     # validators, so this seam has to apply it itself).
     content = prompt_path.read_text(encoding="utf-8").strip() or None
+    # ...which means model_copy also skips check_replace_mode_has_prompt, so a
+    # blank file under `replace` would reach the agent as (replace, no prompt)
+    # and silently downgrade to the append preset at runtime. Reject it here
+    # instead: the file is the only prompt the config had, and the docs promise
+    # this combination fails at load.
+    if content is None and getattr(agent_config, "system_prompt_mode", "append") == "replace":
+        raise ValueError(
+            f"system_prompt_file {prompt_path} is empty; system_prompt_mode='replace' requires a "
+            + "prompt to replace the Claude Code default with"
+        )
     return agent_config.model_copy(update={"system_prompt": content, "system_prompt_file": None})
 
 
