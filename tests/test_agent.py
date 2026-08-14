@@ -481,6 +481,28 @@ def test_environment_info_reports_system_prompt_semantics():
     assert judge_like.get_environment_info() == {"system_prompt_semantics": "replace"}
 
 
+def test_every_registered_agent_reports_prompt_semantics():
+    """REPORT_SCHEMA.md says an ABSENT marker means one thing only — a run from
+    before the marker existed. That holds only if every agent emits it, so the
+    base supplies 'unknown' for agents (in-tree NoOp, out-of-tree SPI) that
+    declare no regime."""
+    from coder_eval.agents.noop_agent import NoOpAgent
+
+    noop = NoOpAgent(parse_agent_config(type=AgentKind.NONE))
+    assert noop.get_environment_info()["system_prompt_semantics"] == "unknown"
+
+    class PluginAgent(NoOpAgent):
+        """Stand-in for an out-of-tree agent that overrides the hook."""
+
+        def get_environment_info(self) -> dict[str, object]:
+            return {**super().get_environment_info(), "plugin_endpoint": "example.invalid"}
+
+    assert PluginAgent(parse_agent_config(type=AgentKind.NONE)).get_environment_info() == {
+        "system_prompt_semantics": "unknown",
+        "plugin_endpoint": "example.invalid",
+    }
+
+
 def test_replace_mode_without_prompt_fails_open_and_warns(caplog):
     """Defense in depth: the config validator rejects this pair at load, so reaching
     the agent means a mutated or hand-built config. Fail OPEN to append — never send
@@ -492,9 +514,18 @@ def test_replace_mode_without_prompt_fails_open_and_warns(caplog):
     agent = ClaudeCodeAgent(config)
 
     with caplog.at_level(logging.WARNING):
-        assert agent._effective_prompt_mode() == "append"
+        assert agent._resolve_system_prompt() == {
+            "type": "preset",
+            "preset": "claude_code",
+            "exclude_dynamic_sections": True,
+        }
 
     assert "falling back to the claude_code preset" in caplog.text
+    # Warned once per agent, not once per query: the resolver runs on every turn.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        agent._resolve_system_prompt()
+    assert "falling back to the claude_code preset" not in caplog.text
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
