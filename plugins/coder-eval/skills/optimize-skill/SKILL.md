@@ -683,7 +683,10 @@ re-spending. `${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md` carries the ha
 follows from it: if the incumbent does not beat the control with a confidence interval excluding
 zero, stop and fix the skill's premise rather than its wording.
 
-Run it as a two-variant experiment, `incumbent` and `control`, at `--repeats 3`:
+Run it as a two-variant experiment, `incumbent` and `control`, at `--repeats 3`. **The experiment
+file is authored in Step 9 like every other stage's, so this command runs after that step even
+though the snapshot belongs here** — Step 9's list names `round<N>-control.yaml` and says it is
+written once per suite rather than once per round:
 
 ```bash
 coder-eval run <suite> -e <path to round<N>-control.yaml> --split train --repeats 3 \
