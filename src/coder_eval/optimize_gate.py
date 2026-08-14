@@ -22,12 +22,13 @@ layer's own routine (CE037), so the gate cannot disagree with the numbers the ru
 from __future__ import annotations
 
 import logging
+import statistics as _stats
 from collections.abc import Sequence
 from pathlib import Path
 
 from coder_eval.criteria._classification_aggregate import classification_metrics
 from coder_eval.models import ActivationGateVerdict, ClassificationCriterionResult, EvaluationResult, GuardrailCheck
-from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, cluster_bootstrap_diff_ci, holm_rejections
+from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, cluster_bootstrap_diff_ci, holm_rejections, mean
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,19 @@ logger = logging.getLogger(__name__)
 # The label whose F1 the activation gate reads. `skill_triggered` emits `yes` / `no`, and
 # "did the skill engage when it should" is the `yes` class.
 TARGET_LABEL = "yes"
+
+# How large a measured cost/latency increase has to be, relative to the incumbent's median, before
+# it is worth reporting as a breach.
+#
+# It is a SUPPRESSION threshold, not a firing one, and the distinction is the whole design. The
+# guardrails fire off a bootstrap interval, so they already refuse to call noise a regression; this
+# floor only stops a statistically-real 3% increase from being announced as one. Raising or
+# lowering it can therefore make the guardrail quieter or chattier — never turn noise into a veto.
+#
+# One constant, not one per measurement: the per-row coefficients of variation measured across this
+# repo's runs/ tree (cost 0.27, duration 0.23) are close enough that two numbers would be false
+# precision, and the bootstrap already handles the difference in spread.
+MATERIALITY_FLOOR = 0.25
 
 
 def load_suite_rows(run_dir: Path, variant_id: str, suite_id: str) -> dict[str, list[EvaluationResult]]:
@@ -129,6 +143,175 @@ def _f1_yes(pairs: list[tuple[str, str]]) -> float:
     return _metric(pairs, f"f1.{TARGET_LABEL}")
 
 
+def resolve_model(rows: dict[str, list[EvaluationResult]]) -> str | None:
+    """The model id these rows ran under, or ``None`` when it is not a single agreed value.
+
+    ``None`` for unset, and ``None`` when the rows disagree — a mixed-model suite must never be
+    cached under one model key, so an unresolvable model recomputes rather than borrowing another
+    model's measurement. ``NoiseFloor.model`` (Phase 6) has no other source.
+    """
+    models = {result.model_used for results in rows.values() for result in results if result.model_used}
+    return models.pop() if len(models) == 1 else None
+
+
+def _row_costs(results: list[EvaluationResult]) -> list[float]:
+    """Per-replicate total cost for one row, skipping replicates that recorded none."""
+    return [
+        result.total_token_usage.total_cost_usd
+        for result in results
+        if result.total_token_usage is not None and result.total_token_usage.total_cost_usd is not None
+    ]
+
+
+def _row_durations(results: list[EvaluationResult]) -> list[float]:
+    return [result.duration_seconds for result in results]
+
+
+def _median(values: list[float]) -> float | None:
+    """The median, or ``None`` for an empty sample — distinct from a median that happens to be 0.0."""
+    return _stats.median(values) if values else None
+
+
+def cost_latency_guardrails(
+    *,
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    row_ids: Sequence[str] | None = None,
+    materiality: float = MATERIALITY_FLOOR,
+    seed: int = 0,
+    confidence: float = 0.95,
+    n_resamples: int = BOOTSTRAP_RESAMPLES,
+) -> list[GuardrailCheck]:
+    """Cost and latency guardrails, derived from the measured spread rather than a fixed percentage.
+
+    A fixed tolerance would veto real wins on noise: the measured per-row coefficient of variation is
+    ≈0.25, so the standard error of a median over 12 rows is ≈0.09 and a 15% rule sits about 1.5
+    standard errors out. So each guardrail runs the SAME paired cluster bootstrap the F1 gate uses,
+    over per-row cost / duration, and fails only when even the optimistic end of the interval
+    (``ci_low``) is still a material increase — ``ci_low > materiality * incumbent median``.
+
+    ``row_ids`` restricts the comparison to a given row set; the gate passes the rows its F1
+    comparison actually used, so the guardrail cannot be computed over a different sample than the
+    number it is guarding.
+
+    A measurement that does not exist (no turn reported a cost) passes with a ``note`` and ``None``
+    values — never a bare pass, which would read as a pass on the merits.
+    """
+    ids = sorted(set(incumbent_rows) & set(candidate_rows)) if row_ids is None else list(row_ids)
+    checks: list[GuardrailCheck] = []
+
+    for name, extract in (("cost (USD/row)", _row_costs), ("latency (seconds/row)", _row_durations)):
+        incumbent_clusters = [extract(incumbent_rows[rid]) for rid in ids]
+        candidate_clusters = [extract(candidate_rows[rid]) for rid in ids]
+        incumbent_median = _median([mean(c) for c in incumbent_clusters if c])
+        candidate_median = _median([mean(c) for c in candidate_clusters if c])
+
+        measured = sum(1 for c in incumbent_clusters if c), sum(1 for c in candidate_clusters if c)
+        if incumbent_median is None or candidate_median is None:
+            checks.append(
+                GuardrailCheck(
+                    name=name,
+                    incumbent=incumbent_median,
+                    candidate=candidate_median,
+                    relative_change=None,
+                    tolerance=materiality,
+                    passed=True,
+                    note=f"no {name.split(' ')[0]} recorded on at least one arm — guardrail not evaluated",
+                )
+            )
+            continue
+
+        notes: list[str] = []
+        if measured[0] != measured[1]:
+            notes.append(f"measured on {measured[0]} incumbent row(s) vs {measured[1]} candidate row(s)")
+
+        bootstrap = cluster_bootstrap_diff_ci(
+            candidate_clusters,
+            incumbent_clusters,
+            mean,
+            n_resamples=n_resamples,
+            confidence=confidence,
+            seed=seed,
+        )
+        if bootstrap is None:
+            notes.append("fewer than 2 comparable rows — no interval, so nothing is claimed")
+            passed, ci_low, ci_high = True, None, None
+        elif incumbent_median == 0.0:
+            notes.append("incumbent median is zero, so a relative change is undefined")
+            passed, (_diff, ci_low, ci_high, _p) = True, bootstrap
+        else:
+            _diff, ci_low, ci_high, _p = bootstrap
+            passed = ci_low <= materiality * incumbent_median
+            if passed and ci_low > 0.0:
+                notes.append("a real increase, but below the materiality floor — reported, not vetoed")
+
+        checks.append(
+            GuardrailCheck(
+                name=name,
+                incumbent=incumbent_median,
+                candidate=candidate_median,
+                relative_change=(
+                    (candidate_median - incumbent_median) / incumbent_median if incumbent_median else None
+                ),
+                tolerance=materiality,
+                passed=passed,
+                ci_low=ci_low,
+                ci_high=ci_high,
+                note="; ".join(notes) or None,
+            )
+        )
+    return checks
+
+
+def noise_floor_mde(
+    *,
+    run_dirs: Sequence[Path],
+    variant_id: str,
+    suite_id: str,
+    criterion_index: int,
+    confidence: float = 0.95,
+    seed: int = 0,
+    n_resamples: int = BOOTSTRAP_RESAMPLES,
+) -> float | None:
+    """The smallest F1 difference this suite at this size can resolve — the minimum detectable effect.
+
+    The same machinery run against ONE arm: split its invocations in half, treat the halves as two
+    arms, and bootstrap their F1 difference. The true difference there is zero by construction, so
+    the interval's half-width is the noise floor. Only the incumbent supplies such a null comparison,
+    which is why the gate computes it from the incumbent's run dirs.
+
+    Returns ``None`` — never a fabricated number — with fewer than 2 invocations or fewer than 2
+    rows scored in both halves. An odd invocation count splits unevenly (3 → 2/1), which widens the
+    interval and therefore reports a CONSERVATIVE floor: the safe direction.
+    """
+    if len(run_dirs) < 2:
+        return None
+
+    per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
+    midpoint = (len(per_dir) + 1) // 2
+    first, second = _pool(per_dir[:midpoint]), _pool(per_dir[midpoint:])
+
+    shared = sorted(set(first) & set(second))
+    clusters_a = [_label_pairs(first[rid], criterion_index) for rid in shared]
+    clusters_b = [_label_pairs(second[rid], criterion_index) for rid in shared]
+    scored = [(a, b) for a, b in zip(clusters_a, clusters_b, strict=True) if a and b]
+    if len(scored) < 2:
+        return None
+
+    bootstrap = cluster_bootstrap_diff_ci(
+        [a for a, _b in scored],
+        [b for _a, b in scored],
+        _f1_yes,
+        n_resamples=n_resamples,
+        confidence=confidence,
+        seed=seed,
+    )
+    if bootstrap is None:
+        return None
+    _diff, ci_low, ci_high, _p = bootstrap
+    return (ci_high - ci_low) / 2.0
+
+
 def _sibling_checks(
     *,
     incumbent_rows: dict[str, list[EvaluationResult]],
@@ -199,6 +382,7 @@ def activation_gate(
     suite_id: str,
     criterion_index: int,
     sibling_indices: Sequence[int] = (),
+    materiality: float = MATERIALITY_FLOOR,
     confidence: float = 0.95,
     seed: int = 0,
     n_resamples: int = BOOTSTRAP_RESAMPLES,
@@ -304,6 +488,28 @@ def activation_gate(
             paired_row_ids=scored_row_ids,
             sibling_indices=sibling_indices,
         ),
+        # Over the rows the F1 comparison actually used, so a guardrail is never computed on a
+        # different sample than the number it guards.
+        "guardrails": cost_latency_guardrails(
+            incumbent_rows=incumbent_rows,
+            candidate_rows=candidate_rows,
+            row_ids=scored_row_ids,
+            materiality=materiality,
+            seed=seed,
+            confidence=confidence,
+            n_resamples=n_resamples,
+        ),
+        # The MDE is a NULL comparison, and only the incumbent supplies one — splitting the
+        # candidate's invocations would measure a different arm's noise.
+        "mde": noise_floor_mde(
+            run_dirs=incumbent_run_dirs,
+            variant_id=incumbent_variant,
+            suite_id=suite_id,
+            criterion_index=criterion_index,
+            confidence=confidence,
+            seed=seed,
+            n_resamples=n_resamples,
+        ),
     }
 
     bootstrap = cluster_bootstrap_diff_ci(
@@ -332,6 +538,19 @@ def activation_gate(
         )
 
     mean_diff, ci_low, ci_high, p_value = bootstrap
+
+    mde = verdict_kwargs["mde"]
+    if isinstance(mde, float) and abs(mean_diff) < mde:
+        notes.append(
+            f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum detectable "
+            + f"effect ({mde:.3f}). An interval excluding zero is still reportable, but do not present it "
+            + "as a comfortable win — the suite cannot resolve a difference this size reliably."
+        )
+    elif mde is None:
+        notes.append(
+            "the minimum detectable effect could not be computed (a null comparison needs at least two "
+            + "invocations of the incumbent), so nothing here says how small a difference this suite can resolve."
+        )
 
     # Retained as a DIAGNOSTIC, never as the gate: the per-invocation ranges are what the old
     # rule compared, and reporting them keeps a reader's intuition calibrated against the CI.
@@ -416,8 +635,14 @@ def _render_checks(title: str, checks: list[GuardrailCheck]) -> list[str]:
     for check in checks:
         state = "PASS" if check.passed else "FAIL"
         detail = f"{_fmt(check.incumbent)} -> {_fmt(check.candidate)}"
+        # The interval is WHY the check did or did not fire — a verdict without it is unauditable.
+        interval = (
+            f", diff CI [{_fmt(check.ci_low)}, {_fmt(check.ci_high)}] vs floor {check.tolerance:.2f} x incumbent"
+            if check.ci_low is not None
+            else ""
+        )
         note = f" — {check.note}" if check.note else ""
-        lines.append(f"  - {state} · {check.name}: {detail}{note}")
+        lines.append(f"  - {state} · {check.name}: {detail}{interval}{note}")
     return lines
 
 

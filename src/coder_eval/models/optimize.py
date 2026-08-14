@@ -26,6 +26,15 @@ class GuardrailCheck(BaseModel):
         description="(candidate - incumbent) / incumbent. None when the incumbent value is zero or unmeasured."
     )
     tolerance: float = Field(description="How much of a relative increase/drop is tolerated before the check fails.")
+    ci_low: float | None = Field(
+        default=None,
+        description=(
+            "Lower bound of the bootstrap interval on the arms' difference, where the check is "
+            "bootstrap-derived. It is what the check fires on — even the optimistic end being a material "
+            "increase — so reporting it shows WHY a guardrail did or did not fire, not only that it did."
+        ),
+    )
+    ci_high: float | None = Field(default=None, description="Upper bound of that interval.")
     passed: bool = Field(description="False only on a measured breach; an unmeasurable check passes with a note.")
     note: str | None = Field(default=None, description="Why the check could not be evaluated, or what qualifies it.")
 
