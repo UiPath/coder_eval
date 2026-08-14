@@ -696,7 +696,8 @@ def resolve_all_tasks(
                             )
                         )
         # Early-stop arming errors are a deliberate hard stop: they always
-        # propagate (never demoted to skipped) so a misarmed run fails loudly.
+        # propagate (never demoted to skipped) so a misconfigured run fails loudly
+        # instead of quietly shrinking the suite.
         except EarlyStopConfigError:
             raise
         # Narrow set, matching the load/expand block above: config-resolution

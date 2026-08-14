@@ -26,17 +26,26 @@ permissions:
 # here — TELEMETRY_ENABLED is the single canonical disable gate.
 env:
   TELEMETRY_ENABLED: "false"
+  # The `uipath-*` pool enforces a minimum package-age safe-chain check on installs.
+  # Workflow-level so every installing job inherits it; per-job copies are how some
+  # jobs previously ended up with no exclusions at all. The literal is the operative
+  # value — no secret of that name exists at repo or org level, so the bare `secrets.`
+  # reference this replaced resolved to an empty list. (Image builds carry their own
+  # list in docker/Dockerfile; deliberately not the same set.)
+  SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS || 'openai-codex-cli-bin,openai-codex' }}
 
 jobs:
   quality-gate:
     name: Quality Gate (Format, Lint, Type, Test, Security)
-    runs-on: ubuntu-latest
+    # Fork PRs go to stock GitHub-hosted runners: this job runs the PR's own
+    # `uv.lock` build hooks and test files, and the repo is public, so untrusted code
+    # must not land on the shared pool image. Everything else uses the pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'uipath-ubuntu-latest' }}
     timeout-minutes: 10
 
-    # Shared env for all steps: safe-chain min-age exclusions and a dummy
-    # Anthropic key so CI tests that construct a client don't fail on a missing key.
+    # A dummy Anthropic key so CI tests that construct a client don't fail on a
+    # missing key.
     env:
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
 
     steps:
@@ -157,20 +166,123 @@ jobs:
           echo "✅ Quality gate complete!"
           echo "📊 All checks passed: formatting, linting, types, security, tests"
 
+  evalboard:
+    # The dashboard's own gate. `evalboard/` ships ~460 vitest assertions,
+    # including the pricing drift guard that asserts lib/pricing.ts still agrees
+    # with src/coder_eval/pricing.py — and until this job existed NOTHING ran
+    # them: not a workflow, not a Makefile target, not a pre-commit hook. The
+    # guard was consequently red on `main` for weeks while a 3x-wrong Opus rate
+    # and five unpriced in-use models shipped to the board. An unrun assertion is
+    # documentation, not enforcement.
+    #
+    # Deliberately NOT path-filtered. `paths:` is workflow-scoped in GitHub
+    # Actions, and the parity guard's whole point is that a reprice in
+    # src/coder_eval/pricing.py — a pure-Python diff touching no evalboard file —
+    # must trip it. A `evalboard/**`-only filter would skip exactly the change
+    # class this job exists to catch.
+    name: Evalboard (Types, Tests, Build)
+    # Fork-PR carve-out — see `quality-gate`. `pnpm install --frozen-lockfile` runs
+    # the PR's own lockfile install scripts, same untrusted-code class.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'uipath-ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm
+        # The version comes from evalboard/package.json's `packageManager` field,
+        # so corepack pins it without a second place to keep in sync.
+        run: corepack enable
+
+      - name: Install dependencies (lockfile-pinned)
+        working-directory: evalboard
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify (tsc --noEmit && vitest run && next build)
+        working-directory: evalboard
+        run: pnpm verify
+
+  plugin-validate:
+    # Proves the Claude Code plugin marketplace is installable and that the suite
+    # `check-skill` scaffolds is real: the manifests pass strict validation, and the
+    # bundled activation template both schema-validates and expands to one task per
+    # dataset row. Needs no credentials — nothing here invokes a model.
+    name: Claude Code Plugin (manifests + offline scaffold)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # `claude plugin validate` ships in the Claude Code npm package.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate plugin manifest (strict)
+        run: claude plugin validate ./plugins/coder-eval --strict
+
+      - name: Validate marketplace manifest (strict)
+        run: claude plugin validate . --strict
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+
+      # Runs OUTSIDE the source tree, the way a user's copy of the template does:
+      # no experiments/, no tasks/, no coder_eval checkout on the path. `plan` is a
+      # schema check only (it exits 0 even when dataset.paths names a nonexistent
+      # file), so the row-count assert goes through expand_dataset — otherwise this
+      # step would pass even if activation-rows.jsonl were never copied.
+      # Reproduce locally with: SCRATCH=$(mktemp -d) VENV=$(mktemp -d)/venv
+      - name: Scaffold assert (no source tree)
+        run: |
+          set -euo pipefail
+          SCRATCH="$RUNNER_TEMP/scratch"
+          VENV="$RUNNER_TEMP/venv"
+          mkdir -p "$SCRATCH"
+          cp plugins/coder-eval/reference/templates/activation.yaml "$SCRATCH/"
+          cp plugins/coder-eval/reference/templates/activation-rows.jsonl "$SCRATCH/"
+          # A venv (not `uv tool install`) because the expansion assert needs
+          # `coder_eval` importable, not just the `coder-eval` CLI on PATH.
+          uv venv "$VENV"
+          VIRTUAL_ENV="$VENV" uv pip install .
+          cd "$SCRATCH"
+          "$VENV/bin/coder-eval" plan activation.yaml
+          "$VENV/bin/python" - <<'PY'
+          from pathlib import Path
+          from coder_eval.orchestration.task_loader import expand_dataset, load_task
+          task, _ = load_task(Path("activation.yaml"))
+          rows = expand_dataset(task, Path("."))
+          assert len(rows) == 6, f"expected 6 row-tasks, got {len(rows)}"
+          labels = {c.expected_skill for t in rows for c in t.success_criteria}
+          assert labels == {"my-skill", ""}, labels
+          print(f"ok: {len(rows)} row-tasks")
+          PY
+
   no-uipath-extra:
     # Proves that `pip install coder-eval` (without the optional `[uipath]`
     # extra) yields a working framework: imports succeed, the criterion
     # registry validates, and the uipath-specific code paths fail with a
     # clear hint instead of an import error.
     name: No-Extra Install (uipath optional)
-    runs-on: ubuntu-latest
+    # Fork-PR carve-out — see the comment on `quality-gate` above.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'uipath-ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: "3.13"
 
@@ -208,7 +320,7 @@ jobs:
 
   windows-smoke:
     name: Windows Smoke Test
-    runs-on: windows-latest
+    runs-on: uipath-windows-latest
     # 15min headroom: the smoke task itself completes in ~7min, but the
     # actions/cache post-step on Windows is slow when ``.venv`` is large.
     # We also exclude ``.venv`` from the cached paths (uv re-creates it
@@ -222,7 +334,6 @@ jobs:
         shell: bash
 
     env:
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       # Job-level dummy key keeps the unit-test step deterministic and isolated
       # from real-API leakage. The e2e step below overrides to Bedrock at step scope.
       ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
@@ -326,7 +437,7 @@ jobs:
 
   e2e-smoke:
     name: E2E Smoke Tests (Real API)
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 10
     # Skip on fork PRs where secrets aren't available
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -341,7 +452,6 @@ jobs:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       # tasks_run for --tags smoke-pass. 6 task files (hello_date, dataset_example,
       # smoke_llm_judge, smoke_agent_judge, byod_smoke_test, agentless_smoke_test);
       # dataset_example fans out to 2 inline rows, so 7 sub-tasks. If you add/remove a
@@ -509,7 +619,7 @@ jobs:
 
   live-tests:
     name: Live Integration Tests (Settings Enforcement + Cost Budget)
-    runs-on: ubuntu-24.04
+    runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -519,7 +629,6 @@ jobs:
       # settings-enforcement and cost-budget steps use this. The Bedrock
       # settings-enforcement step adds API_BACKEND=bedrock at step scope only.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       # Bedrock backend for the third settings-enforcement run. Job-level so
       # the preflight secrets check can validate them; the BedrockRoute is
       # only engaged via API_BACKEND=bedrock at step scope.
@@ -582,10 +691,12 @@ jobs:
         # `-ra` surfaces skipped tests in the summary so CI logs show what ran vs skipped.
         # `--strict-markers` rejects unregistered @pytest.mark.* (cheap typo insurance).
         # JUnit XML feeds the post-run "tests actually passed" assertion below.
+        # `-n 4` overrides pyproject's `-n auto`: these hit the real API, so
+        # concurrency must not vary with the runner's vCPU count. 4 = the old shape.
         run: |
           mkdir -p tmp
           .venv/bin/pytest tests/test_claude_settings_enforcement_live.py \
-            -m live -v --tb=short --strict-markers -ra -n auto \
+            -m live -v --tb=short --strict-markers -ra -n 4 \
             --junit-xml=tmp/junit-settings.xml
 
       - name: Run claude-settings enforcement live tests (BedrockRoute)
@@ -597,7 +708,7 @@ jobs:
           API_BACKEND: "bedrock"
         run: |
           .venv/bin/pytest tests/test_claude_settings_enforcement_live.py \
-            -m live -v --tb=short --strict-markers -ra -n auto \
+            -m live -v --tb=short --strict-markers -ra -n 4 \
             --junit-xml=tmp/junit-settings-bedrock.xml
 
       - name: Assert live tests actually ran (not silently skipped)
@@ -680,7 +791,7 @@ jobs:
 
   codex-live-tests:
     name: Live Integration Tests (Codex)
-    runs-on: ubuntu-24.04
+    runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -692,7 +803,6 @@ jobs:
       CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
       CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
       CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
 
     steps:
       - name: Checkout code
@@ -756,7 +866,7 @@ jobs:
 
   byoa-live-tests:
     name: Live Integration Tests (BYOA Plugin)
-    runs-on: ubuntu-24.04
+    runs-on: uipath-ubuntu-24.04
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -764,7 +874,6 @@ jobs:
     env:
       # DirectRoute: a plugin agent that subclasses ClaudeCodeAgent uses ANTHROPIC_API_KEY.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
 
     steps:
       - name: Checkout code
@@ -834,6 +943,11 @@ jobs:
 
   action-dogfood:
     name: Action Dogfood (composite action, real API)
+    # Deliberately NOT on the `uipath-*` pool, and keep it that way: this job is the
+    # executable proof of the published Action, and docs/tutorials/02-ci-pipeline.md
+    # (the one consumer snippet naming a runner) says `ubuntu-latest`. Nothing else in
+    # CI exercises the image integrators actually use. A bulk `runs-on:` migration has
+    # swept this up twice — check it by hand.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available (matches e2e-smoke).

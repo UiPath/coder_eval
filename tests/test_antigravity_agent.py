@@ -6,7 +6,10 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 
 import asyncio
 import os
-from types import SimpleNamespace
+import sys
+from collections.abc import Callable
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -255,6 +258,8 @@ def _step(
     usage=None,
     complete=None,
     error="",
+    step_index=0,
+    trajectory_id="",
 ):
     # Plain strings stand in for the SDK's str-enums (_enum_value passes them through).
     return SimpleNamespace(
@@ -270,24 +275,44 @@ def _step(
         usage_metadata=usage,
         is_complete_response=complete,
         error=error,
-        step_index=0,
+        step_index=step_index,
+        trajectory_id=trajectory_id,
     )
 
 
 class _FakeConversation:
+    """Scriptable fake SDK conversation.
+
+    ``steps`` is either a flat list (one batch, yielded on the first
+    ``receive_steps()`` call) or a list of batches (one per successive
+    ``receive_steps()`` call — the shape a poll loop drains repeatedly). Once
+    the authored batches are exhausted, further calls yield an EMPTY batch —
+    this mirrors the real SDK's local connection, which drains a queue and
+    returns immediately with nothing once idle; it never replays already-
+    yielded steps. A test standing in for a background job that never
+    resolves should author one batch that opens the orphan and let
+    exhaustion naturally fall through to empty polls, not repeat itself.
+    """
+
     def __init__(self, steps):
-        self._steps = steps
+        self._batches = list(steps) if steps and isinstance(steps[0], list) else [steps]
+        self._batch_index = 0
         self.last_response = ""
+        self.receive_steps_call_count = 0
+        self.cancel_call_count = 0
 
     async def send(self, prompt, **kwargs):
         return None
 
     async def receive_steps(self):
-        for s in self._steps:
+        self.receive_steps_call_count += 1
+        batch = self._batches[self._batch_index] if self._batch_index < len(self._batches) else []
+        self._batch_index += 1
+        for s in batch:
             yield s
 
     async def cancel(self):
-        return None
+        self.cancel_call_count += 1
 
 
 def _agent_with_steps(steps):
@@ -297,6 +322,31 @@ def _agent_with_steps(steps):
     agent.working_directory = Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=_FakeConversation(steps), is_started=True)
     return agent
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """Stand-in for asyncio.sleep in poll-loop tests — no real wait."""
+    return None
+
+
+class _FiringWatchdog:
+    """Fake ThreadedWatchdog that fires ``on_timeout`` synchronously at entry.
+
+    Sets ``state.timeout_hit = True`` before any draining happens (exactly
+    like the real watchdog thread firing early), so a CancelledError raised
+    later — whether from the first drain or from a poll loop's re-drain — is
+    classified via the SAME existing ``if state.timeout_hit`` branch.
+    """
+
+    def __init__(self, *, on_timeout, **_kwargs):
+        self._on_timeout = on_timeout
+
+    def __enter__(self):
+        self._on_timeout()
+        return self
+
+    def __exit__(self, *_exc):
+        return False
 
 
 async def test_communicate_maps_steps_to_turn_record():
@@ -467,17 +517,6 @@ async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
 
     from coder_eval.errors import TurnTimeoutError
 
-    class _FiringWatchdog:
-        def __init__(self, *, on_timeout, **_kwargs):
-            self._on_timeout = on_timeout
-
-        def __enter__(self):
-            self._on_timeout()  # watchdog fired: state.timeout_hit = True
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _FiringWatchdog)
 
     class _Cancelled:
@@ -511,191 +550,1016 @@ async def test_communicate_requires_started_agent():
         await agent.communicate("x")
 
 
-# --- env_path_prepend / harness-spawn PATH shadowing ------------------------------
+def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
+    """Stub ``google.antigravity`` in sys.modules so ``start()`` runs without the extra.
+
+    ``LocalAgentConfig`` becomes a SimpleNamespace factory, so a test can assert on
+    exactly the kwargs the agent built (``env``, ``policies``, ``capabilities``, ...).
+    """
+    ag = ModuleType("google.antigravity")
+    ag.Agent = sdk_agent_cls
+    ag.LocalAgentConfig = lambda **kwargs: SimpleNamespace(models=[], **kwargs)
+    ag.types = SimpleNamespace(
+        ThinkingLevel=lambda level: level,
+        GeminiAPIEndpoint=type("GeminiAPIEndpoint", (), {}),
+        GeminiModelOptions=SimpleNamespace,
+    )
+    hooks = ModuleType("google.antigravity.hooks")
+    hooks.policy = SimpleNamespace(
+        allow_all=lambda: SimpleNamespace(kind="allow_all"),
+        deny=lambda tool, **kw: SimpleNamespace(kind="deny", tool=tool),
+        allow=lambda tool, **kw: SimpleNamespace(kind="allow", tool=tool),
+    )
+    google_pkg = sys.modules.get("google") or ModuleType("google")
+    monkeypatch.setitem(sys.modules, "google", google_pkg)
+    monkeypatch.setitem(sys.modules, "google.antigravity", ag)
+    monkeypatch.setitem(sys.modules, "google.antigravity.hooks", hooks)
+
+
+# --- background-task poll loop (wait_for_wakeup is a dead stub on the Local ------
+# harness; see antigravity_agent.py's communicate() comment + the plan for the
+# full evidence trail. The model leaves a tool call open (never DONE) when it
+# backgrounds work and goes idle -- these tests drive that signal directly. ------
+
+
+def test_has_orphaned_tool_call_detects_active_vs_other_statuses():
+    """Allowlist on ACTIVE, not a denylist on "not closed": a tool stuck in
+    WAITING_FOR_USER/CANCELED/UNKNOWN is also never added to _closed_tools
+    (that set only tracks DONE/ERROR), but must NOT be treated as pollable —
+    it will never become DONE on its own (Phase-2-review finding). Layered on
+    top: a cid already in _closed_tools is never orphaned even if its last-seen
+    status were ever left at ACTIVE by a re-emission (final-review finding)."""
+    from coder_eval.agents.antigravity_agent import _AntigravityTurnState
+
+    state = _AntigravityTurnState.__new__(_AntigravityTurnState)
+    state._closed_tools = set()
+    state._tool_last_status = {}
+    assert state.has_orphaned_tool_call() is False  # no tool calls at all
+
+    state._tool_last_status = {"t1": "ACTIVE"}
+    assert state.has_orphaned_tool_call() is True  # genuinely still running
+
+    state._tool_last_status = {"t1": "DONE"}
+    assert state.has_orphaned_tool_call() is False  # closed normally
+
+    for stuck_status in ["WAITING_FOR_USER", "CANCELED", "UNKNOWN"]:
+        state._tool_last_status = {"t1": stuck_status}
+        assert state.has_orphaned_tool_call() is False, (
+            f"a tool stuck in {stuck_status} must not trigger polling -- it will never become DONE"
+        )
+
+    # A second tool call still ACTIVE is enough, even if the first is DONE.
+    state._tool_last_status = {"t1": "DONE", "t2": "ACTIVE"}
+    assert state.has_orphaned_tool_call() is True
+
+    # A closed cid stuck at ACTIVE (e.g. a stale re-emission) must not re-arm the
+    # poll loop -- closure is authoritative over the last-seen status.
+    state._closed_tools = {"t1"}
+    state._tool_last_status = {"t1": "ACTIVE"}
+    assert state.has_orphaned_tool_call() is False
+
+
+async def test_communicate_fast_path_when_no_orphaned_tools(monkeypatch):
+    """A normal turn closes its tool call before the stream exhausts -- the poll
+    loop's condition is False on first check, so it's never entered: exactly one
+    receive_steps() call, no sleep, byte-identical to today's behavior."""
+    from coder_eval.agents import antigravity_agent
+
+    async def _sleep_should_not_be_called(_seconds: float) -> None:
+        raise AssertionError("asyncio.sleep must not be called on the no-orphan fast path")
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _sleep_should_not_be_called)
+
+    steps = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "echo hi", "exit_code": 0, "combined_output": "hi"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps(steps)
+    tr = await agent.communicate("run it")
+
+    conv = agent._sdk_agent.conversation
+    assert conv.receive_steps_call_count == 1
+    assert tr.agent_output == "done"
+
+
+async def test_communicate_does_not_poll_a_tool_stuck_waiting_for_user(monkeypatch):
+    """A tool call whose LAST status is WAITING_FOR_USER (not ACTIVE) is never
+    added to _closed_tools (that set only tracks DONE/ERROR) -- but it must
+    NOT be mistaken for a genuine backgrounded job either, since a headless
+    eval run will never actually answer the question. This is the exact gap a
+    final cross-cutting review found: has_orphaned_tool_call must allowlist
+    ACTIVE specifically, not just check "not yet closed"."""
+    from coder_eval.agents import antigravity_agent
+
+    async def _sleep_should_not_be_called(_seconds: float) -> None:
+        raise AssertionError("asyncio.sleep must not be called for a tool stuck WAITING_FOR_USER")
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _sleep_should_not_be_called)
+
+    steps = [
+        _step(
+            "TOOL_CALL",
+            "WAITING_FOR_USER",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("ask_question", "t1", {"question": "which region?"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting on you", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps(steps)
+    tr = await agent.communicate("do it")
+
+    conv = agent._sdk_agent.conversation
+    assert conv.receive_steps_call_count == 1  # poll loop never entered
+    ask = next(c for c in tr.commands if c.tool_name == "AskUser")
+    assert ask.result_status == "unknown"  # force-closed as UNRESOLVED by finalize(), not polled forever
+
+
+async def test_communicate_polls_and_resumes_after_orphaned_tool_closes(monkeypatch):
+    """The model backgrounds a run_command and goes idle -- the tool call stays
+    ACTIVE (never DONE) even past the final TEXT_RESPONSE. The orphaned-tool
+    signal triggers a poll; the second receive_steps() call closes the tool and
+    delivers the real result."""
+    from coder_eval.agents import antigravity_agent
+
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 12 && echo done"})],
+        ),
+        _step(
+            "TEXT_RESPONSE",
+            "DONE",
+            content="I've started this in the background.",
+            content_delta="I've started this in the background.",
+            complete=True,
+            usage=_usage(100, 0, 10, 0),
+        ),
+    ]
+    batch2 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc(
+                    "run_command",
+                    "bg1",
+                    {"command_line": "sleep 12 && echo done", "exit_code": 0, "combined_output": "done"},
+                )
+            ],
+            usage=_usage(50, 0, 5, 0),
+        ),
+        _step(
+            "TEXT_RESPONSE",
+            "DONE",
+            content="All finished.",
+            content_delta="All finished.",
+            complete=True,
+            usage=_usage(60, 0, 8, 0),
+        ),
+    ]
+    agent = _agent_with_steps([batch1, batch2])
+    tr = await agent.communicate("do it")
+
+    assert sleep_calls == [antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS]
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "success"
+    assert "All finished." in tr.agent_output
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 2
+
+
+async def test_communicate_resolves_backgrounded_tool_call_with_no_id(monkeypatch):
+    """The SDK types ToolCall.id as optional; the fallback synthetic id must be
+    stable across a step's own ACTIVE -> DONE re-emission (same step_index), not
+    derived from a mutable counter -- otherwise the DONE step mints a fresh id
+    and the ACTIVE entry is orphaned forever, stalling the poll loop for its
+    full budget on every id-less turn (final-review finding)."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", None, {"command_line": "sleep 12 && echo done"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc(
+                    "run_command",
+                    None,
+                    {"command_line": "sleep 12 && echo done", "exit_code": 0, "combined_output": "done"},
+                )
+            ],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="All finished.", complete=True, usage=_usage(5, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([batch1, batch2])
+    tr = await agent.communicate("do it")
+
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 2  # closed on the first poll, not the cap
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "success"
+    assert len(tr.commands) == 1  # the id-less ACTIVE and DONE steps collapsed to ONE tool call, not two
+
+
+async def test_id_less_tool_calls_in_different_trajectories_do_not_collide():
+    """step_index is only unique WITHIN a trajectory -- the SDK itself keys step
+    tracking on (trajectory_id, step_index), since a sub-agent trajectory can
+    reuse the same low step_index values as the main one. Two id-less tool
+    calls sharing a step_index but in DIFFERENT trajectories must still mint
+    distinct fallback cids and produce two separate commands, not collapse
+    into one (round-3 review finding); same trajectory + same step_index
+    still collapses to one, as test_communicate_resolves_backgrounded_tool_call_with_no_id covers."""
+    steps = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", None, {"command_line": "main job", "exit_code": 0, "output": "main"})],
+            step_index=1,
+            trajectory_id="",
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", None, {"command_line": "subagent job", "exit_code": 0, "output": "sub"})],
+            step_index=1,  # same index as the step above, different trajectory
+            trajectory_id="subagent-42",
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps(steps)
+    tr = await agent.communicate("do two things")
+
+    bash_calls = [c for c in tr.commands if c.tool_name == "Bash"]
+    assert len(bash_calls) == 2  # distinct cids, not collapsed into one
+    assert {c.tool_id for c in bash_calls} == {"run_command_1_0", "run_command_subagent-42:1_0"}
+
+
+async def test_communicate_handles_two_sequential_background_jobs(monkeypatch):
+    """paratransit-routing's real observed shape: the model backgrounds a job,
+    it resolves, and the model immediately backgrounds a SECOND job before
+    finally finishing -- the loop must not stop after just one poll cycle."""
+    from coder_eval.agents import antigravity_agent
+
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bgA", {"command_line": "job_a"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started A", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc("run_command", "bgA", {"command_line": "job_a", "exit_code": 0, "combined_output": "a done"})
+            ],
+        ),
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bgB", {"command_line": "job_b"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started B", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch3 = [
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc("run_command", "bgB", {"command_line": "job_b", "exit_code": 0, "combined_output": "b done"})
+            ],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="all done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([batch1, batch2, batch3])
+    tr = await agent.communicate("do two things")
+
+    assert len(sleep_calls) == 2  # exactly two poll cycles, one per backgrounded job
+    bash_calls = [c for c in tr.commands if c.tool_name == "Bash"]
+    assert len(bash_calls) == 2
+    assert all(c.result_status == "success" for c in bash_calls)
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 3
+
+
+async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
+    """A pathological, never-closing background job must not poll forever --
+    the hard _MAX_BACKGROUND_POLLS cap bounds it independent of the turn budget."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 3)
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    # A single batch that opens the orphan; every later call exhausts to an
+    # empty batch (see _FakeConversation's docstring, matching the real SDK) --
+    # the orphan is never closed, simulating a job whose state never changes.
+    agent = _agent_with_steps([never_closing])
+    tr = await agent.communicate("do it forever")
+
+    assert len(sleep_calls) == 3  # exactly _MAX_BACKGROUND_POLLS, not infinite
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
+
+
+async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(monkeypatch):
+    """A never-resolving orphan under a REALISTIC configured timeout (300s, the
+    framework's own experiments/default.yaml turn_timeout) must finalize through
+    the poll loop's own graceful path -- force-close the orphan, grade normally
+    -- instead of the ThreadedWatchdog cutting the whole turn at `timeout` first.
+
+    Pre-fix, `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS` (120 *
+    5s = 600s) was DOUBLE the 300s default, so the watchdog always won that race
+    and this exact scenario -- a tool call spuriously left ACTIVE with no real
+    background job behind it, confirmed live in the final validation run -- burned
+    the full turn timeout and crashed as TurnTimeoutError with zero criteria
+    graded, a strict regression versus the pre-fix immediate finalize. Deriving
+    the poll deadline from a FRACTION of the real `timeout` (not a disconnected
+    cycle count) fixes it: the loop now exits through its own graceful path with
+    room to spare before the watchdog's harder cutoff would ever fire."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    # Fake clock: turn_start_time=0.0, then +130s per subsequent call. The poll
+    # loop reads time.monotonic() at least twice per iteration (the while-head
+    # check, then the post-sleep deadline check), so this crosses the 240s
+    # deadline (0.8 * 300s) after exactly one poll cycle -- proving the exit is
+    # driven by the deadline, not by exhausting all 120 cycles.
+    clock = iter([0.0, 130.0, 260.0])
+    monkeypatch.setattr(antigravity_agent.time, "monotonic", lambda: next(clock, 1_000_000.0))
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([never_closing])
+
+    tr = await agent.communicate("do it forever", timeout=300.0)  # the real default turn_timeout
+
+    # Finalized and graded -- no TurnTimeoutError, no crash.
+    assert tr is not None
+    assert not tr.crashed
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
+    # Exited via the poll_deadline (well under the 120-cycle cap), matching a
+    # real turn where the watchdog's 300s cutoff never gets the chance to fire.
+    assert agent._sdk_agent.conversation.receive_steps_call_count < 5
+
+
+class _WatchdogFiresLater:
+    """Fake ThreadedWatchdog that does NOT fire on entry (unlike _FiringWatchdog
+    above) -- it hands its ``on_timeout`` callback to the caller so the test can
+    invoke it mid-poll-loop, simulating a real watchdog thread firing between
+    poll cycles rather than before the turn even starts."""
+
+    captured_on_timeout: Callable[[], None] | None = None
+
+    def __init__(self, *, on_timeout, **_kwargs):
+        _WatchdogFiresLater.captured_on_timeout = on_timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(monkeypatch):
+    """A watchdog timeout landing BETWEEN poll cycles (state.timeout_hit flips
+    to True while the loop is sleeping) must stop the loop on its next condition
+    check, not burn through the rest of _MAX_BACKGROUND_POLLS waiting for a
+    cancellation that may not land on this coroutine right away (final-review
+    finding: the loop condition must read the flag the watchdog already set)."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 50)
+    monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
+
+    sleep_calls: list[float] = []
+
+    async def _fire_watchdog_on_second_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) == 2:
+            assert _WatchdogFiresLater.captured_on_timeout is not None
+            _WatchdogFiresLater.captured_on_timeout()
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _fire_watchdog_on_second_sleep)
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    from coder_eval.errors import TurnTimeoutError
+
+    agent = _agent_with_steps([never_closing])
+    with pytest.raises(TurnTimeoutError):
+        await agent.communicate("do it forever", timeout=30.0)
+
+    # Stopped right after the sleep that flipped timeout_hit -- NOT the (patched) cap of 50.
+    assert len(sleep_calls) == 2
+    # 1 initial drain + 1 poll re-drain (after sleep #1) -- the mid-loop
+    # `if state.timeout_hit: break` skips the re-drain that would otherwise
+    # follow sleep #2, so no 3rd receive_steps() call happens.
+    assert agent._sdk_agent.conversation.receive_steps_call_count == 2
+    assert agent.pending_turn is not None
+    bash = next(c for c in agent.pending_turn.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"
+
+
+async def test_communicate_respects_should_stop_during_poll(monkeypatch):
+    """A cooperative-stop request arriving during the poll phase must be
+    honored before the next re-drain, not ignored until the job finishes."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [  # must never be drained -- should_stop fires right after the sleep
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc("run_command", "bg1", {"command_line": "sleep 999", "exit_code": 0, "combined_output": "x"})
+            ],
+        ),
+    ]
+    agent = _agent_with_steps([batch1, batch2])
+    conv = agent._sdk_agent.conversation
+
+    call_count = 0
+
+    def should_stop() -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count > 2  # False for batch1's 2 steps; True on the post-sleep check
+
+    await agent.communicate("do it", should_stop=should_stop)
+
+    assert conv.receive_steps_call_count == 1  # the poll's re-drain never happened
+    assert conv.cancel_call_count == 1
+
+
+class _TwoLayerReentrancyGuardedConversation:
+    """Faithfully mirrors the REAL SDK's two-generator-layer shape:
+    ``Conversation.receive_steps()`` (the public method ``_drain()`` calls) is
+    ITSELF an async generator that delegates to
+    ``LocalConnection.receive_steps()`` (``async for step in
+    self._connection.receive_steps(): yield step``, verified against the
+    installed SDK) -- and the ``_is_receiving`` re-entrancy flag lives on that
+    INNER, connection-layer generator, not the outer one. A single-layer fake
+    (putting the flag directly on the generator ``_drain()`` iterates) cannot
+    catch a bug in how the outer/inner boundary is handled, since aclose()-ing
+    a generator always closes ITSELF -- the question this fake exists to probe
+    is whether that also reaches the inner one, and (confirmed live against
+    real asyncio semantics) it does NOT do so synchronously: a `GeneratorExit`
+    thrown into a delegating generator's frame does not immediately run the
+    generator it was mid-iterating -- that's deferred to the event loop's
+    async-gen finalizer, exactly like the original single-layer bug, just one
+    level down. ``_drain()``'s fix is therefore a bounded retry (yielding via
+    ``asyncio.sleep(0)`` for that already-scheduled finalizer to land), not a
+    claim that the inner generator closes synchronously."""
+
+    last_response = ""
+
+    def __init__(self, batches):
+        self._batches = list(batches)
+        self._batch_index = 0
+        self._is_receiving = False  # lives on the "connection" layer, like the real SDK
+        self.receive_steps_call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def _connection_receive_steps(self):
+        if self._is_receiving:
+            raise RuntimeError("Concurrent receive_steps() calls are not supported on this connection.")
+        self._is_receiving = True
+        try:
+            batch = self._batches[self._batch_index] if self._batch_index < len(self._batches) else []
+            self._batch_index += 1
+            for s in batch:
+                yield s
+        finally:
+            self._is_receiving = False
+
+    async def receive_steps(self):
+        # The "Conversation" layer: delegates to the connection layer exactly
+        # like the real SDK's Conversation.receive_steps() does.
+        self.receive_steps_call_count += 1
+        async for step in self._connection_receive_steps():
+            yield step
+
+    async def cancel(self):
+        return None
+
+
+async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_stop():
+    """A cooperative-stop break on a PRIOR communicate() call can leave the
+    real SDK's inner (connection-layer) generator not-yet-closed for a short
+    window, since asyncio's async-gen finalizer runs it on a LATER event-loop
+    turn, not synchronously when the outer generator is aclose()'d (confirmed
+    live against the real two-layer delegation shape -- round-3 review finding;
+    see _drain()'s docstring). The NEXT communicate() call must recover by
+    retrying past that window (mirroring the SDK's own Conversation.send()
+    handling of this exact RuntimeError) instead of crashing with
+    AgentCrashError."""
+    from pathlib import Path
+
+    batch1 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    batch2 = [
+        _step("TEXT_RESPONSE", "DONE", content="second turn", complete=True, usage=_usage(5, 0, 1, 0)),
+    ]
+    conversation = _TwoLayerReentrancyGuardedConversation([batch1, batch2])
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = Path("/tmp")
+    agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
+
+    await agent.communicate("do it", should_stop=lambda: True)  # breaks after the first step
+
+    # Without the retry, this second call raises AgentCrashError wrapping the
+    # fake's RuntimeError (verified live before the fix landed). With it, the
+    # transient window clears within a couple of asyncio.sleep(0) yields and
+    # the second turn's real content is delivered, not silently dropped.
+    tr = await agent.communicate("do it again")
+    assert tr.agent_output == "second turn"
+
+
+async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_path(monkeypatch):
+    """A watchdog timeout landing during the poll loop's re-drain (not the first
+    drain) must surface as TurnTimeoutError via the SAME existing exception
+    branch -- the poll loop must not create a second, inconsistent timeout path.
+
+    Uses ``_WatchdogFiresLater`` (not ``_FiringWatchdog``, which fires at entry
+    and would make the loop's head condition skip the poll cycle entirely, per
+    round-3 review) so ``state.timeout_hit`` only flips once a re-drain is
+    genuinely in flight -- mirroring the real watchdog, whose ``on_timeout``
+    callback and the ``CancelledError`` it triggers are the same causal event,
+    not two independently-timed ones."""
+    from coder_eval.agents import antigravity_agent
+    from coder_eval.errors import TurnTimeoutError
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
+
+    class _FiresWatchdogThenCancelsOnSecondDrain:
+        last_response = ""
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def send(self, prompt, **kwargs):
+            return None
+
+        async def receive_steps(self):
+            self.call_count += 1
+            if self.call_count == 1:
+                yield _step(
+                    "TOOL_CALL",
+                    "ACTIVE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=[_tc("run_command", "bg1", {"command_line": "sleep 999"})],
+                )
+                yield _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0))
+            else:
+                assert _WatchdogFiresLater.captured_on_timeout is not None
+                _WatchdogFiresLater.captured_on_timeout()
+                raise asyncio.CancelledError
+                yield  # pragma: no cover - makes this an async generator
+
+        async def cancel(self):
+            return None
+
+    from pathlib import Path
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = Path("/tmp")
+    conversation = _FiresWatchdogThenCancelsOnSecondDrain()
+    agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
+
+    with pytest.raises(TurnTimeoutError):
+        await agent.communicate("x", timeout=30.0)
+    assert conversation.call_count == 2  # the re-drain genuinely ran, not skipped
+    assert agent.pending_turn is not None
+    assert agent.pending_turn.crashed is True
+
+    await agent.discard_pending_turn()
+    assert agent.pending_turn is None
+
+
+# --- env_path_prepend / mock-CLI PATH shadowing -----------------------------------
 #
-# The localharness subprocess inherits os.environ at Popen time (no SDK env seam),
-# so mock CLIs shadow real ones only if the mock dirs sit at the FRONT of PATH for
-# the spawn. These drive the guard directly (no SDK needed) — an inverted join
-# order (mocks at the back) or a missing restore must fail here.
+# The mock dirs reach the localharness through the SDK's per-agent ``env`` seam
+# (LocalAgentConfig.env), which the SDK merges over os.environ at Popen time. Mock
+# CLIs shadow real ones only if those dirs sit at the FRONT of the merged PATH, so
+# an inverted join order (mocks at the back) must fail here. The process env is
+# never mutated, which is what lets two tasks start harnesses concurrently.
 
 
-async def test_harness_spawn_guard_prepends_path_in_order_then_restores(monkeypatch):
-    """Mock dirs land at the FRONT of PATH in order during the spawn; PATH is restored on exit."""
+async def test_harness_env_prepends_path_in_order(monkeypatch):
+    """Mock dirs land at the FRONT of the overlay PATH, in order, ahead of the parent's."""
     monkeypatch.setenv("PATH", "/parent/bin")
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks", "/sandbox/bins"]
 
-    async with agent._harness_spawn_guard():
-        assert os.environ["PATH"] == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
-    assert os.environ["PATH"] == "/parent/bin"  # restored
+    assert agent._harness_env() == {"PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"}
 
 
-async def test_harness_spawn_guard_no_prepend_leaves_path_untouched(monkeypatch):
-    """Default (no env_path_prepend) never mutates PATH — the guard is a no-op."""
+async def test_harness_env_none_without_prepend(monkeypatch):
+    """No mock dirs → no overlay at all, so the SDK spawns with a plain inherited env."""
     monkeypatch.setenv("PATH", "/parent/bin")
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
 
-    async with agent._harness_spawn_guard():
-        assert os.environ["PATH"] == "/parent/bin"
+    assert agent._harness_env() is None
+
+
+async def test_harness_env_never_mutates_process_env(monkeypatch):
+    """Building the overlay leaves os.environ untouched — the whole point of the seam."""
+    monkeypatch.setenv("PATH", "/parent/bin")
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent._env_path_prepend = ["/sandbox/mocks"]
+
+    agent._harness_env()
+
     assert os.environ["PATH"] == "/parent/bin"
 
 
-async def test_harness_spawn_guard_resolves_path_key_case_insensitively(monkeypatch):
-    """A non-uppercase PATH key (e.g. Windows 'Path') is reused, not duplicated."""
+def test_installed_sdk_still_exposes_the_env_seam():
+    """Pin the SDK-side half of the contract the rest of this section fakes.
+
+    Every other env test stubs ``LocalAgentConfig``, so they prove only that we
+    build the right kwarg. If a future ``google-antigravity`` bump dropped or
+    renamed ``env``, all of them would still pass while mock CLIs silently
+    stopped shadowing and the agent called the real tool instead — the exact
+    silent-wrong-mode this seam exists to prevent. So assert against the real
+    class: the field exists and round-trips.
+    """
+    config_mod = pytest.importorskip("google.antigravity.connections.local.local_connection_config")
+
+    assert "env" in config_mod.LocalAgentConfig.model_fields
+    cfg = config_mod.LocalAgentConfig(env={"PATH": "/sandbox/mocks:/usr/bin"})
+    assert cfg.env == {"PATH": "/sandbox/mocks:/usr/bin"}
+    # Omitted must stay None, not {} — the connection reads `is not None` to decide
+    # whether to build a merged env at all, so {} would spawn with a rebuilt env
+    # for every task instead of plain inheritance.
+    assert config_mod.LocalAgentConfig().env is None
+
+
+async def test_harness_env_resolves_path_key_case_insensitively(monkeypatch):
+    """A non-uppercase PATH key (e.g. Windows 'Path') is reused, so the merge overrides it.
+
+    The SDK merges as ``{**os.environ, **env}``; keying the overlay 'PATH' against an
+    inherited 'Path' would add a sibling entry and leave the real PATH in force.
+    """
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent.os, "environ", {"Path": "/parent/bin"})
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks"]
 
-    async with agent._harness_spawn_guard():
-        assert antigravity_agent.os.environ == {"Path": f"/sandbox/mocks{os.pathsep}/parent/bin"}
-    assert antigravity_agent.os.environ == {"Path": "/parent/bin"}
+    assert agent._harness_env() == {"Path": f"/sandbox/mocks{os.pathsep}/parent/bin"}
 
 
-async def test_harness_spawn_guard_restores_absent_path(monkeypatch):
-    """When PATH was unset, the guard removes the key it added rather than leaving ''."""
+async def test_harness_env_handles_absent_path(monkeypatch):
+    """When PATH is unset, the overlay is just the mock dirs (no stray separator tail)."""
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent.os, "environ", {})
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent._env_path_prepend = ["/sandbox/mocks"]
 
-    async with agent._harness_spawn_guard():
-        assert antigravity_agent.os.environ["PATH"] == f"/sandbox/mocks{os.pathsep}"
-    assert "PATH" not in antigravity_agent.os.environ
+    assert agent._harness_env() == {"PATH": f"/sandbox/mocks{os.pathsep}"}
 
 
-async def test_harness_spawn_guard_restores_path_when_body_raises(monkeypatch):
-    """PATH is restored even when the guarded spawn raises (the failed-boot path).
+async def test_concurrent_starts_get_isolated_mock_dirs(monkeypatch, tmp_path):
+    """Two agents starting concurrently each see ONLY their own mock dirs.
 
-    In start() the guard wraps the SDK context-enter, which raises on harness-boot
-    failure — the restore must live in ``finally`` or a failed spawn leaks the mock
-    dirs onto the global PATH.
+    The defect this replaces: with a process-wide PATH mutation, agent B's harness
+    could spawn inside agent A's mutated-PATH window and resolve run_command against
+    A's mock CLIs for B's entire session. With the per-agent env seam the two configs
+    are independent, so overlapping starts cannot contaminate each other.
     """
     monkeypatch.setenv("PATH", "/parent/bin")
-    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
-    agent._env_path_prepend = ["/sandbox/mocks"]
-
-    with pytest.raises(RuntimeError, match="harness boot failed"):
-        async with agent._harness_spawn_guard():
-            assert os.environ["PATH"] == f"/sandbox/mocks{os.pathsep}/parent/bin"
-            raise RuntimeError("harness boot failed")
-    assert os.environ["PATH"] == "/parent/bin"
-
-
-async def test_harness_spawn_guard_serializes_concurrent_starts(monkeypatch):
-    """Two overlapping guards must NOT stack PATHs — the lock serializes the spawn window.
-
-    Without the lock, agent B entering while A holds the guard would observe A's mock
-    dirs on PATH (cross-task mock contamination — the exact defect this fixes).
-    """
-    monkeypatch.setenv("PATH", "/parent/bin")
-    a = AntigravityAgent(parse_agent_config(type="antigravity"))
-    a._env_path_prepend = ["/a/mocks"]
-    b = AntigravityAgent(parse_agent_config(type="antigravity"))
-    b._env_path_prepend = ["/b/mocks"]
-
-    b_entered = asyncio.Event()
-    b_saw_path: list[str] = []
-
-    async def run_b() -> None:
-        async with b._harness_spawn_guard():
-            b_saw_path.append(os.environ["PATH"])
-            b_entered.set()
-
-    async with a._harness_spawn_guard():
-        # A holds the guard. Launch B; it must block on the lock and NOT mutate PATH.
-        task = asyncio.create_task(run_b())
-        await asyncio.sleep(0.05)
-        assert not b_entered.is_set()
-        assert os.environ["PATH"] == f"/a/mocks{os.pathsep}/parent/bin"  # only A's dirs
-
-    await task
-    # B ran only after A released: it saw the restored parent PATH, not A's mocks.
-    assert b_saw_path == [f"/b/mocks{os.pathsep}/parent/bin"]
-    assert os.environ["PATH"] == "/parent/bin"
-
-
-async def test_harness_spawn_guard_no_prepend_waits_for_active_prepend(monkeypatch):
-    """A no-prepend spawn must wait out another task's mutated-PATH window.
-
-    Without taking the lock on the no-prepend path, agent B would spawn its harness
-    while A's mock dirs are live on the global PATH — B's run_command tool would
-    resolve to A's mock CLIs for B's entire session.
-    """
-    monkeypatch.setenv("PATH", "/parent/bin")
-    a = AntigravityAgent(parse_agent_config(type="antigravity"))
-    a._env_path_prepend = ["/a/mocks"]
-    b = AntigravityAgent(parse_agent_config(type="antigravity"))  # no mock dirs
-
-    b_entered = asyncio.Event()
-    b_saw_path: list[str] = []
-
-    async def run_b() -> None:
-        async with b._harness_spawn_guard():
-            b_saw_path.append(os.environ["PATH"])
-            b_entered.set()
-
-    async with a._harness_spawn_guard():
-        # A holds the guard with its mock dirs on PATH. B must block, not spawn.
-        task = asyncio.create_task(run_b())
-        await asyncio.sleep(0.05)
-        assert not b_entered.is_set()
-
-    await task
-    # B ran only after A restored PATH: it saw the parent PATH, not A's mocks.
-    assert b_saw_path == ["/parent/bin"]
-    assert os.environ["PATH"] == "/parent/bin"
-
-
-async def test_start_stores_env_path_prepend(monkeypatch, tmp_path):
-    """start(env_path_prepend=[...]) records the dirs on the instance for the spawn guard.
-
-    The SDK is stubbed via sys.modules so this needs no google-antigravity install:
-    the fake SdkAgent captures os.environ['PATH'] at context-enter (mirroring the real
-    Popen inheriting env), proving the prepend is live exactly at spawn time.
-    """
-    import sys
-    from types import ModuleType, SimpleNamespace
-
-    monkeypatch.setenv("PATH", "/parent/bin")
-    captured: dict[str, str] = {}
+    configs: list[Any] = []
+    a_entered = asyncio.Event()
 
     class _FakeSdkAgent:
         def __init__(self, cfg):
-            self._cfg = cfg
+            self._first = not configs
+            configs.append(cfg)
 
         async def __aenter__(self):
-            captured["path"] = os.environ["PATH"]  # env the Popen would inherit
+            if self._first:
+                # A parks inside its spawn so B's start() fully overlaps it.
+                a_entered.set()
+                await asyncio.sleep(0.05)
             return self
 
         async def __aexit__(self, *exc):
             return False
 
-    def _local_agent_config(**kwargs):
-        return SimpleNamespace(models=[], **kwargs)
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
 
-    ag = ModuleType("google.antigravity")
-    ag.Agent = _FakeSdkAgent
-    ag.LocalAgentConfig = _local_agent_config
-    ag.types = SimpleNamespace(
-        ThinkingLevel=lambda level: level,
-        GeminiAPIEndpoint=type("GeminiAPIEndpoint", (), {}),
-        GeminiModelOptions=lambda **kw: SimpleNamespace(**kw),
-    )
-    hooks = ModuleType("google.antigravity.hooks")
-    hooks.policy = SimpleNamespace(allow_all=lambda: object())
-    google_pkg = sys.modules.get("google") or ModuleType("google")
-    monkeypatch.setitem(sys.modules, "google", google_pkg)
-    monkeypatch.setitem(sys.modules, "google.antigravity", ag)
-    monkeypatch.setitem(sys.modules, "google.antigravity.hooks", hooks)
+    a = AntigravityAgent(parse_agent_config(type="antigravity"))
+    b = AntigravityAgent(parse_agent_config(type="antigravity"))
+
+    task_a = asyncio.create_task(a.start(str(tmp_path), env_path_prepend=["/a/mocks"]))
+    await a_entered.wait()
+    await b.start(str(tmp_path), env_path_prepend=["/b/mocks"])
+    # Bounded: if a start ever serializes behind the other again, fail the test
+    # rather than hang the suite waiting for a task that will never finish.
+    await asyncio.wait_for(task_a, timeout=10)
+
+    envs = [c.env for c in configs]
+    assert envs == [
+        {"PATH": f"/a/mocks{os.pathsep}/parent/bin"},
+        {"PATH": f"/b/mocks{os.pathsep}/parent/bin"},
+    ]
+    assert os.environ["PATH"] == "/parent/bin"  # process env untouched throughout
+
+
+async def test_start_passes_env_path_prepend_to_sdk_config(monkeypatch, tmp_path):
+    """start(env_path_prepend=[...]) reaches LocalAgentConfig.env, not the process env.
+
+    The SDK is stubbed via sys.modules so this needs no google-antigravity install.
+    """
+    monkeypatch.setenv("PATH", "/parent/bin")
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
 
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
 
     assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
-    # The harness spawn saw the mock dirs at the front of PATH...
-    assert captured["path"] == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
-    # ...and PATH was restored once the spawn completed.
-    assert os.environ["PATH"] == "/parent/bin"
+    assert configs[0].env == {"PATH": f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"}
+    assert os.environ["PATH"] == "/parent/bin"  # never mutated
+
+
+async def test_start_omits_env_when_no_mock_dirs(monkeypatch, tmp_path):
+    """Without mock dirs the SDK gets env=None, so the harness inherits os.environ verbatim."""
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    configs: list[Any] = []
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    await agent.start(str(tmp_path))
+
+    assert configs[0].env is None
+
+
+# --- permission_mode ----------------------------------------------------------------
+#
+# The local harness has one mode: policies are hardcoded to allow_all, so no
+# permission_mode confines it. These pin that as intended behavior rather than an
+# oversight — the write boundary is the sandbox driver, and a headless eval has
+# nobody to approve anything.
+
+
+def _agent(**cfg) -> AntigravityAgent:
+    return AntigravityAgent(parse_agent_config(type="antigravity", **cfg))
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
+async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path, mode: str):
+    """permission_mode is not honored here: every mode stays fully autonomous.
+
+    coder_eval's write boundary is the driver (docker container / ephemeral tempdir),
+    not the agent — same deliberate stance as Codex. A mode that silently switched the
+    policy list would make an A/B across harnesses incomparable.
+    """
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(permission_mode=mode).start(str(tmp_path))
+
+    assert [p.kind for p in configs[0].policies] == ["allow_all"]
+
+
+# --- max_turns visible-turn cap -----------------------------------------------------
+#
+# max_turns was accepted and never read on this backend, so a task capping turns ran
+# uncapped here while the same file capped on Claude Code. The cap counts VISIBLE
+# turns (tool calls — reports_stats.visible_turn_count's unit), enforced on the same
+# step-loop boundary as the cooperative stop.
+
+
+def _tool_steps(count: int) -> list:
+    """`count` complete tool calls, each an ACTIVE step followed by its DONE step."""
+    steps = []
+    for i in range(count):
+        call = _tc("run_command", f"t{i}", {"command_line": f"echo {i}"})
+        steps.append(_step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[call]))
+        done = _tc("run_command", f"t{i}", {"command_line": f"echo {i}", "exit_code": 0, "combined_output": str(i)})
+        steps.append(_step("TOOL_CALL", "DONE", target="TARGET_ENVIRONMENT", tool_calls=[done]))
+    return steps
+
+
+async def test_max_turns_caps_visible_turns():
+    """The stream offers 5 tool calls; max_turns=2 keeps 2 and never pulls the rest."""
+    agent = _agent_with_steps(_tool_steps(5))
+
+    record = await agent.communicate("go", max_turns=2)
+
+    assert len(record.commands) == 2
+    assert record.max_turns_exhausted is True
+
+
+async def test_max_turns_keeps_the_deciding_step_whole():
+    """The tool call that reaches the cap is completed, not cut mid-flight."""
+    agent = _agent_with_steps(_tool_steps(3))
+
+    record = await agent.communicate("go", max_turns=1)
+
+    assert len(record.commands) == 1
+    assert record.commands[0].result_status == "success"
+    assert record.commands[0].result_summary == "0"
+
+
+async def test_under_the_cap_completes_normally():
+    agent = _agent_with_steps(_tool_steps(2))
+
+    record = await agent.communicate("go", max_turns=5)
+
+    assert len(record.commands) == 2
+    assert record.max_turns_exhausted is False
+
+
+async def test_no_max_turns_is_uncapped():
+    """None must preserve the pre-existing behavior exactly."""
+    agent = _agent_with_steps(_tool_steps(4))
+
+    record = await agent.communicate("go")
+
+    assert len(record.commands) == 4
+    assert record.max_turns_exhausted is False
+
+
+async def test_cooperative_stop_outranks_the_cap():
+    """Both firing on the same step reports STOPPED_EARLY — the more specific reason."""
+    agent = _agent_with_steps(_tool_steps(5))
+
+    record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
+
+    assert record.max_turns_exhausted is False
+    assert len(record.commands) == 1
+
+
+async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
+    """The cap and the background-poll loop share a boundary.
+
+    A turn that backgrounds work drains, polls, and re-drains — so a poll cycle can
+    be the cycle that reaches the cap. The re-drain honors it (the check lives in
+    ``_drain``, which both paths call), and the loop must then stop polling rather
+    than keep waiting out the background job on a run that is already over.
+    """
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    bg = _tc("run_command", "bg1", {"command_line": "sleep 999"})
+    batch1 = [_step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[bg])]
+    # The re-drain kicks off a SECOND background job, then closes the first and runs
+    # one more call — reaching the cap (2) with an orphan still ACTIVE. Both exit
+    # conditions are live at once, and the cap has to win: otherwise the loop keeps
+    # polling out a background job on a run that is already over.
+    batch2 = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "bg2", {"command_line": "sleep 999"})],
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[
+                _tc("run_command", "bg1", {"command_line": "sleep 999", "exit_code": 0, "combined_output": "x"})
+            ],
+        ),
+        *_tool_steps(1),
+    ]
+    batch3 = _tool_steps(2)  # must never be drained
+    agent = _agent_with_steps([batch1, batch2, batch3])
+    conv = agent._sdk_agent.conversation
+
+    record = await agent.communicate("go", max_turns=2)
+
+    assert record.max_turns_exhausted is True
+    # The cap counts RESOLVED calls. The still-open bg2 is force-closed and recorded
+    # as unresolved rather than dropped, so the trajectory shows what was interrupted.
+    resolved = [c for c in record.commands if c.result_status != "unknown"]
+    assert [c.tool_id for c in resolved] == ["bg1", "t0"]
+    assert [c.tool_id for c in record.commands if c.result_status == "unknown"] == ["bg2"]
+    assert conv.receive_steps_call_count == 2  # initial drain + one poll re-drain, then stop
+    assert conv.cancel_call_count == 1

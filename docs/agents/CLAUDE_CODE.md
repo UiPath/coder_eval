@@ -56,7 +56,7 @@ direct backend (they call `api.anthropic.com`).
 | --- | --- |
 | `AWS_BEARER_TOKEN_BEDROCK` | Bedrock bearer token (required) |
 | `AWS_REGION` | Bedrock region, e.g. `eu-north-1` (required) |
-| `BEDROCK_MODEL` | Cross-region model id, e.g. `eu.anthropic.claude-sonnet-4-5-20250929-v1:0` (required) |
+| `BEDROCK_MODEL` | Cross-region model id, e.g. `eu.anthropic.claude-sonnet-5` (required) |
 | `BEDROCK_SMALL_MODEL` | Small/fast model id (falls back to the main model) |
 
 The agent sets `CLAUDE_CODE_USE_BEDROCK=1` and forwards these into the SDK
@@ -75,7 +75,7 @@ required; everything else has a default.
 ```yaml
 agent:
   type: claude-code
-  model: claude-sonnet-4-5-20250929      # optional; omit to use the route default
+  model: claude-sonnet-5                 # optional; omit to use the route default
   permission_mode: acceptEdits           # default | acceptEdits | plan | bypassPermissions
   allowed_tools: ["Read", "Write", "Bash"]
   disallowed_tools: ["WebSearch"]
@@ -160,7 +160,7 @@ Any of these merge-resolve through `-D` / `--set` (see
 
 ```bash
 coder-eval run tasks/hello_date.yaml \
-  -D agent.model=claude-opus-4-8 \
+  -D agent.model=claude-opus-5 \
   -D agent.permission_mode=plan \
   -D agent.sdk_options.effort=high
 ```

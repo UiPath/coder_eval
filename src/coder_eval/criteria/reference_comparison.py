@@ -62,18 +62,18 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
                 error="Sandbox not initialized",
             )
 
-        # Load agent code
-        agent_path = sandbox.sandbox_dir / criterion.agent_file
-        if not agent_path.exists():
+        # Load agent code through the shared path seam, so `agent_file` resolves
+        # (glob expansion, ignore filtering, exactly-one) like every other
+        # sandbox-relative criterion path.
+        try:
+            agent_code = sandbox.get_file_content(criterion.agent_file)
+        except FileNotFoundError:
             return CriterionResult(
                 criterion_type="reference_comparison",
                 description=criterion.description,
                 score=0.0,
                 error=f"Agent file not found: {criterion.agent_file}",
             )
-
-        try:
-            agent_code = agent_path.read_text(encoding="utf-8")
         except Exception as e:
             return CriterionResult(
                 criterion_type="reference_comparison",

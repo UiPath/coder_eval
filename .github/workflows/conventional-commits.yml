@@ -16,7 +16,7 @@ permissions:
 jobs:
   check-conventional-commits:
     name: Check PR Title & Commit Messages
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 5
 
     steps:

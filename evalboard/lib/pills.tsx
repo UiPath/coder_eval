@@ -17,6 +17,20 @@ export function matureLinkTooltip(sourceRunLabel: string): string {
     );
 }
 
+// Aggregate-voice variant, for a windowed count of mature appearances rather
+// than one run's row. MATURE_TOOLTIP says "this run" twice, which is right on a
+// single-run surface and wrong on a page that renders no single run at all.
+export function matureAggregateTooltip(
+    matureSkips: number,
+    appearances: number,
+): string {
+    return (
+        `${matureSkips} of these ${appearances} appearances were mature ` +
+        "carry-forwards: skipped to save cost and carried forward as a pass " +
+        "(re-validated about weekly on a fixed slot), not executed."
+    );
+}
+
 // Fallback tooltip when no recent execution was found within the look-back
 // window, so the id stays non-clickable.
 export const MATURE_NO_SOURCE_TOOLTIP =

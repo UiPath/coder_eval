@@ -36,6 +36,11 @@ success_criteria:
     tool_name: "Bash"
     command_pattern: "python app\\.py"
     min_count: 1
+    # Mandatory on an ARMED, pass-capable criterion (CE034). A crashed
+    # `python app.py` would otherwise latch a live PASS inside the budget, and a
+    # latched verdict is never re-polled — so decide_within could never fire and
+    # the criterion would credit a script that never ran successfully.
+    require_success: true
     stop_early:
       decide_within: 3
   - type: "file_exists"

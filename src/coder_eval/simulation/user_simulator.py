@@ -189,10 +189,13 @@ class UserSimulator:
         self._agent: Agent[Any] | None = None
         self._scratch_dir: Path | None = None
 
-        # model is intentionally left to the route: ClaudeCodeAgent._build_sdk_env
-        # maps BedrockRoute.model → ANTHROPIC_MODEL env, so pinning a Gateway-style
-        # name here (e.g. "anthropic.claude-sonnet-4-6") would break Bedrock runs.
-        # For direct routes, None lets the SDK pick its default.
+        # The simulator's model is PINNED from config, not inherited from the route.
+        # Leaving it None meant BEDROCK_MODEL decided who the simulated user was, so
+        # an A/B that varied the subject model silently varied the interlocutor too —
+        # and `_simulator_cost_usd` had to price from environment_info["bedrock_model"]
+        # to compensate. `_resolve_model` translates the vendor-prefixed id into
+        # whatever the run's backend accepts, the same way the LLM judge does.
+        self._model = self._resolve_model(config.model, route)
         #
         # allowed_tools=[] is the primary guarantee that the simulator cannot
         # touch files or run commands. The disallowed_tools list below is
@@ -204,7 +207,7 @@ class UserSimulator:
 
         agent_config = parse_agent_config(
             type=AgentKind.CLAUDE_CODE,
-            model=None,
+            model=self._model,
             allowed_tools=[],
             disallowed_tools=_SIMULATOR_DISALLOWED_TOOLS,
             plugins=None,
@@ -223,9 +226,39 @@ class UserSimulator:
         self._agent_config = agent_config
 
         if route is not None:
-            logger.info("User simulator: Claude Code agent backend (route=%s)", type(route).__name__)
+            logger.info(
+                "User simulator: Claude Code agent backend (route=%s, model=%s)", type(route).__name__, self._model
+            )
         else:
-            logger.info("User simulator: Claude Code agent backend (default route)")
+            logger.info("User simulator: Claude Code agent backend (default route, model=%s)", self._model)
+
+    @staticmethod
+    def _resolve_model(model: str, route: ApiRoute | None) -> str:
+        """Translate the configured model id into what this run's backend accepts.
+
+        The config holds one vendor-prefixed id (``anthropic.claude-sonnet-4-6``).
+        Bedrock wants a cross-region inference-profile id and the direct Anthropic
+        API wants the bare alias, so route through the same translators the LLM judge
+        uses rather than re-deriving the rules here. An untranslatable id falls back
+        to the configured string: a wrong-looking model name that the backend rejects
+        loudly beats silently reverting to a route-chosen interlocutor, which is the
+        exact ambiguity this pin exists to remove.
+        """
+        from coder_eval.evaluation.judge_models import to_anthropic_alias, to_bedrock_model
+        from coder_eval.models import BedrockRoute
+
+        try:
+            if isinstance(route, BedrockRoute):
+                return to_bedrock_model(model, route.region)
+            return to_anthropic_alias(model)
+        except ValueError:
+            logger.warning("User simulator: could not translate model %r for the route; using it verbatim", model)
+            return model
+
+    @property
+    def model(self) -> str:
+        """The resolved model id the simulated user runs on."""
+        return self._model
 
     @property
     def system_prompt(self) -> str:

@@ -81,11 +81,13 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Claude Code](agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
 | [Codex](agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
+| [Run-Limit Parity](agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
 | [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
 | [CI Gate & GitHub Action](CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor |
+| [Claude Code Plugin](PLUGIN.md) | Install the Claude Code plugin — author, run, and analyze suites from inside the agent |
 | [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
 | [How It Compares](comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |

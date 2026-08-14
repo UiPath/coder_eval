@@ -83,11 +83,13 @@ extra:
     agents/CLAUDE_CODE.md: "Configuring and running the default Claude Code agent"
     agents/CODEX.md: "Running the OpenAI Codex agent"
     agents/ANTIGRAVITY.md: "Running the Google Antigravity / Gemini agent"
+    agents/HARNESS_PARITY.md: "What each run_limits field means on every harness"
     AB_EXPERIMENTS.md: "Compare models / tools / prompts across the same tasks"
     DATASETS.md: "Fan a single task out over a dataset"
     DIALOG_MODE.md: "Evaluate agents in multi-turn conversation via a simulated user"
     DOCKER_ISOLATION.md: "The container sandbox driver, with custom images"
     CI_GATE.md: "Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor"
+    PLUGIN.md: "Install the Claude Code plugin — author, run, and analyze suites from inside the agent"
     EXTENDING.md: "Author a custom agent, criterion, or model pricing via the plugin SPI"
     REPORT_SCHEMA.md: "Field-level reference for run.json / variant.json / task.json"
     comparison.md: "vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts"
@@ -102,6 +104,7 @@ nav:
       - 04 · Writing a task: tutorials/04-writing-a-task.md
       - 05 · Comparing two models: tutorials/05-comparing-models.md
       - 06 · Docker isolation: tutorials/06-use-docker-isolation.md
+      - 07 · Driving Coder Eval from Claude Code: tutorials/07-plugin-in-claude-code.md
   - Guides:
       - User Guide: USER_GUIDE.md
       - Task Definition Guide: TASK_DEFINITION_GUIDE.md
@@ -109,12 +112,14 @@ nav:
       - Claude Code: agents/CLAUDE_CODE.md
       - Codex: agents/CODEX.md
       - Antigravity (Gemini): agents/ANTIGRAVITY.md
+      - Run-Limit Parity: agents/HARNESS_PARITY.md
   - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md
       - Bring Your Own Dataset: DATASETS.md
       - Dialog Mode: DIALOG_MODE.md
       - Docker Isolation: DOCKER_ISOLATION.md
       - CI Gate & GitHub Action: CI_GATE.md
+      - Claude Code Plugin: PLUGIN.md
       - Extending Coder Eval: EXTENDING.md
       - Report Schema: REPORT_SCHEMA.md
   - How It Compares: comparison.md

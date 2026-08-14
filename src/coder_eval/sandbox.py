@@ -6,10 +6,14 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
+from .invocation_log import render_recorder
 from .models import (
+    RECORD_CLI_DIR,
+    RECORD_CLI_LOG,
     RepoSource,
     SandboxConfig,
     StarterFilesSource,
@@ -61,6 +65,27 @@ _WORKSPACE_CAPTURE_IGNORE = (
     ".profile",
     ".wget-hsts",
 )
+
+# Characters that make a criterion `path` eligible for glob expansion. Eligible,
+# not automatic: `Sandbox.resolve_files` tries the literal path first.
+_GLOB_METACHARACTERS = "*?["
+
+# Cap on how many matches an ambiguity error enumerates. The message is
+# persisted to task.json and injected into judge prompts, so an unbounded
+# listing over a wide pattern is a real payload.
+_MAX_LISTED_MATCHES = 10
+
+
+def _is_glob(path: str) -> bool:
+    """Return whether ``path`` contains a glob metacharacter."""
+    return any(c in path for c in _GLOB_METACHARACTERS)
+
+
+def _format_matches(matches: list[Path], root: Path) -> str:
+    """Render matches as sandbox-relative paths, truncated to a bounded list."""
+    listed = ", ".join(str(p.relative_to(root)) for p in matches[:_MAX_LISTED_MATCHES])
+    remaining = len(matches) - _MAX_LISTED_MATCHES
+    return f"{listed}, +{remaining} more" if remaining > 0 else listed
 
 
 def _grant_read_traverse(root: Path) -> None:
@@ -202,6 +227,10 @@ class Sandbox:
         try:
             # Setup template content (repo, directory, or inline files)
             self._setup_template()
+
+            # Generate recording shims for `record_cli` tools (before the +x pass
+            # below, which also covers them)
+            self._generate_cli_recorders()
 
             # Mark mock binaries executable so the agent's PATH can shadow real CLIs
             self._prepare_mock_path_dirs()
@@ -430,9 +459,10 @@ class Sandbox:
 
     @property
     def resolved_mock_path_dirs(self) -> list[Path]:
-        """Absolute paths of configured mock dirs that exist on disk.
+        """Absolute paths of mock dirs that exist on disk, in PATH-prepend order.
 
-        Returned in the order they appear in ``SandboxConfig.mock_path_dirs``;
+        The generated ``record_cli`` directory comes first when configured, then the
+        entries in ``SandboxConfig.mock_path_dirs`` in order;
         non-existent and non-directory entries are filtered out so the caller
         can pass the result straight to PATH-prepend logic.
 
@@ -442,14 +472,113 @@ class Sandbox:
         Mirrors the ``mount_point`` containment check in
         :meth:`_apply_template_dir_source`.
         """
-        if self.sandbox_dir is None or not self.config.mock_path_dirs:
+        if self.sandbox_dir is None:
             return []
         resolved: list[Path] = []
-        for rel in self.config.mock_path_dirs:
+        # Generated recorders go FIRST: `_generate_cli_recorders` refuses to
+        # generate a shim whose name a user mock dir already provides, so this
+        # order can never silently shadow a task's own mock — it only fixes which
+        # directory wins for names the harness itself owns.
+        if self.config.record_cli:
+            generated = self._resolve_within_sandbox(RECORD_CLI_DIR, field="record_cli directory")
+            if generated.is_dir():
+                resolved.append(generated)
+        for rel in self.config.mock_path_dirs or []:
             candidate = self._resolve_within_sandbox(rel, field="mock_path_dirs entry")
             if candidate.is_dir():
                 resolved.append(candidate)
         return resolved
+
+    def _generate_cli_recorders(self) -> None:
+        """Write a recording shim for every ``SandboxConfig.record_cli`` entry.
+
+        Each shim is a self-contained Python script — it must run inside the
+        sandbox, where ``coder_eval`` is not installed, so it imports nothing
+        from this package and carries its configuration as embedded literals.
+        A ``.cmd`` twin is written beside it so a bare ``uip`` also resolves
+        through Windows PATHEXT lookup on the tempdir driver.
+
+        Raises:
+            RuntimeError: a task's own ``mock_path_dirs`` already provides an
+                executable with the same name. Generating ours anyway would make
+                which one runs depend on directory order — a silent, confusing
+                override — so the collision is surfaced instead.
+        """
+        assert self.sandbox_dir is not None, "Sandbox directory not initialized"
+        if not self.config.record_cli:
+            return
+
+        for rel in self.config.mock_path_dirs or []:
+            user_dir = self._resolve_within_sandbox(rel, field="mock_path_dirs entry")
+            if not user_dir.is_dir():
+                continue
+            for spec in self.config.record_cli:
+                # Every name this feature generates, not just the bare one: on
+                # Windows PATHEXT resolves `uip` to the generated `uip.cmd` ahead of
+                # the task's own `mocks/uip.cmd`, silently changing what runs.
+                clash = next(
+                    (
+                        user_dir / name
+                        for name in (spec.tool, f"{spec.tool}.cmd", f"{spec.tool}.bat", f"{spec.tool}.exe")
+                        if (user_dir / name).exists()
+                    ),
+                    None,
+                )
+                if clash is not None:
+                    msg = (
+                        f"record_cli would generate a '{spec.tool}' shim, but mock_path_dirs entry "
+                        f"'{rel}' already provides one ({rel}/{clash.name}). "
+                        "Remove the record_cli entry to keep your own mock, or drop the file to use "
+                        "the generated recorder."
+                    )
+                    raise RuntimeError(msg)
+
+        recorder_dir = self._resolve_within_sandbox(RECORD_CLI_DIR, field="record_cli directory")
+        # Wipe rather than reuse: DIRECT_WRITE (the docker default) does not clear the
+        # target dir, so a reused --run-dir would leave a previous run's log to be
+        # scored as this run's, and stale shims for tools no longer declared on PATH.
+        if recorder_dir.exists():
+            shutil.rmtree(recorder_dir, ignore_errors=True)
+        recorder_dir.mkdir(parents=True, exist_ok=True)
+
+        # Seed the log so it always exists: `cli_called` treats a MISSING log as a
+        # harness fault (score 0 even for a negative guard), which is right when a
+        # mock never ran, but wrong for a correct run that legitimately called
+        # nothing. An empty file distinguishes the two.
+        log_path = self.sandbox_dir / RECORD_CLI_LOG
+        log_path.write_text("", encoding="utf-8")
+
+        interpreter = os.path.realpath(sys.executable)
+        for spec in self.config.record_cli:
+            shim = recorder_dir / spec.tool
+            if shim.exists():
+                msg = (
+                    f"record_cli would overwrite '{RECORD_CLI_DIR}/{spec.tool}', already written this "
+                    "setup. Two entries generating the same filename?"
+                )
+                raise RuntimeError(msg)
+            shim.write_text(render_recorder(spec, interpreter), encoding="utf-8", newline="\n")
+            # +x here rather than relying on _prepare_mock_path_dirs: that pass is
+            # what makes the bit real for PATH lookup, but the shim must be
+            # executable even if the recorder dir is consumed some other way.
+            shim.chmod(shim.stat().st_mode | 0o111)
+            # `python "%~dp0<tool>" %*` — the extensionless script beside this file.
+            cmd_lines = [
+                "@echo off",
+                "REM Generated by coder_eval SandboxConfig.record_cli.",
+                "REM Windows PATHEXT lookup resolves this; POSIX uses the extensionless twin.",
+                f'"{interpreter}" "%~dp0{spec.tool}" %*',
+            ]
+            (recorder_dir / f"{spec.tool}.cmd").write_text(
+                "\r\n".join(cmd_lines) + "\r\n",
+                encoding="utf-8",
+                newline="",
+            )
+
+        logger.info(
+            f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/: "
+            + ", ".join(f"{s.tool}(exit {s.exit_code})" for s in self.config.record_cli)
+        )
 
     def _apply_starter_files_source(self, source: StarterFilesSource) -> None:
         """Create inline starter files in sandbox with overwrite tracking.
@@ -714,8 +843,26 @@ class Sandbox:
         """
         from .utils import resolve_uipath_plugin_dir
 
-        resolved = resolve_uipath_plugin_dir(self.uip_search_path)
+        resolved = resolve_uipath_plugin_dir(self._plugin_discovery_path())
         self._plugin_tools_dir = str(resolved) if resolved is not None else None
+
+    def _plugin_discovery_path(self) -> str:
+        """``uip_search_path`` minus the generated recorder dir.
+
+        A recording shim is not the real CLI, so letting it win the `uip` lookup
+        made resolve_uipath_plugin_dir return None (a shim is not inside a
+        node_modules/@uipath tree) and silently drop the PLUGIN_TOOLS_DIR pin for
+        every run_command criterion -- for `record_cli: [{tool: uip}]`, the
+        documented example. A hand-written mock under mock_path_dirs shadows the
+        lookup the same way, but that predates this feature and changing it would
+        alter existing tasks.
+        """
+        search_path = self.uip_search_path
+        if not self.config.record_cli or self.sandbox_dir is None:
+            return search_path
+        recorder_dir = str((self.sandbox_dir / RECORD_CLI_DIR).resolve())
+        kept = [entry for entry in search_path.split(os.pathsep) if entry and os.path.realpath(entry) != recorder_dir]
+        return os.pathsep.join(kept)
 
     def _maybe_remediate_home_plugins_pollution(self) -> Path | None:
         """Optionally delete ``$HOME/node_modules/@uipath`` before the task runs.
@@ -967,38 +1114,121 @@ class Sandbox:
     # needs filesystem access beyond the sandbox root (e.g., reading installed packages,
     # system headers). Path traversal protection is handled at the agent permission level.
 
+    def resolve_files(self, path: str) -> list[Path]:
+        """Resolve a criterion ``path`` to the sandbox files it addresses.
+
+        A path that names an existing file or directory resolves to itself,
+        **even when it contains a glob metacharacter** — a real file called
+        ``report[2024].json`` is graded as itself rather than reinterpreted as
+        a character class that would silently match ``report2.json``. Only when
+        the literal does not exist is a path containing ``*``, ``?`` or ``[``
+        expanded against the sandbox root, so a criterion can address a file
+        whose exact location the task prompt does not pin — e.g. ``**/*.flow``
+        matches a scaffolded wrapper directory the agent was free to name.
+
+        Glob matches are filtered through the sandbox's ignore patterns
+        (``.venv``, ``node_modules``, ``dist``, … — see
+        :func:`~coder_eval.resources.get_ignore_patterns`), because the sandbox
+        root holds harness-created content the agent never authored and
+        grading off it is neither fair nor deterministic. Only path segments
+        the glob *discovered* are filtered: a segment the pattern names
+        literally (``dist/**/*.js``) is an explicit opt-in and survives.
+        Matches are sorted so grading is deterministic, and directories are
+        dropped so a glob cannot resolve to something unreadable.
+
+        Args:
+            path: Relative path or glob pattern
+
+        Returns:
+            Sorted matching files; empty when nothing matches
+        """
+        if not self.sandbox_dir:
+            return []
+
+        # Literal first: an existing path is never reinterpreted as a pattern.
+        candidate = self.sandbox_dir / path
+        if candidate.exists():
+            return [candidate]
+
+        if not _is_glob(path):
+            return []
+
+        patterns = get_ignore_patterns(self.config.ignore_patterns)
+        pinned = {segment for segment in path.split("/") if segment and not _is_glob(segment)}
+
+        matches: list[Path] = []
+        for match in self.sandbox_dir.glob(path):
+            if not match.is_file():
+                continue
+            discovered = [part for part in match.relative_to(self.sandbox_dir).parts if part not in pinned]
+            if discovered and should_ignore_path(Path(*discovered), patterns):
+                continue
+            matches.append(match)
+
+        return sorted(matches)
+
+    def resolved_path_label(self, path: str) -> str | None:
+        """Sandbox-relative path a glob resolved to, for grading transparency.
+
+        With exactly-one-match semantics on content reads, *which* file was
+        graded is most of the signal. Returns ``None`` for a literal path
+        (nothing was inferred) and for a pattern that did not resolve to
+        exactly one file.
+
+        Args:
+            path: Relative path or glob pattern
+
+        Returns:
+            Sandbox-relative path of the single match, or ``None``
+        """
+        if not self.sandbox_dir or not _is_glob(path):
+            return None
+
+        matches = self.resolve_files(path)
+        if len(matches) != 1:
+            return None
+
+        return str(matches[0].relative_to(self.sandbox_dir))
+
     def get_file_content(self, path: str) -> str:
         """Read the content of a file in the sandbox.
 
         Args:
-            path: Relative path to the file
+            path: Relative path to the file, or a glob pattern matching exactly
+                one file
 
         Returns:
             File content as string
 
         Raises:
             RuntimeError: If sandbox is not set up
-            FileNotFoundError: If file doesn't exist
+            FileNotFoundError: If nothing matches ``path``
+            ValueError: If a glob matches more than one file
         """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox not set up")
 
-        file_path = self.sandbox_dir / path
-        return file_path.read_text(encoding="utf-8")
+        matches = self.resolve_files(path)
+        if not matches:
+            raise FileNotFoundError(f"No file matches '{path}' in the sandbox")
+        if len(matches) > 1:
+            raise ValueError(
+                f"Pattern '{path}' matches {len(matches)} files — refusing to guess which to grade: "
+                + _format_matches(matches, self.sandbox_dir)
+            )
+
+        return matches[0].read_text(encoding="utf-8")
 
     def file_exists(self, path: str) -> bool:
         """Check if a file exists in the sandbox.
 
         Args:
-            path: Relative path to the file
+            path: Relative path to the file, or a glob pattern
 
         Returns:
-            True if file exists, False otherwise
+            True if at least one file matches, False otherwise
         """
-        if not self.sandbox_dir:
-            return False
-
-        return (self.sandbox_dir / path).exists()
+        return bool(self.resolve_files(path))
 
     def list_files(self, path: str = ".") -> list[str]:
         """List files in a directory within the sandbox.

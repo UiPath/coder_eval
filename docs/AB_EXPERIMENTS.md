@@ -166,7 +166,7 @@ defaults:
   agent:
     type: claude-code
     permission_mode: bypassPermissions
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 variants:
@@ -210,9 +210,9 @@ description: "Sonnet vs. Opus on the same tasks"
 
 variants:
   - variant_id: sonnet
-    agent: { model: claude-sonnet-4-6 }
+    agent: { model: claude-sonnet-5 }
   - variant_id: opus
-    agent: { model: claude-opus-4-7 }
+    agent: { model: claude-opus-5 }
 ```
 
 ## Recipe: A/B a Prompt

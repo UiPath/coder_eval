@@ -47,14 +47,18 @@ class FileCheckChecker(BaseCriterion[FileCheckCriterion]):
         has_includes = len(criterion.includes) > 0
         has_excludes = len(criterion.excludes) > 0
         has_patterns = len(criterion.patterns) > 0
+        resolved = sandbox.resolved_path_label(criterion.path)
 
         # 2. Pure existence check (no sub-checks specified)
         if not has_includes and not has_excludes and not has_patterns:
+            details = f"File '{criterion.path}' exists"
+            if resolved:
+                details += f" (resolved: {resolved})"
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
                 score=1.0,
-                details=f"File '{criterion.path}' exists",
+                details=details,
             )
 
         # 3. Read file content
@@ -62,6 +66,8 @@ class FileCheckChecker(BaseCriterion[FileCheckCriterion]):
 
         scores: list[float] = []
         details_parts: list[str] = []
+        if resolved:
+            details_parts.append(f"Resolved: {resolved}")
 
         # 4a. Includes score
         if has_includes:

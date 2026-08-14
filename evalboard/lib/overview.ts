@@ -16,6 +16,8 @@ import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
 import { DEFAULT_HARNESS, normalizeHarness, orderHarnesses } from "./harness";
+import { isPassStatus } from "./status";
+import { taskCarriesRepoTag } from "./tags";
 import type { Window } from "./reviews-types";
 
 export interface RunPoint {
@@ -515,13 +517,18 @@ function loadWindowData(window: Window): Promise<PerRun[]> {
     return loadWindowDataInner(window);
 }
 
+// Repo-provenance half of taskMatchesTag. Defined in the dependency-free
+// lib/tags.ts (this module is server-only — it imports next/cache — so a
+// "use client" component could not adopt a copy living here) and re-exported
+// for the existing callers.
+export { taskCarriesRepoTag };
+
 export function taskMatchesTag(
     task: RunOverviewTask,
     reviewTagsByTask: Record<string, string[]>,
     tag: string,
 ): boolean {
-    if (task.skill === tag) return true;
-    if (task.tags.includes(tag)) return true;
+    if (taskCarriesRepoTag(task, tag)) return true;
     const rt = reviewTagsByTask[task.taskId];
     return rt ? rt.includes(tag) : false;
 }
@@ -624,18 +631,172 @@ export async function getOverview(
 export interface TagTaskRow {
     taskId: string;
     skill: string | null;
-    // How many runs in the window carried this task under the tag.
+    // Tagged task ROWS in the window, not distinct runs: a replicated task
+    // contributes one per replicate. Unchanged from the previous behaviour
+    // (the column header stays "Appearances") — the de-tag check below is the
+    // only place that collapses to one sample per run. Includes rows the
+    // nightly skipped as mature and carried forward.
     appearances: number;
-    passRate: number; // 0-100 across those appearances
+    // Of `appearances`, how many were mature carry-forwards (not executed).
+    matureSkips: number;
+    // `appearances - matureSkips`: the denominator behind passRate, carried on
+    // the row rather than re-derived by the renderer so the percentage and the
+    // caption that names its sample size can never describe different rules.
+    executed: number;
+    // 0-100 over EXECUTED appearances only (appearances - matureSkips).
+    // null when nothing in the window actually ran, so the UI shows "—"
+    // rather than a measured-looking 0% or 100%.
+    passRate: number | null;
     latestStatus: string | null;
     latestScore: number | null;
     latestRunId: string;
+    // True when the newest tagged ROW — the same row latestStatus and
+    // latestScore come from — was a mature carry-forward, so those two are
+    // inherited, not measured.
+    latestMatureSkipped: boolean;
 }
 
-// Per-task breakdown for a single tag, windowed like getOverview but grouped
-// by task instead of by run. One row per distinct task_id carrying the tag
-// anywhere in the window; "latest" fields come from the newest run the task
-// appeared in (runs are walked newest-first, so the first occurrence wins).
+// Per-task breakdown for a single tag, windowed like getOverview but grouped by
+// task instead of by run. Pure over the PerRun[] it is handed (the caller does
+// the fetching and the adhoc/harness filtering), so it unit-tests without
+// touching the blob store — mirrors lib/trends.ts::aggregate.
+//
+// DE-TAGGING. A run.json task row carries `tags` as a historical stamp written
+// at execution time; the board never consults the skills repo. So a task
+// de-tagged upstream keeps rendering for as long as a run that predates the
+// removal stays in the window. The rule here: a task is dropped when it appears
+// in a NEWER run in the window whose rows for it do not carry the tag — that is
+// proof the tag was removed, not a heuristic. A task that merely stopped
+// appearing (retired, renamed, `skip: true`) is unknowable and therefore KEPT,
+// with `latestRunId` doubling as "last seen" so its age is visible.
+//
+// The signal comes from taskCarriesRepoTag, NOT taskMatchesTag: review tags
+// (review_index.json) are post-hoc annotations from a separate namespace, so an
+// as-yet-unreviewed newest run — the normal case — would otherwise read as a
+// de-tag. The same predicate is used to accumulate, so the narrowing is
+// symmetric: a task pulled onto this page only by a review tag does not appear.
+//
+// The "did any row carry the tag this run" collapse is required because a
+// replicated task has several rows per run, and one untagged replicate must not
+// read as a de-tag.
+//
+// MATURITY — a DELIBERATE, page-local divergence. lib/trends.ts::aggregate (and
+// app/runs/[id]/run-view.tsx) count a mature carry-forward as a pass and exclude
+// it only from the cost/duration averages. Here it is excluded from BOTH the
+// numerator and the denominator of `passRate`, because /path-to-ga is a
+// GA-readiness page and must report MEASURED passes. That difference is
+// intentional — do not "harmonise" this with trends.ts.
+//
+// CROSS-REPO CONTRACT: `matureSkipped` is stamped into run.json by the external
+// nightly eval_runner, not by anything in src/coder_eval. If the producer renames
+// or drops the field every carry-forward silently reads as an executed pass again
+// — the rate inflates, the "(N mature)" annotations and Mature pills vanish, and
+// nothing errors. It is the one input here this repo cannot type-check.
+export function buildTagTaskRows(perRun: PerRun[], tag: string): TagTaskRow[] {
+    // Run ids are date-shaped, so a lexical sort is chronological — the same
+    // assumption lib/trends.ts::aggregate and the previous implementation
+    // already make.
+    const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
+
+    interface Acc {
+        skill: string | null;
+        appearances: number;
+        matureSkips: number;
+        executedPasses: number;
+        latestRunId: string;
+        latestStatus: string | null;
+        latestScore: number | null;
+        latestMatureSkipped: boolean;
+    }
+    const byTask = new Map<string, Acc>();
+    // taskId -> did its NEWEST appearance in the window carry the tag. First
+    // write wins because the walk is newest-first, so a task that only gained
+    // the tag recently reads as tagged (and one that lost it reads as untagged)
+    // regardless of what the older runs say.
+    const newestTagged = new Map<string, boolean>();
+
+    for (const { id, overview } of sorted) {
+        // A run whose run.json failed to load (loadPerRunForId downgrades to a
+        // null overview) must contribute neither an appearance nor a de-tag
+        // signal — otherwise a transient blob failure on the newest run would
+        // drop every row.
+        if (!overview) continue;
+
+        // Two passes over the run's rows, not one: `taggedInRun` must be
+        // complete before any verdict is recorded, because a replicated task
+        // has several rows per run and one untagged replicate must not read as
+        // a de-tag. The `newestTagged.has` guard below is what collapses those
+        // replicate rows to a single first-write-wins verdict.
+        const taggedInRun = new Set<string>();
+        for (const t of overview.tasks) {
+            if (taskCarriesRepoTag(t, tag)) taggedInRun.add(t.taskId);
+        }
+        for (const t of overview.tasks) {
+            if (!newestTagged.has(t.taskId)) {
+                newestTagged.set(t.taskId, taggedInRun.has(t.taskId));
+            }
+        }
+
+        for (const t of overview.tasks) {
+            if (!taskCarriesRepoTag(t, tag)) continue;
+            let entry = byTask.get(t.taskId);
+            if (!entry) {
+                // All three latest* fields come off ONE row — the first tagged
+                // row of the newest-first walk — so the Mature pill and the
+                // dashed-out score always describe the same sample.
+                entry = {
+                    skill: t.skill,
+                    appearances: 0,
+                    matureSkips: 0,
+                    executedPasses: 0,
+                    latestRunId: id,
+                    latestStatus: t.status,
+                    latestScore: t.weightedScore,
+                    latestMatureSkipped: t.matureSkipped ?? false,
+                };
+                byTask.set(t.taskId, entry);
+            }
+            entry.appearances += 1;
+            if (t.matureSkipped) {
+                entry.matureSkips += 1;
+            } else if (isPassStatus(t.status)) {
+                // lib/status.ts, not a raw "SUCCESS" literal: `status` is an
+                // untyped string, and this page's pass rate must move with
+                // every other surface if the passing set ever widens.
+                entry.executedPasses += 1;
+            }
+        }
+    }
+
+    const rows: TagTaskRow[] = [];
+    for (const [taskId, e] of byTask) {
+        // Provably de-tagged: the task is still running, and its newest run does
+        // not carry the tag. (A task in byTask always has a newestTagged entry —
+        // both are written from the same non-null-overview iteration — so the
+        // `?? true` only satisfies Map.get's `| undefined`; it is not a real
+        // "unknown ⇒ keep" case.)
+        if (!(newestTagged.get(taskId) ?? true)) continue;
+        const executed = e.appearances - e.matureSkips;
+        rows.push({
+            taskId,
+            skill: e.skill,
+            appearances: e.appearances,
+            matureSkips: e.matureSkips,
+            executed,
+            passRate: executed > 0 ? (e.executedPasses / executed) * 100 : null,
+            latestStatus: e.latestStatus,
+            latestScore: e.latestScore,
+            latestRunId: e.latestRunId,
+            latestMatureSkipped: e.latestMatureSkipped,
+        });
+    }
+    return rows.sort((a, b) => a.taskId.localeCompare(b.taskId));
+}
+
+// IO wrapper around buildTagTaskRows: fetch the window, drop ad-hoc runs and
+// (optionally) scope to one harness, then aggregate. Harness scoping happens
+// HERE, before the pure function sees the runs, so a newer run on a different
+// harness cannot de-tag a row in a harness-scoped view.
 export async function getTagTaskBreakdown(
     window: Window,
     tag: string,
@@ -647,51 +808,22 @@ export async function getTagTaskBreakdown(
             (harness == null ||
                 normalizeHarness(r.overview?.harness) === harness),
     );
-    const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
+    return buildTagTaskRows(perRun, tag);
+}
 
-    interface Acc {
-        skill: string | null;
-        statuses: (string | null)[];
-        latestRunId: string;
-        latestStatus: string | null;
-        latestScore: number | null;
-    }
-    const byTask = new Map<string, Acc>();
-
-    for (const { id, overview, reviewTagsByTask } of sorted) {
-        if (!overview) continue;
-        for (const t of overview.tasks) {
-            if (!taskMatchesTag(t, reviewTagsByTask, tag)) continue;
-            let entry = byTask.get(t.taskId);
-            if (!entry) {
-                entry = {
-                    skill: t.skill,
-                    statuses: [],
-                    latestRunId: id,
-                    latestStatus: t.status,
-                    latestScore: t.weightedScore,
-                };
-                byTask.set(t.taskId, entry);
-            }
-            entry.statuses.push(t.status);
-        }
-    }
-
-    const rows: TagTaskRow[] = [];
-    for (const [taskId, e] of byTask) {
-        const appearances = e.statuses.length;
-        const passed = e.statuses.filter((s) => s === "SUCCESS").length;
-        rows.push({
-            taskId,
-            skill: e.skill,
-            appearances,
-            passRate: appearances ? (passed / appearances) * 100 : 0,
-            latestStatus: e.latestStatus,
-            latestScore: e.latestScore,
-            latestRunId: e.latestRunId,
-        });
-    }
-    return rows.sort((a, b) => a.taskId.localeCompare(b.taskId));
+// Mean of the per-run success rates, over the runs that HAVE one. A run whose
+// successRate is null has no measurable outcome (no tasks, or a run.json that
+// failed to load) — folding it in as 0 would drag the headline tile down and
+// make "no data" indistinguishable from "everything failed". null when no run
+// in scope reports a rate at all.
+export function avgRunSuccessRate(
+    runs: readonly { successRate: number | null }[],
+): number | null {
+    const rates = runs
+        .map((r) => r.successRate)
+        .filter((r): r is number => r != null);
+    if (rates.length === 0) return null;
+    return rates.reduce((sum, r) => sum + r, 0) / rates.length;
 }
 
 // The slice of a run that the active tag/q filter selects: which tasks count,

@@ -17,9 +17,11 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Agent Configuration](#agent-configuration)
 - [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
+  - [Recording CLI Invocations](#recording-cli-invocations)
 - [Template Sources](#template-sources)
 - [Success Criteria](#success-criteria)
   - [Continuous Scoring](#continuous-scoring)
+  - [Glob patterns in path](#glob-patterns-in-path)
   - [file_exists](#file_exists)
   - [file_contains](#file_contains)
   - [file_check](#file_check)
@@ -164,7 +166,7 @@ agent:
     - "Read"
     - "Write"
     - "Bash"
-  model: "claude-sonnet-4-20250514"   # Optional: specific model
+  model: "claude-sonnet-5"            # Optional: specific model
   sdk_options:                        # Optional: Claude Code SDK pass-through
     effort: high                      # any non-framework-managed ClaudeAgentOptions field
 ```
@@ -513,6 +515,33 @@ Under `driver: tempdir` only `timeout` is enforced — the agent can consume
 arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
 container limits above to actually bind.
 
+### Recording CLI Invocations
+
+`record_cli` shadows executables with generated recording shims, so a task can assert on **what the agent actually ran** without hand-writing a mock:
+
+```yaml
+sandbox:
+  record_cli:
+    - tool: uip
+      exit_code: 1
+      stderr: "uip: not connected to a tenant in this sandbox.\n"
+    - tool: curl                   # so a disobedient agent cannot reach the network
+```
+
+Each shim records the invocation, writes the configured `stdout`/`stderr`, and exits with `exit_code` — which **defaults to 1**, so a bare `- tool: curl` makes the shadowed tool look like it failed. Set `exit_code: 0` when the agent should see success. Values outside 0-255 are rejected, since `sys.exit` truncates mod 256.
+
+`tool` must be a bare executable name, and a small reserved set (`python`, `python3`, `env`, `sh`, `bash`, `node`, `git`, `uv`, `cmd`) is refused: shadowing those breaks the harness itself rather than the tool under test — the shim's own interpreter, or the shell that `run_command` criteria use.
+
+The sandbox writes the shims into `cli_mocks/` and PATH-prepends that directory, then appends one JSON record per invocation to `cli_mocks/calls.jsonl` — the log [`cli_called`](#cli_called) reads by default. Nothing else to wire: no `mock_path_dirs`, no `template_sources`, no `log:` on the criterion.
+
+Notes:
+
+- **A `.cmd` twin** is generated beside each shim so a bare `uip` also resolves through Windows PATHEXT lookup.
+- **The log is seeded empty**, so a correct run that legitimately calls nothing still satisfies a `max_count: 0` guard — while a *missing* log (mock never ran, or wrote elsewhere) still fails.
+- **stdin is never read** by the shim: reading it would block whenever the sandbox leaves stdin attached to an open pipe, hanging the task.
+- **Collisions are rejected.** If a `mock_path_dirs` entry already provides an executable of the same name, setup raises rather than letting directory order decide which one runs.
+- **It stubs a tool; it does not proxy one, and it does not serve per-invocation responses.** Recording a *real* executable on the way through, or returning different output per invocation, stays a hand-written mock under `mock_path_dirs` — both depend on state the harness cannot guarantee (the tool being installed, PATH order, live credentials, a fixture set).
+
 ## Template Sources
 
 Tasks can start with preset files instead of an empty sandbox. Multiple sources are applied sequentially (last wins for conflicts).
@@ -587,11 +616,11 @@ Experiment variants can add `template_sources` that are **appended after** the t
 variants:
   - variant_id: baseline
     agent:
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-5"
 
   - variant_id: with-context-hint
     agent:
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-5"
     template_sources:
       - type: "starter_files"
         files:
@@ -641,6 +670,30 @@ every consumer, so no reader needs the original criterion to know whether a low
 score mattered.
 
 **Weighted score:** `weighted_score = sum(score * weight) / sum(weight)` — calculated regardless for quality assessment.
+
+### Glob patterns in `path`
+
+Every sandbox-relative path field accepts a glob — `path` on `file_exists`, `file_contains`, `file_matches_regex`, `file_check`, `json_check` and `classification_match`, `json_schema` on `json_check`, and `agent_file` on `reference_comparison`. Use one when the prompt does not pin where the file lands — a scaffolding tool that creates a wrapper directory the agent names itself, for example.
+
+```yaml
+- type: "file_contains"
+  path: "**/*.flow"                     # matches any depth under the sandbox root
+  includes: ['"core.logic.decision"']
+  description: "flow wires a Decision node"
+```
+
+Rules:
+
+- **A path that exists is never treated as a pattern.** A literal `path` behaves exactly as before, including one containing `*`, `?`, or `[` — a real file named `report[2024].json` is graded as itself, not as a character class that would match `report2.json`. Globbing only kicks in when the literal path does not exist.
+- **Glob matches skip ignored directories.** Expansion runs over the live sandbox root, which also holds harness-created content the agent never wrote (`.venv` for any task with a `python:` block, `node_modules`, `dist`, `build`, `__pycache__`, …), so matches are filtered through the same [`ignore_patterns`](#sandbox-configuration) set used for template copying. A segment your pattern names *literally* is an opt-in and survives, so `dist/**/*.js` still grades `dist`; to un-ignore a directory a wildcard has to discover, use the negation escape hatch — `ignore_patterns: ["!dist"]`.
+- Matches are sorted, and directories are skipped.
+- `file_exists` passes when the glob matches **at least one** file.
+- Content checks require the glob to match **exactly one** file. An ambiguous glob scores 0.0 and reports the matches (first 10, then `+N more`) rather than silently grading one of them — narrow the pattern.
+- When a glob resolves, the file that was actually graded is echoed in the criterion's `details` as `resolved: <path>`.
+
+Prefer a glob over a hardcoded path whose leading directory the task prompt never specifies: a correct artifact in an unexpected directory otherwise scores 0.0 on the path alone. Glob away only the segment the prompt leaves free, though — if the free part is an unknown wrapper directory, `**/<Name>.flow` stays unique where a blanket `**/*.flow` turns exactly-one into a hard 0.0 the moment a second flow file exists.
+
+> **Dataset note:** `${row.<field>}` substitution runs over `success_criteria` string leaves, so a row value containing `*`, `?`, or `[` lands inside `path`. Literal-first resolution means such a path still grades the real file when it exists; it falls back to glob expansion only when it does not.
 
 ### `file_exists`
 
@@ -796,6 +849,7 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_exit_code` | 0 | Expected exit code |
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
+| `score_from_stdout` | `false` | Read a float score (0.0–1.0) from the first stdout line (remaining lines become details); a non-zero exit code or a parse failure scores 0.0. Mutually exclusive with `expected_stdout`. |
 
 ### `file_matches_regex`
 
@@ -823,6 +877,12 @@ Compares agent's code with a reference solution using similarity scoring. **Cont
   weight: 2.0
 ```
 
+| Field | Default | Description |
+|-------|---------|-------------|
+| `agent_file` | *required* | Path to the agent's generated file (relative to the sandbox root). |
+| `comparison_method` | `"ast"` | `ast` (structure), `token` (text), or `complexity` (metrics). |
+| `similarity_threshold` | 0.8 | Minimum similarity score to pass (0.0–1.0). |
+
 **Comparison methods:**
 - `ast` — Abstract Syntax Tree similarity (structure-based)
 - `token` — Token-based similarity (implementation details)
@@ -841,6 +901,17 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
   description: "Agent must use curl to fetch weather"
 ```
 
+| Field | Default | Description |
+|-------|---------|-------------|
+| `tool_name` | `null` | Tool-name filter (e.g. `Bash`); `null` counts any tool. |
+| `command_pattern` | `null` | Regex to match the command; `null` matches any command. Matched with shell normalization (see below). |
+| `min_count` | 1 | Minimum matching commands required. `0` permits zero matches — combine with `max_count: 0` to assert a command must **NOT** run. |
+| `max_count` | `null` | Optional inclusive upper bound. When set, the criterion passes iff `min_count <= matches <= max_count`. |
+| `require_success` | `false` | Only count commands that completed successfully. |
+| `exclude_pattern` | `null` | Regex that must NOT match; a command matching both `command_pattern` and `exclude_pattern` is skipped. Also matched with shell normalization (see below). |
+
+**Shell normalization.** For a Bash command, both `command_pattern` and `exclude_pattern` are matched against the raw command text **and** its shell-normalized form — the `bash`/`sh`/`zsh -lc "..."` wrapper stripped and shell quoting resolved with `shlex` — and a hit on *either* form counts. So a pattern like `curated_channels` matches whether the agent wrote the argument bare, `'single'`-quoted, `"double"`-quoted, or `\"escaped\"`; you do **not** hand-encode shell quoting. Because the same haystacks also feed `exclude_pattern` and the `max_count` gate, normalization is **not** purely additive: a quote-obfuscated call can now be caught by an exclusion or a `max_count: 0` gate that the raw text alone would have missed — and, conversely, an unedited `exclude_pattern` may now exclude a call it previously let through. Cross-repo suites that hand-encoded quote tolerance in their patterns should re-baseline.
+
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
 
 ### `cli_called`
@@ -852,7 +923,7 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
 ```yaml
 - type: "cli_called"
   description: "Switched the project to the capable model"
-  log: "mocks/calls.jsonl"            # Path to the JSON Lines invocation log (required)
+  log: "mocks/calls.jsonl"            # Invocation log; omit it to use the record_cli default
   verb: "ixp projects configure-model" # Ordered prefix of the non-flag arguments
   positional: ["my_invoices-ixp"]      # Non-flag arguments following the verb, in order
   flags:
@@ -862,6 +933,8 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
   max_count: null                      # Maximum; null = unbounded, 0 = forbidden
   ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
 ```
+
+`log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
 
 **Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
 
@@ -907,7 +980,7 @@ Defaulting to "switch" is deliberate: `--yes` / `--force` / `-y` before the targ
 
 `ignore_flags` drops a flag from matching but does **not** make it value-bearing — an ignored flag that takes a value must also appear in `value_flags` (as `output` does by default). Otherwise `ignore_flags: ["verbose"]` on `delete --verbose proj-1` would let `--verbose` eat `proj-1`.
 
-**Limitation: bundled short flags are not split.** `-rf` parses as one flag named `rf`, so a predicate on `f` will not see it — including `absent: true`, which passes despite `-rf` being present. Assert on the long spelling, or add the bundled form via `aliases`. Likewise a bare negative number in flag position (`seek -1`) is read as a flag named `1`.
+**Clustered short flags are split, and declarations win.** `-rf` matches predicates on `r` and `f` — so a `-yf` cannot escape an `aliases: ["y"]` guard. If your CLI has a genuine multi-character short flag, naming it (in `flags`, `value_flags`, or `ignore_flags`) keeps it whole; and `-fvalue` binds when `f` is value-bearing. A bare negative number stays positional (`seek -1`), unless you declare a flag by that name (`head -1`).
 
 **Negative guards want the FEWEST facets that capture the forbidden act.** This is the opposite of a positive assertion, and it is easy to get backwards. `max_count: 0` passes when *nothing matches*, so every facet you add is another way for the real invocation to slip past the pattern and report a false PASS.
 
@@ -1026,6 +1099,8 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
 | `max_tokens` | `2000` | Maximum tokens in the judge's response |
 | `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
+| `capture_transcript` | `true` | Persist a `JudgeTranscript` (raw verdict + rendered prompts + token usage) to a sibling `judge-<idx>.yaml`. Set `false` to drop it when on-disk size matters (e.g. 1000-row datasets); the `findings` on the result persist regardless. |
+| `max_transcript_chars` | `100000` | Aggregate cap on captured transcript text (verdict + prompt + system, split 60/30/10). Exceeding it marks the transcript `truncated=True`. |
 
 **Transport selection.** The judge call is routed by the active `API_BACKEND`:
 
@@ -1078,7 +1153,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
   max_turns: 5
   turn_timeout: 300
   agent:                              # Nested AgentConfig — same shape as task.agent
-    model: "claude-sonnet-4-6"
+    model: "claude-sonnet-5"
     permission_mode: "bypassPermissions"
     allowed_tools: ["Bash", "Read", "Grep", "Glob"]
     sdk_options: {effort: low}        # Optional SDK pass-through (e.g. effort)
@@ -1099,6 +1174,8 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `max_turns` | `50` | Judge's inner-loop turn limit |
 | `turn_timeout` | `300` | Wall-clock timeout (seconds) |
 | `agent` | hardened judge defaults | Nested `AgentConfig` — `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `ignore_patterns`, `sdk_options`. A partial block (e.g. only `model:`) still applies the judge security defaults for missing fields, and the security floor (`.claude` / `.mcp.json` / `_reference` ignore patterns, `setting_sources=[]`) is always enforced. |
+| `capture_transcript` | `true` | Persist a `JudgeTranscript` (tool calls + token usage + raw verdict + rendered prompts) to a sibling `judge-<idx>.yaml`. Set `false` to drop the trajectory log when on-disk size matters; the `findings` on the result persist regardless. |
+| `max_transcript_chars` | `100000` | Aggregate cap on captured transcript text (verdict + prompt + system + tool detail/result-preview lines, split 60/30/10 with tool calls prioritized). Exceeding it marks the transcript `truncated=True`. |
 
 **Security**
 
@@ -1315,6 +1392,9 @@ simulation:
   # Sampling (variance analysis).
   n_trials: 3                          # Run N independent dialogs per (task, variant).
 
+  # Who plays the simulated user. Pinned, NOT inherited from the run's route.
+  model: anthropic.claude-sonnet-4-6
+
   # Criteria timing.
   check_criteria: every_turn           # One of: end_of_dialog | every_turn | both.
                                        # Required to be 'every_turn' or 'both' when
@@ -1333,8 +1413,9 @@ simulation:
 | `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
 | `n_trials` | `1` | Independent dialog trajectories per (task, variant). |
 | `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
+| `model` | `anthropic.claude-sonnet-4-6` | Model that plays the simulated user. Auto-translated to the run's backend (Bedrock inference profile / bare Anthropic alias), the same way [`llm_judge`](#llm_judge)'s `model` is. |
 
-The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute` — model/temperature/sampling are resolved at the route level (same `-b` flag as the coding agent), so they are not configured on this block.
+The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute`, so temperature and sampling are resolved at the route level (same `-b` flag as the coding agent) and are not configured on this block. The **model is not**: it is pinned by `model` above. Inheriting it from the route meant `BEDROCK_MODEL` decided who the simulated user was, so an A/B varying the subject model silently varied its interlocutor too. Hold `model` fixed across variants for the same reason you hold a judge model fixed — the simulator is part of the measuring instrument, not the thing being measured.
 
 **Semantics:**
 

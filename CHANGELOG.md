@@ -2,6 +2,173 @@
 
 <!-- version list -->
 
+## v0.9.6 (2026-08-11)
+
+### Bug Fixes
+
+- Code review fixes for evalboard path-to-ga stale tags and mature passes
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- Review round 2 — gate evalboard in CI, correct GPT-5.6 rates
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **ci**: Correct defects in the uipath runner migration
+  ([#86](https://github.com/UiPath/coder_eval/pull/86),
+  [`57556af`](https://github.com/UiPath/coder_eval/commit/57556af6e47bffcd5fbbb708b9f8b399cceea4c7))
+
+- **criteria**: Make glob path resolution literal-first and ignore-filtered
+  ([#65](https://github.com/UiPath/coder_eval/pull/65),
+  [`b3bba2b`](https://github.com/UiPath/coder_eval/commit/b3bba2b6c00e3772351b28bf63d5cde9e97b8e7e))
+
+- **criteria**: Split clustered short flags and keep negative numbers positional
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+- **evalboard**: 1/3 — drop de-tagged tasks and score only executed runs
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **evalboard**: Path-to-GA shows only still-tagged tasks, scored on runs that executed
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **evalboard**: Resync lib/pricing.ts with the authoritative pricing.py table
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **sandbox**: Close the remaining record_cli findings from #73
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+- **sandbox**: Repair record_cli defects found reviewing #73
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+- **sandbox**: Stop the recorder dir defeating the PLUGIN_TOOLS_DIR pin
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+### Chores
+
+- Change to centralized managed GitHub pool ([#86](https://github.com/UiPath/coder_eval/pull/86),
+  [`57556af`](https://github.com/UiPath/coder_eval/commit/57556af6e47bffcd5fbbb708b9f8b399cceea4c7))
+
+### Documentation
+
+- **harness**: Defer four TS-side evalboard invariants from the path-to-ga fix
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+### Features
+
+- **criteria**: Accept glob patterns in criterion path fields
+  ([#65](https://github.com/UiPath/coder_eval/pull/65),
+  [`b3bba2b`](https://github.com/UiPath/coder_eval/commit/b3bba2b6c00e3772351b28bf63d5cde9e97b8e7e))
+
+- **evalboard**: 2/3 — surface last-seen and maturity on the Path-to-GA table
+  ([#94](https://github.com/UiPath/coder_eval/pull/94),
+  [`ce006c1`](https://github.com/UiPath/coder_eval/commit/ce006c19b594701e90aec1d63cae15b337c0e06d))
+
+- **sandbox**: Generate CLI recording shims via record_cli
+  ([#73](https://github.com/UiPath/coder_eval/pull/73),
+  [`a7ec3ea`](https://github.com/UiPath/coder_eval/commit/a7ec3eababc907a0220a598d974540eb579a538c))
+
+
+## v0.9.5 (2026-08-05)
+
+### Bug Fixes
+
+- **command-executed**: Keep whole argv-joined payload in shell unwrap
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **command-executed**: Match patterns against shell-normalized commands
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **command-executed**: Narrow command param to str before shell-normalizing
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **command-executed**: Recognize shell wrappers by predicate, not allowlist
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **criteria**: Add present predicate so asserting a switch cannot weaken a guard
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **criteria**: Make cli_called guards fail loud instead of vacuously passing
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **criteria**: Stop ignore_flags re-opening the guard false-PASS
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **early-stop**: Address PR review — trajectory parity, reason determinism, doc restore
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+- **lint**: Derive CE030 criteria from the source union literal, not runtime
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **lint**: Enumerate in-tree criteria by module attribute, not the union
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **lint**: Scope CE030 criterion parity to in-tree criteria only
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+- **reports**: Explicit return on every early_stop_gate_note path (CodeQL py/mixed-returns)
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+- **reports**: Pre-initialize the gate note so CodeQL sees it bound on every path
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+### Chores
+
+- **deps-dev**: Bump postcss from 8.5.18 to 8.5.23 in /evalboard
+  ([#75](https://github.com/UiPath/coder_eval/pull/75),
+  [`cdced15`](https://github.com/UiPath/coder_eval/commit/cdced152dea732096dcff939c45e7d7c927c2a5a))
+
+### Documentation
+
+- Surface the Marketplace listing and make the Action quickstarts self-sufficient
+  ([#80](https://github.com/UiPath/coder_eval/pull/80),
+  [`401245a`](https://github.com/UiPath/coder_eval/commit/401245ad14055c1da5d7b594e506686c59cedce7))
+
+- **command-executed**: Document shell-normalization contract + gate it (CE030)
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+### Features
+
+- **criteria**: Add cli_called for structured invocation matching
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **criteria**: Match a flag across spellings with FlagMatch.aliases
+  ([#72](https://github.com/UiPath/coder_eval/pull/72),
+  [`8574ded`](https://github.com/UiPath/coder_eval/commit/8574dedb02d6e9ab883b042934f89297591e8abd))
+
+- **early-stop**: Per-criterion arming via stop_early blocks on live criteria
+  ([#78](https://github.com/UiPath/coder_eval/pull/78),
+  [`4cf8092`](https://github.com/UiPath/coder_eval/commit/4cf80920422e25fec663ef93e483902bdeffad24))
+
+### Refactoring
+
+- **command-executed**: Total _match_haystacks, shared window, memoized
+  ([#77](https://github.com/UiPath/coder_eval/pull/77),
+  [`7abd080`](https://github.com/UiPath/coder_eval/commit/7abd08098146067890e16740c37239c2e0009a24))
+
+
 ## v0.9.4 (2026-08-04)
 
 ### Bug Fixes

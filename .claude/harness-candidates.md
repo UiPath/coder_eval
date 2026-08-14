@@ -107,3 +107,287 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
+
+## From PR #77 (command-executed shell-normalize) — CE030-to-criteria deferred
+
+- [ ] **Extend CE030 doc/schema-parity to the `SuccessCriterion` union** so a new
+  criterion (or field) can't ship undocumented. Attempted in PR #77 and reverted:
+  CI installs `--extra uipath`, and in that environment `coder_eval.models.criteria`
+  gains a `CliCalledCriterion` (fields `log`/`positional`) that is NOT present in a
+  plain checkout (it did not reproduce on macOS, whose lockfile resolution omits the
+  contributing linux-only component). It defeated every discriminator tried — union
+  membership, a `__module__` string filter (it is spoofed to `coder_eval.models.criteria`),
+  a genuine-module-attribute scan (it is `setattr` onto the module), and even an AST
+  parse of the `SuccessCriterion` union literal in `criteria.py` source (CI's imported
+  criteria module resolves to a file whose union literal already contains it). No
+  runtime OR source signal available in the lint could separate the injected criterion
+  from an in-tree one. Revisit only with a way to identify the in-tree criterion set that
+  is provably immune to the uipath integration — e.g. a hardcoded name allowlist of the
+  in-tree criteria (losing auto-coverage of new ones), or first understanding exactly how
+  that environment injects the criterion. Until then CE030 stays scoped to the four
+  top-level models; the `command_pattern`/`exclude_pattern` contract this PR changed is
+  documented in the Field descriptions and TASK_DEFINITION_GUIDE regardless.
+
+## From the evalboard Path-to-GA de-tag / mature-passes fix (4e5bbc4…dd5f7e9) — TS-side guards deferred
+
+Context: the CExxx harness is a **Python** AST runner over `src/coder_eval/`, so none
+of the invariants below are mechanizable in it. Each would need a TypeScript lint
+harness (eslint config + custom rules) that `evalboard/` does not have today —
+standing one up for three call sites fails the KISS/YAGNI gate. Deferring rather
+than dropping; promote if a fourth TS-side invariant appears, and stand up the
+harness once for all of them.
+
+> **Update (PR #94 review round 2).** The *execution* half of this gap is closed:
+> `evalboard/` is now gated by the `evalboard` job in `.github/workflows/pr-checks.yml`
+> and reachable locally via `make evalboard-verify`, so the vitest suite (including
+> the pricing drift guard) is enforcement rather than documentation. What remains
+> deferred below is the *static-analysis* half — eslint has still not been stood up.
+> The review that prompted this round names four more candidate TS rules (raw
+> `status === "SUCCESS"` outside `lib/status.ts`; DOM-global shadowing in props;
+> inline copies of the tag predicate; per-run tooltip copy reused on aggregate
+> surfaces), which meets the "fourth invariant" promotion bar stated above —
+> **stand up eslint next time `evalboard/` is touched substantively.**
+
+- [ ] **"Every consumer of `RunOverviewTask.matureSkipped` must decide explicitly
+  whether a carry-forward row counts."** Four consumers now, and they deliberately
+  DISAGREE: `lib/trends.ts` and `app/runs/[id]/run-view.tsx` count a mature skip as
+  a pass; `lib/overview.ts::buildTagTaskRows` excludes it from both terms
+  (`/path-to-ga` is a GA-readiness page). A new consumer silently inheriting either
+  convention is a real hazard. Guard shape: flag a file that reads `.matureSkipped`
+  without a nearby comment naming its convention — weak, hence the deferral. Closed
+  for now by unit tests that assert the exclusion from BOTH numerator and denominator
+  (`lib/__tests__/overview.test.ts` → `describe("buildTagTaskRows")`).
+
+- [x] ~~**`taskCarriesRepoTag` is the single repo-provenance tag predicate — but one
+  duplicate survives.**~~ **RESOLVED in PR #94 review round 2.** The predicate moved to
+  a dependency-free `lib/tags.ts` (structurally typed on `{skill, tags}` so
+  `RunOverviewTask`, `TaskResultSummary` and `TaskTrend` all satisfy it), re-exported
+  from `lib/overview.ts` for existing callers. Both inline copies now import it:
+  `app/runs/[id]/run-view.tsx` (the `"use client"` one that could not before) and
+  `lib/trends.ts::trendMatchesTag` (a third copy the original deferral missed).
+  Still worth a lint rule ("no inline `tags.includes(x) || skill === x`") to catch
+  future copies — folded into the eslint promotion noted above.
+
+- [ ] **The de-tag rule fails CLOSED on a newest run that loads fine but stamps no
+  `tags`** (`lib/overview.ts::buildTagTaskRows`): every tagged task would read as
+  de-tagged and the table would empty, rendering an empty state indistinguishable from
+  a genuine full de-tagging. Its sibling failure mode (`overview == null`, a transient
+  blob read failure) IS guarded, with exactly this rationale. Currently unreachable —
+  0 of ~116k date-shaped non-ad-hoc task rows in `runs-remote/` lack `tags`, and the
+  six zero-tag runs found are all ad-hoc (filtered upstream by id shape + `meta.adhoc`)
+  — so the barrier is two upstream filters rather than a check at the seam. Left
+  unguarded on purpose: a `if (taggedInRun.size === 0) skip the de-tag signal` guard
+  would also mask a real, total de-tagging. Revisit if the pipeline ever stops
+  stamping tags, or if a non-ad-hoc run legitimately carries zero tagged rows.
+
+- [ ] **Discriminating-test discipline for predicate narrowings.** Two tests in this
+  change passed for the wrong reason — a downstream rule (the de-tag drop) masked the
+  mutation they claimed to catch — and the plan leaned on a `grep` acceptance criterion
+  that CI never runs. Both were found by mutation-testing the suite and fixed. No
+  mechanizable guard; the durable lesson is: when a test names a narrowing, construct
+  the fixture so the row SURVIVES every other rule, or the assertion proves nothing.
+
+- [ ] **CE034 — runner-label registry + dogfood runner parity** over
+  `.github/workflows/*.yml`. Two clauses: (a) every label a job can land on must appear
+  in `.github/actionlint.yaml`'s `self-hosted-runner.labels` or a stock GitHub-hosted
+  allowlist — including *both* branches of an expression-valued `runs-on:`, which
+  actionlint treats as opaque; (b) `action-dogfood`'s label must equal the one the
+  consumer snippet in `docs/tutorials/02-ci-pipeline.md` advertises. Nothing guards
+  either today: actionlint is not wired into `make verify` or pre-commit (grep: the
+  config file is its only mention), and CE026 parses that job's prerequisite *steps*
+  but never its `runs-on:`. Why it matters: an undeclared label is not a runtime error,
+  the job queues until GitHub cancels it hours later — indistinguishable from a pool
+  outage; and a repo-wide `runs-on:` migration has twice swept up `action-dogfood`
+  (#306, then 027121e in this PR), which exists precisely to prove the published Action
+  works on the image external integrators use. Implemented and verified once (both
+  clauses caught their regression class on the real tree) but reverted as out of
+  proportion to a 16-line runner migration — ~240 lines including tests. Note when
+  writing it: discriminate labels from expression operands structurally, on the
+  preceding `&&`/`||`, NOT on the string's shape — a "contains 'ubuntu'" heuristic
+  silently fails on `uipath-ubunut-latest`, the exact transposition typo the rule is
+  for. Caught in the multi-model review of PR #86.
+
+## From the 2026-08-04 Claude Code plugin marketplace run
+
+- [ ] **Plugin skills must not name a file that exists only in THIS repo** — the
+  `test_bundled_files_reference_no_repo_paths` denylist (`docs/`, `src/`,
+  `.claude/shared/`, `.claude/commands/`, `uv run`, `../`) deliberately allows
+  `tasks/` and `.claude/skills/`, because those are user-workspace paths the
+  skills legitimately scan and scaffold. So a skill body naming a specific repo
+  file (e.g. `tasks/hello_date.yaml`) would slip past the guard even though an
+  installed plugin is copied to `~/.claude/plugins/cache/` without it. The
+  obvious rule — "extract path-shaped tokens, fail if the path exists at the repo
+  root" — is NOT cheap: `init` legitimately tells users to scan `pyproject.toml`
+  and `package.json`, and `pyproject.toml` exists here, so the heuristic
+  false-positives on correct prose. Needs a token classifier that distinguishes
+  "a file to look for in the user's repo" from "a file in ours", which is a
+  design problem, not a 30-minute one. No skill violates it today (grepped) —
+  caught in the 2026-08-04 claude-code-plugin-marketplace implementation run.
+  *Update (2026-08-04, plugin-audit-p0-p1 run): the guard was renamed and widened
+  from `skills/*/SKILL.md` to every shipped text file under `plugins/coder-eval/`
+  (`PLUGIN_TEXT_FILES`), which closed the coverage half of this gap — a bundled
+  reference now cannot name a repo path either. The token-classifier problem
+  described above is unchanged and still deferred.*
+
+## From 2026-08-04 plugin-audit-p0-p1 run
+
+- [ ] **A skill's advertised `description` must not promise a check that no bundled
+  reference declares.** `lint-tasks` ships a user-facing description claiming it
+  finds "prompts that give away the answer", but that check was declared only in
+  `skills/task/SKILL.md` prose — a file `lint-tasks` never reads — so the two
+  rubric readers had already forked on it before the skill shipped. Caught by a
+  reviewer, not by a test; fixed by promoting it to rubric check 7. A guard would
+  have to map claim-phrases in a description onto declarations in
+  `reference/task-rubric.md`, which is natural-language matching, not a token
+  grep — the phrasings are deliberately different (a description sells, a rubric
+  check instructs), so any cheap version either misses the real case or fails on
+  correct prose. Needs a fixed vocabulary of claim tags shared between the two
+  files to become mechanical, which is a design change rather than a 30-minute
+  rule — caught in the 2026-08-04 plugin-audit-p0-p1 implementation run.
+
+## From the PR #82 review follow-up (2026-08-10)
+
+- [ ] **CE035 — documented `coder-eval` invocations must be executable as written.**
+  `init/SKILL.md` told the agent to run `coder-eval plan <task-directory>` and
+  "iterate until it exits 0", which the CLI rejects outright (`plan` takes files;
+  a directory argument exits 1 with a hint) — an unreachable loop condition
+  shipped in a skill. A rule would scan inline-code spans and fenced `bash` blocks
+  across `README.md`, `docs/**/*.md` and `plugins/**/*.md`, assert the subcommand
+  exists in the Typer app, and — the harder half — that the *argument shape* is
+  one the command accepts. The subcommand check is cheap and would not have caught
+  this; the argument-shape check is what matters and needs either a real
+  invocation (see the live-smoke candidate below) or a per-command arity model
+  that duplicates the CLI signature. Deferred on that split — caught in the PR #82
+  review, fixed by hand in `init/SKILL.md`.
+
+- [ ] **Documented-CLI live smoke.** The behavioural counterpart to CE035: in a
+  `-m live`/`-m slow` test, materialize a fixture repo with one task YAML and
+  execute every fenced `coder-eval …` command extracted from the shipped skills
+  and docs, asserting exit 0 (or an explicitly-expected non-zero). This is the
+  only form that proves argument shape rather than command existence. Not
+  statically reachable, hence separate from CE035 — proposed in the PR #82 review.
+
+## From the 2026-08-11 plugin generic-adopter run
+
+- [ ] **`working-directory` input on `action.yml`.** A repository whose eval tree is
+  nested (`tests/tasks/…`) has no way to tell the composite action to run from that
+  subdirectory, so every path in every input has to be spelled from the repo root. The
+  fix is a new input, and that is why it is deferred rather than cheap: `action.yml`'s
+  inputs are a **published API** — CE026 clause 4 asserts every `with:` key across four
+  onboarding surfaces is a real input, so adding one means updating those surfaces (the
+  `ci` skill among them, whose output lands in other people's repositories), and it
+  carries action tag/release implications. Out of scope for the plan that surfaced it,
+  which worked around it in the `ci` skill's prose instead.
+
+- [ ] **`shopt -s globstar` (or quoting `$CE_TASKS`) in `action.yml`'s run step.** The
+  real fix for a degradation the `ci` skill currently works around in prose:
+  `args+=($CE_TASKS)` is deliberately unquoted so a caller can pass several patterns, but
+  with `globstar` off `a/**/*.yaml` expands to `a/*/*.yaml` and **silently drops every
+  top-level task** — reproduced with `a/top.yaml` + `a/sub/deep.yaml`, which yields
+  `deep.yaml` alone. `nullglob` is off too, so an unmatched pattern reaches the CLI
+  literally and exits 1 (`Error: Task file not found: …`). One line in the action fixes
+  the first half; the second half is arguably correct-as-is (failing loudly beats
+  silently running nothing). Deferred alongside `working-directory` because both change
+  the action's observable contract and belong in one considered change.
+
+## From the final review of the 2026-08-11 plugin generic-adopter run
+
+Two **pre-existing `action.yml` defects** surfaced by an external reviewer during that
+run's final review. Neither is caused by the change, and `action.yml` was explicitly out
+of that plan's scope, so both are recorded here rather than fixed in passing. They belong
+with the two `action.yml` items above — one considered change to the action's contract.
+
+- [ ] **The score gate silently drops a malformed `weighted_score`.** `action.yml`'s
+  minimum-task-score step filters `task_results` rows down to usable floats; a row whose
+  score is a string, a bool, `NaN`/`inf`, or out of `[0, 1]` is omitted from the
+  comparison rather than failing it. So a `run.json` carrying one corrupt row **and** one
+  valid row above the floor gates **green**, which contradicts the fail-closed intent
+  stated in that step's own comment. The fix is to error on a present-but-invalid score
+  while still skipping `None` (errored tasks are already covered by coder-eval's exit
+  code). Wants a test over a synthetic `run.json` per bad-value class, which is why it is
+  not a five-minute change.
+
+- [ ] **`tasks:` is declared optional but omitting it cannot work.** The input defaults to
+  empty and the run step then appends no path arguments, so `coder-eval run` is invoked
+  bare — and zero-argument discovery resolves against the *installed package's* location,
+  finds nothing, and exits 1. The input is therefore effectively required, and the action
+  advertises otherwise. Either mark it `required: true` (a published-input contract change,
+  see the `working-directory` item) or fail with a clear message instead of an obscure
+  discovery error.
+
+## From the coder-eval-code-review of fix/antigravity-wait-for-wakeup (2026-08-12)
+
+- [ ] **A retry/poll loop's continuation state must derive from a stable per-entity
+  key, never a mutable monotonic counter used as an id fallback.** `_AntigravityTurnState._handle_tool_call`
+  minted a synthetic tool-call id from `f"{raw_name}_{self._next_seq}"` when the SDK's
+  `call.id` was falsy; since `_next_seq` advances between a tool call's ACTIVE and DONE
+  emissions, the DONE step computed a *different* fallback id than the ACTIVE step,
+  stranding the ACTIVE entry as a permanent orphan and stalling `communicate()`'s new
+  poll loop for its full `_MAX_BACKGROUND_POLLS` budget on every id-less turn. Fixed by
+  deriving the fallback from `(step.step_index, call_index)` instead (stable across a
+  step's own re-emissions, per this class's own docstring) -- then, in the same PR,
+  further folded in `step.trajectory_id` (falling back to bare `step_index` when it's
+  empty, mirroring the SDK's own `trajectory_id:step_index` id scheme), since a
+  sub-agent trajectory can reuse the same low `step_index` values as the main one and
+  two id-less calls across trajectories would otherwise collide. Not promoted to a CExxx rule:
+  this is the only id-fallback-driving-control-flow site in the codebase today (a
+  single call site, not a recurring class per the existing "single call-site fix, no
+  recurring pattern to guard" convention) — a mechanical AST rule for "no mutable
+  counter in a dict-key fallback" would need real design work to avoid false-positiving
+  on ordinary sequence-numbering counters elsewhere in the file. Caught by two
+  independent reviewers (Opus fallback pair) in this run's final code review.
+
+- [ ] **A `while` loop built around a cooperative-cancellation watchdog should read the
+  watchdog's own "already decided to fire" flag in its condition, not rely solely on a
+  later exception handler to notice.** The antigravity poll loop's condition checked
+  `not state.stopped_early_hit and state.has_orphaned_tool_call() and poll_count < cap`
+  but not `state.timeout_hit`, so if `ThreadedWatchdog`'s background thread set the flag
+  before its `task.cancel()` actually landed on this coroutine, the loop kept
+  sleeping/re-draining for up to the full poll budget before the pre-existing
+  post-loop `if state.timeout_hit:` check ever got a chance to run. Fixed by adding
+  `and not state.timeout_hit` to the condition, plus a mid-body early exit right after
+  the sleep (`if state.timeout_hit: break`) so a flag landing DURING the sleep skips
+  the following re-drain too, instead of waiting for the loop's next head check. Not
+  promoted: `ThreadedWatchdog` + a bespoke poll loop reading its own state flag is a
+  one-off shape unique to this agent; no second instance exists to generalize a rule
+  from. Caught in the same
+  final review as above.
+
+- [ ] **A regression test's fake dependency must model every layer the fix under test
+  actually touches, not just the outermost one.** `_drain()`'s cooperative-stop path
+  wraps a real SDK call (`Conversation.receive_steps()`) that is itself a delegating
+  async generator over an inner, connection-layer generator holding the real
+  re-entrancy guard. The first regression test written for this fix used a
+  single-layer fake (the guard lived on the SAME generator `_drain()` iterated), which
+  passed against an incomplete fix (`contextlib.aclosing` on the outer generator only)
+  that does not work against the real two-layer SDK shape — confirmed live that the
+  inner generator's cleanup is deferred to a LATER event-loop turn, not synchronous
+  with the outer's `aclose()`. Caught by a reviewer re-deriving the real dependency's
+  shape from its installed source, not by the test itself. Not promoted: detecting "a
+  test double is missing a delegation layer the source has" is a semantic match
+  against third-party source, not an AST pattern in our own code — no cheap mechanical
+  check exists. Caught in the round-3 coder-eval-code-review of this same branch.
+
+- [ ] **An agent's internal sleep-and-retry loop must derive its own exit bound from
+  the turn's actual `timeout`, never a fixed cycle count picked independently.** The
+  poll loop's own graceful exit path (force-close a never-resolving orphan as
+  unresolved, finalize and grade normally) was bounded by `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS`
+  (120 × 5s = 600s) — DOUBLE `experiments/default.yaml`'s own default `turn_timeout: 300`.
+  Since the pre-existing `ThreadedWatchdog` enforces `timeout` by cancelling the whole
+  turn, it always won that race under default settings, making the graceful path dead
+  code: a tool call spuriously left ACTIVE with no real background job behind it (a
+  real, observed case — see the final validation run) went from "finalizes immediately,
+  graded on whatever the agent wrote" pre-fix to "burns the full 300s, then crashes as
+  `TurnTimeoutError` with zero criteria graded" post-fix — a strict regression for that
+  input class. Fixed by deriving a `poll_deadline` from a fraction (0.8x) of the actual
+  `timeout` passed to `communicate()`, falling back to the cycle cap only when
+  `timeout is None`. Caught independently by two reviewers (`bai-uipath`, `uipreliga`)
+  on the PR, both citing the exact same arithmetic mismatch. **Not promoted in this
+  pass**, but a stronger candidate than most entries here: `uipreliga` proposed a
+  generic whole-tree rule (their CE035) — for every sleep-loop under
+  `src/coder_eval/agents/**`, assert its own cycle-count × interval either references a
+  timeout-derived name or is provably below `experiments/default.yaml`'s baseline — that
+  would catch this class of bug in ANY agent, not just this one (confirmed zero
+  violations on `main` before this bug, one on this PR). Worth a real look next time
+  `agents/` is touched, since a second agent adding its own disconnected sleep-loop
+  constant would reintroduce the exact same shape.

@@ -443,6 +443,51 @@ class TestRegressionsFromReview:
         assert "ixp projects get proj-1" in details
         assert "(+1 more)" in details
 
+    def test_clustered_short_flags_are_split(self, sandbox_with_log):
+        """`-yf` used to parse as one flag named `yf`, so an aliases: [y] predicate
+        missed it -- leaving the `-y` escape one keystroke away from the hole
+        `aliases` exists to close."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "-yf", "proj-1"])])
+        guard = CliCalledCriterion(
+            description="never deleted without confirming",
+            log=LOG,
+            verb="ixp fields delete",
+            flags={"yes": {"absent": True, "aliases": ["y"]}},
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(sandbox).check(guard).score == 1.0
+
+    def test_declared_multi_char_short_flag_is_taken_whole(self):
+        """Declaring the name wins over splitting, for CLIs with real -ab flags."""
+        assert _split_flags(["rm", "-rf", "p"], frozenset(), frozenset(), frozenset({"rf"})) == (
+            ["rm", "p"],
+            {"rf": [""]},
+        )
+
+    def test_attached_value_on_a_short_flag(self):
+        assert _split_flags(["g", "-ff-002"], frozenset(), frozenset({"f"}), frozenset({"f"})) == (
+            ["g"],
+            {"f": ["f-002"]},
+        )
+
+    def test_bare_negative_number_stays_positional(self):
+        """`-1` as a flag named `1` dropped it from the positionals -- the same
+        silent disappearance as the --yes bug."""
+        assert _split_flags(["seek", "-1"], frozenset(), frozenset(), frozenset()) == (
+            ["seek", "-1"],
+            {},
+        )
+        assert _split_flags(["seek", "-1.5"], frozenset(), frozenset(), frozenset())[0] == ["seek", "-1.5"]
+
+    def test_declared_numeric_flag_still_parses_as_a_flag(self):
+        """`head -1 file` -- declaring it wins over the numeric rule."""
+        assert _split_flags(["head", "-1", "f.txt"], frozenset(), frozenset(), frozenset({"1"})) == (
+            ["head", "f.txt"],
+            {"1": [""]},
+        )
+
     def test_declared_value_flag_consumes_a_dash_leading_value(self):
         """`--limit -1 proj-1`: declared value flags bind even a dash-leading value."""
         positional, flags = _split_flags(

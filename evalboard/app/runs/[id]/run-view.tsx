@@ -7,6 +7,7 @@ import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
 import { passBarClass, passClass } from "@/lib/pass-rate";
 import { perTaskPassCounts, statusCategory } from "@/lib/status";
+import { taskCarriesRepoTag } from "@/lib/tags";
 import { ChipLegend } from "@/app/_overview/tag-rail";
 import { CollapsibleRail } from "@/app/_components/collapsible-rail";
 import { ActivationCard } from "./activation-card";
@@ -279,9 +280,7 @@ export function RunView({
             // `tags` URL param works for both rails. Robust to new runs where
             // the skill comes from task_path but is missing from task.tags.
             arr = arr.filter((t) =>
-                selectedTags.every(
-                    (tag) => t.tags.includes(tag) || t.skill === tag,
-                ),
+                selectedTags.every((tag) => taskCarriesRepoTag(t, tag)),
             );
         }
         if (selectedReviewTags.length > 0) {

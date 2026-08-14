@@ -409,6 +409,14 @@ class SimulationTelemetry(BaseModel):
     simulator_output_tokens: int = Field(default=0, ge=0, description="Sum of simulator completion tokens across turns")
     simulator_failures: int = Field(default=0, ge=0, description="Number of simulator LLM calls that raised")
     total_turns: int = Field(description="Number of user↔agent exchanges completed in this dialog", ge=0)
+    simulator_model: str | None = Field(
+        default=None,
+        description=(
+            "Resolved model that played the simulated user, captured so a persisted "
+            "task.json is self-describing and its cost prices from a fact rather than "
+            "from the run's route. None on records written before the model was pinned."
+        ),
+    )
 
 
 class EarlyStopReason(StrEnum):
@@ -953,9 +961,10 @@ def judge_cost_usd(result: EvaluationResult) -> float | None:
 def simulator_cost_usd(result: EvaluationResult) -> float | None:
     """Price an evaluation's simulator turns. ``None`` outside simulation mode.
 
-    Priced at the ROUTE's model, not the subject's: ``UserSimulator`` pins
-    ``model=None`` so it resolves to ``BEDROCK_MODEL``, which differs from the
-    subject on any task that pins ``agent.model``.
+    Priced at the SIMULATOR's own model — ``SimulationConfig.model``, recorded on
+    the record as ``simulator_model`` — not the subject's and not the route's. The
+    two older fallbacks remain for records written before the model was pinned, when
+    the simulator inherited ``BEDROCK_MODEL`` from the route.
 
     A floor. ``UserSimulator`` records only ``uncached_input_tokens`` and drops
     both cache buckets, so a cached prefix is largely absent from the count.
@@ -966,9 +975,11 @@ def simulator_cost_usd(result: EvaluationResult) -> float | None:
     if sim is None or not (sim.simulator_input_tokens or sim.simulator_output_tokens):
         return None
     route_model = (result.environment_info or {}).get("bedrock_model")
-    # Falls back to the subject's model on a non-Bedrock route, where the SDK picks
-    # its own default and nothing on the record names it.
-    model = route_model if isinstance(route_model, str) and route_model else result.model_used
+    model = sim.simulator_model or (
+        # Legacy records only: the route's model, else the subject's on a non-Bedrock
+        # route where the SDK picked its own default and nothing named it.
+        route_model if isinstance(route_model, str) and route_model else result.model_used
+    )
     if not model:
         return None
     return calculate_cost(

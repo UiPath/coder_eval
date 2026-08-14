@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from coder_eval.models import RepoSource, SandboxConfig, TaskDefinition, TemplateDirSource
 
@@ -106,6 +107,79 @@ def test_command_not_executed_alias_normalizes_before_union_dispatch():
     assert legacy.type == "command_executed"
     assert legacy.min_count == 0
     assert legacy.max_count == 0
+
+
+def test_alias_overlay_overrides_a_user_supplied_count():
+    """The alias overlay wins over the item's own fields — `{**item, **overlay}`.
+
+    A legacy `command_not_executed` carrying an explicit `min_count: 2` is still asking
+    for "this command was NOT run". If the merge were the other way round that 2 would
+    survive normalization and produce a `command_executed` requiring two invocations —
+    a criterion that passes exactly when the original asked it to fail. Deliberately
+    literal: this is the independent net over the alias map, so it must not be driven
+    off the same constant the loader reads.
+    """
+    from coder_eval.models import CommandExecutedCriterion
+
+    td = TaskDefinition(
+        task_id="legacy_with_explicit_count",
+        description="d",
+        initial_prompt="p",
+        agent=None,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[
+            {
+                "type": "command_not_executed",
+                "description": "Do not call the retired command",
+                "tool_name": "Bash",
+                "command_pattern": r"uip\s+codedagent\s+new\b",
+                "min_count": 2,
+                "max_count": 5,
+            },
+        ],
+    )
+
+    legacy = td.success_criteria[0]
+    assert isinstance(legacy, CommandExecutedCriterion)
+    assert legacy.min_count == 0, "the overlay must override a user-supplied min_count"
+    assert legacy.max_count == 0, "the overlay must override a user-supplied max_count"
+
+
+@pytest.mark.parametrize(
+    ("removed_type", "hint", "extra"),
+    [
+        (
+            "program_stdout_equals",
+            "Use 'run_command' with 'expected_stdout' and 'stdout_match' instead.",
+            {"command": "echo hi", "expected_output": "hi"},
+        ),
+        ("code_lints", "Use 'run_command' to run your linter directly instead.", {"linter": "ruff"}),
+        (
+            "scored_command",
+            "Use 'run_command' with 'score_from_stdout: true' instead.",
+            {"command": "echo 1"},
+        ),
+    ],
+)
+def test_removed_criterion_types_keep_their_documented_hint(removed_type: str, hint: str, extra: dict):
+    """Each removed type errors with the exact migration hint it has always carried.
+
+    The sibling guard in `test_run_command_stdout.py` pins that the type is rejected;
+    this pins the *hint*, which is the half a user acts on. Literal on purpose — an
+    independent net over the removed-type map, not a restatement of it.
+    """
+    with pytest.raises(ValidationError) as exc:
+        TaskDefinition(
+            task_id="removed",
+            description="d",
+            initial_prompt="p",
+            agent=None,
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[{"type": removed_type, "description": "d", **extra}],
+        )
+    message = str(exc.value)
+    assert f"Criterion type '{removed_type}' has been removed." in message
+    assert hint in message
 
 
 class TestLLMJudgeCriterion:

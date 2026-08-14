@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
+from coder_eval.models.sandbox import RECORD_CLI_LOG
 
 
 # SECURITY: ignore_patterns floor. The judge's working directory is a copy of
@@ -320,7 +321,9 @@ class FileExistsCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_exists"] = "file_exists"
-    path: str = Field(description="Path to the file that must exist")
+    path: str = Field(
+        description="Path to the file that must exist; a glob pattern passes when it matches at least one file"
+    )
 
 
 class FileContainsCriterion(BaseSuccessCriterion):
@@ -330,7 +333,7 @@ class FileContainsCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_contains"] = "file_contains"
-    path: str = Field(description="Path to the file to check")
+    path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     includes: list[str] = Field(description="List of strings that must be present in the file")
     excludes: list[str] | None = Field(default=None, description="List of strings that must NOT be present in the file")
 
@@ -403,7 +406,7 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_matches_regex"] = "file_matches_regex"
-    path: str = Field(description="Path to the file to check")
+    path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     pattern: str = Field(description="Regex pattern that must match somewhere in the file")
     must_match: bool = Field(default=True, description="If True, pattern must match; if False, pattern must NOT match")
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
@@ -565,7 +568,14 @@ class CliCalledCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["cli_called"] = "cli_called"
-    log: str = Field(description="Path to the JSON Lines invocation log, relative to the sandbox working directory")
+    log: str = Field(
+        default=RECORD_CLI_LOG,
+        description=(
+            "Path to the JSON Lines invocation log, relative to the sandbox working directory. "
+            f"Defaults to '{RECORD_CLI_LOG}', where SandboxConfig.record_cli writes, so a task using "
+            "generated recorders never repeats it"
+        ),
+    )
     verb: str | None = Field(
         default=None,
         min_length=1,
@@ -769,8 +779,13 @@ class JsonCheckCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["json_check"] = "json_check"
-    path: str = Field(description="Path to the JSON file (relative to sandbox root)")
-    json_schema: str | None = Field(default=None, description="Path to JSON Schema file (relative to sandbox root)")
+    path: str = Field(
+        description="Path to the JSON file (relative to sandbox root); may be a glob matching exactly one file"
+    )
+    json_schema: str | None = Field(
+        default=None,
+        description="Path to JSON Schema file (relative to sandbox root); may be a glob matching exactly one file",
+    )
     assertions: list[JMESPathAssertion] = Field(
         default_factory=list, description="JMESPath assertions to evaluate against the parsed JSON"
     )
@@ -801,7 +816,9 @@ class FileCheckCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_check"] = "file_check"
-    path: str = Field(description="Path to the file to check (relative to sandbox root)")
+    path: str = Field(
+        description="Path to the file to check (relative to sandbox root); may be a glob matching exactly one file"
+    )
     includes: list[str] = Field(default_factory=list, description="Strings that must be present in the file")
     excludes: list[str] = Field(default_factory=list, description="Strings that must NOT be present in the file")
     patterns: list[RegexPattern] = Field(
@@ -833,7 +850,9 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     type: Literal["reference_comparison"] = "reference_comparison"
 
     # Required fields
-    agent_file: str = Field(description="Path to agent's generated file (relative to sandbox root)")
+    agent_file: str = Field(
+        description="Path to agent's generated file (relative to sandbox root); may be a glob matching exactly one file"
+    )
 
     comparison_method: Literal["ast", "token", "complexity"] = Field(
         default="ast",
@@ -906,7 +925,14 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
     type: Literal["command_executed"] = "command_executed"
     tool_name: str | None = Field(default=None, description="Tool name filter (e.g., 'Bash'). None = any tool.")
     command_pattern: str | None = Field(
-        default=None, description="Regex to match command parameters. None = any command."
+        default=None,
+        description=(
+            "Regex to match command parameters. None = any command. For a Bash "
+            "command the pattern is matched against the raw command text OR its "
+            "shell-normalized form — `shlex`-resolved quoting with a "
+            "`bash`/`zsh -lc` wrapper stripped — whichever hits, so you need not "
+            "hand-encode shell quoting/escaping (`'single'`, `\"double\"`, bare)."
+        ),
     )
     min_count: int = Field(
         default=1,
@@ -930,7 +956,9 @@ class CommandExecutedCriterion(LiveSuccessCriterion):
     exclude_pattern: str | None = Field(
         default=None,
         description=(
-            "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped."
+            "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped. "
+            "Like command_pattern, this is matched against the raw Bash command OR its shell-normalized form, so "
+            "it also excludes quote-obfuscated variants of the same call."
         ),
     )
 
@@ -1016,7 +1044,12 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["classification_match"] = "classification_match"
-    path: str = Field(description="Path to the file (relative to sandbox) containing the agent's predicted label")
+    path: str = Field(
+        description=(
+            "Path to the file (relative to sandbox) containing the agent's predicted label; "
+            "may be a glob matching exactly one file"
+        )
+    )
     expected_label: str = Field(description="Ground-truth label for this row")
     allowed_labels: list[str] = Field(
         min_length=1,
@@ -1196,7 +1229,12 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
             "prefix is added based on AWS_REGION."
         ),
     )
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for the judge model. 0.0 keeps grading deterministic.",
+    )
     max_tokens: int = Field(
         default=2000,
         gt=0,

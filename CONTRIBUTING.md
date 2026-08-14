@@ -96,6 +96,25 @@ after the type/scope (or a `BREAKING CHANGE:` footer) marks a breaking change.
 Keep PRs small and single-purpose where possible — it makes review faster and
 bisection easier.
 
+### CI runners
+
+Workflows run on UiPath's centralized managed GitHub pool, whose labels are listed in
+[`.github/actionlint.yaml`](.github/actionlint.yaml). Nothing enforces that list, so
+check a new label against it by hand — an unknown label is not a build error, the job
+just queues until GitHub cancels it.
+
+That pool enforces a minimum package-age safe-chain check on installs, so jobs that
+install dependencies set `SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS`. The literal in
+that expression is the operative value — no secret of that name exists at repo or org
+level. `pr-checks.yml` sets it once at the **workflow** level; don't add per-job copies.
+
+Some jobs deliberately use stock `ubuntu-latest`, each explained at its `runs-on:`:
+jobs that execute PR-supplied code (`quality-gate`, `no-uipath-extra`, `evalboard`)
+fall back to it **for fork PRs only**, since this repo is public and untrusted code
+should not run on the shared pool image — any new job running PR-supplied code needs
+the same carve-out. `action-dogfood` always uses it, because it is the executable proof
+behind the published Action and must exercise the image integrators actually use.
+
 ## Adding Tasks or Criteria
 
 - Task YAMLs live in `tasks/`; see
