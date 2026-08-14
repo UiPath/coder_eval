@@ -18,6 +18,7 @@ State the projected run count before each stage and ask. With N candidates, S su
 | Step 6 baseline | `M_train`, or `2 × M_train` on the activation track |
 | Control arm — execution track, **once per suite** | `3 × M_train` (`6 × M_train` with the incumbent it is paired against) |
 | Stage A — triage | `(N+1) × M_train` |
+| Stage A — triage, halved (an abandon point, NOT a saving) | `(N+1) × M_train/2 + ceil((N+1)/2) × M_train` |
 | Stage B — gate, activation track | `3 × (S+1) × M_train` |
 | Stage B — gate, execution track | `6 × M_train` per candidate gated |
 | Stage C — confirm | `6 × M_test` |
@@ -131,6 +132,65 @@ the same rows means something dropped mid-run.
 
 This decides nothing — it only narrows. Replicate pooling is irrelevant here because
 nothing is being gated on.
+
+#### Successive halving — narrow cheaply, then rank properly
+
+Stage A pays full price for arms that were never going to survive. **Successive halving** runs it
+in two passes instead:
+
+1. All `N+1` arms on a **stratified half** of the train rows.
+2. Keep the top `ceil((N+1)/2)`, and run *those* on the **full** train split.
+
+**It does not save runs, and the arithmetic is worth doing rather than assuming.**
+`(N+1) × M_train/2 + ceil((N+1)/2) × M_train` against the flat `(N+1) × M_train` is
+`2.5 × M_train + 3 × M_train` versus `5 × M_train` at five arms — a **premium of half a train
+split**, and it is exactly half a train split at every arm count, because
+`ceil(A/2) ≥ A/2` for all `A`. Pass 2 re-measures the half that pass 1 already ran, and that
+re-measurement is what eats the saving.
+
+**So do it for the abandon point, not for the price.** What pass 1 buys is a cheap look at every
+arm before committing to any of them: if nothing separates from the incumbent on the half, you can
+stop the round there and have spent half a Stage A rather than a whole one. That is a real option
+and it is often the one worth having. If you already intend to run pass 2 whatever pass 1 says,
+halving costs you and buys nothing — run the flat Stage A.
+
+**The version that would save needs a mechanism this CLI does not have.** Pass 2 would have to
+cover only the rows pass 1 did *not*, leaving each survivor a full train split pooled across two
+run directories (`arm_row_scores` already takes a list of run dirs for exactly that reason). That
+is `A × M_train/2 + ceil(A/2) × M_train/2` — a fifth saved at five arms, approaching a quarter — but
+`--sample-per-stratum` draws a sample, it cannot draw a sample's complement. Written down so
+nobody re-derives the saving from the shape of the procedure and believes it.
+
+**The noise caveat is the other half of the trade, so state it before spending.** A ranking on half
+the rows is a *noisier* ranking, and it can discard an arm that would have won on the full split.
+The row matrix and Pareto front the skill prints at Stage A are how you check whether it did — an
+arm dropped in the first pass that was winning rows no survivor won is exactly what that view makes
+visible, and it is why it ships before this does. For a repository that wants a guarantee rather
+than a check, **SySR** (paired successive rejects for best-arm identification) is the principled
+version; it is **not** implemented here.
+
+**Too small to halve?** Below `check-skill`'s un-doubled minimum on either polarity, skip halving
+and run the full train split. Do not halve a six-row suite into three — the first pass would be
+ranking on noise and discarding real arms on it.
+
+**Stratify on the same field the suite already uses** (`expected_skill` by default), so both halves
+carry both polarities. It is the rule Step 5 applies to the train/test split, applied again one
+level down. The mechanism is `--sample-per-stratum`.
+
+**Why that is arm-safe, which is not the reason intuition supplies.** Every arm in one invocation
+sees the byte-identical row set **by construction, seed or no seed**: the dataset expander runs
+once per task file, and the variant fan-out runs over its output. There is no per-arm sampling to
+go out of step. "Pin the seed so the arms match" is plausible, wrong, and would leave you guarding
+something that cannot happen.
+
+**The real hazard is the mirror image, and it lands on Stage B.** Sampling is nondeterministic
+**across invocations** when `dataset.sample_seed` is unset. Stage B runs three separate
+invocations, and the gate pairs rows **by row id across them** — so a suite carrying
+`dataset.sample_per_stratum` would draw three different row sets and the gate would find few or no
+rows in common. It does not error. It reports a shrunken `rows_paired` and an interval that means
+nothing. So: **pin `dataset.sample_seed` on any suite that samples at all**, and understand that
+the rule is about Stage B rather than about halving. No shipped suite samples today, which is
+exactly why this is worth writing down before one does.
 
 ### Stage B — the gate (replicates)
 

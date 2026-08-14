@@ -2456,6 +2456,48 @@ class TestPluginArtifacts:
             "optimize-skill names `skill-check` — that command does not exist; the sibling is `check-skill`"
         )
 
+    def test_optimize_method_documents_successive_halving(self):
+        method = _normalized(PLUGIN_ROOT / "reference" / "optimize-method.md")
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        text = method + " " + skill
+
+        for token, why in (
+            # Capitalized as both surfaces write it — these sensors match the file, not a
+            # normalized form, so a rewording is visible rather than silently tolerated.
+            ("Successive halving", "the two-pass Stage A that stops paying full price for doomed arms"),
+            (
+                "dataset.sample_seed",
+                "an unpinned seed makes Stage B's three invocations draw three different row sets, "
+                "and the gate then pairs almost nothing while reporting an interval anyway",
+            ),
+            (
+                "across invocations",
+                "the hazard is ACROSS invocations, not within one — within a single invocation every "
+                "arm sees the same rows by construction, so a sensor that lost this would let the "
+                "warning be re-described as a within-stage problem and guard the wrong thing",
+            ),
+        ):
+            assert token in text, f"optimize-skill lost {token!r} — {why}"
+
+        # The seed rule is PROCEDURE — it is a thing to check before running a stage — so it must
+        # survive in SKILL.md specifically. Asserted against the pair above, deleting the Step 10
+        # block would stay green on the method file's copy alone.
+        for token in ("dataset.sample_seed", "across invocations"):
+            assert token in skill, (
+                f"optimize-skill's SKILL.md lost {token!r}. This is PROCEDURE: the agent has to act "
+                f"on it before spending a stage, so it cannot live only in the method file."
+            )
+
+        # The halving row must be priced in the same symbols as every other row.
+        assert "M_train/2" in method, (
+            "reference/optimize-method.md's cost table lost the halved Stage A line, so a reader "
+            "cannot see what halving actually saves before choosing it"
+        )
+        assert "by construction" in method, (
+            "reference/optimize-method.md no longer says arms share rows BY CONSTRUCTION — without "
+            "it a reader guards the seed against a risk that does not exist and misses the real one"
+        )
+
     def test_optimize_skill_documents_the_no_skill_control(self):
         # The control answers the question every later round assumes the answer to. Losing it
         # means rounds of wording changes measured against a body that does nothing here.

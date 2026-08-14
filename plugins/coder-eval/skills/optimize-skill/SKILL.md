@@ -700,6 +700,9 @@ snapshots:
   **exactly two** variants (Stage B).
 - `round<N>-confirm.yaml` — the same **exactly two** variants (Stage C).
 
+A fourth appears only if you halve Stage A: `round<N>-triage-survivors.yaml`, the arms that
+survived the first pass.
+
 Authoring one is a single edit — copy the triage file and delete the variants that did not
 survive — so the alternative is not cheaper, it is just wrong. Re-passing the triage file at
 Stage B or C on the execution track costs `(N+1)/2` times the runs those stages were budgeted
@@ -749,7 +752,7 @@ file's cost table; the experiment files are the ones Step 9 named, one per stage
 
 | Stage | Experiment file | How it runs |
 | --- | --- | --- |
-| A — triage | `round<N>-triage.yaml` | one invocation, all candidates + incumbent, `--split train` |
+| A — triage | `round<N>-triage.yaml` | **two invocations** when halving (below), else one, all candidates + incumbent, `--split train` |
 | B — gate, activation track | `round<N>-gate.yaml` | **three separate invocations**, `--split train`, distinct `--run-dir` each |
 | B — gate, execution track | `round<N>-gate.yaml` | one invocation, exactly two variants, `--split train --repeats 3` |
 | C — confirm | `round<N>-confirm.yaml` | exactly two variants, `--split test --repeats 3` |
@@ -762,6 +765,39 @@ run of zero rows.
 The two Stage B rows differ on purpose and the method file says why — do not unify them.
 Neither the promotion conditions nor the sign rule is restated here: read them there, at the
 moment you apply them, rather than from memory.
+
+### Stage A — halve first, when the suite is big enough
+
+**Successive halving makes Stage A two invocations instead of one**, and the method file carries
+the arithmetic and the caveat. State **both** projected counts before spending, not just the
+total — the first pass is what you can still abandon after:
+
+```bash
+# Pass 1 — every arm, a stratified half of the train rows
+coder-eval run <suite> -e <path to round<N>-triage.yaml> --split train --sample-per-stratum <N>
+# Pass 2 — the surviving half of the arms, the full train split
+coder-eval run <suite> -e <path to round<N>-triage-survivors.yaml> --split train
+```
+
+**`--sample-per-stratum` takes rows PER STRATUM, not a fraction.** Read the per-stratum counts off
+`coder-eval plan <suite> --split train` and halve *those*. Passing half the total row count keeps
+the whole suite and halves nothing, silently — which is the one failure this section exists to
+avoid. A single N also truncates the larger stratum harder, so unbalanced strata do not halve
+proportionally; say what each half actually contains rather than assuming it is 50/50.
+
+Pass 2 needs its own experiment file, `round<N>-triage-survivors.yaml` — there is still no
+`--variant` filter, so dropping arms means authoring a file, exactly as Step 9 says for every other
+stage, and it is passed by explicit path for the reason Step 9 gives.
+
+**Skip halving on a small suite.** Below `check-skill`'s un-doubled minimum on either polarity,
+run the full train split in one pass: the first pass would be ranking on noise and discarding real
+arms on it.
+
+**If the suite samples at all, pin `dataset.sample_seed` first.** Sampling is nondeterministic
+**across invocations**, and Stage B runs three of them while the gate pairs rows by row id across
+them — unpinned, it finds few or no rows in common and reports a shrunken `rows_paired` with a
+meaningless interval, silently. (Within one invocation every arm sees the same rows by
+construction, so this is not something halving itself can break.)
 
 ### Stage A — print the row matrix, not just the ranking
 
