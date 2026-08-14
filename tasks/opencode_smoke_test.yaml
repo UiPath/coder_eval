@@ -17,7 +17,7 @@ agent:
   # Real per-call cost still lands on the turn: OpenCode reports `cost` on every
   # step_finish event and the harness folds it into token_usage.total_cost_usd
   # (falling back to the rate card when the stream omits or zeroes it).
-  model: "openrouter/deepseek/deepseek-v4-flash-0731"
+  model: "openrouter/deepseek/deepseek-v4-pro"
   permission_mode: "acceptEdits"
 
 success_criteria:

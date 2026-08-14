@@ -88,7 +88,7 @@ uv run coder-eval run tasks/my_task.yaml -D agent.type=opencode -D agent.model=o
 agent:
   type: "opencode"
   # provider/model, exactly as `opencode models` prints it.
-  model: "openrouter/deepseek/deepseek-v4-flash-0731"
+  model: "openrouter/deepseek/deepseek-v4-pro"
   permission_mode: "acceptEdits"
   variant: "high"   # optional: provider reasoning effort
   pure: true        # optional (default): run with --pure, no host plugins
@@ -101,8 +101,8 @@ agent:
 
 | `agent.model` | Provider | Credential |
 |---|---|---|
-| `openrouter/deepseek/deepseek-v4-flash-0731` | OpenRouter | `OPENROUTER_API_KEY` |
-| `deepseek/deepseek-v4-flash-0731` | DeepSeek direct | `DEEPSEEK_API_KEY` |
+| `openrouter/deepseek/deepseek-v4-pro` | OpenRouter | `OPENROUTER_API_KEY` |
+| `deepseek/deepseek-v4-pro` | DeepSeek direct | `DEEPSEEK_API_KEY` |
 
 OpenCode speaks OpenRouter natively, so it does **not** need the LiteLLM proxy —
 that shim exists to translate Anthropic ↔ OpenAI for the Claude Code SDK.

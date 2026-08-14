@@ -34,10 +34,10 @@ def test_openrouter_provider_prefix_normalizes_to_bare_key():
     WITH its provider prefix, while the rate-card keys are the bare vendor/model
     ids the LiteLLM route uses. Both spellings must price identically, else the
     same model silently goes unpriced depending on which agent ran it."""
-    assert is_priced("deepseek/deepseek-v4-flash-0731")
-    assert is_priced("openrouter/deepseek/deepseek-v4-flash-0731")
-    bare = calculate_cost("deepseek/deepseek-v4-flash-0731", 1_000_000, 1_000_000)
-    prefixed = calculate_cost("openrouter/deepseek/deepseek-v4-flash-0731", 1_000_000, 1_000_000)
+    assert is_priced("deepseek/deepseek-v4-pro")
+    assert is_priced("openrouter/deepseek/deepseek-v4-pro")
+    bare = calculate_cost("deepseek/deepseek-v4-pro", 1_000_000, 1_000_000)
+    prefixed = calculate_cost("openrouter/deepseek/deepseek-v4-pro", 1_000_000, 1_000_000)
     assert bare == prefixed > 0
 
 

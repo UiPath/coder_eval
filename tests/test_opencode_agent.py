@@ -188,7 +188,7 @@ async def _run(agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing"
 
 
 def _agent(**overrides: Any) -> OpenCodeAgent:
-    config = OpenCodeAgentConfig(type="opencode", **{"model": "deepseek/deepseek-v4-flash-0731", **overrides})
+    config = OpenCodeAgentConfig(type="opencode", **{"model": "deepseek/deepseek-v4-pro", **overrides})
     return OpenCodeAgent(config, task_id="t1")
 
 
@@ -214,7 +214,7 @@ class TestHappyPath:
         assert record.crashed is False
         assert record.agent_output == "Created the file."
         assert record.assistant_turn_count == 2
-        assert record.model_used == "deepseek/deepseek-v4-flash-0731"
+        assert record.model_used == "deepseek/deepseek-v4-pro"
 
     async def test_token_buckets_accumulate_across_steps(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
@@ -386,7 +386,7 @@ class TestCostFallsBackToTheRateCard:
         record = await _run(_agent(), tmp_path)
 
         assert record.token_usage is not None
-        expected = calculate_cost("deepseek/deepseek-v4-flash-0731", uncached_input_tokens=1000, output_tokens=500)
+        expected = calculate_cost("deepseek/deepseek-v4-pro", uncached_input_tokens=1000, output_tokens=500)
         assert expected is not None and expected > 0
         assert record.token_usage.total_cost_usd == pytest.approx(expected)
 
@@ -412,7 +412,7 @@ class TestCostFallsBackToTheRateCard:
         with caplog.at_level("WARNING"):
             record = await _run(_agent(), tmp_path)
 
-        expected = calculate_cost("deepseek/deepseek-v4-flash-0731", uncached_input_tokens=1000, output_tokens=500)
+        expected = calculate_cost("deepseek/deepseek-v4-pro", uncached_input_tokens=1000, output_tokens=500)
         assert expected is not None and expected > 0
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == pytest.approx(expected)
@@ -491,7 +491,7 @@ class TestArgvConstruction:
         assert argv[:4] == ["opencode", "run", "--format", "json"]
         assert "--auto" in argv
         assert "--pure" in argv
-        assert argv[argv.index("-m") + 1] == "deepseek/deepseek-v4-flash-0731"
+        assert argv[argv.index("-m") + 1] == "deepseek/deepseek-v4-pro"
         assert argv[-1] == "do the thing"
 
     async def test_plan_mode_withholds_auto(self, patch_exec, tmp_path):

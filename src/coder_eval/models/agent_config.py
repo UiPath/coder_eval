@@ -284,7 +284,7 @@ class OpenCodeAgentConfig(BaseAgentConfig):
     Drives the ``opencode`` CLI in non-interactive mode
     (``opencode run --format json``), which streams newline-delimited JSON events
     on stdout. ``model`` is OpenCode's ``provider/model`` form (e.g.
-    ``deepseek/deepseek-v4-flash-0731``) and is passed through verbatim via ``-m``.
+    ``deepseek/deepseek-v4-pro``) and is passed through verbatim via ``-m``.
 
     Permission handling is derived from the inherited ``permission_mode``: every
     mode except :attr:`PermissionMode.PLAN` passes ``--auto`` so an unattended

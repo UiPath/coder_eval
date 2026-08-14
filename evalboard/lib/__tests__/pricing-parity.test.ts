@@ -110,7 +110,6 @@ describe("pricing.ts ↔ pricing.py parity", () => {
         "moonshotai/kimi-k3",
         "z-ai/glm-5.2",
         "deepseek/deepseek-v4-pro",
-        "deepseek/deepseek-v4-flash-0731",
     ]);
 
     test("every DELIBERATELY_UNMIRRORED id still exists in pricing.py", () => {
