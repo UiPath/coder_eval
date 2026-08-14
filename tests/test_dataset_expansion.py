@@ -466,6 +466,47 @@ class TestExpandDatasetSplit:
         with pytest.raises(ValueError, match="Duplicate dataset row id"):
             expand_dataset(task, tmp_path, split="train")
 
+    def test_malformed_row_id_in_an_unselected_split_still_raises(self, tmp_path: Path) -> None:
+        # Same argument as the duplicate-id test above, for the other two id checks: a
+        # malformed id is malformed data whichever split you asked for. Validated only over
+        # the SELECTED rows, it would pass under every `--split train` and surface at
+        # promotion time — the most expensive moment to learn it.
+        rows = [
+            {"id": "ok", "prompt": "p", "expected": "e", "split": "train"},
+            {"id": "bad id!", "prompt": "p", "expected": "e", "split": "test"},
+        ]
+        with pytest.raises(ValueError, match="must match"):
+            expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="train")
+
+    def test_missing_id_field_in_an_unselected_split_still_raises(self, tmp_path: Path) -> None:
+        rows = [
+            {"id": "ok", "prompt": "p", "expected": "e", "split": "train"},
+            {"prompt": "p", "expected": "e", "split": "test"},
+        ]
+        with pytest.raises(ValueError, match="missing id_field 'id'"):
+            expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, split="train")
+
+    def test_malformed_row_id_beyond_the_sample_still_raises(self, tmp_path: Path) -> None:
+        # The sampler narrows the row set too, and a malformed row the sample happened to
+        # drop is still a malformed row. Validation runs over the whole dataset first.
+        #
+        # `--sample` uses a FIXED seed, so which row it drops is deterministic — but the
+        # test must not silently stop exercising the case if that seed ever changes. So
+        # first establish, on a well-formed twin of the same shape, that row 0 is the one
+        # the sampler excludes; that is the premise the assertion below depends on.
+        shape_twin = [{"id": "first", "prompt": "p", "expected": "e"}, {"id": "second", "prompt": "p", "expected": "e"}]
+        sampled = expand_dataset(_make_task_with_dataset(rows=shape_twin), tmp_path, max_rows=1)
+        assert [t.row_id for t in sampled] == ["second"], (
+            "the fixed sample seed no longer drops row 0; re-pick the malformed row's position"
+        )
+
+        rows = [
+            {"id": "bad id!", "prompt": "p", "expected": "e"},
+            {"id": "ok", "prompt": "p", "expected": "e"},
+        ]
+        with pytest.raises(ValueError, match="must match"):
+            expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, max_rows=1)
+
     def test_split_field_defaults_to_split(self) -> None:
         task = _make_task_with_dataset(rows=[{"id": "a"}])
         assert task.dataset is not None

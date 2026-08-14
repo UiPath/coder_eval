@@ -392,21 +392,30 @@ def row_split_label(row: dict[str, Any], field: str) -> str | None:
     return None if value is None or value == "" else str(value)
 
 
-def _reject_duplicate_row_ids(rows: list[dict[str, Any]], task: TaskDefinition) -> None:
-    """Raise if two rows share an id, considering the dataset as a whole.
+def _validate_row_ids(rows: list[dict[str, Any]], task: TaskDefinition) -> None:
+    """Validate every row's id against the dataset AS A WHOLE, before any narrowing.
 
-    Called before ``--split`` filtering and sampling narrow the row set: a duplicate id is
-    malformed data regardless of which rows a given invocation happens to select. Rows
-    missing the id field are skipped here — that is reported per-row during expansion,
-    where the row index is known.
+    All three id checks live here on purpose: "the dataset is well-formed" must not
+    depend on what a given invocation selected. Split the checks — duplicates whole-set,
+    missing/malformed per-selected-row — and a malformed row sitting in the ``test`` split
+    validates under every ``--split train`` run and surfaces only at promotion time, which
+    is the most expensive moment to learn it.
+
+    The ``Dataset row {i}`` index therefore counts over the whole dataset rather than the
+    selected subset, which is the more useful number: it points at the line in the file.
     """
     assert task.dataset is not None
     id_field = task.dataset.id_field
     seen: set[str] = set()
-    for row in rows:
+    for i, row in enumerate(rows):
         if id_field not in row:
-            continue
+            raise ValueError(f"Dataset row {i} for task '{task.task_id}' missing id_field '{id_field}': {row}")
         row_id = str(row[id_field])
+        if not _ROW_ID_PATTERN.match(row_id):
+            raise ValueError(
+                f"Dataset row id {row_id!r} must match {_ROW_ID_PATTERN.pattern}"
+                + " (letters, digits, underscore, hyphen, dot)"
+            )
         if row_id in seen:
             raise ValueError(f"Duplicate dataset row id for task '{task.task_id}': {row_id!r}")
         seen.add(row_id)
@@ -509,11 +518,11 @@ def expand_dataset(
     # --split filters BEFORE either sampler below: sampling first would leave an
     # unpredictable (possibly zero) number of rows per split, destroying the
     # train/test comparison the split exists to protect.
-    # Duplicate ids are a property of the DATASET, so check the whole row set BEFORE any
-    # filtering or sampling narrows it. Checking only what survives would let a duplicate
-    # sitting in an unselected split validate under every --split and surface only on a
-    # full run — and the split workflow always passes one.
-    _reject_duplicate_row_ids(rows, task)
+    # Row ids are a property of the DATASET, so check the whole row set BEFORE any
+    # filtering or sampling narrows it. Checking only what survives would let a malformed,
+    # id-less or duplicate row sitting in an unselected split validate under every --split
+    # and surface only on a full run — and the split workflow always passes one.
+    _validate_row_ids(rows, task)
 
     if split is not None:
         field = task.dataset.split_field
@@ -569,17 +578,10 @@ def expand_dataset(
     id_field = task.dataset.id_field
     expanded: list[TaskDefinition] = []
 
-    for i, row in enumerate(rows):
-        if id_field not in row:
-            raise ValueError(f"Dataset row {i} for task '{task.task_id}' missing id_field '{id_field}': {row}")
+    for row in rows:
+        # No validation here: all three id checks ran over the whole dataset in
+        # _validate_row_ids, before filtering and sampling narrowed `rows`.
         row_id = str(row[id_field])
-        if not _ROW_ID_PATTERN.match(row_id):
-            raise ValueError(
-                f"Dataset row id {row_id!r} must match {_ROW_ID_PATTERN.pattern}"
-                + " (letters, digits, underscore, hyphen, dot)"
-            )
-        # Uniqueness is already enforced across the whole dataset by
-        # _reject_duplicate_row_ids, before filtering narrowed `rows`.
 
         data = task.model_dump(exclude_unset=True)
         if isinstance(data.get("initial_prompt"), str):
