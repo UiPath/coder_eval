@@ -369,9 +369,17 @@ result**, and the rendered block says `CANNOT SEPARATE AT THIS SIZE`. Read that 
 candidate could have promoted here, however good it was. It is a statement about the suite, and
 reporting it as "not promoted" would be a claim about the candidates that the data cannot support.
 
-A refusal names the largest family size that could still promote on this suite, so the honest
-options are visible: gate fewer survivors, or **add rows**. More rounds will not help — the floor
-is a property of the row count, so re-running the same suite reproduces it exactly. And because
+**Read which refusal you got, because there are two and their remedies are opposite.** The usual
+one names the largest family size that could still promote, so the honest options are visible:
+gate fewer survivors, or **add rows**. More rounds will not help — the floor falls out of the row
+count and the discordance rate, not out of luck, so re-running the same suite reproduces it.
+
+The other says the two arms produced **identical labels on every scored row**. That is a finding
+about the candidate rather than the suite: with nothing discordant the floor is 1.0 at any suite
+size, so adding rows cannot change it. Check the candidate actually differs from the incumbent and
+that each arm mounted the snapshot you think it did.
+
+And because
 the floor bounds the p's *expectation* rather than every draw, a refused verdict is forced to
 `promoted = False`: a realized p that happened to dip below the floor is Monte-Carlo noise, not
 evidence, and promoting on it would make the verdict depend on the seed.
@@ -394,9 +402,12 @@ declaration of it that goes stale the moment the tool's own value changes.
 
 The block reports **median cost per row** and **median latency per row** as the level, over the
 rows the F1 comparison actually used. Read what fires it carefully, because the two numbers are
-not the same one: the interval is on the *mean* difference between arms, and the floor it is
-compared against is scaled by the incumbent's *median*. The median is the level; the interval is
-the evidence. A guardrail with nothing to measure — no turn reported a
+not the same one. The reported LEVEL is the incumbent's *median* cost per row, because a median is
+the robust thing to read on a right-skewed distribution. What the guardrail FIRES on is a
+different pair: the interval is on the difference of *means*, and the floor it is compared against
+is scaled by the incumbent's *mean* — matching units, since scaling a mean-difference by a median
+measured a uniform 10% increase as a breach of a much larger floor. The median is the level; the
+mean is what is being tested. A guardrail with nothing to measure — no turn reported a
 cost — passes with a stated reason rather than silently, because a missing measurement must never
 read as a pass on the merits.
 
@@ -407,7 +418,9 @@ promote, whatever its F1 did. Stage A additionally renders a quality × cost fro
 nothing. Adding the second did not weaken the first — the promote-only-when list below is
 unchanged, and a cheaper arm on that front is a trade to offer the user, **never a promotion** the
 tool makes. Read that front with the arms you are actually choosing between: the emptied-body
-control arm is cheap and bad, so nothing dominates it and it sits there by construction.
+any arm that is cheap because it does less — an emptied-body control among them, if you put one in
+the comparison — sits there by construction, since nothing dominates an arm nobody is trying to
+beat on cost.
 
 **Be precise about what this bounds, because it is easy to claim more.** The interval now bounds
 *row-sampling variation and run noise together* — resampling rows is what adds the first, and

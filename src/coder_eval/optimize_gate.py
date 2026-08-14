@@ -287,7 +287,9 @@ def cost_latency_guardrails(
     ≈0.25, so the standard error of a median over 12 rows is ≈0.09 and a 15% rule sits about 1.5
     standard errors out. So each guardrail runs the SAME paired cluster bootstrap the F1 gate uses,
     over per-row cost / duration, and fails only when even the optimistic end of the interval
-    (``ci_low``) is still a material increase — ``ci_low > materiality * incumbent median``.
+    (``ci_low``) is still a material increase — ``ci_low > materiality * incumbent MEAN``. The mean,
+    not the median reported as the level: the interval is on a difference of means, and scaling it
+    by a median is a unit mismatch on a right-skewed distribution (see below).
 
     ``row_ids`` restricts the comparison to a given row set; the gate passes the rows its F1
     comparison actually used, so the guardrail cannot be computed over a different sample than the
@@ -1501,8 +1503,9 @@ def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_b
 COST_FRONT_ADVISORY = (
     "This front is advisory. Promotion is unchanged: the primary statistic must separate and "
     "every guardrail must hold, so a cheaper arm here is a trade to offer the user, never a "
-    "promotion this tool makes. The control arm is cheap and bad, so it sits on this front by "
-    "construction — read the front with the arms you are actually choosing between."
+    "promotion this tool makes. Read it with the arms you are actually choosing between: any arm "
+    "that is cheap because it does less — an emptied-body control, say — sits on this front by "
+    "construction, since nothing dominates an arm nobody is trying to beat on cost."
 )
 
 

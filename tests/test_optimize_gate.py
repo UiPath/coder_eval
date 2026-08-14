@@ -1820,7 +1820,7 @@ class TestCostQualityFront:
             },
         )
         assert "control" in cost_quality_front(points)
-        assert "The control arm is cheap and bad" in render_cost_quality(points, cost_quality_front(points))
+        assert "cheap because it does less" in render_cost_quality(points, cost_quality_front(points))
 
 
 class TestOneRowCostDefinition:

@@ -492,7 +492,9 @@ with `/`, so a bare string raises after you have already paid for the runs.
 `variant_id` is `default` for a plain `coder-eval run` with no experiment. `criterion_index` is
 the criterion's **position** in the suite's `success_criteria:` list — 0-based, counting from the
 top of the YAML — so open the suite and count rather than assuming the engagement criterion is
-first. Unlike the gate, this function emits no wrong-index note: it just returns a number.
+first. Unlike the gate, this function renders no note *into a verdict block* — a wrong index comes
+back as `None` with a WARNING on stderr naming the precondition that failed, so read the warning
+rather than the return value alone.
 
 A `None` result means the sample could not support a floor — either fewer than two invocations,
 or fewer than two rows scored in both halves — say that, rather than proceeding as if the round were
@@ -943,7 +945,10 @@ at which rows a discarded candidate actually won.
 #### Cost as a second axis of the shortlist — not a second gate
 
 Two candidates at the same score are not the same candidate if one costs twice as much. Print the
-quality × cost plane beside the row matrix:
+quality × cost plane beside the row matrix — **from the same run dir, which if you halved means
+pass 1 only.** Pooling both passes mixes arm sets and row sets, and the front's coverage rule gates
+domination on the row count, so a pass-2 arm would look better-evidenced than a pass-1 one for a
+reason that is an artefact of the procedure.
 
 ```python
 from pathlib import Path
@@ -969,9 +974,11 @@ both numbers, and let them decide. Do not talk yourself into promoting it becaus
 appealing: a candidate that fails the gate has not been shown to be better at any price.
 
 Two readings that are correct rather than bugs. An arm with **no recorded cost** is excluded and
-named, because an unmeasured cost is not a free one. And the **control arm sits on this front by
-construction** — it is cheap and bad, so nothing dominates it — which is why the block's standing
-sentence tells you to read the front with the arms you are actually choosing between.
+named, because an unmeasured cost is not a free one. And **any arm that is cheap because it does
+less sits on this front by construction** — nothing dominates an arm nobody is trying to beat on
+cost. The emptied-body control is the clearest case, so if you add it to `variant_ids` to see where
+it lands, expect it on the front and do not read that as a result. The snippet above lists only the
+incumbent and the candidates, which is the comparison you are actually making.
 
 ### Stage B, activation track — run the gate, do not do the arithmetic
 
@@ -1099,10 +1106,13 @@ rather than narrated, and only those live there — the noise floor, the round's
 the regression corpus:
 
 - **The round's noise floor**, recorded with the suite, the model and the row count it was
-  measured at. A later round reuses it only when **every** key field still matches — suite,
-  variant, model, criterion index, row count, invocation count and confidence, which is what
-  `NoiseFloor` stores. A floor measured on another model, under a renamed incumbent, or before the
-  suite grew is not this suite's floor. The model comes from
+  measured at. A later round reuses it only when **every** key field still matches — which is
+  every field `NoiseFloor` stores except `mde` and `computed_at`, so read the model rather than
+  trusting a list here to stay current. It includes the ones that are easy to forget: `metric`
+  (which keeps the two tracks' floors apart), `n_replicates` (the execution split's axis — a
+  `--repeats 2` floor is not a `--repeats 3` floor), `seed` and `n_resamples`. A floor measured on
+  another model, under a renamed incumbent, or before the suite grew is not this suite's floor.
+  The model comes from
   `resolve_model` on the loaded rows and from nowhere else: it returns `None` for a mixed-model
   suite, and a `None` model never caches and never matches, which is the intended behaviour
   rather than a failure.
@@ -1112,16 +1122,21 @@ the regression corpus:
   the suite size instead, a later lookup simply misses and recomputes: wrong in the safe
   direction, but say which number you recorded so the miss is legible.
 
-- **This round's row matrix and Pareto front** (Stage A, above). Vectors rather than an average,
-  and never truncated: being able to look back at which rows a *discarded* candidate won is the
-  whole reason to keep them, and it is what a merge candidate in a later round is built from.
+- **This round's row matrix and BOTH fronts** (Stage A, above) — the coverage front and the
+  instance-best one. Vectors rather than an average, and never truncated: being able to look back
+  at which rows a *discarded* candidate won is the whole reason to keep them. Record the
+  instance-best front especially: it is the set a later round's merge candidate is drawn from, and
+  it is precisely the arms the coverage front discards.
 
 **Say in `history.json` whether the floor was reused or recomputed.** That is narrative, not a
 field: `measurements.json` is `extra="forbid"` and has nowhere to put it. It matters because a
 reused floor is an *earlier round's* measurement, so two rounds quoting the same MDE may be one
 number rather than two agreeing ones.
 
-One call each:
+One call each. **This snippet continues the interpreter session the earlier steps used** — it
+reads `suite_id` and `arms` from Stage A's snippet, and `baseline_dirs` from Step 6's. Run it in a
+fresh interpreter and it fails with `NameError` on the first of them, after the round has already
+been paid for. **Which floor you record depends on the track**, so take the matching half:
 
 ```python
 from pathlib import Path
@@ -1132,6 +1147,7 @@ from coder_eval.optimize_gate import (
     instance_best_front,
     load_arm_rows,
     load_measurements,
+    measure_execution_noise_floor,
     measure_noise_floor,
     pareto_front,
     record_noise_floor,
@@ -1143,11 +1159,24 @@ from coder_eval.models import RegressionRow, RoundScores
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
 measurements = load_measurements(sidecar)
 
+# ACTIVATION TRACK — the f1.yes floor, from Step 6's two baseline invocations.
 rows = load_arm_rows(baseline_dirs, "default", suite_id)
 floor = measure_noise_floor(
     run_dirs=baseline_dirs, variant_id="default", suite_id=suite_id, criterion_index=0,
     model=resolve_model(rows) or UNRESOLVED_MODEL, measurements=measurements,
 )
+
+# EXECUTION TRACK — the weighted_score floor, from Step 8's control run. Use THIS one there:
+# the call above would record the `f1.yes` floor Step 6 calls confidently meaningless on an
+# outcome suite, and `baseline_dirs` does not exist on this track anyway.
+#
+# control_dirs = [Path("<runs>/control")]
+# rows = load_arm_rows(control_dirs, "incumbent", suite_id)
+# floor = measure_execution_noise_floor(
+#     run_dirs=control_dirs, variant_id="incumbent", suite_id=suite_id,
+#     model=resolve_model(rows) or UNRESOLVED_MODEL, measurements=measurements,
+# )
+
 if floor is not None:
     record_noise_floor(sidecar, floor)
 
@@ -1160,16 +1189,15 @@ record_round_scores(sidecar, RoundScores(
 append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round=1, reason="...")])
 ```
 
-**Use `measure_noise_floor`, not `noise_floor_mde`, when you intend to record.** It returns the
-whole keyed record — including `n_rows`, the count of rows scored in both halves of the split,
-which is smaller than the suite whenever a row errored and which you cannot obtain any other way.
-Record the suite's row count instead and the entry never matches its own lookup again.
+**Use `measure_noise_floor` / `measure_execution_noise_floor`, not `noise_floor_mde`, when you
+intend to record.** They return the whole keyed record — including `n_rows`, the count of rows
+scored in both halves of the split, which is smaller than the suite whenever a row errored and
+which you cannot obtain any other way. Record the suite's row count instead and the entry never
+matches its own lookup again.
 
-On the execution track, `measure_execution_noise_floor` (Step 8) already returns a full keyed
-record, so it goes to `record_noise_floor` unchanged. **`metric` is the field that keeps the two
-tracks' floors from colliding** — `f1.yes` for activation, `weighted_score` for execution. They are
-different numbers on the same suite, variant, model and row count, so both live in the sidecar at
-once and neither replaces the other.
+**`metric` is the field that keeps the two tracks' floors from colliding** — `f1.yes` for
+activation, `weighted_score` for execution. They are different numbers on the same suite, variant,
+model and row count, so both live in the sidecar at once and neither replaces the other.
 - **The regression corpus.** On promotion, append the rows that justified it, with why. That is
   what stops a later round from quietly undoing an earlier one: a candidate that re-loses a row
   a previous promotion was built on is a regression, however good its aggregate looks.
