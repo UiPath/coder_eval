@@ -17,8 +17,16 @@ State the projected run count before each stage and ask. With N candidates, S su
 | --- | --- |
 | Step 6 baseline | `M_train` |
 | Stage A — triage | `(N+1) × M_train` |
-| Stage B — gate | `3 × (S+1) × M_train` |
+| Stage B — gate, activation track | `3 × (S+1) × M_train` |
+| Stage B — gate, execution track | `6 × M_train` per candidate gated |
 | Stage C — confirm | `6 × M_test` |
+
+The two Stage B rows are the two gates below, priced. Activation runs `S+1` arms through
+**three separate invocations**, so the survivor count multiplies. Execution runs exactly
+**two** arms — incumbent plus one candidate — at `--repeats 3`, which is `2 × 3 = 6` runs per
+train row *per candidate you choose to gate*; gating three candidates one after another is
+three times that, not one pass with `S = 3`. Reading the activation formula on the execution
+track overstates a single gate and understates a sequence of them.
 
 **The baseline is a real line item, and it is not redundant with Stage A's incumbent arm.**
 It looks like the same measurement on the same rows, and that is precisely its value: the
