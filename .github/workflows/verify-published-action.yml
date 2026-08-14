@@ -341,8 +341,11 @@ jobs:
           # None, so without this block the only bound is the job's `timeout-minutes`,
           # which cancels the runner and leaves NO run.json for the gate below to read
           # -- the failure is both maximally expensive and minimally diagnosable. These
-          # caps are ~10x what the one-file task needs; tripping one produces a
-          # COST_BUDGET_EXCEEDED / TIMEOUT row the gate prints and fails on.
+          # caps are ~10x what the one-file task needs; tripping the spend or wall-clock
+          # one produces a COST_BUDGET_EXCEEDED / TIMEOUT row that the gate's run-limit
+          # branch prints and fails on (both statuses report as "failed", so nothing else
+          # in the gate would). MAX_TURNS_EXHAUSTED is the one deliberate exception: it is
+          # the classic model-quality outcome, tolerated like an unmet criterion.
           run_limits:
             max_turns: 5
             task_timeout: 300
@@ -511,6 +514,32 @@ jobs:
           if harness_errors:
               print(f"::error::task(s) failed with a harness/environment error, not a model flake: "
                     f"{harness_errors} -- the published action's install, sandbox, or agent wiring is broken")
+              sys.exit(1)
+
+          # Run-limit breaches. models/enums.py maps TIMEOUT and both budget statuses to
+          # the "failed" reporting category -- the same bucket as an ordinary criterion
+          # FAILURE -- so without this branch a tripped cap falls through every check
+          # above AND the exit-contract check below (which only demands green when every
+          # status is SUCCESS), and the repo's one unattended, paid run goes silently
+          # GREEN after burning its cost cap. That is the exact failure the caps were
+          # added to make visible.
+          #
+          # These are not "the model did poorly": the caps in the task YAML are ~10x what
+          # writing one file needs, so reaching one means the run went off the rails -- a
+          # looping agent, a hung turn, an action feeding a different task. Deliberately
+          # NOT excused by error_category, unlike the zero-token symptom above: a
+          # task-level timeout is always categorized agent_timeout (TaskTimeoutError is an
+          # EvaluationTimeoutError, which errors/categorization.py maps typed and first),
+          # so excusing the UNREACHABLE set here would make this branch dead code on its
+          # most likely member. An outage announces itself as an API/rate-limit row long
+          # before it spends 25 cents; and a red here is re-runnable, whereas a green here
+          # is undetectable.
+          RUN_LIMIT_BREACH = {"TIMEOUT", "TOKEN_BUDGET_EXCEEDED", "COST_BUDGET_EXCEEDED"}
+          breaches = [(s, c) for s, c in zip(statuses, categories, strict=True) if s in RUN_LIMIT_BREACH]
+          if breaches:
+              print(f"::error::task(s) tripped a run limit: {breaches} -- the caps in the task YAML are "
+                    "~10x what this one-file task needs, so a healthy run cannot reach one. Read the "
+                    "uploaded run dir before re-running; this is an unattended paid job.")
               sys.exit(1)
 
           # Exit-contract check, conditional on the model having actually performed.

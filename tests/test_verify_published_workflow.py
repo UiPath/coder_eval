@@ -352,3 +352,87 @@ def test_monotonicity_guard_refuses_when_no_release_tag_exists(tmp_path: Path):
     proc = _bash_result(_monotonicity_guard(), env={"VERSION": "0.9.6"}, cwd=repo)
     assert proc.returncode == 1
     assert "no vX.Y.Z release tag found" in proc.stdout
+
+
+# --------------------------------------------------------------------------------------
+# 6. the mechanics gate reasons over FinalStatus values as bare strings
+#
+# The gate's whole job is deciding which run.json `status` values mean "the published
+# action is broken". It spells them as string literals inside a heredoc, so a renamed
+# member, or a NEW member nobody classified here, is invisible to every other gate —
+# the check would just stop matching and the paid nightly would go green.
+# --------------------------------------------------------------------------------------
+
+
+def _gate_python() -> str:
+    """The embedded Python block of the `Verify action mechanics` step."""
+    body = _run_body(_load(VERIFY_WF), "Verify action mechanics")
+    lines = body.splitlines()
+    start = next(i for i, line in enumerate(lines) if "<<'PY'" in line)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "PY")
+    return "\n".join(lines[start + 1 : end]) + "\n"
+
+
+def _statuses_the_gate_names() -> set[str]:
+    """Every status literal the gate compares a run.json `status` against.
+
+    Read out of the AST rather than by regex, so reflowing the block cannot quietly
+    empty the set and make the coverage assertion below vacuous.
+    """
+    import ast
+
+    tree = ast.parse(_gate_python())
+    named: set[str] = set()
+    for node in ast.walk(tree):
+        # `s in {...}` / `s == "..."`, plus the RUN_LIMIT_BREACH set the branch is keyed on.
+        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "s":
+            for comparator in node.comparators:
+                if isinstance(comparator, ast.Set):
+                    named |= {e.value for e in comparator.elts if isinstance(e, ast.Constant)}
+                elif isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+                    named.add(comparator.value)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Set):
+            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if "RUN_LIMIT_BREACH" in targets:
+                named |= {e.value for e in node.value.elts if isinstance(e, ast.Constant)}
+    assert named, "no status literals found — did the gate's Python block get restructured?"
+    return named
+
+
+def test_gate_classifies_every_final_status():
+    """Mirrors the explicit-mapping guard in models/enums.py: a newly added FinalStatus
+    must be classified here rather than silently defaulting to tolerated. Only the two
+    "the model did poorly" outcomes are deliberately unnamed — everything else is either
+    a hard failure or the success the exit-contract check is keyed on."""
+    from coder_eval.models import FinalStatus
+
+    named = _statuses_the_gate_names()
+    unknown = named - {s.value for s in FinalStatus}
+    assert not unknown, f"the gate compares `status` against non-FinalStatus values {unknown} — dead branches"
+
+    tolerated = {s.value for s in FinalStatus} - named
+    assert tolerated == {FinalStatus.FAILURE.value, FinalStatus.MAX_TURNS_EXHAUSTED.value}, (
+        f"the gate does not classify {tolerated}. Every FinalStatus must be either hard-failed "
+        "or deliberately tolerated as a model-quality outcome; an unclassified one falls through "
+        "to a GREEN unattended paid run."
+    )
+
+
+def test_gate_hard_fails_the_run_limit_breaches_the_task_declares():
+    """The task YAML's caps are only as good as the gate reading their breach status.
+
+    Both budget statuses and TIMEOUT map to the "failed" reporting category — the same
+    bucket as an ordinary criterion FAILURE — so they are NOT covered by the
+    ERROR/BUILD_FAILED branch, and nothing else in the gate rejects them.
+    """
+    from coder_eval.models import FinalStatus
+
+    named = _statuses_the_gate_names()
+    for status in (FinalStatus.TIMEOUT, FinalStatus.TOKEN_BUDGET_EXCEEDED, FinalStatus.COST_BUDGET_EXCEEDED):
+        assert status.category == "failed", (
+            f"{status.value} is no longer categorized 'failed'; re-check whether the gate's "
+            "run-limit branch is still the thing that catches it"
+        )
+        assert status.value in named, (
+            f"a tripped {status.value} cap is not rejected by the gate: the run burns its budget and the job goes green"
+        )
