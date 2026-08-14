@@ -1508,11 +1508,22 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # and nest them under the spawning Agent call. The parent stream never
         # carries the child's commands (Limited persistence drops them), but its
         # rollout always persists the raw function_call/local_shell_call items.
-        # Skipped when the pump was cut short (cooperative stop or turn cap):
-        # children may have no rollout yet and the run is already decided —
-        # recovery adds nothing the armed gate uses, and its child tool calls
-        # would push the visible-turn count past the cap that just fired.
-        if state.spawned_children and not state.ended_cleanly:
+        #
+        # Runs on a turn-cap stop. Recovery is also what carries the children's
+        # TOKENS: it is the only writer of the ``parent_tool_use_id``-tagged
+        # messages that ``_fold_subagent_tokens`` sums into the turn total, so
+        # skipping it drops the child threads' spend from the run's cost entirely
+        # (Codex bills children on separate threads the parent total never sees).
+        # A cap is a routine ending, not an exceptional one, so paying ~2s of
+        # rollout polling beats under-reporting spend on every capped run that
+        # spawned a sub-agent. The recovered child calls land in the trajectory
+        # beyond the cap's count, the same way the force-closed orphan does;
+        # the cap bounds what the model was allowed to DO, not what the record is
+        # allowed to explain.
+        #
+        # Still skipped on a cooperative stop: an armed gate has already decided
+        # the run, children may have no rollout yet, and that path predates the cap.
+        if state.spawned_children and not state.stopped_early_hit:
             await self._recover_subagent_tool_calls(
                 state.spawned_children,
                 state.collab_results,

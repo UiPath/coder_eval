@@ -2050,3 +2050,78 @@ class TestMaxTurnsVisibleTurnCap:
         record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
 
         assert record.max_turns_exhausted is False
+
+    async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
+        """A capped turn must not lose the child threads' spend.
+
+        Codex bills sub-agents on separate threads the parent total never sees, and
+        ``_recover_subagent_tool_calls`` is the ONLY writer of the
+        ``parent_tool_use_id`` messages ``_fold_subagent_tokens`` sums. So skipping
+        recovery because the pump was cut short does not just drop telemetry rows —
+        it silently removes the child's tokens and cost from the run. The cap is a
+        routine ending, so recovery still runs; only a cooperative stop skips it.
+        """
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-eeee-7000-8000-000000000005"
+        _write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
+                {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
+                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+            ],
+        )
+        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
+        wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
+        # The cap fires on the wait, before turn/completed is ever dispatched.
+        notifications = [
+            _item_notification("item/started", spawn),
+            _item_notification("item/completed", spawn),
+            _item_notification("item/started", wait),
+            _item_notification("item/completed", wait),
+            *self._cmd_notifications(3),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("delegate it", max_turns=2)
+
+        assert record.max_turns_exhausted is True
+        # The child's inner shell command was recovered despite the cap...
+        assert [c for c in record.commands if c.tool_name == "Bash"]
+        # ...and its generation nests under the spawn, carrying its own tokens...
+        nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
+        assert sum(m.output_tokens for m in nested) == 96
+        # ...which is what makes the turn total (and therefore the run cost)
+        # include the sub-agent instead of silently under-reporting it.
+        assert record.token_usage is not None
+        assert record.token_usage.output_tokens >= 96
+        assert record.token_usage.cache_read_input_tokens >= 15104
+
+    async def test_cooperative_stop_still_skips_sub_agent_recovery(self, monkeypatch, tmp_path):
+        """The early-stop path keeps its pre-existing skip: an armed gate already decided."""
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-ffff-7000-8000-000000000006"
+        _write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
+                {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
+                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
+            ],
+        )
+        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
+        wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
+        notifications = [
+            _item_notification("item/started", spawn),
+            _item_notification("item/completed", spawn),
+            _item_notification("item/started", wait),
+            _item_notification("item/completed", wait),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("delegate it", should_stop=lambda: True)
+
+        assert not [c for c in record.commands if c.tool_name == "Bash"]
