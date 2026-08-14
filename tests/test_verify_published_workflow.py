@@ -25,6 +25,7 @@ Four such couplings, each with an executable binding here:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,38 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 VERIFY_WF = WORKFLOWS / "verify-published-action.yml"
 RELEASE_WF = WORKFLOWS / "release.yml"
 ACTION_YML = REPO_ROOT / "action.yml"
+
+
+def _resolve_bash() -> str | None:
+    """An ABSOLUTE path to a POSIX bash, or None if the host has none.
+
+    Never the bare name ``"bash"``: on Windows, ``subprocess`` resolves it through
+    CreateProcess, which searches ``System32`` *before* ``PATH`` — and
+    ``C:\\Windows\\System32\\bash.exe`` is the WSL launcher stub. With no distro
+    installed it prints "Windows Subsystem for Linux has no installed distributions"
+    (in UTF-16, so it arrives NUL-interleaved) and exits 1, which makes every lifted
+    snippet below fail for a reason that has nothing to do with the snippet.
+    ``shutil.which`` follows PATH order instead, which is how the Windows runner's Git
+    Bash is found — the same resolution ``tests/test_litellm_config.py`` already relies
+    on. The System32 fallback covers a PATH that happens to list it first.
+    """
+    found = shutil.which("bash")
+    if found and "system32" in found.replace("\\", "/").lower():
+        found = next(
+            (
+                candidate
+                for candidate in (
+                    r"C:\Program Files\Git\bin\bash.exe",
+                    r"C:\Program Files\Git\usr\bin\bash.exe",
+                )
+                if Path(candidate).exists()
+            ),
+            None,
+        )
+    return found
+
+
+BASH = _resolve_bash()
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -85,9 +118,16 @@ def _bash_result(
 
     Used for the guards, whose whole contract is *refusing* — asserting exit 0 would
     make every one of them untestable.
+
+    Skips (rather than fails) on a host with no POSIX bash: these snippets are lifted
+    out of workflows that only ever run on ubuntu runners, so a shell-less host proves
+    nothing about them. The skip lives here rather than on ~10 marks so a test added
+    later cannot forget it.
     """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this host; the lifted workflow snippets need one")
     return subprocess.run(
-        ["bash", "-c", script],
+        [BASH, "-c", script],
         input=stdin,
         capture_output=True,
         text=True,
