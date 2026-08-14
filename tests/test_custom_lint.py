@@ -3453,6 +3453,97 @@ class TestCE033PluginReferenceParity:
 
 
 @pytest.mark.lint
+class TestCE038NestedForbidExtras:
+    """CE038: `extra="forbid"` must reach the nested models it appears to protect.
+
+    Pydantic does NOT propagate `model_config` into nested models. A container that declares
+    `extra="forbid"` therefore rejects a typo at its own top level and silently DROPS one inside
+    any nested model that did not declare it for itself — while every reader of the container's
+    config reasonably believes otherwise.
+
+    That is not hypothetical: `OptimizeMeasurements` shipped with `extra="forbid"` and a docstring
+    justifying it as "a typo must not become a permanent cache miss, and the regression corpus is
+    not reconstructible" — and both `NoiseFloor` and `RegressionRow`, where the corpus actually
+    lives, took the lenient default. The guarantee did not hold precisely where it was claimed.
+
+    Runtime introspection rather than an AST walk, because the question is about resolved field
+    TYPES (through `list[...]`, `X | None`, unions and aliases), which the AST does not know.
+    Enforced over every model reachable from `coder_eval.models`.
+    """
+
+    MAX_ANNOTATION_DEPTH = 6
+
+    @staticmethod
+    def _nested_models(annotation: object, depth: int = 0) -> list[type]:
+        """Every BaseModel reachable through an annotation's type arguments."""
+        import typing
+
+        from pydantic import BaseModel
+
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return [annotation]
+        if depth >= TestCE038NestedForbidExtras.MAX_ANNOTATION_DEPTH:
+            return []
+        return [
+            m for arg in typing.get_args(annotation) for m in TestCE038NestedForbidExtras._nested_models(arg, depth + 1)
+        ]
+
+    def _offenders(self) -> list[str]:
+        from pydantic import BaseModel
+
+        import coder_eval.models as models_pkg
+
+        offenders: list[str] = []
+        seen: set[type] = set()
+
+        def visit(cls: type) -> None:
+            if cls in seen:
+                return
+            seen.add(cls)
+            strict = cls.model_config.get("extra") == "forbid"  # type: ignore[attr-defined]
+            for name, field in cls.model_fields.items():  # type: ignore[attr-defined]
+                for nested in self._nested_models(field.annotation):
+                    if strict and nested.model_config.get("extra") != "forbid":
+                        offenders.append(f"{cls.__name__}.{name} -> {nested.__name__}")
+                    visit(nested)
+
+        for name in dir(models_pkg):
+            obj = getattr(models_pkg, name)
+            if isinstance(obj, type) and issubclass(obj, BaseModel):
+                visit(obj)
+        return sorted(set(offenders))
+
+    def test_no_violations(self):
+        offenders = self._offenders()
+        assert not offenders, (
+            "a model declaring extra='forbid' has nested model field(s) that do NOT:\n  "
+            + "\n  ".join(offenders)
+            + "\n\npydantic does not propagate model_config, so a typo inside those nested models is "
+            "silently dropped while the container's config says it would be rejected. Declare "
+            "`model_config = ConfigDict(extra='forbid')` on the nested model too, or relax the "
+            "container if leniency is genuinely intended there."
+        )
+
+    def test_the_check_actually_fires(self):
+        # The rule is only worth having if it can fail. A lenient nested model under a strict
+        # container is exactly the shape that shipped, so build one and prove it is caught.
+        from pydantic import BaseModel, ConfigDict
+
+        class Lenient(BaseModel):
+            value: int = 0
+
+        class Strict(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            nested: list[Lenient] = []
+
+        assert self._nested_models(Strict.model_fields["nested"].annotation) == [Lenient]
+        assert Strict.model_config.get("extra") == "forbid"
+        assert Lenient.model_config.get("extra") != "forbid"
+        # And the consequence it guards, demonstrated rather than asserted about:
+        assert Strict.model_validate({"nested": [{"value": 1, "typo": 2}]}).nested[0].value == 1
+
+
+@pytest.mark.lint
 class TestCE031DeadConfigFields:
     """CE031 — a behavior-driving config field must be read somewhere in src/.
 

@@ -485,3 +485,14 @@ with the two `action.yml` items above — one considered change to the action's 
 ## From the optimize-skill review v2 plan (2026-08-13)
 
 - [ ] **"The ToolStart seam decides" is now a PER-CRITERION property, not a global invariant.** `command_executed`'s verdict is decidable from the tool call's inputs; `skill_triggered`'s is not (for the `Skill` tool the body is delivered AS the result, so an in-flight call engaged nothing). A new `LiveSuccessCriterion` must state which seam its `live_verdict` is decidable at, and a criterion that decides at the ToolStart on information only the result carries silently diverges from its own frozen check. Not mechanically detectable today: the property is about what a `live_verdict` implementation *reads*, which no AST rule can infer — a rule would have to know that `result_status` is the field distinguishing the two seams. A cheaper partial guard would be a test-level convention (every live criterion has a "not decided before the result" or "decided on the call" test), which is a sweep rather than a rule. — caught implementing Phase 1 of c/2026-08-13-optimize-skill-review-v2-fixes.md.
+
+- [ ] A prose claim in `plugins/` about `src/` behaviour that no sensor checks — the token sensors
+      check PRESENCE, never TRUTH. Shipped false twice in one change: "the gate cannot be computed
+      from one run dir" (it can) and a halving cost saving that was arithmetically a premium. Only
+      `test_optimize_skill_snippet_names_the_public_gate_api` checks a claim against the code, and
+      each such sensor is bespoke — there is no general form. — caught in the optimize-skill gate
+      corrections review, 2026-08-13.
+- [ ] Changing a module-level statistical constant in `reports_stats.py` silently reddens
+      `tests/_fixtures/report_snapshots/`, which no phase's scoped tests run. A blast-radius check
+      ("these fixtures are downstream of these constants") is not obviously expressible without
+      hardcoding the pairing it is meant to discover. — caught in the same review.
