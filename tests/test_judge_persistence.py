@@ -1,6 +1,6 @@
 """Tests for the spill/load helpers in ``coder_eval.evaluation.judge_persistence``.
 
-The orchestrator spills judge transcripts to ``judge-<idx>.json`` next to
+The orchestrator spills judge transcripts to sibling YAML files next to
 ``task.json`` so the row record stays lean. Re-render paths reload them.
 These tests verify the round-trip and back-compat with old runs that
 inlined the transcript.
@@ -131,6 +131,31 @@ def test_spill_preserves_index_for_multiple_judges(tmp_path: Path) -> None:
     assert judge2.transcript_path == "judge-1.yaml"
     assert (tmp_path / "judge-0.yaml").is_file()
     assert (tmp_path / "judge-1.yaml").is_file()
+
+
+def test_post_failure_judge_uses_distinct_sibling_and_round_trips(tmp_path: Path) -> None:
+    judge = _make_judge_result(transcript=_make_transcript())
+    result = _make_evaluation_result(criteria=[])
+    result.final_status = FinalStatus.ERROR
+    result.post_failure_criteria_results = [judge]
+
+    assert spill_judge_transcripts(result, tmp_path) == 1
+    assert judge.transcript_path == "post-failure-judge-0.yaml"
+
+    raw = result.model_dump_json(
+        exclude={
+            "success_criteria_results": {"__all__": {"transcript"}},
+            "post_failure_criteria_results": {"__all__": {"transcript"}},
+        }
+    )
+    assert "raw_verdict" not in raw
+
+    reloaded = EvaluationResult.model_validate_json(raw)
+    assert load_judge_transcripts(reloaded, tmp_path) == 1
+    recovered = reloaded.post_failure_criteria_results[0]
+    assert isinstance(recovered, JudgeCriterionResult)
+    assert recovered.transcript is not None
+    assert recovered.transcript.raw_verdict == '{"score":0.75,"rationale":"ok"}'
 
 
 def test_spill_skips_non_judge_results(tmp_path: Path) -> None:
@@ -306,8 +331,8 @@ def test_load_rejects_dotdot_traversal(tmp_path: Path) -> None:
 
 def test_load_rejects_subdir_path(tmp_path: Path) -> None:
     """A path with a separator (even within task_dir) is rejected — the spill helper
-    only ever writes ``judge-<idx>.yaml`` as a basename, so anything with a slash is
-    by definition not from us."""
+    only ever writes basenames, so anything with a slash is by definition not
+    from us."""
     judge = _make_judge_result(transcript=None)
     judge.transcript_path = "subdir/judge-0.yaml"
     result = _make_evaluation_result(criteria=[judge])

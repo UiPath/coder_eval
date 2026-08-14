@@ -61,6 +61,7 @@ def plan_command(
     # Lazy import to avoid circular dependency at module level
     from ..orchestration.early_stop import EarlyStopConfigError, validate_early_stop
     from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
+    from ..orchestration.run_limits import validate_run_limits
 
     # Always load experiment (defaults to experiments/default.yaml)
     exp_path = experiment if isinstance(experiment, Path) else DEFAULT_EXPERIMENT_PATH
@@ -136,6 +137,10 @@ def plan_command(
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
                     # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
                     validate_early_stop(resolved)
+                    for message in validate_run_limits(resolved):
+                        console.print(
+                            f"    [yellow]⚠[/yellow] [yellow]Variant '{variant.variant_id}': {message}[/yellow]"
+                        )
                     agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""

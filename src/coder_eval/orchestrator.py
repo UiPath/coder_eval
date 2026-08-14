@@ -22,6 +22,8 @@ from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors import (
     AgentCrashError,
     BudgetExceededError,
+    CheckerMisuseError,
+    JudgeInfrastructureError,
     TaskTimeoutError,
     TurnTimeoutError,
 )
@@ -36,6 +38,7 @@ from .models import (
     ApiRoute,
     BedrockRoute,
     ConfigLineageEntry,
+    CriteriaResults,
     CriterionResult,
     DirectRoute,
     EvaluationResult,
@@ -48,6 +51,7 @@ from .models import (
     PreservationMode,
     SimulationConfig,
     SimulationTelemetry,
+    SuccessCriterion,
     TaskConfigRecord,
     TaskDefinition,
     TokenUsage,
@@ -58,6 +62,7 @@ from .models import (
 )
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import load_reference
+from .orchestration.run_limits import validate_run_limits
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
@@ -403,6 +408,10 @@ class Orchestrator:
         # task run even though _check_expected_turns is called after every turn.
         self._expected_turns_warning_emitted: bool = False
 
+        # One-shot flag: a resolved task may be inspected more than once during
+        # setup, but its ineffective timeout relationship should be logged once.
+        self._run_limits_warning_emitted: bool = False
+
         # Canonical id shared with run_dir layout, tqdm label, and streaming events.
         self._log_task_id = format_task_log_id(variant_id, task.task_id, replicate_index)
 
@@ -494,16 +503,11 @@ class Orchestrator:
                     asyncio_task_to_cancel=asyncio.current_task(),
                     label=f"task_timeout ({self.task.task_id})",
                 ) as wd:
-                    try:
-                        success = await self._evaluation_loop()
-                    except asyncio.CancelledError:
-                        if wd.fired:
-                            raise TaskTimeoutError(
-                                task_timeout or 0,
-                                task_id=self.task.task_id,
-                                elapsed_seconds=time.time() - start_time,
-                            ) from None
-                        raise
+                    success = await self._run_evaluation_with_failure_evidence(
+                        watchdog=wd,
+                        task_timeout=task_timeout,
+                        start_time=start_time,
+                    )
                 # Belt-and-suspenders: if the loop returned normally but the
                 # watchdog fired during post-loop work or the inner coro
                 # swallowed the cancel, still classify as TIMEOUT.
@@ -627,6 +631,139 @@ class Orchestrator:
                     raise teardown_interrupt
 
         return self.result
+
+    async def _run_evaluation_with_failure_evidence(
+        self,
+        *,
+        watchdog: ThreadedWatchdog,
+        task_timeout: int | None,
+        start_time: float,
+    ) -> bool:
+        """Run the loop and collect diagnostics before its watchdog closes."""
+        try:
+            return await self._evaluation_loop()
+        except asyncio.CancelledError:
+            if watchdog.fired:
+                self._record_post_failure_not_evaluated(
+                    "the task_timeout budget was exhausted before post-failure grading could run"
+                )
+                raise TaskTimeoutError(
+                    task_timeout or 0,
+                    task_id=self.task.task_id,
+                    elapsed_seconds=time.time() - start_time,
+                ) from None
+            raise
+        except TaskTimeoutError:
+            self._record_post_failure_not_evaluated(
+                "the task_timeout budget was exhausted before post-failure grading could run"
+            )
+            raise
+        except (AgentCrashError, TurnTimeoutError, BudgetExceededError) as terminal_error:
+            if (
+                isinstance(terminal_error, BudgetExceededError)
+                and self.result is not None
+                and len(self.result.success_criteria_results) == len(self.task.success_criteria)
+            ):
+                raise
+            try:
+                await self._evaluate_post_failure_criteria()
+            except asyncio.CancelledError:
+                if watchdog.fired:
+                    self._record_post_failure_not_evaluated(
+                        "the task_timeout budget expired during post-failure grading"
+                    )
+                    raise TaskTimeoutError(
+                        task_timeout or 0,
+                        task_id=self.task.task_id,
+                        elapsed_seconds=time.time() - start_time,
+                    ) from None
+                raise
+            except (JudgeInfrastructureError, CheckerMisuseError):
+                raise
+            except Exception as recovery_error:
+                self._record_post_failure_not_evaluated(
+                    f"post-failure grading could not complete ({type(recovery_error).__name__})"
+                )
+                logger.warning(
+                    "[%s] Post-failure criteria evaluation failed; preserving the original terminal error",
+                    self.task.task_id,
+                    exc_info=True,
+                )
+            raise
+
+    @staticmethod
+    def _not_evaluated_result(criterion: SuccessCriterion, reason: str) -> CriterionResult:
+        return CriterionResult(
+            criterion_type=criterion.type,
+            description=criterion.description,
+            score=0.0,
+            details=f"Not evaluated after terminal agent failure: {reason}.",
+            evaluation_status="not_evaluated",
+            pass_threshold=criterion.pass_threshold,
+            gating=criterion.is_gating,
+        )
+
+    def _record_post_failure_not_evaluated(self, reason: str) -> None:
+        """Record a full diagnostic result vector when recovery cannot run."""
+        if self.result is None:
+            return
+        self.result.post_failure_criteria_results = [
+            self._not_evaluated_result(criterion, reason) for criterion in self.task.success_criteria
+        ]
+
+    async def _evaluate_post_failure_criteria(self) -> None:
+        """Evaluate diagnostic criteria before the live sandbox is torn down.
+
+        Results stay outside the canonical scored list. Agent-dependent checks
+        require at least one preserved turn; artifact-only checks can still run
+        when the agent failed before producing trajectory evidence.
+        """
+        if self.result is None:
+            return
+        if self.success_checker is None or self.sandbox is None:
+            self._record_post_failure_not_evaluated("the sandbox or success checker was unavailable")
+            return
+
+        runnable: list[SuccessCriterion] = []
+        unavailable_positions: set[int] = set()
+        for position, criterion in enumerate(self.task.success_criteria):
+            if criterion.requires_agent and not self.result.iterations:
+                unavailable_positions.add(position)
+            else:
+                runnable.append(criterion)
+
+        checked: CriteriaResults = []
+        if runnable:
+            reference_code, reference_dir, self._reference_code = load_reference(
+                task=self.task,
+                task_file=self.task_file,
+                cached_reference=self._reference_code,
+            )
+            checked = await self.success_checker.check_all_async(
+                runnable,
+                reference_code=reference_code,
+                reference_dir=reference_dir,
+                turn_records=self.result.iterations,
+            )
+
+        if len(checked) != len(runnable):
+            raise ValueError(
+                f"Post-failure checker returned {len(checked)} results for {len(runnable)} runnable criteria"
+            )
+
+        checked_iter = iter(checked)
+        recovered: CriteriaResults = []
+        for position, criterion in enumerate(self.task.success_criteria):
+            if position in unavailable_positions:
+                recovered.append(
+                    self._not_evaluated_result(
+                        criterion,
+                        "no turn record survived for this agent-dependent criterion",
+                    )
+                )
+            else:
+                recovered.append(next(checked_iter))
+        self.result.post_failure_criteria_results = recovered
 
     async def _drain_killed_turn(self) -> None:
         """Move a hard-killed turn's partial record from the agent onto the result.
@@ -773,7 +910,7 @@ class Orchestrator:
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
-        # Spill any judge transcripts to sibling judge-<idx>.yaml files BEFORE
+        # Spill any judge transcripts to sibling YAML files BEFORE
         # we dump task.json, so transcript_path is set on each judge result.
         # The inline `transcript` field stays in memory — HTML rendering below
         # uses it directly. We strip it from the JSON dump via `exclude=...`.
@@ -791,11 +928,14 @@ class Orchestrator:
         report_tmp.write_text(  # noqa: CE002 — small JSON write at end of run
             self.result.model_dump_json(
                 indent=2,
-                # Strip inline transcripts: they live in sibling judge-<idx>.yaml
+                # Strip inline transcripts: they live in sibling YAML files
                 # next to task.json, referenced by transcript_path. Excluding
                 # `transcript` here avoids ~20-100 KB of bloat per judge result
                 # in the row record without losing any data.
-                exclude={"success_criteria_results": {"__all__": {"transcript"}}},
+                exclude={
+                    "success_criteria_results": {"__all__": {"transcript"}},
+                    "post_failure_criteria_results": {"__all__": {"transcript"}},
+                },
             ),
             encoding="utf-8",
         )
@@ -907,6 +1047,16 @@ class Orchestrator:
             )
             self._expected_turns_warning_emitted = True
 
+    def _warn_on_ineffective_task_timeout(self) -> None:
+        """Log resolved cross-field run-limit warnings once per task run."""
+        if self._run_limits_warning_emitted:
+            return
+        messages = validate_run_limits(self.task)
+        for message in messages:
+            logger.warning("[%s] %s", self.task.task_id, message)
+        if messages:
+            self._run_limits_warning_emitted = True
+
     @property
     def _cost_correlation_run_id(self) -> str:
         """The LiteLLM cost-log correlation run id — a stable hash of the run dir.
@@ -988,6 +1138,7 @@ class Orchestrator:
         # paths (the CLI already validated during resolution). No-op unless
         # some criterion carries a stop_early: block.
         validate_early_stop(self.task)
+        self._warn_on_ineffective_task_timeout()
 
         # Build the early-stop watcher once, up front, when armed (>= 1 criterion
         # with a stop_early: block and the run_limits.stop_early kill switch not

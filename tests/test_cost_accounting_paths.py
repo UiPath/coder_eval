@@ -188,6 +188,26 @@ class TestRowCostProjection:
         assert row["total_cost_usd"] == pytest.approx(0.15)
         assert row["agent_cost_usd"] == pytest.approx(0.1)
 
+    def test_post_failure_judge_cost_rolls_up_without_affecting_score(self):
+        result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
+        result.final_status = FinalStatus.ERROR
+        result.weighted_score = 0.0
+        result.total_token_usage = TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1)
+        result.post_failure_criteria_results = [
+            JudgeCriterionResult(
+                criterion_type="llm_judge",
+                description="diagnostic",
+                score=1.0,
+                token_usage=TokenUsage(uncached_input_tokens=5000, output_tokens=500, total_cost_usd=0.02),
+            )
+        ]
+
+        row = eval_result_to_task_dict(result)
+
+        assert row["judge_cost_usd"] == pytest.approx(0.02)
+        assert row["total_cost_usd"] == pytest.approx(0.12)
+        assert row["weighted_score"] == 0.0
+
     def test_no_judge_means_no_judge_cost(self):
         """None, not 0.0 — 'no judge ran' must stay distinct from 'a judge ran free'."""
         result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])

@@ -7,10 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.errors.timeout import TaskTimeoutError, TurnTimeoutError
 from coder_eval.models import (
     AgentKind,
     ClaudeCodeAgentConfig,
+    CommandExecutedCriterion,
     CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
@@ -147,6 +149,8 @@ async def test_task_timeout_fires(tmp_path) -> None:
     result = await orchestrator.run()
     assert result.final_status == "TIMEOUT"
     assert f"Task timed out after {task_timeout}s" in (result.error_message or "")
+    assert len(result.post_failure_criteria_results) == 1
+    assert result.post_failure_criteria_results[0].evaluation_status == "not_evaluated"
 
 
 @pytest.mark.asyncio
@@ -329,6 +333,119 @@ async def test_turn_timeout_not_rewrapped_as_task_timeout(tmp_path) -> None:
 
     with pytest.raises(TurnTimeoutError):
         await orchestrator._evaluation_loop()
+
+
+@pytest.mark.asyncio
+async def test_turn_timeout_records_post_failure_evidence_without_rescoring(tmp_path) -> None:
+    """A terminal turn timeout preserves artifact truth without changing the ERROR score."""
+    task = _make_task(turn_timeout=1200, task_timeout=1500)
+    task.success_criteria = [
+        FileExistsCriterion(type="file_exists", path="artifact.txt", description="artifact exists"),
+        CommandExecutedCriterion(
+            type="command_executed",
+            tool_name="Bash",
+            description="agent ran validator",
+        ),
+    ]
+    run_dir = tmp_path / "run" / "post_failure_evidence"
+    run_dir.mkdir(parents=True)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
+    orchestrator._evaluation_loop = AsyncMock(  # type: ignore[method-assign]
+        side_effect=TurnTimeoutError(1200, task_id=task.task_id, iteration=1)
+    )
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    mock_checker = MagicMock()
+    mock_checker.check_all_async = AsyncMock(
+        return_value=[
+            CriterionResult(
+                criterion_type="file_exists",
+                description="artifact exists",
+                score=1.0,
+            )
+        ]
+    )
+    orchestrator.success_checker = mock_checker
+
+    mock_agent = MagicMock()
+    mock_agent.kill_sync = MagicMock()
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+        result = await orchestrator.run()
+
+    assert result.final_status == "ERROR"
+    assert result.weighted_score == 0.0
+    assert result.success_criteria_results == []
+    assert len(result.post_failure_criteria_results) == 2
+    artifact, agent_dependent = result.post_failure_criteria_results
+    assert artifact.score == 1.0
+    assert artifact.evaluation_status == "evaluated"
+    assert agent_dependent.score == 0.0
+    assert agent_dependent.evaluation_status == "not_evaluated"
+    assert "no turn record survived" in (agent_dependent.details or "")
+
+    checked_criteria = mock_checker.check_all_async.await_args.args[0]
+    assert [criterion.type for criterion in checked_criteria] == ["file_exists"]
+
+    persisted = EvaluationResult.model_validate_json((run_dir / "task.json").read_text())
+    assert persisted.final_status == "ERROR"
+    assert persisted.weighted_score == 0.0
+    assert [r.evaluation_status for r in persisted.post_failure_criteria_results] == [
+        "evaluated",
+        "not_evaluated",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_failure_judge_infrastructure_error_still_escalates(tmp_path) -> None:
+    task = _make_task(turn_timeout=1200, task_timeout=1500)
+    task.success_criteria = [
+        FileExistsCriterion(type="file_exists", path="artifact.txt", description="artifact exists")
+    ]
+    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="test-variant")
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
+    orchestrator._evaluation_loop = AsyncMock(  # type: ignore[method-assign]
+        side_effect=TurnTimeoutError(1200, task_id=task.task_id, iteration=1)
+    )
+    orchestrator.sandbox = MagicMock()
+    orchestrator.success_checker = MagicMock()
+    orchestrator.success_checker.check_all_async = AsyncMock(side_effect=JudgeInfrastructureError("judge unavailable"))
+    orchestrator.agent = MagicMock()
+    orchestrator.agent.get_sdk_options.return_value = None
+
+    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+        result = await orchestrator.run()
+
+    assert result.final_status == "ERROR"
+    assert result.error_message == "judge unavailable"
+    assert result.weighted_score == 0.0
+
+
+def test_runtime_timeout_warning_is_emitted_once(tmp_path, caplog) -> None:
+    import logging
+
+    task = _make_task(turn_timeout=1200, task_timeout=1500)
+    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="test-variant")
+
+    with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
+        orchestrator._warn_on_ineffective_task_timeout()
+        orchestrator._warn_on_ineffective_task_timeout()
+
+    messages = [record.message for record in caplog.records if "single iteration" in record.message]
+    assert len(messages) == 1
+    assert "A larger task_timeout cannot extend the agent's single iteration" in messages[0]
+    assert "the agent budget is turn_timeout" in messages[0]
 
 
 @pytest.mark.asyncio

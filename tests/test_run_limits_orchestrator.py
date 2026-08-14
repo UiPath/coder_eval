@@ -281,6 +281,8 @@ class TestSingleShotEnforcement:
         assert "budget exceeded" in (result.error_message or "")
         # Captured error_log_tail key allowlist must include both new statuses.
         assert result.error_details == {}
+        assert len(result.post_failure_criteria_results) == 1
+        assert result.post_failure_criteria_results[0].evaluation_status == "not_evaluated"
         # Inspect the actual create_error_context call to confirm the component label.
         assert mock_ctx.call_args.kwargs["component"] == expected_component
 
