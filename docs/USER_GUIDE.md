@@ -37,7 +37,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--preservation-mode` | Sandbox persistence: `NONE` / `MOVE_ON_WRITE` / `DIRECT_WRITE`. Default is driver-derived (docker → `DIRECT_WRITE`, else `MOVE_ON_WRITE`); explicit value always wins. |
 | `--run-dir` | Custom run directory (default: timestamped in `runs/`) |
 | `-D path=value` / `--set` | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, token/USD budget caps, tools, plugins, and SDK options. |
-| `--model, -m` | Shorthand alias for `-D agent.model=…` (e.g., `claude-sonnet-4-20250514`) |
+| `--model, -m` | Shorthand alias for `-D agent.model=…` (e.g., `claude-sonnet-5`) |
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
 | `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
@@ -228,7 +228,7 @@ Set these in `.env` (copy from `.env.example`).
 | `API_BACKEND` | No | API backend: `direct` or `bedrock` (default: `direct`). Overridden by `--backend`. |
 | `AWS_BEARER_TOKEN_BEDROCK` | For Bedrock | AWS Bedrock bearer token for authentication |
 | `AWS_REGION` | For Bedrock | AWS region for Bedrock endpoint (e.g., `eu-north-1`) |
-| `BEDROCK_MODEL` | No | Cross-region Bedrock model ID (e.g., `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`) |
+| `BEDROCK_MODEL` | No | Cross-region Bedrock model ID (e.g., `eu.anthropic.claude-sonnet-5`) |
 | `BEDROCK_SMALL_MODEL` | No | Cross-region Bedrock small/fast model ID |
 | `CODEX_API_KEY` / `CODEX_BASE_URL` / `CODEX_MODEL` / `CODEX_API_VERSION` | For Codex | Codex agent auth & endpoint routing — see [Codex Agent Guide](agents/CODEX.md#endpoint-routing). |
 | `GEMINI_API_KEY` / `ANTIGRAVITY_MODEL` | For Antigravity | Antigravity (Gemini) agent auth & model — see [Antigravity Agent Guide](agents/ANTIGRAVITY.md#setup). |

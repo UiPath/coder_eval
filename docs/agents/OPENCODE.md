@@ -195,6 +195,13 @@ with an error naming the unrecognized event types it saw instead.
   sets `allowed_tools` on every task, so expect it on a default run). Do not rely on
   them as a boundary here, and note that skill-injection suites, which depend on
   `plugins`, cannot run on this harness.
+- **`max_turns` counts OpenCode's native steps.** One step = one assistant
+  generation (`step_start`/`step_finish`) and may carry several tool calls;
+  `max_turns: N` allows N complete steps, then the run finalizes cleanly as
+  `max_turns_exhausted`. This is the claude-code-style native unit, not the
+  visible-turn unit Codex/Antigravity use — see
+  [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant
+  across harnesses.
 - **No sub-agent attribution.** OpenCode's CLI stream does not expose nested agent
   generations, so per-sub-agent token grouping (available for Claude and Codex) is
   not derivable.

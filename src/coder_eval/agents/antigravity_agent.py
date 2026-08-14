@@ -23,7 +23,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
@@ -70,27 +70,6 @@ from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
-
-# Serializes the transient ``os.environ['PATH']`` prepend around the localharness
-# subprocess spawn (see ``AntigravityAgent._harness_spawn_guard``). The Antigravity
-# SDK's ``subprocess.Popen`` inherits the parent process's ``os.environ`` and exposes
-# NO env seam, so making mock CLIs shadow real ones forces a global mutation; this
-# lock keeps concurrent host-mode starts (``run_batch`` fans them out on one event
-# loop) from leaking one task's mock dirs onto another's harness. Lazily created and
-# rebound per running loop so pytest's per-test loops don't reuse a stale-loop lock.
-_HARNESS_SPAWN_LOCK: asyncio.Lock | None = None
-_HARNESS_SPAWN_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
-
-
-def _harness_spawn_lock() -> asyncio.Lock:
-    """Return the process-wide harness-spawn lock, bound to the running loop."""
-    global _HARNESS_SPAWN_LOCK, _HARNESS_SPAWN_LOCK_LOOP
-    loop = asyncio.get_running_loop()
-    if _HARNESS_SPAWN_LOCK is None or _HARNESS_SPAWN_LOCK_LOOP is not loop:
-        _HARNESS_SPAWN_LOCK = asyncio.Lock()
-        _HARNESS_SPAWN_LOCK_LOOP = loop
-    return _HARNESS_SPAWN_LOCK
-
 
 # Recommended Gemini coding model when a task pins no ``agent.model`` and neither
 # ``--model`` nor ``ANTIGRAVITY_MODEL`` is set. Gemini 3.5 Flash is Antigravity 2.0's
@@ -277,7 +256,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         self._sdk_agent: Any = None
         self._exit_stack: AsyncExitStack | None = None
         # Absolute dirs to prepend to PATH so sandbox mock CLIs shadow real ones
-        # for the harness's run_command tool — applied at spawn (see start()).
+        # for the harness's run_command tool — handed to the SDK's per-agent env
+        # seam at start() (see _harness_env).
         self._env_path_prepend: list[str] = []
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
@@ -352,6 +332,24 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """
         return [str(self.working_directory), *skills_paths]
 
+    def _harness_env(self) -> dict[str, str] | None:
+        """Per-agent environment for the localharness subprocess (``LocalAgentConfig.env``).
+
+        Returns the mock-CLI PATH prepend as a one-key overlay, or ``None`` when no
+        mock dirs are configured (so the SDK spawns with a plain inherited env). The
+        SDK merges this over ``os.environ`` at spawn (``{**os.environ, **env}``), so
+        naming only ``PATH`` leaves every other inherited variable untouched. The
+        same overlay is handed to the harness as its ``run_command`` environment, so
+        mock CLIs shadow the real ones inside the agent's shell too.
+        """
+        if not self._env_path_prepend:
+            return None
+        # Match the parent process's own casing (Windows exports ``Path``) so the
+        # merge overrides the inherited entry instead of adding a sibling key.
+        path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
+        merged = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key) or ""])
+        return {path_key: merged}
+
     async def start(
         self,
         working_directory: str,
@@ -370,10 +368,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             env_path_prepend: Absolute directories to prepend to PATH (typically the
                 resolved ``SandboxConfig.mock_path_dirs``) so mock CLIs shadow the real
                 ones for the harness's ``run_command`` tool — same mock-shadowing
-                contract as the Claude/Codex backends. The Antigravity SDK spawns the
-                localharness via ``subprocess.Popen`` with no env seam, so the prepend
-                is applied by transiently mutating ``os.environ['PATH']`` across the
-                spawn (see ``_harness_spawn_guard``).
+                contract as the Claude/Codex backends. Delivered through the SDK's
+                per-agent ``env`` seam (see ``_harness_env``), so concurrent tasks get
+                genuinely separate environments rather than a time-sliced global one.
             plugin_tools_dir: A skills/plugin source root. Resolved (together with
                 ``config.plugins``) into the harness's native ``skills_paths`` so the
                 agent can discover and engage UiPath skills — see ``_resolve_skills_paths``.
@@ -411,12 +408,23 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 workspaces=self._resolve_workspaces(skills_paths),
                 # Autonomous execution: approve every tool call (incl. run_command),
                 # which the default LocalAgentConfig policy would otherwise deny.
+                # ``permission_mode`` is deliberately NOT mapped onto these policies —
+                # it does not confine this agent, exactly as on Codex. coder_eval's
+                # isolation boundary is the driver (a docker container or an ephemeral
+                # per-task tempdir), so an in-agent approval policy is redundant, and
+                # the modes below bypassPermissions differ only in what they'd ask a
+                # human about — there is no human on a headless eval path. Declared as
+                # such in the parity table so it is visible rather than silent.
                 policies=[policy.allow_all()],
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: hand the harness the search-path roots that parent
                 # the UiPath skill dirs. Unlike Codex (which symlinks into
                 # .agents/skills/), Antigravity takes skill search paths natively.
                 skills_paths=skills_paths,
+                # Mock-CLI PATH shadowing, per agent. The SDK merges this over the
+                # inherited os.environ when it spawns the localharness, so two
+                # concurrent tasks never see each other's mock dirs.
+                env=self._harness_env(),
             )
             # Attach the configured thinking level (reasoning effort) onto every
             # resolved model's Gemini endpoint. The SDK validates the model list in
@@ -429,46 +437,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
             # Enter the SDK Agent context (boots the localharness subprocess +
             # opens the conversation). Held open across communicate() calls and
-            # closed in stop(). The spawn guard prepends the mock dirs onto
-            # os.environ['PATH'] across the whole context-entry (subprocess spawn
-            # + session open — the child keeps the env it was spawned with), then
-            # restores it.
+            # closed in stop().
             self._exit_stack = AsyncExitStack()
-            async with self._harness_spawn_guard():
-                self._sdk_agent = await self._exit_stack.enter_async_context(SdkAgent(cfg))
+            self._sdk_agent = await self._exit_stack.enter_async_context(SdkAgent(cfg))
             self._log.debug("Antigravity local harness started (model=%s)", self._effective_model())
         except Exception as e:
             await self._teardown()
             raise RuntimeError(f"Failed to start Antigravity agent: {e}") from e
-
-    @contextlib.asynccontextmanager
-    async def _harness_spawn_guard(self) -> AsyncIterator[None]:
-        """Prepend ``_env_path_prepend`` onto ``os.environ['PATH']`` across a harness spawn.
-
-        The localharness ``subprocess.Popen`` inherits ``os.environ`` at spawn time and
-        the SDK exposes no env seam, so mock CLIs can only shadow the real ones by
-        mutating the process PATH across the harness context-entry (subprocess spawn +
-        session open). The mutation is serialized (process-wide lock) and restored in
-        ``finally`` — the spawned child keeps the env it started with, so the restore
-        never affects the live harness. The lock is taken even when no prepend dirs
-        were configured: a no-prepend spawn must still wait out any in-flight mutated-
-        PATH window, or its harness would inherit another task's mock dirs.
-        """
-        async with _harness_spawn_lock():
-            if not self._env_path_prepend:
-                yield
-                return
-            path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
-            original = os.environ.get(path_key)
-            os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original or ""])
-            self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
-            try:
-                yield
-            finally:
-                if original is None:
-                    os.environ.pop(path_key, None)
-                else:
-                    os.environ[path_key] = original
 
     async def _drain(
         self,
@@ -513,6 +488,17 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             state.stopped_early_hit = True
                             self._log.debug("Cooperative stop requested; ending step loop at this boundary")
                             break
+                        # The turn cap shares this boundary: the step that reached the
+                        # cap is kept whole, the next is never pulled. Checked after
+                        # the cooperative stop so an armed early-stop still reports as
+                        # STOPPED_EARLY when both would fire on the same step.
+                        if state.max_turns_reached():
+                            state.max_turns_hit = True
+                            self._log.debug(
+                                "max_turns (%s visible turns) reached; ending step loop",
+                                state.max_turns,
+                            )
+                            break
                 return
             except RuntimeError:
                 if attempt == _RECEIVE_STEPS_REENTRY_RETRIES - 1:
@@ -538,6 +524,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         processed step. When it returns True the step loop breaks, the
         conversation is cancelled (best-effort) and the turn finalizes cleanly as
         ``STOPPED_EARLY`` (``crashed=False``).
+
+        ``max_turns`` caps VISIBLE turns — tool calls, the unit
+        ``reports_stats.visible_turn_count`` counts — enforced in-stream on the same
+        step-loop boundary as the cooperative stop. Claude Code's native SDK cap
+        counts assistant messages instead; one ``communicate()`` here is a single SDK
+        turn, so a native counter would cap at 1 and mean nothing. See
+        docs/agents/HARNESS_PARITY.md.
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
         ``receive_steps()`` until the turn goes idle, mapping the Gemini step
@@ -571,6 +564,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             iteration=self._iteration,
             model=model,
             turn_start_time=turn_start_time,
+            max_turns=max_turns,
         )
 
         try:
@@ -618,6 +612,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     # as fast as today.
                     while (
                         not state.stopped_early_hit
+                        and not state.max_turns_hit
                         and not state.timeout_hit
                         and state.has_orphaned_tool_call()
                         and (
@@ -639,9 +634,18 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         if should_stop is not None and should_stop():
                             state.stopped_early_hit = True
                             break
+                        # A re-drain honors the turn cap the same way the initial one
+                        # does (the check lives in _drain), so a poll cycle can also
+                        # be the cycle that reaches it; the loop head above then
+                        # stops polling instead of waiting out the background work.
                         await self._drain(conversation, state, should_stop)
 
-                    if state.has_orphaned_tool_call() and not state.stopped_early_hit and not state.timeout_hit:
+                    if (
+                        state.has_orphaned_tool_call()
+                        and not state.stopped_early_hit
+                        and not state.max_turns_hit
+                        and not state.timeout_hit
+                    ):
                         # Exited via this loop's own bound (poll_deadline or the
                         # cycle cap), not an external stop/timeout -- the tool call
                         # is force-closed as unresolved in finalize() below and the
@@ -654,7 +658,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
                         self._log.warning(msg, bound, poll_count)
 
-                    if state.stopped_early_hit:
+                    if state.stopped_early_hit or state.max_turns_hit:
                         # Best-effort server-side cancel, mirrors kill(); a raising
                         # cancel() lands in the guarded handler below. Single check
                         # point covers a stop from either the initial drain or any
@@ -668,13 +672,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 except Exception as e:
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
-                    if state.stopped_early_hit:
+                    if state.ended_cleanly:
                         # The turn already stopped cleanly (e.g. the generator's
                         # aclose() raised on the break); escalating to a crash
                         # would trigger the orchestrator's retry with the watcher's
                         # decision still latched → immediate stop-at-turn-0 on the
-                        # retry (wasted spend). Fall through to the clean tail.
-                        self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+                        # retry (wasted spend). A cap-break is the same shape: the
+                        # retry would burn the budget again and re-hit the cap.
+                        self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
                     else:
                         self._finalize_and_raise_crash(
                             state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
@@ -691,10 +696,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 self._finalize_external_cancel(state.finalize)
             raise
         except Exception as e:
-            if state.stopped_early_hit and not state.timeout_hit:
-                # Same retry-poisoning guard as the inner handler: a cooperative
-                # stop already happened, so finalize cleanly instead of crashing.
-                self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+            if state.ended_cleanly and not state.timeout_hit:
+                # Same retry-poisoning guard as the inner handler: the turn already
+                # ended cleanly (cooperative stop or turn cap), so finalize instead
+                # of crashing.
+                self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
             else:
                 self._finalize_and_raise_crash(
                     state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
@@ -702,8 +708,16 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
-        # Precedence matches Claude: timeout (raised above) > stopped_early > completed.
-        status = AgentEndStatus.STOPPED_EARLY if state.stopped_early_hit else AgentEndStatus.COMPLETED
+        # Precedence matches Claude: timeout (raised above) > stopped_early >
+        # max_turns_exhausted > completed. stopped_early outranks the cap because an
+        # armed criterion deciding the outcome is the more specific reason to have
+        # cut the run, and the step loop checks it first.
+        if state.stopped_early_hit:
+            status = AgentEndStatus.STOPPED_EARLY
+        elif state.max_turns_hit:
+            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+        else:
+            status = AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
@@ -782,6 +796,7 @@ class _AntigravityTurnState:
         iteration: int,
         model: str,
         turn_start_time: float,
+        max_turns: int | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -793,8 +808,10 @@ class _AntigravityTurnState:
         self.model = model
         self.turn_start_time = turn_start_time
 
+        self.max_turns = max_turns
         self.timeout_hit = False
         self.stopped_early_hit = False
+        self.max_turns_hit = False
         self.finalized = False
 
         self.total_usage = TokenUsage()
@@ -818,6 +835,26 @@ class _AntigravityTurnState:
         self._tool_last_status: dict[str, Any] = {}
         # Content blocks accumulated since the last per-generation flush.
         self._blocks: list[ContentBlock] = []
+
+    @property
+    def ended_cleanly(self) -> bool:
+        """True once the loop broke on purpose (cooperative stop or the turn cap).
+
+        Both are non-crash terminations, so a stray exception raised while unwinding
+        the step generator afterwards must not be escalated into a retry.
+        """
+        return self.stopped_early_hit or self.max_turns_hit
+
+    def max_turns_reached(self) -> bool:
+        """True once this turn has produced ``max_turns`` visible turns.
+
+        Delegates the count to the collector (``EventCollector.visible_turn_count``)
+        — the single agent-agnostic capture path, so one ``max_turns`` value means
+        the same thing here and on Codex. It counts RESOLVED tool calls (the end
+        event), which also means the call that reaches the cap keeps its result
+        instead of being force-closed as unresolved.
+        """
+        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
 
     def process_step(self, step: Any) -> None:
         """Route one streamed ``Step`` to events + transcript reconstruction."""
@@ -1055,6 +1092,7 @@ class _AntigravityTurnState:
                 num_turns=self._assistant_turns,
                 crashed=crashed,
                 crash_reason=crash_reason,
+                max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
             )
         )

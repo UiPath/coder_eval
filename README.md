@@ -210,6 +210,7 @@ alone.
 | [Codex](docs/agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](docs/agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
+| [Run-Limit Parity](docs/agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |

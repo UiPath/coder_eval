@@ -82,6 +82,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Codex](agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
+| [Run-Limit Parity](agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |

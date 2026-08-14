@@ -29,6 +29,7 @@ and A/B plumbing.
 - [Codex](https://coder-eval.com/docs/agents/codex): Running the OpenAI Codex agent
 - [Antigravity (Gemini)](https://coder-eval.com/docs/agents/antigravity): Running the Google Antigravity / Gemini agent
 - [OpenCode](https://coder-eval.com/docs/agents/opencode): Running the OpenCode agent on open-weight models
+- [Run-Limit Parity](https://coder-eval.com/docs/agents/harness-parity): What each run_limits field means on every harness
 - [A/B Experiments](https://coder-eval.com/docs/ab-experiments): Compare models / tools / prompts across the same tasks
 - [Bring Your Own Dataset](https://coder-eval.com/docs/datasets): Fan a single task out over a dataset
 - [Dialog Mode](https://coder-eval.com/docs/dialog-mode): Evaluate agents in multi-turn conversation via a simulated user
