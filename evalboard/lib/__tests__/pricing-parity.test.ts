@@ -104,9 +104,13 @@ describe("pricing.ts ↔ pricing.py parity", () => {
         // max_usd static fallback. The evalboard deliberately does NOT statically
         // price them — OpenRouter routes per-request, so it shows the captured
         // ACTUAL per-call cost instead (see the per-call table, provider_call_costs).
+        // Same reasoning under the OpenCode harness, which addresses OpenRouter
+        // natively: it reports the provider's own per-step cost, which the turn
+        // carries as token_usage.total_cost_usd.
         "moonshotai/kimi-k3",
         "z-ai/glm-5.2",
         "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-flash-0731",
     ]);
 
     test("every DELIBERATELY_UNMIRRORED id still exists in pricing.py", () => {

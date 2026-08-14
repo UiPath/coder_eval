@@ -117,6 +117,7 @@ _PRICING: dict[str, ModelPricing] = {
     "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
     "z-ai/glm-5.2": ModelPricing(0.7168, 2.2528, 0.7168, 0.13312),
     "deepseek/deepseek-v4-pro": ModelPricing(0.435, 0.87, 0.435, 0.003625),
+    "deepseek/deepseek-v4-flash-0731": ModelPricing(0.14, 0.28, 0.14, 0.0028),
 }
 
 
@@ -174,8 +175,13 @@ def _normalize_model(model: str) -> str:
     """
     model = model.strip()
     # LiteLLM/Bedrock routing prefixes (e.g. "converse/zai.glm-5",
-    # "bedrock/converse/deepseek.v3.2") → bare model id.
-    for routing_prefix in ("bedrock/converse/", "bedrock/", "converse/"):
+    # "bedrock/converse/deepseek.v3.2") → bare model id. ``openrouter/`` is here
+    # because agents that address OpenRouter natively (OpenCode) report the model
+    # WITH its provider prefix ("openrouter/deepseek/deepseek-v4-flash-0731"),
+    # while the OpenRouter rate-card keys are the bare vendor/model ids that the
+    # LiteLLM route already uses — without this strip the same model prices under
+    # LiteLLM and silently goes unpriced under OpenCode.
+    for routing_prefix in ("bedrock/converse/", "bedrock/", "converse/", "openrouter/"):
         if model.startswith(routing_prefix):
             model = model[len(routing_prefix) :]
             break

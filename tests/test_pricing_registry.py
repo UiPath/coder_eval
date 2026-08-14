@@ -3,7 +3,7 @@
 import pytest
 
 from coder_eval import pricing
-from coder_eval.pricing import ModelPricing, calculate_cost, register_pricing
+from coder_eval.pricing import ModelPricing, calculate_cost, is_priced, register_pricing
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +27,18 @@ def test_registered_bare_key_resolves_through_prefixed_lookup():
     # Same $1/MTok input rate must resolve through the qualified inference-profile id.
     assert calculate_cost("us.anthropic.acme-1", 1_000_000, 0) == 1.0
     assert calculate_cost("eu.acme-1", 1_000_000, 0) == 1.0
+
+
+def test_openrouter_provider_prefix_normalizes_to_bare_key():
+    """An agent that addresses OpenRouter natively (OpenCode) reports the model
+    WITH its provider prefix, while the rate-card keys are the bare vendor/model
+    ids the LiteLLM route uses. Both spellings must price identically, else the
+    same model silently goes unpriced depending on which agent ran it."""
+    assert is_priced("deepseek/deepseek-v4-flash-0731")
+    assert is_priced("openrouter/deepseek/deepseek-v4-flash-0731")
+    bare = calculate_cost("deepseek/deepseek-v4-flash-0731", 1_000_000, 1_000_000)
+    prefixed = calculate_cost("openrouter/deepseek/deepseek-v4-flash-0731", 1_000_000, 1_000_000)
+    assert bare == prefixed > 0
 
 
 def test_lookup_rate_overlay_precedes_builtins():

@@ -278,6 +278,38 @@ class AntigravityAgentConfig(BaseAgentConfig):
     )
 
 
+class OpenCodeAgentConfig(BaseAgentConfig):
+    """OpenCode agent configuration (the open-source terminal coding agent).
+
+    Drives the ``opencode`` CLI in non-interactive mode
+    (``opencode run --format json``), which streams newline-delimited JSON events
+    on stdout. ``model`` is OpenCode's ``provider/model`` form (e.g.
+    ``deepseek/deepseek-v4-flash-0731``) and is passed through verbatim via ``-m``.
+
+    Permission handling is derived from the inherited ``permission_mode``: every
+    mode except :attr:`PermissionMode.PLAN` passes ``--auto`` so an unattended
+    eval run never blocks on an interactive approval prompt.
+    """
+
+    type: Literal[AgentKind.OPENCODE]  # type: ignore[assignment]
+
+    variant: str | None = Field(
+        default=None,
+        description=(
+            "Provider-specific reasoning effort passed through as OpenCode's --variant "
+            "(e.g. 'minimal', 'high', 'max'). None leaves the provider default."
+        ),
+    )
+    pure: bool = Field(
+        default=True,
+        description=(
+            "Run OpenCode with --pure (no external plugins), isolating the sandbox from "
+            "host-level OpenCode plugin config. Mirrors the isolation rationale behind "
+            "the Claude agent's `setting_sources: []`. Set False to load host plugins."
+        ),
+    )
+
+
 class NoneAgentConfig(BaseAgentConfig):
     """No-op ("agentless") agent configuration.
 
@@ -302,7 +334,7 @@ class NoneAgentConfig(BaseAgentConfig):
 # Only includes the concrete subclasses (not BaseAgentConfig) since the discriminator
 # must be a Literal type. BaseAgentConfig is returned by parse_agent_config when type=None.
 type AgentConfig = Annotated[
-    ClaudeCodeAgentConfig | CodexAgentConfig | AntigravityAgentConfig | NoneAgentConfig,
+    ClaudeCodeAgentConfig | CodexAgentConfig | AntigravityAgentConfig | OpenCodeAgentConfig | NoneAgentConfig,
     Field(discriminator="type"),
 ]
 

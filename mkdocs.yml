@@ -83,6 +83,7 @@ extra:
     agents/CLAUDE_CODE.md: "Configuring and running the default Claude Code agent"
     agents/CODEX.md: "Running the OpenAI Codex agent"
     agents/ANTIGRAVITY.md: "Running the Google Antigravity / Gemini agent"
+    agents/OPENCODE.md: "Running the OpenCode agent on open-weight models"
     AB_EXPERIMENTS.md: "Compare models / tools / prompts across the same tasks"
     DATASETS.md: "Fan a single task out over a dataset"
     DIALOG_MODE.md: "Evaluate agents in multi-turn conversation via a simulated user"
@@ -111,6 +112,7 @@ nav:
       - Claude Code: agents/CLAUDE_CODE.md
       - Codex: agents/CODEX.md
       - Antigravity (Gemini): agents/ANTIGRAVITY.md
+      - OpenCode: agents/OPENCODE.md
   - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md
       - Bring Your Own Dataset: DATASETS.md

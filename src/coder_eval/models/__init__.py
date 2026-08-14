@@ -13,6 +13,7 @@ from coder_eval.models.agent_config import (
     CodexAgentConfig,
     LocalPluginConfig,
     NoneAgentConfig,
+    OpenCodeAgentConfig,
     ResolvedAgentConfig,
     parse_agent_config,
 )
@@ -215,6 +216,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CodexAgentConfig",
     "LocalPluginConfig",
     "NoneAgentConfig",
+    "OpenCodeAgentConfig",
     "ResolvedAgentConfig",
     "parse_agent_config",
     # Enums
