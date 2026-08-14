@@ -417,10 +417,9 @@ promote, whatever its F1 did. Stage A additionally renders a quality × cost fro
 **advisory**: it is the second axis of a shortlist, it shows which trades exist, and it decides
 nothing. Adding the second did not weaken the first — the promote-only-when list below is
 unchanged, and a cheaper arm on that front is a trade to offer the user, **never a promotion** the
-tool makes. Read that front with the arms you are actually choosing between: the emptied-body
-any arm that is cheap because it does less — an emptied-body control among them, if you put one in
-the comparison — sits there by construction, since nothing dominates an arm nobody is trying to
-beat on cost.
+tool makes. Read that front with the arms you are actually choosing between: any arm that is cheap
+because it does less — an emptied-body control among them, if you put one in the comparison — sits
+there by construction, since nothing dominates an arm nobody is trying to beat on cost.
 
 **Be precise about what this bounds, because it is easy to claim more.** The interval now bounds
 *row-sampling variation and run noise together* — resampling rows is what adds the first, and

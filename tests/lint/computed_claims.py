@@ -27,6 +27,17 @@ Three design choices, each load-bearing:
   this repository, so the risk is theoretical — but the walk costs ten lines and removes the
   question, and it gives a failure message naming the offending node instead of a traceback.
 
+**The boundary, stated so a green ``make lint`` is not mistaken for a proof.** The coverage rule
+demands a claim for **arithmetic-bearing tables** only — a table whose BODY carries a backticked
+span holding ``*``, ``+``, ``/`` or ``ceil(`` (see ``_ARITHMETIC_SPAN``). Everything else in these
+surfaces is outside it: a claim made in prose rather than in a table, a table of stages or file
+names, and — the concrete miss — a sentence that has lost half its words. The clause *"Read that
+front with the arms you are actually choosing between: the emptied-body / any arm that is cheap
+because it does less…"* shipped in ``12eee85`` with an orphaned fragment mid-sentence, survived
+three commits and ~50 token sensors, and was found by a human reading it: it deleted no token, so
+no presence sensor could see it, and it carries no arithmetic, so this rule could not either. CE039
+checks that a table's numbers are TRUE; nothing here checks that the prose parses as English.
+
 Like CE026-CE031 and CE033-CE038 this is **not** a ``BaseRule`` in ``tests/lint/runner.py`` (that
 runner is an AST walk over ``src/**/*.py``); it reasons over Markdown and is wired as
 ``tests/test_custom_lint.py::TestCE039ComputedClaims``.
