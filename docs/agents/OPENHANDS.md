@@ -1,0 +1,200 @@
+---
+description: >-
+  Run the OpenHands Software Agent SDK as the agent under evaluation in Coder
+  Eval — installation, the model-prefix provider routing (direct-provider only),
+  and how its telemetry maps to sandboxed, weighted scoring.
+---
+
+# Running OpenHands in Coder Eval
+
+## Overview
+
+Coder Eval can run the **OpenHands Software Agent SDK** as the agent under
+evaluation. Set `agent.type: openhands` in a task and the rest of the framework
+(sandbox, scoring, telemetry, reports) works unchanged.
+
+OpenHands is a **model-agnostic** harness: it drives any model reachable through
+its bundled LiteLLM, resolving the provider from the `agent.model` **prefix**
+(`anthropic/…`, `openai/…`, `openrouter/…`, `bedrock/…`) with no per-provider
+branch in Coder Eval. It is **direct-provider only** — each provider is called
+natively, with no proxy sidecar. This makes it the "universal harness" for
+**isolate-the-model** comparisons — e.g. Claude-Code-on-Sonnet vs
+OpenHands-on-Sonnet, or Codex-on-GPT vs OpenHands-on-GPT — where the harness (not
+the model) is the variable. It is the recommended way to evaluate OSS/open-weight
+models (GLM / DeepSeek / Kimi via OpenRouter) natively, with no
+Anthropic-impersonation proxy on that path.
+
+Under the hood `OpenHandsAgent` builds a fresh OpenHands `Conversation` per turn
+(a `LocalWorkspace` pointed at the sandbox working directory) with the `terminal`
+and `file_editor` tools, and drives the SDK's synchronous `run()` loop to
+completion, mapping its event stream onto Coder Eval's standard telemetry.
+
+## Setup
+
+### 1. Install the OpenHands SDK
+
+```bash
+pip install 'coder-eval[openhands]'
+```
+
+This pulls in `openhands-sdk` and `openhands-tools` (both pinned to `1.40.0`),
+which bundle LiteLLM. As with the other agents the SDK is imported lazily — a base
+install without the extra still runs end-to-end; OpenHands tasks fail at `start()`
+with a clear hint to install the extra.
+
+### 2. Authentication — the provider key follows the model prefix
+
+OpenHands' internal LiteLLM resolves the provider from the `agent.model` prefix and
+reads the matching key from the environment automatically — there is **no single
+`OPENHANDS_API_KEY`**:
+
+| `agent.model` prefix          | Env var read           |
+| ----------------------------- | ---------------------- |
+| `anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY`    |
+| `openai/gpt-5.4`              | `OPENAI_API_KEY`       |
+| `openrouter/z-ai/glm-5.2`     | `OPENROUTER_API_KEY`   |
+| `bedrock/…`                   | `AWS_*`                |
+
+Set the one that matches your grid in `.env` (or the environment). These, plus
+`OPENHANDS_MODEL`, are on the container env-passthrough allowlist, so they are
+forwarded automatically under the Docker driver.
+
+### Cost — direct-provider only
+
+Each provider is called natively; there is no proxy sidecar. Cost is OpenHands'
+native LiteLLM estimate — except for `openrouter/*`, where the **real**
+routed-provider cost is recovered via `usage.include` in the request body (not the
+near-zero LiteLLM OpenRouter estimate).
+
+> **Operational caveat (OpenRouter data policy).** Some OpenRouter accounts enforce
+> a global data-policy/privacy guardrail that **404s direct calls** ("No endpoints
+> available matching your guardrail restrictions and data policy"). If you hit this,
+> relax the account privacy policy at `openrouter.ai/settings/privacy`.
+
+## Usage
+
+### Command line
+
+Run any task under OpenHands by overriding the agent type:
+
+```bash
+coder-eval run tasks/hello_date.yaml --type openhands --model openrouter/z-ai/glm-5.2
+```
+
+Or override the agent type for every task in an experiment:
+
+```bash
+coder-eval run experiments/harness-comparison.yaml --type openhands
+```
+
+### Task definition (YAML)
+
+```yaml
+agent:
+  type: openhands
+  model: openrouter/z-ai/glm-5.2   # carries the LiteLLM provider prefix
+  permission_mode: bypassPermissions
+
+run_limits:
+  max_turns: 20
+  task_timeout: 600
+  turn_timeout: 300
+
+success_criteria:
+  - type: file_exists
+    path: "hello.py"
+    description: "hello.py must be created"
+```
+
+### Model selection
+
+The resolved model is the first of:
+
+1. `agent.model` in the task YAML (or `--model`)
+2. `OPENHANDS_MODEL` in the environment
+
+There is **no built-in default** — OpenHands is multi-provider, so a run with no
+model configured fails fast at `communicate()` with a clear error. Always pin
+`agent.model` (with its provider prefix) for reproducible runs.
+
+## Permissions & tools — important differences
+
+**OpenHands runs its tools directly on the host** (`LocalWorkspace`), and does
+**not** honor `permission_mode` / `allowed_tools` / `disallowed_tools` as a
+security boundary. The trust boundary for an OpenHands run is therefore the
+**sandbox**, not the agent config: run untrusted tasks under the
+[Docker driver](../DOCKER_ISOLATION.md); the `tempdir` driver is a working
+directory, not a confinement boundary. This mirrors how Claude Code / Codex /
+Antigravity already run there. The agent is given exactly two tools — a shell
+(`terminal`) and file editing (`file_editor`).
+
+## Telemetry
+
+Each `communicate()` call is one logical turn; the standard `TurnRecord` is built by
+the shared `EventCollector`, so OpenHands runs report the same per-turn structure as
+every other agent.
+
+- **Commands.** Each `ActionEvent` is captured as `CommandTelemetry` (with the
+  action's inputs as `parameters`) and resolved on its matching `ObservationEvent`
+  (`action_id` ↔ `tool_call_id`); a tool failure arrives as a separate
+  `AgentErrorEvent` and closes the call as an error. Orphaned tool calls (start with
+  no result) are force-closed as `unresolved` at turn end.
+- **Tokens.** OpenHands' accumulated `Metrics` map to Coder Eval's four buckets.
+  Because OpenHands' `prompt_tokens` **already includes** the cache buckets, the
+  fresh/uncached slice is `prompt_tokens − cache_read − cache_write`; `cache_write`
+  maps to `cache_creation`, `cache_read` to `cache_read`, and `completion_tokens`
+  (which already includes reasoning, billed as output by LiteLLM) to `output`. The
+  turn cost is OpenHands' `accumulated_cost` — for `openrouter/*` this is the **real**
+  routed-provider cost (recovered via `usage.include`), otherwise the native LiteLLM
+  estimate — kept even for a model our rate card can't price. OpenHands surfaces usage only as a post-run
+  aggregate (no per-generation token stream in events), so the whole turn total is
+  booked as the `EventCollector`'s single reconciliation entry — the transcript token
+  buckets still sum exactly to the turn total.
+
+## Known limitations
+
+1. **`skill_triggered` is not implemented for OpenHands.** OpenHands has no
+   Claude-style Skill tool, so a task that gates on `skill_triggered` scores it as
+   not-triggered for this agent. Exclude / treat it as N/A for cross-harness scoring
+   (a filesystem-read detector is a follow-up).
+2. **Watchdog-only timeout.** There is no native turn timeout; the deadline is
+   enforced by Coder Eval's `ThreadedWatchdog`, which calls `conversation.pause()`.
+   A cooperative pause may not stop a non-yielding native call promptly;
+   `kill_sync()` best-effort `close()` is the backstop.
+3. **Cost fidelity varies by provider.** For `openrouter/*` the recorded cost is the
+   real routed-provider cost (recovered via `usage.include`); for every other provider
+   it is OpenHands' native LiteLLM *estimate*.
+4. **No sandbox isolation of its own.** Tools run on the host; rely on the Docker
+   driver for untrusted tasks (see above).
+5. **`max_turns` exhaustion is reported as a crash, not `max_turns_exhausted`.** When
+   the run hits `max_iteration_per_run` (coder_eval's `run_limits.max_turns`) without
+   the agent calling `finish`, the SDK ends in the same `ERROR` status it uses for a
+   genuine failure — only the log message differs — so this backend classifies it as a
+   crash (the orchestrator may then retry). Claude Code instead returns a clean turn
+   with `max_turns_exhausted=True`. Set a generous `max_turns` for OpenHands runs so
+   the cap is not hit on legitimate long trajectories.
+
+## Benchmark validity (harness-neutral criteria)
+
+A harness leaderboard (`agent.type × agent.model`, expressible today as experiment
+variants — see `experiments/harness-comparison.yaml`) is only valid if criteria
+grade **outcomes**, not harness-internal signals. `skill_triggered` inspects
+Claude's Skill tool, so OpenHands scores 0 on it *by construction* — that measures
+"Claude-shapedness", not task quality. Auditing the UiPath criteria for
+harness-neutrality is a prerequisite for a fair cross-harness leaderboard and is a
+separate workstream.
+
+## Running in Docker
+
+The `docker` driver works the same as for other agents (see
+[Docker Isolation](../DOCKER_ISOLATION.md)). Install the `[openhands]` extra into
+the image, and the provider keys (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+`OPENROUTER_API_KEY`) and `OPENHANDS_MODEL` are on the container env passthrough
+allowlist, so they are forwarded automatically.
+
+## References
+
+- [A/B Experiments](../AB_EXPERIMENTS.md) — how the harness × model grid is expressed
+- [Codex Agent Guide](CODEX.md) — the sibling third-party-agent guide
+- [Antigravity Agent Guide](ANTIGRAVITY.md) — the sibling local-harness guide
+- [Extending Coder Eval](../EXTENDING.md) — how agents register via the plugin SPI

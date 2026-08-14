@@ -174,8 +174,23 @@ def _normalize_model(model: str) -> str:
     """
     model = model.strip()
     # LiteLLM/Bedrock routing prefixes (e.g. "converse/zai.glm-5",
-    # "bedrock/converse/deepseek.v3.2") → bare model id.
-    for routing_prefix in ("bedrock/converse/", "bedrock/", "converse/"):
+    # "bedrock/converse/deepseek.v3.2", "openrouter/z-ai/glm-5.2",
+    # "litellm_proxy/z-ai/glm-5.2", "anthropic/claude-sonnet-4-6") → bare model id.
+    # OpenHands passes provider-/proxy-prefixed ids that its internal LiteLLM resolves
+    # by prefix; strip them too so those key the rate card (else a provider-prefixed id
+    # reads as unpriced and cost falls back to the SDK estimate only). Note
+    # "openrouter/z-ai/glm-5.2" → "z-ai/glm-5.2" and "litellm_proxy/z-ai/glm-5.2" →
+    # "z-ai/glm-5.2" keep the vendor/model tail — the OpenRouter _PRICING keys include
+    # that tail; "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6".
+    for routing_prefix in (
+        "bedrock/converse/",
+        "bedrock/",
+        "converse/",
+        "litellm_proxy/",
+        "openrouter/",
+        "openai/",
+        "anthropic/",
+    ):
         if model.startswith(routing_prefix):
             model = model[len(routing_prefix) :]
             break

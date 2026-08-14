@@ -137,6 +137,13 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     antigravity_model: str | None = None
 
+    # OpenHands settings (OpenHandsAgent — the OpenHands Software Agent SDK harness).
+    # OPENHANDS_MODEL is the fallback model used when a task doesn't pin agent.model;
+    # it carries the LiteLLM provider prefix (e.g. openrouter/z-ai/glm-5.2). The
+    # provider key (ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / AWS_*)
+    # is resolved by LiteLLM from that prefix (direct-provider only).
+    openhands_model: str | None = None
+
     # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging

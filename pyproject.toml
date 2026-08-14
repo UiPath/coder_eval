@@ -106,6 +106,18 @@ codex = [
 antigravity = [
     "google-antigravity==0.1.7",
 ]
+# Optional extra that enables OpenHands agent support:
+#   - OpenHandsAgent implementation using the OpenHands Software Agent SDK
+#     (openhands-sdk + openhands-tools), which drives OSS/open-weight models
+#     via its bundled LiteLLM — no Anthropic-impersonation proxy on that path.
+# Without this extra, the framework still installs and runs; OpenHands-dependent
+# code paths fail at start() with a clear 'pip install coder-eval[openhands]' hint.
+# Pin both packages to matching versions (the SDK line moves ~weekly). Both ship
+# litellm==1.95.0 transitively — no new top-level pin.
+openhands = [
+    "openhands-sdk==1.40.0",
+    "openhands-tools==1.40.0",
+]
 
 [project.scripts]
 coder-eval = "coder_eval.cli:app"

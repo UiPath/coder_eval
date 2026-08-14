@@ -278,6 +278,20 @@ class AntigravityAgentConfig(BaseAgentConfig):
     )
 
 
+class OpenHandsAgentConfig(BaseAgentConfig):
+    """OpenHands agent configuration (the OpenHands Software Agent SDK harness).
+
+    Runs via the ``openhands-sdk`` + ``openhands-tools`` packages, driving
+    OSS/open-weight models (and any provider) through OpenHands' internal LiteLLM.
+    The harness is direct-provider only: the provider is resolved from the ``model``
+    prefix (``anthropic/…`` → ``ANTHROPIC_API_KEY``, ``openrouter/…`` →
+    ``OPENROUTER_API_KEY``, etc.). ``model`` defaults (when unset on the task /
+    ``--model`` / ``OPENHANDS_MODEL``) are resolved at the agent layer.
+    """
+
+    type: Literal[AgentKind.OPENHANDS]  # type: ignore[assignment]
+
+
 class NoneAgentConfig(BaseAgentConfig):
     """No-op ("agentless") agent configuration.
 
@@ -302,7 +316,7 @@ class NoneAgentConfig(BaseAgentConfig):
 # Only includes the concrete subclasses (not BaseAgentConfig) since the discriminator
 # must be a Literal type. BaseAgentConfig is returned by parse_agent_config when type=None.
 type AgentConfig = Annotated[
-    ClaudeCodeAgentConfig | CodexAgentConfig | AntigravityAgentConfig | NoneAgentConfig,
+    ClaudeCodeAgentConfig | CodexAgentConfig | AntigravityAgentConfig | OpenHandsAgentConfig | NoneAgentConfig,
     Field(discriminator="type"),
 ]
 

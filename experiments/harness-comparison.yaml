@@ -1,0 +1,60 @@
+# Harness comparison experiment — compare AGENTS (harnesses) on the same tasks.
+#
+# `agent.type` IS the harness axis, so a harness x model leaderboard is expressible
+# today as experiment variants (no new dimension needed). This file demonstrates two
+# kinds of cell:
+#   1. harness comparison   — the SAME task run under different harnesses.
+#   2. isolate-the-model    — the SAME model (Sonnet) under Claude Code vs OpenHands,
+#                             so the harness (system prompt, tool schemas, caching) is
+#                             the only variable.
+#
+# Usage:
+#   coder-eval run tasks/hello_date.yaml -e experiments/harness-comparison.yaml
+#   coder-eval plan experiments/harness-comparison.yaml   # dry-run resolution
+#
+# ── VALIDITY WARNING ─────────────────────────────────────────────────────────────
+# This is a HARNESS leaderboard. It is only valid if the success criteria grade
+# OUTCOMES, not harness-internal signals. In particular `skill_triggered` inspects
+# Claude's Skill tool and is NOT implemented for OpenHands (it scores 0 there BY
+# CONSTRUCTION) — EXCLUDE it / treat it as N/A for cross-harness scoring, or the
+# leaderboard measures "Claude-shapedness" rather than task quality. Auditing the
+# UiPath criteria for harness-neutrality is a separate prerequisite workstream.
+
+experiment_id: harness-comparison
+description: "Compare harnesses (claude-code / openhands) on the same tasks, incl. an isolate-the-model cell"
+
+defaults:
+  agent:
+    permission_mode: bypassPermissions
+    # Pin temperature where the harness allows so decoding randomness isn't a
+    # confound across harnesses running the same model.
+    # (Claude Code does not expose temperature; OpenHands passes it to LiteLLM.)
+
+variants:
+  # --- Harness cells (different harness, appropriate model each) ------------------
+  - variant_id: claude-code-sonnet
+    agent:
+      type: claude-code
+      model: claude-sonnet-4-6
+
+  # OpenHands driving an OSS model directly via OpenRouter (priced: z-ai/glm-5.2).
+  # Requires OPENROUTER_API_KEY.
+  - variant_id: openhands-glm-direct
+    agent:
+      type: openhands
+      model: openrouter/z-ai/glm-5.2
+
+  # --- Isolate-the-model cell (SAME model, different harness) ---------------------
+  # Claude-Code-Sonnet vs OpenHands-Sonnet: the harness is the only variable, so this
+  # measures the harness effect (system prompt, tool schemas, prompt caching) on the
+  # same underlying model. Requires ANTHROPIC_API_KEY (LiteLLM resolves it from the
+  # `anthropic/` prefix).
+  - variant_id: openhands-sonnet
+    agent:
+      type: openhands
+      model: anthropic/claude-sonnet-4-6
+
+  # NOTE: a GPT / Codex cell (e.g. `codex` + `gpt-5.x`, or `openhands` +
+  # `openai/gpt-5.x`) is illustrative only and intentionally NOT shipped as a live
+  # variant — pin an exact, real, PRICED GPT id (and register its rate if absent)
+  # before adding one, so `coder-eval plan` resolves cleanly.

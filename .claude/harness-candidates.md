@@ -97,6 +97,22 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   credential-scoping and `${{ }}`-into-`run:` classes reviewed by hand. Subsumes
   the CE026 SHA-pinning candidate above. Start as a non-blocking annotation job.
 
+## From 2026-08-04 openhands-agent integration review
+
+- [ ] **CE034 — forbid internal plan-phase labels ("Phase 0/1/2/3") in `src/`.**
+  The MEMORY rule `no-plan-phase-refs-in-code` (keep internal Phase N labels out of
+  `coder_eval` source/comments/config) is currently unenforced. This run leaked
+  "Phase 0"/"Phase 2" labels into `openhands_agent.py` + `test_openhands_agent.py`
+  (the SDK-surface facts were annotated "Phase 0 verified"); they were caught only
+  by the spec-compliance reviewer and reworded by hand. Deferred (>30 min, not
+  cheap): must scan **comments and string literals** across the whole `src/` tree
+  (a whole-tree text rule like CE027–CE031, not a per-file `BaseRule`), AND carry an
+  explicit exemption for the legitimate algorithm-stage usage CLAUDE.md calls out
+  (`litellm_cost.py` uses "Phase 1"/"Phase 2" for a compute-then-mutate algorithm,
+  which is allowed). Regex like `\bPhase [0-9]\b` in comments/docstrings, minus the
+  exemption allowlist; wire as a `tests/test_custom_lint.py` class. Behavior is
+  otherwise unguarded — only human review catches it today.
+
 ## From 2026-07-03 open-source docs cleanup
 
 - [ ] **Dead-relative-link checker for `docs/**/*.md`** — resolve every relative
@@ -206,3 +222,4 @@ harness once for all of them.
   preceding `&&`/`||`, NOT on the string's shape — a "contains 'ubuntu'" heuristic
   silently fails on `uipath-ubunut-latest`, the exact transposition typo the rule is
   for. Caught in the multi-model review of PR #86.
+- [ ] OpenHands `_OPENROUTER_PROVIDER_ROUTING` (openhands_agent.py) duplicates the `provider.only` lists in `litellm/litellm-config.yaml`, synced only by a comment — a whole-tree lint rule could diff the two, but requires a YAML-vs-Python parse (>30 min). — caught in final review of c/2026-08-04-openhands-drop-litellm-proxy-path.md
