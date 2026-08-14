@@ -706,3 +706,69 @@ class TestMdeAndGuardrailsInTheVerdict:
         assert "FAIL · cost (USD/row)" in text
         assert "diff CI [" in text
         assert "x incumbent" in text
+
+
+class TestPromotionIsNotOverstated:
+    """Two ways the rendered block could claim more than the tool decided."""
+
+    def _verdict(self, **overrides) -> ActivationGateVerdict:
+        base = {
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "cand",
+            "suite_id": SUITE,
+            "criterion_index": 0,
+            "confidence": 0.95,
+            "n_resamples": BOOTSTRAP_RESAMPLES,
+            "rows_paired": 12,
+            "rows_excluded": 0,
+            "incumbent_f1": 0.4,
+            "candidate_f1": 0.9,
+            "mean_diff": 0.5,
+            "ci_low": 0.2,
+            "ci_high": 0.75,
+            "p_value": 0.001,
+        }
+        return ActivationGateVerdict(**{**base, **overrides})
+
+    def test_an_interval_containing_zero_never_promotes(self) -> None:
+        # Holm can reject at a corrected alpha while the reported interval still contains zero.
+        # The method file states the rule as "the interval excludes zero", so the code must make
+        # that literally true rather than approximately true.
+        decided = holm_promote([self._verdict(ci_low=-0.05, ci_high=0.6)])[0]
+        assert decided.promoted is False
+        assert any("still contains zero" in note for note in decided.notes)
+
+    def test_a_failed_guardrail_never_renders_as_promoted(self) -> None:
+        failing = GuardrailCheck(
+            name="cost (USD/row)",
+            incumbent=1.0,
+            candidate=2.0,
+            relative_change=1.0,
+            tolerance=MATERIALITY_FLOOR,
+            ci_low=0.6,
+            ci_high=1.4,
+            passed=False,
+        )
+        decided = holm_promote([self._verdict(guardrails=[failing])])[0]
+        # `promoted` stays the primary statistic's decision — the guardrails gate in the
+        # procedure — but the headline must not invite the reader to ship it anyway.
+        assert decided.promoted is True
+        text = render_markdown(decided)
+        assert "BLOCKED BY A GUARDRAIL" in text
+        assert "cost (USD/row)" in text
+        assert "Do not promote on this block" in text
+
+    def test_a_passing_guardrail_still_reads_promoted(self) -> None:
+        passing = GuardrailCheck(
+            name="cost (USD/row)",
+            incumbent=1.0,
+            candidate=1.02,
+            relative_change=0.02,
+            tolerance=MATERIALITY_FLOOR,
+            ci_low=-0.1,
+            ci_high=0.2,
+            passed=True,
+        )
+        text = render_markdown(holm_promote([self._verdict(guardrails=[passing])])[0])
+        assert "**PROMOTED**" in text
+        assert "BLOCKED" not in text

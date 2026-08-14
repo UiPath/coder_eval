@@ -611,7 +611,17 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = 0.05) -> 
 
         siblings_hold = all(check.passed for check in verdict.sibling_checks)
         favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
-        promoted = i in rejected_at and favours_candidate and siblings_hold
+        # The interval must exclude zero as well as the corrected test rejecting. Holm is the
+        # stricter of the two almost always, so this changes nothing on a typical family — but it
+        # keeps "promote when the interval excludes zero" literally true, which is how the method
+        # file states the rule and how anyone reading the rendered block will check it.
+        excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
+        promoted = i in rejected_at and favours_candidate and siblings_hold and excludes_zero
+        if i in rejected_at and favours_candidate and siblings_hold and not excludes_zero:
+            notes.append(
+                "not promoted: the Holm-corrected test rejects but the confidence interval still "
+                + "contains zero, so the effect is not separated at the reported interval width."
+            )
         if i in rejected_at and not siblings_hold:
             notes.append(
                 "not promoted: the interval separates but a sibling's recall.yes dropped — this candidate "
@@ -653,8 +663,17 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
     Silently reading ``None`` as "not promoted" would let a forgotten :func:`holm_promote` call
     look like an honest negative result — which is the failure this whole gate exists to prevent.
     """
+    failed_guardrails = [check.name for check in verdict.guardrails if not check.passed]
     if verdict.promoted is None:
         headline = "UNDECIDED — holm_promote has not been applied, so this verdict decides nothing"
+    elif verdict.promoted and failed_guardrails:
+        # `promoted` is the PRIMARY statistic's decision; the guardrails gate in the procedure. A
+        # bare "PROMOTED" over a failing guardrail is the misread this line exists to prevent —
+        # the reader prints the block and ships a candidate that doubled what a row costs.
+        headline = (
+            "BLOCKED BY A GUARDRAIL — the primary comparison separated, but "
+            + f"{', '.join(failed_guardrails)} failed. Do not promote on this block."
+        )
     else:
         headline = "PROMOTED" if verdict.promoted else "NOT PROMOTED"
 

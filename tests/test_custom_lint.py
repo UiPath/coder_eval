@@ -2342,6 +2342,27 @@ class TestPluginArtifacts:
                 "which is a fabricated result",
                 "carrying an activation suite's tight caps to an outcome suite fabricates body failures",
             ),
+            # The activation gate's instrument. It replaced `min(candidate F1) > max(incumbent F1)`,
+            # which discarded the pairing (both arms ran the SAME rows) and had very little power at
+            # 8-12 rows per polarity. Resampling ROWS is the load-bearing word: replicates within a
+            # row are the same request asked again, so resampling them individually would understate
+            # the interval and manufacture separation.
+            ("cluster bootstrap", "the activation gate's instrument — resampling rows, not observations"),
+            ("excludes zero", "the promotion condition; a CI containing zero is a non-result"),
+            (
+                "minimum detectable effect",
+                "Stage A must price the smallest resolvable difference before spending, or a stage that "
+                "cannot see the effect returns a non-result indistinguishable from a real one",
+            ),
+            ("Holm", "the Stage A -> Stage B multiplicity correction"),
+            (
+                "reported diagnostic",
+                "range non-overlap is retained as a diagnostic and must never be restored as the gate",
+            ),
+            # The cost guardrail, named for what it actually compares. A body edit that doubles what
+            # a row costs for +0.02 F1 is a trade, not a win.
+            ("median cost per row", "the cost guardrail — a body edit that doubles spend must not promote silently"),
+            ("median latency per row", "the latency half of the same guardrail"),
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
 
@@ -2360,6 +2381,12 @@ class TestPluginArtifacts:
             ("round<N>-triage.yaml", "Step 9's per-stage experiment file"),
             ("round<N>-gate.yaml", "Step 9's per-stage experiment file"),
             ("round<N>-confirm.yaml", "Step 9's per-stage experiment file"),
+            # Step 10 drives a library rather than doing arithmetic by hand, so it must name the
+            # functions it calls. A paraphrase is a step nobody can execute.
+            ("activation_gate", "Step 10 must name the function that computes the verdict"),
+            ("holm_promote", "the family correction is a separate call; gating alone never promotes"),
+            ("render_markdown", "Step 10 must print the verdict block verbatim rather than paraphrasing it"),
+            ("criterion_index", "the gate keys on criterion POSITION; a description key pairs zero rows"),
         ):
             assert token in skill, (
                 f"optimize-skill's SKILL.md lost {token!r} — {why}. This is PROCEDURE: it must stay "
@@ -2427,6 +2454,43 @@ class TestPluginArtifacts:
         assert "/coder-eval:check-skill" in text, "optimize-skill lost its pointer to /coder-eval:check-skill"
         assert "skill-check" not in text.replace("check-skill", ""), (
             "optimize-skill names `skill-check` — that command does not exist; the sibling is `check-skill`"
+        )
+
+    def test_optimize_skill_snippet_names_the_public_gate_api(self):
+        # A prose sensor cannot see a snippet drifting from the API it calls: the tokens stay
+        # present, the skill stays readable, and the step fails at runtime in the user's terminal
+        # after they have paid for three invocations. So assert both halves — the names are in the
+        # skill AND they are importable from the module the skill tells the user to import.
+        import coder_eval.optimize_gate as gate
+
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        for name in ("activation_gate", "holm_promote", "render_markdown", "noise_floor_mde"):
+            assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
+            assert hasattr(gate, name), (
+                f"optimize-skill's SKILL.md tells the user to import {name!r} from coder_eval."
+                f"optimize_gate, which no longer exports it — the snippet would fail at runtime"
+            )
+
+        assert "from coder_eval.optimize_gate import" in skill, (
+            "optimize-skill's snippet no longer shows the import line, so a reader cannot tell which "
+            "module the functions come from"
+        )
+
+    def test_optimize_method_quotes_no_tolerance_numbers(self):
+        # The guardrails are bootstrap-derived; the ONE tolerance constant lives in the module.
+        # A figure hand-copied into the prose is a second declaration of it — the same shape as the
+        # pricing.py <-> pricing.ts mirror this repo had to add a parity test to defend — and it
+        # goes stale silently, because nothing about changing a constant makes anyone reread a
+        # markdown file. Derived from the constant, so this cannot itself go stale.
+        from coder_eval.optimize_gate import MATERIALITY_FLOOR
+
+        method = _normalized(PLUGIN_ROOT / "reference" / "optimize-method.md")
+        forbidden = {f"{MATERIALITY_FLOOR:.0%}", f"{MATERIALITY_FLOOR:g}", f"{MATERIALITY_FLOOR:.2f}"}
+        present = sorted(f for f in forbidden if f in method)
+        assert not present, (
+            f"reference/optimize-method.md quotes {present} — the rendered value of MATERIALITY_FLOOR. "
+            "The guardrail tolerance is owned by coder_eval.optimize_gate; describe the guardrail as "
+            "bootstrap-derived and carry no figure, or the prose drifts the moment the constant moves."
         )
 
     def test_skill_listing_budget_is_bounded(self):

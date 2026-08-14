@@ -15,7 +15,7 @@ State the projected run count before each stage and ask. With N candidates, S su
 
 | Spend | Runs |
 | --- | --- |
-| Step 6 baseline | `M_train` |
+| Step 6 baseline | `M_train`, or `2 × M_train` on the activation track |
 | Stage A — triage | `(N+1) × M_train` |
 | Stage B — gate, activation track | `3 × (S+1) × M_train` |
 | Stage B — gate, execution track | `6 × M_train` per candidate gated |
@@ -34,6 +34,37 @@ baseline runs through the *task's own* skill source, while Stage A's incumbent r
 *snapshot you built*. Agreement between them is the wiring check — it is what proves the
 snapshot machinery did not change what is being measured. Quote both numbers when you
 compare them.
+
+**On the activation track the baseline is two invocations, not one, and the second one is what
+buys the preflight below.** A single run measures a level; two measure the spread, and the
+spread is the only thing that can tell you whether the gain you are hoping for is even visible
+on this suite. It is the cheapest stage in the table, and it is the one that can stop you
+spending the rest of it.
+
+**Not on the execution track.** There a row is a whole task run, so doubling the baseline is the
+most expensive thing in the skill — and the floor it would buy is a floor on `f1.yes`, which the
+execution gate never reads. One baseline there.
+
+### Before Stage A — price what the suite can see
+
+**State the minimum detectable effect before spending.** This is an activation-track preflight —
+it is computed on `f1.yes`, so it prices the activation gate and nothing else. Run the same
+machinery against the incumbent alone: split its invocations into two halves, treat them as two arms, and bootstrap
+the difference in `f1.yes` between them. The true difference there is zero by construction, so
+the interval's half-width is the smallest F1 difference this suite at this size can resolve —
+its noise floor.
+
+Then say the quiet part out loud, before any money is spent: **if the gain you are hypothesising
+is smaller than the minimum detectable effect, this suite cannot see it.** Hand back and say so —
+the answer is more rows, not more rounds. Running a stage that cannot resolve the effect it is
+looking for produces a non-result that reads exactly like a real one.
+
+The second baseline invocation is what it costs, and the table above prices it. Nothing after
+that is extra: at Stage B the MDE is recomputed from gate run directories that exist anyway, and
+the gate reports it beside every verdict, so a difference smaller than the floor is flagged even when the
+interval excludes zero. With only one invocation of the incumbent there is no null comparison and
+the tool reports no MDE at all rather than inventing one — which is itself the signal that the
+preflight did not happen.
 
 **Every stage runs the suite through the experiment.** The suite is the positional
 argument; the experiment carrying the arms is passed with `-e`. Passing the experiment file
@@ -82,18 +113,67 @@ coder-eval run <suite> -e <experiment> --split train --run-dir <runs>/round<N>-g
 
 **This is the instruction most likely to be "simplified" into a bug.** Suite rollups are
 keyed on `(variant, suite)` only, so `--repeats 3` pools all three replicates into a single
-`suite.json` with one confusion matrix — the per-replicate F1 this gate reads would not
+`suite.json` with one confusion matrix — the per-replicate F1 you read and quote would not
 exist in that file. Three invocations produce three run directories and three `suite.json`
 files. The cost is identical.
 
-Read `metrics["f1.yes"]` per invocation per arm. **Never recompute F1 from the confusion
-counts** — the criterion layer owns that arithmetic including its division-by-zero
-convention, and a re-derivation will disagree with the gate the run already applied.
+**Be precise about what the gate needs, because the tempting simplification is now half-right
+and that is worse than wrong.** The gate reads per-row `task.json`, not `suite.json`, and
+`--repeats 3` does write one per replicate — so the *interval itself* could be computed from a
+single run directory. Two things could not:
+
+- **The minimum detectable effect**, which is a comparison between invocations. One run
+  directory offers no null comparison, so the tool reports no floor and the round is unpriced.
+- **The per-invocation diagnostic.** Range non-overlap is computed per run directory; with one,
+  it collapses to comparing a pooled number against itself and reports something meaningless.
+
+So the three invocations stay, and the replicates within each row are the *within-cluster* data
+the resampling pools. What the rollup pooling still costs you is the human-readable per-arm F1
+per invocation — the number the ledger quotes and Stage A ranks on.
+
+Read `metrics["f1.yes"]` per invocation per arm **for the ledger and for Stage A's ranking** —
+the gate computes its own from the same criterion layer, so this is corroboration, not input.
+**Never recompute F1 from the confusion counts** — the criterion layer owns that arithmetic
+including its division-by-zero convention, and a re-derivation will disagree with the gate the
+run already applied. The gate satisfies that rule by construction: it does not re-derive
+anything, it *calls* the criterion layer's own routine on every resample.
+
+#### The statistic: a paired cluster bootstrap over rows
+
+Both arms ran the **same rows**. The old rule threw that away by comparing three separate
+numbers per arm, and at eight to twelve rows per polarity it had very little power. The
+replacement keeps the pairing and resamples **rows, not observations**:
+
+1. Draw `M` rows with replacement from the `M` train rows — *the same drawn rows for both arms*.
+2. For each drawn row, take **all** of its replicates, for the incumbent and for the candidate.
+3. Recompute each arm's `f1.yes` over its pooled resampled pairs, through the criterion layer.
+4. Record `candidate − incumbent`.
+
+The draws give the interval, at the resample count and confidence level the rendered block
+reports — the tool owns both, so read them off the block rather than from here. **Promote when
+that confidence interval excludes zero AND the Holm-corrected test below rejects.**
+
+Both, not either, and the order matters: Holm is the stricter of the two on any family larger
+than one, so an interval that excludes zero is **necessary and not sufficient**. A candidate
+whose raw interval clears zero can still fail the corrected test — that is the correction doing
+its job, not a contradiction to argue around.
+
+Rows, not observations, because replicates within a row are not independent — they are the same
+request asked again. Resampling them individually would understate the interval and manufacture
+separation. A row scored on only one arm is dropped from both and counted: an errored or
+timed-out row produces no criterion result, and comparing arms over different row sets favours
+whichever arm failed to produce one.
+
+**Range non-overlap is retained as a reported diagnostic, not as the gate.** `min(candidate F1)
+> max(incumbent F1)` is still printed beside the interval, because it is a useful sanity check on
+your intuition. It is not the decision, and restoring it as one would reintroduce exactly the
+low-power rule this replaced.
 
 Promote only when all of these hold:
 
-- **`min(candidate F1) > max(incumbent F1)`** across the three invocations — the ranges do
-  not overlap. A difference smaller than the run-to-run spread cannot clear it.
+- **The confidence interval of the paired difference excludes zero, and the Holm-corrected
+  test rejects.** The tool applies both; the interval is the effect size you report, the
+  corrected p-value is what decides.
 - **F1 improves, not just recall.** Widening recall while shedding precision is not an
   improvement, it is a different trade.
 - **No sibling regression.** For every other `skill_triggered` criterion in the suite, its
@@ -108,20 +188,62 @@ Promote only when all of these hold:
   div-by-zero convention drops it to 0.0. Either way it is blind to the thing you are
   watching for: gating on precision here would be gating on a constant that finally moves
   only when the sibling has already lost everything.
-- **Print per-invocation F1 and confusion counts for every arm.** The verdict is never
-  reported without the numbers behind it.
+- **Cost and latency have not materially regressed.** A description edit that doubles what a
+  row costs for two points of F1 is a trade, not a win, and the reader of the ledger is
+  entitled to know it was checked. See the guardrails below.
+- **Print the interval, the p-value, the minimum detectable effect and the diagnostic for every
+  arm.** The verdict is never reported without the numbers behind it.
 
 Why replicates rather than a fixed threshold: each arm's spread measures the noise floor
 for *this* suite at *this* size. A hardcoded "≥ 0.05 F1" would be far too lax on a six-row
 suite and needlessly strict on a forty-row one. **Do not introduce one.**
 
-**Be precise about what this bounds, because it is easy to claim more.** The replicate
-spread measures agent stochasticity over a *fixed* set of rows. It does not measure
-row-sampling variance, and it does not correct for the fact that the survivors were already
-chosen on these same train rows in Stage A — so with S survivors each tested independently,
-some separation by luck is expected. Stage B bounds run noise. **The test is what bounds
-the fit**, and it is why Stage C is not optional. Report the gate as "separated beyond
-run-to-run noise on the train rows", never as "proven better".
+#### The Holm correction, which is a property of the FAMILY
+
+With `S` survivors each gated against the same incumbent on the same rows, the family-wise error
+rate inflates: test enough candidates and one of them separates by luck. **Holm** fixes it —
+order the `S` gates by p-value ascending and reject the `i`-th only while
+`p_(i) ≤ alpha / (S − i + 1)` *and* every earlier one was rejected.
+
+This replaces the caveat the old rule could only warn about and never handle.
+
+**It cannot be applied inside a single gate, and the wrong version is indistinguishable from the
+right one until someone checks the arithmetic.** Gate each survivor first, then pass **all** the
+survivors' verdicts through one `holm_promote` call. Correcting per candidate as you go is not Holm:
+with a family of one the step-down degenerates to plain `p ≤ alpha`, and "scaling alpha by the
+survivor count" at each gate is Bonferroni — strictly more conservative, and not the test you
+said you ran. A single-candidate round is the same call with a family of one.
+
+#### Cost and latency guardrails
+
+Both tracks carry them, and they are **derived from the measured spread, not from a percentage
+threshold**. The same paired cluster bootstrap runs over each row's cost and each row's duration,
+and a guardrail fails only when the *optimistic* end of that interval is still a material
+increase — so an arm has to be reliably more expensive, not merely more expensive in this sample.
+
+**Do not write a percentage into this file.** A fixed tolerance is precisely what the measured
+run-to-run spread rules out: at the per-row variability these suites actually show, a
+tight-sounding rule fires on noise a meaningful fraction of the time, which is the same
+"noisy criteria veto real wins" failure the predeclaration rule below exists to prevent. The
+tool owns the one materiality floor it uses, and quoting its value here would be a second
+declaration of it that goes stale the moment the tool's own value changes.
+
+The block reports **median cost per row** and **median latency per row** as the level, over the
+rows the F1 comparison actually used. Read what fires it carefully, because the two numbers are
+not the same one: the interval is on the *mean* difference between arms, and the floor it is
+compared against is scaled by the incumbent's *median*. The median is the level; the interval is
+the evidence. A guardrail with nothing to measure — no turn reported a
+cost — passes with a stated reason rather than silently, because a missing measurement must never
+read as a pass on the merits.
+
+**Be precise about what this bounds, because it is easy to claim more.** The interval now bounds
+*row-sampling variation and run noise together* — resampling rows is what adds the first, and
+pooling each drawn row's replicates is what keeps the second. What it still does not do is
+correct for the survivors having been chosen on these same train rows in Stage A. Holm bounds the
+multiplicity across the survivors tested here; it does not undo the selection that produced them.
+Stage B bounds noise and multiplicity. **The test is what bounds the fit**, and it is why Stage C
+is not optional. Report the gate as "separated beyond run-to-run and row-sampling noise on the
+train rows", never as "proven better".
 
 **Execution track — gate pairwise, with `--repeats 3`, and let the reporter do the
 statistics.** Take the single best Stage A survivor against the incumbent as a **two-variant**
@@ -168,6 +290,9 @@ Promote only when all of these hold:
 - **`completion_rate` is equal across arms**, or the difference favours the incumbent. An
   eroded, asymmetric sample produces confident nonsense — a *p*-value computed over rows that
   vanished from one arm is not evidence.
+- **Cost and latency have not materially regressed**, by the same bootstrap-derived guardrails
+  described above. They matter more here than on the activation track, not less: an outcome row
+  is a whole task run, so a body edit that sends the agent down a longer path moves real money.
 - The skill **actually engaged** on every scored row; otherwise part of the sample measured
   the absence of the thing under test.
 

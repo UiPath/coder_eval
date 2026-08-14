@@ -41,6 +41,12 @@ If it is missing, follow `${CLAUDE_PLUGIN_ROOT}/reference/cli-setup.md`: offer t
 also covers whether this project pins a version and what to do when the installed one
 disagrees.
 
+**Settle which interpreter goes with that binary, because Step 10 needs it.** The gate is a
+library, driven by a short `python` snippet that imports `coder_eval` — so the interpreter that
+runs it must be the same environment the resolved `coder-eval` binary lives in. If
+`import coder_eval` fails, that is the wrong interpreter, not a broken gate: find the one beside
+the binary you settled on and say which it is.
+
 **A version string is not a capability check, and this loop needs a capability.** Once you
 have a suite (step 4), run `coder-eval plan <suite> --split <the split that stage will use>`
 and require it to exit 0 *before* spending — then read the printed row count, which is the
@@ -90,7 +96,7 @@ Ask which failure the user actually has, and say what each track can and cannot 
 | Suite | activation suite — `skill_triggered` | outcome suite — real success criteria |
 | Metric | `metrics["f1.yes"]` | per-row `weighted_score` / suite pass rate |
 | Row cost | one turn — seconds | a whole task — minutes |
-| Gate | non-overlapping replicate F1 ranges | paired comparison over replicates |
+| Gate | paired cluster bootstrap over rows, Holm-corrected | paired comparison over replicates |
 
 **First, ask whether this needs an A/B at all.** Some complaints are statically detectable,
 and a lint rule or a unit test answers them for zero agent runs and keeps answering forever.
@@ -428,8 +434,59 @@ metric is computed over a smaller suite than the file suggests.
 ## Step 6 — Baseline
 
 ```bash
-coder-eval run <suite> --split train -D run_limits.stop_early=false
+coder-eval run <suite> --split train -D run_limits.stop_early=false --run-dir <runs>/baseline-1
 ```
+
+### Activation track only — a second baseline, to price the round
+
+```bash
+coder-eval run <suite> --split train -D run_limits.stop_early=false --run-dir <runs>/baseline-2
+```
+
+**Run this second invocation on the activation track and NOT on the execution track.** One run
+measures a level; two measure the spread between them, and that spread is the **minimum
+detectable effect** — the smallest F1 difference this suite at this size can resolve. On an
+activation suite the second run costs one more turn per row and can save the whole round.
+
+On the execution track, skip it: every row is a full task run, so the doubling is the most
+expensive thing in this skill — and it would buy a number that does not apply. The MDE is
+computed on `f1.yes`, and the execution gate never reads F1; it compares per-row
+`weighted_score` through the paired block. **Do not run the snippet below on an outcome suite.**
+It would not fail loudly: on the bundled outcome template `criterion_index: 0` is the engagement
+criterion, which the same skill requires to be 1.0 on every row — so both halves score a perfect
+1.0, the floor comes back `0.000`, and you would report a confidently meaningless number about a
+metric the gate does not use.
+
+Compute it and report it *before* proposing anything:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import noise_floor_mde
+
+print(noise_floor_mde(
+    run_dirs=[Path("<runs>/baseline-1"), Path("<runs>/baseline-2")],
+    variant_id="default",
+    suite_id="<the suite's task_id>",
+    criterion_index=0,
+))
+```
+
+**Run directories are `Path` objects, not strings** — every one of these functions joins them
+with `/`, so a bare string raises after you have already paid for the runs.
+
+`variant_id` is `default` for a plain `coder-eval run` with no experiment. `criterion_index` is
+the criterion's **position** in the suite's `success_criteria:` list — 0-based, counting from the
+top of the YAML — so open the suite and count rather than assuming the engagement criterion is
+first. Unlike the gate, this function emits no wrong-index note: it just returns a number.
+
+A `None` result means the sample could not support a floor — either fewer than two invocations,
+or fewer than two rows scored in both halves — say that, rather than proceeding as if the round were
+priced.
+
+Then apply it: **if the gain you are hoping for is smaller than the MDE, hand back and say the
+suite is too small to see it.** More rows, not more rounds. This is the cheapest stage there is
+and it is the one that can stop you paying for the rest.
 
 **Check the resolved row count, not just the exit code.** A mistyped split name (`--split
 holdou`) aborts the run outright, naming the splits that exist — but a *partial* row loss does
@@ -673,13 +730,98 @@ The two Stage B rows differ on purpose and the method file says why — do not u
 Neither the promotion conditions nor the sign rule is restated here: read them there, at the
 moment you apply them, rather than from memory.
 
+### Stage B, activation track — run the gate, do not do the arithmetic
+
+The three invocations are the ones the method file's Stage B block names — three
+`coder-eval run` commands, each with its own `--run-dir <runs>/round<N>-gate-{1,2,3}`. They
+produce the data; a library computes the verdict. Run this with the interpreter you settled on
+in Step 1:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import activation_gate, holm_promote, render_markdown
+
+# The three --run-dir paths from the three invocations above, as Path objects.
+gate_dirs = [Path(f"<runs>/round1-gate-{i}") for i in (1, 2, 3)]
+
+verdicts = [
+    activation_gate(
+        incumbent_run_dirs=gate_dirs, candidate_run_dirs=gate_dirs,
+        incumbent_variant="incumbent", candidate_variant=slug,
+        # sibling_indices only if the suite stacks sibling criteria — a stock check-skill
+        # suite has ONE criterion, so it would be `sibling_indices=()` there.
+        suite_id="<the suite's task_id>", criterion_index=0, sibling_indices=[1],
+    )
+    for slug in ("cand-a-widen-vocabulary", "cand-b-name-the-symptom")
+]
+for v in holm_promote(verdicts):
+    print(render_markdown(v))
+```
+
+**Gate every survivor first, then correct once.** The loop builds all the verdicts before
+`holm_promote` sees any of them, and that ordering is the test. The correction is over the
+*family* of survivors, so promoting one candidate at a time — calling `holm_promote` on a single
+verdict each time round — is a different, weaker test that silently reverts to an uncorrected
+alpha. `activation_gate` on its own never promotes anything; it leaves the verdict undecided, and
+`render_markdown` prints **UNDECIDED** if you forget the correction rather than letting a
+forgotten call read as an honest negative result. (One exception, and it is not a promotion: a
+sample too small to support any statistic comes back NOT PROMOTED outright, because there is no
+p-value for a family decision to correct.)
+
+**`criterion_index` is the criterion's POSITION** in the suite's `success_criteria:` list —
+0-based, counting from the top of the YAML file. Open the suite and count. `sibling_indices` are
+the positions of the other `skill_triggered` criteria whose `recall.yes` must not drop. Get the
+index wrong and the verdict says so, loudly, rather than quietly measuring the wrong criterion.
+
+Print the rendered block verbatim. It carries the interval, the p-value, the Holm alpha, the
+minimum detectable effect, the sibling checks, the cost and latency guardrails, and the
+range-overlap diagnostic — which is reported, and is **not** the gate.
+
+**A failing guardrail blocks the promotion even though the statistic separated.** The library
+decides the primary comparison; the guardrails gate here, in the procedure. The block says so
+itself — a verdict that separated but breached a guardrail renders as **BLOCKED BY A
+GUARDRAIL** rather than PROMOTED — and the rule behind it is in the method file's promote-only-when
+list. Do not talk yourself past it: a description that wins two points of F1 by making every row
+cost twice as much is a trade, and the user is the one who gets to decide whether to take it.
+
+### Stage B, execution track — the same guardrails, called directly
+
+The execution gate's primary instrument is the reporter's `## Paired Comparison` block, but the
+cost and latency guardrails are not in it. Call them on the same two arms:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_gate import cost_latency_guardrails, load_arm_rows
+
+gate_dirs = [Path("<runs>/round1-gate")]
+kwargs = {"suite_id": "<the suite's task_id>"}
+incumbent = load_arm_rows(gate_dirs, "incumbent", **kwargs)
+candidate = load_arm_rows(gate_dirs, "<the candidate's variant_id>", **kwargs)
+
+for check in cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate):
+    print(check.name, check.passed, check.incumbent, check.candidate, check.ci_low, check.note)
+```
+
+They matter more here than on the activation track, not less: an outcome row is a whole task
+run, so a body edit that sends the agent down a longer path moves real money.
+
 ## Step 11 — Ledger
 
 Append to `.optimize-skill/<skill>/history.json`: round, **track**, candidate slug,
 hypothesis, **the predeclared primary criterion and its guardrails** (written before the
 stage runs — see Stage B), the train numbers (per-invocation F1 on activation; the paired
 block on execution), the test numbers, per-criterion or sibling movement, `completion_rate`
-per arm, verdict, and the run ids. Append-only — never rewrite an earlier round. An existing
+per arm, verdict, and the run ids. On the activation track the per-invocation F1s are the
+*diagnostic* half of that — record them, but the gate's own numbers below are the result.
+
+**Record the gate's numbers, not just the F1s.** On the activation track that means the
+confidence interval of the paired difference, the p-value, the Holm alpha and **how many
+survivors were in the family** it was computed over, the minimum detectable effect, and every
+guardrail with its interval. The family size is the one a later reader cannot reconstruct — the
+same p-value means different things in a family of one and a family of four — and it is what
+makes a round comparable to the round after it. Append-only — never rewrite an earlier round. An existing
 directory means read `history.json` first and continue the numbering.
 
 Writing the primary down *before* the numbers exist is what separates a predeclaration from

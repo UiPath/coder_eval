@@ -245,8 +245,11 @@ Python code"* — the two probes designed to catch it over-claiming.
 
 **So the optimization loop stops here, and that is the correct outcome.** With F1 already at
 1.0 there are no false negatives or false positives to build a hypothesis from, and the
-promotion gate — `min(candidate F1) > max(incumbent F1)` — cannot be satisfied by any
-candidate. Running the three A/B stages anyway, on this suite with three candidates and two
+promotion gate these rounds ran under — `min(candidate F1) > max(incumbent F1)` — cannot be
+satisfied by any candidate. (The gate has since been replaced by a paired cluster-bootstrap
+confidence interval on the difference, Holm-corrected across the survivors; the conclusion on
+this page is unchanged, because an arm whose best case is a tie cannot separate from the
+incumbent under either rule. The rounds below are reported as they were run.) Running the three A/B stages anyway, on this suite with three candidates and two
 survivors, would have cost `(3+1)×14 + 3×(2+1)×14 + 6×7` = **224 further agent runs** to
 chase a number that is not reachable. (Arithmetic at the 14-train / 7-test revision these
 runs used — every stage count on this page is computed at the revision that stage actually
@@ -288,8 +291,9 @@ hard-3   expected=(distractor)   ['task', 'task', '-']    <-- UNSTABLE
 ```
 
 So the effect is real but intermittent, and the two runs that agreed were luck, not
-evidence. **That is the whole reason the promotion gate demands non-overlapping replicate
-ranges.** Had this been a candidate description rather than an incumbent's quirk, those two
+evidence. **That is the whole reason the promotion gate demands replicates at all** — the rule
+has since become an interval on the paired difference rather than a comparison of ranges, but
+what the replicates are for is exactly this. Had this been a candidate description rather than an incumbent's quirk, those two
 agreeing runs would have "proved" an improvement worth shipping. Report what replicates;
 treat anything else as a hypothesis.
 
@@ -660,9 +664,10 @@ coder-eval run tasks/skills/lint-tasks-activation.yaml \
 rows — so unlike the original Stage A, nothing here was ranked against a shifting
 denominator.
 
-**The round stops at Stage A, and that is the result.** With the incumbent at F1 1.000,
-`min(candidate F1) > max(incumbent F1)` cannot be satisfied by anything: the best a candidate
-can do is tie. Stage B and Stage C were not run. Establishing that cost 68 runs against the
+**The round stops at Stage A, and that is the result.** With the incumbent at F1 1.000, the
+gate cannot be satisfied by anything: the best a candidate can do is tie, and a tie separates
+from the incumbent under neither this round's rule (`min(candidate F1) > max(incumbent F1)`)
+nor the interval that replaced it. Stage B and Stage C were not run. Establishing that cost 68 runs against the
 `(3+1)×17 + 3×(2+1)×17 + 2×11×3` = **287** the full three stages would have — which is what
 Stage A is for.
 
