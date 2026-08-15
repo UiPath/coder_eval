@@ -786,13 +786,17 @@ class Orchestrator:
                 # Bounded: kill() bottoms out in a cancel/teardown on the very
                 # connection that may be wedged, and run()'s watchdog has
                 # already exited by the time this runs, so nothing else would
-                # stop it hanging. Catch BaseException, not Exception: the
-                # task-timeout watchdog queues a task.cancel() and this is
-                # often the first real suspension point after the handler
-                # begins, so a CancelledError landing here must not skip the
-                # grading pass this quiesce exists to protect.
+                # stop it hanging.
+                #
+                # Exception, NOT BaseException: a CancelledError here means the
+                # runtime asked this task to stop (batch shutdown, Ctrl-C), and
+                # swallowing it would run a 60s grading pass after being told to
+                # quit. Letting it propagate is safe precisely because
+                # fallback_status is already committed above, before any await --
+                # bailing out leaves the row correct, and skipping a best-effort
+                # grade is what cancellation is supposed to mean.
                 await asyncio.wait_for(self.agent.kill(), timeout=_QUIESCE_TIMEOUT_SECONDS)
-            except BaseException:
+            except Exception:
                 # Warning, not debug: grading is about to read a sandbox that
                 # may still be under a live agent's control, so a failed
                 # quiesce is real context for an unexpected verdict.
@@ -901,6 +905,13 @@ class Orchestrator:
             "[%s] Waiting for an over-budget grading pass to finish before sandbox teardown",
             self.task.task_id,
         )
+        # CancelledError IS suppressed here, unlike the quiesce above: this runs
+        # inside run()'s teardown, which the file already establishes must be
+        # interrupt-proof (see the teardown_interrupt handling in run()) --
+        # aborting here would skip _cleanup() and leak the sandbox, and would
+        # also abandon the very thread we are waiting for. The awaited result is
+        # deliberately discarded: the status was decided from the fallback, and
+        # this await exists purely to order teardown after the worker thread.
         with contextlib.suppress(Exception, asyncio.CancelledError):
             await grade
 
