@@ -2207,8 +2207,20 @@ def _exec_run_dir(
     extra_scores: dict[str, dict[str, list[float]]] | None = None,
     variant_ids: list[str] | None = None,
 ) -> Path:
-    """One Stage B gate run directory: both arms' rows on disk plus the experiment file."""
+    """One Stage B gate run directory: both arms' rows on disk plus the experiment file.
+
+    The directory name is FIXED, so two calls under one ``tmp_path`` would write into the same tree
+    — the second arm's rows landing beside the first's while `experiment.json` is overwritten. That
+    is silent and it drifts a fixture without failing anything: measured, a test comparing a refused
+    fixture against a clean control ran the control over the refused arm's leftover rows and moved
+    its `mde` from 2.8e-17 to 0.030, with the assertion still green. Refusing to build twice is what
+    turns that into a test error; the fix at a call site is a distinct `tmp_path / "<name>"`.
+    """
     run_dir = tmp_path / "round1-gate"
+    assert not run_dir.exists(), (
+        f"{run_dir} already exists — two _exec_run_dir calls under one tmp_path merge silently. "
+        "Give each fixture its own subdirectory, e.g. _exec_run_dir(tmp_path / 'winner', ...)."
+    )
     for variant, per_row in (("incumbent", incumbent), ("candidate", candidate)):
         for row_id, scores in per_row.items():
             for replicate, score in enumerate(scores):

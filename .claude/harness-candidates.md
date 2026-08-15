@@ -584,3 +584,20 @@ with the two `action.yml` items above — one considered change to the action's 
       literal keywords, plus a rule forbidding bare `model_copy(update=)`) or a
       `model_validate(instance.model_dump() | update)` convention — a design decision, not a
       bolt-on. — caught in the Plan A Phase 3 quality review; CE041's docstring points here.
+- [ ] A no-op "absence" assertion: `assert "X" not in text.replace("NOT X", "")` is vacuous whenever
+      the fixture cannot contain `X` at all, and reads as a strong guard. Live instance at
+      `tests/test_optimize_gate.py` (the `render_search_comparison` blocked-path test), and the
+      pattern is already named in the review backlog. The correct form is to read the discriminating
+      LINE — `_headline()` in that file is the worked example, and it proves itself non-vacuous by
+      rendering a fixture where the forbidden string DOES appear. Not done here because catching it
+      mechanically means an AST rule over `tests/` matching a `Compare(NotIn)` whose right operand is
+      a `.replace()` call whose first argument CONTAINS the left operand, plus a repo-wide sweep of
+      the hits before it can land green. — caught in the Plan A Phase 1 review.
+- [ ] An `if` whose body is only `notes.append(...)` sitting beside a structurally identical `if`
+      that ends in `return` — the shape of the incumbent-variant fall-through this plan fixed, where
+      one validation branch failed open while its sibling three lines above failed closed. AST-
+      detectable within a single function body (same-parent `If` nodes, one terminating in `Return`,
+      one not, both guarding a comparable predicate). Not done with the fix because landing it green
+      needs a sweep of every multi-branch validator in `src/` to separate the real fall-throughs
+      from the deliberate accumulate-then-continue ones — the same reason CE046 was deferred. —
+      caught in the Plan A Phase 2 review.
