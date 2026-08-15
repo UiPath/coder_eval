@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import logging
 import random
 import re
@@ -19,6 +20,7 @@ from typing import ClassVar
 from unittest import mock
 
 import pytest
+from pydantic import ValidationError
 
 from coder_eval.leak_detection import LEAK_MIN_CHARS
 from coder_eval.models import (
@@ -2638,6 +2640,190 @@ class TestRenderExecutionMarkdown:
         verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
         assert verdict.gate_refusal is not None
         assert _headline(render_execution_markdown(verdict)).startswith("UNDECIDED")
+
+
+# ---------------------------------------------------------------------------
+# Behaviour-preservation pins for the literal-keyword construction rewrite
+# ---------------------------------------------------------------------------
+
+_VERDICT_PINS = Path(__file__).parent / "_fixtures" / "optimize_verdicts"
+
+
+def _pinned_suite() -> tuple[dict, dict]:
+    """`_tiny_suite` plus a SIBLING criterion the candidate annexes one row of.
+
+    Load-bearing for the pins rather than decoration. `_tiny_suite`'s rows carry one criterion, so
+    `sibling_checks` comes back `[]` — which is the model default, so a construction that dropped
+    the `sibling_checks=` keyword entirely would reproduce the pin byte for byte. Measured: with a
+    single-criterion suite, deleting `sibling_checks=` from both return paths left the whole file
+    green. It is the field `holm_promote` folds into `promoted`, so it is the last one a
+    behaviour pin may be blind to.
+    """
+    incumbent, candidate = _tiny_suite(4, 4)
+    return (
+        {rid: [*labels, ("yes", "yes")] for rid, labels in incumbent.items()},
+        {rid: [*labels, ("yes", "no" if rid == "p0" else "yes")] for rid, labels in candidate.items()},
+    )
+
+
+def _assert_matches_pin(verdict, name: str) -> None:
+    """Compare a verdict's dump against output captured BEFORE the construction rewrite.
+
+    That rewrite replaced `verdict_kwargs` / `_verdict(**overrides)` with literal keywords on
+    every construction path of both models. It is behaviour-preserving BY CONSTRUCTION — which is
+    exactly the kind of claim that needs a witness, because a dropped or mis-spelled keyword shows
+    up as a field quietly at its default rather than as an error.
+
+    Compared as PARSED JSON so the pinned floats are the ones the run actually produced, and so a
+    field ADDED to either model fails here rather than being silently absent from the expectation.
+    Committed beside the other characterization fixtures (`report_snapshots`, `golden_streams`).
+    """
+    expected = json.loads((_VERDICT_PINS / f"{name}.json").read_text(encoding="utf-8"))
+    assert json.loads(verdict.model_dump_json()) == expected
+
+
+class TestConstructionIsBehaviourPreserving:
+    """The three construction paths the rewrite touches, pinned against pre-rewrite output."""
+
+    def test_the_activation_verdict_is_unchanged(self, tmp_path: Path) -> None:
+        _assert_matches_pin(_gate(_shared_dirs(tmp_path, *_pinned_suite())), "activation_gate")
+
+    def test_the_activation_early_return_is_unchanged(self, tmp_path: Path) -> None:
+        # The `bootstrap is None` path, which used to OVERWRITE two keys in the shared dict before
+        # splatting it — the path the rewrite changes most. The incumbent scores three rows across
+        # three invocations while only one PAIRS, so the bootstrap declines (1 scored row) while
+        # the incumbent's own null split still yields a real `mde`: an early-return pin whose
+        # `mde` was `None` could not see a dropped `mde=` keyword.
+        incumbent = {f"p{i}": [("yes", "no"), ("yes", "yes")] for i in range(3)}
+        candidate = {"p0": [("yes", "yes"), ("yes", "no")]}
+        _assert_matches_pin(_gate(_shared_dirs(tmp_path, incumbent, candidate)), "activation_gate_early_return")
+
+    def test_the_execution_verdict_is_unchanged(self, tmp_path: Path) -> None:
+        _assert_matches_pin(_exec_gate(_exec_run_dir(tmp_path, **_WINNER)), "execution_gate")
+
+    def test_the_refused_execution_verdict_is_unchanged(self, tmp_path: Path) -> None:
+        # `gate_refusal` is the one value `_verdict` reads from its closure rather than taking as a
+        # parameter, and it is `None` on every healthy verdict — so a pin that never refuses cannot
+        # see it dropped.
+        _assert_matches_pin(_exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4))), "execution_gate_refused")
+
+
+def _full_guardrail_check() -> GuardrailCheck:
+    """A `GuardrailCheck` with every field set away from its default."""
+    return GuardrailCheck(
+        name="cost (USD/row)",
+        incumbent=1.0,
+        candidate=2.0,
+        relative_change=1.0,
+        tolerance=0.25,
+        ci_low=0.5,
+        ci_high=1.5,
+        rate=0.25,
+        passed=False,
+        note="a note",
+    )
+
+
+def _full_activation_verdict() -> ActivationGateVerdict:
+    return ActivationGateVerdict(
+        incumbent_variant="incumbent",
+        candidate_variant="cand",
+        suite_id=SUITE,
+        criterion_index=1,
+        confidence=0.9,
+        n_resamples=99,
+        rows_paired=8,
+        rows_excluded=2,
+        incumbent_f1=0.4,
+        candidate_f1=0.8,
+        mean_diff=0.4,
+        ci_low=0.1,
+        ci_high=0.7,
+        p_value=0.01,
+        p_floor=0.005,
+        n_discordant=4,
+        gate_refusal="refused",
+        holm_alpha=0.05,
+        # False, not True: a refusal forces `promoted=False`, and a carrier fixture that pairs a
+        # refusal with a promotion is a state no gate can emit.
+        promoted=False,
+        range_non_overlap=True,
+        mde=0.2,
+        sibling_checks=[_full_guardrail_check()],
+        guardrails=[_full_guardrail_check()],
+        notes=["a note"],
+    )
+
+
+def _full_execution_verdict() -> ExecutionGateVerdict:
+    return ExecutionGateVerdict(
+        incumbent_variant="incumbent",
+        candidate_variant="cand",
+        suite_id=SUITE,
+        confidence=0.9,
+        n_resamples=99,
+        rows_paired=8,
+        rows_excluded=2,
+        mean_diff=0.4,
+        ci_low=0.1,
+        ci_high=0.7,
+        effect_size=1.2,
+        p_value=0.01,
+        gate_refusal="refused",
+        holm_alpha=0.05,
+        promoted=False,  # as above: a refusal forces this False
+        mde=0.2,
+        integrity_checks=[_full_guardrail_check()],
+        guardrails=[_full_guardrail_check()],
+        notes=["a note"],
+    )
+
+
+class TestTypedConstruction:
+    """A mistyped or renamed field must RAISE, not silently become None.
+
+    Both verdicts used to be built through string-keyed dicts splatted into the constructor, and
+    neither model nor `GuardrailCheck` declared `extra="forbid"` — so `mean_dif=0.42` produced a
+    verdict reporting no difference at all, with every other number intact and nothing to see.
+    """
+
+    @pytest.mark.parametrize(
+        ("build", "typo"),
+        [
+            (_full_activation_verdict, "mean_dif"),
+            (_full_execution_verdict, "mean_dif"),
+            (_full_guardrail_check, "relative_chnge"),
+        ],
+        ids=["activation", "execution", "guardrail"],
+    )
+    def test_an_unknown_field_raises(self, build, typo: str) -> None:
+        instance = build()
+        model = type(instance)
+        with pytest.raises(ValidationError):
+            model(**{**instance.model_dump(), typo: 0.42})
+
+    @pytest.mark.parametrize(
+        "build",
+        [_full_activation_verdict, _full_execution_verdict, _full_guardrail_check],
+        ids=["activation", "execution", "guardrail"],
+    )
+    def test_a_fully_populated_instance_round_trips(self, build) -> None:
+        instance = build()
+        model = type(instance)
+        # Over `model_fields`, never a hand-picked subset: a field the construction rewrite dropped
+        # is invisible to a comparison that never looks at it.
+        dumped = instance.model_dump()
+        assert model.model_validate(dumped) == instance
+        # And every OPTIONAL field is genuinely exercised. Compared against the real resolved
+        # default — `field.get_default(call_default_factory=True)`, which covers `default=None` and
+        # `default_factory=list` alike. Reading `field.default` instead excludes exactly those two,
+        # which is almost every optional field on these models, and the guard then checks nothing.
+        still_default = [
+            name
+            for name, field in model.model_fields.items()
+            if not field.is_required() and dumped[name] == field.get_default(call_default_factory=True)
+        ]
+        assert not still_default, f"fixture leaves {still_default} at the default — it proves nothing there"
 
 
 class TestDeriveSiblingIndices:

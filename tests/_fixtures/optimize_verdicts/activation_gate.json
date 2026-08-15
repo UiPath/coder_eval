@@ -1,0 +1,64 @@
+{
+  "incumbent_variant": "incumbent",
+  "candidate_variant": "candidate",
+  "suite_id": "my-skill-activation",
+  "criterion_index": 0,
+  "confidence": 0.95,
+  "n_resamples": 400,
+  "rows_paired": 8,
+  "rows_excluded": 0,
+  "incumbent_f1": 0.0,
+  "candidate_f1": 1.0,
+  "mean_diff": 1.0,
+  "ci_low": 1.0,
+  "ci_high": 1.0,
+  "p_value": 0.00997506234413965,
+  "p_floor": 0.0078125,
+  "n_discordant": 4,
+  "gate_refusal": null,
+  "holm_alpha": null,
+  "promoted": null,
+  "range_non_overlap": true,
+  "mde": 0.0,
+  "sibling_checks": [
+    {
+      "name": "sibling recall.yes [criterion 1]",
+      "incumbent": 1.0,
+      "candidate": 0.875,
+      "relative_change": -0.125,
+      "tolerance": 0.0,
+      "ci_low": null,
+      "ci_high": null,
+      "rate": 0.125,
+      "passed": false,
+      "note": null
+    }
+  ],
+  "guardrails": [
+    {
+      "name": "cost (USD/row)",
+      "incumbent": null,
+      "candidate": null,
+      "relative_change": null,
+      "tolerance": 0.25,
+      "ci_low": null,
+      "ci_high": null,
+      "rate": null,
+      "passed": true,
+      "note": "no cost recorded on at least one arm — guardrail not evaluated"
+    },
+    {
+      "name": "latency (seconds/row)",
+      "incumbent": 0.0,
+      "candidate": 0.0,
+      "relative_change": null,
+      "tolerance": 0.25,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "rate": null,
+      "passed": true,
+      "note": "the incumbent measured zero, so a relative change is undefined"
+    }
+  ],
+  "notes": []
+}

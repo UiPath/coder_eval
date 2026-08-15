@@ -1,0 +1,67 @@
+{
+  "incumbent_variant": "incumbent",
+  "candidate_variant": "candidate",
+  "suite_id": "my-skill-activation",
+  "criterion_index": 0,
+  "confidence": 0.95,
+  "n_resamples": 400,
+  "rows_paired": 1,
+  "rows_excluded": 2,
+  "incumbent_f1": null,
+  "candidate_f1": null,
+  "mean_diff": null,
+  "ci_low": null,
+  "ci_high": null,
+  "p_value": null,
+  "p_floor": null,
+  "n_discordant": null,
+  "gate_refusal": null,
+  "holm_alpha": null,
+  "promoted": false,
+  "range_non_overlap": false,
+  "mde": 0.0,
+  "sibling_checks": [
+    {
+      "name": "sibling recall.yes [criterion 1]",
+      "incumbent": 1.0,
+      "candidate": 0.0,
+      "relative_change": -1.0,
+      "tolerance": 0.0,
+      "ci_low": null,
+      "ci_high": null,
+      "rate": 1.0,
+      "passed": false,
+      "note": null
+    }
+  ],
+  "guardrails": [
+    {
+      "name": "cost (USD/row)",
+      "incumbent": null,
+      "candidate": null,
+      "relative_change": null,
+      "tolerance": 0.25,
+      "ci_low": null,
+      "ci_high": null,
+      "rate": null,
+      "passed": true,
+      "note": "no cost recorded on at least one arm — guardrail not evaluated"
+    },
+    {
+      "name": "latency (seconds/row)",
+      "incumbent": 0.0,
+      "candidate": 0.0,
+      "relative_change": null,
+      "tolerance": 0.25,
+      "ci_low": null,
+      "ci_high": null,
+      "rate": null,
+      "passed": true,
+      "note": "fewer than 2 comparable rows — no interval, so nothing is claimed"
+    }
+  ],
+  "notes": [
+    "2 row(s) present in only one arm and excluded from the pairing: p1, p2. An asymmetric sample produces confident nonsense — find out why before reading the interval.",
+    "only 1 row(s) scored on both arms — fewer than the 2 an interval needs, so every statistic is reported as unavailable rather than fabricated."
+  ]
+}

@@ -1141,52 +1141,50 @@ def activation_gate(
     # `_discreteness_floor` a valid bound on the smallest p this suite can be expected to express.
     n_discordant = sum(1 for rid in scored_row_ids if sorted(balanced[rid][0]) != sorted(balanced[rid][1]))
 
-    verdict_kwargs = {
-        "incumbent_variant": incumbent_variant,
-        "candidate_variant": candidate_variant,
-        "suite_id": suite_id,
-        "criterion_index": criterion_index,
-        "confidence": confidence,
-        "n_resamples": n_resamples,
-        "p_floor": _discreteness_floor(len(scored_row_ids), n_discordant, n_resamples),
-        "n_discordant": n_discordant,
-        "rows_paired": len(scored_row_ids),
-        "rows_excluded": len(unpaired) + unscored_count,
-        "sibling_checks": _sibling_checks(
-            incumbent_rows=incumbent_rows,
-            candidate_rows=candidate_rows,
-            paired_row_ids=scored_row_ids,
-            # Derived over the UNION of both arms' rows, so a criterion present on one arm only is
-            # still found and reported by the one-sided note rather than going unchecked.
-            sibling_indices=(
-                derive_sibling_indices(incumbent_rows, candidate_rows, primary_index=criterion_index)
-                if sibling_indices is None
-                else sibling_indices
-            ),
+    # The four shared values, hoisted into named locals rather than a keyword dict the two returns
+    # splat. Three are expensive (two bootstraps and a sibling scan); `p_floor` is pure arithmetic
+    # and is computed last here rather than first as the dict had it — safe, and stated because
+    # this comment is the only record of the reorder: `_discreteness_floor` is pure, logs nothing,
+    # raises nothing, and every RNG on this path is a seed-local `random.Random`.
+    #
+    # A splat means a mistyped or renamed field silently becomes None — exactly what
+    # `extra="forbid"` on the model and CE041 in the linter now forbid — and the two return paths
+    # differ in ten values anyway, so the dict was only ever holding these four plus the scalars.
+    sibling_checks = _sibling_checks(
+        incumbent_rows=incumbent_rows,
+        candidate_rows=candidate_rows,
+        paired_row_ids=scored_row_ids,
+        # Derived over the UNION of both arms' rows, so a criterion present on one arm only is
+        # still found and reported by the one-sided note rather than going unchecked.
+        sibling_indices=(
+            derive_sibling_indices(incumbent_rows, candidate_rows, primary_index=criterion_index)
+            if sibling_indices is None
+            else sibling_indices
         ),
-        # Over the rows the F1 comparison actually used, so a guardrail is never computed on a
-        # different sample than the number it guards.
-        "guardrails": cost_latency_guardrails(
-            incumbent_rows=incumbent_rows,
-            candidate_rows=candidate_rows,
-            row_ids=scored_row_ids,
-            materiality=materiality,
-            seed=seed,
-            confidence=confidence,
-            n_resamples=n_resamples,
-        ),
-        # The MDE is a NULL comparison, and only the incumbent supplies one — splitting the
-        # candidate's invocations would measure a different arm's noise.
-        "mde": noise_floor_mde(
-            run_dirs=incumbent_run_dirs,
-            variant_id=incumbent_variant,
-            suite_id=suite_id,
-            criterion_index=criterion_index,
-            confidence=confidence,
-            seed=seed,
-            n_resamples=n_resamples,
-        ),
-    }
+    )
+    # Over the rows the F1 comparison actually used, so a guardrail is never computed on a
+    # different sample than the number it guards.
+    guardrails = cost_latency_guardrails(
+        incumbent_rows=incumbent_rows,
+        candidate_rows=candidate_rows,
+        row_ids=scored_row_ids,
+        materiality=materiality,
+        seed=seed,
+        confidence=confidence,
+        n_resamples=n_resamples,
+    )
+    # The MDE is a NULL comparison, and only the incumbent supplies one — splitting the
+    # candidate's invocations would measure a different arm's noise.
+    mde = noise_floor_mde(
+        run_dirs=incumbent_run_dirs,
+        variant_id=incumbent_variant,
+        suite_id=suite_id,
+        criterion_index=criterion_index,
+        confidence=confidence,
+        seed=seed,
+        n_resamples=n_resamples,
+    )
+    p_floor = _discreteness_floor(len(scored_row_ids), n_discordant, n_resamples)
 
     bootstrap = cluster_bootstrap_diff_ci(
         candidate_clusters,
@@ -1201,29 +1199,36 @@ def activation_gate(
             f"only {len(scored_row_ids)} row(s) scored on both arms — fewer than the 2 an interval needs, "
             + "so every statistic is reported as unavailable rather than fabricated."
         )
-        # No interval, so there is nothing for a floor to be a floor ON. Overwritten rather than
-        # passed at the return: both returns splat this dict, so a second `p_floor=` would be a
-        # duplicate-keyword TypeError.
-        verdict_kwargs["p_floor"] = None
-        # And `None` rather than the 0 or 1 a single row would compute: 0 is the meaningful "the
-        # arms agreed on every row", which is a finding. "There was no comparison" is not.
-        verdict_kwargs["n_discordant"] = None
         return ActivationGateVerdict(
-            **verdict_kwargs,
+            incumbent_variant=incumbent_variant,
+            candidate_variant=candidate_variant,
+            suite_id=suite_id,
+            criterion_index=criterion_index,
+            confidence=confidence,
+            n_resamples=n_resamples,
+            rows_paired=len(scored_row_ids),
+            rows_excluded=len(unpaired) + unscored_count,
             incumbent_f1=None,
             candidate_f1=None,
             mean_diff=None,
             ci_low=None,
             ci_high=None,
             p_value=None,
+            # No interval, so there is nothing for a floor to be a floor ON. And `n_discordant` is
+            # `None` rather than the 0 or 1 a single row would compute: 0 is the meaningful "the
+            # arms agreed on every row", which is a finding. "There was no comparison" is not.
+            p_floor=None,
+            n_discordant=None,
             promoted=False,
+            mde=mde,
+            sibling_checks=sibling_checks,
+            guardrails=guardrails,
             notes=notes,
         )
 
     mean_diff, ci_low, ci_high, p_value = bootstrap
 
-    mde = verdict_kwargs["mde"]
-    if isinstance(mde, float) and abs(mean_diff) < mde:
+    if mde is not None and abs(mean_diff) < mde:
         notes.append(
             f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum detectable "
             + f"effect ({mde:.3f}). An interval excluding zero is still reportable, but do not present it "
@@ -1252,14 +1257,26 @@ def activation_gate(
     )
 
     return ActivationGateVerdict(
-        **verdict_kwargs,
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        criterion_index=criterion_index,
+        confidence=confidence,
+        n_resamples=n_resamples,
+        rows_paired=len(scored_row_ids),
+        rows_excluded=len(unpaired) + unscored_count,
         incumbent_f1=_f1_yes(incumbent_pairs),
         candidate_f1=_f1_yes(candidate_pairs),
         mean_diff=mean_diff,
         ci_low=ci_low,
         ci_high=ci_high,
         p_value=p_value,
+        p_floor=p_floor,
+        n_discordant=n_discordant,
         range_non_overlap=range_non_overlap,
+        mde=mde,
+        sibling_checks=sibling_checks,
+        guardrails=guardrails,
         notes=notes,
     )
 
@@ -1673,22 +1690,47 @@ def execution_gate(
     # disk for both arms but carries an empty score list on one.
     check_row_ids = list(row_ids)
 
-    def _verdict(**overrides) -> ExecutionGateVerdict:
-        base = {
-            "incumbent_variant": incumbent_variant,
-            "candidate_variant": candidate_variant,
-            "suite_id": suite_id,
-            "confidence": confidence,
-            "n_resamples": n_resamples,
-            "rows_paired": 0,
-            "rows_excluded": 0,
-            "integrity_checks": _integrity_checks(
+    def _verdict(
+        *,
+        rows_paired: int = 0,
+        rows_excluded: int = 0,
+        mean_diff: float | None = None,
+        ci_low: float | None = None,
+        ci_high: float | None = None,
+        effect_size: float | None = None,
+        p_value: float | None = None,
+    ) -> ExecutionGateVerdict:
+        """The verdict every return path builds, differing only in the counts and the statistics.
+
+        Explicit keyword-only parameters rather than ``**overrides`` splatted over a base dict: a
+        splat means a mistyped or renamed field silently becomes ``None`` on a model whose whole
+        job is to say what a promotion decision rests on. Kept as a closure — unlike
+        ``activation_gate``'s dict, it has seven call sites and closes over values every path needs.
+        """
+        return ExecutionGateVerdict(
+            incumbent_variant=incumbent_variant,
+            candidate_variant=candidate_variant,
+            suite_id=suite_id,
+            confidence=confidence,
+            n_resamples=n_resamples,
+            rows_paired=rows_paired,
+            rows_excluded=rows_excluded,
+            mean_diff=mean_diff,
+            ci_low=ci_low,
+            ci_high=ci_high,
+            effect_size=effect_size,
+            p_value=p_value,
+            # Read from the enclosing scope at CALL time, so a return path that runs after a
+            # refusal was set carries it without every call site repeating the keyword.
+            gate_refusal=gate_refusal,
+            mde=mde,
+            integrity_checks=_integrity_checks(
                 incumbent_rows=incumbent_rows,
                 candidate_rows=candidate_rows,
                 row_ids=check_row_ids,
                 engagement_criterion_index=engagement_criterion_index,
             ),
-            "guardrails": cost_latency_guardrails(
+            guardrails=cost_latency_guardrails(
                 incumbent_rows=incumbent_rows,
                 candidate_rows=candidate_rows,
                 row_ids=check_row_ids,
@@ -1697,15 +1739,10 @@ def execution_gate(
                 confidence=confidence,
                 n_resamples=n_resamples,
             ),
-            "mde": mde,
-            # Read from the enclosing scope at CALL time, so a return path that runs after a
-            # refusal was set carries it without every call site repeating the keyword.
-            "gate_refusal": gate_refusal,
             # Pydantic copies this list, so every note must already be in it. `_verdict` is
             # therefore always the LAST thing a return path does.
-            "notes": notes,
-        }
-        return ExecutionGateVerdict(**{**base, **overrides})
+            notes=notes,
+        )
 
     if incumbent_variant == candidate_variant:
         return _verdict()

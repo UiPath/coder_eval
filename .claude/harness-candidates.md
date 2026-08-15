@@ -570,3 +570,17 @@ with the two `action.yml` items above — one considered change to the action's 
       the general case and wrong about this one: these four guards are the only ones whose omission
       is *silent and score-changing*, which is what makes them worth the API. — caught in the ReAPO
       optimize-skill Phase 1 quality review, closed the same day.
+- [ ] `model_copy(update={...})` is not validated by pydantic even under `extra="forbid"`, so a
+      mistyped key is set as a bare instance attribute and dropped from `model_dump()` entirely —
+      no raise, no log, and the field it was meant to set stays at its default. This is the exact
+      hole CE041 closed for *construction*, still open for *update*, and it matters most where it
+      is worst: `ActivationGateVerdict.promoted` / `holm_alpha` and their execution-track twins are
+      written ONLY this way (`optimize_gate.holm_promote`, `holm_promote_execution`), so the two
+      fields that ARE the promotion decision are the two the runtime backstop does not cover. Not
+      done with CE041 because the fix is not a matching rule: `update=` legitimately takes a dict
+      in every one of this repo's ~9 call sites, so a rule that flags the CALL is wrong and one
+      that validates the KEYS has to resolve the receiver's model type, which an AST walk cannot do
+      in general. The tractable shapes are a runtime helper (`copy_with(model, **kwargs)` taking
+      literal keywords, plus a rule forbidding bare `model_copy(update=)`) or a
+      `model_validate(instance.model_dump() | update)` convention — a design decision, not a
+      bolt-on. — caught in the Plan A Phase 3 quality review; CE041's docstring points here.

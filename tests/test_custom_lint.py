@@ -525,6 +525,75 @@ class TestCE040BootstrapPFloorSeam:
 
 
 @pytest.mark.lint
+class TestCE041NoModelDictSplat:
+    """CE041 flags a `**<dict>` splat into a model imported from `coder_eval.models`.
+
+    A splat means a mistyped or renamed key lands in no field at all: pydantic ignores extras
+    by default, so the model is built with that field at its default and nothing raises. Both
+    optimize-gate verdicts were built that way, on models whose job is to say what a promotion
+    decision rests on.
+    """
+
+    _IMPORT = "from coder_eval.models import ActivationGateVerdict\n"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "<test>"):
+        import ast
+
+        from tests.lint.rules.ce041_no_model_dict_splat import NoModelDictSplat
+
+        return NoModelDictSplat(filepath).check(ast.parse(src))
+
+    def test_flags_a_bare_name_splat(self):
+        # The exact shape `activation_gate` had: one dict, splatted into both returns.
+        assert self._run(self._IMPORT + "ActivationGateVerdict(**verdict_kwargs, mean_diff=None)")
+
+    def test_flags_a_merged_dict_display_splat(self):
+        # The exact shape `execution_gate`'s `_verdict` had.
+        assert self._run(self._IMPORT + "ActivationGateVerdict(**{**base, **overrides})")
+
+    @pytest.mark.parametrize(
+        "splat",
+        [
+            "**other.model_dump()",
+            "**self.base",
+            '**cfg["v"]',
+            "**dict(base, x=1)",
+            "**(base | overrides)",
+            "**{k: v for k, v in items}",
+        ],
+    )
+    def test_flags_every_operand_shape_not_only_a_name_or_a_dict_display(self, splat: str):
+        # `**x.model_dump()` is how this defect usually arrives, and a dict comprehension is not
+        # an `ast.Dict`. Narrowing the operand would name a boundary users read as "splats are
+        # covered" while leaving the commonest spelling through.
+        assert self._run(self._IMPORT + f"ActivationGateVerdict({splat})")
+
+    def test_flags_a_renamed_import(self):
+        assert self._run("from coder_eval.models import ActivationGateVerdict as V\nV(**kwargs)")
+
+    def test_flags_a_model_from_a_submodule_import(self):
+        assert self._run("from coder_eval.models.optimize import GuardrailCheck\nGuardrailCheck(**d)")
+
+    def test_allows_literal_keywords(self):
+        assert not self._run(self._IMPORT + "ActivationGateVerdict(suite_id='s', mean_diff=None)")
+
+    def test_allows_model_validate_on_a_dict(self):
+        # The intended escape: `model_validate` VALIDATES the payload rather than splatting it.
+        assert not self._run(self._IMPORT + "ActivationGateVerdict.model_validate(payload)")
+
+    def test_ignores_a_splat_into_something_that_is_not_a_model(self):
+        assert not self._run(self._IMPORT + "dict(**kwargs)")
+        assert not self._run("from elsewhere import Thing\nThing(**kwargs)")
+
+    def test_does_not_claim_to_catch_an_alias_or_a_factory(self):
+        # Pins the documented boundary. A test asserting otherwise would misrepresent what
+        # `make lint` proves — the callee NAME has to be the imported one.
+        assert not self._run(self._IMPORT + "Alias = ActivationGateVerdict\nAlias(**kwargs)")
+        assert not self._run(self._IMPORT + "build_verdict(**kwargs)")
+
+
+@pytest.mark.lint
 class TestCE022SimulationDialogLoopStatementCap:
     """CE022 bounds the regrowth of the noqa'd _simulation_dialog_loop.
 

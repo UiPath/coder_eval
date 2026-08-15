@@ -27,6 +27,7 @@ from tests.lint.rules.ce039_config_error_escalates import ConfigErrorEscalates
 from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
 from tests.lint.rules.ce037_single_f1_implementation import SingleF1Implementation
 from tests.lint.rules.ce040_bootstrap_p_floor_seam import BootstrapPFloorSeam
+from tests.lint.rules.ce041_no_model_dict_splat import NoModelDictSplat
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -77,6 +78,7 @@ ALL_RULES: list[RuleClass] = [
     NoCommandOutputTruncation,
     SingleF1Implementation,
     BootstrapPFloorSeam,
+    NoModelDictSplat,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

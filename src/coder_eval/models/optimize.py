@@ -28,6 +28,8 @@ class GuardrailCheck(BaseModel):
     as a pass on the merits, so the note is what the report prints instead of a number.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(description="What was checked, e.g. 'sibling recall.yes [criterion 1]' or 'cost'.")
     incumbent: float | None = Field(description="The incumbent arm's value, or None when it could not be measured.")
     candidate: float | None = Field(description="The candidate arm's value, or None when it could not be measured.")
@@ -81,6 +83,8 @@ class ActivationGateVerdict(BaseModel):
     Rendering a ``None`` as a non-promotion would let a forgotten Holm pass look like an honest
     negative result.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     incumbent_variant: str = Field(description="Variant id of the incumbent arm.")
     candidate_variant: str = Field(description="Variant id of the candidate arm under test.")
@@ -228,6 +232,8 @@ class ExecutionGateVerdict(BaseModel):
     and every promotion conjunct holds at once. ``gate_refusal`` reports that (and the zero-row
     wiring fault beside it), and ``promoted`` is False whenever it is set.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     incumbent_variant: str = Field(description="Variant id of the incumbent arm.")
     candidate_variant: str = Field(description="Variant id of the candidate arm under test.")
