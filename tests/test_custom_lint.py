@@ -594,6 +594,67 @@ class TestCE041NoModelDictSplat:
 
 
 @pytest.mark.lint
+class TestCE042ReplicatePaddingSeam:
+    """CE042 flags a hand-rolled replicate-directory padding outside `path_utils.py`.
+
+    `replicate_subdir_name` owns the two-digit name and its docstring already tells callers so.
+    Four sites pinned it anyway; the day the padding widens none of them raises — the globs match
+    nothing, both optimize gates load ZERO rows, and the zero-row note blames a path typo.
+    """
+
+    _CANONICAL = "/repo/src/coder_eval/path_utils.py"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "<test>"):
+        import ast
+
+        from tests.lint.rules.ce042_replicate_padding_seam import ReplicatePaddingSeam
+
+        return ReplicatePaddingSeam(filepath).check(ast.parse(src))
+
+    def test_flags_a_replicate_02d_format_spec(self):
+        # The shape `reports_junit` had, twice.
+        assert self._run('candidate = task_dir / f"{replicate_index:02d}" / "task.json"')
+
+    def test_flags_an_attribute_form(self):
+        assert self._run('name = f"{row.replicate_index:02d}"')
+
+    def test_flags_a_padded_glob_literal(self):
+        # Both depths: the gate's suite-level glob and the stats loader's task-level one.
+        assert self._run('for p in suite_dir.glob("*/[0-9][0-9]/task.json"): pass')
+        assert self._run('for p in task_dir.glob("[0-9][0-9]"): pass')
+
+    def test_allows_the_canonical_module(self):
+        assert not self._run('return f"{replicate_index:02d}"', filepath=self._CANONICAL)
+        assert not self._run('PATTERN = "[0-9][0-9]"', filepath=self._CANONICAL)
+
+    def test_allows_an_unrelated_two_digit_pad(self):
+        # CE040's lesson applied: keyed on the NAME, not on the `02d` shape. Otherwise the rule
+        # tells a clock formatter to call `replicate_subdir_name`.
+        assert not self._run('stamp = f"{minutes:02d}:{seconds:02d}"')
+        assert not self._run('label = f"{attempt:02d}"')
+
+    def test_allows_the_helper_call(self):
+        assert not self._run("candidate = task_dir / replicate_subdir_name(i) / 'task.json'")
+        assert not self._run('for p in task_dir.glob("*/task.json"): pass')
+
+    def test_does_not_claim_to_catch_zfill_or_a_percent_format(self):
+        # Pins the documented boundary. A test asserting otherwise would misrepresent what
+        # `make lint` proves — and a `??` glob is a legitimate spelling nobody should "unify".
+        assert not self._run("name = str(replicate_index).zfill(2)")
+        assert not self._run('name = "%02d" % replicate_index')
+        assert not self._run('for p in task_dir.glob("??/task.json"): pass')
+
+    def test_the_unconditional_half_fires_on_prose_and_on_an_unrelated_regex(self):
+        # The other side of shape 2 being unconditional, pinned rather than discovered: a docstring
+        # is a string constant like any other (deliberate — prose pinning the old glob lies the day
+        # the padding widens), and so is a genuine non-replicate regex, which is the one false
+        # positive the rule's docstring names a suppression for.
+        assert self._run('"""Walks `<task_id>/[0-9][0-9]/task.json`."""')
+        assert self._run('STAMP = re.compile(r"[0-9][0-9]:[0-9][0-9]")')
+
+
+@pytest.mark.lint
 class TestCE022SimulationDialogLoopStatementCap:
     """CE022 bounds the regrowth of the noqa'd _simulation_dialog_loop.
 

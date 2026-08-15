@@ -627,12 +627,13 @@ def load_variant_eval_results(
         task_dir = variant_dir / ts.task_id
         if not task_dir.is_dir():
             continue
-        for rep_subdir in sorted(task_dir.glob("[0-9][0-9]")):
-            task_json = rep_subdir / "task.json"
-            if task_json.exists():
-                try:
-                    results.append(EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")))
-                except Exception:
-                    logger.warning("Failed to load %s for variant report", task_json, exc_info=True)
+        # Padding-agnostic, the same shape `reports_junit` already globs with elsewhere: the
+        # replicate directory's NAME belongs to `path_utils.replicate_subdir_name`, and a reader
+        # that pins its two-digit form silently loads nothing the day it widens (CE042).
+        for task_json in sorted(task_dir.glob("*/task.json")):
+            try:
+                results.append(EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")))
+            except Exception:
+                logger.warning("Failed to load %s for variant report", task_json, exc_info=True)
 
     return results

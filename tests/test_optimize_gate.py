@@ -48,6 +48,7 @@ from coder_eval.optimize_gate import (
     GATE_P_PRECISION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
+    TASK_JSON_GLOB,
     CostQualityPoint,
     SearchComparison,
     _discreteness_floor,
@@ -208,6 +209,74 @@ class TestLoadSuiteRows:
         _write_row(run_dir, "incumbent", "r1", _eval_result("r1", [("yes", "yes")]))
         assert load_suite_rows(run_dir, "typo-variant", SUITE) == {}
         assert load_suite_rows(run_dir, "incumbent", "typo-suite") == {}
+
+    def test_the_loader_reads_a_differently_padded_replicate_dir(self, tmp_path: Path) -> None:
+        """The day `replicate_subdir_name` widens to NNN, this loader must still find the rows.
+
+        The pre-CE042 glob pinned `[0-9][0-9]`, so it would have matched NOTHING — both gates load
+        zero rows and the zero-row note blames a wrong variant id, a wrong suite id or a wrong run
+        directory, which are the three things that would be correct.
+        """
+        run_dir = tmp_path / "run-0"
+        task_dir = run_dir / "incumbent" / SUITE / "r1" / "000"
+        task_dir.mkdir(parents=True)
+        (task_dir / "task.json").write_text(_eval_result("r1", [("yes", "yes")]).model_dump_json(), encoding="utf-8")
+        assert list(load_suite_rows(run_dir, "incumbent", SUITE)) == ["r1"]
+
+
+class TestEveryWrongPathMessageDerivesFromTheGlob:
+    """The four messages that tell a reader what did not match are built from `TASK_JSON_GLOB`.
+
+    They used to spell the pattern as a literal `*/NN/task.json`, in four places, none of which
+    was the glob the loader actually ran. Changing the glob left all four describing a tree the
+    code no longer searched — and these are the messages a reader consults precisely when the
+    path is what is wrong.
+    """
+
+    def test_the_activation_zero_row_note_derives(self, tmp_path: Path) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        verdict = activation_gate(
+            incumbent_run_dirs=run_dirs,
+            candidate_run_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variant="typo",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        note = next(n for n in verdict.notes if "loaded ZERO rows" in n)
+        assert TASK_JSON_GLOB in note
+
+    def test_the_execution_zero_row_refusal_derives(self, tmp_path: Path) -> None:
+        # Spelled with the literal `<variant>` because this one message names BOTH arms.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        shutil.rmtree(run_dir / "incumbent")
+        verdict = _exec_gate(run_dir)
+        assert verdict.gate_refusal is not None
+        assert f"<run>/<variant>/{EXEC_SUITE}/{TASK_JSON_GLOB}" in verdict.gate_refusal
+
+    def test_the_activation_floor_reason_derives(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        with caplog.at_level(logging.WARNING):
+            assert (
+                measure_noise_floor(run_dirs=run_dirs, variant_id="typo", suite_id=SUITE, criterion_index=0, model="m")
+                is None
+            )
+        assert TASK_JSON_GLOB in caplog.text
+
+    def test_the_execution_floor_reason_derives(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        with caplog.at_level(logging.WARNING):
+            assert (
+                measure_execution_noise_floor(run_dirs=run_dirs, variant_id="typo", suite_id=SUITE, model="m") is None
+            )
+        assert TASK_JSON_GLOB in caplog.text
+
+    def test_no_message_spells_the_padding_itself(self) -> None:
+        # The whole point of the seam: a message may name the glob, never the padding it replaced.
+        source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
+        assert "*/NN/task.json" not in source
+        assert TASK_JSON_GLOB == "*/*/task.json"
 
 
 class TestLabelPairs:

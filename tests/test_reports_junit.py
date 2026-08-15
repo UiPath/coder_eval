@@ -234,6 +234,36 @@ def test_replicates_naming_and_per_replicate_task_json(write_run_json: Callable[
     assert "REP1DETAIL" in bodies["task[01]"]
 
 
+def test_a_two_digit_replicate_still_resolves_and_renders(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """Guards the swap from a hand-rolled `f"{i:02d}"` to `path_utils.replicate_subdir_name` (CE042).
+
+    Both sites in one assertion: the task.json LOOKUP (`07/task.json`) and the DISPLAY name
+    (`task[07]`). An index above 9 is what makes the padding observable at all.
+    """
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [_row("task", "FAILURE", variant_id="v1", replicate_index=7)])
+    _write_task_json(
+        run_dir,
+        "v1",
+        "task",
+        7,
+        [
+            {
+                "criterion_type": "c",
+                "description": "rep7",
+                "score": 0.0,
+                "pass_threshold": 0.9,
+                "details": "REP7DETAIL",
+                "error": None,
+            }
+        ],
+    )
+    root = fromstring(generate_junit_xml(run_dir))
+    case = _find_testsuite(root, "v1").find("testcase")
+    assert case.get("name") == "task[07]"
+    assert "REP7DETAIL" in (case.find("failure").text or "")
+
+
 def test_replicate_index_none_globs_task_json(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     rows = [_row("task", "FAILURE", variant_id="v1", replicate_index=None)]

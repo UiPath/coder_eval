@@ -111,6 +111,27 @@ GATE_MAX_FAMILY = 5
 GATE_RESAMPLES = math.ceil(2.0 / (GATE_P_PRECISION**2 * (DEFAULT_ALPHA / GATE_MAX_FAMILY)))
 
 
+# The one declaration of where a row's replicate results live under a suite directory — and of how
+# that path is spelled back to a user. `*/*/task.json`, never a two-digit character class in the
+# replicate position: that directory's NAME is owned by `path_utils.replicate_subdir_name`, and pinning its
+# two-digit padding here makes BOTH gates load zero rows the day it widens, with the zero-row note
+# blaming a path typo. The row id comes from `task_json.parent.parent.name`, which is
+# padding-agnostic, so nothing else in the loader cares. Not shared with `reports_junit` /
+# `reports_stats`: they glob one level down from a TASK dir, not two down from a SUITE dir, so a
+# shared constant would be concatenated at two of three sites. CE042 is what keeps all three honest.
+TASK_JSON_GLOB = "*/*/task.json"
+
+
+def _task_json_pattern(variant_id: str, suite_id: str) -> str:
+    """The glob as a user-facing path, so a wrong-path message cannot describe a different tree.
+
+    Four messages tell a reader what did not match; they used to spell the pattern as a string, so
+    changing the glob left three of them lying. Pass ``"<variant>"`` for a message that names both
+    arms at once.
+    """
+    return f"<run>/{variant_id}/{suite_id}/{TASK_JSON_GLOB}"
+
+
 def load_suite_rows(run_dir: Path, variant_id: str, suite_id: str) -> dict[str, list[EvaluationResult]]:
     """Every row's replicate results for one arm of one run, keyed by row id.
 
@@ -127,7 +148,7 @@ def load_suite_rows(run_dir: Path, variant_id: str, suite_id: str) -> dict[str, 
     if not suite_dir.is_dir():
         return rows
 
-    for task_json in sorted(suite_dir.glob("*/[0-9][0-9]/task.json")):
+    for task_json in sorted(suite_dir.glob(TASK_JSON_GLOB)):
         row_id = task_json.parent.parent.name
         try:
             result = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
@@ -746,7 +767,7 @@ def measure_noise_floor(
     if not any(per_dir):
         searched = ", ".join(str(d) for d in run_dirs)
         return _no_floor(
-            f"nothing matched <run>/{variant_id}/{suite_id}/*/NN/task.json under {searched} — that "
+            f"nothing matched {_task_json_pattern(variant_id, suite_id)} under {searched} — that "
             + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
         )
 
@@ -829,7 +850,7 @@ def measure_execution_noise_floor(
     if not rows:
         searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
         return _no_floor(
-            f"nothing matched <run>/{variant_id}/{suite_id}/*/NN/task.json under {searched} — that "
+            f"nothing matched {_task_json_pattern(variant_id, suite_id)} under {searched} — that "
             + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
         )
 
@@ -1089,7 +1110,7 @@ def activation_gate(
             searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
             notes.append(
                 f"the {arm} arm loaded ZERO rows: nothing matched "
-                + f"<run>/{variant_id}/{suite_id}/*/NN/task.json under {searched}. "
+                + f"{_task_json_pattern(variant_id, suite_id)} under {searched}. "
                 + "That is a wrong variant id, a wrong suite id or a wrong run directory — not a result. "
                 + "Fix the path before reading anything below."
             )
@@ -1891,7 +1912,8 @@ def execution_gate(
         named = " and ".join(f"the {arm} arm ({variant_id!r})" for arm, variant_id in empty_arms)
         _refuse(
             f"{named} loaded ZERO rows: nothing matched "
-            + f"<run>/<variant>/{suite_id}/*/NN/task.json under {run_dir}. That is a wrong variant "
+            # `<variant>` literally: this one message names BOTH arms, so it cannot spell either id.
+            + f"{_task_json_pattern('<variant>', suite_id)} under {run_dir}. That is a wrong variant "
             + "id, a wrong suite id or a wrong run directory. Every guardrail and integrity check "
             + "below is computed over the rows that DID load, so they all pass — over nothing when "
             + "both arms are empty, and as a large candidate improvement when only one is — and the "

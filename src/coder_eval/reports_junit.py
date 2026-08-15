@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from .evaluation.judge_context import truncate
 from .models import FinalStatus, RunSummary, SuiteRollup
+from .path_utils import replicate_subdir_name
 
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,7 @@ def _load_task_json(run_dir: Path, row: dict[str, Any], variant: str) -> dict[st
     replicate_index = row.get("replicate_index")
     task_dir = run_dir / variant / task_id
     if isinstance(replicate_index, int) and not isinstance(replicate_index, bool):
-        candidate = task_dir / f"{replicate_index:02d}" / "task.json"
+        candidate = task_dir / replicate_subdir_name(replicate_index) / "task.json"
     else:
         matches = sorted(task_dir.glob("*/task.json"))
         # With no replicate index, picking one of several would misattribute
@@ -270,9 +271,17 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
     task_id = str(row.get("task_id", "<unknown>"))
 
     # `bool` is an int subclass — exclude it so True never renders as "[01]".
+    #
+    # The guard is spelled inline rather than through a `has_replicate` flag so it NARROWS: the
+    # row is an untyped dict, and `replicate_subdir_name` takes an `int`. Behind a bool variable
+    # pyright still sees `Any | bool | int | None` at the call and rejects it — the same widening
+    # the old hand-rolled f-string hid by accepting anything at all.
     replicate_index = row.get("replicate_index")
-    has_replicate = isinstance(replicate_index, int) and not isinstance(replicate_index, bool)
-    name = f"{task_id}[{replicate_index:02d}]" if has_replicate else task_id
+    name = (
+        f"{task_id}[{replicate_subdir_name(replicate_index)}]"
+        if isinstance(replicate_index, int) and not isinstance(replicate_index, bool)
+        else task_id
+    )
 
     task_path = row.get("task_path")
     classname = (Path(task_path).stem or variant) if isinstance(task_path, str) and task_path else variant
