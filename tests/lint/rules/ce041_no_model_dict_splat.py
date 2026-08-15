@@ -26,8 +26,10 @@ It is a shape check, and the boundary is worth stating so nobody trusts it furth
 - A constructor reached through an ALIAS (``M = ActivationGateVerdict; M(**d)``), through a
   factory, or through a variable holding the class is NOT matched — the callee name has to be the
   imported one.
-- A model imported some other way (a plain ``import coder_eval.models`` plus attribute access) is
-  not matched either; this repo's own rule is that models come from ``coder_eval.models``, which
+- A model imported some other way is not matched either: a plain ``import coder_eval.models`` plus
+  attribute access, a star import (``from coder_eval.models import *``, which ruff's F403 rejects
+  anyway), or — because ``_model_names`` fills in visit order — an import that appears *after* the
+  call site in the file. This repo's own rule is that models come from ``coder_eval.models``, which
   CE002 enforces separately.
 - ``model_copy(update={...})`` is a DIFFERENT hole and this rule does not cover it: pydantic does
   not validate ``update=`` keys even under ``extra="forbid"``, so a typo there is set as a bare

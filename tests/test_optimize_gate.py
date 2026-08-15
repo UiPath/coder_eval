@@ -2630,6 +2630,27 @@ class TestHolmPromoteExecution:
     def test_empty_list_returns_empty(self) -> None:
         assert holm_promote_execution([]) == []
 
+    def test_a_refused_verdict_is_outside_the_family(self) -> None:
+        # Holm's step-down breaks at the first failure, so a refused verdict left in the vector
+        # drags down a genuine candidate ranked behind it — and the reader is shown NOT PROMOTED on
+        # a candidate whose only problem is a SIBLING gate run's wiring fault. The zero-row cause is
+        # set before experiment.json is read, so a refused verdict routinely carries a real p.
+        real = self._verdict(0.03)
+        refused = self._verdict(0.06, gate_refusal="the incumbent arm ('x') loaded ZERO rows")
+        assert holm_promote_execution([real])[0].promoted is True, "it promotes alone"
+        decided = holm_promote_execution([real, refused])
+        assert decided[0].promoted is True, "a refused sibling must not tighten the correction"
+        assert decided[1].promoted is False
+        # And the family size the note reports counts only the verdicts that were decisions.
+        assert any("family of 1" in note for note in decided[0].notes)
+
+    def test_a_refused_verdict_without_a_p_value_gets_no_negative_result_note(self) -> None:
+        # Reachable, not theoretical: the zero-row refusal is set before `experiment.json` is even
+        # opened, so "refused AND no p" is what a mistyped incumbent id produces.
+        decided = holm_promote_execution([self._verdict(0.0, p_value=None, gate_refusal="loaded ZERO rows")])[0]
+        assert decided.promoted is False
+        assert not any("outside the family" in note for note in decided.notes)
+
     def test_a_failed_guardrail_leaves_promoted_true_and_is_noted(self) -> None:
         # Load-bearing: folding guardrails into `promoted` makes the BLOCKED headline unreachable.
         failing = GuardrailCheck(
@@ -2706,6 +2727,46 @@ class TestRenderExecutionMarkdown:
         verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
         assert verdict.gate_refusal is not None
         assert _headline(render_execution_markdown(verdict)).startswith("UNDECIDED")
+
+    def test_the_refusal_text_survives_the_undecided_headline(self, tmp_path: Path) -> None:
+        """The message must reach the reader on EVERY render path, not only when it wins.
+
+        The refusal replaced notes that `render_execution_markdown` printed unconditionally. Moving
+        it to a headline-only channel meant a pre-Holm block over a mis-wired arm rendered a
+        confident interval and four green checks with nothing anywhere saying the rows are missing
+        — measured, and the exact silent-zero this module's docstring promises never happens.
+        """
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        shutil.rmtree(run_dir / "incumbent")
+        verdict = _exec_gate(run_dir)
+        assert verdict.promoted is None and verdict.gate_refusal is not None
+        block = render_execution_markdown(verdict)
+        assert _headline(block).startswith("UNDECIDED"), "the ladder is unchanged — this is about the TEXT"
+        assert verdict.gate_refusal in block
+        # And it appears exactly once: when the headline DOES carry it, the extra line must not.
+        decided = holm_promote_execution([verdict])[0]
+        assert render_execution_markdown(decided).count(decided.gate_refusal or "") == 1
+
+    def test_a_non_finite_score_cannot_reach_the_paired_statistic(self, tmp_path: Path) -> None:
+        """`paired_t_ci` declines on a non-finite score — which would be an all-`None` statistic
+        over a real `task_count`, i.e. every number `—` with no note saying why.
+
+        It cannot arrive through `execution_gate`, and this pins the reason rather than guarding
+        the same thing twice: pydantic's JSON validator REJECTS `NaN`, so the file never parses and
+        the read's own note is what the reader gets. If that ever changes, this test is the thing
+        that says the unreachability claim in `execution_gate` is no longer true.
+        """
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        raw = ExperimentResult.model_validate_json((run_dir / "experiment.json").read_text(encoding="utf-8"))
+        scores = {v: dict(per) for v, per in raw.per_replicate_scores.items()}
+        scores["candidate"][f"{EXEC_SUITE}/r1"] = [float("nan"), 0.8]
+        (run_dir / "experiment.json").write_text(
+            raw.model_copy(update={"per_replicate_scores": scores}).model_dump_json(), encoding="utf-8"
+        )
+        verdict = _exec_gate(run_dir)
+        assert (verdict.mean_diff, verdict.p_value) == (None, None)
+        assert any("could not be read or parsed" in note for note in verdict.notes)
+        assert holm_promote_execution([verdict])[0].promoted is False
 
 
 # ---------------------------------------------------------------------------

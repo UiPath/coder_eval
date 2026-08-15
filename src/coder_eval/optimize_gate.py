@@ -1861,6 +1861,11 @@ def execution_gate(
             f"only {comparison.task_count} row(s) of {suite_id!r} scored on both arms — fewer than the 2 a "
             + "paired interval needs, so every statistic is reported as unavailable rather than fabricated."
         )
+    # `paired_comparison` has one other way to return an all-`None` statistic on a sample big enough
+    # for one: `paired_t_ci` declines on a NON-FINITE score. That cannot arrive through this
+    # function, and the reason is worth recording rather than guarded against twice — pydantic's
+    # JSON validator REJECTS `NaN` / `Infinity`, so such a file never parses and is already reported
+    # by the read's own note above. A guard here would be an unreachable branch claiming otherwise.
 
     mean_diff = _signed(comparison.mean_diff)
     # Cohen's d carries the direction too, so it is signed with the rest.
@@ -1945,8 +1950,14 @@ def holm_promote_execution(
     loaded no rows at all). ``execution_gate`` detects both where each is already computed and sets
     ``gate_refusal``; this function only READS it, forcing ``promoted=False`` and suppressing the
     negative-result notes, which would otherwise contradict the refusal headline.
+
+    **A refused verdict is outside the family too, for the same reason a p-less one is**: it cannot
+    be allowed to tighten the correction for the others. The zero-row cause is detected before
+    ``experiment.json`` is even opened, so a refused verdict routinely carries a real p — and left
+    in the vector it makes Holm's step-down break early on a candidate whose only problem is a
+    *sibling* gate run's wiring fault. Conservative in direction, wrong in what it tells the reader.
     """
-    family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
+    family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None and v.gate_refusal is None]
     rejections = holm_rejections([p for _i, p in family], alpha)
     rejected_at = {i for (i, _p), reject in zip(family, rejections, strict=True) if reject}
 
@@ -1954,7 +1965,12 @@ def holm_promote_execution(
     for i, verdict in enumerate(verdicts):
         notes = list(verdict.notes)
         if verdict.p_value is None:
-            notes.append("not promoted: the sample could not support a p-value, so this arm is outside the family.")
+            # Guarded like the three rungs below, and reachable: the zero-row refusal is set before
+            # `experiment.json` is read, so "refused AND no p" is an ordinary state — this repo's
+            # own mistyped-incumbent test produces it — and an unguarded note here prints an
+            # ordinary negative result directly under a refusal headline.
+            if verdict.gate_refusal is None:
+                notes.append("not promoted: the sample could not support a p-value, so this arm is outside the family.")
             decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
             continue
 
@@ -1966,11 +1982,10 @@ def holm_promote_execution(
         refused = verdict.gate_refusal is not None
         promoted = i in rejected_at and favours_candidate and excludes_zero and not refused
 
-        # All THREE negative-result rungs are guarded, not only the last: a refused verdict whose
-        # difference happens to favour the incumbent would otherwise print an ordinary
-        # negative-result note directly under a refusal headline — two contradictory claims in one
-        # block. (The `p_value is None` rung above is outside this ladder and unreachable with a
-        # refusal today: both causes are detected where a comparison already exists.)
+        # Every negative-result rung is guarded, this ladder and the `p_value is None` one above:
+        # a refused verdict whose difference happens to favour the incumbent would otherwise print
+        # an ordinary negative-result note directly under a refusal headline — two contradictory
+        # claims in one block.
         if not refused:
             if i in rejected_at and not favours_candidate:
                 notes.append(
@@ -2014,6 +2029,13 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
     - **BLOCKED BY A GUARDRAIL** — the statistic separated but something non-primary failed. Below
       the refusal, since reading a guardrail presupposes a statistic that separated.
     - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
+
+    ``UNDECIDED`` outranking the refusal is right — a verdict Holm never saw has no decision to
+    refuse — but the refusal's TEXT must still reach the reader, so it is printed on its own line
+    whenever the headline could not carry it. Without that, a pre-Holm block over a mis-wired arm
+    renders a confident interval and four green checks with nothing anywhere saying the rows are
+    not there: the message used to live in ``notes``, which every path prints, and moving it to a
+    headline-only channel is what would have lost it.
     """
     failed = [check.name for check in (*verdict.integrity_checks, *verdict.guardrails) if not check.passed]
     if verdict.promoted is None:
@@ -2033,6 +2055,12 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
         "",
         f"**{headline}**",
         "",
+    ]
+    # Exactly the one path where the headline did not carry it — so the message appears once, never
+    # twice, which is the rule the refusal replaced its own note under.
+    if verdict.gate_refusal is not None and verdict.promoted is None:
+        lines += [f"**NOT A RESULT:** {verdict.gate_refusal}", ""]
+    lines += [
         f"- Suite `{verdict.suite_id}`, per-row `weighted_score` through the reporter's paired comparison",
         f"- Rows paired: {verdict.rows_paired} · excluded: {verdict.rows_excluded}",
         (
@@ -2472,9 +2500,7 @@ def _dominates(a: ArmRowScores, b: ArmRowScores) -> bool:
     scored_by_b = sorted(b_scores)
     if not scored_by_b or not set(scored_by_b) <= set(a_scores):
         return False
-    return all(a_scores[r] >= b_scores[r] for r in scored_by_b) and any(
-        a_scores[r] > b_scores[r] for r in scored_by_b
-    )
+    return all(a_scores[r] >= b_scores[r] for r in scored_by_b) and any(a_scores[r] > b_scores[r] for r in scored_by_b)
 
 
 def pareto_front(arms: list[ArmRowScores]) -> list[str]:
