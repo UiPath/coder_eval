@@ -2962,6 +2962,99 @@ class TestConstructionIsBehaviourPreserving:
         _assert_matches_pin(_exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4))), "execution_gate_refused")
 
 
+_RENDER_PINS = Path(__file__).parent / "_fixtures" / "optimize_renders"
+
+
+def _assert_matches_render_pin(block: str, name: str) -> None:
+    """Compare a rendered markdown block against output captured BEFORE the module split.
+
+    The verdict pins next door compare a `model_dump`; nothing compared the STRING the skill
+    actually prints. `render_row_matrix` is about to be split into section helpers and every
+    renderer is about to move modules, and both are the kind of change that reorders a line
+    without changing a number — which no substring assertion in this file can see.
+    """
+    expected = (_RENDER_PINS / f"{name}.md").read_text(encoding="utf-8")
+    assert block == expected
+
+
+def _matrix_arms() -> list[ArmRowScores]:
+    """Five arms chosen so every section of `render_row_matrix` renders something.
+
+    `cand-broad` is on the coverage front while winning no row; `cand-dominated` wins r1 while
+    being dominated outright — so the two fronts disagree in BOTH directions and the disagreement
+    paragraph names each side. `r0` is scored 0.0 by every arm that measured it (the all-zero
+    footnote) and absent from the rest (the hole footnote), and `cand-crashed` scored nothing at
+    all (the unscored footnote).
+    """
+    return [
+        ArmRowScores(variant_id="cand-broad", row_scores={"r1": 0.5, "r2": 0.5}),
+        ArmRowScores(variant_id="cand-r1", row_scores={"r0": 0.0, "r1": 1.0, "r2": 0.4}),
+        ArmRowScores(variant_id="cand-r2", row_scores={"r0": 0.0, "r1": 0.4, "r2": 1.0}),
+        ArmRowScores(variant_id="cand-dominated", row_scores={"r1": 1.0, "r2": 0.3}),
+        ArmRowScores(variant_id="cand-crashed", row_scores={}),
+    ]
+
+
+def _cost_quality_pin_points(tmp_path: Path) -> list[CostQualityPoint]:
+    """Four arms: two fully measured, one thin (2 rows of 4) and one with no cost at all."""
+    arms: dict[str, dict[str, tuple[float, float | None]]] = {
+        "incumbent": {f"r{i}": (0.90, 1.00) for i in range(4)},
+        "cand-cheap": {f"r{i}": (0.88, 0.60) for i in range(4)},
+        "cand-thin": {f"r{i}": (0.95, 0.50) for i in range(2)},
+        "cand-costless": {f"r{i}": (0.95, None) for i in range(4)},
+    }
+    for variant, per_row in arms.items():
+        _cost_quality_arm(tmp_path, variant, per_row)
+    return cost_quality_points(
+        run_dirs=[tmp_path / "run-0"], variant_ids=list(arms), suite_id=SUITE, criterion_index=None
+    )
+
+
+class TestRenderingIsBehaviourPreserving:
+    """The six rendered blocks, pinned whole against output captured before the module split.
+
+    `TestRenderMarkdown` and its siblings assert substrings, so a reordered or dropped line stays
+    green. Every renderer is about to move modules and `render_row_matrix` is about to be split
+    into section helpers; these are the witnesses that neither changed a byte.
+    """
+
+    def test_the_activation_block_is_unchanged(self, tmp_path: Path) -> None:
+        verdict = holm_promote([_gate(_shared_dirs(tmp_path, *_pinned_suite()))])[0]
+        _assert_matches_render_pin(render_markdown(verdict), "activation_gate")
+
+    def test_the_refused_activation_block_is_unchanged(self, tmp_path: Path) -> None:
+        # The discreteness refusal, which is the one refused verdict carrying no filesystem path.
+        incumbent, candidate = _tiny_suite(3, 3)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        verdicts = [_gate(run_dirs, n_resamples=TestGateRefusal._REFUSAL_RESAMPLES) for _ in range(2)]
+        _assert_matches_render_pin(render_markdown(holm_promote(verdicts)[0]), "activation_gate_refused")
+
+    def test_the_execution_block_is_unchanged(self, tmp_path: Path) -> None:
+        verdict = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+        _assert_matches_render_pin(render_execution_markdown(verdict), "execution_gate")
+
+    def test_the_row_matrix_is_unchanged(self) -> None:
+        arms = _matrix_arms()
+        block = render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms))
+        _assert_matches_render_pin(block, "row_matrix")
+
+    def test_the_cost_quality_table_is_unchanged(self, tmp_path: Path) -> None:
+        points = _cost_quality_pin_points(tmp_path)
+        _assert_matches_render_pin(render_cost_quality(points, cost_quality_front(points)), "cost_quality")
+
+    def test_the_search_comparison_is_unchanged(self) -> None:
+        corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
+        # The head vector comes from `TestSearchCompare` rather than being respelled here: this pin
+        # exists to witness the block that class's corpus-regression case renders, and an inlined
+        # copy would silently stop mirroring it the day that vector is edited.
+        comparison = search_compare(
+            _arm("head", TestSearchCompare._HEAD),
+            _arm("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
+            corpus=corpus,
+        )
+        _assert_matches_render_pin(render_search_comparison(comparison), "search_comparison")
+
+
 def _full_guardrail_check() -> GuardrailCheck:
     """A `GuardrailCheck` with every field set away from its default."""
     return GuardrailCheck(
