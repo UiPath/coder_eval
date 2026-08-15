@@ -49,6 +49,7 @@ from coder_eval.optimize_gate import (
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
     CostQualityPoint,
+    SearchComparison,
     _discreteness_floor,
     _holm_threshold,
     _label_pairs,
@@ -944,6 +945,53 @@ class TestParetoFront:
         partial = ArmRowScores(variant_id="partial", row_scores={"r1": 0.5})
         assert pareto_front([covered, partial]) == ["covered"]
 
+    def test_a_nan_cell_does_not_take_the_front_by_incomparability(self) -> None:
+        # Every `>=` against NaN is False, so an unguarded NaN arm is undominatable AND dominates
+        # nobody — it lands on the front in bold beside arms that earned it. Treated as a hole, it
+        # goes through the coverage rule instead: `poisoned` is then a one-row arm that `winner`
+        # covers and beats.
+        winner = ArmRowScores(variant_id="winner", row_scores={"r1": 1.0, "r2": 1.0})
+        poisoned = ArmRowScores(variant_id="poisoned", row_scores={"r1": 0.5, "r2": float("nan")})
+        assert pareto_front([winner, poisoned]) == ["winner"]
+
+    def test_an_arm_whose_every_cell_is_non_finite_is_excluded(self) -> None:
+        # Same rule as an arm that scored no rows: nothing about an empty vector is a win.
+        real = ArmRowScores(variant_id="real", row_scores={"r1": 0.5})
+        broken = ArmRowScores(variant_id="broken", row_scores={"r1": float("nan"), "r2": float("inf")})
+        assert pareto_front([real, broken]) == ["real"]
+
+
+class TestEveryFrontGuardsNonFiniteScores:
+    """The claim `cost_quality_front`'s docstring and CLAUDE.md both make, asserted rather than read.
+
+    The three fronts answer different questions and guard by different mechanisms — a hole on the
+    coverage front, a skipped maximum on GEPA's, an excluded arm on the cost one. What has to agree
+    is the OUTCOME: a non-finite cell never wins anything and never makes its arm undominatable.
+    """
+
+    _CLEAN = ArmRowScores(variant_id="clean", row_scores={"r1": 1.0, "r2": 1.0})
+    _POISONED = ArmRowScores(variant_id="poisoned", row_scores={"r1": 0.5, "r2": float("nan")})
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+    def test_no_front_carries_the_non_finite_arm(self, bad: float) -> None:
+        poisoned = ArmRowScores(variant_id="poisoned", row_scores={"r1": 0.5, "r2": bad})
+        arms = [self._CLEAN, poisoned]
+        assert pareto_front(arms) == ["clean"]
+        assert instance_best_front(arms) == ["clean"]
+        points = [
+            CostQualityPoint("clean", 1.0, 0.5, frozenset({"r1", "r2"})),
+            CostQualityPoint("poisoned", bad, 0.1, frozenset({"r1", "r2"})),
+        ]
+        assert cost_quality_front(points) == ["clean"]
+
+    def test_the_finite_rows_of_a_mixed_arm_still_participate(self) -> None:
+        # Not a stricter rule than `instance_best_front`'s: a NaN cell is dropped, the arm is not.
+        # `poisoned` still owns r1, so both row-vector fronts keep it.
+        poisoned = ArmRowScores(variant_id="poisoned", row_scores={"r1": 1.0, "r2": float("nan")})
+        other = ArmRowScores(variant_id="other", row_scores={"r1": 0.5, "r2": 0.9})
+        assert pareto_front([poisoned, other]) == ["poisoned", "other"]
+        assert instance_best_front([poisoned, other]) == ["poisoned", "other"]
+
 
 class TestRenderRowMatrix:
     def test_renders_holes_as_dash_and_says_they_were_excluded(self) -> None:
@@ -1768,6 +1816,24 @@ class TestEveryMissingFloorSaysWhy:
                 is None
             )
         assert "No noise floor could be computed" in caplog.text
+
+    def test_the_activation_floor_names_the_path_not_the_criterion_index(self, tmp_path: Path, caplog) -> None:
+        # The parity gap with the execution twin: without its own wrong-path guard this reported
+        # "only 0 row(s) ... scored a classification result at criterion 0", sending the reader to
+        # check the criterion index when the real fault is the variant / suite / run directory.
+        with caplog.at_level(logging.WARNING):
+            assert (
+                measure_noise_floor(
+                    run_dirs=[tmp_path / "typo-a", tmp_path / "typo-b"],
+                    variant_id="incumbent",
+                    suite_id=SUITE,
+                    criterion_index=0,
+                    model="m",
+                )
+                is None
+            )
+        assert "wrong variant id, a wrong suite id or a wrong run directory" in caplog.text
+        assert "at criterion" not in caplog.text, "the criterion index is the wrong thing to blame here"
 
     def test_execution_floor_names_too_few_replicated_rows(self, tmp_path: Path, caplog) -> None:
         with caplog.at_level(logging.WARNING):
@@ -3349,6 +3415,25 @@ class TestRenderSearchComparison:
         block = render_search_comparison(search_compare(_arm("head", {"r1": 1.0}), _arm("cand", {"other": 1.0})))
         assert "sample_seed" in block
         assert "ACCEPT" not in block.replace("DO NOT ACCEPT", "")
+
+    def test_a_none_score_renders_a_dash_rather_than_raising(self) -> None:
+        # Both scores are `float | None` on the model and were formatted with a bare `:.3f`, which
+        # raises. `search_compare` refuses before producing a `None` score today, so this builds
+        # the tuple directly — the function is public, and a TypeError out of the skill's inline
+        # snippet would discard the block it was rendering.
+        blocked = SearchComparison(
+            beats=True,
+            accepted=False,
+            head_score=None,
+            candidate_score=None,
+            shared_rows=("r1",),
+            holes=(),
+            regressions=(),
+            blocker="a blocker",
+        )
+        assert "—" in render_search_comparison(blocked)
+        unblocked = blocked._replace(blocker=None, accepted=True)
+        assert "—" in render_search_comparison(unblocked)
 
     def test_it_says_a_search_accept_is_not_a_promotion(self) -> None:
         # The block is printed into a ledger a human reads later, and this is the one thing that

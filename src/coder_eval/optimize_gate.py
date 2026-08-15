@@ -77,6 +77,13 @@ MATERIALITY_FLOOR = 0.25
 # standard error of the p may be at most this fraction of that threshold.
 GATE_P_PRECISION = 0.10
 
+# What "at or near the bootstrap's resolution floor" means: a p within this multiple of the
+# estimator's own 2/(m+1) is close enough that the DRAW COUNT, not the data, is plausibly deciding
+# it — so the verdict says so and tells the reader to re-run with more draws before believing
+# either answer. A suppression threshold on a warning, never a gate: nothing about a promotion
+# turns on it. Named because a bare literal silently decides whether that warning fires at all.
+NEAR_FLOOR_MULTIPLE = 5.0
+
 # The survivor count the gate is sized to decide. Holm's strictest threshold is alpha/S, so this
 # is what sets the resolution requirement. Five is a full Stage A shortlist.
 GATE_MAX_FAMILY = 5
@@ -116,7 +123,7 @@ def load_suite_rows(run_dir: Path, variant_id: str, suite_id: str) -> dict[str, 
         try:
             result = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
         except Exception:
-            logger.warning("Failed to load %s for the activation gate", task_json, exc_info=True)
+            logger.warning("Failed to load %s for the optimize gate", task_json, exc_info=True)
             continue
         rows.setdefault(row_id, []).append(result)
     return rows
@@ -720,6 +727,20 @@ def measure_noise_floor(
         return _no_floor(f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}")
 
     per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
+    # The same wrong-path guard `measure_execution_noise_floor` carries, and for the same reason: a
+    # mistyped variant, suite or run directory is the documented SILENT-ZERO failure mode, and
+    # without it the reader is told "only 0 row(s) scored a classification result at criterion N"
+    # and goes off to check the criterion index instead of the path.
+    #
+    # `not any(per_dir)` rather than the twin's `not rows`: that one pools once, this one keeps the
+    # per-invocation maps because it splits them into halves.
+    if not any(per_dir):
+        searched = ", ".join(str(d) for d in run_dirs)
+        return _no_floor(
+            f"nothing matched <run>/{variant_id}/{suite_id}/*/NN/task.json under {searched} — that "
+            + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
+        )
+
     midpoint = (len(per_dir) + 1) // 2
     first, second = _pool(per_dir[:midpoint]), _pool(per_dir[midpoint:])
 
@@ -1419,7 +1440,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         # promote however good it is. Measured: 4 perfect candidates at 8 rows flip from all-rejected
         # to all-promoted between 2,000 and 20,000 resamples on identical data.
         estimator_floor = bootstrap_p_floor(verdict.n_resamples)
-        if verdict.p_value <= 5.0 * estimator_floor:
+        if verdict.p_value <= NEAR_FLOOR_MULTIPLE * estimator_floor:
             notes.append(
                 f"p = {verdict.p_value:.4f} is at or near this bootstrap's resolution floor "
                 + f"({estimator_floor:.4f} at {verdict.n_resamples} draws), and the Holm threshold for "
@@ -2385,6 +2406,13 @@ def render_search_comparison(comparison: SearchComparison) -> str:
 
     Says *why* on every path, and says what an accept is not — the block is read back weeks later
     beside gate verdicts that look similar and mean something much stronger.
+
+    Both scores are ``float | None`` on the model, so they print through :func:`_fmt` — the
+    module's one declaration of how it renders an optional float — rather than through a bare
+    ``:.3f``, which raises on ``None``. Every ``None`` path here is currently a ``_refused`` one
+    that returns above, so the ``—`` is not reachable through :func:`search_compare` today; the
+    formatting is not conditional on that staying true, because the function is public and the
+    alternative is a ``TypeError`` out of the skill's inline snippet.
     """
     if comparison.blocker is not None:
         headline = "DO NOT ACCEPT" if comparison.beats else "CANNOT COMPARE"
@@ -2392,7 +2420,7 @@ def render_search_comparison(comparison: SearchComparison) -> str:
         if comparison.beats:
             lines += [
                 "",
-                f"Train score {comparison.candidate_score:.3f} against the head's {comparison.head_score:.3f}.",
+                f"Train score {_fmt(comparison.candidate_score)} against the head's {_fmt(comparison.head_score)}.",
             ]
         return "\n".join(lines)
 
@@ -2401,8 +2429,8 @@ def render_search_comparison(comparison: SearchComparison) -> str:
         [
             f"### Search round — {verdict}",
             "",
-            f"- Candidate: **{comparison.candidate_score:.3f}**",
-            f"- Lineage head: {comparison.head_score:.3f}",
+            f"- Candidate: **{_fmt(comparison.candidate_score)}**",
+            f"- Lineage head: {_fmt(comparison.head_score)}",
             f"- Compared over {len(comparison.shared_rows)} shared row(s).",
             "",
             "Unpaired, unreplicated and uncorrected across invocations, so **a search accept is "
@@ -2410,6 +2438,21 @@ def render_search_comparison(comparison: SearchComparison) -> str:
             + "plus Stage C and nowhere else.",
         ]
     )
+
+
+def _finite_scores(arm: ArmRowScores) -> dict[str, float]:
+    """An arm's row vector with non-finite cells removed — a NaN is treated as ABSENT.
+
+    The same guard :func:`instance_best_front` and :func:`cost_quality_front` already apply, in the
+    one place the coverage front was missing it. Every ``>=`` and ``>`` against NaN is False, so a
+    NaN cell makes its arm undominatable by anyone AND unable to dominate anyone — it takes the
+    front by incomparability, rendered in bold beside arms that earned it. Treating it as absent
+    instead routes it through the coverage rule, which is the answer already agreed for a hole.
+
+    Nothing produces a non-finite score today (``_row_score`` returns means of scores bounded
+    [0, 1]), which is exactly why it would be silent.
+    """
+    return {row_id: value for row_id, value in arm.row_scores.items() if math.isfinite(value)}
 
 
 def _dominates(a: ArmRowScores, b: ArmRowScores) -> bool:
@@ -2422,12 +2465,15 @@ def _dominates(a: ArmRowScores, b: ArmRowScores) -> bool:
     - An arm cannot dominate on the rows it happens to share while being ABSENT from a row the
       other arm won. It has no evidence there, and "at least as good everywhere" is a claim about
       everywhere the other arm was measured — so it is not entitled to make it.
+
+    A non-finite cell counts as a hole rather than as a value — see :func:`_finite_scores`.
     """
-    scored_by_b = sorted(b.row_scores)
-    if not scored_by_b or not set(scored_by_b) <= set(a.row_scores):
+    a_scores, b_scores = _finite_scores(a), _finite_scores(b)
+    scored_by_b = sorted(b_scores)
+    if not scored_by_b or not set(scored_by_b) <= set(a_scores):
         return False
-    return all(a.row_scores[r] >= b.row_scores[r] for r in scored_by_b) and any(
-        a.row_scores[r] > b.row_scores[r] for r in scored_by_b
+    return all(a_scores[r] >= b_scores[r] for r in scored_by_b) and any(
+        a_scores[r] > b_scores[r] for r in scored_by_b
     )
 
 
@@ -2439,9 +2485,11 @@ def pareto_front(arms: list[ArmRowScores]) -> list[str]:
 
     An arm that scored **no** rows is excluded rather than undominatable. Nothing can cover an
     empty vector, so the domination rule alone would put a candidate that crashed on every row on
-    the front — rendered indistinguishably from one that won something nobody else did.
+    the front — rendered indistinguishably from one that won something nobody else did. An arm
+    whose every cell is non-finite is excluded by the same rule, since :func:`_finite_scores`
+    leaves it with an empty vector.
     """
-    scored = [arm for arm in arms if arm.row_scores]
+    scored = [arm for arm in arms if _finite_scores(arm)]
     return [
         arm.variant_id
         for i, arm in enumerate(scored)
@@ -2679,8 +2727,14 @@ def cost_quality_front(points: list[CostQualityPoint]) -> list[str]:
     ``register_pricing`` states for an all-zero rate.
 
     A **non-finite** coordinate is excluded for the opposite reason: every ``>=`` / ``<=`` against
-    NaN is False, so a NaN arm is undominatable and would render in bold as a live trade. The same
-    guard, for the same reason, as :func:`instance_best_front`.
+    NaN is False, so a NaN arm is undominatable and would render in bold as a live trade.
+
+    **All three fronts guard non-finite values**, and now agree about them: this one excludes the
+    arm, :func:`instance_best_front` skips the cell when seeding a row's maximum, and
+    :func:`pareto_front` treats it as a hole via :func:`_finite_scores`. The mechanisms differ
+    because the three answer different questions; the outcome — a non-finite cell never wins
+    anything and never makes its arm undominatable — is the same, and a parametrized test asserts
+    it across all three rather than leaving this sentence to be believed.
     """
     # Narrowed to plain floats up front rather than suppressing the comparison's type error: the
     # filter IS the exclusion rule, so making it produce a non-optional shape is what keeps the
