@@ -1593,9 +1593,13 @@ def execution_gate(
     interval bounds are swapped along with it. The method file warns twice that a reversed reading
     promotes the arm that lost; this is that warning, implemented.
 
-    Every failure mode — a missing ``experiment.json``, an experiment with other than two variants,
-    variant ids that do not match it — returns a verdict whose statistics are ``None`` with a note
-    naming what failed. Never an exception, and never a silent zero.
+    Every failure mode — a missing, unreadable or malformed ``experiment.json``, an experiment with
+    other than two variants, **either** variant id not matching it — returns a verdict whose
+    statistics are ``None`` with a note naming what failed. Never an exception, and never a silent
+    zero. The faults that do NOT show up in the statistic set ``gate_refusal`` instead, which forces
+    ``promoted=False`` and takes the headline: an arm whose rows are not on disk (the statistic
+    comes from ``experiment.json``, so it computes perfectly well over nothing), and paired
+    differences with zero variance (it computes, and every promotion conjunct then holds at once).
 
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
@@ -1623,18 +1627,27 @@ def execution_gate(
     # base so EVERY return path reports it. Two causes share one field — see
     # ExecutionGateVerdict.gate_refusal — and the first one set wins.
     gate_refusal: str | None = None
-    for arm, variant_id, rows in (
-        ("incumbent", incumbent_variant, incumbent_rows),
-        ("candidate", candidate_variant, candidate_rows),
-    ):
-        if not rows:
-            notes.append(
-                f"the {arm} arm loaded ZERO rows: nothing matched "
-                + f"<run>/{variant_id}/{suite_id}/*/NN/task.json under {run_dir}. That is a wrong "
-                + "variant id, a wrong suite id or a wrong run directory — not a result. Every "
-                + "guardrail and integrity check below is unevaluated, and the paired statistic "
-                + "comes from experiment.json, which can still look fine. Fix the path first."
-            )
+    empty_arms = [
+        (arm, variant_id)
+        for arm, variant_id, rows in (
+            ("incumbent", incumbent_variant, incumbent_rows),
+            ("candidate", candidate_variant, candidate_rows),
+        )
+        if not rows
+    ]
+    if empty_arms:
+        # ONE refusal naming every empty arm, not one message per arm: the loop this replaces
+        # appended twice when both arms were empty, saying the same thing about a single fault.
+        named = " and ".join(f"the {arm} arm ({variant_id!r})" for arm, variant_id in empty_arms)
+        gate_refusal = (
+            f"{named} loaded ZERO rows: nothing matched "
+            f"<run>/<variant>/{suite_id}/*/NN/task.json under {run_dir}. That is a wrong variant "
+            "id, a wrong suite id or a wrong run directory. Every guardrail and integrity check "
+            "below is computed over the rows that DID load, so they all pass — over nothing when "
+            "both arms are empty, and as a large candidate improvement when only one is — and the "
+            "paired statistic comes from experiment.json, which can still be perfectly valid. "
+            "Fix the path before reading anything below."
+        )
 
     # Measured ONCE, before `_verdict` exists: it costs a bootstrap, every return path reports it,
     # and the below-MDE note has to be written before the model is constructed (pydantic COPIES the
@@ -1707,9 +1720,14 @@ def execution_gate(
         return _verdict()
     try:
         result = ExperimentResult.model_validate_json(experiment_json.read_text(encoding="utf-8"))
-    except ValueError:
+    except (ValueError, OSError):
+        # OSError as well as ValueError: the docstring promises "Never an exception", and an
+        # unreadable file (permissions, or one that vanished between the is_file() and the read) is
+        # exactly as much a wiring fault as a malformed one — with the same right answer.
         logger.warning("Failed to load %s for the execution gate", experiment_json, exc_info=True)
-        notes.append(f"the experiment file at {experiment_json} could not be parsed, so no statistic was computed.")
+        notes.append(
+            f"the experiment file at {experiment_json} could not be read or parsed, so no statistic was computed."
+        )
         return _verdict()
 
     # Only this suite's rows. `expand_dataset` writes row task ids as `<suite_id>/<row_id>`, so
@@ -1748,11 +1766,16 @@ def execution_gate(
         )
         return _verdict(rows_paired=comparison.task_count, rows_excluded=comparison.excluded_count)
     if incumbent_variant not in (comparison.vid_a, comparison.vid_b):
+        # Fails CLOSED, like its candidate-side sibling above. It used to annotate and fall
+        # through, which reported a real, significant difference against whichever arm the file
+        # happened to carry — under a header naming the arm the caller asked for.
         notes.append(
             f"incumbent_variant={incumbent_variant!r} is not one of the two variants the experiment "
-            + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}); the sign was resolved from the "
-            + "candidate, so the difference is against whichever arm the file actually carries."
+            + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}), so the difference could not be "
+            + "resolved against the arm you named and no statistic is reported. Check the variant id "
+            + "against the experiment file."
         )
+        return _verdict(rows_paired=comparison.task_count, rows_excluded=comparison.excluded_count)
 
     # The rows the statistic was actually computed over — `paired_comparison`'s own rule, applied
     # to the same scoped copy it was handed, so the checks below guard the number above rather than

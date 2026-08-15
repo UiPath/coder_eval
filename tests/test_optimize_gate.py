@@ -11,10 +11,12 @@ import inspect
 import logging
 import random
 import re
+import shutil
 import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
+from unittest import mock
 
 import pytest
 
@@ -2226,7 +2228,24 @@ class TestExecutionGateLoading:
         (run_dir / "experiment.json").write_text("{not json", encoding="utf-8")
         verdict = _exec_gate(run_dir)
         assert verdict.p_value is None
-        assert any("could not be parsed" in note for note in verdict.notes)
+        assert any("could not be read or parsed" in note for note in verdict.notes)
+
+    def test_an_unreadable_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
+        # The docstring promises "Never an exception". `except ValueError` did not cover a
+        # permission error or a file that vanished between the is_file() and the read.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        real_read_text = Path.read_text
+
+        def _raise_on_the_experiment_file(self: Path, *args, **kwargs) -> str:
+            if self.name == "experiment.json":
+                raise OSError(13, "Permission denied")
+            return real_read_text(self, *args, **kwargs)
+
+        # Patched rather than `chmod 000`, which is a no-op as root and in many CI containers.
+        with mock.patch.object(Path, "read_text", _raise_on_the_experiment_file):
+            verdict = _exec_gate(run_dir)
+        assert verdict.p_value is None and verdict.mean_diff is None
+        assert any("could not be read or parsed" in note for note in verdict.notes)
 
     def test_a_three_variant_experiment_names_the_exactly_two_precondition(self, tmp_path: Path) -> None:
         # The triage file re-passed at Stage B: the mistake reaching the gate.
@@ -2246,6 +2265,47 @@ class TestExecutionGateLoading:
         )
         assert verdict.mean_diff is None
         assert any("'incumbent'" in note and "'candidate'" in note for note in verdict.notes)
+
+    def test_an_incumbent_the_experiment_does_not_carry_fails_closed(self, tmp_path: Path) -> None:
+        """The return is the ONLY thing acting here, so a regression in it is attributable.
+
+        A mistyped incumbent id also empties that arm, and the zero-row refusal would then carry
+        the assertions — the test would pass with this branch reverted. So the fixture keeps the
+        incumbent's rows on disk under the id the caller names, and makes only `experiment.json`
+        disagree: it declares `inc-A`. That is the one configuration in which this branch decides
+        the outcome, and before it returned, the block reported a real, significant
+        `inc-A - candidate` difference under a header naming `incumbent`.
+        """
+        run_dir = _exec_run_dir(
+            tmp_path,
+            **_WINNER,
+            extra_scores={"inc-A": {f"{EXEC_SUITE}/{r}": s for r, s in _WINNER["incumbent"].items()}},
+            variant_ids=["inc-A", "candidate"],
+        )
+        verdict = _exec_gate(run_dir)
+        assert verdict.gate_refusal is None, "both arms loaded rows — the zero-row cause must not apply"
+        assert (verdict.mean_diff, verdict.ci_low, verdict.ci_high) == (None, None, None)
+        assert (verdict.p_value, verdict.effect_size) == (None, None)
+        assert any("could not be resolved against the arm you named" in note for note in verdict.notes)
+        assert holm_promote_execution([verdict])[0].promoted is False
+
+    def test_a_mistyped_incumbent_id_is_refused_rather_than_promoted(self, tmp_path: Path) -> None:
+        # The way the fault actually arrives: a typo makes the id unknown to the experiment file
+        # AND empties the arm, so both this phase's halves fire. Kept beside the isolating test
+        # above rather than instead of it — this is the realistic shape, that one is attributable.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbnet",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert (verdict.mean_diff, verdict.ci_low, verdict.ci_high) == (None, None, None)
+        assert (verdict.p_value, verdict.effect_size) == (None, None)
+        decided = holm_promote_execution([verdict])[0]
+        assert decided.promoted is not True
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_fewer_than_two_paired_rows_is_carried_not_treated_as_a_wiring_error(self, tmp_path: Path) -> None:
         run_dir = _exec_run_dir(tmp_path, incumbent={"r1": [0.2, 0.3]}, candidate={"r1": [0.8, 0.9]})
@@ -2690,12 +2750,12 @@ class TestAnnexationRate:
 
 
 class TestExecutionGateCannotBeQuietlyMisread:
-    """The three ways this gate could report a confident verdict about nothing."""
+    """Every way this gate could report a confident verdict about nothing."""
 
-    def test_a_missing_row_tree_is_named_even_when_the_experiment_file_is_fine(self, tmp_path: Path) -> None:
+    def test_a_missing_row_tree_is_refused_even_when_the_experiment_file_is_fine(self, tmp_path: Path) -> None:
         # The statistic comes from experiment.json and every CHECK comes from the row tree, so a
         # mistyped variant/suite/run-dir leaves a perfectly good p beside four `— -> —` passes.
-        # Measured before the note existed: headline PROMOTED, every check green.
+        # Measured before the refusal existed: headline PROMOTED, every check green.
         run_dir = _exec_run_dir(tmp_path, **_WINNER)
         verdict = execution_gate(
             run_dir=run_dir,
@@ -2704,8 +2764,44 @@ class TestExecutionGateCannotBeQuietlyMisread:
             suite_id="a-suite-that-was-never-run",
             n_resamples=_FAST_RESAMPLES,
         )
-        assert sum("loaded ZERO rows" in note for note in verdict.notes) == 2
-        assert any("not a result" in note for note in verdict.notes)
+        # ONE refusal naming BOTH arms, not one note per arm: the loop used to append twice.
+        assert verdict.gate_refusal is not None
+        assert "'incumbent'" in verdict.gate_refusal and "'candidate'" in verdict.gate_refusal
+        assert not any("loaded ZERO rows" in note for note in verdict.notes)
+        decided = holm_promote_execution([verdict])[0]
+        assert decided.promoted is not True
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+
+    def test_one_empty_arm_is_refused_where_the_variant_check_does_not_fire(self, tmp_path: Path) -> None:
+        # A VALID incumbent id whose rows are simply not on disk (right id, wrong run dir). The
+        # variant-mismatch return cannot see this — the experiment file names the arm perfectly
+        # well — so the zero-row refusal is the only thing standing between it and PROMOTED.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        shutil.rmtree(run_dir / "incumbent")
+        verdict = _exec_gate(run_dir)
+        assert verdict.mean_diff is not None, "the statistic still computes — that is the whole hazard"
+        assert verdict.gate_refusal is not None
+        assert "the incumbent arm" in verdict.gate_refusal
+        assert "the candidate arm" not in verdict.gate_refusal, "only the empty arm may be named"
+        decided = holm_promote_execution([verdict])[0]
+        assert decided.promoted is False
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+
+    def test_a_wiring_refusal_outranks_a_zero_variance_one(self, tmp_path: Path) -> None:
+        # Both causes at once. If the rows never loaded, whether their differences vary is moot —
+        # so the wiring message is what renders, and its remedy is the one the reader needs.
+        run_dir = _exec_run_dir(tmp_path, **_uniform_shift(4))
+        shutil.rmtree(run_dir / "incumbent")
+        verdict = _exec_gate(run_dir)
+        # BOTH halves of the variance predicate (`mean_diff is not None and effect_size is None`):
+        # asserting only the second would let a fixture that produced no comparison at all pass
+        # this test without the second cause ever applying.
+        assert verdict.mean_diff is not None and verdict.effect_size is None, (
+            "fixture drifted — the zero-variance cause must also apply for precedence to mean anything"
+        )
+        assert verdict.gate_refusal is not None
+        assert "loaded ZERO rows" in verdict.gate_refusal
+        assert "zero variance" not in verdict.gate_refusal
 
     def test_the_same_variant_on_both_arms_reports_nothing(self, tmp_path: Path) -> None:
         # Sign resolution keys on the candidate, so a duplicated id used to yield `vid_a - vid_b`
@@ -2824,7 +2920,7 @@ class TestGuardrailsNeverRaiseOnACallerSuppliedRow:
             {"incumbent": {EXEC_SUITE: [0.4, 0.5]}, "candidate": {EXEC_SUITE: [0.8, 0.9]}},
         )
         verdict = _exec_gate(run_dir)
-        assert sum("loaded ZERO rows" in note for note in verdict.notes) == 2
+        assert verdict.gate_refusal is not None and "loaded ZERO rows" in verdict.gate_refusal
         assert [c.passed for c in verdict.guardrails] == [True, True]
 
 
