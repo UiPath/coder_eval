@@ -43,7 +43,6 @@ from coder_eval.models import (
     TokenUsage,
 )
 from coder_eval.optimize_gate import (
-    COST_FRONT_ADVISORY,
     GATE_MAX_FAMILY,
     GATE_P_PRECISION,
     GATE_RESAMPLES,
@@ -54,7 +53,6 @@ from coder_eval.optimize_gate import (
     _balance_pair,
     _discreteness_floor,
     _execution_diagnostics,
-    _front_summary,
     _holm_threshold,
     _label_pairs,
     _load_and_pair,
@@ -62,7 +60,6 @@ from coder_eval.optimize_gate import (
     _note_holm_family,
     _note_ordinary_negative,
     _refusal_message,
-    _render_checks,
     _row_cost_levels,
     _row_costs,
     _sibling_checks,
@@ -85,15 +82,20 @@ from coder_eval.optimize_gate import (
     min_discordant_rows,
     noise_floor_mde,
     pareto_front,
-    record_noise_floor,
     regression_check,
+    resolve_model,
+    search_compare,
+)
+from coder_eval.optimize_store import record_noise_floor
+from coder_eval.reports_optimize import (
+    COST_FRONT_ADVISORY,
+    _front_summary,
+    _render_checks,
     render_cost_quality,
     render_execution_markdown,
     render_markdown,
     render_row_matrix,
     render_search_comparison,
-    resolve_model,
-    search_compare,
 )
 from coder_eval.reports_stats import (
     BOOTSTRAP_RESAMPLES,
@@ -677,6 +679,116 @@ class TestRenderMarkdown:
         assert "a note the reader needs" in text
 
 
+# The three modules the optimize gate was split into. Named once: two module-scoped assertions and
+# the layering tests below all reason over the same surface, and a list that drifted would leave a
+# new module silently unchecked by whichever one forgot it.
+_OPTIMIZE_MODULES = ("optimize_gate", "optimize_store", "reports_optimize")
+
+
+def _module_source(module: str) -> str:
+    return (Path(__file__).parent.parent / "src" / "coder_eval" / f"{module}.py").read_text(encoding="utf-8")
+
+
+def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None) -> dict[str, set[str]]:
+    """`coder_eval` imports in a module, keyed by module path.
+
+    AST-based, not a substring scan: these modules are heavily docstringed and a raw-text check
+    over them is exactly the fragile presence sensor CE039 exists to discourage.
+
+    ``inside_type_checking`` filters to imports inside (True) or outside (False) an
+    ``if TYPE_CHECKING:`` body; ``None`` takes both.
+    """
+    tree = ast.parse(_module_source(module))
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+            guarded |= {id(child) for stmt in node.body for child in ast.walk(stmt)}
+
+    found: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not (node.module or "").startswith("coder_eval"):
+            continue
+        if inside_type_checking is not None and (id(node) in guarded) != inside_type_checking:
+            continue
+        found.setdefault(node.module or "", set()).update(alias.name for alias in node.names)
+    return found
+
+
+def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
+    """What makes the split real rather than cosmetic.
+
+    A renderer that reaches back for a run directory or an estimator is a gate with a table on it,
+    and the module boundary then documents a separation that does not exist. The two NamedTuples it
+    needs are allowed only under `if TYPE_CHECKING`, so the runtime dependency on the decision
+    layer is exactly zero.
+    """
+    runtime = _coder_eval_imports("reports_optimize", inside_type_checking=False)
+    assert set(runtime) <= {"coder_eval.models", "coder_eval.reports_stats"}, (
+        f"reports_optimize gained a runtime coder_eval dependency: {sorted(set(runtime))}"
+    )
+    # One display value, and CE040 requires it be DERIVED there rather than respelled.
+    assert runtime.get("coder_eval.reports_stats", set()) == {"bootstrap_p_floor"}
+
+    deferred = _coder_eval_imports("reports_optimize", inside_type_checking=True)
+    assert deferred.get("coder_eval.optimize_gate") == {"CostQualityPoint", "SearchComparison"}
+
+    # No filesystem call anywhere in the module.
+    tree = ast.parse(_module_source("reports_optimize"))
+    called: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                called.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                called.add(node.func.attr)
+    filesystem = {"open", "read_text", "write_text", "glob", "rglob", "mkdir", "replace", "Path"}
+    assert not called & filesystem, f"reports_optimize touches the filesystem: {sorted(called & filesystem)}"
+
+
+def test_the_gate_never_imports_its_presentation() -> None:
+    # The mirror direction. If anything drives you to add this edge, the split boundary is wrong.
+    assert "coder_eval.reports_optimize" not in _coder_eval_imports("optimize_gate")
+
+
+def test_the_store_module_imports_only_models() -> None:
+    # `optimize_gate` -> `optimize_store` is the only edge between the three non-model modules, so
+    # anything else here would close a cycle.
+    assert set(_coder_eval_imports("optimize_store")) <= {"coder_eval.models"}
+
+
+def test_a_moved_name_is_gone_from_the_gate() -> None:
+    """No name the two new modules define survives on `optimize_gate` except a deliberate re-import.
+
+    DERIVED on both sides, never a hand-written list — a list here would be a second declaration of
+    each module's contents, which is the exact defect this plan removed three of. The module's own
+    contents come from enumerating it (with a `__module__` filter, so a name it merely IMPORTS does
+    not count as one it defines); the permitted survivors come from parsing the gate's OWN import
+    statements. A leftover copy is therefore caught, while the two names the gate genuinely imports
+    back are not mistaken for one.
+
+    `ruff` keeps that permitted set minimal for free: an unused back-import is F401.
+    """
+    import coder_eval.optimize_gate as gate
+    import coder_eval.optimize_store as store
+    import coder_eval.reports_optimize as presentation
+
+    gate_imports = _coder_eval_imports("optimize_gate")
+    for module in (store, presentation):
+        defined = [
+            name
+            for name, value in vars(module).items()
+            if not name.startswith("__") and getattr(value, "__module__", None) == module.__name__
+        ]
+        assert defined, f"{module.__name__} defines nothing — the enumeration is not doing its job"
+        back_imported = gate_imports.get(module.__name__, set())
+        leftovers = [name for name in defined if hasattr(gate, name) and name not in back_imported]
+        assert not leftovers, f"{module.__name__} names still defined on optimize_gate: {leftovers}"
+
+    # The one edge between the three non-model modules, pinned to what Spike D measured.
+    assert gate_imports.get("coder_eval.optimize_store") == {"UNRESOLVED_MODEL", "lookup_noise_floor"}
+    assert "coder_eval.reports_optimize" not in gate_imports
+
+
 def test_module_imports_no_cli_machinery() -> None:
     """A core library the skill drives from a snippet — not a command.
 
@@ -684,9 +796,12 @@ def test_module_imports_no_cli_machinery() -> None:
     so a top-level module is out of scope, and it bans importing `coder_eval.cli` rather than
     typer/rich at all. Hence a real assertion here.
     """
-    source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
-    for banned in ("import typer", "import rich", "from typer", "from rich", "coder_eval.cli"):
-        assert banned not in source, f"optimize_gate.py imports {banned!r} — it is a library, not a CLI surface"
+    # All THREE modules: the claim is about the whole surface the skill's snippets import, and the
+    # gate's presentation and sidecar halves are exactly as reachable from a snippet as it is.
+    for module in _OPTIMIZE_MODULES:
+        source = _module_source(module)
+        for banned in ("import typer", "import rich", "from typer", "from rich", "coder_eval.cli"):
+            assert banned not in source, f"{module}.py imports {banned!r} — it is a library, not a CLI surface"
 
 
 def _costed_result(
@@ -1375,10 +1490,10 @@ class TestGateResampleCount:
         # and 0.0501, so a comment quoting an unrelated measured figure would fail this for a
         # reason that has nothing to do with alpha.
         alpha_literal = re.compile(r"0\.05(?!\d)")
-        for module in ("optimize_gate.py", "reports_stats.py"):
-            source = (Path(__file__).parent.parent / "src" / "coder_eval" / module).read_text(encoding="utf-8")
+        for module in (*_OPTIMIZE_MODULES, "reports_stats"):
+            source = _module_source(module)
             literals = [ln for ln in source.splitlines() if alpha_literal.search(ln) and "DEFAULT_ALPHA = " not in ln]
-            assert not literals, f"{module} still spells 0.05 outside DEFAULT_ALPHA: {literals}"
+            assert not literals, f"{module}.py still spells 0.05 outside DEFAULT_ALPHA: {literals}"
 
 
 class TestDiscretenessFloor:

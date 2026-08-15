@@ -3028,7 +3028,7 @@ class TestPluginArtifacts:
         # exist in three files at three vintages. Asserted PER SURFACE rather than against the
         # concatenation: both carry it today, so a pair-wide check would stay green if either
         # section were deleted whole — and the procedure half is what an agent acts on.
-        from coder_eval.optimize_gate import COST_FRONT_ADVISORY
+        from coder_eval.reports_optimize import COST_FRONT_ADVISORY
 
         # A distinctive substring of the constant rather than the whole sentence: the prose is
         # hard-wrapped and pitched at a reader, so it paraphrases around this anchor.

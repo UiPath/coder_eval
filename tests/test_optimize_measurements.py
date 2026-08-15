@@ -19,16 +19,18 @@ import pytest
 from coder_eval.models import ArmRowScores, NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores
 from coder_eval.optimize_gate import (
     GATE_RESAMPLES,
+    measure_noise_floor,
+    noise_floor_mde,
+    regression_check,
+)
+from coder_eval.optimize_store import (
     MEASUREMENTS_FILENAME,
     UNRESOLVED_MODEL,
     append_regression_rows,
     load_measurements,
     lookup_noise_floor,
-    measure_noise_floor,
-    noise_floor_mde,
     record_noise_floor,
     record_round_scores,
-    regression_check,
 )
 from tests.test_optimize_gate import SUITE, _eval_result, _write_row
 

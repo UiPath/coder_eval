@@ -468,7 +468,8 @@ Compute it and report it *before* proposing anything:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import load_measurements, load_arm_rows, noise_floor_mde, resolve_model
+from coder_eval.optimize_gate import load_arm_rows, noise_floor_mde, resolve_model
+from coder_eval.optimize_store import load_measurements
 
 baseline_dirs = [Path("<runs>/baseline-1"), Path("<runs>/baseline-2")]
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
@@ -868,11 +869,13 @@ floor** free — it is arithmetic over a run directory that already exists. Read
 from pathlib import Path
 
 from coder_eval.optimize_gate import (
-    UNRESOLVED_MODEL,
     load_arm_rows,
-    load_measurements,
     measure_execution_noise_floor,
     resolve_model,
+)
+from coder_eval.optimize_store import (
+    UNRESOLVED_MODEL,
+    load_measurements,
 )
 
 control_dirs = [Path("<runs>/control")]   # the run dir from the control-arm command above
@@ -1047,9 +1050,13 @@ from pathlib import Path
 from coder_eval.optimize_gate import (
     arm_row_scores,
     lineage_head_scores,
-    load_measurements,
-    render_search_comparison,
     search_compare,
+)
+from coder_eval.optimize_store import (
+    load_measurements,
+)
+from coder_eval.reports_optimize import (
+    render_search_comparison,
 )
 
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
@@ -1183,7 +1190,8 @@ discard. Only the per-row vectors tell them apart, so print them:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import arm_row_scores, instance_best_front, pareto_front, render_row_matrix
+from coder_eval.optimize_gate import arm_row_scores, instance_best_front, pareto_front
+from coder_eval.reports_optimize import render_row_matrix
 
 arms = arm_row_scores(
     run_dirs=[Path("<runs>/round1-triage")],
@@ -1237,7 +1245,8 @@ show it:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import load_measurements, regression_check
+from coder_eval.optimize_gate import regression_check
+from coder_eval.optimize_store import load_measurements
 
 # Defined here rather than reused from Step 6: that snippet is activation-only, so on the
 # execution track the name does not exist in this session.
@@ -1271,7 +1280,8 @@ reason that is an artefact of the procedure.
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import cost_quality_front, cost_quality_points, render_cost_quality
+from coder_eval.optimize_gate import cost_quality_front, cost_quality_points
+from coder_eval.reports_optimize import render_cost_quality
 
 points = cost_quality_points(
     run_dirs=[Path("<runs>/round1-triage")],
@@ -1308,7 +1318,8 @@ in Step 1:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import activation_gate, holm_promote, render_markdown
+from coder_eval.optimize_gate import activation_gate, holm_promote
+from coder_eval.reports_optimize import render_markdown
 
 # The three --run-dir paths from the three invocations above, as Path objects.
 gate_dirs = [Path(f"<runs>/round1-gate-{i}") for i in (1, 2, 3)]
@@ -1387,7 +1398,8 @@ readings the method's promote-only-when list requires and a human used to check 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import execution_gate, holm_promote_execution, render_execution_markdown
+from coder_eval.optimize_gate import execution_gate, holm_promote_execution
+from coder_eval.reports_optimize import render_execution_markdown
 
 # ONE run dir per candidate: the paired statistic fires only for exactly two variants, so each
 # candidate is gated in its own two-variant round<N>-gate.yaml. The family therefore lives ACROSS
@@ -1550,20 +1562,22 @@ been paid for. **Which floor you record depends on the track**, so take the matc
 ```python
 from pathlib import Path
 
+from coder_eval.models import RegressionRow, RoundScores
 from coder_eval.optimize_gate import (
-    UNRESOLVED_MODEL,
-    append_regression_rows,
     instance_best_front,
     load_arm_rows,
-    load_measurements,
     measure_execution_noise_floor,
     measure_noise_floor,
     pareto_front,
-    record_noise_floor,
-    record_round_scores,
     resolve_model,
 )
-from coder_eval.models import RegressionRow, RoundScores
+from coder_eval.optimize_store import (
+    UNRESOLVED_MODEL,
+    append_regression_rows,
+    load_measurements,
+    record_noise_floor,
+    record_round_scores,
+)
 
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
 measurements = load_measurements(sidecar)
