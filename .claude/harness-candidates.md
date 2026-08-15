@@ -601,3 +601,24 @@ with the two `action.yml` items above — one considered change to the action's 
       needs a sweep of every multi-branch validator in `src/` to separate the real fall-throughs
       from the deliberate accumulate-then-continue ones — the same reason CE046 was deferred. —
       caught in the Plan A Phase 2 review.
+- [ ] A duplicated long prose literal (≥60 chars) across two functions. Phase 3 of the optimize-gate
+      module split collapsed four such strings — the notes both Holm wrappers emit, which sat 600
+      lines apart as byte-identical copies, two of them wrapped differently in source while producing
+      the same string. A wording fix applied to one would have left the two tracks describing the
+      same decision differently in a ledger read back weeks later. The interim guard is
+      `test_neither_wrapper_respells_a_shared_note` in `tests/test_optimize_gate.py`, which pins
+      those four strings only. The general rule is **Plan D's proposed CE049** and is deliberately
+      not built here: unlike CE042 (a one-allowed-site seam rule copied wholesale from CE040), this
+      is a heuristic whole-tree rule needing its own design pass — a length threshold, a
+      normalisation for source wrapping, and an allowlist sweep before it can land green. Recorded
+      here because Plan D lives in an untracked planning file and this is the committed surface. —
+      caught in the optimize-gate module-split run, Phase 3.
+- [ ] A raw-substring prose sensor firing on its own documentation. `test_module_imports_no_cli_machinery`
+      scans module source for banned tokens (`import typer`, `coder_eval.cli`, …); the new
+      `reports_optimize.py` tripped it by *documenting* that it imports no such module. The instance
+      was fixed by rewording (and saying why in the docstring), but the class is live for every
+      substring-scanning sensor in `tests/test_custom_lint.py` — the same fragility CE039 exists to
+      discourage for arithmetic claims. A real guard means parsing rather than scanning: check
+      `ast.Import`/`ast.ImportFrom` nodes instead of text, which is a sweep of every such sensor and
+      a decision about the ones that legitimately scan prose. — caught in the optimize-gate
+      module-split run, Phase 6.
