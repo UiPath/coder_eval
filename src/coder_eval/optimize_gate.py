@@ -50,6 +50,7 @@ from coder_eval.models import (
 )
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
+    PairedComparison,
     bootstrap_p_floor,
     cluster_bootstrap_diff_ci,
     holm_rejections,
@@ -1076,7 +1077,35 @@ def _sibling_checks(
     return checks
 
 
-def activation_gate(
+class _PairedRows(NamedTuple):
+    """Everything :func:`activation_gate` needs from the two arms' run directories, already paired.
+
+    Six concerns used to be interleaved in the gate's first hundred lines: loading both arms,
+    pairing and reporting the unpaired, the zero-row wrong-path note, hollow-row exclusion,
+    replicate balancing, and the wrong-index note. None of them touches a statistic, and every one
+    of them appends to ``notes`` — which is why they read as one step and extract as one.
+
+    The clusters and the flattened pairs are carried rather than the balanced mapping they come
+    from: the gate's remaining body wants exactly these four (two for the bootstrap, two for the
+    reported F1s) and nothing else, so returning the mapping would leave the caller re-deriving
+    them — a second spelling of the flattening this helper just did.
+    """
+
+    incumbent_by_dir: list[dict[str, list[EvaluationResult]]]
+    candidate_by_dir: list[dict[str, list[EvaluationResult]]]
+    incumbent_rows: dict[str, list[EvaluationResult]]
+    candidate_rows: dict[str, list[EvaluationResult]]
+    scored_row_ids: list[str]
+    incumbent_clusters: list[list[tuple[str, str]]]
+    candidate_clusters: list[list[tuple[str, str]]]
+    incumbent_pairs: list[tuple[str, str]]
+    candidate_pairs: list[tuple[str, str]]
+    rows_excluded: int
+    n_discordant: int
+    notes: list[str]
+
+
+def _load_and_pair(
     *,
     incumbent_run_dirs: Sequence[Path],
     candidate_run_dirs: Sequence[Path],
@@ -1084,34 +1113,16 @@ def activation_gate(
     candidate_variant: str,
     suite_id: str,
     criterion_index: int,
-    sibling_indices: Sequence[int] | None = None,
-    materiality: float = MATERIALITY_FLOOR,
-    confidence: float = 0.95,
-    seed: int = 0,
-    n_resamples: int = GATE_RESAMPLES,
-) -> ActivationGateVerdict:
-    """Gate ONE candidate against the incumbent with a paired cluster bootstrap over rows.
+) -> _PairedRows:
+    """Load both arms, pair their rows, and report everything that made the sample smaller.
 
-    Each row is a cluster carrying all of its per-invocation label pairs. One draw samples rows
-    with replacement, pools each drawn row's replicates, and recomputes ``f1.yes`` per arm through
-    the criterion layer's routine; the CI is over ``candidate - incumbent``.
+    Every note this produces is about the SAMPLE — a wrong path, an asymmetric row set, a row that
+    errored, an unbalanced replicate count, a wrong criterion index. None of them is about a
+    statistic, and the gate cannot compute one until all of them have been applied.
 
-    ``criterion_index`` is the criterion's **position** in the suite's ``success_criteria`` list
-    (0-based, counting from the top of the YAML).
-
-    ``sibling_indices`` has three states, and ``None`` and ``()`` are no longer the same thing:
-    ``None`` (the default) **derives** every other classification position from the run itself via
-    :func:`derive_sibling_indices`, ``()`` checks nothing, and an explicit sequence checks exactly
-    those. The default flipped because a guardrail nobody remembers to arm is a guardrail the tool
-    does not have — the shipped snippet passed ``()`` and told the reader to leave it that way, so
-    a suite that stacked sibling criteria was silently ungated against a candidate winning by
-    annexing them. Passing ``()`` is now how you turn the check off deliberately.
-
-    Leaves ``promoted=None``. One gate knows nothing about the family it belongs to, and the Holm
-    correction is a property of that family — pass every survivor's verdict through
-    :func:`holm_promote` in one call. (The one exception is a sample too small to support any
-    statistic at all: that returns ``promoted=False`` outright, because there is no p-value for a
-    family decision to correct.)
+    The returned ``notes`` list is the caller's to keep appending to. It is returned rather than
+    copied because pydantic COPIES the list at construction, so a note appended after the model is
+    built is silently discarded — the gate must therefore hold this exact list until its return.
     """
     incumbent_by_dir = [load_suite_rows(d, incumbent_variant, suite_id) for d in incumbent_run_dirs]
     candidate_by_dir = [load_suite_rows(d, candidate_variant, suite_id) for d in candidate_run_dirs]
@@ -1214,6 +1225,75 @@ def activation_gate(
     # `_discreteness_floor` a valid bound on the smallest p this suite can be expected to express.
     n_discordant = sum(1 for rid in scored_row_ids if sorted(balanced[rid][0]) != sorted(balanced[rid][1]))
 
+    return _PairedRows(
+        incumbent_by_dir=incumbent_by_dir,
+        candidate_by_dir=candidate_by_dir,
+        incumbent_rows=incumbent_rows,
+        candidate_rows=candidate_rows,
+        scored_row_ids=scored_row_ids,
+        incumbent_clusters=incumbent_clusters,
+        candidate_clusters=candidate_clusters,
+        incumbent_pairs=incumbent_pairs,
+        candidate_pairs=candidate_pairs,
+        # Computed once here rather than at each of the gate's two returns, which is where it used
+        # to be spelled twice.
+        rows_excluded=len(unpaired) + unscored_count,
+        n_discordant=n_discordant,
+        notes=notes,
+    )
+
+
+def activation_gate(
+    *,
+    incumbent_run_dirs: Sequence[Path],
+    candidate_run_dirs: Sequence[Path],
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    criterion_index: int,
+    sibling_indices: Sequence[int] | None = None,
+    materiality: float = MATERIALITY_FLOOR,
+    confidence: float = 0.95,
+    seed: int = 0,
+    n_resamples: int = GATE_RESAMPLES,
+) -> ActivationGateVerdict:
+    """Gate ONE candidate against the incumbent with a paired cluster bootstrap over rows.
+
+    Each row is a cluster carrying all of its per-invocation label pairs. One draw samples rows
+    with replacement, pools each drawn row's replicates, and recomputes ``f1.yes`` per arm through
+    the criterion layer's routine; the CI is over ``candidate - incumbent``.
+
+    ``criterion_index`` is the criterion's **position** in the suite's ``success_criteria`` list
+    (0-based, counting from the top of the YAML).
+
+    ``sibling_indices`` has three states, and ``None`` and ``()`` are no longer the same thing:
+    ``None`` (the default) **derives** every other classification position from the run itself via
+    :func:`derive_sibling_indices`, ``()`` checks nothing, and an explicit sequence checks exactly
+    those. The default flipped because a guardrail nobody remembers to arm is a guardrail the tool
+    does not have — the shipped snippet passed ``()`` and told the reader to leave it that way, so
+    a suite that stacked sibling criteria was silently ungated against a candidate winning by
+    annexing them. Passing ``()`` is now how you turn the check off deliberately.
+
+    Leaves ``promoted=None``. One gate knows nothing about the family it belongs to, and the Holm
+    correction is a property of that family — pass every survivor's verdict through
+    :func:`holm_promote` in one call. (The one exception is a sample too small to support any
+    statistic at all: that returns ``promoted=False`` outright, because there is no p-value for a
+    family decision to correct.)
+    """
+    paired = _load_and_pair(
+        incumbent_run_dirs=incumbent_run_dirs,
+        candidate_run_dirs=candidate_run_dirs,
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        criterion_index=criterion_index,
+    )
+    incumbent_rows, candidate_rows = paired.incumbent_rows, paired.candidate_rows
+    scored_row_ids, n_discordant = paired.scored_row_ids, paired.n_discordant
+    # THE SAME list object, not a copy: pydantic copies it at construction, so every note this
+    # function still adds has to land in the list `_load_and_pair` returned, before either return.
+    notes = paired.notes
+
     # The four shared values, hoisted into named locals rather than a keyword dict the two returns
     # splat. Three are expensive (two bootstraps and a sibling scan); `p_floor` is pure arithmetic
     # and is computed last here rather than first as the dict had it — safe, and stated because
@@ -1260,8 +1340,8 @@ def activation_gate(
     p_floor = _discreteness_floor(len(scored_row_ids), n_discordant, n_resamples)
 
     bootstrap = cluster_bootstrap_diff_ci(
-        candidate_clusters,
-        incumbent_clusters,
+        paired.candidate_clusters,
+        paired.incumbent_clusters,
         _f1_yes,
         n_resamples=n_resamples,
         confidence=confidence,
@@ -1280,7 +1360,7 @@ def activation_gate(
             confidence=confidence,
             n_resamples=n_resamples,
             rows_paired=len(scored_row_ids),
-            rows_excluded=len(unpaired) + unscored_count,
+            rows_excluded=paired.rows_excluded,
             incumbent_f1=None,
             candidate_f1=None,
             mean_diff=None,
@@ -1317,11 +1397,11 @@ def activation_gate(
     # rule compared, and reporting them keeps a reader's intuition calibrated against the CI.
     incumbent_per_invocation = [
         _f1_yes([p for rid in scored_row_ids if rid in rows for p in _label_pairs(rows[rid], criterion_index)])
-        for rows in incumbent_by_dir
+        for rows in paired.incumbent_by_dir
     ]
     candidate_per_invocation = [
         _f1_yes([p for rid in scored_row_ids if rid in rows for p in _label_pairs(rows[rid], criterion_index)])
-        for rows in candidate_by_dir
+        for rows in paired.candidate_by_dir
     ]
     range_non_overlap = bool(
         incumbent_per_invocation
@@ -1337,9 +1417,9 @@ def activation_gate(
         confidence=confidence,
         n_resamples=n_resamples,
         rows_paired=len(scored_row_ids),
-        rows_excluded=len(unpaired) + unscored_count,
-        incumbent_f1=_f1_yes(incumbent_pairs),
-        candidate_f1=_f1_yes(candidate_pairs),
+        rows_excluded=paired.rows_excluded,
+        incumbent_f1=_f1_yes(paired.incumbent_pairs),
+        candidate_f1=_f1_yes(paired.candidate_pairs),
         mean_diff=mean_diff,
         ci_low=ci_low,
         ci_high=ci_high,
@@ -1381,6 +1461,94 @@ def _note_holm_family(family_size: int, alpha: float) -> str:
     return f"Holm applied across a family of {family_size} at alpha={alpha}."
 
 
+def _refusal_message(verdict: ActivationGateVerdict, *, threshold: float, family_size: int, alpha: float) -> str | None:
+    """The CANNOT SEPARATE refusal for one verdict, or ``None`` when the suite can express its bar.
+
+    A ~60-line message builder sitting inside a boolean decision: it computes ``max_family``, the
+    family lever, the row lever and the remedy, and the decision resumes 60 lines later. It takes
+    everything it needs from the verdict plus the family's rank-dependent threshold — which is
+    exactly why it could not live on the verdict model and does live here.
+
+    Rank-scoped, deliberately: ``p_floor`` is a property of the SUITE and identical across the
+    family, but ``threshold`` depends on rank, so where the floor sits between alpha/S and
+    alpha/(S-1) a worse-ranked sibling is NOT refused and may still promote.
+
+    Returns ``None``, never ``""``: ``gate_refusal`` is ``str | None`` on the model and
+    :func:`render_markdown` branches on ``is not None``.
+    """
+    # A floor above the bar the p is decided against means the gate structurally cannot
+    # separate here — a statement about the SUITE, not about this candidate.
+    #
+    # `not p_floor > threshold` rather than `p_floor <= threshold`, which is the one place this
+    # early return is not a plain De Morgan of the `if p_floor is not None and p_floor > threshold`
+    # it replaced. Every comparison against NaN is False, so a NaN floor took the no-refusal path
+    # before; under `<=` it would fall THROUGH to `math.floor(alpha / nan)` and raise out of the
+    # skill's inline snippet. Defence in depth rather than a live path — `_discreteness_floor`
+    # clamps through `min`/`max` and pydantic's validator rejects a non-finite float, so no
+    # validated verdict can carry one — but preserving the original semantics costs one `not`.
+    if verdict.p_floor is None or not verdict.p_floor > threshold:
+        return None
+
+    # A floor of exactly 1.0 is the ZERO-DISCORDANT case and nothing else: `2*(1-R/M)**M`
+    # reaches 1.0 only at R = 0 (for R >= 1 it peaks at 0.5, at M = 2). It is a different
+    # finding with a different remedy — the arms behaved identically, so the discordance
+    # RATE is zero and `(1-R/M)**M` does not shrink with M however many rows are added.
+    # Telling that operator to buy more rows is the misdiagnosis this branch exists to stop.
+    if verdict.p_floor >= 1.0:
+        return (
+            f"the two arms produced identical labels on every one of the {verdict.rows_paired} "
+            "scored rows, so there is nothing for any test to separate — at any family size, "
+            "at any alpha, and at any number of rows. That is a result about this candidate "
+            "rather than about the suite: adding rows cannot change it. Check the candidate "
+            "actually differs from the incumbent, and that both arms were wired to the "
+            "snapshots you think they were."
+        )
+
+    # TWO levers, and the second one is not "more rows". `2*(1-R/M)**M` RISES with M at
+    # a fixed R, so a reader told to add rows can buy concordant ones and land strictly
+    # worse off (measured: R=3 floors at 0.047 over 8 rows, 0.056 over 10, 0.078 over
+    # 20). The lever is the DISCORDANT count, and `min_discordant_rows` owns it — the
+    # number is computed here, never quoted from prose.
+    max_family = math.floor(alpha / verdict.p_floor)
+    family_lever = (
+        f"Gate at most {max_family} survivor(s) at alpha={alpha}"
+        if max_family >= 1
+        else f"No family size works at alpha={alpha}, not even a family of one"
+    )
+    if verdict.n_discordant is None:
+        # Never a sentence about a count the verdict does not carry.
+        remedy = f"{family_lever}."
+    else:
+        required = min_discordant_rows(verdict.rows_paired, threshold, verdict.n_resamples)
+        row_lever = (
+            (
+                f"raise the rows the two arms DISAGREE on from {verdict.n_discordant} to "
+                + f"{required} at the current {verdict.rows_paired} paired rows — adding "
+                + "rows they agree on makes this floor worse, not better"
+            )
+            if required is not None
+            # `min_discordant_rows` returns None only when even EVERY row discordant
+            # leaves the estimator's own 2/(m+1) above the bar — and that value
+            # depends on the draw count alone, not on the suite. So "more rows" is
+            # not merely insufficient here, it is irrelevant, and saying otherwise
+            # would send a user to buy rows that provably cannot work.
+            else (
+                f"no discordant count clears this bar at {verdict.rows_paired} rows or at "
+                + f"any other: the bar sits below what {verdict.n_resamples} bootstrap "
+                + "draws can resolve at all, so the levers are a larger n_resamples or a "
+                + "smaller family — not rows"
+            )
+        )
+        remedy = f"{family_lever}, or {row_lever}."
+    return (
+        f"this suite cannot express a p below {verdict.p_floor:.4f} at {verdict.rows_paired} "
+        f"paired rows, and the Holm threshold for this rank in a family of {family_size} is "
+        f"{threshold:.4f}. This candidate could not have promoted however good it is — the "
+        f"bar sits below what the suite can measure — so this is NOT a negative result "
+        f"about it. {remedy}"
+    )
+
+
 def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_ALPHA) -> list[ActivationGateVerdict]:
     """Decide the whole survivor family at once, and record the decision on each verdict.
 
@@ -1416,72 +1584,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
             continue
 
         threshold = _holm_threshold([p for _i, p in family], verdict.p_value, alpha)
-        # A floor above the bar the p is decided against means the gate structurally cannot
-        # separate here — a statement about the SUITE, not about this candidate.
-        refusal: str | None = None
-        if verdict.p_floor is not None and verdict.p_floor > threshold:
-            # A floor of exactly 1.0 is the ZERO-DISCORDANT case and nothing else: `2*(1-R/M)**M`
-            # reaches 1.0 only at R = 0 (for R >= 1 it peaks at 0.5, at M = 2). It is a different
-            # finding with a different remedy — the arms behaved identically, so the discordance
-            # RATE is zero and `(1-R/M)**M` does not shrink with M however many rows are added.
-            # Telling that operator to buy more rows is the misdiagnosis this branch exists to stop.
-            if verdict.p_floor >= 1.0:
-                refusal = (
-                    f"the two arms produced identical labels on every one of the {verdict.rows_paired} "
-                    "scored rows, so there is nothing for any test to separate — at any family size, "
-                    "at any alpha, and at any number of rows. That is a result about this candidate "
-                    "rather than about the suite: adding rows cannot change it. Check the candidate "
-                    "actually differs from the incumbent, and that both arms were wired to the "
-                    "snapshots you think they were."
-                )
-            else:
-                # TWO levers, and the second one is not "more rows". `2*(1-R/M)**M` RISES with M at
-                # a fixed R, so a reader told to add rows can buy concordant ones and land strictly
-                # worse off (measured: R=3 floors at 0.047 over 8 rows, 0.056 over 10, 0.078 over
-                # 20). The lever is the DISCORDANT count, and `min_discordant_rows` owns it — the
-                # number is computed here, never quoted from prose.
-                max_family = math.floor(alpha / verdict.p_floor)
-                family_lever = (
-                    f"Gate at most {max_family} survivor(s) at alpha={alpha}"
-                    if max_family >= 1
-                    else f"No family size works at alpha={alpha}, not even a family of one"
-                )
-                if verdict.n_discordant is None:
-                    # Never a sentence about a count the verdict does not carry.
-                    remedy = f"{family_lever}."
-                else:
-                    required = min_discordant_rows(verdict.rows_paired, threshold, verdict.n_resamples)
-                    row_lever = (
-                        (
-                            f"raise the rows the two arms DISAGREE on from {verdict.n_discordant} to "
-                            + f"{required} at the current {verdict.rows_paired} paired rows — adding "
-                            + "rows they agree on makes this floor worse, not better"
-                        )
-                        if required is not None
-                        # `min_discordant_rows` returns None only when even EVERY row discordant
-                        # leaves the estimator's own 2/(m+1) above the bar — and that value
-                        # depends on the draw count alone, not on the suite. So "more rows" is
-                        # not merely insufficient here, it is irrelevant, and saying otherwise
-                        # would send a user to buy rows that provably cannot work.
-                        else (
-                            f"no discordant count clears this bar at {verdict.rows_paired} rows or at "
-                            + f"any other: the bar sits below what {verdict.n_resamples} bootstrap "
-                            + "draws can resolve at all, so the levers are a larger n_resamples or a "
-                            + "smaller family — not rows"
-                        )
-                    )
-                    remedy = f"{family_lever}, or {row_lever}."
-                # Rank-scoped, deliberately. `p_floor` is a property of the SUITE and identical
-                # across the family, but `threshold` depends on rank — so where the floor sits
-                # between alpha/S and alpha/(S-1) a worse-ranked sibling is NOT refused and may
-                # still promote. Claiming "no candidate can promote here" would contradict it.
-                refusal = (
-                    f"this suite cannot express a p below {verdict.p_floor:.4f} at {verdict.rows_paired} "
-                    f"paired rows, and the Holm threshold for this rank in a family of {len(family)} is "
-                    f"{threshold:.4f}. This candidate could not have promoted however good it is — the "
-                    f"bar sits below what the suite can measure — so this is NOT a negative result "
-                    f"about it. {remedy}"
-                )
+        refusal = _refusal_message(verdict, threshold=threshold, family_size=len(family), alpha=alpha)
 
         siblings_hold = all(check.passed for check in verdict.sibling_checks)
         favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
@@ -1926,7 +2029,94 @@ def execution_gate(
     def _signed(value: float | None) -> float | None:
         return None if value is None else sign * value
 
+    # HOISTED above the diagnostics below, which used to assign these three and which the final
+    # `return _verdict(...)` reads. All three are pure — `_signed` has no side effects — so
+    # computing them earlier changes nothing; what must NOT move is the order the causes are
+    # detected in, and that order lives inside `_execution_diagnostics`, which still evaluates
+    # `empty_arms` first.
+    mean_diff = _signed(comparison.mean_diff)
+    # Cohen's d carries the direction too, so it is signed with the rest.
+    effect_size = _signed(comparison.effect_size)
     # Negating an interval reverses it, so re-order rather than reporting a "low" above its "high".
+    bounds = sorted(b for b in (_signed(comparison.ci_low), _signed(comparison.ci_high)) if b is not None)
+
+    refusal, diagnostics = _execution_diagnostics(
+        incumbent_rows=incumbent_rows,
+        candidate_rows=candidate_rows,
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        run_dir=run_dir,
+        comparison=comparison,
+        mean_diff=mean_diff,
+        effect_size=effect_size,
+        mde=mde,
+        bounds=bounds,
+        refused_already=gate_refusal is not None,
+    )
+    if refusal is not None:
+        _refuse(refusal)
+    notes.extend(diagnostics)
+
+    return _verdict(
+        rows_paired=comparison.task_count,
+        rows_excluded=comparison.excluded_count,
+        mean_diff=mean_diff,
+        ci_low=bounds[0] if len(bounds) == 2 else None,
+        ci_high=bounds[1] if len(bounds) == 2 else None,
+        effect_size=effect_size,
+        p_value=comparison.p_value,
+    )
+
+
+def _execution_diagnostics(
+    *,
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    run_dir: Path,
+    comparison: PairedComparison,
+    mean_diff: float | None,
+    effect_size: float | None,
+    mde: float | None,
+    bounds: list[float],
+    refused_already: bool,
+) -> tuple[str | None, list[str]]:
+    """Every check that runs AFTER the paired statistic is signed: (refusal cause, notes).
+
+    Five independent findings in a linear ladder — an arm with no rows on disk, zero-variance
+    paired differences, a difference under the suite's own noise floor, a floor that could not be
+    priced, and an interval tighter than that floor. Each is a pure function of values the gate has
+    already computed, none of them can return early, and together they were most of what took
+    :func:`execution_gate` to F(50).
+
+    Returns the FIRST refusal cause rather than calling ``_refuse`` itself, so the caller's
+    first-cause-wins ordering stays in one place: every cause here ranks below every cause the gate
+    found before the statistic, which is the precedence the zero-row comment states. Two setters
+    for one field is exactly the state ``_refuse`` collapsed, and a helper reaching back into that
+    closure could not be tested without building a gate around it.
+
+    ``refused_already`` is what the two advisory notes suppress on — a note explaining a number
+    printed under a refusal headline contradicts it. It is OR-ed with a cause found here, because
+    "nothing has refused yet" has to include what this function itself decided three lines up.
+
+    It is **False at the only call site today**, and deliberately a parameter anyway: every cause
+    the gate finds before the statistic returns early, so none of them can reach this ladder. The
+    parameter is what keeps that an accident of the caller rather than an assumption baked in here
+    — a future cause that annotates and falls through would otherwise start printing a floor note
+    under its own refusal headline, which is the exact defect the two guards exist to prevent.
+    """
+    notes: list[str] = []
+    refusal: str | None = None
+
+    def _refuse(reason: str) -> None:
+        """First cause wins, mirroring the gate's own setter."""
+        nonlocal refusal
+        if refusal is None:
+            refusal = reason
+
     # The statistic comes from `experiment.json` while every check comes from the on-disk row tree,
     # so the two can disagree — and a valid experiment file beside a mistyped variant, suite or run
     # directory renders as PROMOTED with every check a green `— -> —`. `activation_gate` carries
@@ -1963,7 +2153,6 @@ def execution_gate(
             + "Fix the path before reading anything below."
         )
 
-    bounds = sorted(b for b in (_signed(comparison.ci_low), _signed(comparison.ci_high)) if b is not None)
     if comparison.task_count < 2:
         # A refusal, not a note: no interval can be computed at all, so there is nothing here for a
         # reader to weigh — and rendering it as NOT PROMOTED says the candidate lost a comparison
@@ -1982,10 +2171,7 @@ def execution_gate(
     # JSON validator REJECTS `NaN` / `Infinity`, so such a file never parses and is already reported
     # by the read's own note above. A guard here would be an unreachable branch claiming otherwise.
 
-    mean_diff = _signed(comparison.mean_diff)
-    # Cohen's d carries the direction too, so it is signed with the rest.
-    effect_size = _signed(comparison.effect_size)
-    # No `gate_refusal is None` guard: `_refuse` keeps the first cause, and every cause above this
+    # No `refused_already` guard: `_refuse` keeps the first cause, and every cause above this
     # one outranks it. If the rows never loaded, whether their differences vary is moot.
     if mean_diff is not None and effect_size is None:
         # Cohen's d is undefined exactly when stddev(diffs) == 0 — two arms differing by an
@@ -2069,7 +2255,11 @@ def execution_gate(
     # detectable effect: 0.000" as "this suite can resolve anything", which is the opposite of what
     # an unmeasurable floor means. Advisory, and suppressed under a refusal that already explains
     # the block.
-    if gate_refusal is None and mean_diff is not None and (mde is None or mde < FLOOR_RESOLUTION):
+    #
+    # Suppressed on `refused_already` OR a cause found above: inside this ladder "nothing has
+    # refused yet" has to include what the zero-variance branch decided three lines up, or a
+    # zero-variance verdict starts printing a floor note under its own refusal headline.
+    if not refused_already and refusal is None and mean_diff is not None and (mde is None or mde < FLOOR_RESOLUTION):
         notes.append(
             "this suite's minimum detectable effect came back "
             + (f"{mde:.3f}" if mde is not None else "unavailable")
@@ -2092,7 +2282,8 @@ def execution_gate(
         and mde is not None
         and mde >= FLOOR_RESOLUTION
         and half_width < mde
-        and gate_refusal is None
+        and not refused_already
+        and refusal is None
     ):
         notes.append(
             "the paired interval is tighter than this suite's own noise floor: a half-width of "
@@ -2105,15 +2296,7 @@ def execution_gate(
             + "extra confidence."
         )
 
-    return _verdict(
-        rows_paired=comparison.task_count,
-        rows_excluded=comparison.excluded_count,
-        mean_diff=mean_diff,
-        ci_low=bounds[0] if len(bounds) == 2 else None,
-        ci_high=bounds[1] if len(bounds) == 2 else None,
-        effect_size=effect_size,
-        p_value=comparison.p_value,
-    )
+    return refusal, notes
 
 
 def holm_promote_execution(
@@ -2755,17 +2938,8 @@ def instance_best_front(arms: list[ArmRowScores]) -> list[str]:
     return [arm.variant_id for arm in scored if any(v == best.get(r) for r, v in arm.row_scores.items())]
 
 
-def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_best: list[str] | None = None) -> str:
-    """The row x candidate table, with the Pareto set marked and the holes made visible.
-
-    ``instance_best`` is keyword-only and optional so the existing two-positional-argument form
-    keeps working byte-for-byte. When given, the block names both fronts AND the arms they disagree
-    about — a reader shown two lists learns nothing; the diff is the finding.
-    """
-    if not arms:
-        return "_No arms to compare._"
-
-    row_ids = sorted({rid for arm in arms for rid in arm.row_scores})
+def _matrix_table(arms: list[ArmRowScores], row_ids: list[str], pareto: list[str]) -> list[str]:
+    """The header, the separator and one line per row. A hole renders as ``—``, never as 0.0."""
     header = " | ".join(f"**{a.variant_id}**" if a.variant_id in pareto else a.variant_id for a in arms)
     lines = [
         f"| row | {header} |",
@@ -2774,31 +2948,46 @@ def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_b
     for row_id in row_ids:
         cells = " | ".join(f"{a.row_scores[row_id]:.3f}" if row_id in a.row_scores else "—" for a in arms)
         lines.append(f"| {row_id} | {cells} |")
+    return lines
 
-    lines.append("")
-    lines.append(f"Pareto front (**bold**): {', '.join(pareto) if pareto else 'none'}")
-    if instance_best is not None:
-        listed = ", ".join(instance_best) if instance_best else "none"
-        lines.append(f"Instance-best front (GEPA's, the merge shortlist): {listed}")
-        only_coverage = [v for v in pareto if v not in instance_best]
-        only_instance = [v for v in instance_best if v not in pareto]
-        if only_coverage or only_instance:
-            parts = []
-            if only_coverage:
-                parts.append(f"on coverage without winning any row: {', '.join(only_coverage)}")
-            if only_instance:
-                parts.append(f"wins a row despite being dominated overall: {', '.join(only_instance)}")
-            lines.append(
-                "The two fronts disagree, which is the interesting case rather than an inconsistency: "
-                + "; ".join(parts)
-                + ". Coverage is the set to DISCARD from; instance-best is the set to MERGE from."
-            )
-        elif pareto or instance_best:
-            # Only when there is something to agree ABOUT. With both fronts empty every arm
-            # crashed, and "both fronts agree" would read as a result immediately above the line
-            # saying it is a wiring problem.
-            lines.append("Both fronts agree on these arms.")
 
+def _front_summary(pareto: list[str], instance_best: list[str] | None) -> list[str]:
+    """The front block: the Pareto line always, and the instance-best pair only when asked.
+
+    ``None`` and ``[]`` are DIFFERENT and the distinction is the legacy call shape. ``None`` is the
+    two-positional-argument form, which must emit neither the instance-best line nor an agreement
+    sentence; ``[]`` is a real, empty instance-best front and emits ``… : none``.
+    """
+    lines = [f"Pareto front (**bold**): {', '.join(pareto) if pareto else 'none'}"]
+    if instance_best is None:
+        return lines
+
+    listed = ", ".join(instance_best) if instance_best else "none"
+    lines.append(f"Instance-best front (GEPA's, the merge shortlist): {listed}")
+    only_coverage = [v for v in pareto if v not in instance_best]
+    only_instance = [v for v in instance_best if v not in pareto]
+    if only_coverage or only_instance:
+        parts = []
+        if only_coverage:
+            parts.append(f"on coverage without winning any row: {', '.join(only_coverage)}")
+        if only_instance:
+            parts.append(f"wins a row despite being dominated overall: {', '.join(only_instance)}")
+        lines.append(
+            "The two fronts disagree, which is the interesting case rather than an inconsistency: "
+            + "; ".join(parts)
+            + ". Coverage is the set to DISCARD from; instance-best is the set to MERGE from."
+        )
+    elif pareto or instance_best:
+        # Only when there is something to agree ABOUT. With both fronts empty every arm
+        # crashed, and "both fronts agree" would read as a result immediately above the line
+        # saying it is a wiring problem.
+        lines.append("Both fronts agree on these arms.")
+    return lines
+
+
+def _matrix_footnotes(arms: list[ArmRowScores], row_ids: list[str]) -> list[str]:
+    """The three things the table alone cannot say: unscored arms, holes, and all-zero rows."""
+    lines: list[str] = []
     unscored = [a.variant_id for a in arms if not a.row_scores]
     if unscored:
         lines.append(
@@ -2819,7 +3008,28 @@ def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_b
             f"Rows no arm scored above zero: {', '.join(floored)}. These contribute nothing to the "
             + "front — usually a broken row or an unmet fixture precondition rather than N bad candidates."
         )
-    return "\n".join(lines)
+    return lines
+
+
+def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_best: list[str] | None = None) -> str:
+    """The row x candidate table, with the Pareto set marked and the holes made visible.
+
+    ``instance_best`` is keyword-only and optional so the existing two-positional-argument form
+    keeps working byte-for-byte. When given, the block names both fronts AND the arms they disagree
+    about — a reader shown two lists learns nothing; the diff is the finding.
+    """
+    if not arms:
+        return "_No arms to compare._"
+
+    row_ids = sorted({rid for arm in arms for rid in arm.row_scores})
+    return "\n".join(
+        [
+            *_matrix_table(arms, row_ids, pareto),
+            "",
+            *_front_summary(pareto, instance_best),
+            *_matrix_footnotes(arms, row_ids),
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------

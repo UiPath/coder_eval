@@ -53,11 +53,15 @@ from coder_eval.optimize_gate import (
     SearchComparison,
     _balance_pair,
     _discreteness_floor,
+    _execution_diagnostics,
+    _front_summary,
     _holm_threshold,
     _label_pairs,
+    _load_and_pair,
     _median,
     _note_holm_family,
     _note_ordinary_negative,
+    _refusal_message,
     _render_checks,
     _row_cost_levels,
     _row_costs,
@@ -91,7 +95,13 @@ from coder_eval.optimize_gate import (
     resolve_model,
     search_compare,
 )
-from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, DEFAULT_ALPHA, bootstrap_p_floor, holm_rejections
+from coder_eval.reports_stats import (
+    BOOTSTRAP_RESAMPLES,
+    DEFAULT_ALPHA,
+    PairedComparison,
+    bootstrap_p_floor,
+    holm_rejections,
+)
 
 
 SUITE = "my-skill-activation"
@@ -3121,6 +3131,376 @@ class TestConstructionIsBehaviourPreserving:
         # parameter, and it is `None` on every healthy verdict — so a pin that never refuses cannot
         # see it dropped.
         _assert_matches_pin(_exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4))), "execution_gate_refused")
+
+
+class TestLoadAndPair:
+    """The load/pair/exclude step, called directly rather than only through the gate.
+
+    Six concerns used to be interleaved in `activation_gate`'s first hundred lines. Testing them
+    through the gate meant paying two bootstraps to assert a note, so most of them were asserted
+    only incidentally.
+    """
+
+    def _pair(self, run_dirs: list[Path], **kwargs):
+        return _load_and_pair(
+            **{
+                "incumbent_run_dirs": run_dirs,
+                "candidate_run_dirs": run_dirs,
+                "incumbent_variant": "incumbent",
+                "candidate_variant": "candidate",
+                "suite_id": SUITE,
+                "criterion_index": 0,
+                **kwargs,
+            }
+        )
+
+    def test_a_clean_pair_carries_every_row_and_no_notes(self, tmp_path: Path) -> None:
+        rows = {f"r{i}": [("yes", "yes" if i else "no")] for i in range(4)}
+        paired = self._pair(_shared_dirs(tmp_path, rows, rows))
+        assert paired.scored_row_ids == ["r0", "r1", "r2", "r3"]
+        assert paired.rows_excluded == 0
+        assert paired.notes == []
+        # Four rows x three invocations, flattened from the same clusters.
+        assert len(paired.incumbent_clusters) == 4
+        assert len(paired.incumbent_pairs) == 12
+        assert paired.incumbent_pairs == paired.candidate_pairs
+        assert paired.n_discordant == 0
+
+    def test_a_zero_row_incumbent_says_which_arm_and_what_did_not_match(self, tmp_path: Path) -> None:
+        run_dirs = _write_arm(tmp_path, "candidate", {"r1": [("yes", "yes")]})
+        paired = self._pair(run_dirs)
+        assert paired.scored_row_ids == []
+        assert any("the incumbent arm loaded ZERO rows" in n for n in paired.notes)
+        assert not any("the candidate arm loaded ZERO rows" in n for n in paired.notes)
+
+    def test_an_unpaired_row_on_each_side_is_excluded_and_counted(self, tmp_path: Path) -> None:
+        incumbent = {"shared": [("yes", "yes")], "only-inc": [("yes", "yes")]}
+        candidate = {"shared": [("yes", "yes")], "only-cand": [("yes", "yes")]}
+        paired = self._pair(_shared_dirs(tmp_path, incumbent, candidate))
+        assert paired.scored_row_ids == ["shared"]
+        assert paired.rows_excluded == 2
+        assert any("only-cand, only-inc" in n for n in paired.notes)
+
+    def test_a_hollow_row_is_dropped_from_both_vectors(self, tmp_path: Path) -> None:
+        # The row directory exists on both arms, so it PAIRS — but only one arm scored it.
+        run_dirs = _shared_dirs(tmp_path, {"r1": [("yes", "yes")]}, {"r1": [("yes", "yes")]})
+        for run_dir in run_dirs:
+            _write_row(run_dir, "candidate", "hollow", _eval_result("hollow", []))
+            _write_row(run_dir, "incumbent", "hollow", _eval_result("hollow", [("yes", "yes")]))
+        paired = self._pair(run_dirs)
+        assert paired.scored_row_ids == ["r1"]
+        assert paired.rows_excluded == 1
+        assert any("scored on only one arm" in n and "hollow" in n for n in paired.notes)
+
+    def test_unbalanced_replicates_are_trimmed_and_the_drop_is_counted(self, tmp_path: Path) -> None:
+        run_dirs = _shared_dirs(tmp_path, {"r1": [("yes", "yes")]}, {"r1": [("yes", "yes")]})
+        # A fourth candidate replicate for r1 only, which would otherwise weigh 4:3.
+        _write_row(run_dirs[0], "candidate", "r1", _eval_result("r1", [("yes", "yes")]), replicate=1)
+        paired = self._pair(run_dirs)
+        assert len(paired.incumbent_pairs) == len(paired.candidate_pairs) == 3
+        assert any("dropping 1 observation(s)" in n for n in paired.notes)
+
+    def test_a_criterion_index_past_the_end_is_named_as_a_wiring_mistake(self, tmp_path: Path) -> None:
+        rows = {"r1": [("yes", "yes")]}
+        paired = self._pair(_shared_dirs(tmp_path, rows, rows), criterion_index=7)
+        assert paired.incumbent_pairs == [] and paired.candidate_pairs == []
+        assert any("criterion_index=7 selected NO classification results" in n for n in paired.notes)
+        assert any("the index is past the end" in n for n in paired.notes)
+
+    def test_the_returned_notes_list_is_the_one_the_gate_keeps_appending_to(self, tmp_path: Path) -> None:
+        # Pydantic COPIES the list at construction, so a note appended after the model is built is
+        # silently discarded. The gate must hold THIS list, not a copy of it.
+        rows = {"r1": [("yes", "yes")]}
+        paired = self._pair(_shared_dirs(tmp_path, rows, rows))
+        before = len(paired.notes)
+        paired.notes.append("added by the caller")
+        assert len(paired.notes) == before + 1
+
+
+def test_the_gate_notes_keep_their_order(tmp_path: Path) -> None:
+    """Note ORDER is observable — `render_markdown` prints them in order and the pins compare bytes.
+
+    A fixture that trips three of them at once, asserted as an ordered list of prefixes rather than
+    a set, so the extraction cannot quietly reorder the ladder.
+
+    THREE, not all four: the zero-row note fires only when an arm loaded nothing, and an arm that
+    loaded nothing pairs no rows — so it cannot co-occur with the hollow and unbalanced notes,
+    which need paired rows to exist. `TestLoadAndPair` covers that one on its own fixture.
+    """
+    incumbent = {"shared": [("yes", "yes")], "only-inc": [("yes", "yes")]}
+    candidate = {"shared": [("yes", "yes")]}
+    run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+    for run_dir in run_dirs:
+        _write_row(run_dir, "candidate", "hollow", _eval_result("hollow", []))
+        _write_row(run_dir, "incumbent", "hollow", _eval_result("hollow", [("yes", "yes")]))
+    _write_row(run_dirs[0], "candidate", "shared", _eval_result("shared", [("yes", "yes")]), replicate=1)
+
+    verdict = _gate(run_dirs)
+    prefixes = [
+        "1 row(s) present in only one arm",
+        "1 row(s) scored on only one arm",
+        "1 row(s) had different replicate counts",
+    ]
+    matched = [
+        next(p for p in prefixes if n.startswith(p)) for n in verdict.notes if any(n.startswith(p) for p in prefixes)
+    ]
+    assert matched == prefixes, f"note order changed: {matched}"
+
+
+class TestRefusalMessage:
+    """`_refusal_message` called directly, one test per branch of a ~60-line message builder."""
+
+    def _verdict(
+        self,
+        *,
+        p_floor: float | None,
+        n_discordant: int | None = 3,
+        rows_paired: int = 6,
+        n_resamples: int = GATE_RESAMPLES,
+    ) -> ActivationGateVerdict:
+        # Literal keywords, not a splat: `extra="forbid"` plus CE041's static half is the two-sided
+        # rule this repo settled on, and a helper that splatted would be the shape it forbids.
+        return ActivationGateVerdict(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=SUITE,
+            criterion_index=0,
+            confidence=0.95,
+            n_resamples=n_resamples,
+            rows_paired=rows_paired,
+            rows_excluded=0,
+            incumbent_f1=0.0,
+            candidate_f1=1.0,
+            mean_diff=1.0,
+            ci_low=0.5,
+            ci_high=1.0,
+            p_value=0.01,
+            p_floor=p_floor,
+            n_discordant=n_discordant,
+        )
+
+    def test_none_when_the_floor_is_below_the_threshold(self) -> None:
+        assert _refusal_message(self._verdict(p_floor=0.001), threshold=0.025, family_size=2, alpha=0.05) is None
+
+    def test_none_when_there_is_no_floor_at_all(self) -> None:
+        # `None`, never `""` — `gate_refusal` is `str | None` and the render branches on `is not None`.
+        assert _refusal_message(self._verdict(p_floor=None), threshold=0.025, family_size=2, alpha=0.05) is None
+
+    def test_a_floor_of_one_is_the_zero_discordant_case_with_its_own_message(self) -> None:
+        message = _refusal_message(self._verdict(p_floor=1.0), threshold=0.025, family_size=2, alpha=0.05)
+        assert message is not None
+        assert "identical labels on every one of the 6" in message
+        assert "adding rows cannot change it" in message
+        assert "survivor(s)" not in message, "the family lever is meaningless when nothing differs"
+
+    def test_a_finite_floor_names_both_levers_and_the_required_discordant_count(self) -> None:
+        message = _refusal_message(
+            self._verdict(p_floor=0.03125, n_discordant=3, n_resamples=2000), threshold=0.025, family_size=2, alpha=0.05
+        )
+        assert message is not None
+        assert "Gate at most 1 survivor(s)" in message
+        assert "DISAGREE on from 3 to 4" in message
+        assert "adding rows they agree on makes this floor worse" in message
+
+    def test_a_verdict_with_no_discordant_count_gets_the_family_lever_alone(self) -> None:
+        # Never a sentence about a count the verdict does not carry.
+        message = _refusal_message(
+            self._verdict(p_floor=0.03125, n_discordant=None), threshold=0.025, family_size=2, alpha=0.05
+        )
+        assert message is not None
+        assert "Gate at most 1 survivor(s) at alpha=0.05." in message
+        assert "DISAGREE on" not in message
+
+    def test_an_unreachable_bar_says_rows_are_irrelevant_rather_than_insufficient(self) -> None:
+        # `min_discordant_rows` returns None when even every row discordant leaves the estimator's
+        # own floor above the bar — a draw-count fact, so "more rows" would be actively wrong.
+        message = _refusal_message(
+            self._verdict(p_floor=0.5, n_discordant=1, rows_paired=4, n_resamples=10),
+            threshold=0.0001,
+            family_size=5,
+            alpha=0.05,
+        )
+        assert message is not None
+        assert "no discordant count clears this bar" in message
+        assert "a larger n_resamples or a smaller family — not rows" in message
+
+    def test_a_non_finite_floor_takes_the_no_refusal_path_rather_than_raising(self) -> None:
+        """The one place the early return is not a plain De Morgan of the guard it replaced.
+
+        Every comparison against NaN is False, so a NaN floor refused nothing before; under a
+        `p_floor <= threshold` spelling it falls THROUGH to `math.floor(alpha / nan)` and raises
+        out of the skill's inline snippet.
+
+        Built with `model_construct`, which is the honest framing: pydantic's validator rejects a
+        non-finite float, so this cannot arrive through a validated verdict and the guard is
+        defence in depth rather than a live path. It is kept because it is the ORIGINAL spelling's
+        semantics — preserving them costs one `not` — and because `_refusal_message` is a
+        standalone function now, reachable by a caller that builds a verdict without validating it.
+        """
+        verdict = ActivationGateVerdict.model_construct(rows_paired=6, p_floor=float("nan"), n_discordant=3)
+        assert _refusal_message(verdict, threshold=0.025, family_size=2, alpha=0.05) is None
+
+    def test_no_workable_family_size_says_so(self) -> None:
+        message = _refusal_message(
+            self._verdict(p_floor=0.9, n_discordant=1), threshold=0.025, family_size=2, alpha=0.05
+        )
+        assert message is not None
+        assert "No family size works at alpha=0.05, not even a family of one" in message
+
+
+class TestFrontSummary:
+    """`None` and `[]` are different, and that distinction is the legacy two-argument call shape."""
+
+    def test_none_emits_the_pareto_line_only(self) -> None:
+        assert _front_summary(["a"], None) == ["Pareto front (**bold**): a"]
+
+    def test_an_empty_instance_best_still_emits_its_line(self) -> None:
+        lines = _front_summary(["a"], [])
+        assert any(line.endswith("merge shortlist): none") for line in lines)
+
+    def test_two_empty_fronts_emit_no_agreement_sentence(self) -> None:
+        # With both fronts empty every arm crashed, and "both fronts agree" would read as a result
+        # immediately above the line saying it is a wiring problem.
+        lines = _front_summary([], [])
+        assert not any("agree" in line for line in lines)
+        assert sum("none" in line for line in lines) == 2
+
+    def test_identical_non_empty_fronts_agree(self) -> None:
+        assert "Both fronts agree on these arms." in _front_summary(["a", "b"], ["a", "b"])
+
+    def test_disagreeing_fronts_name_each_side(self) -> None:
+        text = "\n".join(_front_summary(["a"], ["b"]))
+        assert "on coverage without winning any row: a" in text
+        assert "wins a row despite being dominated overall: b" in text
+        assert "Coverage is the set to DISCARD from" in text
+
+
+class TestExecutionDiagnostics:
+    """`_execution_diagnostics` called directly, one test per finding plus the ordering rule."""
+
+    _ROWS: ClassVar[dict[str, list[EvaluationResult]]] = {"r1": [], "r2": []}
+
+    def _comparison(self, **kwargs) -> PairedComparison:
+        return PairedComparison(
+            **{
+                "vid_a": "candidate",
+                "vid_b": "incumbent",
+                "task_count": 4,
+                "excluded_count": 0,
+                "mean_diff": 0.5,
+                "ci_low": 0.3,
+                "ci_high": 0.7,
+                "effect_size": 2.0,
+                "p_value": 0.001,
+                **kwargs,
+            }
+        )
+
+    def _run(self, tmp_path: Path, **kwargs) -> tuple[str | None, list[str]]:
+        rows = {"r1": [_scored_result("r1", 1.0)]}
+        return _execution_diagnostics(
+            **{
+                "incumbent_rows": rows,
+                "candidate_rows": rows,
+                "incumbent_variant": "incumbent",
+                "candidate_variant": "candidate",
+                "suite_id": SUITE,
+                "run_dir": tmp_path,
+                "comparison": self._comparison(),
+                "mean_diff": 0.5,
+                "effect_size": 2.0,
+                "mde": 0.1,
+                "bounds": [0.3, 0.7],
+                "refused_already": False,
+                **kwargs,
+            }
+        )
+
+    def test_a_healthy_sample_refuses_nothing(self, tmp_path: Path) -> None:
+        refusal, notes = self._run(tmp_path)
+        assert refusal is None and notes == []
+
+    def test_an_empty_incumbent_arm_refuses(self, tmp_path: Path) -> None:
+        refusal, _notes = self._run(tmp_path, incumbent_rows={})
+        assert refusal is not None and "the incumbent arm ('incumbent')" in refusal
+        assert "the candidate arm" not in refusal
+
+    def test_both_arms_empty_produce_one_refusal_naming_both(self, tmp_path: Path) -> None:
+        refusal, _notes = self._run(tmp_path, incumbent_rows={}, candidate_rows={})
+        assert refusal is not None
+        assert "the incumbent arm ('incumbent') and the candidate arm ('candidate')" in refusal
+
+    def test_fewer_than_two_paired_rows_refuses(self, tmp_path: Path) -> None:
+        refusal, _notes = self._run(tmp_path, comparison=self._comparison(task_count=1))
+        assert refusal is not None and "fewer than the 2 a paired interval needs" in refusal
+
+    def test_zero_variance_at_a_zero_difference_is_its_own_message(self, tmp_path: Path) -> None:
+        refusal, _notes = self._run(tmp_path, mean_diff=0.0, effect_size=None, bounds=[0.0, 0.0], mde=None)
+        assert refusal is not None
+        assert "identical per-row score" in refusal and "p = 1.0000" in refusal
+
+    def test_zero_variance_at_a_constant_non_zero_difference_is_the_other(self, tmp_path: Path) -> None:
+        refusal, _notes = self._run(tmp_path, effect_size=None, bounds=[0.5, 0.5], mde=None)
+        assert refusal is not None
+        assert "differed by exactly 0.500 on every one" in refusal
+        assert "p = 0.0000" in refusal
+
+    def test_below_the_mde_with_an_interval_excluding_zero_refuses(self, tmp_path: Path) -> None:
+        refusal, _notes = self._run(tmp_path, mean_diff=0.05, mde=0.2, bounds=[0.01, 0.09])
+        assert refusal is not None
+        assert "confident claim about an effect this suite cannot see" in refusal
+
+    def test_below_the_mde_with_an_interval_containing_zero_is_an_ordinary_negative(self, tmp_path: Path) -> None:
+        # 37 of 40 true-null candidates land here. Refusing them would retire NOT PROMOTED.
+        refusal, notes = self._run(tmp_path, mean_diff=0.05, mde=0.2, bounds=[-0.1, 0.2])
+        assert refusal is None
+        assert any("ordinary negative result and not a measurement problem" in n for n in notes)
+
+    def test_an_unavailable_floor_is_noted_not_skipped(self, tmp_path: Path) -> None:
+        _refusal, notes = self._run(tmp_path, mde=None)
+        assert any("came back unavailable" in n for n in notes)
+
+    def test_a_floor_at_the_resolution_limit_is_noted_as_unpriced(self, tmp_path: Path) -> None:
+        _refusal, notes = self._run(tmp_path, mde=0.0)
+        assert any("came back 0.000" in n and "never as 'this suite can resolve anything'" in n for n in notes)
+
+    def test_an_interval_tighter_than_the_floor_is_a_caveat_not_a_refusal(self, tmp_path: Path) -> None:
+        # The t reads BETWEEN-row spread, which the MDE never sees. Refusing would throw away
+        # genuine large consistent wins.
+        refusal, notes = self._run(tmp_path, mean_diff=0.5, mde=0.3, bounds=[0.49, 0.51])
+        assert refusal is None
+        assert any("tighter than this suite's own noise floor" in n for n in notes)
+
+    def test_the_first_of_two_causes_wins(self, tmp_path: Path) -> None:
+        # Both the zero-row and the zero-variance causes apply. If the rows never loaded, whether
+        # their differences vary is moot — so the wiring message is the one that survives.
+        refusal, _notes = self._run(
+            tmp_path, incumbent_rows={}, mean_diff=0.0, effect_size=None, bounds=[0.0, 0.0], mde=None
+        )
+        assert refusal is not None
+        assert "loaded ZERO rows" in refusal
+        assert "zero variance" not in refusal
+
+    def test_refused_already_suppresses_both_advisory_notes(self, tmp_path: Path) -> None:
+        # A note explaining a number printed under a refusal headline contradicts it.
+        _refusal, unavailable = self._run(tmp_path, mde=None, refused_already=True)
+        assert unavailable == []
+        _refusal, tighter = self._run(tmp_path, mean_diff=0.5, mde=0.3, bounds=[0.49, 0.51], refused_already=True)
+        assert tighter == []
+
+    def test_a_cause_found_here_also_suppresses_them(self, tmp_path: Path) -> None:
+        # `refused_already` is the CALLER's flag; a zero-variance verdict refused three lines up
+        # would otherwise print a floor note under its own refusal headline.
+        refusal, notes = self._run(tmp_path, mean_diff=0.0, effect_size=None, bounds=[0.0, 0.0], mde=None)
+        assert refusal is not None
+        assert not any("came back unavailable" in n for n in notes)
+
+    def test_it_neither_refuses_nor_builds_a_verdict_itself(self) -> None:
+        # Two setters for one field is the state `_refuse` collapsed; a helper that reached back
+        # into the gate's closure could not be tested without building a gate around it.
+        source = inspect.getsource(_execution_diagnostics)
+        assert "_verdict(" not in source
+        assert "gate_refusal" not in source
 
 
 _RENDER_PINS = Path(__file__).parent / "_fixtures" / "optimize_renders"
