@@ -199,6 +199,28 @@ def _label_pairs(results: list[EvaluationResult], criterion_index: int) -> list[
     return pairs
 
 
+def _balance_pair[T](incumbent: list[T], candidate: list[T]) -> tuple[list[T], list[T]]:
+    """Trim two arms' observations for ONE row to a common count, the shorter one winning.
+
+    A row's weight in an arm's metric is its observation count, so an arm that contributed 3
+    replicates where the other contributed 2 has silently reweighted the comparison — and the
+    trigger is mundane: Stage B is three separate invocations and one interrupted run leaves a
+    partial row set. Measured before this rule existed, two arms with BYTE-IDENTICAL labels on
+    every row produced f1 0.818 vs 0.750 with an interval excluding zero (:func:`activation_gate`),
+    and the sibling check read recall.yes 0.5 against 0.6 from one row's extra replicate.
+
+    Generic over the element type, exactly as :func:`_floor_from_clusters` is and for the same
+    reason: the guardrail trims floats, the F1 and sibling paths trim label pairs. It was spelled
+    three times, in three shapes, and only one of the three surfaced the trim to the user.
+
+    NOT used by :func:`measure_execution_noise_floor`, whose row-wise split takes a minimum ACROSS
+    rows rather than between two arms of one row — a genuinely different computation that stays
+    separate.
+    """
+    keep = min(len(incumbent), len(candidate))
+    return incumbent[:keep], candidate[:keep]
+
+
 def _observed_result_types(rows: dict[str, list[EvaluationResult]], criterion_index: int) -> set[str]:
     """The result types actually sitting at ``criterion_index`` — for the wrong-index note."""
     found: set[str] = set()
@@ -384,7 +406,8 @@ def cost_latency_guardrails(
         # A row with no measurement on one arm already falls through to the note-and-None path.
         paired = [(extract(incumbent_rows.get(rid, [])), extract(candidate_rows.get(rid, []))) for rid in ids]
         measured = sum(1 for inc, _c in paired if inc), sum(1 for _i, cand in paired if cand)
-        comparable = [(inc[: min(len(inc), len(cand))], cand[: min(len(inc), len(cand))]) for inc, cand in paired]
+        comparable = [_balance_pair(inc, cand) for inc, cand in paired]
+        # A different rule, applied AFTER the trim: drop rows one arm did not measure at all.
         comparable = [(inc, cand) for inc, cand in comparable if inc and cand]
 
         incumbent_clusters = [inc for inc, _c in comparable]
@@ -950,8 +973,7 @@ def _balanced_sibling_pairs(
     for row_id in paired_row_ids:
         incumbent = _label_pairs(incumbent_rows.get(row_id, []), index)
         candidate = _label_pairs(candidate_rows.get(row_id, []), index)
-        keep = min(len(incumbent), len(candidate))
-        per_row.append((incumbent[:keep], candidate[:keep]))
+        per_row.append(_balance_pair(incumbent, candidate))
     return per_row
 
 
@@ -1155,9 +1177,9 @@ def activation_gate(
     dropped = 0
     for rid in scored_row_ids:
         inc, cand = per_row[rid]
-        keep = min(len(inc), len(cand))
-        dropped += len(inc) + len(cand) - 2 * keep
-        balanced[rid] = (inc[:keep], cand[:keep])
+        kept_inc, kept_cand = _balance_pair(inc, cand)
+        dropped += len(inc) + len(cand) - len(kept_inc) - len(kept_cand)
+        balanced[rid] = (kept_inc, kept_cand)
     unbalanced_rows = [rid for rid in scored_row_ids if len(per_row[rid][0]) != len(per_row[rid][1])]
     if unbalanced_rows:
         notes.append(
@@ -1332,6 +1354,33 @@ def activation_gate(
     )
 
 
+# The four notes both Holm wrappers emit verbatim. They were byte-identical copies in two functions
+# 600 lines apart; a wording fix applied to one of them would have left the two tracks describing
+# the same decision differently in a ledger read back weeks later.
+#
+# Deliberately NOT collapsed with them: the zero-row and below-MDE notes. Those diverged on purpose
+# — the execution track's zero-row case became a `gate_refusal` with different text, and its MDE
+# note names `weighted_score` because that is the statistic its gate reads. Two tracks saying
+# different things there is the finding, not drift.
+_NOTE_OUTSIDE_FAMILY = "not promoted: the sample could not support a p-value, so this arm is outside the family."
+_NOTE_CI_CONTAINS_ZERO = (
+    "not promoted: the Holm-corrected test rejects but the confidence interval still "
+    "contains zero, so the effect is not separated at the reported interval width."
+)
+
+
+def _note_ordinary_negative(p_value: float, family_size: int, alpha: float) -> str:
+    return (
+        f"not promoted: p = {p_value:.4f} did not clear the Holm threshold for its rank in a "
+        f"family of {family_size} (alpha={alpha}). This is the ordinary negative result — the "
+        "interval and the effect size above are what to report."
+    )
+
+
+def _note_holm_family(family_size: int, alpha: float) -> str:
+    return f"Holm applied across a family of {family_size} at alpha={alpha}."
+
+
 def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_ALPHA) -> list[ActivationGateVerdict]:
     """Decide the whole survivor family at once, and record the decision on each verdict.
 
@@ -1362,7 +1411,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     for i, verdict in enumerate(verdicts):
         notes = list(verdict.notes)
         if verdict.p_value is None:
-            notes.append("not promoted: the sample could not support a p-value, so this arm is outside the family.")
+            notes.append(_NOTE_OUTSIDE_FAMILY)
             decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
             continue
 
@@ -1448,10 +1497,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         # and the defect this whole field exists to fix, reborn.
         promoted = i in rejected_at and favours_candidate and siblings_hold and excludes_zero and refusal is None
         if i in rejected_at and favours_candidate and siblings_hold and not excludes_zero:
-            notes.append(
-                "not promoted: the Holm-corrected test rejects but the confidence interval still "
-                + "contains zero, so the effect is not separated at the reported interval width."
-            )
+            notes.append(_NOTE_CI_CONTAINS_ZERO)
         if i in rejected_at and not siblings_hold:
             notes.append(
                 "not promoted: the interval separates but a sibling's recall.yes dropped — this candidate "
@@ -1460,11 +1506,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         if i in rejected_at and not favours_candidate:
             notes.append("not promoted: the interval separates in the incumbent's favour.")
         if i not in rejected_at and refusal is None:
-            notes.append(
-                f"not promoted: p = {verdict.p_value:.4f} did not clear the Holm threshold for its rank "
-                + f"in a family of {len(family)} (alpha={alpha}). This is the ordinary negative result — "
-                + "the interval and the effect size above are what to report."
-            )
+            notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
         # A p at the resample floor is a resolution statement, not a measurement: the corrected
         # threshold can sit BELOW what the bootstrap can express, and then no candidate can ever
         # promote however good it is. Measured: 4 perfect candidates at 8 rows flip from all-rejected
@@ -1479,7 +1521,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
                 + "n_resamples before believing either answer. A small suite has its own coarser floor: with "
                 + "few positive rows the smallest achievable p is bounded well above the estimator's."
             )
-        notes.append(f"Holm applied across a family of {len(family)} at alpha={alpha}.")
+        notes.append(_note_holm_family(len(family), alpha))
         # The refusal lives on `gate_refusal` and NOT in `notes`: notes is the "everything the
         # reader needs to distrust the numbers" channel, a refusal is a headline, and duplicating
         # it would print the same sentence twice in one block.
@@ -2125,7 +2167,7 @@ def holm_promote_execution(
             # cause lands here carrying a refusal, so an unguarded note would print an ordinary
             # negative result directly under a refusal headline.
             if verdict.gate_refusal is None:
-                notes.append("not promoted: the sample could not support a p-value, so this arm is outside the family.")
+                notes.append(_NOTE_OUTSIDE_FAMILY)
             decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
             continue
 
@@ -2148,23 +2190,16 @@ def holm_promote_execution(
                     + "resolved as candidate - incumbent, so this reads the way it looks.)"
                 )
             elif i in rejected_at and not excludes_zero:
-                notes.append(
-                    "not promoted: the Holm-corrected test rejects but the confidence interval still "
-                    + "contains zero, so the effect is not separated at the reported interval width."
-                )
+                notes.append(_NOTE_CI_CONTAINS_ZERO)
             elif i not in rejected_at:
-                notes.append(
-                    f"not promoted: p = {verdict.p_value:.4f} did not clear the Holm threshold for its rank in "
-                    + f"a family of {len(family)} (alpha={alpha}). This is the ordinary negative result — the "
-                    + "interval and the effect size above are what to report."
-                )
+                notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
         for check in (*verdict.integrity_checks, *verdict.guardrails):
             if not check.passed:
                 notes.append(
                     f"{check.name} FAILED — this blocks the promotion even if the statistic separated. "
                     + "It is reported here and gated in the rendered block, not folded into `promoted`."
                 )
-        notes.append(f"Holm applied across a family of {len(family)} at alpha={alpha}.")
+        notes.append(_note_holm_family(len(family), alpha))
         decided.append(verdict.model_copy(update={"promoted": promoted, "holm_alpha": alpha, "notes": notes}))
     return decided
 

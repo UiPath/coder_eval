@@ -51,10 +51,13 @@ from coder_eval.optimize_gate import (
     TASK_JSON_GLOB,
     CostQualityPoint,
     SearchComparison,
+    _balance_pair,
     _discreteness_floor,
     _holm_threshold,
     _label_pairs,
     _median,
+    _note_holm_family,
+    _note_ordinary_negative,
     _render_checks,
     _row_cost_levels,
     _row_costs,
@@ -277,6 +280,95 @@ class TestEveryWrongPathMessageDerivesFromTheGlob:
         source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
         assert "*/NN/task.json" not in source
         assert TASK_JSON_GLOB == "*/*/task.json"
+
+
+class TestBalancePair:
+    """The per-row replicate trim, which was spelled three times in three shapes."""
+
+    def test_equal_lengths_pass_through(self) -> None:
+        assert _balance_pair([1.0, 2.0], [3.0, 4.0]) == ([1.0, 2.0], [3.0, 4.0])
+
+    def test_a_longer_incumbent_trims_to_the_candidate(self) -> None:
+        assert _balance_pair([1.0, 2.0, 3.0], [4.0]) == ([1.0], [4.0])
+
+    def test_a_longer_candidate_trims_to_the_incumbent(self) -> None:
+        assert _balance_pair([1.0], [4.0, 5.0, 6.0]) == ([1.0], [4.0])
+
+    def test_an_empty_side_yields_two_empty_lists(self) -> None:
+        # The row is then dropped by whichever caller's own emptiness rule applies — a different
+        # question from balancing, and deliberately not this function's to answer.
+        assert _balance_pair([], [1.0, 2.0]) == ([], [])
+        assert _balance_pair([1.0, 2.0], []) == ([], [])
+
+    def test_it_is_generic_over_the_element_type(self) -> None:
+        # Both real element types: the guardrail trims floats, the F1 and sibling paths trim
+        # label pairs. A signature that only served one would have left two of the three sites.
+        pairs = [("yes", "yes"), ("no", "no"), ("yes", "no")]
+        assert _balance_pair(pairs, pairs[:1]) == ([("yes", "yes")], [("yes", "yes")])
+        assert _balance_pair([0.1, 0.2, 0.3], [0.4, 0.5]) == ([0.1, 0.2], [0.4, 0.5])
+
+
+def test_the_trim_is_declared_once() -> None:
+    """`min(len(a), len(b))` may appear in exactly one function: `_balance_pair`.
+
+    Counts call NODES, mirroring `TestHolmRejectionsIsConfined`. The trim was spelled three times
+    in three shapes and only one of the three surfaced the dropped observations to the user, which
+    is precisely how a re-weighted comparison stays invisible.
+
+    `measure_execution_noise_floor`'s `min(len(values) for values in replicated)` is explicitly
+    allowed: a GENERATOR argument rather than two `len` arguments, and a minimum ACROSS rows rather
+    than between two arms of one row — a different computation that stays separate.
+    """
+    source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    offenders: list[str] = []
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "min"):
+                continue
+            two_lens = len(node.args) == 2 and all(
+                isinstance(a, ast.Call) and isinstance(a.func, ast.Name) and a.func.id == "len" for a in node.args
+            )
+            if two_lens and function.name != "_balance_pair":
+                offenders.append(f"{function.name}:{node.lineno}")
+    assert not offenders, f"a per-arm observation trim outside _balance_pair: {offenders}"
+
+
+class TestBothTracksEmitTheSameHolmNotes:
+    """The four notes both wrappers emit are one declaration, not two byte-identical copies.
+
+    They lived 600 lines apart, so a wording fix applied to one would have left the two tracks
+    describing the same decision differently in a ledger read back weeks later.
+    """
+
+    def test_the_ordinary_negative_note_is_identical_across_tracks(self, tmp_path: Path) -> None:
+        # Same p, same family size, same alpha on both tracks — so any difference in the produced
+        # string is a difference in the DECLARATION, which is what this pins.
+        activation = _note_ordinary_negative(0.4321, 3, DEFAULT_ALPHA)
+        assert activation == _note_ordinary_negative(0.4321, 3, DEFAULT_ALPHA)
+        assert "0.4321" in activation and "family of 3" in activation
+
+    def test_both_wrappers_emit_the_shared_declarations(self, tmp_path: Path) -> None:
+        # Through the real wrappers, not the constants: a call site that kept its own copy would
+        # still produce an equal string today, so the source scan below is what makes this tight.
+        incumbent = {f"r{i}": [("yes", "no" if i else "yes")] for i in range(6)}
+        activation = holm_promote([_gate(_shared_dirs(tmp_path, incumbent, incumbent))])[0]
+        execution = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+        for verdict in (activation, execution):
+            assert _note_holm_family(1, DEFAULT_ALPHA) in verdict.notes
+
+    def test_neither_wrapper_respells_a_shared_note(self) -> None:
+        source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
+        for fragment in (
+            "the sample could not support a p-value",
+            "the Holm-corrected test rejects but the confidence",
+            "did not clear the Holm threshold for its rank",
+            "Holm applied across a family of",
+        ):
+            assert source.count(fragment) == 1, f"{fragment!r} is declared more than once"
 
 
 class TestLabelPairs:
