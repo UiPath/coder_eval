@@ -1414,21 +1414,49 @@ family of one, which is the same call. `execution_gate` alone never promotes any
 the block decided nothing — do not report it as "not promoted", do not re-run hoping for a
 different draw, and do not read the interval either way. It is *not* the activation track's
 `CANNOT SEPARATE AT THIS SIZE`, which reports a discreteness floor the paired *t* does not have.
-**Read the message before choosing a remedy, because there are two and they are not
+**Read the message before choosing a remedy, because there are five kinds and they are not
 interchangeable:**
 
-- **An arm loaded ZERO rows.** A wiring fault: the variant id, the suite id or the run directory is
-  wrong. The statistic comes from `experiment.json` while every check comes from the on-disk row
-  tree, so a valid experiment file beside a mistyped id leaves a confident p above a column of
-  green checks computed over nothing. Fix the path and re-run; nothing below the headline is
-  evidence.
+- **There was no comparison to make.** Both arms named the same variant; no experiment file, or one
+  that could not be read or parsed; an experiment declaring other than exactly two variants; or a
+  variant id the experiment does not carry (the message names the two it does). All wiring: fix the
+  ids or the `round<N>-gate.yaml` and re-run.
+- **An arm loaded ZERO rows.** The variant id, the suite id or the run directory is wrong. The
+  statistic comes from `experiment.json` while every check comes from the on-disk row tree, so a
+  valid experiment file beside a mistyped id leaves a confident p above a column of green checks
+  computed over nothing. Fix the path; nothing below the headline is evidence.
 - **The paired differences carry ZERO variance.** The two arms differed by an identical amount on
   *every* row, so the paired *t* reports p = 0.0000 with a zero-width interval and every promotion
   condition holds at once. Add rows whose difference the arms do **not** agree on, or add
-  replicates so within-row spread can appear. More rows of the same shape do not help.
+  replicates so within-row spread can appear. More rows of the same shape do not help. If the
+  identical amount was **zero**, that is a finding about the candidate — it behaved exactly like
+  the incumbent, and no number of rows changes it.
+- **Fewer than two rows paired.** No interval exists at all. The block still carries the counts, so
+  read `paired 1 · excluded 2` and find out why the rows did not pair.
+- **The difference is below the suite's minimum detectable effect *and the interval still excludes
+  zero*.** The MDE is measured by splitting the incumbent's replicates, where the true difference is
+  zero by construction, so it is this suite's run-to-run noise; a confident claim about an effect
+  under it is not a result. Add replicates or rows to lower the floor, or find rows where the
+  candidate's effect is larger.
 
-Neither cause is helped by gating a smaller family or lowering alpha — the bar was never what
+  **A candidate that simply does not help does NOT land here** — it is also below the floor, but its
+  interval contains zero, so it renders as an ordinary `NOT PROMOTED`. That is the distinction to
+  act on: `NOT A RESULT` means fix the measurement, `NOT PROMOTED` means write the next hypothesis.
+
+None of these is helped by gating a smaller family or lowering alpha — the bar was never what
 failed.
+
+**A floor of `0.000` is not a green light.** That last refusal needs a measured floor, and the null
+split returns exactly zero whenever every row's replicates agreed — common at two replicates. The
+block says the difference was *not* checked against a floor; do not read "minimum detectable
+effect: 0.000" as "this suite can resolve anything". Raise `--repeats` and check the rows ran.
+
+**One thing is reported without refusing, and the distinction is the point.** If the interval's
+half-width is below the MDE while the difference itself is above it, the block says so and the
+decision stands. The *t*'s interval comes from the spread of the differences *between rows*, which
+is tiny whenever the arms differ by a similar amount on every row, so a real and large win can
+report an absurdly small p. What is wrong is the reported precision, not the verdict — so read the
+difference against the floor and do not quote that p as confidence.
 
 **The tool resolves the subtraction; you never do.** `mean_diff` in this block is always
 `candidate - incumbent`, whichever order the experiment file declared its variants in. If you also

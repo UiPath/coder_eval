@@ -2296,19 +2296,21 @@ class TestExecutionGateLoading:
         )
         assert _exec_gate(run_dir).rows_paired == 4
 
-    def test_a_missing_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
+    def test_a_missing_experiment_file_is_refused_not_raised(self, tmp_path: Path) -> None:
         run_dir = _exec_run_dir(tmp_path, **_WINNER)
         (run_dir / "experiment.json").unlink()
         verdict = _exec_gate(run_dir)
         assert (verdict.mean_diff, verdict.ci_low, verdict.p_value) == (None, None, None)
-        assert any("experiment.json" in note and "-e" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None
+        assert "experiment.json" in verdict.gate_refusal and "-e" in verdict.gate_refusal
+        assert _headline(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith("NOT A RESULT")
 
     def test_a_malformed_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
         run_dir = _exec_run_dir(tmp_path, **_WINNER)
         (run_dir / "experiment.json").write_text("{not json", encoding="utf-8")
         verdict = _exec_gate(run_dir)
         assert verdict.p_value is None
-        assert any("could not be read or parsed" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None and "could not be read or parsed" in verdict.gate_refusal
 
     def test_an_unreadable_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
         # The docstring promises "Never an exception". `except ValueError` did not cover a
@@ -2325,14 +2327,15 @@ class TestExecutionGateLoading:
         with mock.patch.object(Path, "read_text", _raise_on_the_experiment_file):
             verdict = _exec_gate(run_dir)
         assert verdict.p_value is None and verdict.mean_diff is None
-        assert any("could not be read or parsed" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None and "could not be read or parsed" in verdict.gate_refusal
 
     def test_a_three_variant_experiment_names_the_exactly_two_precondition(self, tmp_path: Path) -> None:
         # The triage file re-passed at Stage B: the mistake reaching the gate.
         run_dir = _exec_run_dir(tmp_path, **_WINNER, variant_ids=["incumbent", "candidate", "cand-b"])
         verdict = _exec_gate(run_dir)
         assert verdict.p_value is None
-        assert any("EXACTLY two" in note and "round<N>-gate.yaml" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None
+        assert "EXACTLY two" in verdict.gate_refusal and "round<N>-gate.yaml" in verdict.gate_refusal
 
     def test_a_variant_the_experiment_does_not_carry_names_both_actual_ids(self, tmp_path: Path) -> None:
         run_dir = _exec_run_dir(tmp_path, **_WINNER)
@@ -2344,7 +2347,8 @@ class TestExecutionGateLoading:
             n_resamples=_FAST_RESAMPLES,
         )
         assert verdict.mean_diff is None
-        assert any("'incumbent'" in note and "'candidate'" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None
+        assert "'incumbent'" in verdict.gate_refusal and "'candidate'" in verdict.gate_refusal
 
     def test_an_incumbent_the_experiment_does_not_carry_fails_closed(self, tmp_path: Path) -> None:
         """The return is the ONLY thing acting here, so a regression in it is attributable.
@@ -2363,10 +2367,13 @@ class TestExecutionGateLoading:
             variant_ids=["inc-A", "candidate"],
         )
         verdict = _exec_gate(run_dir)
-        assert verdict.gate_refusal is None, "both arms loaded rows — the zero-row cause must not apply"
         assert (verdict.mean_diff, verdict.ci_low, verdict.ci_high) == (None, None, None)
         assert (verdict.p_value, verdict.effect_size) == (None, None)
-        assert any("could not be resolved against the arm you named" in note for note in verdict.notes)
+        # The message is what attributes it: both arms DID load rows, so the zero-row cause cannot
+        # be what set the refusal, and this text belongs to this branch alone.
+        assert verdict.gate_refusal is not None
+        assert "could not be resolved against the arm you named" in verdict.gate_refusal
+        assert "loaded ZERO rows" not in verdict.gate_refusal
         assert holm_promote_execution([verdict])[0].promoted is False
 
     def test_a_mistyped_incumbent_id_is_refused_rather_than_promoted(self, tmp_path: Path) -> None:
@@ -2387,12 +2394,17 @@ class TestExecutionGateLoading:
         assert decided.promoted is not True
         assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
-    def test_fewer_than_two_paired_rows_is_carried_not_treated_as_a_wiring_error(self, tmp_path: Path) -> None:
+    def test_fewer_than_two_paired_rows_is_refused_with_the_count_still_carried(self, tmp_path: Path) -> None:
+        # No interval can be computed at all, so there is nothing for a reader to weigh — rendering
+        # it as NOT PROMOTED says the candidate lost a comparison that never happened. The COUNTS
+        # stay on the verdict either way, which is what distinguishes this from a wiring fault: a
+        # reader can see `paired 1` rather than having it flattened into the message.
         run_dir = _exec_run_dir(tmp_path, incumbent={"r1": [0.2, 0.3]}, candidate={"r1": [0.8, 0.9]})
         verdict = _exec_gate(run_dir)
         assert verdict.rows_paired == 1
         assert verdict.p_value is None
-        assert any("fewer than the 2 a paired interval needs" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None
+        assert "fewer than the 2 a paired interval needs" in verdict.gate_refusal
 
     def test_an_unpairable_row_is_carried_as_excluded(self, tmp_path: Path) -> None:
         incumbent = {**_WINNER["incumbent"], "r5": [0.4]}
@@ -2483,18 +2495,104 @@ class TestExecutionGateMde:
         )
         assert _exec_gate(run_dir).mde == 0.0
 
-    def test_a_difference_below_the_mde_is_noted(self, tmp_path: Path) -> None:
-        # Wide within-row replicate spread gives a real floor; the arms differ by a hair. Both
-        # halves are asserted unconditionally — a guarded assertion is a silent no-op the moment
-        # the fixture drifts, which is how this test shipped vacuous the first time.
-        # The per-row split spreads must DIFFER, or the null half-split has no variance and the
-        # floor comes back a real 0.000 — which is what made the first version of this vacuous.
+    def test_a_difference_below_the_mde_is_refused(self, tmp_path: Path) -> None:
+        """An effect under the suite's own resolution is not a result — it is noise with a p.
+
+        `mde` is the half-width of a bootstrap interval on a NULL difference (the incumbent's own
+        replicates split against each other), so it is what this suite's run-to-run noise actually
+        is. Promoting a difference below it claims an effect the instrument cannot measure. It used
+        to be a note the reader could promote past.
+
+        The per-row SHIFTS differ so the paired differences carry variance: with a constant shift
+        the zero-variance refusal fires first and this test would pass without ever reaching the
+        branch it is named for. The per-row replicate spreads differ too, or the null half-split
+        has no variance and the floor comes back a real 0.000.
+        """
+        incumbent = {"r0": [0.1, 0.9], "r1": [0.3, 0.5], "r2": [0.0, 0.95], "r3": [0.45, 0.55], "r4": [0.2, 0.8]}
+        shifts = {"r0": 0.02, "r1": 0.03, "r2": 0.01, "r3": 0.025, "r4": 0.015}
+        candidate = {row: [round(v + shifts[row], 3) for v in values] for row, values in incumbent.items()}
+        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        assert verdict.mde is not None and verdict.mean_diff is not None
+        assert verdict.effect_size is not None, "fixture drifted — the zero-variance cause must NOT apply"
+        assert abs(verdict.mean_diff) < verdict.mde, "fixture drifted — the difference is no longer below the floor"
+        assert verdict.gate_refusal is not None
+        assert "minimum detectable effect" in verdict.gate_refusal
+        assert holm_promote_execution([verdict])[0].promoted is False
+
+    def test_an_unmeasurable_floor_is_said_rather_than_skipped(self, tmp_path: Path) -> None:
+        # Both MDE-based checks are inert without a positive floor, and a floor of exactly 0.000 is
+        # ordinary: the null split reduces to zero whenever every row carries the same replicate
+        # pattern. Rendered as "Minimum detectable effect: 0.000" and nothing else, that reads as
+        # "this suite can resolve anything" — the opposite of what it means.
+        rows = {f"r{i}": [0.1, 0.5] for i in range(4)}
+        candidate = {f"r{i}": [0.6 + 0.01 * i, 0.9 + 0.01 * i] for i in range(4)}
+        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=rows, candidate=candidate))
+        assert verdict.mde == 0.0, "fixture drifted — this test is about an unmeasurable floor"
+        assert verdict.gate_refusal is None
+        assert any("NOT checked against a noise floor" in note for note in verdict.notes)
+
+    def test_a_measurable_floor_says_nothing_about_being_unmeasurable(self, tmp_path: Path) -> None:
+        # The anti-over-fire half: the note must not print on a suite that DID price its floor.
         incumbent = {"r0": [0.1, 0.9], "r1": [0.3, 0.5], "r2": [0.0, 0.95], "r3": [0.45, 0.55], "r4": [0.2, 0.8]}
         candidate = {row: [round(v + 0.02, 3) for v in values] for row, values in incumbent.items()}
         verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
-        assert verdict.mde is not None and verdict.mean_diff is not None
-        assert abs(verdict.mean_diff) < verdict.mde, "fixture drifted — the difference is no longer below the floor"
-        assert any("minimum detectable effect" in note for note in verdict.notes)
+        assert verdict.mde is not None and verdict.mde > 0.0
+        assert not any("NOT checked against a noise floor" in note for note in verdict.notes)
+
+    def test_a_difference_above_a_measurable_mde_is_not_refused(self, tmp_path: Path) -> None:
+        # The anti-over-fire half. `_WINNER` cannot witness this: its floor is 2.8e-17, so
+        # "difference above the floor" is satisfied by any non-zero win at all and the assertion
+        # would pass on a 1e-9 one. This fixture prices a real floor and clears it by a margin.
+        incumbent = {"r0": [0.1, 0.5], "r1": [0.2, 0.3], "r2": [0.0, 0.55], "r3": [0.25, 0.35], "r4": [0.15, 0.45]}
+        candidate = {
+            row: [round(v + 0.42 + 0.02 * i, 3) for v in values] for i, (row, values) in enumerate(incumbent.items())
+        }
+        decided = holm_promote_execution(
+            [_exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))]
+        )[0]
+        assert decided.mde is not None and decided.mde > 0.05, "fixture drifted — the floor must be REAL"
+        assert decided.mean_diff is not None and abs(decided.mean_diff) > 2 * decided.mde
+        assert decided.gate_refusal is None and decided.promoted is True
+
+    def test_a_candidate_that_merely_does_not_help_is_a_negative_result_not_a_refusal(self, tmp_path: Path) -> None:
+        """The distinction the refusal must not swallow, and the reason it is two-sided.
+
+        Under a true null the difference is below the floor for nearly every candidate, so refusing
+        on that alone would retire NOT PROMOTED almost entirely and tell the reader to buy
+        replicates for a candidate whose only problem is that it does not work. An interval that
+        CONTAINS zero is the data agreeing it is null — an ordinary negative result.
+        """
+        incumbent = {"r0": [0.1, 0.9], "r1": [0.3, 0.5], "r2": [0.0, 0.95], "r3": [0.45, 0.55], "r4": [0.2, 0.8]}
+        # Differences straddling zero: a candidate that helps on some rows and hurts on others.
+        shifts = {"r0": 0.02, "r1": -0.03, "r2": 0.01, "r3": -0.02, "r4": 0.015}
+        candidate = {row: [round(v + shifts[row], 3) for v in values] for row, values in incumbent.items()}
+        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        assert verdict.mde is not None and verdict.mean_diff is not None and verdict.ci_low is not None
+        assert abs(verdict.mean_diff) < verdict.mde, "fixture drifted — it must be BELOW the floor"
+        assert verdict.ci_low < 0.0 < (verdict.ci_high or 0.0), "and its interval must contain zero"
+        assert verdict.gate_refusal is None, "below the floor AND consistent with zero is not a refusal"
+        decided = holm_promote_execution([verdict])[0]
+        assert decided.promoted is False
+        assert _headline(render_execution_markdown(decided)) == "NOT PROMOTED"
+
+    def test_an_interval_tighter_than_the_floor_is_a_caveat_not_a_refusal(self, tmp_path: Path) -> None:
+        """A large, consistent win reports an absurd p — the PRECISION is wrong, not the decision.
+
+        The paired t's interval comes from the between-row spread of the differences, so two arms
+        differing by a similar amount on every row report a half-width far below the suite's
+        measured noise. Refusing that would be worse than the defect: a genuine 8-row 0.30 win has
+        the same shape. So it is a note, and the promotion stands.
+        """
+        incumbent = {"r0": [0.1, 0.5], "r1": [0.2, 0.3], "r2": [0.0, 0.55], "r3": [0.25, 0.35], "r4": [0.15, 0.45]}
+        shifts = {"r0": 0.40, "r1": 0.405, "r2": 0.395, "r3": 0.40, "r4": 0.405}
+        candidate = {row: [round(v + shifts[row], 3) for v in values] for row, values in incumbent.items()}
+        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        assert verdict.mde is not None and verdict.ci_low is not None and verdict.ci_high is not None
+        half_width = (verdict.ci_high - verdict.ci_low) / 2.0
+        assert half_width < verdict.mde, "fixture drifted — the interval is no longer tighter than the floor"
+        assert verdict.mean_diff is not None and abs(verdict.mean_diff) > verdict.mde
+        assert verdict.gate_refusal is None, "an effect above the floor is a decision, however tight the interval"
+        assert any("tighter than this suite's own noise floor" in note for note in verdict.notes)
 
     def test_a_missing_effect_size_is_explained_by_the_refusal(self, tmp_path: Path) -> None:
         # Two arms agreeing exactly on every row: zero variance, so Cohen's d is undefined while
@@ -2642,19 +2740,31 @@ class TestHolmPromoteExecution:
     def test_empty_list_returns_empty(self) -> None:
         assert holm_promote_execution([]) == []
 
-    def test_a_refused_verdict_is_outside_the_family(self) -> None:
-        # Holm's step-down breaks at the first failure, so a refused verdict left in the vector
-        # drags down a genuine candidate ranked behind it — and the reader is shown NOT PROMOTED on
-        # a candidate whose only problem is a SIBLING gate run's wiring fault. The zero-row cause is
-        # set before experiment.json is read, so a refused verdict routinely carries a real p.
+    def test_a_refused_verdict_with_a_real_p_stays_in_the_family(self) -> None:
+        """Membership is `p_value is not None` and nothing else — dropping a refusal LOOSENS Holm.
+
+        Holm corrects for the hypotheses actually tested, and a candidate that was gated and
+        measured was tested however degenerate its sample turned out to be. Excluding it shrinks
+        `m`, so `alpha/m` gets looser for its siblings — the uncorrected-`p <= alpha` degeneration
+        approached from the other side. Measured while this was briefly wrong: two below-MDE
+        refusals promoted a p = 0.027 sibling that a family of three rejects.
+        """
         real = self._verdict(0.03)
-        refused = self._verdict(0.06, gate_refusal="the incumbent arm ('x') loaded ZERO rows")
-        assert holm_promote_execution([real])[0].promoted is True, "it promotes alone"
-        decided = holm_promote_execution([real, refused])
-        assert decided[0].promoted is True, "a refused sibling must not tighten the correction"
-        assert decided[1].promoted is False
-        # And the family size the note reports counts only the verdicts that were decisions.
+        refused = self._verdict(0.06, gate_refusal="the observed difference is below the MDE")
+        assert holm_promote_execution([real])[0].promoted is True, "it promotes in a family of one"
+        decided = holm_promote_execution([real, refused, self._verdict(0.04)])
+        assert any("family of 3" in note for note in decided[0].notes), "the refusal is counted"
+        assert decided[0].promoted is False, "the multiplicity that was actually incurred applies"
+        assert decided[1].promoted is False, "and the refusal itself never promotes"
+
+    def test_a_refusal_with_no_p_value_is_outside_the_family(self) -> None:
+        # The other half: a cause meaning "there was no comparison at all" has no p, so it is
+        # outside the family by the ordinary rule, without a second one keyed on the refusal.
+        real = self._verdict(0.03)
+        no_comparison = self._verdict(0.0, p_value=None, gate_refusal="there is no experiment file")
+        decided = holm_promote_execution([real, no_comparison])
         assert any("family of 1" in note for note in decided[0].notes)
+        assert decided[0].promoted is True and decided[1].promoted is False
 
     def test_a_refused_verdict_without_a_p_value_gets_no_negative_result_note(self) -> None:
         # Reachable, not theoretical: the zero-row refusal is set before `experiment.json` is even
@@ -2777,7 +2887,7 @@ class TestRenderExecutionMarkdown:
         )
         verdict = _exec_gate(run_dir)
         assert (verdict.mean_diff, verdict.p_value) == (None, None)
-        assert any("could not be read or parsed" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None and "could not be read or parsed" in verdict.gate_refusal
         assert holm_promote_execution([verdict])[0].promoted is False
 
 
@@ -2816,6 +2926,11 @@ def _assert_matches_pin(verdict, name: str) -> None:
     Compared as PARSED JSON so the pinned floats are the ones the run actually produced, and so a
     field ADDED to either model fails here rather than being silently absent from the expectation.
     Committed beside the other characterization fixtures (`report_snapshots`, `golden_streams`).
+
+    They have since outlived that one job and become ordinary characterization snapshots: an
+    INTENTIONAL change to what a verdict says will fail here too, and the fixture is then updated
+    with the diff reviewed. That is the point — every field of a promotion verdict is something a
+    reader acts on, so none of them should be able to move without someone looking at it.
     """
     expected = json.loads((_VERDICT_PINS / f"{name}.json").read_text(encoding="utf-8"))
     assert json.loads(verdict.model_dump_json()) == expected
@@ -3077,10 +3192,13 @@ class TestAnnexationRate:
 class TestExecutionGateCannotBeQuietlyMisread:
     """Every way this gate could report a confident verdict about nothing."""
 
-    def test_a_missing_row_tree_is_refused_even_when_the_experiment_file_is_fine(self, tmp_path: Path) -> None:
+    def test_a_mistyped_suite_id_is_refused_and_the_message_names_the_suite(self, tmp_path: Path) -> None:
         # The statistic comes from experiment.json and every CHECK comes from the row tree, so a
         # mistyped variant/suite/run-dir leaves a perfectly good p beside four `— -> —` passes.
         # Measured before the refusal existed: headline PROMOTED, every check green.
+        #
+        # A wrong SUITE id also empties both arms, but the more specific cause fires first: no row
+        # of that suite scored on both arms, and naming the suite is what the reader has to fix.
         run_dir = _exec_run_dir(tmp_path, **_WINNER)
         verdict = execution_gate(
             run_dir=run_dir,
@@ -3089,13 +3207,29 @@ class TestExecutionGateCannotBeQuietlyMisread:
             suite_id="a-suite-that-was-never-run",
             n_resamples=_FAST_RESAMPLES,
         )
-        # ONE refusal naming BOTH arms, not one note per arm: the loop used to append twice.
         assert verdict.gate_refusal is not None
-        assert "'incumbent'" in verdict.gate_refusal and "'candidate'" in verdict.gate_refusal
-        assert not any("loaded ZERO rows" in note for note in verdict.notes)
+        # Pin WHICH cause: the zero-row message interpolates the suite id too, so asserting the id
+        # alone would pass under either and the precedence claim above would go unwitnessed.
+        assert "no paired comparison" in verdict.gate_refusal
+        assert "a-suite-that-was-never-run" in verdict.gate_refusal
+        assert "loaded ZERO rows" not in verdict.gate_refusal
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is not True
         assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+
+    def test_both_arms_empty_produce_exactly_one_refusal_naming_both(self, tmp_path: Path) -> None:
+        # Every id correct and the experiment file valid — only the row tree is gone. That is the
+        # case no other cause can see, and it is where the zero-row message earns its place. ONE
+        # refusal naming both arms: the loop this replaced appended the same finding twice.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        shutil.rmtree(run_dir / "incumbent")
+        shutil.rmtree(run_dir / "candidate")
+        verdict = _exec_gate(run_dir)
+        assert verdict.gate_refusal is not None and "loaded ZERO rows" in verdict.gate_refusal
+        assert "the incumbent arm ('incumbent')" in verdict.gate_refusal
+        assert "the candidate arm ('candidate')" in verdict.gate_refusal
+        assert not any("loaded ZERO rows" in note for note in verdict.notes), "one message, not one per arm"
+        assert _headline(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith("NOT A RESULT")
 
     def test_one_empty_arm_is_refused_where_the_variant_check_does_not_fire(self, tmp_path: Path) -> None:
         # A VALID incumbent id whose rows are simply not on disk (right id, wrong run dir). The
@@ -3141,7 +3275,7 @@ class TestExecutionGateCannotBeQuietlyMisread:
             n_resamples=_FAST_RESAMPLES,
         )
         assert (verdict.mean_diff, verdict.p_value, verdict.ci_low) == (None, None, None)
-        assert any("both 'incumbent'" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None and "both 'incumbent'" in verdict.gate_refusal
 
     def test_a_row_that_vanished_from_one_arm_lowers_its_completion_rate(self, tmp_path: Path) -> None:
         # Computed over the paired intersection, this check reported 8/8 against 8/8 and PASSED
@@ -3245,6 +3379,8 @@ class TestGuardrailsNeverRaiseOnACallerSuppliedRow:
             {"incumbent": {EXEC_SUITE: [0.4, 0.5]}, "candidate": {EXEC_SUITE: [0.8, 0.9]}},
         )
         verdict = _exec_gate(run_dir)
+        # The row tree is what is missing, and that outranks the "fewer than 2 paired rows" the
+        # unfanned scores also produce: an arm with no rows at all is the more specific fault.
         assert verdict.gate_refusal is not None and "loaded ZERO rows" in verdict.gate_refusal
         assert [c.passed for c in verdict.guardrails] == [True, True]
 

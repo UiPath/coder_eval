@@ -77,6 +77,15 @@ MATERIALITY_FLOOR = 0.25
 # standard error of the p may be at most this fraction of that threshold.
 GATE_P_PRECISION = 0.10
 
+# Below this, a measured noise floor is floating-point residue rather than a measurement, and the
+# gate treats it as no floor at all. Not a tolerance anyone chose: `weighted_score` is bounded
+# [0, 1] and reported to three decimals, so a floor of 1e-9 is nine orders below anything the
+# metric can express. It exists because a null split over a CONSTANT per-row difference returns
+# something like 2.8e-17 rather than exactly 0.0 — measured on this repo's own winning fixture —
+# which is not zero, so an `mde == 0.0` test misses it while `abs(diff) < mde` can never fire. Both
+# floor-based checks then went silently inert on exactly the degenerate suites they exist for.
+FLOOR_RESOLUTION = 1e-9
+
 # What "at or near the bootstrap's resolution floor" means: a p within this multiple of the
 # estimator's own 2/(m+1) is close enough that the DRAW COUNT, not the data, is plausibly deciding
 # it — so the verdict says so and tells the reader to re-run with more draws before believing
@@ -1631,61 +1640,57 @@ def execution_gate(
     interval bounds are swapped along with it. The method file warns twice that a reversed reading
     promotes the arm that lost; this is that warning, implemented.
 
-    Every failure mode — a missing, unreadable or malformed ``experiment.json``, an experiment with
-    other than two variants, **either** variant id not matching it — returns a verdict whose
-    statistics are ``None`` with a note naming what failed. Never an exception, and never a silent
-    zero. The faults that do NOT show up in the statistic set ``gate_refusal`` instead, which forces
-    ``promoted=False`` and takes the headline: an arm whose rows are not on disk (the statistic
-    comes from ``experiment.json``, so it computes perfectly well over nothing), and paired
-    differences with zero variance (it computes, and every promotion conjunct then holds at once).
+    **Every state that is not a decision sets** ``gate_refusal``, which forces ``promoted=False``,
+    takes the headline and drops the verdict out of the Holm family. Never an exception, and never
+    a silent zero. Four kinds of cause, recorded MOST-SPECIFIC-FIRST because a later one is often
+    the earlier one's consequence:
+
+    - **No comparison to make** — both arms named the same variant; a missing, unreadable or
+      malformed ``experiment.json``; an experiment declaring other than exactly two variants;
+      either variant id absent from it. Each returns statistics that are all ``None``.
+    - **An arm loaded ZERO rows** — the statistic comes from ``experiment.json``, so it computes
+      perfectly well over rows that are not on disk while every check reads green over nothing.
+    - **Fewer than two rows paired** — no interval exists, so there is nothing to weigh.
+    - **Zero-variance paired differences** — the statistic computes, and every promotion conjunct
+      then holds at once on a sample that separated nothing.
+    - **A difference below this suite's own MDE *while the interval excludes zero*** — a confident
+      claim about an effect the instrument cannot see. The second half of that condition is what
+      keeps the commonest honest outcome intact: a candidate that simply does not help also has a
+      difference below the floor, but its interval CONTAINS zero, and that is an ordinary negative
+      result which stays one.
 
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
     notes: list[str] = []
+    # Read by `_verdict`'s construction at CALL time, so EVERY return path reports it.
+    gate_refusal: str | None = None
+
+    def _refuse(reason: str) -> None:
+        """Record the FIRST cause that makes this block not a decision, and keep it.
+
+        Every cause answers the same question — *is this a result?* — with the same consequence, so
+        they share one field, one headline and one prose token. They differ in REMEDY, and the
+        earliest cause is the one whose remedy comes first: if there is no comparison to make, the
+        rows are moot; if the rows never loaded, whether their differences vary is moot. Program
+        order IS the precedence, and routing every setter through here says so once instead of
+        leaving 11 `if gate_refusal is None` guards to be kept in agreement.
+        """
+        nonlocal gate_refusal
+        if gate_refusal is None:
+            gate_refusal = reason
+
     if incumbent_variant == candidate_variant:
         # Otherwise the sign resolves off the candidate, matches vid_a, and the block reports
         # `vid_a - vid_b` labelled `candidate - incumbent` with both labels reading the same name
         # — a confident, significant, sign-flipped verdict comparing an arm to the other arm while
         # claiming to compare it to itself. Measured before this guard existed.
-        notes.append(
+        _refuse(
             f"incumbent_variant and candidate_variant are both {incumbent_variant!r}, so there is no "
-            + "comparison to make and no sign to resolve. Nothing below is a result."
+            + "comparison to make and no sign to resolve. Name the two arms you meant to compare."
         )
     incumbent_rows = load_arm_rows([run_dir], incumbent_variant, suite_id)
     candidate_rows = load_arm_rows([run_dir], candidate_variant, suite_id)
     row_ids = sorted(set(incumbent_rows) & set(candidate_rows))
-
-    # The statistic comes from `experiment.json` while every check comes from the on-disk row tree,
-    # so the two can disagree — and a valid experiment file beside a mistyped variant, suite or run
-    # directory renders as PROMOTED with every check a green `— -> —`. `activation_gate` carries
-    # this note for the same reason; without it the silent-zero failure mode is loud on one track
-    # and silent on the other.
-    #
-    # Declared here, above the first condition that can set it, and read by `_verdict`'s shared
-    # base so EVERY return path reports it. Two causes share one field — see
-    # ExecutionGateVerdict.gate_refusal — and the first one set wins.
-    gate_refusal: str | None = None
-    empty_arms = [
-        (arm, variant_id)
-        for arm, variant_id, rows in (
-            ("incumbent", incumbent_variant, incumbent_rows),
-            ("candidate", candidate_variant, candidate_rows),
-        )
-        if not rows
-    ]
-    if empty_arms:
-        # ONE refusal naming every empty arm, not one message per arm: the loop this replaces
-        # appended twice when both arms were empty, saying the same thing about a single fault.
-        named = " and ".join(f"the {arm} arm ({variant_id!r})" for arm, variant_id in empty_arms)
-        gate_refusal = (
-            f"{named} loaded ZERO rows: nothing matched "
-            f"<run>/<variant>/{suite_id}/*/NN/task.json under {run_dir}. That is a wrong variant "
-            "id, a wrong suite id or a wrong run directory. Every guardrail and integrity check "
-            "below is computed over the rows that DID load, so they all pass — over nothing when "
-            "both arms are empty, and as a large candidate improvement when only one is — and the "
-            "paired statistic comes from experiment.json, which can still be perfectly valid. "
-            "Fix the path before reading anything below."
-        )
 
     # Measured ONCE, before `_verdict` exists: it costs a bootstrap, every return path reports it,
     # and the below-MDE note has to be written before the model is constructed (pydantic COPIES the
@@ -1770,10 +1775,11 @@ def execution_gate(
 
     experiment_json = run_dir / "experiment.json"
     if not experiment_json.is_file():
-        notes.append(
-            f"no experiment file at {experiment_json} — the paired statistic could not be computed. "
-            + "A plain `coder-eval run` without `-e <experiment>` writes none, and this track's gate "
-            + "is a two-variant experiment. Nothing below is a result about the candidate."
+        _refuse(
+            f"there is no experiment file at {experiment_json}, so the paired statistic could not be "
+            + "computed at all. A plain `coder-eval run` without `-e <experiment>` writes none, and "
+            + "this track's gate is a two-variant experiment. Re-run the gate with its "
+            + "round<N>-gate.yaml."
         )
         return _verdict()
     try:
@@ -1783,8 +1789,10 @@ def execution_gate(
         # unreadable file (permissions, or one that vanished between the is_file() and the read) is
         # exactly as much a wiring fault as a malformed one — with the same right answer.
         logger.warning("Failed to load %s for the execution gate", experiment_json, exc_info=True)
-        notes.append(
-            f"the experiment file at {experiment_json} could not be read or parsed, so no statistic was computed."
+        _refuse(
+            f"the experiment file at {experiment_json} could not be read or parsed, so no statistic "
+            + "was computed. Check the file is present, readable and complete — a run killed while "
+            + "writing it leaves a truncated one."
         )
         return _verdict()
 
@@ -1803,12 +1811,13 @@ def execution_gate(
         # `variant_ids` is deliberately NOT narrowed to force a comparison out of an N-variant
         # file: that would compute a Stage B verdict from Stage A data — one replicate per row,
         # arms chosen on those same rows — which is precisely what the method forbids.
-        notes.append(
+        _refuse(
             f"no paired comparison: {experiment_json} declares {len(result.variant_ids)} variant(s) "
             + f"({', '.join(result.variant_ids) or 'none'}) and no row of {suite_id!r} scored on both, "
-            + "or the file predates per-replicate scores. The statistic fires only for EXACTLY two "
-            + "variants, so gate one candidate at a time in its own round<N>-gate.yaml — re-passing "
-            + "the triage experiment here produces no paired block at all."
+            + "or the file predates per-replicate scores. Check the suite id first — the one above is "
+            + "what was searched for. If the variant count is not EXACTLY two, that is the other cause: "
+            + "the statistic fires only for two, so gate one candidate at a time in its own "
+            + "round<N>-gate.yaml, since re-passing the triage experiment produces no paired block."
         )
         return _verdict()
 
@@ -1817,7 +1826,7 @@ def execution_gate(
     elif candidate_variant == comparison.vid_b:
         sign = -1.0
     else:
-        notes.append(
+        _refuse(
             f"candidate_variant={candidate_variant!r} is not one of the two variants the experiment "
             + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}), so no sign could be resolved and "
             + "no statistic is reported. Check the variant id against the experiment file."
@@ -1827,7 +1836,7 @@ def execution_gate(
         # Fails CLOSED, like its candidate-side sibling above. It used to annotate and fall
         # through, which reported a real, significant difference against whichever arm the file
         # happened to carry — under a header naming the arm the caller asked for.
-        notes.append(
+        _refuse(
             f"incumbent_variant={incumbent_variant!r} is not one of the two variants the experiment "
             + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}), so the difference could not be "
             + "resolved against the arm you named and no statistic is reported. Check the variant id "
@@ -1855,11 +1864,53 @@ def execution_gate(
         return None if value is None else sign * value
 
     # Negating an interval reverses it, so re-order rather than reporting a "low" above its "high".
+    # The statistic comes from `experiment.json` while every check comes from the on-disk row tree,
+    # so the two can disagree — and a valid experiment file beside a mistyped variant, suite or run
+    # directory renders as PROMOTED with every check a green `— -> —`. `activation_gate` carries
+    # this note for the same reason; without it the silent-zero failure mode is loud on one track
+    # and silent on the other.
+    #
+    # Refused HERE, after the experiment-file and variant-id causes above, even though the rows
+    # were loaded at the top. `_refuse` keeps the first cause recorded, so the call order IS the
+    # precedence — and a mistyped variant id makes that arm load zero rows as a CONSEQUENCE, so
+    # refusing on the consequence first would replace a message naming the two ids the experiment
+    # actually carries with one that can only say "a wrong variant id, suite id or run directory".
+    # What is left for this cause is the case the others cannot see: every id correct, and the rows
+    # still not on disk.
+    empty_arms = [
+        (arm, variant_id)
+        for arm, variant_id, rows in (
+            ("incumbent", incumbent_variant, incumbent_rows),
+            ("candidate", candidate_variant, candidate_rows),
+        )
+        if not rows
+    ]
+    if empty_arms:
+        # ONE refusal naming every empty arm, not one message per arm: the loop this replaces
+        # appended twice when both arms were empty, saying the same thing about a single fault.
+        named = " and ".join(f"the {arm} arm ({variant_id!r})" for arm, variant_id in empty_arms)
+        _refuse(
+            f"{named} loaded ZERO rows: nothing matched "
+            + f"<run>/<variant>/{suite_id}/*/NN/task.json under {run_dir}. That is a wrong variant "
+            + "id, a wrong suite id or a wrong run directory. Every guardrail and integrity check "
+            + "below is computed over the rows that DID load, so they all pass — over nothing when "
+            + "both arms are empty, and as a large candidate improvement when only one is — and the "
+            + "paired statistic comes from experiment.json, which can still be perfectly valid. "
+            + "Fix the path before reading anything below."
+        )
+
     bounds = sorted(b for b in (_signed(comparison.ci_low), _signed(comparison.ci_high)) if b is not None)
     if comparison.task_count < 2:
-        notes.append(
+        # A refusal, not a note: no interval can be computed at all, so there is nothing here for a
+        # reader to weigh — and rendering it as NOT PROMOTED says the candidate lost a comparison
+        # that never happened. The row count is still carried on the verdict, so an eroded sample
+        # (say 3 incumbent rows against 1 candidate row) is visible as `paired 1 · excluded 2`
+        # rather than being flattened into the message.
+        _refuse(
             f"only {comparison.task_count} row(s) of {suite_id!r} scored on both arms — fewer than the 2 a "
-            + "paired interval needs, so every statistic is reported as unavailable rather than fabricated."
+            + "paired interval needs, so every statistic is unavailable rather than fabricated. Check "
+            + "why the rows did not pair before reading anything below; an asymmetric sample is the "
+            + "usual cause, and `rows_excluded` above says how many were dropped."
         )
     # `paired_comparison` has one other way to return an all-`None` statistic on a sample big enough
     # for one: `paired_t_ci` declines on a NON-FINITE score. That cannot arrive through this
@@ -1870,10 +1921,9 @@ def execution_gate(
     mean_diff = _signed(comparison.mean_diff)
     # Cohen's d carries the direction too, so it is signed with the rest.
     effect_size = _signed(comparison.effect_size)
-    # `gate_refusal` may already carry the zero-row WIRING cause set above. Wiring outranks
-    # variance — if the rows never loaded, whether their differences vary is moot — so the guard is
-    # explicit rather than left to program order.
-    if gate_refusal is None and mean_diff is not None and effect_size is None:
+    # No `gate_refusal is None` guard: `_refuse` keeps the first cause, and every cause above this
+    # one outranks it. If the rows never loaded, whether their differences vary is moot.
+    if mean_diff is not None and effect_size is None:
         # Cohen's d is undefined exactly when stddev(diffs) == 0 — two arms differing by an
         # IDENTICAL amount on every row. The interval collapses to a point either way, so
         # `excludes_zero` and `favours_candidate` stop meaning what they read as. This is the
@@ -1887,31 +1937,108 @@ def execution_gate(
         # can change — and `paired_t_test` reports p = 1.0 there rather than the 0.0 a non-zero
         # constant shift gives, so a single message would state a p the block below it contradicts.
         if mean_diff == 0.0:
-            gate_refusal = (
-                f"the two arms produced an identical per-row score on every one of the "
-                f"{comparison.task_count} paired row(s), so there is nothing for any test to "
-                "separate — the paired difference is exactly zero with zero variance, and the "
-                "paired t reports p = 1.0000 over a zero-width interval. That is a result about "
-                "this candidate rather than about the suite: adding rows cannot change it. Check "
-                "the candidate actually differs from the incumbent, and that both arms were wired "
-                "to the snapshots you think they were."
+            _refuse(
+                "the two arms produced an identical per-row score on every one of the "
+                + f"{comparison.task_count} paired row(s), so there is nothing for any test to "
+                + "separate — the paired difference is exactly zero with zero variance, and the "
+                + "paired t reports p = 1.0000 over a zero-width interval. That is a result about "
+                + "this candidate rather than about the suite: adding rows cannot change it. Check "
+                + "the candidate actually differs from the incumbent, and that both arms were wired "
+                + "to the snapshots you think they were."
             )
         else:
-            gate_refusal = (
+            _refuse(
                 f"the two arms differed by exactly {mean_diff:.3f} on every one of the "
-                f"{comparison.task_count} paired row(s), so the paired differences carry zero "
-                "variance. A paired t on a constant non-zero difference reports p = 0.0000 and a "
-                "zero-width interval whatever the effect actually is — every promotion condition "
-                "holds at once and none of them measured anything. This is not a result about the "
-                "candidate. Add rows whose difference the two arms do NOT agree on, or add "
-                "replicates so within-row spread can appear; a larger family or a smaller alpha "
-                "cannot help."
+                + f"{comparison.task_count} paired row(s), so the paired differences carry zero "
+                + "variance. A paired t on a constant non-zero difference reports p = 0.0000 and a "
+                + "zero-width interval whatever the effect actually is — every promotion condition "
+                + "holds at once and none of them measured anything. This is not a result about the "
+                + "candidate. Add rows whose difference the two arms do NOT agree on, or add "
+                + "replicates so within-row spread can appear; a larger family or a smaller alpha "
+                + "cannot help."
             )
-    if mde is not None and mean_diff is not None and abs(mean_diff) < mde:
+    # The zero-variance case above is the LIMIT of a continuum, not an isolated point: two arms can
+    # differ by ALMOST the same amount on every row, and the paired t is then almost as overconfident
+    # — measured, 4 rows differing by 0.400, 0.400, 0.400, 0.401 report p = 5.4e-10. Two different
+    # things go wrong there, and they need opposite responses, so they are two checks and only one
+    # of them refuses.
+    #
+    # (1) A CONFIDENT CLAIM ABOUT AN EFFECT BELOW WHAT THE SUITE CAN RESOLVE. `mde` is the
+    # half-width of a bootstrap interval on a NULL difference — the incumbent's own replicates split
+    # against each other, where the true difference is zero by construction — so it is what this
+    # suite's run-to-run noise actually is. A difference under it is indistinguishable from that
+    # noise however small the p is.
+    #
+    # Conditioned on the interval EXCLUDING ZERO, and that conjunct is what keeps the refusal from
+    # swallowing the commonest honest outcome. Under the null a candidate's difference is small, so
+    # `abs(mean_diff) < mde` is true for nearly every candidate that simply does not work —
+    # measured, 40 of 40 true-null candidates. Refusing all of them would retire NOT PROMOTED
+    # almost entirely and send the reader to buy replicates for a candidate whose problem is that it
+    # is null. An interval that CONTAINS zero is the data agreeing it is null: an ordinary negative
+    # result, and it stays one. What is left here is the pathology — a confident claim, in either
+    # direction, about an effect the instrument cannot see.
+    excludes_zero_either_way = len(bounds) == 2 and (bounds[0] > 0.0 or bounds[1] < 0.0)
+    if mde is not None and mde >= FLOOR_RESOLUTION and mean_diff is not None and abs(mean_diff) < mde:
+        if excludes_zero_either_way:
+            _refuse(
+                f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum "
+                + f"detectable effect ({mde:.3f}) on weighted_score — the half-width of a null "
+                + "comparison that split the incumbent's own replicates, where the true difference is "
+                + "zero by construction — and yet the interval excludes zero. That is a confident "
+                + "claim about an effect this suite cannot see, not a result about the candidate. "
+                + "Lower the floor with more replicates or more rows, or find rows where the "
+                + "candidate's effect is larger."
+            )
+        else:
+            # Below the floor AND consistent with zero: the ordinary "it did not help" outcome.
+            notes.append(
+                f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum "
+                + f"detectable effect ({mde:.3f}), and the interval contains zero — so this is an "
+                + "ordinary negative result and not a measurement problem. The suite could not have "
+                + "resolved an effect this small either way; a candidate that does not help reads "
+                + "exactly like this."
+            )
+    # And when there is NO floor, say so rather than skipping the check silently. Both refusals
+    # above are inert without a positive `mde`, and a floor of exactly 0.000 is common: the null
+    # split reduces to zero whenever every row carries the same replicate pattern, which two
+    # replicates on a deterministic suite produce. A reader who is not told this reads "Minimum
+    # detectable effect: 0.000" as "this suite can resolve anything", which is the opposite of what
+    # an unmeasurable floor means. Advisory, and suppressed under a refusal that already explains
+    # the block.
+    if gate_refusal is None and mean_diff is not None and (mde is None or mde < FLOOR_RESOLUTION):
         notes.append(
-            f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum detectable "
-            + f"effect ({mde:.3f}) on weighted_score. An interval excluding zero is still reportable, but "
-            + "do not present it as a comfortable win — the suite cannot resolve a difference this size."
+            "this suite's minimum detectable effect came back "
+            + (f"{mde:.3f}" if mde is not None else "unavailable")
+            + ", so the difference above was NOT checked against a noise floor. A null split "
+            + "measures zero only when every row's replicates agreed exactly — a deterministic "
+            + "suite, or one whose rows all failed the same way — so read it as 'the floor could "
+            + "not be priced', never as 'this suite can resolve anything'. Raise --repeats, and "
+            + "check the rows actually ran, before treating a small difference here as an effect."
+        )
+    # (2) THE INTERVAL IS TIGHTER THAN THE FLOOR. A caveat, deliberately NOT a refusal: the paired
+    # t's interval comes from the BETWEEN-ROW spread of the differences, which is tiny whenever the
+    # arms differ by a similar amount on every row, while `mde` measures WITHIN-row noise the t
+    # never sees. So a real, large, consistent win reports an absurd p — and refusing it would be
+    # worse than the defect: measured, a genuine 8-row 0.30 win reports a half-width of 0.007, the
+    # same shape as the 0.400-on-every-row case above. What is wrong there is the reported
+    # PRECISION, not the decision, so the block says so and lets the decision stand.
+    half_width = (bounds[1] - bounds[0]) / 2.0 if len(bounds) == 2 else None
+    if (
+        half_width is not None
+        and mde is not None
+        and mde >= FLOOR_RESOLUTION
+        and half_width < mde
+        and gate_refusal is None
+    ):
+        notes.append(
+            "the paired interval is tighter than this suite's own noise floor: a half-width of "
+            + f"{half_width:.4f} against a minimum detectable effect of {mde:.3f}. The t-interval is "
+            + "computed from the between-row spread of the differences, which is small whenever the "
+            + "two arms differ by a SIMILAR amount on every row; the floor measures the run-to-run "
+            + "noise the same suite actually has. Whichever way the difference went, it is larger "
+            + "than the floor, so the DECISION above stands — but do not quote this p or this "
+            + "interval as the precision of the result, and do not read a p far below the floor as "
+            + "extra confidence."
         )
 
     return _verdict(
@@ -1946,18 +2073,25 @@ def holm_promote_execution(
 
     **There is a refusal state, and it is a different condition from the activation track's.** The
     paired *t* is continuous, so this track has no discreteness floor to refuse against — but it
-    does have a degenerate sample: zero-variance paired differences (and, beside it, an arm that
-    loaded no rows at all). ``execution_gate`` detects both where each is already computed and sets
-    ``gate_refusal``; this function only READS it, forcing ``promoted=False`` and suppressing the
-    negative-result notes, which would otherwise contradict the refusal headline.
+    does have several degenerate states — no comparison to make at all, an arm that loaded no rows,
+    too few rows paired, zero-variance paired differences, a confident claim about a difference
+    below the suite's own MDE. ``execution_gate``
+    detects each where it is already computed and sets ``gate_refusal``; this function only READS
+    it, forcing ``promoted=False`` and suppressing the negative-result notes, which would otherwise
+    contradict the refusal headline.
 
-    **A refused verdict is outside the family too, for the same reason a p-less one is**: it cannot
-    be allowed to tighten the correction for the others. The zero-row cause is detected before
-    ``experiment.json`` is even opened, so a refused verdict routinely carries a real p — and left
-    in the vector it makes Holm's step-down break early on a candidate whose only problem is a
-    *sibling* gate run's wiring fault. Conservative in direction, wrong in what it tells the reader.
+    **A refused verdict with a real p STAYS in the family**, and the membership rule is
+    ``p_value is not None`` and nothing else. Holm corrects for the hypotheses actually tested, and
+    a candidate that was gated and measured was tested however degenerate its sample turned out to
+    be — dropping it shrinks ``m`` and LOOSENS ``alpha/m`` for its siblings, which is the
+    uncorrected-``p <= alpha`` degeneration from the other direction (measured: three gate runs
+    with two below-MDE refusals promoted a p = 0.027 sibling that a family of three rejects).
+    A refusal whose cause is that there was no comparison at ALL already has no p, so it is outside
+    the family by the same rule, without a second one. The cost of keeping the others in is a
+    genuine candidate reading NOT PROMOTED because a sibling's sample was degenerate — which is the
+    multiplicity that was actually incurred, and the conservative direction.
     """
-    family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None and v.gate_refusal is None]
+    family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
     rejections = holm_rejections([p for _i, p in family], alpha)
     rejected_at = {i for (i, _p), reject in zip(family, rejections, strict=True) if reject}
 
@@ -1965,10 +2099,9 @@ def holm_promote_execution(
     for i, verdict in enumerate(verdicts):
         notes = list(verdict.notes)
         if verdict.p_value is None:
-            # Guarded like the three rungs below, and reachable: the zero-row refusal is set before
-            # `experiment.json` is read, so "refused AND no p" is an ordinary state — this repo's
-            # own mistyped-incumbent test produces it — and an unguarded note here prints an
-            # ordinary negative result directly under a refusal headline.
+            # Guarded like the rungs below, and reachable: every "there was no comparison to make"
+            # cause lands here carrying a refusal, so an unguarded note would print an ordinary
+            # negative result directly under a refusal headline.
             if verdict.gate_refusal is None:
                 notes.append("not promoted: the sample could not support a p-value, so this arm is outside the family.")
             decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
@@ -2020,9 +2153,11 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
     Four headlines, in this precedence:
 
     - **UNDECIDED** — Holm has not run, so there is no decision to refuse or report.
-    - **NOT A RESULT** — ``gate_refusal`` is set: either an arm loaded zero rows, or the paired
-      differences carry zero variance. It outranks everything below because it says the sample
-      decided nothing, and the message names which cause and its remedy. Deliberately NOT the
+    - **NOT A RESULT** — ``gate_refusal`` is set: there was no comparison to make, an arm loaded
+      zero rows, fewer than two rows paired, the paired differences carry zero variance, or the
+      difference is below the suite's own MDE with an interval that still excludes zero. It
+      outranks everything below because it says the sample decided nothing, and the
+      message names which cause and its remedy. Deliberately NOT the
       activation track's CANNOT SEPARATE AT THIS SIZE, which reports a discreteness floor the
       paired *t* does not have — a shared string would make the two indistinguishable in a ledger
       read back weeks later.

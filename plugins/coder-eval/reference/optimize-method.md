@@ -435,6 +435,60 @@ evidence, and promoting on it would make the verdict depend on the seed.
 
 Carry no number here. The floor is data-dependent and the resample count is owned by the module.
 
+##### The execution track refuses too, on different conditions
+
+The paired *t* is continuous, so it has no discreteness floor and none of the above applies to it.
+It has its own degenerate states, and the tool refuses on them under a **different headline —
+`NOT A RESULT`** — so that a ledger read back weeks later cannot confuse the two. Do not carry a
+remedy across: nothing on this list is fixed by gating a smaller family, and nothing on the
+activation list is fixed by adding replicates.
+
+- **There is no comparison to make.** Both arms named the same variant; no experiment file, or one
+  that could not be read or parsed; an experiment declaring other than exactly two variants; either
+  variant id absent from the one it declares. Each of these is a wiring fault with its own message,
+  and most of them used to render as `NOT PROMOTED` — an ordinary negative result about a candidate
+  that was never actually compared. (Two did already refuse, by accident rather than by design: a
+  mistyped variant id also empties that arm, and the zero-row cause fired first.)
+- **An arm loaded ZERO rows.** This track's statistic comes from `experiment.json` while every
+  guardrail and integrity check comes from the on-disk row tree, so a valid experiment file beside
+  a wrong run directory computes a perfectly good p over rows that are not there. Fix the path.
+- **Fewer than two rows paired.** No interval exists, so there is nothing to weigh; the row counts
+  stay on the block so an eroded sample is visible as `paired 1 · excluded 2` rather than being
+  flattened into the message.
+- **The paired differences carry ZERO variance** — the two arms differed by an identical amount on
+  every row. For a non-zero amount the *t* reports `p = 0.0000` over a zero-width interval, so Holm
+  rejects, the difference favours the candidate and the interval excludes zero, all at once, on a
+  sample that separated nothing. Add rows the arms disagree on, or add replicates. If the amount
+  was exactly **zero** the arithmetic is different — `p = 1.0000`, nothing rejects — and so is the
+  finding: it is about the candidate, which behaved identically to the incumbent, and no number of
+  rows changes that.
+- **The difference is below the suite's own minimum detectable effect *and the interval still
+  excludes zero*.** The MDE is the half-width of a null comparison — the incumbent's replicates
+  split against each other, where the true difference is zero by construction — so it is this
+  suite's run-to-run noise. A confident claim about an effect under that floor is not a result.
+  Lower the floor with more replicates or more rows, or find rows where the effect is larger.
+  **The second half of that condition is load-bearing.** A candidate that simply does not help is
+  also below the floor — under a true null nearly every one is — but its interval CONTAINS zero,
+  and that is the ordinary negative result this whole method is usually looking for. Refusing those
+  too would retire `NOT PROMOTED` almost entirely and send you to buy replicates for a candidate
+  whose only problem is that it does not work. Measured over 40 true-null candidates: 37 read as
+  `NOT PROMOTED`, 2 refused, 1 promoted.
+
+That last refusal needs a floor to compare against, and sometimes there is not one. A null split
+reduces to **exactly 0.000** whenever every row's replicates agreed — a deterministic suite, or one
+whose rows all failed the same way — and at two replicates on homogeneous rows that is the ordinary
+outcome, not an exotic one. The block says so instead of skipping the check silently, because
+"minimum detectable effect: 0.000" printed alone reads as *this suite can resolve anything*, which
+is the exact opposite of what an unpriced floor means. Raise `--repeats` and check the rows ran.
+
+One more state is reported but **not** refused, and the difference matters. Where the interval's
+half-width is below the MDE while the difference itself is above it, the block says so and lets the
+decision stand. The *t*'s interval comes from the between-row spread of the differences, which is
+tiny whenever the arms differ by a similar amount on every row, while the MDE measures within-row
+noise the *t* never sees — so a real, large, consistent win reports an absurdly small p. What is
+wrong there is the reported precision, not the verdict: refusing it would throw away genuine wins.
+Read the difference against the floor, and do not quote such a p as confidence.
+
 #### Cost and latency guardrails
 
 Both tracks carry them, and they are **derived from the measured spread, not from a percentage
