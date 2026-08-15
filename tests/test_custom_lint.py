@@ -1503,6 +1503,13 @@ _SKILL_PROCEDURE_TOKENS: tuple[tuple[str, str], ...] = (
         "CANNOT SEPARATE AT THIS SIZE",
         "Step 10 must name the refusal headline and say it is not a negative result",
     ),
+    # The execution track's own refusal. A DIFFERENT condition with two DIFFERENT remedies
+    # (fix the path; add rows the arms disagree on), so a reader who acts on the activation
+    # track's advice here buys rows that cannot help.
+    (
+        "NOT A RESULT",
+        "Step 10 must name the execution track's refusal headline and say it is not a negative result",
+    ),
     # The control arm had no invocation at all until the execution preflight needed its
     # output — Step 8 described the snapshot and Step 9's file list never mentioned it.
     # The "+0 runs" claim is false without a run directory to read.

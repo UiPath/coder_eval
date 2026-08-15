@@ -205,9 +205,11 @@ class ExecutionGateVerdict(BaseModel):
     rather than fabricated, ``notes`` is the distrust-the-numbers channel, and ``promoted`` is
     ``None`` until :func:`coder_eval.optimize_gate.holm_promote_execution` has seen the whole
     family — but it is a separate flat model rather than a track-discriminated union with it. A
-    union would carry ``p_floor`` / ``gate_refusal`` / ``criterion_index`` as permanently-``None``
+    union would carry ``p_floor`` / ``n_discordant`` / ``criterion_index`` as permanently-``None``
     noise on one side and ``effect_size`` on the other, and every reader would have to know which
-    half applied.
+    half applied. (``gate_refusal`` is deliberately NOT in that list: both tracks refuse, so it
+    carries the same name and the same meaning here — a different condition, set by a different
+    function, for reasons its own description gives.)
 
     **``mean_diff`` is ALWAYS candidate - incumbent.** The reporter's own ``## Paired Comparison``
     block subtracts in variant *declaration* order, so with the incumbent declared first a
@@ -217,10 +219,14 @@ class ExecutionGateVerdict(BaseModel):
     regardless of how the experiment file was written. ``ci_low``/``ci_high`` are swapped along
     with it, so ``ci_low <= ci_high`` always holds.
 
-    **There is no ``p_floor`` and no refusal state here, and that is not an oversight.** The
-    activation gate's discreteness floor exists because a resample that draws no discordant row
-    produces a difference of exactly 0.0, which bounds the smallest p a suite can express. The
-    paired *t* is continuous: it has no such floor, so there is nothing to refuse against.
+    **There is no ``p_floor`` here, and that is not an oversight.** The activation gate's
+    discreteness floor exists because a resample that draws no discordant row produces a difference
+    of exactly 0.0, which bounds the smallest p a suite can express. The paired *t* is continuous
+    and has no such floor. **It does, however, have a degenerate case** — per-row ``weighted_score``
+    is a weighted mean over a handful of discrete criterion scores, so two arms can differ by an
+    identical amount on every row. The paired *t* then reports p = 0.0000 with a zero-width interval
+    and every promotion conjunct holds at once. ``gate_refusal`` reports that (and the zero-row
+    wiring fault beside it), and ``promoted`` is False whenever it is set.
     """
 
     incumbent_variant: str = Field(description="Variant id of the incumbent arm.")
@@ -259,6 +265,24 @@ class ExecutionGateVerdict(BaseModel):
         ),
     )
     p_value: float | None = Field(default=None, description="Paired t-test p. None when fewer than 2 rows paired.")
+    gate_refusal: str | None = Field(
+        default=None,
+        description=(
+            "Why this block is NOT a decision, or None when it is one. Set by execution_gate for "
+            "either of two causes: an arm that loaded ZERO rows (a wiring fault — this track's "
+            "statistic comes from experiment.json rather than from the rows, so it can look fine "
+            "while every check reads green over nothing), or paired differences carrying ZERO "
+            "variance (the two arms differed by an identical amount on every row, so the paired t "
+            "reports p = 0.0 with a zero-width interval and every promotion conjunct holds at once "
+            "on a sample that separated nothing). One field for both because they answer the same "
+            "question with the same consequence; the message names which cause and its remedy, "
+            "which differ. holm_promote_execution forces promoted=False whenever it is set. Note "
+            "the DIFFERENT setter from ActivationGateVerdict.gate_refusal, which holm_promote sets "
+            "because a discreteness refusal needs the family's rank-dependent threshold; both "
+            "causes here need nothing outside a single verdict, so each is detected where it is "
+            "already computed."
+        ),
+    )
     holm_alpha: float | None = Field(
         default=None, description="The family-wise alpha holm_promote_execution applied. None until it has run."
     )
@@ -267,7 +291,9 @@ class ExecutionGateVerdict(BaseModel):
         description=(
             "None means gated but undecided — holm_promote_execution has not been applied. "
             "**It reports the PRIMARY statistic's decision only**: Holm rejecting, the difference "
-            "favouring the candidate, and the interval excluding zero. Guardrails and integrity "
+            "favouring the candidate, and the interval excluding zero — plus `gate_refusal` being "
+            "unset, which is not a fourth criterion so much as the statement that those three mean "
+            "anything at all. Guardrails and integrity "
             "checks do NOT enter it — they gate in render_execution_markdown, which headlines "
             "BLOCKED BY A GUARDRAIL over a True promoted. So never ship on this field alone: read "
             "the rendered block, or check `all(c.passed for c in (*integrity_checks, *guardrails))` "

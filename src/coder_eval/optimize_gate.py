@@ -1618,6 +1618,11 @@ def execution_gate(
     # directory renders as PROMOTED with every check a green `— -> —`. `activation_gate` carries
     # this note for the same reason; without it the silent-zero failure mode is loud on one track
     # and silent on the other.
+    #
+    # Declared here, above the first condition that can set it, and read by `_verdict`'s shared
+    # base so EVERY return path reports it. Two causes share one field — see
+    # ExecutionGateVerdict.gate_refusal — and the first one set wins.
+    gate_refusal: str | None = None
     for arm, variant_id, rows in (
         ("incumbent", incumbent_variant, incumbent_rows),
         ("candidate", candidate_variant, candidate_rows),
@@ -1680,6 +1685,9 @@ def execution_gate(
                 n_resamples=n_resamples,
             ),
             "mde": mde,
+            # Read from the enclosing scope at CALL time, so a return path that runs after a
+            # refusal was set carries it without every call site repeating the keyword.
+            "gate_refusal": gate_refusal,
             # Pydantic copies this list, so every note must already be in it. `_verdict` is
             # therefore always the LAST thing a return path does.
             "notes": notes,
@@ -1776,11 +1784,43 @@ def execution_gate(
     mean_diff = _signed(comparison.mean_diff)
     # Cohen's d carries the direction too, so it is signed with the rest.
     effect_size = _signed(comparison.effect_size)
-    if mean_diff is not None and effect_size is None:
-        notes.append(
-            "the effect size is unavailable while the difference is not: Cohen's d is undefined at zero "
-            + "variance, which is what two arms agreeing exactly on every row produce. Read the interval."
-        )
+    # `gate_refusal` may already carry the zero-row WIRING cause set above. Wiring outranks
+    # variance — if the rows never loaded, whether their differences vary is moot — so the guard is
+    # explicit rather than left to program order.
+    if gate_refusal is None and mean_diff is not None and effect_size is None:
+        # Cohen's d is undefined exactly when stddev(diffs) == 0 — two arms differing by an
+        # IDENTICAL amount on every row. The interval collapses to a point either way, so
+        # `excludes_zero` and `favours_candidate` stop meaning what they read as. This is the
+        # execution track's analogue of the activation track's discreteness refusal: a statement
+        # about the sample, not about the candidate. It REPLACES the note that used to describe the
+        # same condition — one message per finding.
+        #
+        # TWO messages, split exactly where `holm_promote`'s discreteness refusal splits its own
+        # (`p_floor >= 1.0`) and for the same reason: at a constant difference of zero the arms
+        # behaved IDENTICALLY, which is a finding about the candidate that no number of extra rows
+        # can change — and `paired_t_test` reports p = 1.0 there rather than the 0.0 a non-zero
+        # constant shift gives, so a single message would state a p the block below it contradicts.
+        if mean_diff == 0.0:
+            gate_refusal = (
+                f"the two arms produced an identical per-row score on every one of the "
+                f"{comparison.task_count} paired row(s), so there is nothing for any test to "
+                "separate — the paired difference is exactly zero with zero variance, and the "
+                "paired t reports p = 1.0000 over a zero-width interval. That is a result about "
+                "this candidate rather than about the suite: adding rows cannot change it. Check "
+                "the candidate actually differs from the incumbent, and that both arms were wired "
+                "to the snapshots you think they were."
+            )
+        else:
+            gate_refusal = (
+                f"the two arms differed by exactly {mean_diff:.3f} on every one of the "
+                f"{comparison.task_count} paired row(s), so the paired differences carry zero "
+                "variance. A paired t on a constant non-zero difference reports p = 0.0000 and a "
+                "zero-width interval whatever the effect actually is — every promotion condition "
+                "holds at once and none of them measured anything. This is not a result about the "
+                "candidate. Add rows whose difference the two arms do NOT agree on, or add "
+                "replicates so within-row spread can appear; a larger family or a smaller alpha "
+                "cannot help."
+            )
     if mde is not None and mean_diff is not None and abs(mean_diff) < mde:
         notes.append(
             f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum detectable "
@@ -1810,13 +1850,20 @@ def holm_promote_execution(
     the other track. Correcting per candidate would degenerate to an uncorrected ``p <= alpha``.
 
     **``promoted`` is Holm rejecting AND the difference favouring the candidate AND the interval
-    excluding zero — nothing else.** Guardrails and integrity checks stay advisory in the model and
-    gating in the render, which is how :func:`holm_promote` already treats guardrails: folding them
-    into ``promoted`` would make :func:`render_execution_markdown`'s BLOCKED headline unreachable,
-    and that headline is the thing that stops a reader promoting past a doubled row cost.
+    excluding zero AND no refusal — nothing else.** Guardrails and integrity checks stay advisory in
+    the model and gating in the render, which is how :func:`holm_promote` already treats guardrails:
+    folding them into ``promoted`` would make :func:`render_execution_markdown`'s BLOCKED headline
+    unreachable, and that headline is the thing that stops a reader promoting past a doubled row
+    cost. The refusal conjunct is not of that kind — see below.
 
-    A verdict with no ``p_value`` is outside the family and comes back ``promoted=False``. There is
-    no refusal state here — the paired *t* is continuous and has no discreteness floor.
+    A verdict with no ``p_value`` is outside the family and comes back ``promoted=False``.
+
+    **There is a refusal state, and it is a different condition from the activation track's.** The
+    paired *t* is continuous, so this track has no discreteness floor to refuse against — but it
+    does have a degenerate sample: zero-variance paired differences (and, beside it, an arm that
+    loaded no rows at all). ``execution_gate`` detects both where each is already computed and sets
+    ``gate_refusal``; this function only READS it, forcing ``promoted=False`` and suppressing the
+    negative-result notes, which would otherwise contradict the refusal headline.
     """
     family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
     rejections = holm_rejections([p for _i, p in family], alpha)
@@ -1832,24 +1879,34 @@ def holm_promote_execution(
 
         favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
         excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
-        promoted = i in rejected_at and favours_candidate and excludes_zero
+        # READ, never re-derived: `execution_gate` sets this where each condition is already
+        # computed. It is LOAD-BEARING rather than belt-and-braces — a zero-variance verdict has
+        # p = 0.0000 and a zero-width interval, so all three conjuncts above hold at once.
+        refused = verdict.gate_refusal is not None
+        promoted = i in rejected_at and favours_candidate and excludes_zero and not refused
 
-        if i in rejected_at and not favours_candidate:
-            notes.append(
-                "not promoted: the paired difference favours the incumbent. (The sign is already "
-                + "resolved as candidate - incumbent, so this reads the way it looks.)"
-            )
-        elif i in rejected_at and not excludes_zero:
-            notes.append(
-                "not promoted: the Holm-corrected test rejects but the confidence interval still "
-                + "contains zero, so the effect is not separated at the reported interval width."
-            )
-        elif i not in rejected_at:
-            notes.append(
-                f"not promoted: p = {verdict.p_value:.4f} did not clear the Holm threshold for its rank in a "
-                + f"family of {len(family)} (alpha={alpha}). This is the ordinary negative result — the "
-                + "interval and the effect size above are what to report."
-            )
+        # All THREE negative-result rungs are guarded, not only the last: a refused verdict whose
+        # difference happens to favour the incumbent would otherwise print an ordinary
+        # negative-result note directly under a refusal headline — two contradictory claims in one
+        # block. (The `p_value is None` rung above is outside this ladder and unreachable with a
+        # refusal today: both causes are detected where a comparison already exists.)
+        if not refused:
+            if i in rejected_at and not favours_candidate:
+                notes.append(
+                    "not promoted: the paired difference favours the incumbent. (The sign is already "
+                    + "resolved as candidate - incumbent, so this reads the way it looks.)"
+                )
+            elif i in rejected_at and not excludes_zero:
+                notes.append(
+                    "not promoted: the Holm-corrected test rejects but the confidence interval still "
+                    + "contains zero, so the effect is not separated at the reported interval width."
+                )
+            elif i not in rejected_at:
+                notes.append(
+                    f"not promoted: p = {verdict.p_value:.4f} did not clear the Holm threshold for its rank in "
+                    + f"a family of {len(family)} (alpha={alpha}). This is the ordinary negative result — the "
+                    + "interval and the effect size above are what to report."
+                )
         for check in (*verdict.integrity_checks, *verdict.guardrails):
             if not check.passed:
                 notes.append(
@@ -1864,14 +1921,24 @@ def holm_promote_execution(
 def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
     """The block the skill prints verbatim, mirroring :func:`render_markdown`'s headline precedence.
 
-    Three headlines rather than four: **UNDECIDED** when Holm has not run, **BLOCKED BY A
-    GUARDRAIL** when it has and something non-primary failed, else PROMOTED / NOT PROMOTED. There
-    is no CANNOT SEPARATE here — that headline reports a discreteness floor the paired *t* does
-    not have.
+    Four headlines, in this precedence:
+
+    - **UNDECIDED** — Holm has not run, so there is no decision to refuse or report.
+    - **NOT A RESULT** — ``gate_refusal`` is set: either an arm loaded zero rows, or the paired
+      differences carry zero variance. It outranks everything below because it says the sample
+      decided nothing, and the message names which cause and its remedy. Deliberately NOT the
+      activation track's CANNOT SEPARATE AT THIS SIZE, which reports a discreteness floor the
+      paired *t* does not have — a shared string would make the two indistinguishable in a ledger
+      read back weeks later.
+    - **BLOCKED BY A GUARDRAIL** — the statistic separated but something non-primary failed. Below
+      the refusal, since reading a guardrail presupposes a statistic that separated.
+    - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
     """
     failed = [check.name for check in (*verdict.integrity_checks, *verdict.guardrails) if not check.passed]
     if verdict.promoted is None:
         headline = "UNDECIDED — holm_promote_execution has not been applied, so this verdict decides nothing"
+    elif verdict.gate_refusal is not None:
+        headline = f"NOT A RESULT — {verdict.gate_refusal}"
     elif verdict.promoted and failed:
         headline = (
             "BLOCKED BY A GUARDRAIL — the paired comparison separated, but "

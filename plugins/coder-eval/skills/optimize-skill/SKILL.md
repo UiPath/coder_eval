@@ -534,8 +534,11 @@ whose candidate changes the verdict on two or three rows cannot promote at any r
 **adding rows the arms agree on makes the floor worse, not better**. Buying rows is only a remedy
 when the new rows are ones the candidate is expected to change.
 
-**Execution track: skip this.** The paired *t* is continuous, so it has no discreteness floor to
-refuse against — the same reason Step 6's second baseline is activation-only.
+**Execution track: skip this sizing rule.** The paired *t* is continuous, so it has no discreteness
+floor — the same reason Step 6's second baseline is activation-only, and there is no discordant-row
+count to buy here. It has a *different* degenerate sample instead, and Step 10's gate refuses on it
+rather than promoting: two arms differing by an identical amount on every row carry zero variance,
+which no row count fixes.
 
 **Check the resolved row count, not just the exit code.** A mistyped split name (`--split
 holdou`) aborts the run outright, naming the splits that exist — but a *partial* row loss does
@@ -1406,6 +1409,26 @@ track. The list is built before `holm_promote_execution` sees any of it; correct
 at a time silently reverts to an uncorrected alpha. A round that gates a single candidate passes a
 family of one, which is the same call. `execution_gate` alone never promotes anything, and
 `render_execution_markdown` prints **UNDECIDED** if you forget the correction.
+
+**There is a fourth headline here too, and it is not a negative result: `NOT A RESULT`.** It means
+the block decided nothing — do not report it as "not promoted", do not re-run hoping for a
+different draw, and do not read the interval either way. It is *not* the activation track's
+`CANNOT SEPARATE AT THIS SIZE`, which reports a discreteness floor the paired *t* does not have.
+**Read the message before choosing a remedy, because there are two and they are not
+interchangeable:**
+
+- **An arm loaded ZERO rows.** A wiring fault: the variant id, the suite id or the run directory is
+  wrong. The statistic comes from `experiment.json` while every check comes from the on-disk row
+  tree, so a valid experiment file beside a mistyped id leaves a confident p above a column of
+  green checks computed over nothing. Fix the path and re-run; nothing below the headline is
+  evidence.
+- **The paired differences carry ZERO variance.** The two arms differed by an identical amount on
+  *every* row, so the paired *t* reports p = 0.0000 with a zero-width interval and every promotion
+  condition holds at once. Add rows whose difference the arms do **not** agree on, or add
+  replicates so within-row spread can appear. More rows of the same shape do not help.
+
+Neither cause is helped by gating a smaller family or lowering alpha — the bar was never what
+failed.
 
 **The tool resolves the subtraction; you never do.** `mean_diff` in this block is always
 `candidate - incumbent`, whichever order the experiment file declared its variants in. If you also

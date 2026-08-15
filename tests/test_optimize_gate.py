@@ -2356,14 +2356,102 @@ class TestExecutionGateMde:
         assert abs(verdict.mean_diff) < verdict.mde, "fixture drifted — the difference is no longer below the floor"
         assert any("minimum detectable effect" in note for note in verdict.notes)
 
-    def test_a_missing_effect_size_is_explained_in_the_notes(self, tmp_path: Path) -> None:
+    def test_a_missing_effect_size_is_explained_by_the_refusal(self, tmp_path: Path) -> None:
         # Two arms agreeing exactly on every row: zero variance, so Cohen's d is undefined while
-        # the other statistics are fine. The note has to REACH the verdict — pydantic copies the
-        # notes list, so a note appended after construction is silently discarded.
+        # the other statistics are fine. That used to be a note; it is now the refusal, which has
+        # to REACH the verdict — pydantic copies the notes list and `gate_refusal` is passed at
+        # construction for the same reason.
         rows = {f"r{i}": [0.4, 0.6] for i in range(4)}
         verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=rows, candidate=dict(rows)))
         assert verdict.mean_diff is not None and verdict.effect_size is None
-        assert any("Cohen's d is undefined" in note for note in verdict.notes)
+        assert verdict.gate_refusal is not None and "zero variance" in verdict.gate_refusal
+        # Subsumed, not printed beside it: one message per finding.
+        assert not any("Cohen's d is undefined" in note for note in verdict.notes)
+
+
+def _uniform_shift(n_rows: int, *, shift: float = 0.5) -> dict[str, dict[str, list[float]]]:
+    """Two flat arms differing by an IDENTICAL amount on every row — zero paired variance.
+
+    The shape the shipped `outcome-rows.jsonl` train split produces: per-row `weighted_score` is a
+    weighted mean over a handful of discrete criterion scores, so identical per-row differences are
+    ordinary rather than exotic. The paired t then reports p = 0.0000 with a zero-width interval.
+    """
+    return {
+        "incumbent": {f"r{i}": [0.5, 0.5] for i in range(n_rows)},
+        "candidate": {f"r{i}": [round(0.5 + shift, 3)] * 2 for i in range(n_rows)},
+    }
+
+
+def _headline(text: str) -> str:
+    """The rendered block's headline, unwrapped from its bold markers.
+
+    Reading the headline LINE rather than asserting a substring is absent from the whole block:
+    "PROMOTED" is a substring of "NOT PROMOTED", so a `not in` over the block is either wrong or a
+    no-op depending on the fixture, and both failure modes already exist in this file.
+    """
+    return next(line for line in text.splitlines() if line.startswith("**")).strip("*")
+
+
+class TestExecutionGateRefusesAZeroVarianceSample:
+    """A8: identical per-row differences make every promotion conjunct hold on nothing.
+
+    `paired_t_test` returns 0.0 for a constant non-zero difference and `paired_t_ci` collapses to a
+    point, so Holm rejects, the difference favours the candidate and the interval "excludes zero"
+    — all three at once, on a sample that separated nothing.
+    """
+
+    @pytest.mark.parametrize("n_rows", [2, 4, 8])
+    def test_it_refuses_at_any_row_count(self, tmp_path: Path, n_rows: int) -> None:
+        # Variance is the defect, not size, so the refusal must not depend on the row count.
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(n_rows)))
+        decided = holm_promote_execution([verdict])[0]
+        assert decided.p_value == 0.0, "fixture drifted — the degenerate p is what makes this dangerous"
+        assert decided.gate_refusal is not None
+        assert decided.promoted is not True
+
+    def test_the_gate_sets_it_before_holm_runs(self, tmp_path: Path) -> None:
+        # Pins the setter's location: `execution_gate` already evaluates this predicate, so moving
+        # the detection into `holm_promote_execution` would be a second declaration of it.
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
+        assert verdict.promoted is None
+        assert verdict.gate_refusal is not None
+
+    def test_the_message_names_the_row_count_and_the_constant_difference(self, tmp_path: Path) -> None:
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4, shift=0.3)))
+        assert verdict.gate_refusal is not None
+        assert "0.300" in verdict.gate_refusal and "4 paired row" in verdict.gate_refusal
+
+    def test_identical_arms_get_their_own_message_and_remedy(self, tmp_path: Path) -> None:
+        """The strongest form of the case, split out the way the activation track splits its own.
+
+        `paired_t_test` returns 1.0 — not 0.0 — for a constant difference of exactly zero, so one
+        message covering both shapes would state a p the block four lines below it contradicts. And
+        the remedy differs: identical arms are a finding about the CANDIDATE (a wrong `plugins:`
+        path gives exactly this shape), so "add rows the arms disagree on" is the wrong advice.
+        """
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4, shift=0.0)))
+        assert verdict.mean_diff == 0.0 and verdict.p_value == 1.0
+        assert verdict.gate_refusal is not None
+        assert "p = 1.0000" in verdict.gate_refusal
+        assert "identical per-row score" in verdict.gate_refusal
+        assert "adding rows cannot change it" in verdict.gate_refusal
+        # And it must not carry the other shape's claim or its remedy.
+        assert "p = 0.0000" not in verdict.gate_refusal
+        assert "do NOT agree on" not in verdict.gate_refusal
+
+    def test_a_healthy_sample_is_not_refused(self, tmp_path: Path) -> None:
+        # The anti-over-fire test. `_WINNER` has within-row spread, so the paired t has variance.
+        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+        assert decided.gate_refusal is None
+        assert decided.promoted is True
+
+    def test_zero_variance_favouring_the_incumbent_carries_no_negative_result_note(self, tmp_path: Path) -> None:
+        # `promoted` was already False here; what changes is the headline — and an unguarded note
+        # would print an ordinary negative result directly under a refusal.
+        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4, shift=-0.3)))])[0]
+        assert decided.mean_diff is not None and decided.mean_diff < 0.0
+        assert decided.gate_refusal is not None and decided.promoted is False
+        assert not any("favours the incumbent" in note for note in decided.notes)
 
 
 class TestHolmPromoteExecution:
@@ -2462,6 +2550,34 @@ class TestRenderExecutionMarkdown:
     def test_renders_a_missing_effect_size_as_a_dash(self, tmp_path: Path) -> None:
         verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER)).model_copy(update={"effect_size": None})
         assert "Cohen's d: —" in render_execution_markdown(verdict)
+
+    def test_a_refused_verdict_leads_with_not_a_result(self, tmp_path: Path) -> None:
+        # SEPARATE tmp dirs: `_exec_run_dir` always writes `<tmp>/round1-gate` and never clears it,
+        # so building both fixtures under one `tmp_path` leaves the refused arm's rows on disk for
+        # the control — measured, it moved the control's `mde` from 2.8e-17 to 0.030.
+        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path / "refused", **_uniform_shift(4)))])[0]
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        # And the assertion is not a no-op: a clean fixture WITH spread headlines PROMOTED, so the
+        # headline above is discriminating rather than whatever this renderer happens to print.
+        assert _headline(render_execution_markdown(self._decided(tmp_path / "winner"))) == "PROMOTED"
+
+    def test_a_refusal_outranks_a_failing_guardrail(self, tmp_path: Path) -> None:
+        # Reading a guardrail presupposes a statistic that separated, so the refusal is above it —
+        # matching `render_markdown`'s precedence. Guaranteed only indirectly today (a refusal
+        # forces `promoted=False`, which makes the BLOCKED rung unreachable), which is exactly why
+        # it is pinned: a change that stopped forcing it would reorder the ladder silently.
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
+        failing = GuardrailCheck(
+            name="cost (USD/row)", incumbent=1.0, candidate=3.0, relative_change=2.0, tolerance=0.25, passed=False
+        )
+        decided = holm_promote_execution([verdict.model_copy(update={"guardrails": [failing]})])[0]
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+
+    def test_undecided_still_outranks_the_refusal(self, tmp_path: Path) -> None:
+        # A verdict Holm never saw has no decision to refuse, so `promoted is None` wins the ladder.
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
+        assert verdict.gate_refusal is not None
+        assert _headline(render_execution_markdown(verdict)).startswith("UNDECIDED")
 
 
 class TestDeriveSiblingIndices:
