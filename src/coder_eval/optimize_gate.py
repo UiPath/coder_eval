@@ -2679,21 +2679,32 @@ class SearchComparison(NamedTuple):
     never persisted. What IS persisted is the outcome — ``RoundScores.lineage_head`` — and that is
     a model.
 
-    ``beats`` and ``accepted`` are deliberately two fields rather than one. ``beats`` is the score
-    comparison alone; ``accepted`` is that AND nothing blocking it. Collapsing them would make a
-    corpus regression indistinguishable from a candidate that simply scored worse, and those two
-    call for opposite next actions — one is "look at the row and decide", the other is "write the
-    next hypothesis".
+    ``beats`` and ``blocker`` are deliberately two fields rather than one. ``beats`` is the score
+    comparison alone; ``blocker`` is what stands in its way. Collapsing them would make a corpus
+    regression indistinguishable from a candidate that simply scored worse, and those two call for
+    opposite next actions — one is "look at the row and decide", the other is "write the next
+    hypothesis". ``accepted`` is their conjunction and is DERIVED (see below), never stored.
     """
 
     beats: bool
-    accepted: bool
     head_score: float | None
     candidate_score: float | None
     shared_rows: tuple[str, ...]
     holes: tuple[str, ...]
     regressions: tuple[tuple[RegressionRow, float | None], ...]
     blocker: str | None
+
+    @property
+    def accepted(self) -> bool:
+        """``beats`` AND nothing blocking it — derived, never set.
+
+        It was a field, and every construction site computed exactly this expression, so the two
+        could be set inconsistently by a caller and nothing would notice. ``beats`` and ``blocker``
+        stay separate fields because a corpus block and a plain loss call for opposite next
+        actions — "look at the row and decide" against "write the next hypothesis" — and that
+        distinction lives in those two, not in their conjunction.
+        """
+        return self.beats and self.blocker is None
 
 
 def lineage_head_scores(measurements: OptimizeMeasurements) -> ArmRowScores | None:
@@ -2759,7 +2770,17 @@ def search_compare(
     holes = tuple(sorted(set(head.row_scores) - set(candidate.row_scores)))
 
     def _refused(blocker: str) -> SearchComparison:
-        return SearchComparison(False, False, None, None, shared, holes, (), blocker)
+        # Keyword form, not positional: dropping the `accepted` field would otherwise have shifted
+        # every later argument silently, which is the class of defect this whole change removes.
+        return SearchComparison(
+            beats=False,
+            head_score=None,
+            candidate_score=None,
+            shared_rows=shared,
+            holes=holes,
+            regressions=(),
+            blocker=blocker,
+        )
 
     if not head.row_scores:
         return _refused(
@@ -2794,7 +2815,6 @@ def search_compare(
         )
     return SearchComparison(
         beats=beats,
-        accepted=beats and blocker is None,
         head_score=head_score,
         candidate_score=candidate_score,
         shared_rows=shared,

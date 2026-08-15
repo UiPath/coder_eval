@@ -4247,6 +4247,45 @@ class TestSearchCompare:
         assert not result.accepted and result.blocker is not None
 
 
+class TestAcceptedIsDerived:
+    """`accepted` was a field every construction site set to `beats and blocker is None`.
+
+    Two spellings of one rule, settable inconsistently by any caller, with nothing to notice.
+    """
+
+    def _comparison(self, *, beats: bool, blocker: str | None) -> SearchComparison:
+        return SearchComparison(
+            beats=beats,
+            head_score=0.5,
+            candidate_score=0.75,
+            shared_rows=("r1",),
+            holes=(),
+            regressions=(),
+            blocker=blocker,
+        )
+
+    def test_accepted_is_not_stored(self) -> None:
+        assert "accepted" not in SearchComparison._fields
+        assert len(SearchComparison._fields) == 7
+
+    def test_a_winning_unblocked_candidate_is_accepted(self) -> None:
+        assert self._comparison(beats=True, blocker=None).accepted is True
+
+    def test_a_blocker_defeats_a_win(self) -> None:
+        assert self._comparison(beats=True, blocker="a corpus regression").accepted is False
+
+    def test_accepted_cannot_be_set_inconsistently(self) -> None:
+        # The state a caller could previously have stored as `accepted=True`: it did not win.
+        assert self._comparison(beats=False, blocker=None).accepted is False
+
+    def test_replace_on_the_dropped_field_now_raises(self) -> None:
+        # The failure mode the keyword-form construction sites exist to make loud rather than
+        # silent — a positional build would have shifted every later argument instead.
+        # `TypeError` on 3.13, not the `ValueError` older CPython raised here.
+        with pytest.raises(TypeError, match="accepted"):
+            self._comparison(beats=True, blocker=None)._replace(accepted=False)
+
+
 class TestRenderSearchComparison:
     def test_an_accepted_comparison_names_both_numbers_and_the_row_count(self) -> None:
         block = render_search_comparison(
@@ -4266,7 +4305,6 @@ class TestRenderSearchComparison:
         # snippet would discard the block it was rendering.
         blocked = SearchComparison(
             beats=True,
-            accepted=False,
             head_score=None,
             candidate_score=None,
             shared_rows=("r1",),
@@ -4275,7 +4313,10 @@ class TestRenderSearchComparison:
             blocker="a blocker",
         )
         assert "—" in render_search_comparison(blocked)
-        unblocked = blocked._replace(blocker=None, accepted=True)
+        # `accepted` is derived, so clearing the blocker is the whole edit — with `beats=True` and
+        # no blocker the property already reads True.
+        unblocked = blocked._replace(blocker=None)
+        assert unblocked.accepted is True
         assert "—" in render_search_comparison(unblocked)
 
     def test_it_says_a_search_accept_is_not_a_promotion(self) -> None:
