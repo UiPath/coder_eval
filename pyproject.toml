@@ -189,7 +189,8 @@ external = [
     "CE039",
     "CE045",
     "CE048",
-]  # custom architectural lint rules (tests/lint/); an id needs listing once a real `# noqa` names it
+]  # custom architectural lint rules (tests/lint/). Partial and inert: ruff does not flag an
+# unknown code under RUF100, so an unlisted id (CE001, CE047, …) is silently accepted too.
 
 [tool.ruff.lint.pylint]
 # Function-size ceiling: gates NEW growth past these bounds (a god-function must

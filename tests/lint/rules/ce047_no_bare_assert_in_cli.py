@@ -11,8 +11,9 @@ removed by a later plan *without* a guard. This is that guard, arriving one plan
 **What it detects, precisely.** Any ``ast.Assert`` in a file whose normalized path contains
 ``src/coder_eval/cli/``.
 
-**The boundary, stated so a green ``make lint`` is not mistaken for a proof.** Repo-wide there are
-**77** ``assert`` statements in ``src/`` and almost all of them are legitimate internal invariants
+**The boundary, stated so a green ``make lint`` is not mistaken for a proof.** Repo-wide there were
+**77** ``assert`` statements in ``src/`` when this rule landed, and almost all of them are
+legitimate internal invariants
 in code a user never reaches through an ``-O`` interpreter. This rule is deliberately scoped to the
 one directory where an ``assert`` is most likely to BE input validation, and it does **not**
 distinguish the two cases — it cannot, without reading intent. An internal-invariant assertion that

@@ -10,12 +10,14 @@ prevent, one level up — so both read it here.
 derives from the parameter name (``sample: int | None = typer.Option(None)`` becoming ``--sample``)
 carries no ``param_decls`` and is invisible here — the same blind spot CE043 already declares.
 Short flags are filtered out by construction. Nothing here inspects behaviour: a command may
-declare a flag and ignore it entirely.
+declare a flag and ignore it entirely. And a flag counts as documented wherever its name appears
+in the guide — a mention inside a fenced example satisfies it as much as a table row does.
 """
 
 from __future__ import annotations
 
 import inspect
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -64,6 +66,17 @@ def documented_commands() -> dict[str, Callable[..., Any]]:
     return commands
 
 
+def _documents(guide_text: str, flag: str) -> bool:
+    """Is ``flag`` named in the guide as a WHOLE flag, rather than as a prefix of another?
+
+    A bare substring test cannot fail for ``--sample``, which is a prefix of the real
+    ``--sample-per-stratum`` — so deleting every mention of ``--sample`` from the guide would
+    leave the check green on the strength of its longer sibling. Measured: exactly the flag family
+    CE043 exists for. The trailing character must therefore not continue the flag name.
+    """
+    return re.search(rf"{re.escape(flag)}(?![\w-])", guide_text) is not None
+
+
 def undocumented_flags(commands: dict[str, Callable[..., Any]], guide_text: str) -> list[str]:
     """Every declared long flag whose bare name is absent from ``guide_text``.
 
@@ -72,11 +85,14 @@ def undocumented_flags(commands: dict[str, Callable[..., Any]], guide_text: str)
     matched on its own. That is required behaviour rather than leniency: the raw-substring form
     fails on ``--preserve/--no-preserve``, which IS documented — a sensor demanding an edit that
     makes the guide worse is the worst kind.
+
+    Each bare name is matched at a WORD BOUNDARY, for the mirror-image reason: an unanchored
+    ``in`` test can never fail for a flag that is a prefix of another (see :func:`_documents`).
     """
     missing: list[str] = []
     for name, fn in sorted(commands.items()):
         for flag in sorted(long_flags(fn)):
-            absent = [bare for bare in flag.split("/") if bare and bare not in guide_text]
+            absent = [bare for bare in flag.split("/") if bare and not _documents(guide_text, bare)]
             if absent:
                 missing.append(
                     f"`{name} {flag}` is not in docs/USER_GUIDE.md (missing: {', '.join(absent)}). "

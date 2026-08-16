@@ -35,6 +35,16 @@ see. So a ``Name`` in the condition is resolved back through a *direct local ass
   fixture, a comprehension or a class attribute is invisible.
 - A ``pytest.skip`` with no enclosing ``if`` (module level, or inside ``try/except ImportError``)
   is skipped rather than guessed at.
+- The path is reconstructed from its STRING segments only, so a ``/``-chain rooted at a variable
+  reads as starting at its first literal: ``tmp_path / "runs" / "run.json"`` looks like the
+  gitignored top-level ``runs/``. There is no such guard today, and the rule errs toward noise
+  rather than silence, but a future one would need a ``# noqa: CE045`` for the wrong reason.
+- Any ``<expr>.skip(...)`` attribute call counts, not only ``pytest.skip`` — deliberately broad,
+  since aliasing the import is the obvious evasion, but it means a ``self.skip(...)`` would be
+  reported in a message that says pytest.
+- Suppression runs through the shared ``runner._is_suppressed``, which honours a **bare**
+  ``# noqa`` as well as ``# noqa: CE045``. A bare marker added for ruff on any line the ``if``
+  spans silently suppresses this rule too.
 - It pins the SHAPE of the guard, never what the skip hides. A skip on a tracked path that is
   nonetheless absent in CI is outside it.
 
@@ -102,6 +112,8 @@ def _first_chain(node: ast.AST) -> list[str]:
 
 
 def _skip_calls(node: ast.AST) -> list[ast.Call]:
+    """Any ``<expr>.skip(...)`` under ``node``. Broader than ``pytest.skip`` on purpose — aliasing
+    the import is the obvious evasion — which the module docstring's boundary states."""
     return [
         n
         for n in ast.walk(node)

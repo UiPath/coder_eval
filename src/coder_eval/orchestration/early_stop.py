@@ -46,20 +46,20 @@ verdict can fire a stop but is not persisted, so a dispatched call that never
 resolves (e.g. a crashed attempt) cannot leave a stale verdict behind across
 retries.
 
-Evaluating on the tool *call* (``ToolStartEvent``) as well as on its result is
-what makes the stop robust: where a criterion CAN decide from the call's inputs
-alone, the watcher latches the instant the call is dispatched — before a
-cut-short turn (e.g. a timeout) can strip the result and leave the call
-unresolved. The agent polls ``should_stop`` immediately after dispatching each
-message, so a stop on the call breaks the loop before the result message is ever
+Every event is evaluated — the tool *call* (``ToolStartEvent``) as well as its
+result. The call seam lets a verdict latch the instant the call is dispatched,
+before a cut-short turn (e.g. a timeout) can strip the result and leave it
+unresolved; the agent polls ``should_stop`` immediately after dispatching each
+message, so a stop there breaks the loop before the result message is ever
 pulled.
 
-Which criteria can decide there is **per-criterion, and sometimes per-field**;
-the seam is not universal and must not be assumed. ``skill_triggered`` can never
-decide at ToolStart, and ``command_executed`` can only while ``require_success``
-is unset. The whole rule, with its reasons, is on
-``EarlyStopWatcher._on_event_impl`` — the one declaration; do not restate it
-here.
+Which criteria can actually decide at that seam is **per-criterion, and
+sometimes per-field** — it is not universal and must not be assumed. In practice
+the window is narrow: ``skill_triggered`` can never use it, and
+``command_executed`` only while ``require_success`` is unset, which CE034
+mandates for an armed live-*passable* instance. The whole rule, with its
+reasons, is on ``EarlyStopWatcher._on_event_impl`` — the one declaration; do not
+restate it here.
 
 Live verdicts only *trigger* the stop; the authoritative scores always come
 from the standard ``check_all_async`` on the frozen trajectory after the cut.

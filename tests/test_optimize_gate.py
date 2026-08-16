@@ -616,9 +616,14 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
     renders a block reporting no difference at all.
 
     So a decided verdict's INSTANCE STATE is pinned, not only its values: no attribute outside the
-    declared fields, and the fields the copy writes carrying what the wrapper decided. `copy_with`
-    raises on a bad key today, and this is what notices if some future call site stops going
-    through it.
+    declared fields, and the fields the copy writes carrying what the wrapper decided.
+
+    Be precise about what that catches. `copy_with` raises on a bad key, so while these wrappers go
+    through it the stray-attribute check cannot fire — and a call site reverted to
+    `model_copy(update=)` with CORRECT keys does not trip it either (CE048 is what catches that).
+    It fires on the conjunction: a reverted call site AND a wrong key, which is the state that
+    ships a verdict silently reporting no difference. The value assertions below are what carry
+    these tests day to day.
 
     Read `__dict__`, never `model_dump()`. Under `extra="forbid"` an undeclared key set by
     `model_copy(update=)` lands in `__dict__` and is never serialized, so

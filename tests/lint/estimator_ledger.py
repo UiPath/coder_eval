@@ -22,10 +22,11 @@ row count between the merge base and the working copy is what makes it a real ga
   ``2/(m+1)`` — is not matched **directly**. The fixture half is what backstops it: that floor is
   rendered into ``tests/_fixtures/optimize_renders/``, so the change lands there and IS caught.
   A form change that reaches no pinned fixture is genuinely invisible.
-* The diff match is ``^[+-]\\s*<NAME>\\s*=``, so a comment reflow beside a constant does not fire,
-  and a value changed through an expression on another line is not caught. An annotated
-  re-declaration (``NAME: Final[int] = …``) is matched, but only because a test pins that every
-  watched constant's real source line still matches — the regex itself is not clever.
+* The diff match is ``^[+-]\\s*<NAME>\\s*[:=]``, so a comment reflow beside a constant does not
+  fire, and a value changed through an expression on another line is not caught. The ``:``
+  alternative is what admits an annotated re-declaration (``NAME: Final[int] = …``); a test pins
+  separately that every watched constant's REAL source line still matches, because the regex is a
+  shape check and not an understanding of Python.
 * Only ``.md`` / ``.json`` fixtures count, and only MODIFIED ones. A brand-new fixture has no
   "before" and therefore no step; the directories' ``__init__.py`` / helper modules carry no
   rendered numbers.
@@ -67,6 +68,12 @@ WATCHED_CONSTANTS: tuple[tuple[str, str], ...] = (
     ("src/coder_eval/optimize_gate.py", "GATE_P_PRECISION"),
     ("src/coder_eval/optimize_gate.py", "GATE_MAX_FAMILY"),
     ("src/coder_eval/optimize_gate.py", "GATE_RESAMPLES"),
+    # These two are not resample counts, but they move rendered output just as directly:
+    # FLOOR_RESOLUTION decides whether an MDE counts as measurable at all (and therefore whether
+    # the execution gate REFUSES), and NEAR_FLOOR_MULTIPLE gates the "p is at or near this
+    # bootstrap's resolution floor" note.
+    ("src/coder_eval/optimize_gate.py", "FLOOR_RESOLUTION"),
+    ("src/coder_eval/optimize_gate.py", "NEAR_FLOOR_MULTIPLE"),
 )
 
 # BOTH halves of the pinned-render tree. `report_snapshots/` alone would watch the reports and

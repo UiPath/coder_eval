@@ -6704,14 +6704,24 @@ class TestEstimatorLedger:
     def test_it_fires_on_the_historical_commit_that_motivated_it(self) -> None:
         """Retro-validation, with `b306a99`'s real inputs rather than a checkout of history.
 
-        That commit set `BOOTSTRAP_RESAMPLES = 2000` and moved a snapshot's CI upper bound from
-        `[0.850, 0.933]` to `[0.850, 0.950]`. BOTH signals must fire, or the rule was written
-        against a defect it could not have caught.
+        That commit set `BOOTSTRAP_RESAMPLES = 2000` and moved a snapshot's two CI upper bounds.
+        BOTH signals must fire, or the rule was written against a defect it could not have caught.
+
+        The two inputs are RESOLVED against the tree rather than typed as literals: the module and
+        the fixture must still exist at those paths, or this is only a restatement of the two
+        trigger tests above with different strings.
         """
         from tests.lint.estimator_ledger import check
 
+        repo = Path(__file__).parent.parent
         module = "src/coder_eval/reports_stats.py"
         snapshot = "tests/_fixtures/report_snapshots/experiment_replicates.md"
+        assert (repo / module).is_file() and (repo / snapshot).is_file(), (
+            "the commit's own inputs have moved — this test no longer retro-validates anything"
+        )
+        # And the constant is still declared there, so the diff line below is a real shape.
+        assert "BOOTSTRAP_RESAMPLES" in (repo / module).read_text(encoding="utf-8")
+
         failures = check(
             [module, snapshot],
             {module: "+BOOTSTRAP_RESAMPLES = 2000\n"},
@@ -6720,6 +6730,23 @@ class TestEstimatorLedger:
         )
         assert any("BOOTSTRAP_RESAMPLES" in f for f in failures), failures
         assert any("experiment_replicates.md" in f for f in failures), failures
+
+    def test_the_documented_watch_list_matches_the_code(self) -> None:
+        """`docs/REPORT_SCHEMA.md` enumerates the watched constants; that list is derived here.
+
+        Two surfaces spelling one set is the drift CE036/`LEAK_LOCATOR_FIELDS` already needed a
+        two-way test for. Adding a constant to `WATCHED_CONSTANTS` without documenting it leaves a
+        consumer reading a boundary the job no longer has.
+        """
+        from tests.lint.estimator_ledger import LEDGER_DOC, WATCHED_CONSTANTS
+
+        page = (Path(__file__).parent.parent / LEDGER_DOC).read_text(encoding="utf-8")
+        section = page.split("## Estimator changes", 1)[1].split("\n## ", 1)[0]
+        undocumented = sorted({name for _module, name in WATCHED_CONSTANTS if f"`{name}`" not in section})
+        assert not undocumented, (
+            f"{undocumented} are watched by the estimator-protocol job but absent from "
+            f"{LEDGER_DOC}'s boundary paragraph, which claims to name the watch set."
+        )
 
     def test_the_failure_message_names_the_escape_hatch(self) -> None:
         # A row EDITED rather than added does not raise the count, so a pure-correction PR fails.
@@ -6812,7 +6839,10 @@ class TestCE046CliFlagsAreDocumented:
     - it pins DOCUMENTATION, never behaviour — a flag can be documented and do nothing;
     - short flags (`-j`, `-e`) are out of scope by construction, matching CE043;
     - a flag Typer DERIVES from the parameter name carries no `param_decls` and is invisible to
-      it — the same blind spot CE043 declares, stated on `tests/lint/cli_flags.py`.
+      it — the same blind spot CE043 declares, stated on `tests/lint/cli_flags.py`;
+    - "documented" means the name appears anywhere in the guide, including inside a fenced
+      example — the failure message names the flag table because that is where a row BELONGS,
+      not because the check can tell one from the other.
     """
 
     GUIDE: ClassVar[Path] = Path(__file__).parent.parent / "docs" / "USER_GUIDE.md"
@@ -6860,6 +6890,22 @@ class TestCE046CliFlagsAreDocumented:
 
         missing = undocumented_flags({"stub": _stub}, "a guide that mentions no such flag")
         assert len(missing) == 1 and "--nowhere" in missing[0], missing
+
+    def test_a_flag_that_prefixes_another_is_not_auto_satisfied(self) -> None:
+        """`--sample` is a prefix of `--sample-per-stratum`, and both are real flags.
+
+        Under a bare substring test this check CANNOT FAIL for `--sample`: deleting every mention
+        of it from the guide leaves the longer sibling satisfying the shorter one. Measured on the
+        real guide, so this is the sensor's own blind spot pinned rather than a hypothetical.
+        """
+        from tests.lint.cli_flags import documented_commands, undocumented_flags
+
+        guide = self.GUIDE.read_text(encoding="utf-8")
+        without_sample = re.sub(r"--sample(?![\w-])", "--smpl", guide)
+        assert "--sample-per-stratum" in without_sample, "the longer sibling must survive the edit"
+
+        missing = undocumented_flags(documented_commands(), without_sample)
+        assert missing and all("--sample`" in m or "--sample " in m for m in missing), missing
 
     def test_a_boolean_pair_documented_with_spaces_still_counts(self) -> None:
         """`--preserve/--no-preserve` arrives as ONE unspaced string; the guide writes it spaced.
@@ -6913,21 +6959,33 @@ class TestCE047NoBareAssertInCli:
         rule = NoBareAssertInCli("src\\coder_eval\\cli\\run_command.py")
         assert len(rule.check(ast.parse(source))) == 1
 
-    def test_the_repo_wide_count_in_the_docstring_is_still_true(self) -> None:
-        """The docstring justifies the narrow scope with a measured number; measure it again.
+    def test_the_narrow_scope_is_still_justified(self) -> None:
+        """The docstring justifies the narrow scope with a measured number; re-measure the CLAIM.
 
-        A boundary that quotes a count is a claim, and a claim that rots is how a rule's scope
-        stops being defensible without anyone noticing.
+        Asserted as a BOUND, not as equality. The load-bearing part is "`src/` holds many asserts
+        and almost all are legitimate internal invariants, so a repo-wide rule would be noise" —
+        an exact-equality anchor would additionally turn every PR that adds or removes an assert
+        anywhere in the package red for a rule it never touched, which is friction the claim does
+        not need.
         """
         import tests.lint.rules.ce047_no_bare_assert_in_cli as module
 
-        total = sum(
-            1
-            for path in sorted(SRC.rglob("*.py"))
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-            if isinstance(node, ast.Assert)
+        def _asserts(paths) -> int:
+            return sum(
+                1
+                for path in paths
+                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                if isinstance(node, ast.Assert)
+            )
+
+        total = _asserts(sorted(SRC.rglob("*.py")))
+        assert total >= 50, (
+            f"src/ now holds only {total} assert statements; CE047's boundary justifies a "
+            "one-directory scope by there being far too many to gate repo-wide."
         )
-        assert f"**{total}**" in (module.__doc__ or ""), (
-            f"src/ now holds {total} assert statements; CE047's docstring quotes a different number "
-            "to justify its narrow scope."
+        assert re.search(r"\*\*\d+\*\* ``assert`` statements", module.__doc__ or ""), (
+            "CE047's docstring no longer states the measured count its narrow scope rests on."
         )
+        # And the part that IS exact: the scoped directory is clean, so the rule is a live guard
+        # rather than a wish.
+        assert _asserts(sorted((SRC / "coder_eval" / "cli").rglob("*.py"))) == 0

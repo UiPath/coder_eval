@@ -283,8 +283,8 @@ a fixture with no estimator change behind it, add a row saying the step was zero
 
 Where the check is sharp and where it is not, so a green job is not read as more than it is. It
 watches **constant assignments** — `reports_stats`'s `BOOTSTRAP_RESAMPLES` / `DEFAULT_ALPHA` and
-`optimize_gate`'s `MATERIALITY_FLOOR` / `GATE_P_PRECISION` / `GATE_MAX_FAMILY` / `GATE_RESAMPLES` —
-and not estimator **forms**. Changing the expression inside `reports_stats.bootstrap_p_floor`
+`optimize_gate`'s `MATERIALITY_FLOOR` / `GATE_P_PRECISION` / `GATE_MAX_FAMILY` / `GATE_RESAMPLES` /
+`FLOOR_RESOLUTION` / `NEAR_FLOOR_MULTIPLE` — and not estimator **forms**. Changing the expression inside `reports_stats.bootstrap_p_floor`
 (which has already happened once: `1/m` → `2/(m+1)`) steps every rendered p floor and is not
 matched directly; it is caught only because that floor is rendered into a pinned fixture under
 `tests/_fixtures/optimize_renders/`, which the fixture half watches. A form change that reaches no

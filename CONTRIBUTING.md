@@ -114,9 +114,10 @@ fall back to it **for fork PRs only**, since this repo is public and untrusted c
 should not run on the shared pool image — any new job running PR-supplied code needs
 the same carve-out. `action-dogfood` always uses it, because it is the executable proof
 behind the published Action and must exercise the image integrators actually use, and
-`plugin-validate` / `estimator-protocol` always use it because they install nothing —
-the safe direction, so they take the stock image unconditionally rather than only on
-fork PRs.
+`plugin-validate` and `estimator-protocol` always use it too — the safe
+direction, taken unconditionally rather than only on fork PRs. (`estimator-protocol`
+installs nothing at all; `plugin-validate` installs the Claude Code CLI and the
+package, and still takes the stock image rather than the shared pool.)
 
 ## Adding Tasks or Criteria
 

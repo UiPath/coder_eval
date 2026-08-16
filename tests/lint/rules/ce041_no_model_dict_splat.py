@@ -39,6 +39,10 @@ It is a shape check, and the boundary is worth stating so nobody trusts it furth
   the two fields a promotion decision IS, were written only that way.
 - The scan covers ``src/`` only. Tests legitimately build models from dicts — that is how a
   round-trip test is written.
+- It matches on the NAME being imported from ``coder_eval.models``, so ``copy_with`` — a function
+  exported from there, not a model — is matched too. Splatting a dict into it is the same defect
+  one verb over and should be flagged; only the remediation sentence below reads oddly for it
+  (there is no ``copy_with.model_validate``). Write the keywords out instead.
 
 Add ``# noqa: CE041`` with a reason only where a dict really is the input (re-validating a payload,
 say), and prefer ``Model.model_validate(payload)`` there, which validates rather than splats.

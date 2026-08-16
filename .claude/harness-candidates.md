@@ -592,7 +592,10 @@ with the two `action.yml` items above — one considered change to the action's 
       re-validating convention was rejected: it re-runs every validator on every field on paths
       that run once per candidate per round. Note the inventory here said "~9 call sites" and the
       plan's single-line grep said 17 — the AST count is **22**, because four are wrapped across
-      lines, one of them `holm_promote`'s main promotion write.
+      lines, one of them `holm_promote`'s main promotion write. The reasoning above that "a rule
+      that flags the CALL is wrong" did not survive contact either: 21 of the 22 sites needed no
+      dict at all, so flagging the call shape and routing every author to a validating helper is
+      exactly what CE048 does, with one documented exemption.
 - [x] **REFUTED, not built — a SHA-pinning rule over `templates/**/.github/workflows/`.** A review
       raised it on the premise that *"users copy this template into their own repos"*, which would
       make a floating action tag a supply-chain exposure. The premise is false, and the file's own
@@ -628,9 +631,11 @@ with the two `action.yml` items above — one considered change to the action's 
       than a mechanical conversion, and either answer changes what a currently-accepted task YAML
       does. — caught in the Plan D Phase 3 quality review.
 - [ ] A no-op "absence" assertion: `assert "X" not in text.replace("NOT X", "")` is vacuous whenever
-      the fixture cannot contain `X` at all, and reads as a strong guard. Live instance at
-      `tests/test_optimize_gate.py` (the `render_search_comparison` blocked-path test), and the
-      pattern is already named in the review backlog. The correct form is to read the discriminating
+      the fixture cannot contain `X` at all, and reads as a strong guard. The named instance —
+      `tests/test_optimize_gate.py`'s `render_search_comparison` blocked-path test — **is FIXED**
+      (Plan D Phase 4: it now asserts `block.splitlines()[0] == "### Search round — CANNOT
+      COMPARE"`, and a sibling pins `DO NOT ACCEPT` as PRESENT on the input that produces it), so
+      do not go looking for a live example; the general RULE is what remains deferred. The correct form is to read the discriminating
       LINE — `_headline()` in that file is the worked example, and it proves itself non-vacuous by
       rendering a fixture where the forbidden string DOES appear. Not done here because catching it
       mechanically means an AST rule over `tests/` matching a `Compare(NotIn)` whose right operand is
@@ -642,8 +647,12 @@ with the two `action.yml` items above — one considered change to the action's 
       detectable within a single function body (same-parent `If` nodes, one terminating in `Return`,
       one not, both guarding a comparable predicate). Not done with the fix because landing it green
       needs a sweep of every multi-branch validator in `src/` to separate the real fall-throughs
-      from the deliberate accumulate-then-continue ones — the same reason CE046 was deferred. —
-      caught in the Plan A Phase 2 review.
+      from the deliberate accumulate-then-continue ones — the same reason the
+      OSError-in-a-`try` rule was deferred. (That entry once reserved the number "CE046"; Plan D
+      Phase 2 spent CE046 on the CLI-flag documentation rule, so the number here would now point at
+      a shipped, unrelated rule. Numbers reserved in this file are enforced nowhere —
+      `runner.py`'s uniqueness assert covers `ALL_RULES` only.) — caught in the Plan A Phase 2
+      review.
 - [ ] A duplicated long prose literal (≥60 chars) across two functions. Phase 3 of the optimize-gate
       module split collapsed four such strings — the notes both Holm wrappers emit, which sat 600
       lines apart as byte-identical copies, two of them wrapped differently in source while producing
