@@ -622,3 +622,17 @@ with the two `action.yml` items above — one considered change to the action's 
       `ast.Import`/`ast.ImportFrom` nodes instead of text, which is a sweep of every such sensor and
       a decision about the ones that legitimately scan prose. — caught in the optimize-gate
       module-split run, Phase 6.
+
+- [ ] **`fingerprint_diff` cannot see a config key that MOVED, only one that changed value.**
+      `compute_run_fingerprint` dumps the whole `BatchRunConfig`, and `fingerprint_diff` compares
+      only keys present in BOTH stamps — so when Phase 2 collapsed the three flat selector fields
+      into one nested `row_selection`, a `--resume` into a run dir stamped before the change
+      silently skipped the config-drift warning instead of reporting it. Verified: a prior stamp
+      with `"split": "train"` against a current stamp with `row_selection: {"split": "test"}`
+      yields `{}`. Not a correctness break (resume matches on `id_field`-derived row ids, and the
+      warning is informational) and it self-heals after one run, so it was not worth blocking on.
+      A real guard is a rule that flags a key present in exactly one of the two fingerprint
+      schemas — which needs a notion of the PREVIOUS schema that nothing in the tree currently
+      carries, so it is a design question rather than a test. Note also that nothing pins that a
+      changed `row_selection` surfaces in the diff at all. — caught in the row-selection
+      integrity run, Phase 2 review.
