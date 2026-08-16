@@ -8,11 +8,12 @@ import os
 import random
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
 from ..models import (
+    ROW_SELECTOR_FLAGS,
     AgentConfig,
     BaseAgentConfig,
     Dataset,
@@ -328,7 +329,7 @@ def _resolve_path(p: str, task_file_dir: Path) -> Path:
     return path if path.is_absolute() else (task_file_dir / path).resolve()
 
 
-def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, Any]]:
+def load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, Any]]:
     """Load dataset rows from inline list or one or more JSONL files."""
     if dataset.rows is not None:
         return [dict(r) for r in dataset.rows]
@@ -340,29 +341,44 @@ def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, 
     return rows
 
 
+def stratum_key(row: dict[str, Any], field: str) -> str:
+    """The stratum a row belongs to under ``_stratified_sample``'s convention.
+
+    ``str(row.get(field, ""))`` — folding a **missing** key into the ``""`` stratum, which is
+    what stratifying wants (it groups the missing with the genuine-empty; this is where the
+    activation dataset's shared negatives, ``expected_skill: ""``, collect). The cost is that
+    an explicit ``None`` becomes the string ``"None"`` rather than joining ``""``.
+
+    Deliberately NOT :func:`row_split_label`'s convention, which treats absent / ``None`` /
+    ``""`` alike. The two differ on purpose: the split filter cannot tolerate an explicit
+    ``null`` silently becoming a real label, while the sampler wants missing and empty in one
+    bucket. This function owns the STRATUM rule only.
+
+    It exists as a function rather than an expression inside the sampler because
+    ``coder-eval plan``'s per-stratum preview must group rows exactly the way the sampler
+    draws them — a preview with its own grouping would print counts for strata the sampler
+    does not use. Rendering the ``""`` key as ``(none)`` is a display concern and belongs to
+    the caller, not here.
+    """
+    return str(row.get(field, ""))
+
+
 def _stratified_sample(
     rows: list[dict[str, Any]],
     field: str,
     n: int,
     seed: int | None,
 ) -> list[dict[str, Any]]:
-    """Randomly keep up to ``n`` rows per stratum, keyed on ``str(row[field])``.
+    """Randomly keep up to ``n`` rows per stratum, keyed by :func:`stratum_key`.
 
     Strata with <= n rows are taken whole. Output preserves first-seen stratum
     order; within a sampled stratum, rows are in their drawn (random) order.
-    Rows missing ``field`` fall into the "" stratum (this is where the activation
-    dataset's shared negatives — ``expected_skill: ""`` — collect). ``seed=None``
-    uses a fresh nondeterministic RNG, so the draw differs every run.
-
-    Note this missing-value convention is deliberately NOT ``row_split_label``'s: folding a
-    missing key to ``""`` groups it with the genuine-empty stratum, which is what stratifying
-    wants, but it also turns an explicit ``None`` into the string ``"None"``. The split
-    filter cannot tolerate that, hence two conventions rather than one.
+    ``seed=None`` uses a fresh nondeterministic RNG, so the draw differs every run.
     """
     rng = random.Random(seed)
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        groups.setdefault(str(row.get(field, "")), []).append(row)
+        groups.setdefault(stratum_key(row, field), []).append(row)
     out: list[dict[str, Any]] = []
     for grp in groups.values():
         out.extend(grp if len(grp) <= n else rng.sample(grp, n))
@@ -449,6 +465,132 @@ def _substitute_row_in_tree(obj: Any, row: dict[str, Any]) -> Any:
     return obj
 
 
+# The two causes a STRATIFIED draw reports, by source. Named here, on the producer, because a
+# consumer that wants to know "was this narrowing stratified?" would otherwise sniff the cause
+# string — and the two spellings differ (`--sample-per-stratum` is hyphenated, the YAML key is
+# not), so a single substring test silently matches only one of them.
+#
+# The CLI half is DERIVED from `ROW_SELECTOR_FLAGS`, never respelled: that map is the one
+# declaration of how each selector is spelled on the command line, and a `--sample-per-stratum`
+# typed again here would keep printing the retired flag after a rename while CE043 stayed green.
+_STRATIFIED_CLI_CAUSE = ROW_SELECTOR_FLAGS["sample_per_stratum"]
+_STRATIFIED_YAML_CAUSE = "dataset.sample_per_stratum"
+STRATIFIED_CAUSE_PREFIXES = (_STRATIFIED_CLI_CAUSE, _STRATIFIED_YAML_CAUSE)
+
+
+class RowSelectionOutcome(NamedTuple):
+    """What :func:`select_rows` selected, and which selectors actually did the narrowing.
+
+    ``applied`` records a cause **only when it removed at least one row**, so ``--sample 99``
+    over a 4-row dataset names nothing. That guard is the point: ``coder-eval plan``'s
+    accounting line used to name whichever selector was *set*, which misattributed a
+    YAML-driven stratified reduction to ``--split``.
+
+    Two fields, not three. The per-stratum breakdown is
+    ``Counter(stratum_key(r, field) for r in rows)`` at the display layer — carrying it here
+    would be a second place to keep a derived count correct.
+    """
+
+    rows: list[dict[str, Any]]
+    applied: tuple[str, ...]
+
+
+def select_rows(
+    rows: list[dict[str, Any]],
+    dataset: Dataset,
+    *,
+    task_id: str,
+    split: str | None = None,
+    max_rows: int | None = None,
+    sample_per_stratum: int | None = None,
+) -> RowSelectionOutcome:
+    """Apply ``--split`` then one sampler, and report which of them narrowed the set.
+
+    **The one declaration of the selection and its precedence.** ``expand_dataset`` calls it to
+    select; ``coder-eval plan`` calls it (through
+    :func:`expand_dataset_with_selection`) to *preview* and prints ``applied`` verbatim. A
+    ``plan`` that restated the win-order would be the very defect this consolidation fixes,
+    and it would decay the same way: silently, as the order changed here.
+
+    Order, and why:
+
+    1. ``split`` filters FIRST. Sampling first would leave an unpredictable (possibly zero)
+       number of rows per split, destroying the train/test comparison the split exists to
+       protect. A task whose rows are all unlabelled passes through untouched (``--split`` is
+       global to the invocation, so an unlabelled task in a multi-task run must not fail);
+       partial labelling keeps the matching rows, drops the unlabelled ones and logs a
+       WARNING naming the count; a *labelled* task with no matching row raises
+       :class:`SplitSelectorError`.
+    2. ``max_rows`` (``--sample``): flat uniform-random N over the whole dataset, fixed seed
+       so it is reproducible but — unlike a first-N slice — unbiased across the concatenated
+       ``dataset.paths``. When set it **overrides** both stratified sources.
+    3. otherwise ``sample_per_stratum``: stratified random N-per-stratum. The CLI argument
+       overrides ``dataset.sample_per_stratum`` (the YAML), so a runner can cap a dataset
+       without editing its task. ``applied`` names which source supplied the count, because
+       "the YAML did this" and "your flag did this" send a reader to different places.
+
+    Row-id validation is deliberately NOT here — it is a property of the dataset, not of the
+    selection, and runs over the whole row set in :func:`expand_dataset` before this is called.
+
+    Raises:
+        SplitSelectorError: A labelled dataset has no row in ``split``.
+    """
+    applied: list[str] = []
+
+    if split is not None:
+        field = dataset.split_field
+        # One pass, one label per row: selecting and reporting read the same computed value,
+        # so they cannot drift into two definitions of "labelled".
+        labelled = [(r, label) for r in rows if (label := row_split_label(r, field)) is not None]
+        if labelled:
+            matching = [r for r, label in labelled if label == split]
+            # Guarded on an actual drop, not on --split being set: a fully labelled dataset
+            # drops nothing and must stay quiet, or the warning becomes noise and gets ignored.
+            if len(labelled) != len(rows):
+                logger.warning(
+                    "Task '%s': --split %r kept %d of %d rows; %d row(s) carry no %r label and were "
+                    + "DROPPED. Every metric below is computed over the smaller set.",
+                    task_id,
+                    split,
+                    len(matching),
+                    len(rows),
+                    len(rows) - len(labelled),
+                    field,
+                )
+            if not matching:
+                raise SplitSelectorError(
+                    f"Dataset for task '{task_id}' has no rows in split {split!r} "
+                    + f"(split_field={field!r}); labelled splits present: "
+                    + f"{sorted({label for _, label in labelled})}"
+                )
+            if len(matching) != len(rows):
+                applied.append(f"{ROW_SELECTOR_FLAGS['split']} {split}")
+            rows = matching
+        # else: no row in this task carries a split label -> --split does not apply here.
+
+    n_per_stratum = sample_per_stratum if sample_per_stratum is not None else dataset.sample_per_stratum
+    if max_rows is not None:
+        if max_rows < len(rows):
+            rows = random.Random(_SMOKE_SAMPLE_SEED).sample(rows, max_rows)
+            applied.append(f"{ROW_SELECTOR_FLAGS['max_rows']} {max_rows}")
+    elif n_per_stratum is not None:
+        # Seeded ONLY by dataset.sample_seed. When that is None the draw is deliberately
+        # nondeterministic — re-drawn every run — regardless of whether the CLI flag or the
+        # YAML supplied the count (see Dataset.sample_seed). The nightly activation suite
+        # relies on this to broaden coverage across runs.
+        sampled = _stratified_sample(rows, dataset.stratify_field, n_per_stratum, dataset.sample_seed)
+        if len(sampled) != len(rows):
+            # Name the SOURCE, not just the count: a reduction the task's own YAML caused
+            # sends a reader to the task file, one a flag caused sends them to their command.
+            if sample_per_stratum is not None:
+                applied.append(f"{_STRATIFIED_CLI_CAUSE} {n_per_stratum}")
+            else:
+                applied.append(f"{_STRATIFIED_YAML_CAUSE}: {n_per_stratum}")
+        rows = sampled
+
+    return RowSelectionOutcome(rows=rows, applied=tuple(applied))
+
+
 def expand_dataset(
     task: TaskDefinition,
     task_file_dir: Path,
@@ -508,79 +650,61 @@ def expand_dataset(
             (it describes a malformed INVOCATION, not a malformed file).
         FileNotFoundError: Dataset path does not exist.
     """
-    if task.dataset is None:
-        return [task]
+    return expand_dataset_with_selection(
+        task,
+        task_file_dir,
+        max_rows=max_rows,
+        sample_per_stratum=sample_per_stratum,
+        split=split,
+    )[0]
 
-    rows = _load_dataset_rows(task.dataset, task_file_dir)
+
+def expand_dataset_with_selection(
+    task: TaskDefinition,
+    task_file_dir: Path,
+    max_rows: int | None = None,
+    sample_per_stratum: int | None = None,
+    split: str | None = None,
+) -> tuple[list[TaskDefinition], RowSelectionOutcome]:
+    """:func:`expand_dataset`, plus the :class:`RowSelectionOutcome` that produced it.
+
+    The form ``coder-eval plan`` calls, so its preview reports the causes and counts from
+    **the same draw** it is previewing. Two calls would re-run a nondeterministic stratified
+    sampler and print a breakdown of rows the command did not return.
+
+    Every other caller uses :func:`expand_dataset`, whose signature and return type are
+    unchanged. A non-dataset task yields ``([task], RowSelectionOutcome([], ()))`` — an empty
+    outcome, because a task with no ``dataset:`` has no rows to have selected.
+    """
+    if task.dataset is None:
+        return [task], RowSelectionOutcome(rows=[], applied=())
+
+    rows = load_dataset_rows(task.dataset, task_file_dir)
     if not rows:
         raise ValueError(f"Dataset for task '{task.task_id}' is empty")
 
-    # --split filters BEFORE either sampler below: sampling first would leave an
-    # unpredictable (possibly zero) number of rows per split, destroying the
-    # train/test comparison the split exists to protect.
-    # Row ids are a property of the DATASET, so check the whole row set BEFORE any
-    # filtering or sampling narrows it. Checking only what survives would let a malformed,
-    # id-less or duplicate row sitting in an unselected split validate under every --split
-    # and surface only on a full run — and the split workflow always passes one.
+    # Row ids are a property of the DATASET, so check the whole row set BEFORE any filtering
+    # or sampling narrows it. Checking only what survives would let a malformed, id-less or
+    # duplicate row sitting in an unselected split validate under every --split and surface
+    # only on a full run — and the split workflow always passes one. Deliberately outside
+    # select_rows for exactly that reason: validation is not part of the selection.
     _validate_row_ids(rows, task)
 
-    if split is not None:
-        field = task.dataset.split_field
-        # One pass, one label per row: selecting and reporting both read the same computed
-        # value, so they cannot drift apart into two definitions of "labelled".
-        labelled = [(r, label) for r in rows if (label := row_split_label(r, field)) is not None]
-        if labelled:
-            # A PARTLY labelled dataset is the dangerous state: the unlabelled rows are
-            # dropped (the safe direction), so the run succeeds and every metric is
-            # computed over a smaller suite than the file suggests. Say so. Guarded on an
-            # actual drop, not on --split being set — a fully labelled dataset drops
-            # nothing and must stay quiet, or the warning becomes noise and gets ignored.
-            matching = [r for r, label in labelled if label == split]
-            if len(labelled) != len(rows):
-                logger.warning(
-                    "Task '%s': --split %r kept %d of %d rows; %d row(s) carry no %r label and were "
-                    + "DROPPED. Every metric below is computed over the smaller set.",
-                    task.task_id,
-                    split,
-                    len(matching),
-                    len(rows),
-                    len(rows) - len(labelled),
-                    field,
-                )
-            rows = matching
-            if not rows:
-                raise SplitSelectorError(
-                    f"Dataset for task '{task.task_id}' has no rows in split {split!r} "
-                    + f"(split_field={field!r}); labelled splits present: "
-                    + f"{sorted({label for _, label in labelled})}"
-                )
-        # else: no row in this task carries a split label -> --split does not apply here.
-
-    # Row selection precedence:
-    #   1. CLI --sample (max_rows): flat uniform-random N over the whole dataset.
-    #      Fixed seed => reproducible across runs, but (unlike a first-N slice)
-    #      unbiased across the concatenated dataset.paths.
-    #   2. sample_per_stratum: stratified random N-per-stratum. CLI
-    #      --sample-per-stratum (the arg) overrides dataset.sample_per_stratum
-    #      (the YAML), so a runner can cap a dataset without editing its task.
-    ds = task.dataset
-    n_per_stratum = sample_per_stratum if sample_per_stratum is not None else ds.sample_per_stratum
-    # Stratified sampling is seeded only by dataset.sample_seed. When that is None the sample is
-    # deliberately nondeterministic — re-drawn every run — regardless of whether the CLI
-    # --sample-per-stratum flag or the YAML supplied the count (see Dataset.sample_seed). The
-    # nightly activation suite relies on this to broaden coverage across runs.
-    stratum_seed = ds.sample_seed
-    if max_rows is not None and max_rows < len(rows):
-        rows = random.Random(_SMOKE_SAMPLE_SEED).sample(rows, max_rows)
-    elif max_rows is None and n_per_stratum is not None:
-        rows = _stratified_sample(rows, ds.stratify_field, n_per_stratum, stratum_seed)
+    outcome = select_rows(
+        rows,
+        task.dataset,
+        task_id=task.task_id,
+        split=split,
+        max_rows=max_rows,
+        sample_per_stratum=sample_per_stratum,
+    )
 
     id_field = task.dataset.id_field
     expanded: list[TaskDefinition] = []
 
-    for row in rows:
+    for row in outcome.rows:
         # No validation here: all three id checks ran over the whole dataset in
-        # _validate_row_ids, before filtering and sampling narrowed `rows`.
+        # _validate_row_ids, before filtering and sampling narrowed the set.
         row_id = str(row[id_field])
 
         data = task.model_dump(exclude_unset=True)
@@ -594,4 +718,4 @@ def expand_dataset(
         data["dataset"] = None
         expanded.append(TaskDefinition(**data))
 
-    return expanded
+    return expanded, outcome

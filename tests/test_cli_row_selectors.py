@@ -27,14 +27,23 @@ from unittest.mock import patch
 
 import pytest
 import typer
+import yaml
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
 from coder_eval.cli.run_command import _run_with_experiment
-from coder_eval.models import ROW_SELECTOR_FLAGS, RowSelection
+from coder_eval.models import ROW_SELECTOR_FLAGS, Dataset, RowSelection
 from coder_eval.orchestration.config import BatchRunConfig
-from coder_eval.orchestration.task_loader import SplitSelectorError
+from coder_eval.orchestration.task_loader import (
+    STRATIFIED_CAUSE_PREFIXES,
+    SplitSelectorError,
+    expand_dataset,
+    expand_dataset_with_selection,
+    row_split_label,
+    select_rows,
+    stratum_key,
+)
 
 
 runner = CliRunner()
@@ -210,3 +219,210 @@ class TestRowSelectionModel:
         # The config side and the summary side default DIFFERENTLY on purpose: a run always
         # HAS a (possibly empty) selection, while a summary's None means "not recorded".
         assert BatchRunConfig(run_dir=Path("runs/x")).row_selection.requested is False
+
+
+class TestStratumKey:
+    """The sampler's grouping rule, now owned by one function.
+
+    `plan`'s per-stratum preview groups through this, so the counts it prints describe the
+    strata `--sample-per-stratum` actually draws from. A preview with its own grouping would
+    report numbers for strata the sampler does not use.
+    """
+
+    def test_a_missing_field_and_an_empty_string_share_the_empty_key(self) -> None:
+        assert stratum_key({}, "expected_skill") == ""
+        assert stratum_key({"expected_skill": ""}, "expected_skill") == ""
+
+    def test_an_explicit_null_becomes_the_string_none(self) -> None:
+        """The documented cost of folding a missing key to "". Deliberately NOT
+        `row_split_label`'s convention, which treats absent / None / "" alike — the split
+        filter cannot tolerate an explicit null silently becoming a real label."""
+        assert stratum_key({"expected_skill": None}, "expected_skill") == "None"
+        assert row_split_label({"expected_skill": None}, "expected_skill") is None
+
+    def test_the_two_conventions_are_deliberately_different(self) -> None:
+        row = {"split": None}
+        assert stratum_key(row, "split") == "None"
+        assert row_split_label(row, "split") is None
+
+
+class TestSelectRowsAppliedCauses:
+    """`applied` names a selector only when it actually removed a row."""
+
+    @staticmethod
+    def _rows(n: int, **extra: object) -> list[dict[str, Any]]:
+        return [{"id": f"r{i}", **extra} for i in range(n)]
+
+    def test_a_selector_that_removed_nothing_is_absent(self) -> None:
+        outcome = select_rows(self._rows(4), Dataset(rows=[{"id": "x"}]), task_id="t", max_rows=99)
+        assert outcome.applied == ()
+        assert len(outcome.rows) == 4
+
+    def test_a_split_that_kept_every_row_is_absent(self) -> None:
+        rows = self._rows(3, split="train")
+        outcome = select_rows(rows, Dataset(rows=[{"id": "x"}]), task_id="t", split="train")
+        assert outcome.applied == ()
+
+    def test_a_cli_sourced_stratified_count_names_the_flag(self) -> None:
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        dataset = Dataset(rows=[{"id": "x"}], sample_seed=1)
+        outcome = select_rows(rows, dataset, task_id="t", sample_per_stratum=1)
+        assert outcome.applied == ("--sample-per-stratum 1",)
+
+    def test_a_yaml_sourced_stratified_count_names_the_yaml_key(self) -> None:
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        dataset = Dataset(rows=[{"id": "x"}], sample_per_stratum=1, sample_seed=1)
+        outcome = select_rows(rows, dataset, task_id="t")
+        assert outcome.applied == ("dataset.sample_per_stratum: 1",)
+
+    def test_sample_beats_sample_per_stratum_and_only_it_is_named(self) -> None:
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(4)]
+        dataset = Dataset(rows=[{"id": "x"}], sample_seed=1)
+        outcome = select_rows(rows, dataset, task_id="t", max_rows=2, sample_per_stratum=1)
+        assert outcome.applied == ("--sample 2",)
+        assert len(outcome.rows) == 2
+
+    def test_split_is_named_first_when_both_narrow(self) -> None:
+        rows = [{"id": f"a{i}", "expected_skill": "alpha", "split": "train"} for i in range(3)]
+        rows += [{"id": "b0", "expected_skill": "alpha", "split": "test"}]
+        dataset = Dataset(rows=[{"id": "x"}], sample_seed=1)
+        outcome = select_rows(rows, dataset, task_id="t", split="train", sample_per_stratum=1)
+        assert outcome.applied == ("--split train", "--sample-per-stratum 1")
+
+    def test_every_stratified_cause_select_rows_emits_matches_the_shared_prefixes(self) -> None:
+        """`plan`'s nondeterminism warning tests each cause against STRATIFIED_CAUSE_PREFIXES.
+
+        Asserted against causes `select_rows` ACTUALLY PRODUCES, not against hard-coded
+        literals: the point is that the producer's format and the consumer's prefixes cannot
+        drift apart, and a test comparing two literals to each other would keep passing while
+        the real cause was reworded and the warning silently stopped firing. Both sources are
+        exercised because the two spellings differ — `--sample-per-stratum` is hyphenated,
+        `dataset.sample_per_stratum` is not.
+        """
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        cli = select_rows(rows, Dataset(rows=[{"id": "x"}], sample_seed=1), task_id="t", sample_per_stratum=1)
+        yaml_sourced = select_rows(rows, Dataset(rows=[{"id": "x"}], sample_per_stratum=1, sample_seed=1), task_id="t")
+        for outcome in (cli, yaml_sourced):
+            assert outcome.applied, "expected a stratified narrowing to be reported"
+            assert all(cause.startswith(STRATIFIED_CAUSE_PREFIXES) for cause in outcome.applied)
+
+
+class TestExpandDatasetWrapperIsAWrapper:
+    def test_both_entry_points_return_the_same_rows_for_seeded_inputs(self, tmp_path: Path) -> None:
+        from coder_eval.models import TaskDefinition
+
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(4)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta"} for i in range(4)]
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="Do ${row.id}",
+            sandbox={"driver": "tempdir"},
+            success_criteria=[{"type": "file_exists", "description": "c", "path": "o.txt"}],
+            dataset=Dataset(rows=rows, sample_seed=3),
+        )
+        plain = expand_dataset(task, tmp_path, sample_per_stratum=2)
+        wrapped, outcome = expand_dataset_with_selection(task, tmp_path, sample_per_stratum=2)
+        assert [t.task_id for t in plain] == [t.task_id for t in wrapped]
+        assert len(outcome.rows) == len(wrapped)
+
+
+class TestPlanPreviewsWhatRunExecutes:
+    """B5: the row count `plan` prints must equal the row count `run` resolves.
+
+    `plan` is only worth running if it previews the invocation you are about to pay for.
+    Both halves are asserted — the STRUCTURAL one (the selected rows vs what
+    `resolve_all_tasks` produced) and the PRINTED one (the "N selected" token) — so neither
+    the selection nor its rendering can drift alone. `dataset.sample_seed` is pinned
+    throughout, since an unseeded stratified draw is re-drawn per call by design.
+    """
+
+    @staticmethod
+    def _write_suite(tmp_path: Path) -> Path:
+        rows = [{"id": f"a{i}", "expected_skill": "alpha", "split": "train"} for i in range(3)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta", "split": "train"} for i in range(3)]
+        rows += [{"id": f"c{i}", "expected_skill": "alpha", "split": "test"} for i in range(2)]
+        data = {
+            "task_id": "suite",
+            "description": "d",
+            "initial_prompt": "Do ${row.id}",
+            "sandbox": {"driver": "tempdir"},
+            "success_criteria": [{"type": "file_exists", "description": "c", "path": "o.txt"}],
+            "dataset": {"rows": rows, "sample_seed": 11},
+        }
+        path = tmp_path / "suite.yaml"
+        path.write_text(yaml.safe_dump(data), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _resolved_ids(task_file: Path, tmp_path: Path, **selectors: object) -> set[str]:
+        from coder_eval.models import ExperimentDefaults, ExperimentDefinition, ExperimentVariant
+        from coder_eval.orchestration.experiment import resolve_all_tasks
+
+        # The agent type comes from the DEFAULT experiment's defaults, exactly as
+        # experiments/default.yaml supplies it in a real run.
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="e",
+            description="d",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        resolved, _ = resolve_all_tasks(
+            task_files=[task_file],
+            experiment=experiment,
+            default_experiment=default_exp,
+            config=BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(**selectors)),  # type: ignore[arg-type]
+        )
+        return {rt.task.task_id for rt in resolved}
+
+    @pytest.mark.parametrize(
+        "selectors",
+        [
+            {"split": "train"},
+            {"split": "train", "max_rows": 2},
+            {"split": "train", "sample_per_stratum": 1},
+            {"sample_per_stratum": 2},
+        ],
+        ids=["split", "split+sample", "split+per-stratum", "per-stratum"],
+    )
+    def test_plan_previews_the_row_count_run_resolves(self, tmp_path: Path, selectors: dict) -> None:
+        from coder_eval.cli.plan_command import _preview_dataset
+        from coder_eval.orchestration.task_loader import load_task
+
+        task_file = self._write_suite(tmp_path)
+        task, _ = load_task(task_file)
+
+        run_ids = self._resolved_ids(task_file, tmp_path, **selectors)
+
+        with patch("coder_eval.cli.plan_command.console") as mock_console:
+            previewed = _preview_dataset(
+                task,
+                task_file,
+                split_name=selectors.get("split"),
+                max_rows=selectors.get("max_rows"),
+                sample_per_stratum=selectors.get("sample_per_stratum"),
+            )
+        printed = " ".join(str(call) for call in mock_console.print.call_args_list)
+
+        # Structural half: plan selected exactly what run resolved.
+        assert {t.task_id for t in previewed} == run_ids
+        # Rendering half: the number a reader actually sees matches it too.
+        assert f"{len(run_ids)} selected" in printed
+
+    def test_a_seeded_stratified_preview_selects_the_same_rows_not_just_the_same_count(self, tmp_path: Path) -> None:
+        """What pinning `dataset.sample_seed` buys: identity, not merely cardinality."""
+        from coder_eval.cli.plan_command import _preview_dataset
+        from coder_eval.orchestration.task_loader import load_task
+
+        task_file = self._write_suite(tmp_path)
+        task, _ = load_task(task_file)
+        run_ids = self._resolved_ids(task_file, tmp_path, sample_per_stratum=1)
+
+        with patch("coder_eval.cli.plan_command.console"):
+            previewed = _preview_dataset(task, task_file, sample_per_stratum=1)
+
+        assert {t.task_id for t in previewed} == run_ids

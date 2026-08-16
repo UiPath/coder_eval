@@ -429,3 +429,165 @@ class TestPlanCommandDatasetPreview:
         printed, exit_code = self._run(task, task_file, split="train")
         assert exit_code == 0
         assert "⚠" in printed and "1 of 3 rows carry no 'split' label" in printed
+
+
+class TestPlanCommandRowSelectors:
+    """`plan` previews what `run` executes, and names WHICH selector narrowed the set.
+
+    The accounting line used to name whichever selector was *set*, so a reduction caused by a
+    task's own `dataset.sample_per_stratum` was reported as `(--split X)`. The suffix now comes
+    straight from `RowSelectionOutcome.applied`, which records a cause only when it actually
+    removed a row — so the preview cannot claim a narrowing that did not happen, and cannot
+    attribute one to the wrong selector.
+    """
+
+    _run = TestPlanCommandDatasetPreview._run
+
+    @staticmethod
+    def _stratified_task(rows, **dataset_kwargs):
+        from coder_eval.models import Dataset
+
+        return TaskDefinition(
+            task_id="dataset-task",
+            description="A dataset task",
+            initial_prompt="Do ${row.id}",
+            sandbox={"driver": "tempdir"},
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+            dataset=Dataset(rows=rows, **dataset_kwargs),
+        )
+
+    def test_sample_narrows_and_is_named(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": f"r{i}"} for i in range(4)])
+        printed, exit_code = self._run(task, task_file, sample=2)
+        assert exit_code == 0
+        assert "4 rows" in printed and "2 selected" in printed and "--sample 2" in printed
+
+    def test_sample_at_or_above_the_row_count_names_nothing(self, tmp_path: Path) -> None:
+        """`--sample 99` over 4 rows REQUESTS a sample and narrows nothing. Naming it would
+        claim a subset the run does not take."""
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": f"r{i}"} for i in range(4)])
+        printed, exit_code = self._run(task, task_file, sample=99)
+        assert exit_code == 0
+        assert "4 rows -> 4 selected" in printed
+        # No parenthetical cause at all: `applied` is empty, so nothing is named.
+        assert "--sample" not in printed
+
+    def test_sample_per_stratum_narrows_and_is_named(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta"} for i in range(3)]
+        task = self._stratified_task(rows, sample_seed=1)
+        printed, exit_code = self._run(task, task_file, sample_per_stratum=1)
+        assert exit_code == 0
+        assert "6 rows -> 2 selected" in printed and "--sample-per-stratum 1" in printed
+
+    def test_a_yaml_sourced_stratified_count_is_not_attributed_to_split(self, tmp_path: Path) -> None:
+        """The B2 regression: a task carrying `dataset.sample_per_stratum` with only --split
+        passed used to report the stratified reduction as `(--split train)`."""
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": f"a{i}", "expected_skill": "alpha", "split": "train"} for i in range(3)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta", "split": "train"} for i in range(3)]
+        task = self._stratified_task(rows, sample_per_stratum=1, sample_seed=1)
+        printed, exit_code = self._run(task, task_file, split="train")
+        assert exit_code == 0
+        assert "dataset.sample_per_stratum: 1" in printed
+        # --split kept every row, so it must NOT be named as a cause at all. Asserting on the
+        # bare flag rather than "(--split train)": the parenthesised form matches only when
+        # --split is the SOLE cause, so a regression naming it alongside the stratified cause
+        # would render "(--split train, dataset.sample_per_stratum: 1)" and slip through.
+        assert "--split" not in printed
+
+    def test_split_and_sample_per_stratum_are_both_named_split_first(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": f"a{i}", "expected_skill": "alpha", "split": "train"} for i in range(2)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta", "split": "train"} for i in range(2)]
+        rows += [{"id": f"c{i}", "expected_skill": "alpha", "split": "test"} for i in range(2)]
+        task = self._stratified_task(rows, sample_seed=1)
+        printed, exit_code = self._run(task, task_file, split="train", sample_per_stratum=1)
+        assert exit_code == 0
+        assert "(--split train, --sample-per-stratum 1)" in printed
+
+    def test_sample_beats_sample_per_stratum_and_only_it_is_named(self, tmp_path: Path) -> None:
+        """`--sample` wins; naming both would claim a stratified narrowing that did not run."""
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta"} for i in range(3)]
+        task = self._stratified_task(rows, sample_seed=1)
+        printed, exit_code = self._run(task, task_file, sample=2, sample_per_stratum=1)
+        assert exit_code == 0
+        assert "--sample 2" in printed
+        assert "--sample-per-stratum" not in printed
+
+    def test_strata_line_counts_the_selected_rows(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta"} for i in range(2)]
+        task = self._stratified_task(rows)
+        printed, exit_code = self._run(task, task_file)
+        assert exit_code == 0
+        assert "strata (expected_skill): alpha=3, beta=2" in printed
+        # And DERIVED, not just literal-equal: the rendered counts must equal what
+        # `stratum_key` — the sampler's own rule — produces over the selected rows. A
+        # preview that invented its own grouping could still match the literal above.
+        from collections import Counter
+
+        from coder_eval.orchestration.task_loader import stratum_key
+
+        expected = Counter(stratum_key(r, task.dataset.stratify_field) for r in rows)
+        rendered = ", ".join(f"{k}={n}" for k, n in sorted(expected.items()))
+        assert f"strata ({task.dataset.stratify_field}): {rendered}" in printed
+
+    def test_rows_missing_the_stratify_field_are_counted_under_none(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": "a", "expected_skill": "alpha"}, {"id": "b"}, {"id": "c"}]
+        task = self._stratified_task(rows)
+        printed, exit_code = self._run(task, task_file)
+        assert exit_code == 0
+        assert "(none)=2" in printed and "alpha=1" in printed
+
+    def test_a_single_stratum_prints_no_strata_line(self, tmp_path: Path) -> None:
+        """A one-entry breakdown just restates the row count."""
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = self._stratified_task([{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)])
+        printed, exit_code = self._run(task, task_file)
+        assert exit_code == 0
+        assert "strata (" not in printed
+
+    def test_an_unseeded_stratified_sample_warns_that_rows_are_redrawn(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta"} for i in range(3)]
+        task = self._stratified_task(rows)  # no sample_seed
+        printed, exit_code = self._run(task, task_file, sample_per_stratum=1)
+        assert exit_code == 0
+        assert "re-drawn every invocation" in printed
+
+    def test_a_seeded_stratified_sample_does_not_warn(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        rows = [{"id": f"a{i}", "expected_skill": "alpha"} for i in range(3)]
+        rows += [{"id": f"b{i}", "expected_skill": "beta"} for i in range(3)]
+        task = self._stratified_task(rows, sample_seed=7)
+        printed, exit_code = self._run(task, task_file, sample_per_stratum=1)
+        assert exit_code == 0
+        assert "re-drawn every invocation" not in printed
+
+    def test_a_non_dataset_task_prints_no_selector_lines(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        printed, exit_code = self._run(task, task_file, split="test", sample=2)
+        assert exit_code == 0
+        assert "Dataset:" not in printed and "strata (" not in printed

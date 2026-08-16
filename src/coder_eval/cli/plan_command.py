@@ -1,18 +1,42 @@
 """Plan command - validate task files without executing."""
 
 import warnings
+from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import typer
+from rich.markup import escape
 
 from ..models.tasks import TaskDefinition, UnknownTaskFieldWarning
-from ..orchestration.task_loader import _load_dataset_rows, expand_dataset, load_task, row_split_label
+from ..orchestration.task_loader import (
+    STRATIFIED_CAUSE_PREFIXES,
+    expand_dataset_with_selection,
+    load_dataset_rows,
+    load_task,
+    row_split_label,
+    stratum_key,
+)
 from .console import console
+from .row_selectors import SAMPLE_HELP, SAMPLE_PER_STRATUM_HELP, SPLIT_HELP
 from .run_helpers import discover_default_tasks
 from .utils import check_api_keys, check_tools
 
 
-def _preview_dataset(task: TaskDefinition, task_file: Path, split_name: str | None) -> list[TaskDefinition]:
+# The empty stratum key rendered for a human. `stratum_key` folds a missing field and an
+# empty string into "", which prints as nothing at all — a count with no label. The LABEL is
+# a display concern and lives here; the RULE lives on `stratum_key` and is not restated.
+_EMPTY_STRATUM_LABEL = "(none)"
+
+
+def _preview_dataset(
+    task: TaskDefinition,
+    task_file: Path,
+    *,
+    split_name: str | None = None,
+    max_rows: int | None = None,
+    sample_per_stratum: int | None = None,
+) -> list[TaskDefinition]:
     """Expand a dataset-backed task, print its row accounting, and return the rows.
 
     Runs at the one surface that costs nothing, so a suite's resolved row count — the
@@ -20,43 +44,95 @@ def _preview_dataset(task: TaskDefinition, task_file: Path, split_name: str | No
     any money is spent. Expansion also validates row ids and every ``${row.*}``
     substitution, which previously failed per-row at run time after the sandbox was built.
 
+    The narrowing suffix is printed from what the selector code **reports**
+    (``RowSelectionOutcome.applied``), never re-derived here. The win-order lives in
+    ``task_loader.select_rows``; restating it would rebuild the defect this preview exists
+    to fix — the old line named whichever selector was *set*, so a reduction caused by a
+    task's own ``dataset.sample_per_stratum`` was attributed to ``--split``.
+
     Returns ``[task]`` unchanged when the task carries no ``dataset:`` block; a "1 row"
     line there would be noise about a concept the task does not have.
     """
     if task.dataset is None:
         return [task]
 
-    expanded = expand_dataset(task, task_file.parent, split=split_name)
-    # The unfiltered total, from a list length rather than a second expand_dataset call:
-    # that would re-run whole-dataset id validation and full substitution over every row
-    # for a number already in hand.
-    rows = _load_dataset_rows(task.dataset, task_file.parent)
-    # `row_split_label` is the runtime's single definition of "labelled" (expand_dataset
-    # and CE035 call it too) — do not re-derive the rule here.
+    # ONE draw, previewed and reported. Calling expand_dataset and then re-selecting for the
+    # breakdown would re-run a nondeterministic stratified sampler and print counts for rows
+    # this command did not return.
+    expanded, outcome = expand_dataset_with_selection(
+        task,
+        task_file.parent,
+        max_rows=max_rows,
+        sample_per_stratum=sample_per_stratum,
+        split=split_name,
+    )
+    # The unfiltered total, from a list length rather than a second expansion: that would
+    # re-run whole-dataset id validation and full substitution over every row for a number
+    # already in hand.
+    rows = load_dataset_rows(task.dataset, task_file.parent)
+    # `row_split_label` is the runtime's single definition of "labelled" (select_rows and
+    # CE035 call it too) — do not re-derive the rule here.
     labels = [row_split_label(r, task.dataset.split_field) for r in rows]
     labelled = [x for x in labels if x is not None]
 
-    if split_name is None:
-        suffix = ""
-    elif not labelled:
+    if outcome.applied:
+        suffix = f" ({escape(', '.join(outcome.applied))})"
+    elif split_name is not None and not labelled:
         # Do not imply the selector did something. It did not: an unlabelled task passes
         # through --split untouched, because --split is global to the invocation.
-        suffix = f" (--split {split_name}: not labelled, all rows kept)"
+        suffix = f" (--split {escape(split_name)}: not labelled, all rows kept)"
     else:
-        suffix = f" (--split {split_name})"
+        suffix = ""
     console.print(f"  [dim]Dataset: {len(rows)} rows -> {len(expanded)} selected{suffix}[/dim]")
 
-    # The pre-spend half of the partial-labelling signal (expand_dataset also logs a
-    # WARNING). `plan` is the loudest of the two because it is free to run — and this is
-    # the state that silently shrinks every metric.
+    _print_strata(task, outcome.rows)
+
+    # The pre-spend half of the partial-labelling signal (select_rows also logs a WARNING).
+    # `plan` is the loudest of the two because it is free to run — and this is the state
+    # that silently shrinks every metric.
     if split_name is not None and labelled and len(labelled) != len(labels):
         console.print(
             f"  [yellow]⚠[/yellow] [yellow]{len(labels) - len(labelled)} of {len(labels)} rows carry "
-            + f"no '{task.dataset.split_field}' label and are DROPPED by --split; every metric would be "
+            + f"no '{escape(task.dataset.split_field)}' label and are DROPPED by --split; every metric would be "
             + "computed over the smaller set[/yellow]"
         )
-    assert expanded, "expand_dataset returned no rows (the empty-dataset raise should have fired)"
+
+    # A stratified draw that actually narrowed the set, with no pinned seed, selects a
+    # DIFFERENT subset every invocation. Without saying so the strata line above reads as a
+    # promise of identity the sampler does not make.
+    stratified = any(cause.startswith(STRATIFIED_CAUSE_PREFIXES) for cause in outcome.applied)
+    if stratified and task.dataset.sample_seed is None:
+        console.print(
+            "  [yellow]⚠[/yellow] [yellow]the stratified sample is re-drawn every invocation "
+            + "(dataset.sample_seed is not set), so `run` will execute this many rows but not "
+            + "necessarily these ones; set dataset.sample_seed to pin them[/yellow]"
+        )
     return expanded
+
+
+def _print_strata(task: TaskDefinition, selected: list[dict[str, Any]]) -> None:
+    """Print the per-stratum breakdown of the SELECTED rows, or nothing.
+
+    Silent below two distinct strata: a one-entry breakdown restates the row count.
+
+    Grouping goes through ``task_loader.stratum_key`` — the sampler's own rule — so the
+    counts describe the strata ``--sample-per-stratum`` actually draws from. A preview that
+    invented its own grouping would print numbers for strata the sampler does not use, which
+    is the class of bug this whole surface exists to close.
+    """
+    if task.dataset is None or not selected:
+        return
+    field = task.dataset.stratify_field
+    counts = Counter(stratum_key(row, field) for row in selected)
+    if len(counts) < 2:
+        return
+    # Stratum values and the field name come from user YAML/JSONL, so they are ESCAPED: the
+    # threat is not that they sit outside the [dim] span, it is that a value can BE a tag.
+    # An `expected_skill: "[/dim]"` raises MarkupError — swallowed by the per-task handler
+    # into a red ✗ and a non-zero exit on a perfectly valid suite — and an `[bold]` silently
+    # renders as an empty label, i.e. a preview that misreports its own breakdown.
+    rendered = ", ".join(f"{escape(key or _EMPTY_STRATUM_LABEL)}={n}" for key, n in sorted(counts.items()))
+    console.print(f"  [dim]strata ({escape(field)}): {rendered}[/dim]")
 
 
 def plan_command(
@@ -70,17 +146,9 @@ def plan_command(
         "-e",
         help="Experiment definition YAML (default: experiments/default.yaml)",
     ),
-    split: str | None = typer.Option(
-        None,
-        "--split",
-        help=(
-            "For dataset-backed tasks, preview only rows whose dataset.split_field value "
-            "(default field: split) matches this name — e.g. --split train / --split test, "
-            "matching `coder-eval run --split`. Tasks whose rows are all unlabelled are "
-            "unaffected; a labelled task with no row in this split is an error naming the "
-            "splits that exist."
-        ),
-    ),
+    split: str | None = typer.Option(None, "--split", help=SPLIT_HELP),
+    sample: int | None = typer.Option(None, "--sample", help=SAMPLE_HELP, min=1),
+    sample_per_stratum: int | None = typer.Option(None, "--sample-per-stratum", help=SAMPLE_PER_STRATUM_HELP, min=1),
 ) -> None:
     """Validate task files without executing (dry-run).
 
@@ -107,13 +175,19 @@ def plan_command(
         coder-eval plan tasks/*.yaml
         coder-eval plan tasks/*.yaml -e experiments/model-comparison.yaml
         coder-eval plan evals/outcome.yaml --split test
+        coder-eval plan evals/outcome.yaml --split test --sample-per-stratum 3
     """
     # Default to discovering all tasks under tasks/ when none provided
     resolved_task_files = task_files if task_files else discover_default_tasks()
     # Tests call plan_command(...) directly rather than through CliRunner, so an unpassed
     # option arrives as a typer OptionInfo rather than its declared default — the same
-    # guard `experiment` already carries below.
+    # guard `experiment` already carries below. `not isinstance(x, bool)` on the integers
+    # because bool is an int subclass, and a True would otherwise become a sample of 1.
     split_name = split if isinstance(split, str) else None
+    max_rows = sample if isinstance(sample, int) and not isinstance(sample, bool) else None
+    per_stratum = (
+        sample_per_stratum if isinstance(sample_per_stratum, int) and not isinstance(sample_per_stratum, bool) else None
+    )
 
     console.print("\n[bold]Task Validation (Dry-Run)[/bold]\n")
 
@@ -184,7 +258,13 @@ def plan_command(
 
             console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
 
-            expanded = _preview_dataset(task, task_file, split_name)
+            expanded = _preview_dataset(
+                task,
+                task_file,
+                split_name=split_name,
+                max_rows=max_rows,
+                sample_per_stratum=per_stratum,
+            )
 
             # Surface unknown-field warnings as inline notices (non-blocking;
             # catches stale top-level fields like max_iterations / llm_reviewer

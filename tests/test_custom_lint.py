@@ -5209,9 +5209,9 @@ class TestCE035SplitLabelsAllOrNothing:
     @staticmethod
     def _split_labels(task, task_file_dir: Path) -> list[str | None]:
         """Each row's split label, using the runtime's own definition of "labelled"."""
-        from coder_eval.orchestration.task_loader import _load_dataset_rows, row_split_label
+        from coder_eval.orchestration.task_loader import load_dataset_rows, row_split_label
 
-        rows = _load_dataset_rows(task.dataset, task_file_dir)
+        rows = load_dataset_rows(task.dataset, task_file_dir)
         # The CONFIGURED field name, never the literal "split" — a dataset may name it
         # anything, and keying on the default would silently pass every such suite.
         return [row_split_label(row, task.dataset.split_field) for row in rows]
@@ -5796,3 +5796,133 @@ class TestHolmRejectionsIsConfined:
         callers = sorted(name for name, _line in self._call_sites(ast.parse(source)))
         assert callers == ["_per_candidate"], callers
         assert callers != sorted(self.ALLOWED)
+
+
+def _row_selector_fields() -> set[str]:
+    from coder_eval.models import ROW_SELECTOR_FLAGS
+
+    return set(ROW_SELECTOR_FLAGS)
+
+
+_ROW_SELECTOR_FIELDS = _row_selector_fields()
+
+
+@pytest.mark.lint
+class TestCE043RowSelectorParity:
+    """CE043 — `run` and `plan` must declare the same row-selector flags, described identically.
+
+    `plan` is sold as the pre-spend preview of what `run` will execute. A selector `run` has
+    and `plan` lacks makes the exact invocation the user is about to pay for un-previewable —
+    which is precisely the state this rule was written after: `run` shipped `--split`,
+    `--sample` and `--sample-per-stratum` while `plan` had only `--split`, so the one command
+    whose whole job is to cost a run could not preview two thirds of the ways a run is scoped.
+
+    Three assertions, because the drift has three shapes:
+
+    1. the flag MAP covers exactly the model's fields — a fourth selector on `RowSelection`
+       forces a flag decision instead of silently existing on neither command;
+    2. both commands DECLARE every flag in the map;
+    3. both use the SAME help-string object, so the two surfaces cannot describe one flag two
+       different ways.
+
+    Wired as a dedicated ``@pytest.mark.lint`` class rather than a ``BaseRule`` because it
+    reasons over resolved Typer signatures, not over one ``.py`` AST.
+
+    **Boundary**, stated so a green run is not mistaken for a proof:
+
+    - it reads ``OptionInfo.param_decls``, so a flag Typer DERIVES from the parameter name
+      (``sample: int | None = typer.Option(None)``) is invisible to it and would be reported
+      as missing;
+    - it pins DECLARATION and HELP TEXT, never behaviour. ``plan`` could accept ``--sample``
+      and ignore it entirely and this rule would stay green — the preview-parity test in
+      ``tests/test_cli_row_selectors.py`` is what covers that.
+    """
+
+    @staticmethod
+    def _long_flags(fn) -> set[str]:
+        """Every ``--long`` flag the command declares, read off its Typer OptionInfo defaults."""
+        import inspect
+
+        out: set[str] = set()
+        for param in inspect.signature(fn).parameters.values():
+            out.update(getattr(param.default, "param_decls", ()) or ())
+        return {flag for flag in out if flag.startswith("--")}
+
+    @staticmethod
+    def _help_for(fn, flag: str) -> str | None:
+        import inspect
+
+        for param in inspect.signature(fn).parameters.values():
+            if flag in (getattr(param.default, "param_decls", ()) or ()):
+                return getattr(param.default, "help", None)
+        return None
+
+    def test_the_flag_map_covers_exactly_the_selector_model(self) -> None:
+        from coder_eval.models import ROW_SELECTOR_FLAGS, RowSelection
+
+        assert set(ROW_SELECTOR_FLAGS) == set(RowSelection.model_fields), (
+            "ROW_SELECTOR_FLAGS and RowSelection have drifted — a selector field with no flag "
+            "renders as nothing on every surface that prints selectors, and a flag with no "
+            "field is recorded nowhere in run.json"
+        )
+
+    @pytest.mark.parametrize("command_name", ["run_command", "plan_command"])
+    def test_both_commands_declare_every_row_selector(self, command_name: str) -> None:
+        # Import the FUNCTIONS from their defining modules: `coder_eval.cli` re-exports both
+        # names, so `from coder_eval.cli import run_command` would bind the function and make
+        # a module-attribute lookup fail confusingly.
+        from coder_eval.cli.plan_command import plan_command
+        from coder_eval.cli.run_command import run_command
+        from coder_eval.models import ROW_SELECTOR_FLAGS
+
+        fn = run_command if command_name == "run_command" else plan_command
+        declared = self._long_flags(fn)
+        missing = sorted(set(ROW_SELECTOR_FLAGS.values()) - declared)
+        assert not missing, (
+            f"{command_name} does not declare {missing}. `plan` is the pre-spend preview of what "
+            "`run` executes, so a selector on one command only makes the exact invocation the "
+            "user is about to pay for un-previewable — or, the other way round, previewable but "
+            "not runnable. Add the flag to both, sharing the help text in cli/row_selectors.py."
+        )
+
+    @pytest.mark.parametrize("field", sorted(_ROW_SELECTOR_FIELDS))
+    def test_both_commands_share_one_help_string_per_flag(self, field: str) -> None:
+        from coder_eval.cli import row_selectors
+        from coder_eval.cli.plan_command import plan_command
+        from coder_eval.cli.run_command import run_command
+        from coder_eval.models import ROW_SELECTOR_FLAGS
+
+        # Parametrized over the MODEL's fields and resolved to a flag through the one map, so
+        # a fourth selector is covered here automatically rather than needing this list edited.
+        flag = ROW_SELECTOR_FLAGS[field]
+        expected = {
+            "split": row_selectors.SPLIT_HELP,
+            "max_rows": row_selectors.SAMPLE_HELP,
+            "sample_per_stratum": row_selectors.SAMPLE_PER_STRATUM_HELP,
+        }[field]
+        run_help = self._help_for(run_command, flag)
+        plan_help = self._help_for(plan_command, flag)
+        assert run_help is plan_help, (
+            f"{flag} is described differently by `run` and `plan`. One flag, two descriptions, is "
+            "how the preview and the run drift apart in a reader's head."
+        )
+        # Identity, not equality: an inlined copy of the same sentence would compare equal
+        # while being a second declaration free to drift on the next edit.
+        assert run_help is expected, (
+            f"{flag}'s help is not the shared constant from cli/row_selectors.py — it is a copy, "
+            "and a copy is what lets the two surfaces describe one flag two ways."
+        )
+
+    def test_the_rule_fires_on_a_command_missing_a_selector(self) -> None:
+        """Prove the checker BITES rather than merely passing — a stub with two of three flags."""
+        import typer
+
+        from coder_eval.models import ROW_SELECTOR_FLAGS
+
+        def _stub(
+            split: str | None = typer.Option(None, "--split"),
+            sample: int | None = typer.Option(None, "--sample"),
+        ) -> None: ...
+
+        missing = sorted(set(ROW_SELECTOR_FLAGS.values()) - self._long_flags(_stub))
+        assert missing == ["--sample-per-stratum"]

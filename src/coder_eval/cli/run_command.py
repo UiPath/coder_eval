@@ -23,6 +23,7 @@ from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
 from ..streaming.renderers import LoggingStreamRenderer, RichStreamRenderer
 from .console import console
+from .row_selectors import SAMPLE_HELP, SAMPLE_PER_STRATUM_HELP, SPLIT_HELP
 from .run_helpers import (
     discover_default_tasks,
     expand_task_files,
@@ -277,38 +278,9 @@ def run_command(
         "-e",
         help="Experiment definition YAML (default: experiments/default.yaml)",
     ),
-    sample: int | None = typer.Option(
-        None,
-        "--sample",
-        help=(
-            "For dataset-backed tasks, use a random N-row sample "
-            "(fixed seed: reproducible, unbiased across paths). Cheap dataset smoke-test."
-        ),
-        min=1,
-    ),
-    sample_per_stratum: int | None = typer.Option(
-        None,
-        "--sample-per-stratum",
-        help=(
-            "For dataset-backed tasks, keep up to N rows per stratum (stratify_field, "
-            "default expected_skill) — a stratified sample that overrides the task's "
-            "dataset.sample_per_stratum without editing the YAML. Ignored when --sample is set. "
-            "Nondeterministic (re-draws each run) unless the task sets dataset.sample_seed."
-        ),
-        min=1,
-    ),
-    split: str | None = typer.Option(
-        None,
-        "--split",
-        help=(
-            "For dataset-backed tasks, keep only rows whose dataset.split_field value "
-            "(default field: split) matches this name — e.g. --split train / --split test. "
-            "Applied BEFORE --sample / --sample-per-stratum, so a sampled split keeps a "
-            "predictable size. Tasks whose rows are all unlabelled are unaffected; a "
-            "labelled task with no row in this split aborts the run with an error naming "
-            "the splits that exist."
-        ),
-    ),
+    sample: int | None = typer.Option(None, "--sample", help=SAMPLE_HELP, min=1),
+    sample_per_stratum: int | None = typer.Option(None, "--sample-per-stratum", help=SAMPLE_PER_STRATUM_HELP, min=1),
+    split: str | None = typer.Option(None, "--split", help=SPLIT_HELP),
     repeats: int | None = typer.Option(
         None,
         "--repeats",
