@@ -37,10 +37,11 @@ layer's own routine (CE037), so the gate cannot disagree with the numbers the ru
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import statistics as _stats
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -61,7 +62,7 @@ from coder_eval.models import (
     RegressionRow,
     TaskDefinition,
 )
-from coder_eval.optimize_store import UNRESOLVED_MODEL, lookup_noise_floor
+from coder_eval.optimize_store import UNRECORDED_SPLIT, UNRESOLVED_MODEL, lookup_noise_floor
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
     PairedComparison,
@@ -571,6 +572,106 @@ def noise_floor_mde(
     return measured.mde if measured is not None else None
 
 
+class SplitProvenance(NamedTuple):
+    """What the row-selection provenance of a set of run directories says, taken together.
+
+    Three states, and they are NOT collapsible into two:
+
+    - every run dir recorded the SAME value (including ``None``, i.e. "no ``--split`` was
+      passed") → ``value`` is that split and the measurement is cacheable;
+    - ANY run dir recorded nothing → ``value`` is ``UNRECORDED_SPLIT``: measure, but never
+      cache and never match a cached entry, because a run whose provenance is missing could
+      have used any row set;
+    - the run dirs recorded DIFFERENT values → ``mismatched``: refuse. A null comparison
+      pooled across a train and a test invocation is not a floor, and a gate pairing them is
+      comparing two row sets and reporting the difference as one measurement.
+
+    A run.json that recorded a selection whose ``split`` is ``null`` is **recorded**, not
+    unrecorded — the first says no split was passed, the second says nothing at all.
+    """
+
+    recorded: frozenset[str | None]
+    unrecorded: int
+
+    @property
+    def mismatched(self) -> bool:
+        return len(self.recorded) > 1
+
+    @property
+    def value(self) -> str | None:
+        """The single recorded split, or ``UNRECORDED_SPLIT`` when any dir carried none.
+
+        Only meaningful when not :attr:`mismatched` — a mismatch is refused before this is read.
+        """
+        if self.unrecorded or not self.recorded:
+            # `not self.recorded` covers an EMPTY run_dirs sequence. Returning `None` there would
+            # be indistinguishable from a genuinely recorded full-suite run and would be stamped
+            # onto a NoiseFloor as one. Unreachable through today's callers (both floor functions
+            # guard on an empty set earlier), but the type should be right on its own rather than
+            # by an artefact of call ordering.
+            return UNRECORDED_SPLIT
+        return next(iter(self.recorded))
+
+
+def read_split_provenance(run_dirs: Sequence[Path]) -> SplitProvenance:
+    """Read ``row_selection.split`` from each run root's ``run.json``.
+
+    A missing, unreadable or malformed ``run.json``, an absent ``row_selection``, or a
+    ``row_selection`` of ``null`` all count as **unrecorded** — never as a recorded ``None``.
+    That distinction is the whole point: "this run did not use ``--split``" and "we cannot
+    tell what this run used" support very different conclusions, and only the first is
+    comparable against another run.
+
+    Catches ``OSError`` (unreadable file) and ``ValueError`` (a JSON decode error is one);
+    a run directory that predates the provenance field is an ordinary, expected input here,
+    not an error worth aborting a gate over.
+    """
+    recorded: set[str | None] = set()
+    unrecorded = 0
+    for run_dir in run_dirs:
+        try:
+            payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            unrecorded += 1
+            continue
+        selection = payload.get("row_selection") if isinstance(payload, dict) else None
+        if not isinstance(selection, dict):
+            unrecorded += 1
+            continue
+        split = selection.get("split")
+        # The LEAF is validated too, not just its container. run.json is untrusted here — it may be
+        # hand-edited, or pulled from blob storage, or written by a newer coder-eval — and an
+        # unhashable value (a dict) raised `TypeError` straight out of a function whose entire
+        # contract is to degrade, while a non-string scalar was accepted into a
+        # `frozenset[str | None]` and then crashed the SORT that builds the refusal message.
+        # Both are "we cannot tell what this run selected", which is exactly `unrecorded`.
+        if split is not None and not isinstance(split, str):
+            unrecorded += 1
+            continue
+        recorded.add(split)
+    return SplitProvenance(recorded=frozenset(recorded), unrecorded=unrecorded)
+
+
+def _format_splits(values: Iterable[str | None]) -> str:
+    """The recorded splits as one readable list, ``None`` first.
+
+    Shared by the floor's refusal and the gate's, because the whole value of those two messages is
+    that a reader recognises the same vocabulary in both. It is also the single place the sort key
+    lives — `read_split_provenance` guarantees every element is `str | None`, and this is what
+    would break first if that ever stopped being true.
+    """
+    return ", ".join(repr(v) for v in sorted(values, key=lambda v: (v is not None, v or "")))
+
+
+def _split_mismatch_reason(label: str, provenance: SplitProvenance, run_dirs: Sequence[Path]) -> str:
+    """The message a cross-split refusal carries, naming the splits AND where they came from."""
+    where = ", ".join(str(d) for d in run_dirs)
+    return (
+        f"{label} pooled run directories recording DIFFERENT row selections "
+        f"(splits: {_format_splits(provenance.recorded)}) under {where}"
+    )
+
+
 def _no_floor(reason: str) -> None:
     """Log why a null comparison could not be made, and return None.
 
@@ -669,6 +770,13 @@ def measure_noise_floor(
             + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
         )
 
+    # The null split assumes both halves measure the SAME thing. Pooling a train invocation with
+    # a test one breaks that assumption before any arithmetic happens, so refuse rather than
+    # report a floor for a row set that does not exist.
+    provenance = read_split_provenance(run_dirs)
+    if provenance.mismatched:
+        return _no_floor(_split_mismatch_reason("the null split", provenance, run_dirs))
+
     midpoint = (len(per_dir) + 1) // 2
     first, second = _pool(per_dir[:midpoint]), _pool(per_dir[midpoint:])
 
@@ -693,6 +801,10 @@ def measure_noise_floor(
         confidence=confidence,
         seed=seed,
         n_resamples=n_resamples,
+        # Derived from the run dirs, never a caller argument. A defaulted `split=` parameter
+        # would reintroduce the bug this closes on the first snippet that forgot to pass it —
+        # unlike `model`, whose caller at least resolved it and can see it is unresolved.
+        split=provenance.value,
         mde=0.0,
         computed_at=datetime.now(UTC),
     )
@@ -752,6 +864,14 @@ def measure_execution_noise_floor(
             + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
         )
 
+    # Same refusal as the activation floor, and for the same reason: a null comparison pooled
+    # over run directories that selected different row sets is not a floor for any of them.
+    # Reachable here even though the execution GATE takes one run_dir — this function takes a
+    # sequence, and Stage B may hand it several.
+    provenance = read_split_provenance(run_dirs)
+    if provenance.mismatched:
+        return _no_floor(_split_mismatch_reason("the replicate split", provenance, run_dirs))
+
     # `criterion_index=None` is already the "read the row's weighted_score" mode, so this reuses
     # the existing extractor rather than adding a second definition of what a row scored.
     replicated: list[list[float]] = []
@@ -790,6 +910,7 @@ def measure_execution_noise_floor(
         confidence=confidence,
         seed=seed,
         n_resamples=n_resamples,
+        split=provenance.value,
         mde=0.0,
         computed_at=datetime.now(UTC),
     )
@@ -1168,6 +1289,65 @@ def activation_gate(
     # function still adds has to land in the list `_load_and_pair` returned, before either return.
     notes = paired.notes
 
+    # --- Row-selection preflight, BEFORE any bootstrap ---------------------------------
+    #
+    # The two arms are separate `coder-eval run` invocations, so they can genuinely have scored
+    # different row sets. Pairing a train run against a test run is not a weak comparison, it is
+    # not a comparison at all — the arms never saw the same rows — so this refuses outright
+    # rather than reporting a number with a caveat.
+    #
+    # This asymmetry with `execution_gate` (which only NOTES the split) is a consequence of the
+    # data sources, not drift: that track takes ONE run_dir holding both variants, so both arms
+    # share one run.json and one split by construction and a cross-split pair is unrepresentable
+    # there.
+    incumbent_provenance = read_split_provenance(incumbent_run_dirs)
+    candidate_provenance = read_split_provenance(candidate_run_dirs)
+    union = incumbent_provenance.recorded | candidate_provenance.recorded
+    if len(union) > 1:
+        splits = _format_splits(union)
+        refusal = (
+            f"the two arms recorded DIFFERENT row selections (splits: {splits}) — "
+            f"{incumbent_variant!r} over {', '.join(str(d) for d in incumbent_run_dirs)} and "
+            f"{candidate_variant!r} over {', '.join(str(d) for d in candidate_run_dirs)}. "
+            "They did not score the same rows, so their difference is not an effect. Re-run both "
+            "arms under one --split before gating."
+        )
+        return ActivationGateVerdict(
+            incumbent_variant=incumbent_variant,
+            candidate_variant=candidate_variant,
+            suite_id=suite_id,
+            criterion_index=criterion_index,
+            confidence=confidence,
+            n_resamples=n_resamples,
+            # Echoed from _load_and_pair so the block still says what it LOADED, even though it
+            # refuses to compare it.
+            rows_paired=len(scored_row_ids),
+            rows_excluded=paired.rows_excluded,
+            incumbent_f1=None,
+            candidate_f1=None,
+            mean_diff=None,
+            ci_low=None,
+            ci_high=None,
+            p_value=None,
+            gate_refusal=refusal,
+            notes=notes,
+        )
+    # A missing provenance cannot RULE OUT a cross-split pair, so it is said out loud rather than
+    # passed over in silence — the one state where the fault is undetectable must not also be the
+    # one state that says nothing. Not a refusal: old run dirs stay gatable.
+    missing = incumbent_provenance.unrecorded + candidate_provenance.unrecorded
+    total_dirs = len(incumbent_run_dirs) + len(candidate_run_dirs)
+    if missing:
+        # "directories" unconditionally: `_load_and_pair` does NOT return early on an empty arm
+        # (it notes zero rows and continues), so `total_dirs == 1` is reachable via an empty arm.
+        # A plural on a count of one is a cosmetic wart; a comment claiming an invariant that does
+        # not hold is worse, so this says which it is.
+        notes.append(
+            f"row-selection provenance is missing from {missing} of {total_dirs} run directories "
+            + "(they predate the run.json `row_selection` field, or it could not be read), so a "
+            + "cross-split pair cannot be ruled out for this comparison."
+        )
+
     # The four shared values, hoisted into named locals rather than a keyword dict the two returns
     # splat. Three are expensive (two bootstraps and a sibling scan); `p_floor` is pure arithmetic
     # and is computed last here rather than first as the dict had it — safe, and stated because
@@ -1211,6 +1391,29 @@ def activation_gate(
         seed=seed,
         n_resamples=n_resamples,
     )
+    # THE ALL-NEGATIVE SUBSET. When the target label appears in neither arm's pairs, `f1.yes` is
+    # undefined on both arms and reads 0.0 by the ClassificationMetrics convention — so the block
+    # reports a real-looking zero-effect verdict over a metric that was never computed.
+    #
+    # A NOTE, not a refusal, and that is a measured decision rather than a preference: the case
+    # always carries n_discordant == 0 (`expected` is a property of the ROW, so both arms share
+    # it; an absent label forces every pair to ("no","no") on both arms), so it is ALREADY refused
+    # by the zero-discordant path with promoted=False. A second refusal would add an ordering
+    # question against the first and change no outcome. What it does fix is the message: without
+    # this note, "the label is absent from the suite" and "rows expect the label and neither arm
+    # engaged" render byte-identically, and the shared remedy is wrong for the first.
+    #
+    # `--split` is how this now arises in practice: a test split can select an all-negative subset
+    # of a suite that has positive rows in train.
+    if not any(TARGET_LABEL in pair for pair in (*paired.incumbent_pairs, *paired.candidate_pairs)):
+        notes.append(
+            f"no row scored here expects or observes {TARGET_LABEL!r}, so f1.{TARGET_LABEL} is "
+            + "undefined on BOTH arms and reads 0.000 by the criterion layer's convention — the "
+            + "comparison above is over a metric that was never really computed. The remedy is rows "
+            + "that EXPECT the label: check `expected_skill`, and check whether --split selected an "
+            + "all-negative subset of a suite whose positive rows live in another split."
+        )
+
     p_floor = _discreteness_floor(len(scored_row_ids), n_discordant, n_resamples)
 
     bootstrap = cluster_bootstrap_diff_ci(
@@ -1373,9 +1576,9 @@ def _refusal_message(verdict: ActivationGateVerdict, *, threshold: float, family
             f"the two arms produced identical labels on every one of the {verdict.rows_paired} "
             "scored rows, so there is nothing for any test to separate — at any family size, "
             "at any alpha, and at any number of rows. That is a result about this candidate "
-            "rather than about the suite: adding rows cannot change it. Check the candidate "
-            "actually differs from the incumbent, and that both arms were wired to the "
-            "snapshots you think they were."
+            "rather than about the suite: adding more rows LIKE THESE cannot change it. Check "
+            "the candidate actually differs from the incumbent, and that both arms were wired "
+            "to the snapshots you think they were."
         )
 
     # TWO levers, and the second one is not "more rows". `2*(1-R/M)**M` RISES with M at
@@ -1444,6 +1647,15 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     candidate can promote however good it is — reporting that as an ordinary negative result is a
     claim about the candidates that the data cannot support. Such a verdict comes back with
     ``gate_refusal`` set and ``promoted=False``, and renders as its own headline.
+
+    **There are now TWO `gate_refusal` setters on this track**, and they differ in where they run
+    and in what they carry. The discreteness refusal is set HERE, because it needs the family's
+    rank-dependent threshold. The cross-split refusal is set in :func:`activation_gate`, needs
+    nothing outside a single verdict, and always arrives with ``p_value is None`` — so it takes
+    the branch below and ``_refusal_message`` never sees it, which is what stops the two refusals
+    overwriting each other. The membership rule for the family is ``p_value is not None`` and
+    nothing else: a refused verdict is outside it, so ``m`` (and therefore every sibling's
+    ``alpha/m``) is unchanged by its presence.
     """
     family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
     rejections = holm_rejections([p for _i, p in family], alpha)
@@ -1453,7 +1665,12 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     for i, verdict in enumerate(verdicts):
         notes = list(verdict.notes)
         if verdict.p_value is None:
-            notes.append(_NOTE_OUTSIDE_FAMILY)
+            # Guarded exactly as `holm_promote_execution` guards its twin, and now reachable for
+            # the same reason: the cross-split preflight is a SECOND `gate_refusal` setter on this
+            # track, and its verdicts always arrive with `p_value is None`. Unguarded, a refused
+            # block would print an ordinary negative-result note directly under a refusal headline.
+            if verdict.gate_refusal is None:
+                notes.append(_NOTE_OUTSIDE_FAMILY)
             decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
             continue
 
@@ -1702,6 +1919,25 @@ def execution_gate(
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
     notes: list[str] = []
+    # The run's row-selection provenance, as a NOTE and never a refusal — deliberately unlike
+    # `activation_gate`, and the asymmetry is a consequence of the data sources rather than drift:
+    # this track takes ONE `run_dir` holding BOTH variants, so the two arms share one run.json and
+    # one split by construction and a cross-split pair is unrepresentable here. There is nothing to
+    # refuse; there is still something worth stating, because "which rows did this gate run score?"
+    # is the question a reader of a promotion ledger asks weeks later.
+    _execution_provenance = read_split_provenance([run_dir])
+    if _execution_provenance.unrecorded:
+        notes.append(
+            f"row-selection provenance is missing from {run_dir} (it predates the run.json "
+            + "`row_selection` field, or it could not be read), so which rows this gate scored is "
+            + "not recorded. Both arms still share one run directory, so they cannot disagree."
+        )
+    elif _execution_provenance.value is not None:
+        notes.append(
+            f"both arms ran under --split {_execution_provenance.value!r} (one run directory, so "
+            + "they cannot disagree)."
+        )
+
     # Read by `_verdict`'s construction at CALL time, so EVERY return path reports it.
     gate_refusal: str | None = None
 

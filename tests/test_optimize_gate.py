@@ -38,11 +38,14 @@ from coder_eval.models import (
     OptimizeMeasurements,
     RegressionRow,
     RoundScores,
+    RowSelection,
+    RunSummary,
     SkillTriggeredCriterion,
     TaskDefinition,
     TokenUsage,
 )
 from coder_eval.optimize_gate import (
+    _NOTE_OUTSIDE_FAMILY,
     GATE_MAX_FAMILY,
     GATE_P_PRECISION,
     GATE_RESAMPLES,
@@ -50,6 +53,7 @@ from coder_eval.optimize_gate import (
     TASK_JSON_GLOB,
     CostQualityPoint,
     SearchComparison,
+    SplitProvenance,
     _balance_pair,
     _discreteness_floor,
     _execution_diagnostics,
@@ -82,11 +86,12 @@ from coder_eval.optimize_gate import (
     min_discordant_rows,
     noise_floor_mde,
     pareto_front,
+    read_split_provenance,
     regression_check,
     resolve_model,
     search_compare,
 )
-from coder_eval.optimize_store import record_noise_floor
+from coder_eval.optimize_store import UNRECORDED_SPLIT, record_noise_floor
 from coder_eval.reports_optimize import (
     COST_FRONT_ADVISORY,
     _front_summary,
@@ -138,11 +143,42 @@ def _eval_result(row_id: str, labels: list[tuple[str, str]], *, extra_basic: boo
     )
 
 
+# The run.json key the gate reads, taken from the model that declares it rather than typed again.
+_RUN_SELECTION_KEY = next(name for name in RunSummary.model_fields if name == "row_selection")
+
+
+def _write_run_provenance(run_dir: Path, split: str | None = None) -> None:
+    """Stamp a minimal ``run.json`` carrying the run's row selection.
+
+    Every arm builder goes through ``_write_row``, which calls this, so fixtures model a run
+    directory written by a CURRENT coder-eval rather than a pre-provenance one. Without it every
+    fixture takes the "unrecorded" path: the gate would note it on every block (churning six
+    pinned renders) and — the part that actually bites — ``record_noise_floor`` would refuse to
+    cache any floor, since a floor measured over runs whose row sets are unknown is a floor for
+    no particular row set. The unrecorded and mismatched paths get their own explicit tests
+    instead of contaminating every other one.
+
+    Only the keys the gate reads are written; ``RunSummary`` has many more, and a fixture that
+    tracked all of them would be a second implementation of the writer.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "run.json"
+    if path.exists():
+        return
+    # Built from the REAL models rather than hand-typed keys. `read_split_provenance` hand-writes
+    # its READER, and this hand-wrote its WRITER — so renaming `RunSummary.row_selection` or
+    # `RowSelection.split` would have moved both in lockstep, leaving every test green while
+    # production went 100% "unrecorded". Deriving the payload here is what breaks that symmetry.
+    payload = {_RUN_SELECTION_KEY: RowSelection(split=split).model_dump(mode="json")}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _write_row(run_dir: Path, variant: str, row_id: str, result: EvaluationResult, replicate: int = 0) -> Path:
     task_dir = run_dir / variant / SUITE / row_id / f"{replicate:02d}"
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / "task.json"
     path.write_text(result.model_dump_json(), encoding="utf-8")
+    _write_run_provenance(run_dir)
     return path
 
 
@@ -784,8 +820,15 @@ def test_a_moved_name_is_gone_from_the_gate() -> None:
         leftovers = [name for name in defined if hasattr(gate, name) and name not in back_imported]
         assert not leftovers, f"{module.__name__} names still defined on optimize_gate: {leftovers}"
 
-    # The one edge between the three non-model modules, pinned to what Spike D measured.
-    assert gate_imports.get("coder_eval.optimize_store") == {"UNRESOLVED_MODEL", "lookup_noise_floor"}
+    # The one edge between the three non-model modules. THREE names now: `UNRECORDED_SPLIT` joined
+    # the two the split originally left, and for the same reason `UNRESOLVED_MODEL` is over there —
+    # it is a cache-key sentinel the STORE refuses to write, so declaring it in the gate would make
+    # the store import the gate and close a cycle.
+    assert gate_imports.get("coder_eval.optimize_store") == {
+        "UNRECORDED_SPLIT",
+        "UNRESOLVED_MODEL",
+        "lookup_noise_floor",
+    }
     assert "coder_eval.reports_optimize" not in gate_imports
 
 
@@ -1722,7 +1765,7 @@ class TestGateRefusal:
         assert decided.promoted is False
         assert decided.gate_refusal is not None
         assert "identical labels on every one of the 8 scored rows" in decided.gate_refusal
-        assert "adding rows cannot change it" in decided.gate_refusal
+        assert "adding more rows LIKE THESE cannot change it" in decided.gate_refusal
         # And NOT the suite-size remedy, which would be false here.
         assert "survivor(s) at alpha" not in decided.gate_refusal
         assert "the answer is more rows" not in decided.gate_refusal
@@ -3405,7 +3448,7 @@ class TestRefusalMessage:
         message = _refusal_message(self._verdict(p_floor=1.0), threshold=0.025, family_size=2, alpha=0.05)
         assert message is not None
         assert "identical labels on every one of the 6" in message
-        assert "adding rows cannot change it" in message
+        assert "adding more rows LIKE THESE cannot change it" in message
         assert "survivor(s)" not in message, "the family lever is meaningless when nothing differs"
 
     def test_a_finite_floor_names_both_levers_and_the_required_discordant_count(self) -> None:
@@ -3621,14 +3664,21 @@ class TestExecutionDiagnostics:
 _RENDER_PINS = Path(__file__).parent / "_fixtures" / "optimize_renders"
 
 
-def _assert_matches_render_pin(block: str, name: str) -> None:
+def _assert_matches_render_pin(block: str, name: str, *, tmp_path: Path | None = None) -> None:
     """Compare a rendered markdown block against output captured BEFORE the module split.
 
     The verdict pins next door compare a `model_dump`; nothing compared the STRING the skill
     actually prints. `render_row_matrix` is about to be split into section helpers and every
     renderer is about to move modules, and both are the kind of change that reorders a line
     without changing a number — which no substring assertion in this file can see.
+
+    Pass ``tmp_path`` for a block that NAMES run directories: the cross-split refusal quotes the
+    paths it read, which are per-test temporaries. Normalising them to a placeholder is what lets
+    that block be pinned whole rather than sampled by substring — the pin still covers every other
+    character, including the headline and the order of the lines around it.
     """
+    if tmp_path is not None:
+        block = block.replace(str(tmp_path), "<TMP>")
     expected = (_RENDER_PINS / f"{name}.md").read_text(encoding="utf-8")
     assert block == expected
 
@@ -3688,6 +3738,17 @@ class TestRenderingIsBehaviourPreserving:
     def test_the_execution_block_is_unchanged(self, tmp_path: Path) -> None:
         verdict = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
         _assert_matches_render_pin(render_execution_markdown(verdict), "execution_gate")
+
+    def test_the_cross_split_refusal_block_is_unchanged(self, tmp_path: Path) -> None:
+        """The fifth headline, pinned whole like its siblings rather than sampled by substring.
+
+        The other refused pin next door is the DISCRETENESS refusal, which carries a p and keeps
+        `CANNOT SEPARATE AT THIS SIZE`. This is the other refusal on the same track — no p, no
+        comparison made — and the two must not converge on one block.
+        """
+        inc, cand = TestCrossSplitRefusal._arms(tmp_path, "train", "test")
+        verdict = holm_promote([TestCrossSplitRefusal._gate(inc, cand)])[0]
+        _assert_matches_render_pin(render_markdown(verdict), "activation_gate_cross_split", tmp_path=tmp_path)
 
     def test_the_row_matrix_is_unchanged(self) -> None:
         arms = _matrix_arms()
@@ -4439,3 +4500,381 @@ class TestRenderSearchComparison:
         # must not be inferred from a green word.
         block = render_search_comparison(search_compare(_arm("head", {"r1": 0.0}), _arm("cand", {"r1": 1.0})))
         assert "not a promotion" in block.lower()
+
+
+# ---------------------------------------------------------------------------
+# Row-selection provenance: the gate stops pairing a train run against a test run
+# ---------------------------------------------------------------------------
+
+
+def _set_split(run_dir: Path, split: str | None) -> None:
+    """Overwrite a fixture run dir's recorded split (``_write_row`` stamps `None` by default)."""
+    (run_dir / "run.json").write_text(
+        json.dumps({"row_selection": {"split": split, "max_rows": None, "sample_per_stratum": None}}),
+        encoding="utf-8",
+    )
+
+
+class TestReadSplitProvenance:
+    """`None` (no --split was passed) and "unrecorded" (we cannot tell) are different answers."""
+
+    def test_a_recorded_split_is_read(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "r"
+        _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
+        _set_split(run_dir, "train")
+        assert read_split_provenance([run_dir]) == SplitProvenance(recorded=frozenset({"train"}), unrecorded=0)
+
+    def test_a_recorded_null_split_is_recorded_not_unrecorded(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "r"
+        _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
+        provenance = read_split_provenance([run_dir])
+        assert provenance == SplitProvenance(recorded=frozenset({None}), unrecorded=0)
+        assert provenance.value is None
+
+    @pytest.mark.parametrize(
+        ("name", "write"),
+        [
+            ("no run.json", lambda p: None),
+            ("unparseable JSON", lambda p: (p / "run.json").write_text("{not json", encoding="utf-8")),
+            ("run.json is a list", lambda p: (p / "run.json").write_text("[]", encoding="utf-8")),
+            ("no row_selection key", lambda p: (p / "run.json").write_text('{"run_id": "x"}', encoding="utf-8")),
+            (
+                "row_selection is null",
+                lambda p: (p / "run.json").write_text('{"row_selection": null}', encoding="utf-8"),
+            ),
+        ],
+    )
+    def test_every_unreadable_shape_counts_as_unrecorded(self, tmp_path: Path, name: str, write) -> None:
+        run_dir = tmp_path / "r"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").unlink(missing_ok=True)
+        write(run_dir)
+        provenance = read_split_provenance([run_dir])
+        assert provenance == SplitProvenance(recorded=frozenset(), unrecorded=1), name
+        assert provenance.value == UNRECORDED_SPLIT
+
+    def test_mixed_dirs_report_both_halves(self, tmp_path: Path) -> None:
+        recorded = tmp_path / "a"
+        _write_row(recorded, "v", "r1", _eval_result("r1", [("yes", "yes")]))
+        _set_split(recorded, "test")
+        missing = tmp_path / "b"
+        missing.mkdir()
+        provenance = read_split_provenance([recorded, missing])
+        assert provenance == SplitProvenance(recorded=frozenset({"test"}), unrecorded=1)
+        # Any unrecorded dir makes the whole measurement uncacheable, whatever the others said.
+        assert provenance.value == UNRECORDED_SPLIT
+
+    def test_different_recorded_splits_are_mismatched(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a", tmp_path / "b"
+        for run_dir, split in ((a, "train"), (b, "test")):
+            _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
+            _set_split(run_dir, split)
+        assert read_split_provenance([a, b]).mismatched is True
+
+    def test_the_same_split_everywhere_is_not_mismatched(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a", tmp_path / "b"
+        for run_dir in (a, b):
+            _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
+            _set_split(run_dir, "train")
+        provenance = read_split_provenance([a, b])
+        assert provenance.mismatched is False and provenance.value == "train"
+
+
+class TestCrossSplitRefusal:
+    """A train arm against a test arm is not a weak comparison — it is not a comparison."""
+
+    @staticmethod
+    def _arms(tmp_path: Path, incumbent_split: str | None, candidate_split: str | None):
+        labels = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(6)}
+        inc = _write_arm(tmp_path, "incumbent", labels, invocations=2, prefix="inc-")
+        cand = _write_arm(tmp_path, "candidate", labels, invocations=2, prefix="cand-")
+        for d in inc:
+            _set_split(d, incumbent_split)
+        for d in cand:
+            _set_split(d, candidate_split)
+        return inc, cand
+
+    @staticmethod
+    def _gate(inc, cand):
+        return activation_gate(
+            incumbent_run_dirs=inc,
+            candidate_run_dirs=cand,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+
+    def test_a_train_vs_test_pair_is_refused_with_both_splits_named(self, tmp_path: Path) -> None:
+        verdict = self._gate(*self._arms(tmp_path, "train", "test"))
+        assert verdict.gate_refusal is not None
+        assert "'train'" in verdict.gate_refusal and "'test'" in verdict.gate_refusal
+        # No statistic is reported: there was nothing to compute one over.
+        assert verdict.p_value is None
+        assert verdict.mean_diff is None and verdict.ci_low is None and verdict.ci_high is None
+        assert verdict.incumbent_f1 is None and verdict.candidate_f1 is None
+        # Left for holm_promote, exactly like every other activation verdict.
+        assert verdict.promoted is None
+        # It still says what it LOADED, so the reader can see the arms were otherwise fine.
+        assert verdict.rows_paired > 0
+
+    def test_a_recorded_null_split_against_a_named_one_is_also_refused(self, tmp_path: Path) -> None:
+        """A full-suite run and a --split run scored different row sets just as surely."""
+        verdict = self._gate(*self._arms(tmp_path, None, "test"))
+        assert verdict.gate_refusal is not None and verdict.p_value is None
+
+    def test_matching_splits_produce_no_refusal_and_no_note(self, tmp_path: Path) -> None:
+        """Silence is the correct output for a correctly wired gate."""
+        verdict = self._gate(*self._arms(tmp_path, "train", "train"))
+        assert verdict.gate_refusal is None
+        assert not any("provenance" in note for note in verdict.notes)
+
+    def test_one_unrecorded_arm_notes_but_does_not_refuse(self, tmp_path: Path) -> None:
+        """The recorded arm proves nothing about the other, so a note — not a refusal."""
+        inc, cand = self._arms(tmp_path, "train", "train")
+        (cand[0] / "run.json").unlink()
+        verdict = self._gate(inc, cand)
+        assert verdict.gate_refusal is None
+        assert verdict.p_value is not None, "an unrecorded arm must stay gatable"
+        assert any("provenance is missing from 1 of 4" in note for note in verdict.notes)
+
+    def test_a_within_arm_mismatch_is_caught_too(self, tmp_path: Path) -> None:
+        """Stage B runs one arm three times; those three can disagree with each other."""
+        inc, cand = self._arms(tmp_path, "train", "train")
+        _set_split(inc[0], "test")
+        verdict = self._gate(inc, cand)
+        assert verdict.gate_refusal is not None and verdict.p_value is None
+
+    def test_the_refusal_blocks_a_promotion_that_would_otherwise_happen(self, tmp_path: Path) -> None:
+        """The assertion that proves the preflight does something.
+
+        The other tests here use a zero-discordant fixture that could never promote, so they would
+        pass with the whole preflight deleted. This one uses the clear-win fixture — incumbent
+        engages 3 of 12, candidate 12 of 12 — which promotes reliably on matching splits. The ONLY
+        difference between the two halves is the recorded split.
+        """
+        labels_inc = {f"r{i}": [("yes", "yes" if i < 3 else "no")] for i in range(12)}
+        labels_cand = {f"r{i}": [("yes", "yes")] for i in range(12)}
+
+        def _pair(root: Path, inc_split: str | None, cand_split: str | None):
+            inc = _write_arm(root, "incumbent", labels_inc, invocations=2, prefix="inc-")
+            cand = _write_arm(root, "candidate", labels_cand, invocations=2, prefix="cand-")
+            for d in inc:
+                _set_split(d, inc_split)
+            for d in cand:
+                _set_split(d, cand_split)
+            return inc, cand
+
+        (promoted,) = holm_promote([self._gate(*_pair(tmp_path / "same", "train", "train"))])
+        assert promoted.promoted is True, "the fixture must promote when the splits agree"
+
+        (blocked,) = holm_promote([self._gate(*_pair(tmp_path / "crossed", "train", "test"))])
+        assert blocked.promoted is False
+        assert blocked.gate_refusal is not None
+
+    def test_holm_forces_not_promoted_and_keeps_the_refusal(self, tmp_path: Path) -> None:
+        verdict = self._gate(*self._arms(tmp_path, "train", "test"))
+        (decided,) = holm_promote([verdict])
+        assert decided.promoted is False
+        assert decided.gate_refusal == verdict.gate_refusal
+        # Outside the family by the p-based rule, so the "outside the family" note would be
+        # redundant AND contradictory under a refusal headline.
+        assert _NOTE_OUTSIDE_FAMILY not in decided.notes
+
+    def test_a_refused_verdict_does_not_shrink_a_siblings_holm_threshold(self, tmp_path: Path) -> None:
+        """Family membership is `p_value is not None` and nothing else.
+
+        Dropping a refused verdict from the family would shrink `m` and LOOSEN `alpha/m` for
+        every sibling — the uncorrected-p degeneration, arrived at from the other side.
+        """
+        refused = self._gate(*self._arms(tmp_path / "x", "train", "test"))
+        incumbent, candidate = _tiny_suite(positives=6, distractors=6)
+        sibling = _gate(_shared_dirs(tmp_path / "y", incumbent, candidate))
+        assert sibling.p_value is not None, "the sibling fixture must actually produce a p"
+
+        alone = holm_promote([sibling])[0]
+        with_refused = next(v for v in holm_promote([sibling, refused]) if v.p_value is not None)
+        # Asserted on the RANK-DEPENDENT quantity, not on `holm_alpha`: that one is assigned
+        # `alpha` unconditionally in both branches, so comparing it is 0.05 == 0.05 and passes
+        # even with the family filter broken. `_note_ordinary_negative` and `_note_holm_family`
+        # both spell the family SIZE, which is the number a dropped verdict would move.
+        assert _note_holm_family(1, DEFAULT_ALPHA) in alone.notes
+        assert _note_holm_family(1, DEFAULT_ALPHA) in with_refused.notes, (
+            "the refused verdict was counted in the family — dropping it would shrink m and "
+            "LOOSEN alpha/m for every sibling"
+        )
+        assert alone.promoted == with_refused.promoted
+
+
+class TestCrossSplitRendering:
+    """The refusal must reach the reader whatever state the verdict is in."""
+
+    @staticmethod
+    def _refused(tmp_path: Path):
+        return TestCrossSplitRefusal._gate(*TestCrossSplitRefusal._arms(tmp_path, "train", "test"))
+
+    def test_after_holm_the_headline_is_not_a_result(self, tmp_path: Path) -> None:
+        (decided,) = holm_promote([self._refused(tmp_path)])
+        block = render_markdown(decided)
+        assert "**NOT A RESULT — " in block
+        # The discreteness refusal's headline is a different claim and must not appear.
+        assert "CANNOT SEPARATE AT THIS SIZE" not in block
+
+    def test_before_holm_undecided_wins_the_headline_but_the_reason_still_prints(self, tmp_path: Path) -> None:
+        """The regression the execution renderer's comment describes: UNDECIDED outranks the
+        refusal, so without an own-line fallback the reason lands nowhere on the page."""
+        block = render_markdown(self._refused(tmp_path))
+        assert "**UNDECIDED" in block
+        assert "**NOT A RESULT:** " in block
+        assert "DIFFERENT row selections" in block
+
+    def test_an_ordinary_discreteness_refusal_still_says_cannot_separate(self, tmp_path: Path) -> None:
+        """Regression guard for the new branch: that one carries a p and keeps its own headline.
+
+        6 rows / 3 discordant gives a floor of 0.031 against a family-of-2 threshold of 0.025 —
+        the established refusal fixture, which crucially DOES compute a p.
+        """
+        incumbent, candidate = _tiny_suite(positives=3, distractors=3)
+        dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        decided = holm_promote([_gate(dirs, n_resamples=2_000) for _ in range(2)])
+        for verdict in decided:
+            assert verdict.gate_refusal is not None and verdict.p_value is not None
+            block = render_markdown(verdict)
+            assert "CANNOT SEPARATE AT THIS SIZE" in block
+            assert "NOT A RESULT" not in block
+
+
+class TestAllNegativeSubsetNote:
+    """Two suites that render byte-identically today, and only one of them is a measurement."""
+
+    @staticmethod
+    def _decided(tmp_path: Path, pairs: tuple[str, str]):
+        rows = {f"r{i}": [pairs] for i in range(8)}
+        dirs = _shared_dirs(tmp_path, rows, rows)
+        (decided,) = holm_promote([_gate(dirs, n_resamples=2_000)])
+        return decided
+
+    def test_a_suite_with_no_yes_anywhere_names_the_missing_positive_rows(self, tmp_path: Path) -> None:
+        decided = self._decided(tmp_path, ("no", "no"))
+        note = "\n".join(decided.notes)
+        assert "undefined on BOTH arms" in note
+        assert "expected_skill" in note and "--split" in note
+
+    def test_rows_that_expect_yes_but_nobody_engaged_get_no_such_note(self, tmp_path: Path) -> None:
+        """That one IS a real measurement: the label is present, both arms simply failed it."""
+        decided = self._decided(tmp_path, ("yes", "no"))
+        assert not any("undefined on BOTH arms" in note for note in decided.notes)
+
+    def test_the_two_blocks_are_no_longer_byte_identical(self, tmp_path: Path) -> None:
+        """The whole point. Before this note they were the same text with the same wrong remedy."""
+        absent = render_markdown(self._decided(tmp_path / "a", ("no", "no")))
+        unengaged = render_markdown(self._decided(tmp_path / "b", ("yes", "no")))
+        assert absent != unengaged
+
+    def test_the_note_changes_no_decision(self, tmp_path: Path) -> None:
+        """A note, not a refusal: the zero-discordant path still owns the outcome."""
+        decided = self._decided(tmp_path, ("no", "no"))
+        assert decided.promoted is False
+        assert decided.gate_refusal is not None
+        assert decided.n_discordant == 0
+
+    def test_the_zero_discordant_remedy_no_longer_claims_rows_cannot_help(self, tmp_path: Path) -> None:
+        """In the all-negative case adding POSITIVE rows is exactly the fix, so the old
+        unqualified "adding rows cannot change it" was false precisely here."""
+        decided = self._decided(tmp_path, ("no", "no"))
+        assert decided.gate_refusal is not None
+        assert "adding more rows LIKE THESE cannot change it" in decided.gate_refusal
+
+
+class TestExecutionGateSplitNote:
+    """The execution track NOTES its split and never refuses on it.
+
+    That asymmetry with `activation_gate` is a consequence of the data sources: this track takes
+    ONE run_dir holding BOTH variants, so the arms share one run.json and one split by
+    construction, and a cross-split pair is unrepresentable here.
+    """
+
+    def test_the_note_names_the_recorded_split(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=_WINNER["candidate"])
+        _set_split(run_dir, "test")
+        verdict = _exec_gate(run_dir)
+        assert any("--split 'test'" in note for note in verdict.notes)
+        assert verdict.gate_refusal is None
+
+    def test_a_full_suite_run_says_nothing(self, tmp_path: Path) -> None:
+        """A recorded `split: null` is the ordinary case; silence is the right output."""
+        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=_WINNER["candidate"])
+        verdict = _exec_gate(run_dir)
+        assert not any("--split" in note or "provenance" in note for note in verdict.notes)
+
+    def test_an_unrecorded_run_dir_says_so(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=_WINNER["candidate"])
+        (run_dir / "run.json").unlink()
+        verdict = _exec_gate(run_dir)
+        assert any("provenance is missing" in note for note in verdict.notes)
+        assert verdict.gate_refusal is None, "provenance is never a refusal on this track"
+
+
+class TestNoiseFloorCarriesItsSplit:
+    """The floor's split is DERIVED from the run dirs, never passed by a caller.
+
+    A caller-supplied `split=` would default to `None` and reintroduce the cross-split bug on the
+    first snippet that forgot it — unlike `model`, which a caller at least resolved and can see is
+    unresolved.
+    """
+
+    @staticmethod
+    def _dirs(tmp_path: Path, splits: list[str | None]) -> list[Path]:
+        labels = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(6)}
+        dirs = _write_arm(tmp_path, "incumbent", labels, invocations=len(splits))
+        for run_dir, split in zip(dirs, splits, strict=True):
+            _set_split(run_dir, split)
+        return dirs
+
+    def test_a_matching_split_is_stamped_on_the_floor(self, tmp_path: Path) -> None:
+        floor = measure_noise_floor(
+            run_dirs=self._dirs(tmp_path, ["train", "train"]),
+            variant_id="incumbent",
+            suite_id=SUITE,
+            criterion_index=0,
+            model="claude-haiku-4-5",
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert floor is not None and floor.split == "train"
+
+    def test_mismatched_splits_refuse_to_measure_and_log_why(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            floor = measure_noise_floor(
+                run_dirs=self._dirs(tmp_path, ["train", "test"]),
+                variant_id="incumbent",
+                suite_id=SUITE,
+                criterion_index=0,
+                model="claude-haiku-4-5",
+                n_resamples=_FAST_RESAMPLES,
+            )
+        assert floor is None, "a null split pooled across two row sets is not a floor"
+        assert "DIFFERENT row selections" in caplog.text
+
+    def test_an_unrecorded_dir_makes_the_floor_uncacheable(self, tmp_path: Path) -> None:
+        dirs = self._dirs(tmp_path, ["train", "train"])
+        (dirs[0] / "run.json").unlink()
+        floor = measure_noise_floor(
+            run_dirs=dirs,
+            variant_id="incumbent",
+            suite_id=SUITE,
+            criterion_index=0,
+            model="claude-haiku-4-5",
+            n_resamples=_FAST_RESAMPLES,
+        )
+        # Still MEASURED — an unrecorded run dir stays usable — but carrying the sentinel, so
+        # `record_noise_floor` refuses to write it and no lookup can ever match it.
+        assert floor is not None and floor.split == UNRECORDED_SPLIT
+
+    def test_the_execution_floor_carries_its_split_too(self, tmp_path: Path) -> None:
+        dirs = _weighted_arm(tmp_path, "incumbent", {f"r{i}": [0.2, 0.55, 0.9] for i in range(8)})
+        _set_split(dirs[0], "test")
+        floor = _execution_floor(dirs)
+        assert floor is not None and floor.split == "test"

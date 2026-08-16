@@ -25,6 +25,7 @@ from coder_eval.optimize_gate import (
 )
 from coder_eval.optimize_store import (
     MEASUREMENTS_FILENAME,
+    UNRECORDED_SPLIT,
     UNRESOLVED_MODEL,
     append_regression_rows,
     load_measurements,
@@ -49,6 +50,10 @@ def _floor(**overrides) -> NoiseFloor:
         "confidence": 0.95,
         "seed": 0,
         "n_resamples": 2000,
+        # Set EXPLICITLY, as `measure_noise_floor` sets it, so the helper models a floor written
+        # by current code. `lookup_noise_floor` skips an entry whose `split` was never set at all —
+        # that is how a pre-upgrade cache file is told apart from a full-suite measurement.
+        "split": None,
         "mde": 0.08,
         "computed_at": datetime(2026, 8, 13, 12, 0, tzinfo=UTC),
     }
@@ -515,12 +520,22 @@ class TestTheTwoTracksCoexist:
         measurements = OptimizeMeasurements(skill="my-skill", noise_floors=[self._activation()])
         assert lookup_noise_floor(measurements, self._execution()) is None
 
-    def test_a_floor_written_before_the_metric_field_still_matches_an_activation_probe(self, tmp_path: Path) -> None:
-        """An existing `measurements.json` must still load AND still match.
+    def test_a_legacy_floor_still_loads_but_no_longer_matches_once_split_joined_the_key(self, tmp_path: Path) -> None:
+        """An existing `measurements.json` must still LOAD; whether it still MATCHES depends.
 
-        `load_measurements` deliberately RAISES on a malformed file rather than rebuilding it, so a
-        non-defaulted field here would make every pre-existing sidecar unreadable — not a cache
-        miss, a hard failure on a file carrying a regression corpus that is not reconstructible.
+        Loading is the non-negotiable half: `load_measurements` deliberately RAISES on a malformed
+        file rather than rebuilding it, so a non-defaulted field would make every pre-existing
+        sidecar unreadable — not a cache miss, a hard failure on a file carrying a regression
+        corpus that is not reconstructible.
+
+        Matching is where `split` deliberately DIFFERS from `metric`, and the difference is about
+        whether the default is TRUE of legacy data. When `metric` was added, activation was the
+        only track, so every pre-existing floor really was `f1.yes` and the default described it
+        correctly. `split=None` means "no --split was passed", which a legacy floor measured under
+        `--split train` would assert falsely — and being handed that floor is exactly the
+        train-against-test failure this field exists to prevent, surviving inside the sidecar. So a
+        floor whose `split` key was never set is skipped, and the round recomputes. That costs one
+        bootstrap over data already on disk, which is the trade this module's own docstring makes.
         """
         path = _path(tmp_path)
         path.parent.mkdir(parents=True)
@@ -546,7 +561,17 @@ class TestTheTwoTracksCoexist:
 
         loaded = load_measurements(path)
         assert loaded.noise_floors[0].metric == "f1.yes", "a legacy entry IS an activation floor"
-        found = lookup_noise_floor(loaded, _floor(mde=0.0))
+        # metric: the default describes legacy data correctly, so it is still a match candidate.
+        assert "metric" not in loaded.noise_floors[0].model_fields_set
+        # split: the default does NOT, so the entry is skipped and the caller recomputes.
+        assert "split" not in loaded.noise_floors[0].model_fields_set
+        assert lookup_noise_floor(loaded, _floor(mde=0.0)) is None
+
+    def test_a_floor_written_by_current_code_still_matches(self, tmp_path: Path) -> None:
+        """The other side of the skip: a floor whose split WAS set matches normally."""
+        path = _path(tmp_path)
+        record_noise_floor(path, _floor(mde=0.08))
+        found = lookup_noise_floor(load_measurements(path), _floor(mde=0.0))
         assert found is not None and found.mde == 0.08
 
     def test_criterion_index_none_is_legal_and_negative_is_not(self) -> None:
@@ -710,3 +735,74 @@ class TestLineageHeadIsPersisted:
         # second thing that can disagree — the drift CE037/CE040 and `_floor_key` exist to prevent.
         assert "lineage_score" not in RoundScores.model_fields
         assert RoundScores.model_fields["lineage_head"].annotation == (str | None)
+
+
+class TestSplitIsPartOfTheCacheKey:
+    """A train floor must never be served to a test lookup.
+
+    On the shipped `outcome.yaml` template `split` is the ONLY key field that differs between the
+    two measurements — same suite, same variant, same model, same row count — so without it in the
+    key one split's floor answers the other's lookup, on the number that decides whether a round
+    runs at all.
+    """
+
+    def test_two_floors_differing_only_in_split_do_not_match_each_other(self) -> None:
+        train = _floor(split="train", mde=0.08)
+        test = _floor(split="test", mde=0.31)
+        measurements = OptimizeMeasurements(skill="my-skill", noise_floors=[train, test])
+
+        assert lookup_noise_floor(measurements, _floor(split="train")) is train
+        assert lookup_noise_floor(measurements, _floor(split="test")) is test
+
+    def test_a_null_split_is_its_own_key_not_a_wildcard(self) -> None:
+        """A full-suite floor answers a full-suite lookup and nothing else."""
+        measurements = OptimizeMeasurements(skill="my-skill", noise_floors=[_floor(split=None, mde=0.08)])
+        assert lookup_noise_floor(measurements, _floor(split=None)) is not None
+        assert lookup_noise_floor(measurements, _floor(split="train")) is None
+
+    def test_split_is_in_the_derived_key_not_a_hand_written_list(self) -> None:
+        """`_floor_key` reads `NoiseFloor.model_fields`, which is what makes adding a key field
+        a one-line change that cannot be forgotten here."""
+        from coder_eval.optimize_store import _FLOOR_MEASUREMENT_FIELDS
+
+        key_fields = [n for n in NoiseFloor.model_fields if n not in _FLOOR_MEASUREMENT_FIELDS]
+        assert "split" in key_fields
+        # And declared above `mde`, so the file keeps reading the way its docstring says.
+        names = list(NoiseFloor.model_fields)
+        assert names.index("split") < names.index("mde")
+
+    def test_two_floors_differing_only_in_split_both_survive_a_write(self, tmp_path: Path) -> None:
+        """Round-tripped through the REAL cache: replacement is keyed, so these must not collide."""
+        path = _path(tmp_path)
+        record_noise_floor(path, _floor(split="train", mde=0.08))
+        measurements = record_noise_floor(path, _floor(split="test", mde=0.31))
+        assert len(measurements.noise_floors) == 2, "the test floor REPLACED the train one"
+
+
+class TestUnrecordedSplitIsNeverCached:
+    """The sentinel's whole contract, mirroring UNRESOLVED_MODEL's."""
+
+    def test_record_refuses_and_says_which_field_made_it_uncacheable(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        path = _path(tmp_path)
+        with caplog.at_level("INFO"):
+            measurements = record_noise_floor(path, _floor(split=UNRECORDED_SPLIT))
+        assert measurements.noise_floors == []
+        assert not path.exists(), "an uncacheable floor must not even create the sidecar"
+        assert "split" in caplog.text and UNRECORDED_SPLIT in caplog.text
+
+    def test_the_unresolved_model_refusal_still_works_and_names_its_own_field(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Regression guard: the two refusals now share one branch."""
+        with caplog.at_level("INFO"):
+            measurements = record_noise_floor(_path(tmp_path), _floor(model=UNRESOLVED_MODEL))
+        assert measurements.noise_floors == []
+        assert "model" in caplog.text and UNRESOLVED_MODEL in caplog.text
+
+    def test_it_can_never_collide_with_a_real_split_name(self) -> None:
+        # Parenthesised exactly like UNRESOLVED_MODEL, and a --split value comes from a
+        # dataset's split_field, which task authors spell as plain identifiers.
+        assert UNRECORDED_SPLIT.startswith("(") and UNRECORDED_SPLIT.endswith(")")
+        assert UNRECORDED_SPLIT != UNRESOLVED_MODEL

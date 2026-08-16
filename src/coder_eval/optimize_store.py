@@ -105,8 +105,19 @@ def record_noise_floor(path: Path, floor: NoiseFloor) -> OptimizeMeasurements:
     append-only next door.
     """
     measurements = load_measurements(path)
-    if floor.model == UNRESOLVED_MODEL:
-        logger.info("Not caching a noise floor measured under an unresolved model — it could never match a lookup")
+    # Both sentinels are checked here rather than at the call sites: a floor is uncacheable
+    # because of what it IS, and the two reasons differ only in which key field is a placeholder.
+    # The message names the field so a reader is not left guessing which one.
+    uncacheable = (
+        ("model", UNRESOLVED_MODEL)
+        if floor.model == UNRESOLVED_MODEL
+        else ("split", UNRECORDED_SPLIT)
+        if floor.split == UNRECORDED_SPLIT
+        else None
+    )
+    if uncacheable is not None:
+        field, sentinel = uncacheable
+        logger.info("Not caching a noise floor whose %s is %s — it could never match a lookup", field, sentinel)
         return measurements
     key = _floor_key(floor)
     kept = [f for f in measurements.noise_floors if _floor_key(f) != key]
@@ -127,6 +138,17 @@ def lookup_noise_floor(measurements: OptimizeMeasurements, probe: NoiseFloor) ->
     """
     key = _floor_key(probe)
     for floor in reversed(measurements.noise_floors):
+        # A floor written BEFORE `split` joined the key carries no `split` in the file and
+        # validates to the `None` default — which is a real, matchable value meaning "no --split
+        # was passed". So a stale entry actually measured under `--split train` would answer a
+        # full-suite lookup exactly, with a floor for a different row set, on the number that
+        # decides whether a round runs. `model_fields_set` distinguishes the two: every floor this
+        # module writes goes through `model_dump_json`, so the key is always present in a
+        # current file and absent only in a pre-upgrade one. Skipping those costs one bootstrap
+        # over data already on disk; serving one costs a wrong promotion decision.
+        if "split" not in floor.model_fields_set:
+            logger.info("Ignoring a cached noise floor written before `split` joined the key — recomputing")
+            continue
         if _floor_key(floor) == key:
             return floor
     return None
@@ -174,3 +196,14 @@ def record_round_scores(path: Path, scores: RoundScores) -> OptimizeMeasurements
 # snippet needs to spell it; a literal in the prose would silently become a REAL key if this value
 # ever changed.
 UNRESOLVED_MODEL = "(unresolved)"
+
+# The exact twin of UNRESOLVED_MODEL, one key field over: placeholder for "at least one of the run
+# directories this floor was measured over recorded no row-selection provenance". It can never
+# collide with a real split name. A floor carrying it is never WRITTEN to the cache (it is not
+# blocked from ATTEMPTING a lookup the way UNRESOLVED_MODEL is, and does not need to be: nothing
+# carrying this value is ever written, so no lookup can match. The asymmetry costs one scan and is
+# stated rather than removed.)
+# It is kept out of the cache — a floor measured over runs that MIGHT have used different splits is not a floor for any
+# one of them, and storing it would accumulate entries that can never match their own lookup.
+# PUBLIC because the gate imports it.
+UNRECORDED_SPLIT = "(unrecorded)"

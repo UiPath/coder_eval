@@ -1344,7 +1344,18 @@ alpha. `activation_gate` on its own never promotes anything; it leaves the verdi
 `render_markdown` prints **UNDECIDED** if you forget the correction rather than letting a
 forgotten call read as an honest negative result. (One exception, and it is not a promotion: a
 sample too small to support any statistic comes back NOT PROMOTED outright, because there is no
-p-value for a family decision to correct.)
+p-value for a family decision to correct. A cross-split refusal also has no p, but it does NOT
+come back that way — it keeps `promoted=None` until `holm_promote` forces it to `False`, so the
+refusal reaches you whether or not you remembered the correction.)
+
+**There is a FIFTH headline on this track too, and it is a different fault with a different
+remedy: `NOT A RESULT`.** It means the two arms recorded DIFFERENT `--split` values, so they never
+scored the same rows and their difference is not an effect. Nothing about the candidate is being
+reported. The remedy is neither more rows nor a smaller family: **re-run both arms under one
+`--split` and gate again.** A block whose provenance is merely MISSING is not refused — it carries
+a note saying a cross-split pair could not be ruled out, which is worth repeating to the user when
+you hand back. Tell the two refusals apart by the p: `NOT A RESULT` never has one, because no
+comparison was made.
 
 **There is a fourth headline, and it is not a negative result: `CANNOT SEPARATE AT THIS SIZE`.**
 It means the smallest p this suite can express is larger than the Holm threshold for that

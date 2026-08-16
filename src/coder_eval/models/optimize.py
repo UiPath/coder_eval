@@ -162,9 +162,15 @@ class ActivationGateVerdict(BaseModel):
     gate_refusal: str | None = Field(
         default=None,
         description=(
-            "Set by holm_promote when the suite's discreteness floor exceeds this candidate's Holm "
-            "threshold, i.e. the gate structurally CANNOT separate. Renders as its own headline: a "
-            "refusal is not a negative result, and reporting it as one is the defect this field fixes."
+            "Why this block is not a decision. Renders as its own headline: a refusal is not a "
+            "negative result, and reporting it as one is the defect this field fixes. TWO setters, "
+            "told apart by `p_value` rather than by a second field. (1) holm_promote sets it when "
+            "the suite's discreteness floor exceeds this candidate's Holm threshold — the gate "
+            "structurally cannot separate at this size; that one always carries a p, because it is "
+            "only reachable inside the `p_value is not None` branch, and renders as CANNOT SEPARATE "
+            "AT THIS SIZE. (2) activation_gate's row-selection preflight sets it when the two arms "
+            "recorded different `--split` values — they never scored the same rows, so no comparison "
+            "was made; that one always has `p_value is None` and renders as NOT A RESULT."
         ),
     )
     holm_alpha: float | None = Field(
@@ -294,10 +300,12 @@ class ExecutionGateVerdict(BaseModel):
             "but does NOT drop the verdict from the Holm family — membership is p_value-based, "
             "since a measured candidate was tested however degenerate its sample was, and "
             "excluding it would loosen alpha/m for its siblings. Note the "
-            "DIFFERENT setter from ActivationGateVerdict.gate_refusal, which holm_promote sets "
-            "because a discreteness refusal needs the family's rank-dependent threshold; every "
-            "cause here needs nothing outside a single verdict, so each is detected where it is "
-            "already computed."
+            "DIFFERENT setters from ActivationGateVerdict.gate_refusal, which is set either by "
+            "holm_promote (a discreteness refusal needs the family's rank-dependent threshold) or "
+            "by that gate's row-selection preflight; every cause here needs nothing outside a "
+            "single verdict, so each is detected where it is already computed. Note this track has "
+            "NO cross-split refusal: it takes one run_dir holding both arms, so they share one "
+            "run.json and one split by construction and a mismatch is unrepresentable."
         ),
     )
     holm_alpha: float | None = Field(
@@ -359,6 +367,11 @@ class NoiseFloor(BaseModel):
     Monte-Carlo error rather than by a lot, but "every field above `mde` is part of the key" is
     only a rule worth having if it has no exceptions.
 
+    `split` joins the key because it selects a fixed, NAMED row set — unlike the two samplers,
+    which are deliberately out of it (see the field). On the shipped `outcome.yaml` template it is
+    the only field above `mde` that differs between the train and the test measurement, so without
+    it a train floor is served to a test lookup on a suite where every other key field is equal.
+
     `metric` joins the key for a sharper reason than the rest: a floor is now measured on two
     different quantities. The activation track's is a floor on `f1.yes`, the execution track's on
     per-row `weighted_score`, and on the SAME suite, variant, model and row count they are
@@ -407,6 +420,23 @@ class NoiseFloor(BaseModel):
     confidence: float = Field(gt=0.0, lt=1.0, description="Interval width used. A wider interval is a wider floor.")
     seed: int = Field(description="Bootstrap seed. Two seeds give two (close, but different) floors.")
     n_resamples: int = Field(gt=0, description="Bootstrap draws. Fewer draws, coarser floor.")
+    split: str | None = Field(
+        default=None,
+        description=(
+            "The ``--split`` the runs this floor was measured over recorded, derived from their "
+            "``run.json`` provenance rather than passed by a caller. ``None`` means every run "
+            "recorded no split (a full-suite measurement); "
+            "``optimize_store.UNRECORDED_SPLIT`` means at least one run directory carried no "
+            "provenance at all, which makes the floor UNCACHEABLE — it is neither written nor "
+            "matched, because a floor pooled over runs that might have used different row sets "
+            "is not a floor for any one of them. In the key because a split selects a fixed, "
+            "named row set: on the shipped outcome.yaml template it is the ONLY key field that "
+            "differs between the train and test measurements. The two samplers are deliberately "
+            "NOT in the key — ``n_rows`` already moves with a ``--sample``, and an unseeded "
+            "stratified draw is re-drawn every run, so keying on the requested count would add "
+            "a dimension that makes no two draws comparable anyway."
+        ),
+    )
     mde: float = Field(
         ge=0.0,
         le=1.0,

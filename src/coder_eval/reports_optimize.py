@@ -69,22 +69,41 @@ def _render_checks(title: str, checks: list[GuardrailCheck]) -> list[str]:
 def render_markdown(verdict: ActivationGateVerdict) -> str:
     """The block the skill prints verbatim, numbers and all.
 
-    Four headlines, in this precedence, and each is a different claim:
+    Five headlines, in this precedence, and each is a different claim:
 
     - **UNDECIDED** — ``promoted`` is ``None``, so :func:`holm_promote` never ran. It outranks
       everything below because a verdict Holm never saw has no threshold to be refused against.
       Silently reading ``None`` as "not promoted" would let a forgotten call look like an honest
       negative result — the failure this whole gate exists to prevent.
-    - **CANNOT SEPARATE AT THIS SIZE** — ``gate_refusal`` is set: the suite's discreteness floor
-      exceeds the Holm threshold, so no candidate could promote however good it is. It outranks
-      NOT PROMOTED because it is a statement about the suite, not about this candidate.
+    - **NOT A RESULT** — ``gate_refusal`` is set AND ``p_value is None``: there was no comparison
+      to make. On this track that is the cross-split preflight — the two arms scored different row
+      sets, so their difference is not an effect. Deliberately the vocabulary the execution
+      renderer already uses, because it is the same claim.
+    - **CANNOT SEPARATE AT THIS SIZE** — ``gate_refusal`` is set and a p WAS computed: the suite's
+      discreteness floor exceeds the Holm threshold, so no candidate could promote however good it
+      is. It outranks NOT PROMOTED because it is a statement about the suite, not this candidate.
     - **BLOCKED BY A GUARDRAIL** — the statistic separated but a guardrail failed. Below the
       refusal, since reading a guardrail presupposes a statistic that separated.
     - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
+
+    **What separates the two refusals is the p, not a second field.** A discreteness refusal is a
+    statement about the suite's RESOLUTION and is only ever set inside ``holm_promote``'s
+    ``p_value is not None`` branch, so it always carries one. A wiring refusal says NO COMPARISON
+    WAS MADE and never does. One boolean on a value the model already carries, rather than a field
+    two setters would have to agree about.
+
+    ``UNDECIDED`` outranking both refusals is right — a verdict Holm never saw has no decision to
+    refuse — but the refusal's TEXT must still reach the reader, so it is printed on its own line
+    whenever the headline could not carry it. Without that, a pre-Holm cross-split block renders a
+    confident ``UNDECIDED`` with the reason nowhere on the page. The execution renderer solved
+    exactly this and its comment records why.
     """
     failed_guardrails = [check.name for check in verdict.guardrails if not check.passed]
     if verdict.promoted is None:
         headline = "UNDECIDED — holm_promote has not been applied, so this verdict decides nothing"
+    elif verdict.gate_refusal is not None and verdict.p_value is None:
+        # No p means no comparison was made — a wiring fault, not a resolution limit.
+        headline = f"NOT A RESULT — {verdict.gate_refusal}"
     elif verdict.gate_refusal is not None:
         headline = f"CANNOT SEPARATE AT THIS SIZE — {verdict.gate_refusal}"
     elif verdict.promoted and failed_guardrails:
@@ -104,6 +123,12 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
         "",
         f"**{headline}**",
         "",
+    ]
+    # Exactly the one path where the headline did not carry it — so the message appears once,
+    # never twice. Mirrors the execution renderer, for the reason its own comment gives.
+    if verdict.gate_refusal is not None and verdict.promoted is None:
+        lines += [f"**NOT A RESULT:** {verdict.gate_refusal}", ""]
+    lines += [
         f"- Suite `{verdict.suite_id}`, criterion index {verdict.criterion_index} (position in `success_criteria`)",
         # The discordant count sits beside the paired one because it is what `p_floor` below is
         # computed from — a reader handed a floor without it cannot see the quantity that moves it.

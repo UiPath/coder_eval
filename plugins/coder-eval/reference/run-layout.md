@@ -73,7 +73,10 @@ selection is *not* a promise that every row ran. Read the task YAML for that hal
 
 A consumer comparing two runs must not pair different `split` values — a train run and a test
 run of one suite are two different row sets, and reporting their difference as one measurement
-is the failure this field exists to prevent.
+is the failure this field exists to prevent. `optimize_gate.activation_gate` enforces exactly
+that: it REFUSES a pair whose arms recorded different splits (`NOT A RESULT`, `promoted=False`),
+and NOTES an unrecorded one rather than assuming it matched. `measure_noise_floor` refuses to
+measure across them at all, and a floor measured over any unrecorded run dir is never cached.
 
 **Scope-marker files** (used to detect what a given path represents):
 
