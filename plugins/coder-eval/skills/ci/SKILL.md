@@ -138,6 +138,28 @@ this exists to prevent.
 `extra-args` is a trusted input that is split on whitespace, so a path containing a space
 is unsafe there. Choose paths without spaces rather than discovering this in CI.
 
+### The split, if the suite carries one
+
+Grep the discovered tasks' datasets for a `split_field` label (default field: `split`). If the
+rows are labelled, the emitted workflow must select the **test** split:
+
+```yaml
+extra-args: "--split test"
+```
+
+`extra-args` is one whitespace-split string, so this composes with the experiment path when both
+apply: `extra-args: "-e tests/experiments/default.yaml --split test"`.
+
+The reason is load-bearing. `train` rows are the rows an optimize loop tunes a skill against, so a
+gate that runs them scores the skill partly on its own training data — and it drifts optimistic
+exactly as the skill improves, which is the direction that hides a regression rather than
+revealing one. The `test` split is the half held back for confirmation; that is what a gate is for.
+
+Two cases that are not errors. A suite whose rows carry **no** labels is unaffected — `--split`
+does not apply to it, so do not pass one. And passing `--split test` to a *labelled* suite that
+has no `test` row **aborts the run** with a message naming the splits that do exist; that is the
+intended loud failure, not something to work around.
+
 ### Environment — including the skill source, if the suite is an activation suite
 
 If the resolved experiment or the tasks interpolate environment variables, pass them

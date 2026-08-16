@@ -3534,6 +3534,61 @@ class TestPluginArtifacts:
             "the ci skill no longer conditions the `version:` input on whether the repository pins a coder-eval version"
         )
 
+    def test_user_guide_documents_every_row_selector_on_plan(self):
+        """`plan`'s flag table must name every selector the model declares.
+
+        Derived from `ROW_SELECTOR_FLAGS` rather than a hand-typed list, so a fourth selector is
+        covered here automatically — the same reason CE043 reads the mapping instead of restating
+        it. This is the cheap, targeted half of a general "every long flag has a USER_GUIDE
+        section" rule; it deliberately checks the `plan` section only, because that is the surface
+        this pairing exists to keep honest. The table already lacked `--split` before the
+        selectors were added to `plan` at all, which is how the gap went unnoticed.
+        """
+        from coder_eval.models import ROW_SELECTOR_FLAGS
+
+        # RAW text, not `_normalized`: that helper collapses newlines, and this assertion is
+        # about table ROWS, which only exist while the line structure does.
+        guide = (PLUGIN_ROOT.parent.parent / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+        marker = "### `coder-eval plan`"
+        assert marker in guide, "the USER_GUIDE no longer has a `coder-eval plan` section"
+        section = guide.split(marker, 1)[1].split("\n### ", 1)[0]
+        # A table ROW, not merely the token: every selector is also NAMED in its siblings' prose
+        # ("applied before --sample / --sample-per-stratum"), so a substring test stays green
+        # after the row documenting the flag is deleted. Verified: it did.
+        rows = [line for line in section.splitlines() if line.lstrip().startswith("| `")]
+        documented = {line.split("`")[1].split()[0].rstrip(",") for line in rows if "`" in line}
+        missing = sorted(flag for flag in ROW_SELECTOR_FLAGS.values() if flag not in documented)
+        assert not missing, (
+            f"docs/USER_GUIDE.md's `plan` flag table does not document {missing}. `plan` is the "
+            "pre-spend preview of a run, so a selector it accepts but never documents is one a "
+            "user pays to discover."
+        )
+
+    def test_ci_skill_teaches_the_split_selector(self):
+        # A gate that runs the TRAIN rows scores the skill partly on its own training data and
+        # drifts optimistic exactly as the skill improves — the direction that HIDES a regression.
+        # The emitted workflow is copied into users' repos, so a skill that never mentions the
+        # selector produces a fleet of gates quietly measuring the wrong half of every split suite.
+        text = _normalized(PLUGIN_ROOT / "skills" / "ci" / "SKILL.md")
+        assert "--split" in text, (
+            "the ci skill does not name --split — a suite whose rows are split-labelled will be "
+            "gated on whichever half the default selects, which is both halves"
+        )
+        # Sliced to the SECTION, not the file. `extra-args` appears three times in the
+        # pre-existing experiment subsection above, so a whole-file test is unconditionally true
+        # and stays green with the snippet deleted — verified.
+        section = text.split("The split, if the suite carries one", 1)[-1]
+        assert 'extra-args: "--split test"' in section, (
+            "the ci skill names --split but never shows it INSIDE extra-args — that input is the "
+            "only channel the emitted workflow has for it, and a reader who has to guess the "
+            "wiring guesses a `split:` action input that does not exist"
+        )
+        assert "train" in text, (
+            "the ci skill does not say WHY the test split is the one to gate on — without the "
+            "reason a reader drops the flag as noise, and a gate on train rows looks green while "
+            "the skill is being tuned against the very rows it is scored on"
+        )
+
     def test_ci_skill_does_not_recommend_a_recursive_task_glob(self):
         # `action.yml` expands the `tasks:` input unquoted (`args+=($CE_TASKS)`) with
         # globstar OFF, so `a/**/*.yaml` degrades to `a/*/*.yaml` and silently drops every

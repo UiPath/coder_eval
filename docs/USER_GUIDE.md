@@ -71,6 +71,13 @@ Checks task syntax, required CLI tools, API keys, and schema validity without ex
 | Flag | Description |
 | --- | --- |
 | `--experiment, -e` | Experiment definition YAML to resolve variants against (default: `experiments/default.yaml`). |
+| `--split NAME` | For dataset-backed tasks, preview only rows whose `dataset.split_field` value (default field: `split`) matches — e.g. `--split train` / `--split test`. Applied **before** `--sample` / `--sample-per-stratum`. A labelled task with no row in this split is an error naming the splits that exist. See [Bring Your Own Dataset](DATASETS.md). |
+| `--sample N` | For dataset-backed tasks, preview a fixed-seed random N-row sample (reproducible). Overrides `--sample-per-stratum`. See [Bring Your Own Dataset](DATASETS.md). |
+| `--sample-per-stratum N` | For dataset-backed tasks, preview up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — `plan` warns when that applies. See [Bring Your Own Dataset](DATASETS.md). |
+
+`plan` takes the same three row selectors as `run` and previews **exactly** what `run` would
+select, naming which selector narrowed the set and printing a per-stratum breakdown of the
+selected rows. That parity is enforced by a lint rule, so the two commands cannot drift apart.
 
 ### `coder-eval evaluate` — test criteria without an agent
 

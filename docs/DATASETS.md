@@ -126,6 +126,15 @@ Load-time errors, with their message shapes:
 | `paths: []` | `Dataset.paths must be a non-empty list` |
 | `--split X` on a labelled dataset with no `X` rows | `Dataset for task '<task_id>' has no rows in split 'X' (split_field='split'); labelled splits present: ['test', 'train']` |
 
+**Row-id validation runs over the WHOLE dataset, before `--split` and before either sampler.** So
+a malformed, id-less or duplicate row sitting in a split you did not select still fails the load.
+That is intended, not an oversight: "the dataset is well-formed" must not depend on what a given
+invocation happened to select. Split the checks — duplicates whole-set, malformed per-selected-row
+— and a bad row in the `test` split validates cleanly under every `--split train` run and surfaces
+only at promotion time, which is the most expensive moment to learn about it. The `Dataset row <i>`
+index therefore counts over the whole file, which is also the more useful number: it points at the
+line.
+
 ## Selecting a subset
 
 A full dataset is expensive. Three mechanisms cut it down, in two stages: **`--split` filters
@@ -200,6 +209,14 @@ what keeps a measured improvement from being an artifact of the rows you trained
 ```bash
 coder-eval run tasks/skills/activation.yaml --split train      # iterate here
 coder-eval run tasks/skills/activation.yaml --split test   # confirm here, once
+```
+
+`coder-eval plan` takes the same three selectors, so the exact invocation you are about to pay for
+can be previewed for free — it prints the selected row count, names which selector narrowed the
+set, and breaks the selection down per stratum:
+
+```bash
+coder-eval plan tasks/skills/activation.yaml --split train --sample-per-stratum 2
 ```
 
 **The filter runs before either sampler, and that ordering is load-bearing.** Sampling first would
