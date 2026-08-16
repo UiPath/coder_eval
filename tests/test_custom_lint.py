@@ -3967,10 +3967,33 @@ class TestCE038NestedForbidExtras:
 
     Runtime introspection rather than an AST walk, because the question is about resolved field
     TYPES (through `list[...]`, `X | None`, unions and aliases), which the AST does not know.
-    Enforced over every model reachable from `coder_eval.models`.
+    **Roots.** Every model reachable from `coder_eval.models`, PLUS the extra roots below.
+    `coder_eval.models` alone is not the whole surface: `BatchRunConfig` lives in
+    `orchestration/` and declares `extra="forbid"`, so a lenient model nested under it was
+    exactly this rule's shape while sitting outside its reach. Found while adding `RowSelection`
+    — the rule stayed green on the very pattern it exists to catch, because of WHERE the
+    container happens to live rather than because of anything about the container.
+
+    **Exemptions carry a reason, not just a name.** A container may legitimately nest a lenient
+    model; what it must not do is nest one silently.
     """
 
     MAX_ANNOTATION_DEPTH = 6
+
+    # Strict containers outside `coder_eval.models` that this rule must still reach.
+    EXTRA_ROOTS = ("coder_eval.orchestration.config:BatchRunConfig",)
+
+    # `Container.field -> Nested` pairs that are deliberate, each with WHY.
+    EXEMPT: ClassVar[dict[str, str]] = {
+        "BatchRunConfig.row_selection -> RowSelection": (
+            "RowSelection is also nested under RunSummary, which is deliberately lenient so "
+            "run.json stays readable when written by a NEWER coder-eval — a forbid here would "
+            "turn a future fourth selector into a hard parse failure of the whole report rather "
+            "than an ignored key. The config-side typo risk is covered statically instead: "
+            "RowSelection(splt=...) is a pyright error, and the model is constructed at exactly "
+            "one production site with literal keywords."
+        ),
+    }
 
     @staticmethod
     def _nested_models(annotation: object, depth: int = 0) -> list[type]:
@@ -3988,6 +4011,11 @@ class TestCE038NestedForbidExtras:
         ]
 
     def _offenders(self) -> list[str]:
+        return sorted({o for o in self._raw_offenders() if o not in self.EXEMPT})
+
+    def _raw_offenders(self) -> list[str]:
+        from importlib import import_module
+
         from pydantic import BaseModel
 
         import coder_eval.models as models_pkg
@@ -4010,6 +4038,9 @@ class TestCE038NestedForbidExtras:
             obj = getattr(models_pkg, name)
             if isinstance(obj, type) and issubclass(obj, BaseModel):
                 visit(obj)
+        for root in self.EXTRA_ROOTS:
+            module_path, _, attr = root.partition(":")
+            visit(getattr(import_module(module_path), attr))
         return sorted(set(offenders))
 
     def test_no_violations(self):
@@ -4022,6 +4053,27 @@ class TestCE038NestedForbidExtras:
             "`model_config = ConfigDict(extra='forbid')` on the nested model too, or relax the "
             "container if leniency is genuinely intended there."
         )
+
+    def test_every_extra_root_resolves_and_is_strict(self):
+        """A root that stopped existing — or stopped forbidding extras — silently checks nothing."""
+        from importlib import import_module
+
+        for root in self.EXTRA_ROOTS:
+            module_path, _, attr = root.partition(":")
+            cls = getattr(import_module(module_path), attr)
+            assert cls.model_config.get("extra") == "forbid", (
+                f"{root} is listed as a strict root but no longer declares extra='forbid' — it is "
+                "checking nothing, and removing it from EXTRA_ROOTS is the honest fix"
+            )
+
+    def test_every_exemption_is_still_a_real_violation(self):
+        """An exemption for a pair that no longer violates is a stale licence.
+
+        Without this, tightening `RowSelection` later would leave a permanent excuse behind — and
+        the next lenient model added to that field would inherit it silently.
+        """
+        stale = sorted(set(self.EXEMPT) - set(self._raw_offenders()))
+        assert not stale, f"EXEMPT lists pair(s) that are no longer violations, so the entry is dead: {stale}"
 
     def test_the_check_actually_fires(self):
         # The rule is only worth having if it can fail. A lenient nested model under a strict
