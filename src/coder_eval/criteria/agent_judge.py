@@ -286,7 +286,21 @@ def _build_agent_config(
     user_overrides = criterion.agent.model_dump(exclude_unset=True)
     if "sdk_options" in user_overrides:
         user_overrides["sdk_options"] = {**defaults.sdk_options, **user_overrides["sdk_options"]}
-    config = defaults.model_copy(
+    # The one exempt `model_copy(update=)` in src/ (CE048): the update is a dict VARIABLE built
+    # from the user's YAML — there are no literal keywords to write — and the call needs
+    # `deep=True`, neither of which `copy_with` expresses. `system_prompt_file` / `system_prompt_mode`
+    # must be forced in the SAME update: they are mutually exclusive with `system_prompt` and
+    # BaseAgentConfig sets validate_assignment=True, so sequential assignment raises on the
+    # intermediate state.
+    #
+    # The key hole is NOT closed here, and that is worth saying rather than assuming away:
+    # `criterion.agent` is the four-way `AgentConfig` union while `defaults` is always a
+    # `ClaudeCodeAgentConfig`, so a judge configured `type: antigravity` supplies `thinking_level`,
+    # which this model does not declare — it lands as a bare instance attribute, absent from
+    # `model_dump()`, silently. Narrowing that is a behaviour decision about what an off-kind judge
+    # config should DO (reject it, or coerce it), not a mechanical conversion, so it is recorded in
+    # `.claude/harness-candidates.md` rather than smuggled in here.
+    config = defaults.model_copy(  # noqa: CE048
         update={
             **user_overrides,
             # Force the judge's own prompt in replace mode regardless of user YAML

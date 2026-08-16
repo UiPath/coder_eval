@@ -24,6 +24,7 @@ from coder_eval.models import (
     TASK_DIR_TOKEN,
     JudgeTranscript,
     JudgeTranscriptToolCall,
+    copy_with,
     path_uses_token,
 )
 
@@ -591,11 +592,10 @@ def build_judge_transcript(
         judge_prompt = scrub_reference(judge_prompt, scrub_key)
         judge_system_prompt = scrub_reference(judge_system_prompt, scrub_key)
         kept = [
-            tc.model_copy(
-                update={
-                    "detail": scrub_reference(tc.detail, scrub_key),
-                    "result_preview": scrub_reference(tc.result_preview, scrub_key),
-                }
+            copy_with(
+                tc,
+                detail=scrub_reference(tc.detail, scrub_key),
+                result_preview=scrub_reference(tc.result_preview, scrub_key),
             )
             for tc in kept
         ]

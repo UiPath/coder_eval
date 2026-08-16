@@ -34,6 +34,7 @@ from coder_eval.models import (
     CONTAINER_TASK_DIR,
     ConfigLineageEntry,
     PreservationMode,
+    copy_with,
 )
 from coder_eval.orchestration.task_loader import load_task
 
@@ -179,7 +180,7 @@ def run_task_internal_command(
     # We're already inside the container; another nested docker would be
     # both wrong and impossible (no docker CLI in image).
     if task.sandbox.driver == "docker":
-        task = task.model_copy(update={"sandbox": task.sandbox.model_copy(update={"driver": "tempdir"})})
+        task = copy_with(task, sandbox=copy_with(task.sandbox, driver="tempdir"))
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

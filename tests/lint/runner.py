@@ -30,6 +30,7 @@ from tests.lint.rules.ce040_bootstrap_p_floor_seam import BootstrapPFloorSeam
 from tests.lint.rules.ce041_no_model_dict_splat import NoModelDictSplat
 from tests.lint.rules.ce042_replicate_padding_seam import ReplicatePaddingSeam
 from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
+from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -83,6 +84,7 @@ ALL_RULES: list[RuleClass] = [
     NoModelDictSplat,
     ReplicatePaddingSeam,
     NoBareAssertInCli,
+    NoBareModelCopyUpdate,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

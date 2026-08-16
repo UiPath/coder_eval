@@ -188,6 +188,7 @@ external = [
     "CE038",
     "CE039",
     "CE045",
+    "CE048",
 ]  # custom architectural lint rules (tests/lint/); an id needs listing once a real `# noqa` names it
 
 [tool.ruff.lint.pylint]

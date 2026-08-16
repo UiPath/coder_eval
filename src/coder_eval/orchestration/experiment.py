@@ -35,6 +35,7 @@ from ..models import (
     VariantAggregate,
     VariantResult,
     apply_prompt_mutations,
+    copy_with,
 )
 from ..path_utils import build_task_run_dir
 from .config import BatchRunConfig
@@ -449,15 +450,14 @@ def resolve_task_for_variant(
     resolved_simulation = _resolve_simulation(default_experiment, experiment, task, variant, lineage)
 
     # Build resolved task (copy with overrides)
-    resolved_task = task.model_copy(
-        update={
-            "agent": resolved_agent,
-            "run_limits": resolved_run_limits,
-            "sandbox": resolved_sandbox,
-            "post_run": resolved_post_run,
-            "pre_run": resolved_pre_run,
-            "simulation": resolved_simulation,
-        }
+    resolved_task = copy_with(
+        task,
+        agent=resolved_agent,
+        run_limits=resolved_run_limits,
+        sandbox=resolved_sandbox,
+        post_run=resolved_post_run,
+        pre_run=resolved_pre_run,
+        simulation=resolved_simulation,
     )
 
     # Resolve repeats (4-layer: default → experiment-defaults → variant → cli; skips task layer)

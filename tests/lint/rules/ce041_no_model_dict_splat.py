@@ -33,9 +33,10 @@ It is a shape check, and the boundary is worth stating so nobody trusts it furth
   CE002 enforces separately.
 - ``model_copy(update={...})`` is a DIFFERENT hole and this rule does not cover it: pydantic does
   not validate ``update=`` keys even under ``extra="forbid"``, so a typo there is set as a bare
-  instance attribute and dropped from ``model_dump()`` entirely. That one is filed in
-  ``.claude/harness-candidates.md``; it matters here because ``promoted`` and ``holm_alpha`` — the
-  two fields a promotion decision IS — are written only that way.
+  instance attribute and dropped from ``model_dump()`` entirely. That one is now **CLOSED** by
+  ``models.copy_with`` and **CE048**, which apply this same two-sided fix — a runtime raise plus
+  literal keywords — to the update half. It mattered here because ``promoted`` and ``holm_alpha``,
+  the two fields a promotion decision IS, were written only that way.
 - The scan covers ``src/`` only. Tests legitimately build models from dicts — that is how a
   round-trip test is written.
 

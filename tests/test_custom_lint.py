@@ -20,6 +20,7 @@ import pytest
 
 from tests.lint.cli_flags import help_for, long_flags
 from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
+from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.runner import ALL_RULES, check_paths
 
 
@@ -6281,6 +6282,70 @@ class TestCE043RowSelectorParity:
 
         missing = sorted(set(ROW_SELECTOR_FLAGS.values()) - long_flags(_stub))
         assert missing == ["--sample-per-stratum"]
+
+
+@pytest.mark.lint
+class TestCE048NoBareModelCopyUpdate:
+    """CE048 — `model_copy(update={...})` is replaced by `models.copy_with` everywhere in `src/`.
+
+    `model_copy(update=)` does not check the update's KEYS: a mistyped one lands as a bare instance
+    attribute, absent from `model_dump()` entirely, with the intended field left at its default and
+    nothing raised. Both optimize-gate verdicts were written that way — on the models that say what
+    a promotion decision rests on.
+
+    CE041's shape one verb over: `copy_with` catches it at runtime, literal keywords catch it
+    statically, and this rule keeps the static half from coming back. The boundary is on the rule
+    module.
+    """
+
+    def test_it_fires_on_a_bare_update_call(self) -> None:
+        source = "def f(v, notes):\n    return v.model_copy(update={'promoted': False, 'notes': notes})\n"
+        violations = NoBareModelCopyUpdate("src/coder_eval/optimize_gate.py").check(ast.parse(source))
+        assert len(violations) == 1 and violations[0].rule_id == "CE048", violations
+
+    def test_it_is_silent_on_copy_with(self) -> None:
+        source = "def f(v, notes):\n    return copy_with(v, promoted=False, notes=notes)\n"
+        assert NoBareModelCopyUpdate("src/coder_eval/optimize_gate.py").check(ast.parse(source)) == []
+
+    def test_it_is_silent_on_a_model_copy_with_no_update(self) -> None:
+        # `model_copy(deep=True)` copies without setting anything, so no key can be wrong.
+        source = "def f(v):\n    return v.model_copy(deep=True)\n"
+        assert NoBareModelCopyUpdate("src/coder_eval/orchestrator.py").check(ast.parse(source)) == []
+
+    def test_the_canonical_module_is_exempt(self) -> None:
+        # `copy_with` itself must make the call — it is the thing that checks the keys first.
+        source = "def copy_with(model, /, **updates):\n    return model.model_copy(update=updates)\n"
+        assert NoBareModelCopyUpdate("src/coder_eval/models/copy_with.py").check(ast.parse(source)) == []
+        assert NoBareModelCopyUpdate("src\\coder_eval\\models\\copy_with.py").check(ast.parse(source)) == []
+
+    def test_only_the_canonical_module_and_one_documented_exemption_remain(self) -> None:
+        """Anti-vacuity, and the acceptance criterion in test form.
+
+        The rule is satisfied by suppressions as easily as by conversions, so the number of live
+        `model_copy(update=)` calls in `src/` is pinned rather than left to the sweep.
+        """
+        offenders = [
+            path.relative_to(SRC).as_posix()
+            for path in sorted(SRC.rglob("*.py"))
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "model_copy"
+            and any(k.arg == "update" for k in node.keywords)
+        ]
+        assert offenders == [
+            # The one documented exemption: a dict VARIABLE from user YAML, plus deep=True.
+            "coder_eval/criteria/agent_judge.py",
+            # And the canonical module, which is the thing that checks the keys.
+            "coder_eval/models/copy_with.py",
+        ], offenders
+
+    def test_ce041_no_longer_calls_this_hole_open(self) -> None:
+        # CE041's docstring named `model_copy(update=)` as the hole it deliberately left; it now
+        # points at the rule that closed it, so the two rules cannot describe the tree differently.
+        import tests.lint.rules.ce041_no_model_dict_splat as ce041
+
+        assert "CE048" in (ce041.__doc__ or "")
 
 
 @pytest.mark.lint

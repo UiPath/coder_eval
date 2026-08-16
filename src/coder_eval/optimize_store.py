@@ -30,7 +30,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from coder_eval.models import NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores
+from coder_eval.models import NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores, copy_with
 
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ def record_noise_floor(path: Path, floor: NoiseFloor) -> OptimizeMeasurements:
         return measurements
     key = _floor_key(floor)
     kept = [f for f in measurements.noise_floors if _floor_key(f) != key]
-    updated = measurements.model_copy(update={"noise_floors": [*kept, floor]})
+    updated = copy_with(measurements, noise_floors=[*kept, floor])
     _atomic_write(path, updated.model_dump_json(indent=2))
     return updated
 
@@ -169,7 +169,7 @@ def append_regression_rows(path: Path, rows: list[RegressionRow]) -> OptimizeMea
             fresh.append(row)
     if not fresh:
         return measurements
-    updated = measurements.model_copy(update={"regression_corpus": [*measurements.regression_corpus, *fresh]})
+    updated = copy_with(measurements, regression_corpus=[*measurements.regression_corpus, *fresh])
     _atomic_write(path, updated.model_dump_json(indent=2))
     return updated
 
@@ -184,7 +184,7 @@ def record_round_scores(path: Path, scores: RoundScores) -> OptimizeMeasurements
     """
     measurements = load_measurements(path)
     kept = [r for r in measurements.round_scores if r.round != scores.round]
-    updated = measurements.model_copy(update={"round_scores": [*kept, scores]})
+    updated = copy_with(measurements, round_scores=[*kept, scores])
     _atomic_write(path, updated.model_dump_json(indent=2))
     return updated
 

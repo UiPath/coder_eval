@@ -570,8 +570,9 @@ with the two `action.yml` items above — one considered change to the action's 
       the general case and wrong about this one: these four guards are the only ones whose omission
       is *silent and score-changing*, which is what makes them worth the API. — caught in the ReAPO
       optimize-skill Phase 1 quality review, closed the same day.
-- [ ] `model_copy(update={...})` is not validated by pydantic even under `extra="forbid"`, so a
-      mistyped key is set as a bare instance attribute and dropped from `model_dump()` entirely —
+- [x] **CLOSED.** `model_copy(update={...})` is not validated by pydantic even under
+      `extra="forbid"`, so a mistyped key is set as a bare instance attribute and dropped from
+      `model_dump()` entirely —
       no raise, no log, and the field it was meant to set stays at its default. This is the exact
       hole CE041 closed for *construction*, still open for *update*, and it matters most where it
       is worst: `ActivationGateVerdict.promoted` / `holm_alpha` and their execution-track twins are
@@ -584,6 +585,26 @@ with the two `action.yml` items above — one considered change to the action's 
       literal keywords, plus a rule forbidding bare `model_copy(update=)`) or a
       `model_validate(instance.model_dump() | update)` convention — a design decision, not a
       bolt-on. — caught in the Plan A Phase 3 quality review; CE041's docstring points here.
+      **Resolution (Plan D Phase 3):** the helper, not the convention. `models/copy_with.py`
+      takes literal keywords and raises on an unknown field name; **CE048** forbids the bare call
+      shape in `src/`; all 21 call sites converted, with one documented exemption
+      (`criteria/agent_judge.py` — a dict VARIABLE from user YAML, plus `deep=True`). The
+      re-validating convention was rejected: it re-runs every validator on every field on paths
+      that run once per candidate per round. Note the inventory here said "~9 call sites" and the
+      plan's single-line grep said 17 — the AST count is **22**, because four are wrapped across
+      lines, one of them `holm_promote`'s main promotion write.
+- [ ] **`agent_judge` silently drops an off-kind judge config's fields.** `_build_agent_config`
+      copies the user's `criterion.agent` dump onto a `ClaudeCodeAgentConfig`, but
+      `AgentJudgeCriterion.agent` is the four-way `AgentConfig` union — so `type: antigravity`
+      supplies `thinking_level`, which `ClaudeCodeAgentConfig` does not declare. Verified: it lands
+      as a bare instance attribute, absent from `model_dump()`, and the same call writes
+      `type="antigravity"` onto a claude-code model unvalidated. This is exactly the key hole
+      `copy_with` closes, at the one site CE048 exempts — the exemption is legitimate (a dict
+      variable plus `deep=True`) but it is NOT harmless, and the comment there now says so instead
+      of claiming the hole cannot open. Not fixed with CE048 because the fix is a behaviour
+      decision — reject an off-kind judge config, or coerce it to the judge's own kind — rather
+      than a mechanical conversion, and either answer changes what a currently-accepted task YAML
+      does. — caught in the Plan D Phase 3 quality review.
 - [ ] A no-op "absence" assertion: `assert "X" not in text.replace("NOT X", "")` is vacuous whenever
       the fixture cannot contain `X` at all, and reads as a strong guard. Live instance at
       `tests/test_optimize_gate.py` (the `render_search_comparison` blocked-path test), and the

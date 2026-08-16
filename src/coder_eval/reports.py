@@ -17,6 +17,7 @@ from .models import (
     SuiteRollup,
     TaskResult,
     ThresholdCheck,
+    copy_with,
     eval_overhead_cost,
     row_cost_incomplete,
     sum_costs,
@@ -808,7 +809,7 @@ def _evaluate_thresholds(
     records actual_value=None and fails.
     """
     if not suite_thresholds:
-        return aggregate.model_copy(update={"threshold_checks": [], "passed": True})
+        return copy_with(aggregate, threshold_checks=[], passed=True)
 
     checks: list[ThresholdCheck] = []
     for metric, min_value in suite_thresholds.items():
@@ -816,7 +817,7 @@ def _evaluate_thresholds(
         passed = actual is not None and actual >= min_value
         checks.append(ThresholdCheck(metric=metric, min_value=min_value, actual_value=actual, passed=passed))
 
-    return aggregate.model_copy(update={"threshold_checks": checks, "passed": all(c.passed for c in checks)})
+    return copy_with(aggregate, threshold_checks=checks, passed=all(c.passed for c in checks))
 
 
 def _attach_row_accounting(agg: CriterionAggregate, rows_total: int, rows_aggregated: int) -> CriterionAggregate:
@@ -833,7 +834,7 @@ def _attach_row_accounting(agg: CriterionAggregate, rows_total: int, rows_aggreg
     excluded = rows_total - rows_aggregated
     metrics = dict(agg.metrics)
     metrics["completion_rate"] = (rows_aggregated / rows_total) if rows_total else 0.0
-    return agg.model_copy(update={"rows_total": rows_total, "rows_excluded": excluded, "metrics": metrics})
+    return copy_with(agg, rows_total=rows_total, rows_excluded=excluded, metrics=metrics)
 
 
 def _build_missing_aggregator(
@@ -935,10 +936,11 @@ def _compute_suite_rollup(
                     # completion_rate is now a real value in metrics; refresh the
                     # threshold checks so the rendered actual matches it, but keep
                     # the aggregate failed because the real metrics are absent.
-                    stub = _evaluate_thresholds(stub, suite_thresholds).model_copy(update={"passed": False})
+                    checked = _evaluate_thresholds(stub, suite_thresholds)
+                    stub = copy_with(checked, passed=False)
                     criterion_aggregates.append(stub)
                 continue
-            aggregate = aggregate.model_copy(update={"description": description})
+            aggregate = copy_with(aggregate, description=description)
             aggregate = _attach_row_accounting(aggregate, rows_total, len(per_rows))
             criterion_aggregates.append(_evaluate_thresholds(aggregate, suite_thresholds))
 

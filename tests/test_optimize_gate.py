@@ -607,6 +607,90 @@ class TestActivationGate:
         assert _gate(run_dirs, seed=3) == _gate(run_dirs, seed=3)
 
 
+class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
+    """Both wrappers write their decision through `copy_with`, whose keys pydantic never validated.
+
+    `model_copy(update=)` sets an unknown key as a bare instance attribute: absent from
+    `model_dump()`, with the field it was meant to set left at its default and nothing raised. On
+    these two models — the ones that say what a promotion decision rests on — a `mean_dif` typo
+    renders a block reporting no difference at all.
+
+    So a decided verdict's INSTANCE STATE is pinned, not only its values: no attribute outside the
+    declared fields, and the fields the copy writes carrying what the wrapper decided. `copy_with`
+    raises on a bad key today, and this is what notices if some future call site stops going
+    through it.
+
+    Read `__dict__`, never `model_dump()`. Under `extra="forbid"` an undeclared key set by
+    `model_copy(update=)` lands in `__dict__` and is never serialized, so
+    `set(model_dump()) == set(model_fields)` is true **even when the defect is present** — and
+    `model_extra` is `None`, because that is only populated under `extra="allow"`. A sensor built
+    on either would assert something that cannot be false, which is the CE039 failure mode this
+    repo already has a rule class for.
+    """
+
+    @staticmethod
+    def _assert_no_attribute_outside_the_model(verdict) -> None:
+        stray = sorted(set(verdict.__dict__) - set(type(verdict).model_fields))
+        assert not stray, (
+            f"{stray} sit on the verdict as bare instance attributes. That is what an unvalidated "
+            "model_copy(update=) does with a mistyped key: the field it was meant to set is left "
+            "at its default, and model_dump() never mentions either."
+        )
+
+    def test_the_assertion_bites_on_the_defect_it_describes(self, tmp_path: Path) -> None:
+        """Anti-vacuity. The first draft of this class asserted on `model_dump()` and could not fail.
+
+        Built by doing to a real verdict exactly what a mistyped `model_copy(update=)` would.
+        """
+        lone = {"r0": [("yes", "yes")]}
+        verdict = _gate(_shared_dirs(tmp_path, lone, lone))
+        typo = verdict.model_copy(update={"promotd": True})  # noqa: CE048 — this IS the defect
+
+        assert set(typo.model_dump()) == set(type(typo).model_fields), (
+            "the model_dump() check the first draft used still passes here — that is why this "
+            "class reads __dict__ instead"
+        )
+        with pytest.raises(AssertionError, match="promotd"):
+            self._assert_no_attribute_outside_the_model(typo)
+
+    def test_a_promoted_activation_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
+        incumbent = {f"r{i}": [("yes", "no")] for i in range(12)}
+        candidate = {f"r{i}": [("yes", "yes")] for i in range(12)}
+        decided = holm_promote([_gate(_shared_dirs(tmp_path, incumbent, candidate))])[0]
+
+        self._assert_no_attribute_outside_the_model(decided)
+        assert decided.promoted is True
+        assert decided.holm_alpha == DEFAULT_ALPHA
+        assert decided.gate_refusal is None
+        assert decided.notes and _note_holm_family(1, DEFAULT_ALPHA) in decided.notes
+
+    def test_an_unfamilied_activation_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
+        # The `p_value is None` branch, which writes three fields rather than four.
+        lone = {"r0": [("yes", "yes")]}
+        decided = holm_promote([_gate(_shared_dirs(tmp_path, lone, lone))])[0]
+
+        self._assert_no_attribute_outside_the_model(decided)
+        assert decided.p_value is None
+        assert decided.promoted is False
+        assert decided.holm_alpha == DEFAULT_ALPHA
+
+    def test_a_promoted_execution_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
+        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+
+        self._assert_no_attribute_outside_the_model(decided)
+        assert decided.promoted is True
+        assert decided.holm_alpha == DEFAULT_ALPHA
+        assert decided.mean_diff is not None and decided.mean_diff > 0.0
+
+    def test_a_refused_execution_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
+        one_row = {"incumbent": {"r1": [0.2, 0.3]}, "candidate": {"r1": [0.7, 0.8]}}
+        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **one_row))])[0]
+
+        self._assert_no_attribute_outside_the_model(decided)
+        assert decided.gate_refusal is not None
+        assert decided.promoted is False
+
+
 class TestHolmPromote:
     def _verdict(self, name: str, p: float | None, diff: float | None = 0.2) -> ActivationGateVerdict:
         return ActivationGateVerdict(

@@ -17,6 +17,7 @@ from coder_eval.models import (
     ConfusionEntry,
     CriterionAggregate,
     CriterionResult,
+    copy_with,
 )
 
 
@@ -154,4 +155,4 @@ def overlay_classification_metrics(
         }
     )
 
-    return base.model_copy(update={"metrics": metrics, "details": details})
+    return copy_with(base, metrics=metrics, details=details)

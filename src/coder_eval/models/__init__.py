@@ -33,6 +33,9 @@ from coder_eval.models.container_paths import (
     path_uses_token,
 )
 
+# The validated model_copy(update=) replacement (a cycle-free leaf; pydantic only)
+from coder_eval.models.copy_with import copy_with
+
 # Enums
 # Criteria
 from coder_eval.models.criteria import (
@@ -369,6 +372,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "OptimizeMeasurements",
     "RegressionRow",
     "RoundScores",
+    # Not a record: the validated model_copy(update=) replacement, which CE048 routes every
+    # src/ update site through. Exported here because CE001 routes model consumers via this module.
+    "copy_with",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
     "DEFAULT_STOP_EARLY_GATE_THRESHOLD",

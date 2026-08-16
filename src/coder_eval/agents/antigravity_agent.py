@@ -51,6 +51,7 @@ from coder_eval.models import (
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
+    copy_with,
 )
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
@@ -947,15 +948,14 @@ class _AntigravityTurnState:
             )
             completed = datetime.now()
             started = start_tel.execution_started_at or completed
-            end_tel = start_tel.model_copy(
-                update={
-                    "parameters": self._params(start_tel.tool_name, call.args, self._tool_input_keys.get(cid)),
-                    "result_status": "error" if errored else "success",
-                    "result_summary": str(result_text) if result_text is not None else None,
-                    "error_message": (step.error or "tool failed") if errored else None,
-                    "execution_completed_at": completed,
-                    "duration_ms": max((completed - started).total_seconds() * 1000.0, 0.0),
-                }
+            end_tel = copy_with(
+                start_tel,
+                parameters=self._params(start_tel.tool_name, call.args, self._tool_input_keys.get(cid)),
+                result_status="error" if errored else "success",
+                result_summary=str(result_text) if result_text is not None else None,
+                error_message=(step.error or "tool failed") if errored else None,
+                execution_completed_at=completed,
+                duration_ms=max((completed - started).total_seconds() * 1000.0, 0.0),
             )
             self.commands.append(end_tel)
             self.emit.on_event(
@@ -1058,7 +1058,7 @@ class _AntigravityTurnState:
         for cid, tel in self._open_tools.items():
             if cid in self._closed_tools:
                 continue
-            orphan = tel.model_copy(update={"result_status": "unknown", "execution_completed_at": datetime.now()})
+            orphan = copy_with(tel, result_status="unknown", execution_completed_at=datetime.now())
             self.emit.on_event(
                 ToolEndEvent(
                     task_id=self.task_id,

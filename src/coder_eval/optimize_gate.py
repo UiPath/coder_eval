@@ -61,6 +61,7 @@ from coder_eval.models import (
     OptimizeMeasurements,
     RegressionRow,
     TaskDefinition,
+    copy_with,
 )
 from coder_eval.optimize_store import UNRECORDED_SPLIT, UNRESOLVED_MODEL, lookup_noise_floor
 from coder_eval.reports_stats import (
@@ -722,7 +723,7 @@ def _floor_from_clusters[T](
     if bootstrap is None:
         return _no_floor(f"the bootstrap declined on {len(clusters_a)} cluster(s) for {probe.suite_id!r} — it needs 2")
     _diff, ci_low, ci_high, _p = bootstrap
-    return probe.model_copy(update={"mde": (ci_high - ci_low) / 2.0})
+    return copy_with(probe, mde=(ci_high - ci_low) / 2.0)
 
 
 def measure_noise_floor(
@@ -1687,7 +1688,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
             # block would print an ordinary negative-result note directly under a refusal headline.
             if verdict.gate_refusal is None:
                 notes.append(_NOTE_OUTSIDE_FAMILY)
-            decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
+            decided.append(copy_with(verdict, promoted=False, holm_alpha=alpha, notes=notes))
             continue
 
         threshold = _holm_threshold([p for _i, p in family], verdict.p_value, alpha)
@@ -1735,11 +1736,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         # The refusal lives on `gate_refusal` and NOT in `notes`: notes is the "everything the
         # reader needs to distrust the numbers" channel, a refusal is a headline, and duplicating
         # it would print the same sentence twice in one block.
-        decided.append(
-            verdict.model_copy(
-                update={"promoted": promoted, "holm_alpha": alpha, "gate_refusal": refusal, "notes": notes}
-            )
-        )
+        decided.append(copy_with(verdict, promoted=promoted, holm_alpha=alpha, gate_refusal=refusal, notes=notes))
     return decided
 
 
@@ -2097,7 +2094,8 @@ def execution_gate(
         }
         for variant_id, per_task in result.per_replicate_scores.items()
     }
-    comparison = paired_comparison(result.model_copy(update={"per_replicate_scores": scoped_scores}), confidence)
+    scoped = copy_with(result, per_replicate_scores=scoped_scores)
+    comparison = paired_comparison(scoped, confidence)
     if comparison is None:
         # `variant_ids` is deliberately NOT narrowed to force a comparison out of an N-variant
         # file: that would compute a Stage B verdict from Stage A data — one replicate per row,
@@ -2476,7 +2474,7 @@ def holm_promote_execution(
             # negative result directly under a refusal headline.
             if verdict.gate_refusal is None:
                 notes.append(_NOTE_OUTSIDE_FAMILY)
-            decided.append(verdict.model_copy(update={"promoted": False, "holm_alpha": alpha, "notes": notes}))
+            decided.append(copy_with(verdict, promoted=False, holm_alpha=alpha, notes=notes))
             continue
 
         favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
@@ -2508,7 +2506,7 @@ def holm_promote_execution(
                     + "It is reported here and gated in the rendered block, not folded into `promoted`."
                 )
         notes.append(_note_holm_family(len(family), alpha))
-        decided.append(verdict.model_copy(update={"promoted": promoted, "holm_alpha": alpha, "notes": notes}))
+        decided.append(copy_with(verdict, promoted=promoted, holm_alpha=alpha, notes=notes))
     return decided
 
 
