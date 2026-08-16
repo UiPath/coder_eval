@@ -636,3 +636,16 @@ with the two `action.yml` items above — one considered change to the action's 
       carries, so it is a design question rather than a test. Note also that nothing pins that a
       changed `row_selection` surfaces in the diff at all. — caught in the row-selection
       integrity run, Phase 2 review.
+
+- [ ] **The cross-split gate refusal compares `--split` only, not the samplers.** `run.json`
+      records `max_rows` and `sample_per_stratum` beside `split`, and `read_split_provenance`
+      reads none of them. A `--sample` draw is fixed-seed, so two arms run at DIFFERENT counts
+      score largely disjoint rows (`random.sample` with a different `k` is not a prefix) and the
+      preflight passes silently — the same failure the refusal exists for, one field over. It is
+      narrower than the split case: a sampler mismatch surfaces downstream as a small
+      `rows_paired` beside a large `rows_excluded`, which the verdict already reports, whereas a
+      split mismatch can leave both arms fully paired on rows that merely share ids. Widening the
+      comparison is a behaviour change beyond what the preflight was scoped to, and it needs a
+      decision about whether an intentional `--sample` difference should ever be gateable at all.
+      The message and a comment beside the check now state the scope so it is at least not a
+      false claim. — caught in the row-selection integrity run, final cross-phase review.
