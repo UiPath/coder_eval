@@ -20,7 +20,13 @@ from coder_eval.models import PreservationMode, RowSelection
 # remove it, which is pure churn. (Stated precisely because it is checkable and easy to get
 # backwards: a future reader who finds f1b6abb and concludes the exclusion was an oversight would
 # "fix" it and ship an alias for a field that never left the branch.)
-_DEPRECATED_ROW_SELECTORS = tuple(n for n in RowSelection.model_fields if n != "split")
+#
+# FROZEN, not derived. Deriving it from `RowSelection.model_fields` reads well but describes the
+# CURRENT field set while this list is a statement about a HISTORICAL one: a fourth selector added
+# later would silently become an accepted flat alias here, warning about a 0.11.0 removal for a
+# spelling that never shipped — precisely the churn the `split` exclusion above argues against. The
+# parity test below keeps the two from drifting without anyone noticing.
+_DEPRECATED_ROW_SELECTORS = ("max_rows", "sample_per_stratum")
 
 
 def _stacklevel_past_pydantic() -> int:

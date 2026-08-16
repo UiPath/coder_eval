@@ -15,16 +15,25 @@ This is not an injection guard. Task YAML is author-controlled and the values ar
 supplied in any deployment this project has; the severity is a mangled message, not RCE. It is a
 correctness rule about output.
 
-**What it detects, precisely.** An ``ast.JoinedStr`` (an f-string) passed as an argument to a call
-whose function is named ``print`` on any receiver — ``console.print``, ``err_console.print`` — in a
-file whose normalized path contains ``src/coder_eval/cli/``, where the f-string contains BOTH a
-literal Rich markup tag (``[name]`` or ``[/name]`` in one of its constant parts) AND at least one
-interpolation that is not wrapped in a call to ``escape``.
+**What it detects, precisely.** An ``ast.JoinedStr`` (an f-string) passed as an argument to ANY
+call, in a file whose normalized path contains ``src/coder_eval/cli/``, where the f-string contains
+BOTH a literal Rich markup tag (``[name]`` or ``[/name]`` in one of its constant parts) AND at
+least one interpolation that is not escaped.
+
+**Any call, not just ``console.print``** — because the SINK is an implementation detail and keying
+on it fails open the moment output is buffered. Measured: the same change that added this rule
+also moved ``plan``'s per-file output behind an ``emit`` sink and a ``detail.append`` list, so five
+markup-bearing f-strings in ``plan_command.py`` left the rule's view on the very file it was
+written for. A Rich markup tag in a ``cli/`` f-string is markup because it reaches a console
+eventually; where it is handed off on the way does not change that.
 
 **The boundary, stated so a green ``make lint`` is not mistaken for a proof.**
 
 * It matches f-strings **at the call site**. ``msg = f"[red]{e}[/red]"`` followed by
   ``console.print(msg)`` is invisible to it, because the rule never resolves a name to its value.
+  It does follow ONE hop in the other direction: a local assigned directly from ``escape(...)``
+  within the same function counts as escaped, so hoisting an escape out of a long line — which is
+  ordinary formatting, not a trust decision — does not cost a suppression.
 * It does not decide whether a given value is actually untrusted — it cannot, without knowing
   where the value came from. A genuinely trusted interpolation (a literal from this module, a
   formatted count) needs ``# noqa: CE050`` with a reason. That is the rule working: it forces the
@@ -46,6 +55,7 @@ import ast
 import re
 
 from tests.lint.rules.base import BaseRule
+from tests.lint.violation import Violation
 
 
 _CLI_PACKAGE = "src/coder_eval/cli/"
@@ -72,8 +82,8 @@ def _has_markup(node: ast.JoinedStr) -> bool:
     )
 
 
-def _is_escaped(value: ast.expr) -> bool:
-    """True when the interpolated expression is a call to something named ``escape``.
+def _is_escape_call(value: ast.expr) -> bool:
+    """True when the expression is a call to something named ``escape``.
 
     Reads the callee NAME, so `escape(x)` and `markup.escape(x)` both count. It does not resolve
     the import, which the module docstring states as a boundary.
@@ -84,6 +94,29 @@ def _is_escaped(value: ast.expr) -> bool:
     if isinstance(func, ast.Name):
         return func.id == "escape"
     return isinstance(func, ast.Attribute) and func.attr == "escape"
+
+
+def _escaped_locals(tree: ast.AST) -> set[str]:
+    """Names assigned directly from ``escape(...)``, per enclosing scope, flattened.
+
+    Hoisting `escape(str(x))` into a local to keep a line under the length limit is formatting,
+    not a trust decision, and charging a `# noqa` for it teaches the reader that the suppression
+    is bookkeeping. Flattened rather than scope-accurate on purpose: the cost of the imprecision
+    is a missed violation where two functions in one file reuse a name for different things, which
+    is far cheaper than a false one — and `cli/` does not do that.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _is_escape_call(node.value):
+            names |= {target.id for target in node.targets if isinstance(target, ast.Name)}
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and _is_escape_call(node.value)
+            and isinstance(node.target, ast.Name)
+        ):
+            names.add(node.target.id)
+    return names
 
 
 # Format specs that only a number accepts. `str.format` raises on a non-numeric value for every
@@ -124,12 +157,25 @@ class EscapeUntrustedMarkup(BaseRule):
         # Normalized so the match works on Windows runners, where pathlib hands the rule
         # native-separator strings (the convention CE047 and CE009 already follow).
         self._active = _CLI_PACKAGE in filepath.replace("\\", "/")
+        self._escaped: set[str] = set()
+
+    def check(self, tree: ast.AST) -> list[Violation]:
+        # The escaped-locals set is a whole-file fact, so it has to be collected before the walk
+        # rather than during it — an assignment can follow the call that uses it.
+        if self._active:
+            self._escaped = _escaped_locals(tree)
+        return super().check(tree)
+
+    def _is_escaped(self, value: ast.expr) -> bool:
+        return _is_escape_call(value) or (isinstance(value, ast.Name) and value.id in self._escaped)
 
     def visit_Call(self, node: ast.Call) -> None:
-        if self._active and isinstance(node.func, ast.Attribute) and node.func.attr == "print":
+        if self._active:
             for arg in node.args:
                 if isinstance(arg, ast.JoinedStr) and _has_markup(arg):
                     for part in arg.values:
-                        if isinstance(part, ast.FormattedValue) and not (_is_escaped(part.value) or _is_numeric(part)):
+                        if isinstance(part, ast.FormattedValue) and not (
+                            self._is_escaped(part.value) or _is_numeric(part)
+                        ):
                             self.violation(part, _FIX)
         self.generic_visit(node)

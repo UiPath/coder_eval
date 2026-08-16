@@ -7461,6 +7461,45 @@ class TestCE050EscapeUntrustedMarkup:
         # with a BaseRule's without failing anything.
         assert [r.id for r in ALL_RULES].count("CE050") == 1
 
+    def test_it_matches_any_sink_not_just_console_print(self) -> None:
+        """Keying on `console.print` fails open the moment output is BUFFERED.
+
+        Measured: the same change that added this rule moved `plan`'s per-file output behind an
+        `emit` sink and a `detail.append` list, and five markup-bearing f-strings left the rule's
+        view on the very file it was written for. A Rich tag in a `cli/` f-string is markup
+        because it reaches a console eventually; the hand-off on the way does not change that.
+        """
+        for sink in ('emit(f"[red]{e}[/red]")', 'detail.append(f"[red]{e}[/red]")', 'log(f"[red]{e}[/red]")'):
+            assert len(self._check(sink)) == 1, sink
+
+    def test_a_local_assigned_from_escape_counts_as_escaped(self) -> None:
+        # Hoisting an escape out of a long line is formatting, not a trust decision, and charging
+        # a noqa for it teaches the reader that suppressions are bookkeeping.
+        source = """
+            variant_id = escape(str(variant.variant_id))
+            detail.append(f"    [dim]Variant '{variant_id}'[/dim]")
+        """
+        assert self._check(source) == []
+
+    def test_the_escaped_local_may_be_assigned_after_its_use(self) -> None:
+        # The set is a whole-file fact collected before the walk; an assignment can follow the
+        # call textually (a helper defined below its caller).
+        source = """
+            def render():
+                detail.append(f"[dim]{name}[/dim]")
+
+            def build():
+                name = escape(str(x))
+        """
+        assert self._check(source) == []
+
+    def test_a_local_assigned_from_something_else_is_not_escaped(self) -> None:
+        source = """
+            variant_id = str(variant.variant_id)
+            detail.append(f"    [dim]Variant '{variant_id}'[/dim]")
+        """
+        assert len(self._check(source)) == 1
+
     def test_the_cli_package_is_clean(self) -> None:
         """The remediation held: every flagged site is escaped or carries a reasoned noqa.
 

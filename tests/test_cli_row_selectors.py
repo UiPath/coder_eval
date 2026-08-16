@@ -500,12 +500,18 @@ class TestBatchRunConfigDeprecatedRowSelectors:
         assert aliased.model_dump() == explicit.model_dump()
         assert "max_rows" not in aliased.model_dump()
 
-    def test_the_alias_list_derives_from_rowselection(self) -> None:
-        # Typed once. A fourth selector added to `RowSelection` must not silently become a
-        # deprecated alias for a spelling that never existed on this model.
+    def test_the_alias_list_is_frozen_and_still_names_real_fields(self) -> None:
+        """The list is a statement about a HISTORICAL API, so it is frozen rather than derived.
+
+        Deriving it from `RowSelection.model_fields` would make a fourth selector added later
+        silently become an accepted flat alias, warning about a 0.11.0 removal for a spelling that
+        never shipped. Both halves are asserted: the exact frozen set, and that every entry is
+        still a real `RowSelection` field — a rename there must not leave a dead alias behind.
+        """
         from coder_eval.orchestration.config import _DEPRECATED_ROW_SELECTORS
 
-        assert set(_DEPRECATED_ROW_SELECTORS) == set(RowSelection.model_fields) - {"split"}
+        assert _DEPRECATED_ROW_SELECTORS == ("max_rows", "sample_per_stratum")
+        assert set(_DEPRECATED_ROW_SELECTORS) <= set(RowSelection.model_fields)
 
     def test_it_does_not_mutate_the_callers_dict(self, tmp_path: Path) -> None:
         """`model_validate` hands the validator the CALLER'S dict; popping rewrites it in place.

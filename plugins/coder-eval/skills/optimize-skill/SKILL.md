@@ -1496,8 +1496,14 @@ difference against the floor and do not quote that p as confidence.
 read the reporter's own `## Paired Comparison` block, that one still subtracts in *declaration
 order* — quote its header verbatim there, or read this block instead.
 
-**Read the block, not `.passed` by eye.** A failing guardrail or integrity check renders as
-**BLOCKED BY A GUARDRAIL** even though the statistic separated. The two integrity checks are
+**Read the block, not `.passed` by eye.** On this track a failing guardrail or integrity check
+FORCES `promoted = False` — unlike the activation track, where the cost/latency guardrails stay
+advisory in the model and this procedure is what gates them. It renders as **BLOCKED BY A
+GUARDRAIL** when the comparison had otherwise WON: the difference favours the candidate, the
+interval excludes zero, and Holm rejected at this candidate's rank. A candidate that failed a
+check but did *not* clear Holm reads **NOT PROMOTED** instead, and that is the honest headline —
+its problem is power, not cost, and sending the reader to fix the guardrail would be a
+misdiagnosis. The two integrity checks are
 engagement (`recall.yes` must be 1.0 — a row the skill never engaged on measured the *absence* of
 the thing under test) and `completion_rate` (equal, or favouring the incumbent; a p computed over
 rows that vanished from one arm is not evidence).

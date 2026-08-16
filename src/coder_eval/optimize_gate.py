@@ -1070,7 +1070,15 @@ def derive_sibling_indices(*rows_maps: dict[str, list[EvaluationResult]], primar
 
     A single-criterion suite — the shipped ``activation.yaml`` — derives ``[]``, which is the
     common case and is silent rather than noted: there is no sibling, so there is nothing to say.
+
+    ``primary_index`` is validated for the same reason every other index on this module's public
+    surface is: negative indexing does not fail, and here it fails *quietly the other way* —
+    ``found - {-1}`` removes nothing, so the gated criterion stays in its own sibling set and
+    ``_sibling_checks`` grades the candidate against the very criterion under test. Unreachable
+    through ``activation_gate``, which validates first; reachable by anyone calling this directly,
+    which the parameter's different NAME makes easy to overlook.
     """
+    _require_valid_criterion_index(primary_index)
     found: set[int] = set()
     for rows in rows_maps:
         for results in rows.values():
@@ -1870,10 +1878,12 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     claim about the candidates that the data cannot support. Such a verdict comes back with
     ``gate_refusal`` set and ``promoted=False``, and renders as its own headline.
 
-    **There are now TWO `gate_refusal` setters on this track**, and they differ in where they run
-    and in what they carry. The discreteness refusal is set HERE, because it needs the family's
-    rank-dependent threshold. The cross-split refusal is set in :func:`activation_gate`, needs
-    nothing outside a single verdict, and always arrives with ``p_value is None`` — so it takes
+    **There are now TWO `gate_refusal` setters on this track and THREE causes**, and they differ in
+    where they run and in what they carry. The discreteness refusal is set HERE, because it needs
+    the family's rank-dependent threshold. The other two are both set in :func:`activation_gate`'s
+    row-selection preflight — the arms recorded different ``--split`` values, or a run directory
+    holds results its own ``run.json`` never wrote (a re-used ``--run-dir``). Neither needs
+    anything outside a single verdict, and both always arrive with ``p_value is None``  — so it takes
     the branch below and ``_refusal_message`` never sees it, which is what stops the two refusals
     overwriting each other. The membership rule for the family is ``p_value is not None`` and
     nothing else: a refused verdict is outside it, so ``m`` (and therefore every sibling's

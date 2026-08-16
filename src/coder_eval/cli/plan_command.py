@@ -110,7 +110,7 @@ def _preview_dataset(
         suffix = ""
     # `suffix` is BUILT from escaped parts above and must NOT be escaped again — escape() is not
     # idempotent, so a second pass renders a literal backslash before every bracket in a value.
-    emit(f"  [dim]Dataset: {len(rows)} rows -> {len(expanded)} selected{suffix}[/dim]")
+    emit(f"  [dim]Dataset: {len(rows)} rows -> {len(expanded)} selected{suffix}[/dim]")  # noqa: CE050
 
     _print_strata(task, outcome.rows, emit)
 
@@ -161,7 +161,7 @@ def _print_strata(task: TaskDefinition, selected: list[dict[str, Any]], emit: Ca
     rendered = ", ".join(f"{escape(key or _EMPTY_STRATUM_LABEL)}={n}" for key, n in sorted(counts.items()))
     # `rendered` is assembled from escaped keys just above and must NOT be escaped again: escape()
     # is not idempotent, so a second pass prints a backslash before every bracket in a value.
-    emit(f"  [dim]strata ({escape(field)}): {rendered}[/dim]")
+    emit(f"  [dim]strata ({escape(field)}): {rendered}[/dim]")  # noqa: CE050
 
 
 def plan_command(

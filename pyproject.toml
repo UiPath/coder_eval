@@ -211,8 +211,14 @@ max-branches = 25
 # Measured at this commit: `isolation/docker_runner.py::_build_argv` 29,
 # `reports_experiment.py::generate_variant_report` 24,
 # `orchestrator.py::_simulation_dialog_loop` 22, `agents/claude_code_agent.py::communicate` 21 —
-# everything else is under 20. Note `optimize_gate.py`, long the worst offender, is now clean at
-# 18: the module split retired it, which is why this carries no exemption for it.
+# everything else is under 20.
+#
+# No per-file-ignore exists because the CEILING is 30, and nothing else. `optimize_gate.py` — the
+# file the plan that introduced this expected to exempt — peaks at 17 (`execution_gate`), but that
+# was ALREADY true before this change and is not a mccabe result worth reading as health: the
+# module split remains undone (3250 lines, `radon cc` still reports one E-grade and seven D-grade
+# functions), so mccabe and radon simply disagree about that file. Do not read the absence of an
+# exemption as evidence the split landed.
 #
 # Lowering this toward 20 is tracked in .claude/harness-candidates.md, one function at a time.
 max-complexity = 30

@@ -750,9 +750,12 @@ with the two `action.yml` items above — one considered change to the action's 
       (24), `orchestrator.py::_simulation_dialog_loop` (22),
       `agents/claude_code_agent.py::communicate` (21). Lower the ceiling by one step per landed
       refactor; do NOT add a `per-file-ignores` entry instead — a second entry in that list means
-      the ceiling is wrong, not that a file is special. Note the plan that introduced `C90`
-      assumed `optimize_gate.py` would need the exemption; by the time it landed the module split
-      had already brought that file to 18, so the exemption was never needed.
+      the ceiling is wrong, not that a file is special. Note the plan that introduced `C90` assumed
+      `optimize_gate.py` would need the single exemption. It does not — but NOT because the module
+      split landed: that is still undone (3250 lines, `radon cc` reports one E-grade and seven
+      D-grade functions). Its mccabe peak is 17 (`execution_gate`), unchanged since `fa69cdf`, so
+      mccabe and radon disagree about that file and only the ceiling of 30 is why no exemption
+      exists. The module split is still owed.
       — caught in the top-10 review-fixes run, Phase 7.
 
 - [x] **CE050, CE051 and CE052 are TAKEN** by the top-10 review-fixes run: CE050 (escape untrusted text in a Rich-markup `console.print` under `cli/`), CE051 (a lint rule matching an import's module string must route through `tests/lint/import_resolution.py::resolved_module`), CE052 (every task YAML under `templates/` must load through the real `load_task`). CE049 remains reserved by the backlog entry above. The next free id is **CE053** — but re-run `grep -rhoE "CE0[0-9][0-9]" tests/ .claude/ src/ docs/ pyproject.toml | sort -u` before claiming it: `tests/lint/runner.py`'s uniqueness assert covers `ALL_RULES` only, so a class-wired id (CE052 is one) can collide with a `BaseRule`'s without failing anything.
