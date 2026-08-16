@@ -239,9 +239,13 @@ class StopEarlyPolicy(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Timeout in tool-call steps: still 'undecided' after this many steps latches an "
-            "effective FAIL — fed through the same weighted ceiling fail-stop rule as a native "
-            "live-fail, reported as reason 'decision_budget_exceeded'. Inert on an instance "
+            "Timeout in COMPLETED tool calls: still 'undecided' after this many calls have "
+            "RESOLVED latches an effective FAIL — fed through the same weighted ceiling "
+            "fail-stop rule as a native live-fail, reported as reason "
+            "'decision_budget_exceeded'. A dispatched call that has not returned yet does not "
+            "expire the budget: criteria like skill_triggered cannot decide before the result "
+            "arrives, so counting the call would fail them on the very step that satisfies "
+            "them. Inert on an instance "
             "that can only ever live-fail (a distractor/guard, whose 'undecided' is its "
             "success state). None (default) = no timeout. The step count is CUMULATIVE across "
             "every retry attempt of the turn (the same EarlyStopWatcher instance, and its "

@@ -357,7 +357,7 @@ under the weighted ceiling rule — plus two knobs inside the block:
 |-------|---------|
 | `stop_early: {}` | armed: fail-stop on a native live-fail (the idiomatic distractor arming) |
 | `stop_early: {on_pass: stop}` | …plus pass-stop the moment the criterion live-passes |
-| `stop_early: {decide_within: N}` | …plus an *effective* fail if still **undecided** after N tool-call steps (reported as `decision_budget_exceeded`) |
+| `stop_early: {decide_within: N}` | …plus an *effective* fail if still **undecided** after N **completed** tool calls (reported as `decision_budget_exceeded`) |
 
 ```yaml
 run_limits:
@@ -492,13 +492,17 @@ Semantics:
   decide mid-run.
 - **Decision-step timeout.** `stop_early: {decide_within: N}`. If the
   criterion is still **undecided**
-  after N tool-call steps, the watcher latches an **effective fail** for it and
+  after N **completed** tool calls, the watcher latches an **effective fail** for it and
   the normal fail-stop ceiling rule applies — reported as
   `reason: decision_budget_exceeded` so an analysis can tell a timeout from a
   native misfire, but gated identically (a low-weight criterion's timeout that
   cannot doom the gate is absorbed, and the run continues). The timeout is
   checked after the criterion's own verdict each round, so one that decides on
-  that very step is never penalized. `None` (default) = no timeout; the run
+  that very step is never penalized — and it is checked on *resolved* rounds
+  only, so a call that has been dispatched but has not returned yet never
+  expires the budget. That matters for any criterion whose verdict needs the
+  result (`skill_triggered` always; `command_executed` with `require_success`):
+  counting the dispatch would fail it on the exact call that satisfies it. `None` (default) = no timeout; the run
   relies solely on `run_limits.max_turns`. The step count is **cumulative
   across every retry attempt** of the turn — including an attempt that crashed
   or timed out before this criterion's own investigation even began — so size

@@ -438,7 +438,12 @@ class EarlyStopWatcher:
         has engaged nothing and that criterion deliberately stays undecided until
         its ``ToolEndEvent``. A new live criterion must state which seam its
         verdict is decidable at — and, if its answer depends on its own fields,
-        under which settings. The call is
+        under which settings. **A criterion that cannot decide at this seam must
+        not have its ``decide_within`` budget expire here either**, or the budget
+        fails it on the very call that would satisfy it: the round is
+        ``undecided`` for a structural reason, not for want of evidence. That is
+        why ``_collect_verdicts`` gates the expiry on ``in_flight is None``, and
+        it is why ``decide_within: N`` means N *completed* tool calls. The call is
         not in the collector yet (it reduces commands from ``ToolEndEvent``), so it
         is passed to ``_evaluate_impl`` as the in-flight command, reported at
         ``tool_call_index + 1`` (it has no ``ToolEndEvent`` to count yet). The
@@ -543,6 +548,30 @@ class EarlyStopWatcher:
         ``decide_within`` budget has expired becomes an *effective*
         ``fail`` (marked in ``_budget_expired`` for reason attribution).
 
+        The budget is evaluated on RESOLVED rounds only, the same
+        ``in_flight is None`` discipline the latch below already applies. A
+        criterion that cannot decide at the call seam (``skill_triggered``
+        always; ``command_executed`` under ``require_success``) is
+        *structurally* ``undecided`` on an in-flight round, so expiring its
+        budget there fails it on the very call that would satisfy it — under
+        serial dispatch the matching ``ToolEndEvent`` evaluates at the SAME
+        ``tool_call_index`` (``_tool_call_index`` is incremented before
+        ``_evaluate_impl``), so nothing is lost: the budget still expires on
+        completed tool call N, exactly as ``decide_within`` documents. With
+        PARALLEL tool calls the agent emits every ``ToolStartEvent`` of one
+        assistant message before any result, so the deferred expiry lands a
+        round or two later rather than on the same index — the fix only ever
+        DELAYS an expiry, never advances one, so that direction is safe.
+
+        The other consequence of counting completed calls: if the last
+        dispatched call never returns (a turn timeout or a crash) or every
+        remaining tool end is ``UNRESOLVED`` — which is deliberately neither
+        counted nor evaluated — the budget does not expire at all on that
+        attempt. ``_tool_call_index`` and ``_latched`` persist across retries,
+        so the next attempt's first completed call expires it; and a run that
+        completes naturally gates strict-AND, which fails the still-undecided
+        criterion anyway.
+
         Latching only happens on RESOLVED rounds (``in_flight is None``): an
         in-flight round's verdict may fire a stop this round, but is not
         persisted — a dispatched call that never resolves (crashed attempt)
@@ -577,7 +606,9 @@ class EarlyStopWatcher:
                 )
                 raise
             budget = self._budget[i]
-            budget_expired = verdict == "undecided" and budget is not None and tool_call_index >= budget
+            budget_expired = (
+                in_flight is None and verdict == "undecided" and budget is not None and tool_call_index >= budget
+            )
             if budget_expired:
                 verdict = "fail"
             if in_flight is None and verdict != "undecided":
@@ -586,27 +617,38 @@ class EarlyStopWatcher:
             verdicts.append(verdict)
         return verdicts
 
-    def _budget_drove(self, index: int, verdicts: list[LiveVerdict], tool_call_index: int) -> bool:
+    def _budget_drove(self, index: int) -> bool:
         """True when ``index``'s ``fail`` is timeout-driven rather than a native live-fail.
 
-        Reads the persistent ``_budget_expired`` latch when set; for a
-        transient (in-flight, not-yet-latched) fail it re-derives: a fail on an
-        instance that cannot natively live-fail, with an expired budget, can
-        only have come from the timeout. A native live-fail on an instance
-        whose budget also happens to be expired reports as a native fail —
-        ``_collect_verdicts`` only converts the verdict when the checker itself
-        returned ``undecided``.
+        Just the persistent ``_budget_expired`` latch, and that is now the whole
+        rule. It used to carry a second, transient arm that re-derived the
+        attribution for a not-yet-latched fail — necessary while a budget could
+        expire on an IN-FLIGHT round, which latches nothing. It cannot any
+        more: ``_collect_verdicts`` expires the budget on resolved rounds only,
+        and a resolved round latches the fail (and sets ``_budget_expired``)
+        before ``_evaluate_impl`` reads it. The only remaining way to be
+        ``fail`` while unlatched is a NATIVE live-fail on an in-flight round,
+        which the transient arm's own final conjunct (``"fail" not in
+        _decidable``) excluded — a budget is armed only when ``"pass" in pol``,
+        and neither live criterion declares both polarities, so an armed budget
+        and a declarable live-fail are mutually exclusive. Measured, not
+        assumed: the arm raised on entry across ``test_early_stop`` /
+        ``test_orchestrator`` / both criteria suites and was never reached.
+
+        That argument rests on ``live_verdict`` never returning a polarity its
+        model did not declare — an invariant CE025 does NOT check (it pins that
+        the model/checker pair exists, not that they agree). A checker that
+        violated it would produce a ``fail`` classified as neither a native nor
+        a budget fail in ``_evaluate_impl``, and therefore no stop at all. That
+        hole predates this reduction and applies to a LATCHED fail too, where
+        the removed arm never helped either; it is recorded here rather than
+        papered over.
+
+        A native live-fail on an instance whose budget also happens to be
+        expired still reports as a native fail — ``_collect_verdicts`` only
+        converts the verdict when the checker itself returned ``undecided``.
         """
-        if self._budget_expired[index]:
-            return True
-        budget = self._budget[index]
-        return (
-            verdicts[index] == "fail"
-            and self._latched[index] == "undecided"
-            and budget is not None
-            and tool_call_index >= budget
-            and "fail" not in self._decidable[index]
-        )
+        return self._budget_expired[index]
 
     def _evaluate_impl(self, in_flight: CommandTelemetry | None = None) -> None:
         # An in-flight call has not been counted by a ToolEnd yet, so report it as
@@ -647,13 +689,9 @@ class EarlyStopWatcher:
             # mere reorder of ``success_criteria`` when both resolve on the same
             # round. Within each class, first criteria-order match wins.
             native_fails = [
-                i
-                for i, v in enumerate(verdicts)
-                if v == "fail" and self._fail_trigger[i] and not self._budget_drove(i, verdicts, tool_call_index)
+                i for i, v in enumerate(verdicts) if v == "fail" and self._fail_trigger[i] and not self._budget_drove(i)
             ]
-            budget_fails = [
-                i for i, v in enumerate(verdicts) if v == "fail" and self._budget_drove(i, verdicts, tool_call_index)
-            ]
+            budget_fails = [i for i, v in enumerate(verdicts) if v == "fail" and self._budget_drove(i)]
             candidate_index = native_fails[0] if native_fails else (budget_fails[0] if budget_fails else None)
             if candidate_index is not None and self._ceiling(verdicts) < self._gate_threshold:
                 reason = EarlyStopReason.CRITERION_FAILED if native_fails else EarlyStopReason.DECISION_BUDGET_EXCEEDED

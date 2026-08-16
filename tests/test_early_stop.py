@@ -67,6 +67,7 @@ from coder_eval.models import (
     StopEarlyPolicy,
     TaskDefinition,
     TurnRecord,
+    copy_with,
     parse_agent_config,
 )
 from coder_eval.orchestration.config import BatchRunConfig
@@ -285,21 +286,51 @@ def _tool_end(cmd: CommandTelemetry) -> ToolEndEvent:
     return ToolEndEvent(task_id="t", tool=cmd)
 
 
-def _skill_start(skill: str, *, tool_id: str = "sk-1", sequence_number: int = 0) -> ToolStartEvent:
+def _in_flight(cmd: CommandTelemetry) -> CommandTelemetry:
+    """The dispatched (ToolStart) form of ``cmd``: same inputs, no result yet."""
+    return copy_with(cmd, result_status=None)
+
+
+def _tool_start(cmd: CommandTelemetry) -> ToolStartEvent:
+    return ToolStartEvent(task_id="t", tool=_in_flight(cmd))
+
+
+def _rounds(*commands: CommandTelemetry, with_tool_start: bool = True) -> list[Any]:
+    """AgentStart + TurnStart, then one round per command.
+
+    ``with_tool_start=True`` is the REALISTIC shape a live agent emits: every
+    ``ToolEndEvent`` is preceded by the ``ToolStartEvent`` of the same call,
+    whose ``result_status`` is still ``None``. A helper that emitted only
+    ToolEnds is precisely what hid the in-flight ``decide_within`` expiry bug,
+    so the budget suite is parametrized over BOTH shapes and neither can
+    regress alone.
+    """
+    events: list[Any] = [_agent_start(), _turn_start()]
+    for cmd in commands:
+        if with_tool_start:
+            events.append(_tool_start(cmd))
+        events.append(_tool_end(cmd))
+    return events
+
+
+# Ids for the `decide_within` suite's stream-shape parametrization. The realistic shape (a
+# ToolStart before every ToolEnd) is what a live agent emits; the resolved-only shape is what the
+# old blind helper emitted, and it is what hid the in-flight budget-expiry bug for the whole life
+# of the feature. Every budget outcome must hold identically under both.
+_STREAM_SHAPES = ["with-ToolStart", "resolved-only"]
+
+
+def _skill_start(skill: str, *, tool_id: str = "sk-1") -> ToolStartEvent:
     """A Skill ToolStart (the tool CALL) engaging ``skill`` — no result yet."""
-    cmd = CommandTelemetry(
-        tool_name="Skill",
-        tool_id=tool_id,
-        timestamp=_TS,
-        parameters={"skill": skill},
-        sequence_number=sequence_number,
-    )
-    return ToolStartEvent(task_id="t", tool=cmd)
+    return _tool_start(_skill_cmd(skill, tool_id=tool_id))
 
 
-def _skill_events(skill: str, *, tool_id: str = "sk-1") -> list[Any]:
-    """AgentStart + TurnStart + a Skill ToolEnd engaging ``skill``."""
-    return [_agent_start(), _turn_start(), _tool_end(_skill_cmd(skill, tool_id=tool_id))]
+def _skill_events(skill: str, *, tool_id: str = "sk-1", with_tool_start: bool = True) -> list[Any]:
+    """AgentStart + TurnStart + one realistic Skill round engaging ``skill``.
+
+    The ToolStart/ToolEnd pair shares one ``tool_id``, as a real stream does.
+    """
+    return _rounds(_skill_cmd(skill, tool_id=tool_id), with_tool_start=with_tool_start)
 
 
 def _unresolved_skill_end(skill: str, *, tool_id: str = "orphan-1") -> ToolEndEvent:
@@ -1810,19 +1841,21 @@ class TestEarlyStopWatcher:
         assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
         assert watcher.info.deciding_criterion_type == "command_executed"
 
-    def test_decision_budget_not_exceeded_below_cap(self) -> None:
+    @pytest.mark.parametrize("with_tool_start", [True, False], ids=_STREAM_SHAPES)
+    def test_decision_budget_not_exceeded_below_cap(self, with_tool_start: bool) -> None:
         # Same cap, but only reached on the FIRST tool call (index 1) — a cap of
         # 2 must not fire yet.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=2)])
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        _feed(watcher, _rounds(_cmd("Bash", {"command": "echo hi"}), with_tool_start=with_tool_start))
         assert watcher.should_stop() is False
         assert watcher.info is None
 
-    def test_real_decision_within_budget_wins_over_budget_check(self) -> None:
+    @pytest.mark.parametrize("with_tool_start", [True, False], ids=_STREAM_SHAPES)
+    def test_real_decision_within_budget_wins_over_budget_check(self, with_tool_start: bool) -> None:
         # The criterion decides (pass-stops) on the SAME tool call that would
         # otherwise have tripped its budget — the real decision takes priority.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
-        _feed(watcher, _skill_events("date-teller"))
+        _feed(watcher, _skill_events("date-teller", with_tool_start=with_tool_start))
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
@@ -1850,22 +1883,24 @@ class TestEarlyStopWatcher:
         assert watcher.should_stop() is False
         assert watcher.info is None
 
-    def test_timeout_only_arming_undecided_past_budget_stops(self) -> None:
+    @pytest.mark.parametrize("with_tool_start", [True, False], ids=_STREAM_SHAPES)
+    def test_timeout_only_arming_undecided_past_budget_stops(self, with_tool_start: bool) -> None:
         # The other half of the same intent: not engaged within the budget →
-        # effective fail → fail-stop (default gate threshold 1.0).
+        # effective fail → fail-stop (default gate threshold 1.0). The budget
+        # counts COMPLETED calls, so the answer is the same under both shapes.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", max_steps_to_decide=2)])
         _feed(
             watcher,
-            [
-                _agent_start(),
-                _turn_start(),
-                _tool_end(_cmd("Bash", {"command": "ls"})),
-                _tool_end(_cmd("Bash", {"command": "cat x"})),
-            ],
+            _rounds(
+                _cmd("Bash", {"command": "ls"}),
+                _cmd("Bash", {"command": "cat x"}),
+                with_tool_start=with_tool_start,
+            ),
         )
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert watcher.info.tool_call_index == 2
 
     def test_timeout_inert_on_fail_only_distractor(self) -> None:
         # A distractor (fail-only decidable) carrying a timeout — the fanned
@@ -1965,18 +2000,119 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
-    def test_decision_budget_exceeded_on_in_flight_call(self) -> None:
-        # The budget expires on the in-flight round: an AgentStart + TurnStart +
-        # a dispatched ToolStart with NO ToolEnd. The in-flight call reports as
-        # tool call 1, which meets decide_within=1 — the timeout fail-stop must
-        # fire on the call itself, before any result resolves.
+    def test_decision_budget_never_expires_on_an_in_flight_call(self) -> None:
+        # THE OFF-BY-ONE. decide_within: 1 with a dispatched ToolStart and no
+        # ToolEnd yet. The in-flight round reports as tool call 1, which MEETS
+        # the budget arithmetically — but `skill_triggered` is structurally
+        # undecided at the call seam (the Skill body IS the result), so
+        # expiring here would fail the criterion on the very call that would
+        # satisfy it. The budget must wait for the completed call.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
-        start = ToolStartEvent(task_id="t", tool=_cmd("Bash", {"command": "echo hi"}))
-        _feed(watcher, [_agent_start(), _turn_start(), start])
+        cmd = _cmd("Bash", {"command": "echo hi"})
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_start(cmd)])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+        # ...and the matching ToolEnd — same tool call, now COMPLETED — expires it.
+        watcher.on_event(_tool_end(cmd))
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
         assert watcher.info.tool_call_index == 1
+
+    def test_decide_within_one_decides_on_the_tool_end_of_call_one(self) -> None:
+        # The satisfying half of the same boundary: the deciding Skill call at
+        # index 1 under decide_within: 1. Its ToolStart must not expire the
+        # budget; its ToolEnd must decide CRITERION_PASSED.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller")])
+        assert watcher.should_stop() is False
+        watcher.on_event(_tool_end(_skill_cmd("date-teller", tool_id="sk-1")))
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_command_executed_require_success_not_failed_by_its_own_matching_call(self) -> None:
+        # The review's reproduction, on the OTHER live criterion. An armed
+        # `command_executed` with require_success (what CE034 mandates) drops
+        # in-flight commands, so it is undecided at every ToolStart. Two
+        # resolved non-matching calls then the ToolStart of the MATCHING one:
+        # under the old rule call 3 expired the budget and the run stopped one
+        # event before the command it was waiting for resolved.
+        criterion = CommandExecutedCriterion(
+            type="command_executed",
+            description="app must be run",
+            tool_name="Bash",
+            command_pattern="python app.py",
+            require_success=True,
+            min_count=1,
+            stop_early=StopEarlyPolicy(on_pass="stop", decide_within=3),
+        )
+        watcher = _watcher([criterion])
+        matching = _cmd("Bash", {"command": "python app.py"})
+        _feed(
+            watcher,
+            [
+                _agent_start(),
+                _turn_start(),
+                _tool_end(_cmd("Bash", {"command": "ls"})),
+                _tool_end(_cmd("Bash", {"command": "cat x"})),
+                _tool_start(matching),
+            ],
+        )
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+        # The matching call resolves on the same index: a pass, not a timeout.
+        watcher.on_event(_tool_end(matching))
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_dispatched_call_that_never_resolves_leaves_no_stale_verdict(self) -> None:
+        # Latch stability across a crashed attempt: an in-flight call that never
+        # resolves must neither expire the budget nor latch anything, so the
+        # retry's re-derivation from the collector's RESOLVED commands is clean.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=4)])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller", tool_id="orphan")])
+        assert watcher.should_stop() is False
+        assert watcher._latched == ["undecided"]
+        assert watcher._budget_expired == [False]
+        # The retry re-dispatches and this time the call resolves.
+        _feed(watcher, _skill_events("date-teller", tool_id="sk-retry"))
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_an_in_flight_budget_expiry_would_defeat_the_recall_deferral(self) -> None:
+        # THE INDEPENDENT PIN for the `in_flight is None` conjunct. Every other budget test is
+        # satisfied by the latch discipline alone: reverting the conjunct on its own leaves them
+        # all green, because the transient fail never latches and the next resolved round
+        # re-derives it. This one is not, because the transient fail is CONSULTED the same round
+        # it is produced.
+        #
+        # A positive `skill_triggered` (decide_within: 1, structurally undecidable at the call
+        # seam) beside a `command_executed` distractor that CAN live-fail at that seam. On the
+        # ToolStart of a matching `rm`, the distractor natively fails. The fail-stop is deferred
+        # only while a pass-capable armed criterion is still undecided — and the skill is exactly
+        # that. Expire its budget on this in-flight round and it becomes an effective FAIL, the
+        # deferral evaporates, the ceiling drops and the run is cut on a distractor before the
+        # positive row's own signal could ever appear. That is the recall truncation the deferral
+        # exists to prevent, reached through the budget rather than through the deferral.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1),
+                _cmd_crit(min_count=0, max_count=0, pattern="rm ", stop_on_fail=True),
+            ]
+        )
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_start(_cmd("Bash", {"command": "rm -rf build"}))])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_criterion_decidable_at_tool_start_is_unaffected(self) -> None:
+        # The fix is a no-op for a criterion that CAN decide on the call seam:
+        # `command_executed` without require_success reads the call's inputs, so
+        # it live-passes on the ToolStart and never reaches the budget branch.
+        watcher = _watcher([_cmd_crit(min_count=1, max_count=None, pattern="curl", stop_on_pass=True)])
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_start(_cmd("Bash", {"command": "curl example.com"}))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_timeout_fail_deferred_while_sibling_positive_in_budget(self) -> None:
         # Criterion B times out (budget 1) while criterion A — pass-capable,
@@ -2426,10 +2562,11 @@ class TestOrchestratorEarlyStopWiring:
             tmp_path=tmp_path,
         )
         assert result.early_stop is None
-        assert agent.delivered == 3  # full stream consumed (should_stop=None)
+        assert agent.delivered == 4  # full stream consumed (should_stop=None)
 
     async def test_pass_stop_cuts_the_stream(self, tmp_path) -> None:
-        # A trailing event AFTER the deciding ToolEnd proves the cut: delivered == 3.
+        # A trailing event AFTER the deciding ToolEnd proves the cut: the
+        # ToolStart/ToolEnd pair is delivered, the trailing turn_start is not.
         events = [*_skill_events(self._SKILL), _turn_start()]
         result, agent, _success = await _run_wiring(
             criteria=self._criteria(),
@@ -2437,7 +2574,7 @@ class TestOrchestratorEarlyStopWiring:
             scores=[1.0, 0.0],
             tmp_path=tmp_path,
         )
-        assert agent.delivered == 3
+        assert agent.delivered == 4
         assert result.early_stop is not None
         assert result.early_stop.reason == EarlyStopReason.CRITERION_PASSED
 
@@ -3346,7 +3483,8 @@ class TestOrchestratorEarlyStopWiringCodex:
         ]
 
     async def test_pass_stop_populates_early_stop_and_armed_gate(self, tmp_path) -> None:
-        # A trailing event AFTER the deciding ToolEnd proves the cut: delivered == 3.
+        # A trailing event AFTER the deciding ToolEnd proves the cut: the
+        # ToolStart/ToolEnd pair is delivered, the trailing turn_start is not.
         events = [*_skill_events(self._SKILL), _turn_start()]
         result, agent, _success = await _run_wiring(
             criteria=self._criteria(),
@@ -3355,7 +3493,7 @@ class TestOrchestratorEarlyStopWiringCodex:
             tmp_path=tmp_path,
             agent_type=AgentKind.CODEX,
         )
-        assert agent.delivered == 3
+        assert agent.delivered == 4
         assert result.early_stop is not None
         assert result.early_stop.reason == EarlyStopReason.CRITERION_PASSED
         # Armed-subset gate: advisory 0.0 is not gated on an early-stopped run.
