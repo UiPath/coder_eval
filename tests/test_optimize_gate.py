@@ -4556,7 +4556,37 @@ class TestRenderSearchComparison:
     def test_a_blocked_comparison_leads_with_the_blocker(self) -> None:
         block = render_search_comparison(search_compare(_arm("head", {"r1": 1.0}), _arm("cand", {"other": 1.0})))
         assert "sample_seed" in block
-        assert "ACCEPT" not in block.replace("DO NOT ACCEPT", "")
+        # Read the discriminating LINE. The old form here asserted that "ACCEPT" was absent from
+        # the block once the negative headline had been stripped out of it — vacuous on this
+        # fixture, whose headline is CANNOT COMPARE: the strip removed nothing, so the absence
+        # assertion could not fail while reading as a strong guard.
+        #
+        # Not `_headline`: that helper returns the first line starting with `**`, and
+        # `render_search_comparison` leads with an `###` heading on all three of its paths, so
+        # calling it here raises StopIteration. Same discipline, differently-shaped block.
+        assert block.splitlines()[0] == "### Search round — CANNOT COMPARE"
+
+    def test_a_corpus_regression_renders_do_not_accept(self) -> None:
+        """The other headline, asserted as PRESENT on the input that produces it.
+
+        `DO NOT ACCEPT` and `CANNOT COMPARE` carry opposite meanings — a candidate that WINS on
+        the aggregate but re-lost a corpus row, against one where no comparison could be made at
+        all. Each is now pinned on its own input, so neither can be produced by the other's path.
+        """
+        corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
+        comparison = search_compare(
+            _arm("head", {"r1": 1.0, "r2": 0.0, "r3": 0.0, "r4": 0.0}),
+            _arm("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
+            corpus=corpus,
+        )
+        assert comparison.beats and not comparison.accepted
+
+        block = render_search_comparison(comparison)
+        assert block.splitlines()[0] == "### Search round — DO NOT ACCEPT"
+        assert "oblique phrasing" in block
+        # Both train scores print: a reader has to see that the aggregate really did improve, or
+        # the block reads as an ordinary loss rather than as the trap it is.
+        assert "0.750" in block and "0.250" in block
 
     def test_a_none_score_renders_a_dash_rather_than_raising(self) -> None:
         # Both scores are `float | None` on the model and were formatted with a bare `:.3f`, which

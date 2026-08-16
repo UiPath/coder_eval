@@ -484,7 +484,7 @@ with the two `action.yml` items above — one considered change to the action's 
 
 ## From the optimize-skill review v2 plan (2026-08-13)
 
-- [ ] **"The ToolStart seam decides" is now a PER-CRITERION property, not a global invariant.** `command_executed`'s verdict is decidable from the tool call's inputs; `skill_triggered`'s is not (for the `Skill` tool the body is delivered AS the result, so an in-flight call engaged nothing). A new `LiveSuccessCriterion` must state which seam its `live_verdict` is decidable at, and a criterion that decides at the ToolStart on information only the result carries silently diverges from its own frozen check. Not mechanically detectable today: the property is about what a `live_verdict` implementation *reads*, which no AST rule can infer — a rule would have to know that `result_status` is the field distinguishing the two seams. A cheaper partial guard would be a test-level convention (every live criterion has a "not decided before the result" or "decided on the call" test), which is a sweep rather than a rule. — caught implementing Phase 1 of c/2026-08-13-optimize-skill-review-v2-fixes.md.
+- [ ] **"The ToolStart seam decides" is now a PER-CRITERION property, not a global invariant.** `command_executed`'s verdict is decidable from the tool call's inputs **only while `require_success` is unset** — with it set, `_matching_commands` drops the in-flight call, whose `result_status` is `None`, and the criterion decides at ToolEnd like any other (corrected in Plan D Phase 4; the entry originally stated the unconditional form, which is false for the configuration CE034 mandates). `skill_triggered`'s is never decidable there (for the `Skill` tool the body is delivered AS the result, so an in-flight call engaged nothing). A new `LiveSuccessCriterion` must state which seam its `live_verdict` is decidable at, and a criterion that decides at the ToolStart on information only the result carries silently diverges from its own frozen check. Not mechanically detectable today: the property is about what a `live_verdict` implementation *reads*, which no AST rule can infer — a rule would have to know that `result_status` is the field distinguishing the two seams. A cheaper partial guard would be a test-level convention (every live criterion has a "not decided before the result" or "decided on the call" test), which is a sweep rather than a rule. — caught implementing Phase 1 of c/2026-08-13-optimize-skill-review-v2-fixes.md.
 
 - [x] ~~A prose claim in `plugins/` about `src/` behaviour that no sensor checks — the token sensors
       check PRESENCE, never TRUTH. Shipped false twice in one change: "the gate cannot be computed
@@ -593,6 +593,17 @@ with the two `action.yml` items above — one considered change to the action's 
       that run once per candidate per round. Note the inventory here said "~9 call sites" and the
       plan's single-line grep said 17 — the AST count is **22**, because four are wrapped across
       lines, one of them `holm_promote`'s main promotion write.
+- [x] **REFUTED, not built — a SHA-pinning rule over `templates/**/.github/workflows/`.** A review
+      raised it on the premise that *"users copy this template into their own repos"*, which would
+      make a floating action tag a supply-chain exposure. The premise is false, and the file's own
+      header says so: `templates/ci-outcome-fixture/.github/workflows/lint.yml` is a **graded eval
+      fixture** mounted into a sandbox for the `ci` skill's outcome suite — deliberately
+      "unrelated to evaluation", present only so `ci` does not take its no-`.github/` branch.
+      GitHub never runs it, no user copies it, and a floating tag therefore has no effect at all.
+      Worse, editing it perturbs the fixture the `ci` skill is *scored on*, so the "fix" would move
+      an A/B baseline. One file, zero exposure. Recorded here so the next review does not re-raise
+      it. — checked and refuted in the Plan D scoping pass, confirmed against the file at
+      implementation time.
 - [ ] **`agent_judge` silently drops an off-kind judge config's fields.** `_build_agent_config`
       copies the user's `criterion.agent` dump onto a `ClaudeCodeAgentConfig`, but
       `AgentJudgeCriterion.agent` is the four-way `AgentConfig` union — so `type: antigravity`

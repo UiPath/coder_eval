@@ -46,13 +46,20 @@ verdict can fire a stop but is not persisted, so a dispatched call that never
 resolves (e.g. a crashed attempt) cannot leave a stale verdict behind across
 retries.
 
-Deciding on the tool *call* (``ToolStartEvent``), not the result, is what makes
-the stop robust: for an observable criterion the verdict is fully determined by
-the call's inputs (which skill / which command), so the watcher can latch the
-instant the call is dispatched — before a cut-short turn (e.g. a timeout) can
-strip the result and leave the call unresolved. The agent polls ``should_stop``
-immediately after dispatching each message, so a stop on the call breaks the
-loop before the result message is ever pulled.
+Evaluating on the tool *call* (``ToolStartEvent``) as well as on its result is
+what makes the stop robust: where a criterion CAN decide from the call's inputs
+alone, the watcher latches the instant the call is dispatched — before a
+cut-short turn (e.g. a timeout) can strip the result and leave the call
+unresolved. The agent polls ``should_stop`` immediately after dispatching each
+message, so a stop on the call breaks the loop before the result message is ever
+pulled.
+
+Which criteria can decide there is **per-criterion, and sometimes per-field**;
+the seam is not universal and must not be assumed. ``skill_triggered`` can never
+decide at ToolStart, and ``command_executed`` can only while ``require_success``
+is unset. The whole rule, with its reasons, is on
+``EarlyStopWatcher._on_event_impl`` — the one declaration; do not restate it
+here.
 
 Live verdicts only *trigger* the stop; the authoritative scores always come
 from the standard ``check_all_async`` on the frozen trajectory after the cut.
@@ -418,12 +425,20 @@ class EarlyStopWatcher:
         The decision is evaluated on the tool *call* (``ToolStartEvent``), which
         lets the agent's post-dispatch ``should_stop`` poll break the loop before a
         cut-short turn can strip the result. Whether a given criterion can actually
-        decide there is **per-criterion, not global**: ``command_executed``'s
-        verdict is fully determined by the call's inputs, whereas
-        ``skill_triggered``'s is not — for the ``Skill`` tool the body is delivered
-        AS the result, so an in-flight call has engaged nothing and that criterion
-        deliberately stays undecided until its ``ToolEndEvent``. A new live
-        criterion must state which seam its verdict is decidable at. The call is
+        decide there is **per-criterion, not global**, and for
+        ``command_executed`` it is per-CONFIGURATION too: its verdict is
+        determined by the call's inputs only while ``require_success`` is unset.
+        With ``require_success`` — the configuration CE034 mandates for an armed,
+        live-*passable* ``command_executed`` — ``_matching_commands`` drops any
+        command whose ``result_status != "success"``, and an in-flight call
+        carries ``result_status=None``; so it is not counted, the criterion stays
+        undecided at ToolStart, and the matching ``ToolEndEvent`` below is what
+        decides. ``skill_triggered`` is never decidable at ToolStart: for the
+        ``Skill`` tool the body is delivered AS the result, so an in-flight call
+        has engaged nothing and that criterion deliberately stays undecided until
+        its ``ToolEndEvent``. A new live criterion must state which seam its
+        verdict is decidable at — and, if its answer depends on its own fields,
+        under which settings. The call is
         not in the collector yet (it reduces commands from ``ToolEndEvent``), so it
         is passed to ``_evaluate_impl`` as the in-flight command, reported at
         ``tool_call_index + 1`` (it has no ``ToolEndEvent`` to count yet). The

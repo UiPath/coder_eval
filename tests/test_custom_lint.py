@@ -1884,6 +1884,69 @@ def _assert_outcome_suite_shape(
             )
 
 
+_PYTHON_FENCE = re.compile(r"```python\n(.*?)```", re.DOTALL)
+
+
+def _snippet_binding_failures(markdown: str) -> list[str]:
+    """Every `coder_eval` call in a shipped snippet whose KEYWORDS no longer bind, as strings.
+
+    A prose sensor sees a snippet's tokens, not its call signatures: a renamed or removed keyword
+    argument leaves every token in place and fails in the user's terminal after they have paid for
+    the runs the snippet was meant to read.
+
+    Imports are collected across the WHOLE file first (a snippet may import in one fence and call
+    in another), then each fence's calls are bound with `Signature.bind_partial` — keywords only,
+    since a snippet's positional values are placeholders. A syntax error in a fence is itself a
+    failure: a shipped snippet that does not parse cannot run.
+
+    The boundary is stated on the calling test: keywords only, silent against a `**kwargs` callee,
+    and a name assigned anywhere in the same fence is skipped as shadowed.
+    """
+    import importlib
+    import inspect
+
+    origins: dict[str, str] = {}
+    for module, block in re.findall(r"from (coder_eval[\w.]*) import \(([^)]*)\)", markdown):
+        for name in block.split():
+            if cleaned := name.strip(" ,"):
+                origins[cleaned] = module
+    for module, line in re.findall(r"from (coder_eval[\w.]*) import ([^(\n]+)", markdown):
+        for name in line.split(","):
+            if cleaned := name.strip():
+                origins[cleaned] = module
+
+    failures: list[str] = []
+    for index, source in enumerate(_PYTHON_FENCE.findall(markdown), start=1):
+        try:
+            tree = ast.parse(textwrap.dedent(source))
+        except SyntaxError as exc:
+            failures.append(f"fence {index} does not parse: {exc}")
+            continue
+
+        shadowed = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            name = node.func.id
+            if name in shadowed or name not in origins:
+                continue
+            target = getattr(importlib.import_module(origins[name]), name, None)
+            if not callable(target):
+                continue
+            keywords = {kw.arg: None for kw in node.keywords if kw.arg is not None}
+            try:
+                inspect.signature(target).bind_partial(**keywords)
+            except TypeError as exc:
+                failures.append(f"fence {index}: {origins[name]}.{name}({', '.join(keywords)}) — {exc}")
+    return failures
+
+
 def _skill_frontmatter(path: Path) -> dict:
     """Parse a SKILL.md's YAML frontmatter block."""
     import yaml
@@ -3008,6 +3071,62 @@ class TestPluginArtifacts:
         # the skill imports exists, so deleting a whole snippet leaves it green on the others.
         for name in ("activation_gate", "holm_promote", "render_markdown", "candidate_leaks", "search_compare"):
             assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
+
+    def test_optimize_skill_snippets_parse_and_bind(self):
+        """The third half: a snippet's CALLS must still bind against the real signatures.
+
+        `test_optimize_skill_snippet_names_the_public_gate_api` asserts the imported names exist.
+        A renamed or removed keyword ARGUMENT is invisible to it — the name resolves, the tokens
+        are all present, and the snippet raises `TypeError` in the user's terminal after they have
+        paid for three invocations.
+
+        **Boundary**, so a green run is not mistaken for a proof:
+
+        - KEYWORD arguments only. A snippet's positional values are placeholders (`run_dir`,
+          `dirs`), and `bind_partial` inspects names rather than values, so nothing here executes
+          or resolves a snippet local.
+        - A callee taking `**kwargs` accepts anything, so the sensor is silent there by
+          construction.
+        - A name assigned anywhere in the same fence shadows the import, and is skipped — binding
+          a local's call against the imported function's signature would be simply wrong.
+        """
+        raw = (PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8")
+        failures = _snippet_binding_failures(raw)
+        assert not failures, "\n  ".join(["optimize-skill's snippets no longer bind:", *failures])
+
+    def test_the_snippet_binder_reads_the_real_snippets(self):
+        """Anti-vacuity, on the REAL file: a binder that found no calls would also pass green.
+
+        Mutating one keyword the shipped snippets actually pass must light up several fences.
+        """
+        raw = (PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8")
+        mutated = raw.replace("suite_id=", "suite_i=")
+        assert mutated != raw, "the anchor moved — re-derive it from the skill's snippets"
+
+        failures = _snippet_binding_failures(mutated)
+        assert len(failures) >= 5 and all("suite_i" in f for f in failures), failures
+
+    def test_the_snippet_binder_catches_a_bogus_keyword(self):
+        # The self-test. Without it the binder could be reverted to a no-op with everything green.
+        markdown = (
+            "```python\n"
+            "from coder_eval.optimize_gate import activation_gate\n\n"
+            "activation_gate(suite_id='s', bogus_kwarg=1)\n"
+            "```\n"
+        )
+        failures = _snippet_binding_failures(markdown)
+        assert len(failures) == 1 and "bogus_kwarg" in failures[0], failures
+
+    def test_the_snippet_binder_skips_a_shadowed_name(self):
+        # A snippet that rebinds an imported name locally must not be bound against the import.
+        markdown = (
+            "```python\n"
+            "from coder_eval.optimize_gate import activation_gate\n\n"
+            "activation_gate = lambda **kw: None\n"
+            "activation_gate(bogus_kwarg=1)\n"
+            "```\n"
+        )
+        assert _snippet_binding_failures(markdown) == []
 
     def test_optimize_method_quotes_no_tolerance_numbers(self):
         # The guardrails are bootstrap-derived; the ONE tolerance constant lives in the module.
