@@ -398,15 +398,19 @@ class TestPlanPreviewsWhatRunExecutes:
 
         run_ids = self._resolved_ids(task_file, tmp_path, **selectors)
 
-        with patch("coder_eval.cli.plan_command.console") as mock_console:
-            previewed = _preview_dataset(
-                task,
-                task_file,
-                split_name=selectors.get("split"),
-                max_rows=selectors.get("max_rows"),
-                sample_per_stratum=selectors.get("sample_per_stratum"),
-            )
-        printed = " ".join(str(call) for call in mock_console.print.call_args_list)
+        # `_preview_dataset` now writes through an `emit` sink rather than the console, so the
+        # caller can BUFFER a file's whole preview and print its ✓/✗ banner once, after
+        # everything that could fail has run.
+        emitted: list[str] = []
+        previewed = _preview_dataset(
+            task,
+            task_file,
+            split_name=selectors.get("split"),
+            max_rows=selectors.get("max_rows"),
+            sample_per_stratum=selectors.get("sample_per_stratum"),
+            emit=emitted.append,
+        )
+        printed = " ".join(emitted)
 
         # Structural half: plan selected exactly what run resolved.
         assert {t.task_id for t in previewed} == run_ids
@@ -422,7 +426,6 @@ class TestPlanPreviewsWhatRunExecutes:
         task, _ = load_task(task_file)
         run_ids = self._resolved_ids(task_file, tmp_path, sample_per_stratum=1)
 
-        with patch("coder_eval.cli.plan_command.console"):
-            previewed = _preview_dataset(task, task_file, sample_per_stratum=1)
+        previewed = _preview_dataset(task, task_file, sample_per_stratum=1, emit=lambda _line: None)
 
         assert {t.task_id for t in previewed} == run_ids

@@ -4,6 +4,7 @@ import random
 from pathlib import Path
 
 import typer
+from rich.markup import escape
 
 from ..config import settings
 from ..models import RunSummary
@@ -31,7 +32,7 @@ def discover_default_tasks() -> list[Path]:
         typer.Exit: If the tasks/ directory doesn't exist or contains no YAML files.
     """
     if not DEFAULT_TASKS_DIR.is_dir():
-        console.print(f"[red]Default tasks directory not found: {DEFAULT_TASKS_DIR}[/red]")
+        console.print(f"[red]Default tasks directory not found: {escape(str(DEFAULT_TASKS_DIR))}[/red]")
         console.print(
             "[yellow]Hint: Zero-argument task discovery requires a source checkout. "
             + "Provide explicit task file paths instead: coder-eval run task1.yaml task2.yaml[/yellow]"
@@ -40,11 +41,11 @@ def discover_default_tasks() -> list[Path]:
 
     task_files = list(DEFAULT_TASKS_DIR.rglob("*.yaml"))
     if not task_files:
-        console.print(f"[red]No .yaml files found in {DEFAULT_TASKS_DIR}[/red]")
+        console.print(f"[red]No .yaml files found in {escape(str(DEFAULT_TASKS_DIR))}[/red]")
         raise typer.Exit(1)
 
     random.shuffle(task_files)
-    console.print(f"[dim]Discovered {len(task_files)} task(s) from {DEFAULT_TASKS_DIR}[/dim]")
+    console.print(f"[dim]Discovered {len(task_files)} task(s) from {escape(str(DEFAULT_TASKS_DIR))}[/dim]")
     return task_files
 
 
@@ -62,7 +63,7 @@ def prepare_run_directory(run_dir: Path | None) -> Path:
         run_dir = settings.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    console.print(f"[bold]Run directory:[/bold] {run_dir}\n")
+    console.print(f"[bold]Run directory:[/bold] {escape(str(run_dir))}\n")
     return run_dir
 
 
@@ -104,9 +105,10 @@ def print_execution_mode(task_count: int, max_parallel: int) -> None:
         task_count: Number of tasks to execute
         max_parallel: Maximum parallel tasks
     """
-    console.print(f"\n[bold]Running {task_count} task(s)[/bold]")
+    # CE050 exemption (x2 below): both are ints, which cannot carry a bracket.
+    console.print(f"\n[bold]Running {task_count} task(s)[/bold]")  # noqa: CE050
     if max_parallel > 1:
-        console.print(f"[dim]Max parallel tasks: {max_parallel}[/dim]\n")
+        console.print(f"[dim]Max parallel tasks: {max_parallel}[/dim]\n")  # noqa: CE050
     else:
         console.print("[dim]Mode: Sequential[/dim]\n")
 
@@ -118,10 +120,13 @@ def print_execution_summary(run_dir: Path, summary: RunSummary) -> None:
         run_dir: Path to the run directory
         summary: Run execution summary
     """
-    console.print(f"\n[bold green]Run complete:[/bold green] {run_dir}")
-    console.print(f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_run} succeeded")
-    console.print(f"[dim]View report: open {run_dir / 'experiment.md'}[/dim]")
-    console.print(f"[dim]View report: uv run coder-eval report {run_dir}[/dim]")
+    console.print(f"\n[bold green]Run complete:[/bold green] {escape(str(run_dir))}")
+    console.print(
+        # CE050 exemption: both are ints on RunSummary, which cannot carry a bracket.
+        f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_run} succeeded"  # noqa: CE050
+    )
+    console.print(f"[dim]View report: open {escape(str(run_dir / 'experiment.md'))}[/dim]")
+    console.print(f"[dim]View report: uv run coder-eval report {escape(str(run_dir))}[/dim]")
 
     # Print log file locations
     console.print("\n[bold]Log Files:[/bold]")

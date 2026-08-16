@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import typer
+from rich.markup import escape
 
 from ..logging_config import setup_logging
 from ..models import (
@@ -69,7 +70,7 @@ def evaluate_command(
     try:
         task, source_yaml = load_task(task_file)
     except Exception as e:
-        console.print(f"[red]✗ Failed to load task:[/red] {e}")
+        console.print(f"[red]✗ Failed to load task:[/red] {escape(str(e))}")
         raise typer.Exit(1) from e
 
     # Evaluate-only mode bypasses experiment resolution + CLI overrides, so
@@ -84,13 +85,13 @@ def evaluate_command(
         task.agent = parse_agent_config(**{**task.agent.model_dump(exclude_unset=True), "type": AgentKind.CLAUDE_CODE})
 
     if not work_dir.is_dir():
-        console.print(f"[red]✗ Work directory is not a directory:[/red] {work_dir}")
+        console.print(f"[red]✗ Work directory is not a directory:[/red] {escape(str(work_dir))}")
         raise typer.Exit(1)
 
     try:
         prepared_run_dir = prepare_run_directory(run_dir)
     except Exception as e:
-        console.print(f"[red]✗ Failed to prepare run directory:[/red] {e}")
+        console.print(f"[red]✗ Failed to prepare run directory:[/red] {escape(str(e))}")
         raise typer.Exit(1) from e
 
     # Build a sandbox pre-loaded with the work_dir contents, then run evaluate-only
@@ -137,12 +138,12 @@ def evaluate_command(
         else:
             status = "[green]✓[/green]" if cr.score >= criterion.pass_threshold else "[red]✗[/red]"
         console.print(f"{status} {cr.criterion_type}")
-        console.print(f"  [dim]{cr.description}[/dim]")
+        console.print(f"  [dim]{escape(str(cr.description))}[/dim]")
         console.print(f"  [dim]Score: {cr.score:.2f}[/dim]")
         if cr.details:
-            console.print(f"  [dim]Details: {cr.details}[/dim]")
+            console.print(f"  [dim]Details: {escape(str(cr.details))}[/dim]")
         if cr.error:
-            console.print(f"  [red]Error: {cr.error}[/red]")
+            console.print(f"  [red]Error: {escape(str(cr.error))}[/red]")
         console.print()
 
     # Gate over gating criteria only (weight=0 is informational and cannot fail
@@ -157,17 +158,19 @@ def evaluate_command(
     console.print(f"  Passed: {passed}/{total}")
     console.print(f"  Failed: {failed}/{total}")
     if informational:
-        console.print(f"  [dim]Informational (weight=0, not gated): {informational}[/dim]")
-    console.print(f"\n[dim]Run directory: {prepared_run_dir}[/dim]")
+        # CE050 exemption: an int (a criteria count), which cannot carry a bracket.
+        console.print(f"  [dim]Informational (weight=0, not gated): {informational}[/dim]")  # noqa: CE050
+    console.print(f"\n[dim]Run directory: {escape(str(prepared_run_dir))}[/dim]")
     if result.sandbox_path:
-        console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")
+        console.print(f"[dim]Artifacts: {escape(str(result.sandbox_path))}[/dim]")
 
     if result.final_status == FinalStatus.ERROR:
-        console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
+        console.print(f"\n[red]✗ Evaluation error: {escape(str(result.error_message))}[/red]")
         raise typer.Exit(1)
     elif failed == 0:
         console.print("\n[green]All criteria passed! ✓[/green]")
         raise typer.Exit(0)
     else:
-        console.print(f"\n[red]{failed} criterion/criteria failed.[/red]")
+        # CE050 exemption: an int (a criteria count), which cannot carry a bracket.
+        console.print(f"\n[red]{failed} criterion/criteria failed.[/red]")  # noqa: CE050
         raise typer.Exit(1)

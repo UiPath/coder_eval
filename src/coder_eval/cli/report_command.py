@@ -4,6 +4,7 @@ from pathlib import Path
 
 import typer
 from rich.markdown import Markdown
+from rich.markup import escape
 
 from ..models import EvaluationResult
 from ..reports import ReportGenerator
@@ -53,7 +54,9 @@ def report_command(
     """
     fmt = report_format.lower()
     if fmt not in ("md", "html", "junit"):
-        console.print(f"[red]Error: unknown --format '{report_format}' (expected 'md', 'html', or 'junit')[/red]")
+        console.print(
+            f"[red]Error: unknown --format '{escape(str(report_format))}' (expected 'md', 'html', or 'junit')[/red]"
+        )
         raise typer.Exit(1)
 
     if fmt == "html":
@@ -67,24 +70,24 @@ def report_command(
         try:
             written = write_junit_xml(run_dir, target)
         except FileNotFoundError as e:
-            console.print(f"[red]Error: {e}[/red]")
+            console.print(f"[red]Error: {escape(str(e))}[/red]")
             raise typer.Exit(1) from e
-        console.print(f"[green][OK]JUnit report written to {written}[/green]")
+        console.print(f"[green][OK]JUnit report written to {escape(str(written))}[/green]")
         return
 
     try:
         report_md, source_path = ReportGenerator.load_from_run_dir(run_dir)
-        console.print(f"[dim]Reading report from {source_path}[/dim]\n")
+        console.print(f"[dim]Reading report from {escape(str(source_path))}[/dim]\n")
 
     except FileNotFoundError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
         console.print("\n[dim]Hint: Use 'coder-eval run' to create evaluation runs.[/dim]")
         raise typer.Exit(1) from e
 
     # Output report
     if output_file:
         output_file.write_text(report_md, encoding="utf-8")
-        console.print(f"[green][OK]Report saved to {output_file}[/green]")
+        console.print(f"[green][OK]Report saved to {escape(str(output_file))}[/green]")
     else:
         console.print(Markdown(report_md))
 
@@ -98,7 +101,7 @@ def _regenerate_html_reports(run_dir: Path, output_file: Path | None) -> None:
     """
     task_json_paths = sorted(run_dir.rglob("task.json"))
     if not task_json_paths:
-        console.print(f"[red]Error: no task.json files found under {run_dir}[/red]")
+        console.print(f"[red]Error: no task.json files found under {escape(str(run_dir))}[/red]")
         raise typer.Exit(1)
 
     if output_file and len(task_json_paths) > 1:
@@ -117,7 +120,7 @@ def _regenerate_html_reports(run_dir: Path, output_file: Path | None) -> None:
         try:
             result = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
         except Exception as e:
-            console.print(f"[yellow]Skipping {task_json}: {e}[/yellow]")
+            console.print(f"[yellow]Skipping {escape(str(task_json))}: {escape(str(e))}[/yellow]")
             failed.append(task_json)
             continue
         # Pull any spilled judge transcripts back onto the in-memory result so
@@ -126,13 +129,13 @@ def _regenerate_html_reports(run_dir: Path, output_file: Path | None) -> None:
         target = output_file if output_file else task_json.with_name("task.html")
         written_path = write_task_html(result, target)
         if written_path is None:
-            console.print(f"[red]Failed to write HTML for {task_json}[/red]")
+            console.print(f"[red]Failed to write HTML for {escape(str(task_json))}[/red]")
             failed.append(task_json)
             continue
         written.append(written_path)
 
     for p in written:
-        console.print(f"[green][OK]Wrote {p}[/green]")
+        console.print(f"[green][OK]Wrote {escape(str(p))}[/green]")
     console.print(f"[green]Generated {len(written)} HTML report(s)[/green]")
     if failed:
         console.print(f"[red]{len(failed)} task(s) failed[/red]")

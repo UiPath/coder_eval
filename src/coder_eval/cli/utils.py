@@ -2,6 +2,8 @@
 
 import shutil
 
+from rich.markup import escape
+
 from ..config import settings
 from .console import console
 
@@ -18,9 +20,9 @@ def check_tools() -> None:
     all_found = True
     for cmd, name in tools.items():
         if shutil.which(cmd):
-            console.print(f"  [green]✓[/green] {name} ({cmd})")
+            console.print(f"  [green]✓[/green] {escape(str(name))} ({escape(str(cmd))})")
         else:
-            console.print(f"  [red]✗[/red] {name} ({cmd}) not found")
+            console.print(f"  [red]✗[/red] {escape(str(name))} ({escape(str(cmd))}) not found")
             all_found = False
 
     if not all_found:

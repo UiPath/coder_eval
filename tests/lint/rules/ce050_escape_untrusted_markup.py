@@ -1,0 +1,135 @@
+"""CE050: escape interpolated values in a Rich-markup ``console.print`` under ``src/coder_eval/cli/``.
+
+Rich reads ``[...]`` in the string it is handed as MARKUP, not as text. So a value carrying square
+brackets — a task id, an exception message, a ``run.json`` fragment, an agent's own output — does
+not render as itself. ``[bold]`` disappears; an unclosed ``[`` swallows the rest of the line; a
+stray ``[/red]`` closes a tag the program opened. The failure is a corrupted or *missing*
+diagnostic, and it lands precisely when something has already gone wrong and the message matters
+most.
+
+``cli/aggregate_command.py`` shipped two of these on the degrade path, interpolating raw
+``run.json`` values straight into a ``[yellow]…[/yellow]`` span, and ``cli/plan_command.py``
+another dozen over task ids, variant ids, model names and exception text.
+
+This is not an injection guard. Task YAML is author-controlled and the values are not attacker
+supplied in any deployment this project has; the severity is a mangled message, not RCE. It is a
+correctness rule about output.
+
+**What it detects, precisely.** An ``ast.JoinedStr`` (an f-string) passed as an argument to a call
+whose function is named ``print`` on any receiver — ``console.print``, ``err_console.print`` — in a
+file whose normalized path contains ``src/coder_eval/cli/``, where the f-string contains BOTH a
+literal Rich markup tag (``[name]`` or ``[/name]`` in one of its constant parts) AND at least one
+interpolation that is not wrapped in a call to ``escape``.
+
+**The boundary, stated so a green ``make lint`` is not mistaken for a proof.**
+
+* It matches f-strings **at the call site**. ``msg = f"[red]{e}[/red]"`` followed by
+  ``console.print(msg)`` is invisible to it, because the rule never resolves a name to its value.
+* It does not decide whether a given value is actually untrusted — it cannot, without knowing
+  where the value came from. A genuinely trusted interpolation (a literal from this module, a
+  formatted count) needs ``# noqa: CE050`` with a reason. That is the rule working: it forces the
+  author to answer *could this value contain a bracket?* rather than never asking.
+* It only fires when a markup tag is present in the same f-string. An f-string with no tags is
+  passed through by Rich unchanged, so there is nothing to escape.
+* It checks that the interpolation is *wrapped in a call named* ``escape``; it does not verify
+  that the callee is ``rich.markup.escape``.
+* Scope is ``src/coder_eval/cli/`` only, mirroring CE047's single-directory scoping and for the
+  same reason: everything else in ``src/`` reports through ``logging``, where markup is never
+  interpreted, so the rule would be noise there.
+
+The fix: ``from rich.markup import escape`` and wrap the interpolated value —
+``f"[yellow]dropped {escape(str(entry))}[/yellow]"``. Escape the VALUE only; the program's own
+``[yellow]`` tags are markup on purpose and must not be escaped.
+"""
+
+import ast
+import re
+
+from tests.lint.rules.base import BaseRule
+
+
+_CLI_PACKAGE = "src/coder_eval/cli/"
+
+# A Rich markup tag: `[name]`, `[/name]`, `[/]`, `[bold red]`, `[link=http://x]`. Deliberately
+# narrow — it must not match `[0]` (a subscript rendered into the text) or `[Errno 66]`, which are
+# ordinary prose and carry no markup meaning, so an f-string containing only those is not the
+# shape this rule is about.
+_MARKUP_TAG = re.compile(r"\[/?[a-zA-Z][a-zA-Z0-9 ._=#:/-]*\]|\[/\]")
+
+_FIX = (
+    "this f-string carries Rich markup AND an unescaped interpolation. Rich reads `[...]` in the "
+    "VALUE as markup too, so a task id, exception message or run.json fragment containing a "
+    "bracket renders wrong or vanishes. Wrap the value: `from rich.markup import escape` then "
+    "`{escape(str(value))}`. Escape the value only — the literal [tags] are the program's own. "
+    "`# noqa: CE050` with a reason if the value genuinely cannot contain a bracket."
+)
+
+
+def _has_markup(node: ast.JoinedStr) -> bool:
+    return any(
+        isinstance(part, ast.Constant) and isinstance(part.value, str) and _MARKUP_TAG.search(part.value)
+        for part in node.values
+    )
+
+
+def _is_escaped(value: ast.expr) -> bool:
+    """True when the interpolated expression is a call to something named ``escape``.
+
+    Reads the callee NAME, so `escape(x)` and `markup.escape(x)` both count. It does not resolve
+    the import, which the module docstring states as a boundary.
+    """
+    if not isinstance(value, ast.Call):
+        return False
+    func = value.func
+    if isinstance(func, ast.Name):
+        return func.id == "escape"
+    return isinstance(func, ast.Attribute) and func.attr == "escape"
+
+
+# Format specs that only a number accepts. `str.format` raises on a non-numeric value for every
+# one of these, so an interpolation carrying one cannot render a bracket.
+_NUMERIC_SPEC = re.compile(r"[bcdeEfFgGnoxX%]$|,")
+
+
+def _is_numeric(part: ast.FormattedValue) -> bool:
+    """True when this interpolation provably cannot contain a bracket.
+
+    Three shapes, each decidable from the AST alone and each covering a large share of the CLI's
+    interpolations — counts, durations, costs, percentages:
+
+    * a numeric format spec (``{n:.2f}``, ``{n:,}``, ``{n:d}``);
+    * a call to ``len(...)``, ``round(...)``, ``sum(...)``, ``int(...)``, ``float(...)``;
+    * a numeric literal.
+
+    Everything else is treated as possibly-bracketed, including a bare name holding an int. That
+    asymmetry is deliberate: the rule cannot infer types, and the cost of being wrong in this
+    direction is one ``escape()`` on a number (harmless) rather than a corrupted diagnostic.
+    """
+    spec = part.format_spec
+    if isinstance(spec, ast.JoinedStr):
+        text = "".join(p.value for p in spec.values if isinstance(p, ast.Constant) and isinstance(p.value, str))
+        if text and _NUMERIC_SPEC.search(text):
+            return True
+    value = part.value
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        return value.func.id in {"len", "round", "sum", "int", "float", "abs"}
+    return isinstance(value, ast.Constant) and isinstance(value.value, int | float)
+
+
+class EscapeUntrustedMarkup(BaseRule):
+    id = "CE050"
+
+    def __init__(self, filepath: str) -> None:
+        super().__init__(filepath)
+        # Normalized so the match works on Windows runners, where pathlib hands the rule
+        # native-separator strings (the convention CE047 and CE009 already follow).
+        self._active = _CLI_PACKAGE in filepath.replace("\\", "/")
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if self._active and isinstance(node.func, ast.Attribute) and node.func.attr == "print":
+            for arg in node.args:
+                if isinstance(arg, ast.JoinedStr) and _has_markup(arg):
+                    for part in arg.values:
+                        if isinstance(part, ast.FormattedValue) and not (_is_escaped(part.value) or _is_numeric(part)):
+                            self.violation(part, _FIX)
+        self.generic_visit(node)

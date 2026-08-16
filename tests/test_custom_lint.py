@@ -21,6 +21,7 @@ import pytest
 from tests.lint.cli_flags import help_for, long_flags
 from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
+from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
 from tests.lint.runner import ALL_RULES, check_paths
 
 
@@ -6961,6 +6962,83 @@ class TestCE046CliFlagsAreDocumented:
 
 
 @pytest.mark.lint
+class TestCE050EscapeUntrustedMarkup:
+    """CE050 — an interpolated value in a Rich-markup `console.print` must be escaped.
+
+    Rich reads `[...]` in the VALUE as markup too, so a task id, exception message or run.json
+    fragment carrying a bracket renders wrong or vanishes — precisely when something has already
+    gone wrong and the diagnostic matters most. The rule's boundary (call-site f-strings only, no
+    trust analysis) is on the rule module.
+    """
+
+    def _check(self, source: str, path: str = "src/coder_eval/cli/plan_command.py"):
+        return EscapeUntrustedMarkup(path).check(ast.parse(textwrap.dedent(source)))
+
+    def test_it_fires_on_a_bare_value_beside_a_markup_tag(self) -> None:
+        violations = self._check('console.print(f"[red]Error: {e}[/red]")')
+        assert len(violations) == 1 and violations[0].rule_id == "CE050", violations
+
+    def test_it_is_silent_when_the_value_is_escaped(self) -> None:
+        assert self._check('console.print(f"[red]Error: {escape(str(e))}[/red]")') == []
+
+    def test_it_is_silent_on_an_fstring_with_no_markup(self) -> None:
+        # Rich passes a tag-free string through unchanged, so there is nothing to escape.
+        assert self._check('console.print(f"Error: {e}")') == []
+
+    def test_it_is_silent_outside_cli(self) -> None:
+        assert self._check('console.print(f"[red]{e}[/red]")', "src/coder_eval/reports.py") == []
+
+    def test_it_flags_each_unescaped_value_separately(self) -> None:
+        # Two interpolations, one already escaped: only the bare one is reported.
+        violations = self._check('console.print(f"[dim]{escape(str(a))} then {b}[/dim]")')
+        assert len(violations) == 1
+
+    def test_a_numeric_format_spec_is_exempt(self) -> None:
+        # `str.format` raises on a non-numeric value for these specs, so the value cannot be a
+        # string and cannot carry a bracket.
+        assert self._check('console.print(f"[dim]{cost:.2f} in {n:,} rows[/dim]")') == []
+
+    def test_a_len_call_is_exempt(self) -> None:
+        assert self._check('console.print(f"[dim]{len(rows)} rows[/dim]")') == []
+
+    def test_a_bare_name_is_not_assumed_numeric(self) -> None:
+        # The asymmetry is deliberate: the rule cannot infer types, and the cost of being wrong
+        # this way is one escape() on a number rather than a corrupted diagnostic.
+        assert len(self._check('console.print(f"[dim]{count} rows[/dim]")')) == 1
+
+    def test_a_subscript_in_the_text_is_not_a_markup_tag(self) -> None:
+        # `[0]` and `[Errno 66]` are prose, not tags — an f-string containing only those is not
+        # the shape this rule is about, and treating them as markup would fire on every one.
+        assert self._check('console.print(f"row [0] failed: {e}")') == []
+
+    def test_the_scope_match_survives_windows_separators(self) -> None:
+        violations = self._check('console.print(f"[red]{e}[/red]")', "src\\coder_eval\\cli\\run_command.py")
+        assert len(violations) == 1
+
+    def test_noqa_suppresses_it(self, tmp_path: Path) -> None:
+        """Through the runner, which is what honours `# noqa` — the rule itself does not."""
+        source = 'console.print(f"[dim]{count} rows[/dim]")  # noqa: CE050\n'
+        path = tmp_path / "plan_command.py"
+        path.write_text(source, encoding="utf-8")
+        assert check_paths([path], rules=[EscapeUntrustedMarkup]) == []
+
+    def test_the_id_is_unique_across_every_wired_rule(self) -> None:
+        # `tests/lint/runner.py`'s assert covers ALL_RULES only, so a class-wired id can collide
+        # with a BaseRule's without failing anything.
+        assert [r.id for r in ALL_RULES].count("CE050") == 1
+
+    def test_the_cli_package_is_clean(self) -> None:
+        """The remediation held: every flagged site is escaped or carries a reasoned noqa.
+
+        A rule reporting zero because it is broken and one reporting zero for the right reason are
+        indistinguishable without the positive fixtures above — which is why they come first.
+        """
+        offenders = [
+            f"{v.file}:{v.line}" for v in check_paths([Path("src/coder_eval/cli")], rules=[EscapeUntrustedMarkup])
+        ]
+        assert offenders == [], offenders
+
+
 class TestCE047NoBareAssertInCli:
     """CE047 — no bare `assert` under `src/coder_eval/cli/`.
 

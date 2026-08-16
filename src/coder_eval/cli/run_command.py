@@ -13,6 +13,7 @@ from typing import Any
 
 import click
 import typer
+from rich.markup import escape
 from tqdm import tqdm
 
 from ..config import Settings, settings
@@ -502,7 +503,7 @@ async def _run_all_tasks(
     # otherwise the agent hangs on the dead endpoint instead of erroring.
     preflight_error = await asyncio.to_thread(_litellm_preflight_error, settings)
     if preflight_error:
-        console.print(f"[red]{preflight_error}[/red]")
+        console.print(f"[red]{escape(str(preflight_error))}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -527,7 +528,7 @@ async def _run_all_tasks(
             from ..reports_junit import write_junit_xml
 
             written = write_junit_xml(run_dir, junit_xml)
-            console.print(f"[green][OK]JUnit report written to {written}[/green]")
+            console.print(f"[green][OK]JUnit report written to {escape(str(written))}[/green]")
     finally:
         # Explicit flush before process exit (belt-and-suspenders with atexit).
         # In a `finally` so it runs on the success path and on any raised

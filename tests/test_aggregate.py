@@ -1,11 +1,14 @@
 """Tests for the run-summary seam: build_run_summary / recover_task_results / `aggregate`."""
 
+import io
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
@@ -449,3 +452,31 @@ def test_aggregate_cli_keeps_an_unknown_selector_key_rather_than_rejecting_it(tm
     assert result.exit_code == 0, result.output
     assert "Dropping malformed row_selection" not in result.output
     assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))["row_selection"]["split"] == "test"
+
+
+class TestAggregateDegradeMessagesRenderLiterally:
+    """A malformed `run.json` value is untrusted TEXT, and Rich reads `[...]` in it as markup.
+
+    Both degrade paths interpolate the offending value straight into a `[yellow]…[/yellow]` span.
+    Unescaped, a value containing a bracket renders wrong or swallows the rest of the message —
+    and this is the message whose whole job is to say what was dropped.
+    """
+
+    def test_a_malformed_skipped_task_entry_renders_its_brackets(self) -> None:
+        from coder_eval.cli.aggregate_command import _recover_skipped_tasks
+
+        prior = {"skipped_tasks": [{"task_file": "[bold]x[/bold]", "reason": None}]}
+        console = Console(file=io.StringIO(), width=200, force_terminal=False)
+        with patch("coder_eval.cli.aggregate_command.console", console):
+            assert _recover_skipped_tasks(prior) == []
+        out = console.file.getvalue()
+        assert "[bold]x[/bold]" in out, out
+
+    def test_a_malformed_row_selection_renders_its_brackets(self) -> None:
+        from coder_eval.cli.aggregate_command import _recover_row_selection
+
+        console = Console(file=io.StringIO(), width=200, force_terminal=False)
+        with patch("coder_eval.cli.aggregate_command.console", console):
+            assert _recover_row_selection({"row_selection": "[/yellow]not-an-object"}) is None
+        out = console.file.getvalue()
+        assert "[/yellow]not-an-object" in out, out

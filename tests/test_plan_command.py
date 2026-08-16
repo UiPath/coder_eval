@@ -16,6 +16,7 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.models.enums import AgentKind
+from coder_eval.orchestration.early_stop import EarlyStopConfigError
 
 
 # Since plan_command uses lazy imports from orchestration.experiment,
@@ -311,6 +312,161 @@ class TestPlanCommandValidation:
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "Bad experiment" in printed
+
+
+class TestPlanBannerIsPrintedOnce:
+    """One ✓/✗ per file, and only after everything that could fail has run.
+
+    The banner used to print the moment `load_task` returned — but `_preview_dataset` and the
+    per-variant resolution loop both run AFTER that and can both raise, and the outer handler then
+    printed ✗ for the SAME file. A reader saw a file marked valid and invalid in consecutive lines.
+    """
+
+    def _run(self, task_file: Path, *, task, preview_error: Exception | None = None, variants=None):
+        experiment = _make_experiment(variants=variants or [ExperimentVariant(variant_id="default")])
+        preview = (
+            patch("coder_eval.cli.plan_command._preview_dataset", side_effect=preview_error)
+            if preview_error is not None
+            else patch("coder_eval.cli.plan_command._preview_dataset", return_value=[task])
+        )
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            preview,
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            exit_code = 0
+            try:
+                plan_command(task_files=[task_file])
+            except typer.Exit as exc:
+                exit_code = exc.exit_code
+        lines = [str(call) for call in mock_console.print.call_args_list]
+        return lines, exit_code
+
+    def test_a_file_that_loads_then_fails_its_preview_prints_only_a_cross(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        lines, exit_code = self._run(task_file, task=_make_task(), preview_error=ValueError("dataset row 3 has no id"))
+        banners = [ln for ln in lines if "task.yaml" in ln]
+        assert len(banners) == 1, f"expected exactly one banner, got {banners}"
+        assert "\u2717" in banners[0] and "\u2713" not in banners[0]
+        assert any("dataset row 3 has no id" in ln for ln in lines)
+        assert exit_code == 1
+
+    def test_a_clean_file_prints_only_a_tick(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        lines, exit_code = self._run(task_file, task=_make_task())
+        banners = [ln for ln in lines if "task.yaml" in ln]
+        assert len(banners) == 1
+        assert "\u2713" in banners[0] and "\u2717" not in banners[0]
+        assert exit_code == 0
+
+    def test_the_detail_lines_stay_under_their_own_banner(self, tmp_path: Path) -> None:
+        # Two files, so a detached heading is observable: every detail line must follow ITS
+        # filename, not the next one's.
+        first, second = tmp_path / "a.yaml", tmp_path / "b.yaml"
+        first.write_text("placeholder")
+        second.write_text("placeholder")
+        task = _make_task()
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch("coder_eval.cli.plan_command._preview_dataset", return_value=[task]),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            plan_command(task_files=[first, second])
+        lines = [str(call) for call in mock_console.print.call_args_list]
+        banner_positions = [i for i, ln in enumerate(lines) if "a.yaml" in ln or "b.yaml" in ln]
+        assert len(banner_positions) == 2
+        # The Task ID detail for each file sits between its banner and the next one.
+        task_id_positions = [i for i, ln in enumerate(lines) if "Task ID" in ln]
+        assert len(task_id_positions) == 2
+        assert banner_positions[0] < task_id_positions[0] < banner_positions[1] < task_id_positions[1]
+
+    def test_a_soft_per_variant_failure_keeps_the_tick_and_exit_zero(self, tmp_path: Path) -> None:
+        # Preserved exactly: a generic per-variant resolution failure is SOFT — red text, ✓ banner,
+        # exit 0. Changing which failures are fatal is out of scope.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_task()
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch("coder_eval.cli.plan_command._preview_dataset", return_value=[task]),
+            patch(
+                f"{_EXP}.resolve_task_for_variant",
+                side_effect=RuntimeError("variant blew up"),
+            ),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            plan_command(task_files=[task_file])  # no typer.Exit — the failure is soft
+        lines = [str(call) for call in mock_console.print.call_args_list]
+        banners = [ln for ln in lines if "task.yaml" in ln]
+        assert len(banners) == 1 and "\u2713" in banners[0]
+        assert any("resolution failed" in ln for ln in lines)
+
+    def test_an_early_stop_config_error_keeps_the_tick_but_flips_the_exit_code(self, tmp_path: Path) -> None:
+        # DELIBERATE: the banner reports whether the FILE is loadable, and it is. The red line
+        # right beneath it names the variant that is not, and the exit code is 1.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_task()
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch("coder_eval.cli.plan_command._preview_dataset", return_value=[task]),
+            # Resolution must SUCCEED, or the generic handler below catches its failure first and
+            # the early-stop branch is never reached — the test would then pass for the wrong
+            # reason on the soft path.
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(task, {}, None)),
+            patch(
+                "coder_eval.orchestration.early_stop.validate_early_stop",
+                side_effect=EarlyStopConfigError("armed without a live criterion"),
+            ),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            plan_command(task_files=[task_file])
+        assert exc_info.value.exit_code == 1
+        lines = [str(call) for call in mock_console.print.call_args_list]
+        banners = [ln for ln in lines if "task.yaml" in ln]
+        assert len(banners) == 1 and "\u2713" in banners[0]
+        assert any("early-stop config error" in ln for ln in lines)
+
+
+class TestPlanEscapesUntrustedMarkup:
+    """Rich reads `[...]` in an interpolated VALUE as markup, so a bracket in a task id vanishes."""
+
+    def test_a_task_id_containing_markup_renders_literally(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_task()
+        task.task_id = "suite/[bold]row[/bold]"
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch("coder_eval.cli.plan_command._preview_dataset", return_value=[task]),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            plan_command(task_files=[task_file])
+        printed = " ".join(str(call) for call in mock_console.print.call_args_list)
+        # Escaped, so Rich renders the brackets as text rather than opening a style span.
+        assert "\\[bold]" in printed
 
 
 def _make_dataset_task(

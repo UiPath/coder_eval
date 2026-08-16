@@ -15,6 +15,7 @@ from typing import Any
 
 import typer
 from pydantic import ValidationError
+from rich.markup import escape
 
 from ..models import RowSelection, SkippedTask, TaskResult
 from .console import console
@@ -53,7 +54,7 @@ def aggregate_command(
 
     results = recover_task_results(run_dir)
     if not results:
-        console.print(f"[red]Error: no finalized task.json files found under {run_dir}[/red]")
+        console.print(f"[red]Error: no finalized task.json files found under {escape(str(run_dir))}[/red]")
         console.print("\n[dim]Hint: this aggregates a finished run — use 'coder-eval run' to create one.[/dim]")
         raise typer.Exit(1)
 
@@ -132,7 +133,9 @@ def _recover_skipped_tasks(prior: dict[str, Any]) -> list[SkippedTask]:
         try:
             recovered.append(SkippedTask.model_validate(entry))
         except ValidationError:
-            console.print(f"[yellow]Dropping malformed skipped_tasks entry from prior run.json: {entry}[/yellow]")
+            console.print(
+                f"[yellow]Dropping malformed skipped_tasks entry from prior run.json: {escape(str(entry))}[/yellow]"
+            )
     return recovered
 
 
@@ -157,7 +160,7 @@ def _recover_row_selection(prior: dict[str, Any]) -> RowSelection | None:
             return RowSelection.model_validate(raw)
         except ValidationError:
             pass
-    console.print(f"[yellow]Dropping malformed row_selection from prior run.json: {raw}[/yellow]")
+    console.print(f"[yellow]Dropping malformed row_selection from prior run.json: {escape(str(raw))}[/yellow]")
     return None
 
 

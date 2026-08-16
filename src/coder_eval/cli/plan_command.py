@@ -2,6 +2,7 @@
 
 import warnings
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ def _preview_dataset(
     split_name: str | None = None,
     max_rows: int | None = None,
     sample_per_stratum: int | None = None,
+    emit: Callable[[str], None],
 ) -> list[TaskDefinition]:
     """Expand a dataset-backed task, print its row accounting, and return the rows.
 
@@ -53,6 +55,11 @@ def _preview_dataset(
 
     Returns ``[task]`` unchanged when the task carries no ``dataset:`` block; a "1 row"
     line there would be noise about a concept the task does not have.
+
+    Lines go to ``emit`` rather than straight to the console because the caller BUFFERS a
+    file's whole preview: this function can raise part-way through, and the ✓/✗ banner is only
+    knowable once it has either finished or not. Printing directly is what let one file print
+    ✓ and then ✗.
     """
     if task.dataset is None:
         return [task]
@@ -102,15 +109,17 @@ def _preview_dataset(
         suffix = f" (requested {escape(', '.join(requested))}; removed no rows)"
     else:
         suffix = ""
-    console.print(f"  [dim]Dataset: {len(rows)} rows -> {len(expanded)} selected{suffix}[/dim]")
+    # `suffix` is BUILT from escaped parts above and must NOT be escaped again — escape() is not
+    # idempotent, so a second pass renders a literal backslash before every bracket in a value.
+    emit(f"  [dim]Dataset: {len(rows)} rows -> {len(expanded)} selected{suffix}[/dim]")
 
-    _print_strata(task, outcome.rows)
+    _print_strata(task, outcome.rows, emit)
 
     # The pre-spend half of the partial-labelling signal (select_rows also logs a WARNING).
     # `plan` is the loudest of the two because it is free to run — and this is the state
     # that silently shrinks every metric.
     if split_name is not None and labelled and len(labelled) != len(labels):
-        console.print(
+        emit(
             f"  [yellow]⚠[/yellow] [yellow]{len(labels) - len(labelled)} of {len(labels)} rows carry "
             + f"no '{escape(task.dataset.split_field)}' label and are DROPPED by --split; every metric would be "
             + "computed over the smaller set[/yellow]"
@@ -121,7 +130,7 @@ def _preview_dataset(
     # promise of identity the sampler does not make.
     stratified = any(cause.startswith(STRATIFIED_CAUSE_PREFIXES) for cause in outcome.applied)
     if stratified and task.dataset.sample_seed is None:
-        console.print(
+        emit(
             "  [yellow]⚠[/yellow] [yellow]the stratified sample is re-drawn every invocation "
             + "(dataset.sample_seed is not set), so `run` will execute this many rows but not "
             + "necessarily these ones; set dataset.sample_seed to pin them[/yellow]"
@@ -129,7 +138,7 @@ def _preview_dataset(
     return expanded
 
 
-def _print_strata(task: TaskDefinition, selected: list[dict[str, Any]]) -> None:
+def _print_strata(task: TaskDefinition, selected: list[dict[str, Any]], emit: Callable[[str], None]) -> None:
     """Print the per-stratum breakdown of the SELECTED rows, or nothing.
 
     Silent below two distinct strata: a one-entry breakdown restates the row count.
@@ -151,7 +160,9 @@ def _print_strata(task: TaskDefinition, selected: list[dict[str, Any]]) -> None:
     # into a red ✗ and a non-zero exit on a perfectly valid suite — and an `[bold]` silently
     # renders as an empty label, i.e. a preview that misreports its own breakdown.
     rendered = ", ".join(f"{escape(key or _EMPTY_STRATUM_LABEL)}={n}" for key, n in sorted(counts.items()))
-    console.print(f"  [dim]strata ({escape(field)}): {rendered}[/dim]")
+    # `rendered` is assembled from escaped keys just above and must NOT be escaped again: escape()
+    # is not idempotent, so a second pass prints a backslash before every bracket in a value.
+    emit(f"  [dim]strata ({escape(field)}): {rendered}[/dim]")
 
 
 def plan_command(
@@ -232,24 +243,33 @@ def plan_command(
         else:
             default_exp = exp_def  # fall back to custom as its own baseline
     except Exception as e:
-        console.print(f"[red]Failed to load experiment ({exp_path}): {e}[/red]")
+        console.print(f"[red]Failed to load experiment ({escape(str(exp_path))}): {escape(str(e))}[/red]")
         raise typer.Exit(1) from e
 
     # Show experiment info
     console.print("[bold cyan]Experiment[/bold cyan]")
-    console.print(f"  [dim]ID: {exp_def.experiment_id}[/dim]")
+    console.print(f"  [dim]ID: {escape(str(exp_def.experiment_id))}[/dim]")
     if exp_def.description:
-        console.print(f"  [dim]Description: {exp_def.description}[/dim]")
-    console.print(
-        f"  [dim]Variants ({len(exp_def.variants)}): {', '.join(v.variant_id for v in exp_def.variants)}[/dim]"
-    )
+        console.print(f"  [dim]Description: {escape(str(exp_def.description))}[/dim]")
+    variant_ids = escape(", ".join(v.variant_id for v in exp_def.variants))
+    console.print(f"  [dim]Variants ({len(exp_def.variants)}): {variant_ids}[/dim]")  # noqa: CE050
     if exp_def.defaults and exp_def.defaults.agent:
-        console.print(f"  [dim]Default agent config: {exp_def.defaults.agent}[/dim]")
+        console.print(f"  [dim]Default agent config: {escape(str(exp_def.defaults.agent))}[/dim]")
     console.print()
 
     # Validate each task file
+    #
+    # BUFFERED, one file at a time. The ✓/✗ banner is not knowable until the whole per-file body
+    # has either finished or raised — `_preview_dataset` and the per-variant loop both run AFTER
+    # the file has loaded and both can fail — so printing the banner on a successful `load_task`
+    # made a file that loaded and then failed print ✓ and, from the outer handler, ✗ as well. The
+    # banner is emitted first and the buffered lines under it, because the detail lines belong
+    # beneath their own filename heading: simply moving the banner below the body would leave a
+    # multi-file plan with every heading detached from its own detail.
     all_valid = True
     for task_file in resolved_task_files:
+        detail: list[str] = []
+        loaded = True
         try:
             # Capture warnings so unknown-field UnknownTaskFieldWarnings
             # (emitted by TaskDefinition._warn_on_unknown_fields while the
@@ -263,19 +283,18 @@ def plan_command(
                 warnings.simplefilter("always", DeprecationWarning)
                 task, _source_yaml = load_task(task_file)
 
-            console.print(f"[green]\u2713[/green] {task_file.name}")
-            console.print(f"  [dim]Task ID: {task.task_id}[/dim]")
+            detail.append(f"  [dim]Task ID: {escape(str(task.task_id))}[/dim]")
 
             # Handle optional agent field. Phase 3 made agent.type optional —
             # tasks may now defer it to experiment defaults / --type.
             if task.agent is None:
-                console.print("  [dim]Agent: N/A (resolved from experiment)[/dim]")
+                detail.append("  [dim]Agent: N/A (resolved from experiment)[/dim]")
             elif task.agent.type is None:
-                console.print("  [dim]Agent type: (deferred to experiment / --type)[/dim]")
+                detail.append("  [dim]Agent type: (deferred to experiment / --type)[/dim]")
             else:
-                console.print(f"  [dim]Agent: {task.agent.type}[/dim]")
+                detail.append(f"  [dim]Agent: {escape(str(task.agent.type))}[/dim]")
 
-            console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
+            detail.append(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
 
             expanded = _preview_dataset(
                 task,
@@ -283,6 +302,7 @@ def plan_command(
                 split_name=split_name,
                 max_rows=max_rows,
                 sample_per_stratum=per_stratum,
+                emit=detail.append,
             )
 
             # Surface unknown-field warnings as inline notices (non-blocking;
@@ -293,12 +313,13 @@ def plan_command(
             # gets re-emitted to stderr so non-target deprecations stay visible.
             for w in caught:
                 if issubclass(w.category, UnknownTaskFieldWarning):
-                    console.print(f"  [yellow]⚠[/yellow] [yellow]{w.message}[/yellow]")
+                    detail.append(f"  [yellow]⚠[/yellow] [yellow]{escape(str(w.message))}[/yellow]")
                 else:
                     warnings.showwarning(w.message, w.category, w.filename, w.lineno)
 
             # Show resolved agent per variant
             for variant in exp_def.variants:
+                variant_id = escape(str(variant.variant_id))
                 try:
                     # Resolve the FIRST expanded row for a dataset-backed task: that is the
                     # shape a run actually resolves, and it is where a criterion that only
@@ -313,19 +334,30 @@ def plan_command(
                     agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""
-                    console.print(f"    [dim]Variant '{variant.variant_id}': {agent_type}{model_str}[/dim]")
+                    detail.append(f"    [dim]Variant '{variant_id}': {escape(agent_type)}{escape(model_str)}[/dim]")
                 except EarlyStopConfigError as e:
                     # A hard config error (unlike generic per-variant resolution
-                    # failures, which stay soft): flip the plan exit code.
-                    console.print(f"    [red]Variant '{variant.variant_id}': early-stop config error - {e}[/red]")
+                    # failures, which stay soft): flip the plan exit code. The banner stays ✓ —
+                    # it reports whether the FILE is loadable, and this file is; the red line
+                    # right beneath it names the variant that is not.
+                    detail.append(f"    [red]Variant '{variant_id}': early-stop config error - {escape(str(e))}[/red]")
                     all_valid = False
                 except Exception as e:
-                    console.print(f"    [red]Variant '{variant.variant_id}': resolution failed - {e}[/red]")
+                    detail.append(f"    [red]Variant '{variant_id}': resolution failed - {escape(str(e))}[/red]")
 
         except Exception as e:
-            console.print(f"[red]\u2717[/red] {task_file.name}")
-            console.print(f"  [red]Error: {e}[/red]")
+            loaded = False
             all_valid = False
+            detail.append(f"  [red]Error: {escape(str(e))}[/red]")
+
+        # ONE banner per file, and only now — after everything that could fail has run.
+        console.print(
+            f"[green]\u2713[/green] {escape(str(task_file.name))}"
+            if loaded
+            else f"[red]\u2717[/red] {escape(str(task_file.name))}"
+        )
+        for line in detail:
+            console.print(line)
 
     if all_valid:
         console.print("\n[green]All tasks are valid![/green]")
