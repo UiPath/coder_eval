@@ -598,6 +598,25 @@ class TestTargetLabelMoved:
         source = (REPO_ROOT / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
         assert "TARGET_LABEL = " not in source, "optimize_gate re-declares TARGET_LABEL — it must import it"
 
+    def test_the_criterion_that_produces_the_label_imports_it_too(self) -> None:
+        """The gate reads `f1.yes`; `skill_triggered` is what emits that `yes`.
+
+        Two equal string constants is precisely the state being removed: they agree today and
+        would diverge silently the moment either moved, with the gate reading an F1 for a class
+        the criterion had stopped emitting. Identity, not equality — equality is what two
+        independent literals already satisfy.
+
+        The dependency points criterion -> models rather than the other way because
+        `models/optimize.py` is a cycle-free leaf the gate imports, and `models` cannot import
+        `criteria`.
+        """
+        from coder_eval.criteria import skill_triggered
+        from coder_eval.models import TARGET_LABEL
+
+        assert skill_triggered._YES is TARGET_LABEL
+        source = (REPO_ROOT / "src" / "coder_eval" / "criteria" / "skill_triggered.py").read_text(encoding="utf-8")
+        assert '_YES = "yes"' not in source, "skill_triggered re-declares the label — it must import it"
+
     def test_the_noise_floor_default_is_derived_from_it(self) -> None:
         # The model cannot import the gate (that is a cycle), so the literal needs a guard.
         from coder_eval.models import TARGET_LABEL

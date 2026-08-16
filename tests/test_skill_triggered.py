@@ -1,4 +1,12 @@
-"""Tests for SkillTriggeredCriterion + checker."""
+"""Tests for SkillTriggeredCriterion + checker.
+
+The delivered-body cases below (an errored `Skill` call scores `no`, a delivered one `yes`) are
+not only a checker detail: that rule re-baselines every activation suite authored before it
+DOWNWARD, because the same traces that used to score `yes` now score `no`. A suite's
+`suite_thresholds` therefore cannot be trusted across that boundary without a fresh measurement —
+see the provenance comments above each `suite_thresholds:` block in `tasks/skills/`, and the
+blast-radius paragraph in `criteria/skill_triggered.py`'s module docstring.
+"""
 
 from __future__ import annotations
 

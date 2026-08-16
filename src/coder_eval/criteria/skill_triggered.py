@@ -7,6 +7,15 @@ signals are detected here so the criterion scores identically across agents, and
 both require the signal to have actually DELIVERED the body: a refused, in-flight
 or crash-force-closed ``Skill`` call, and a failed or unresolved
 ``Read``/``Glob``/``Grep``, loaded nothing and are not engagement.
+
+**The delivered-body rule re-baselines every pre-existing activation suite DOWNWARD.** The same
+traces that used to score ``yes`` for a ``Skill`` call with ``result_status: error`` now score
+``no``, so a suite whose ``suite_thresholds`` were set before this rule is gated against numbers
+its runs can no longer reach — and it fails without anything in the report saying the rule moved
+rather than the skill. A suite authored before it must be RE-MEASURED before its thresholds are
+trusted. ``framework_version`` in ``run.json`` is the only attribution a trend line across that
+boundary gets; there is no per-criterion version stamp, so a chart spanning the change will show a
+step that belongs to the checker, not to the agent.
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ from typing import TYPE_CHECKING
 from coder_eval.criteria._classification_aggregate import overlay_classification_metrics
 from coder_eval.criteria.base import BaseCriterion, LiveVerdict, register_criterion
 from coder_eval.models import (
+    TARGET_LABEL,
     ClassificationCriterionResult,
     CriterionAggregate,
     CriterionResult,
@@ -33,7 +43,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_YES = "yes"
+# ONE declaration of the positive label. The criterion PRODUCES it and `optimize_gate` CONSUMES
+# it (its activation gate reads `f1.yes`), so the two must agree — but the dependency has to point
+# this way: `models/optimize.py` is a cycle-free leaf that `optimize_gate` imports, and `models`
+# cannot import `criteria`. `_NO` is left as a literal; it has no twin anywhere.
+_YES = TARGET_LABEL
 _NO = "no"
 
 # Extracts the skill name between ``skills/<name>/`` path segments (the Codex

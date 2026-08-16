@@ -81,6 +81,11 @@ Two suites for one skill drift apart and the user pays for both on every run. Sc
 only when nothing covers this skill, or when the user chooses to after seeing what is
 there.
 
+**A threshold is only as current as the run that set it.** `skill_triggered` scores a refused or
+crash-closed `Skill` call as `no`, where an earlier checker scored it `yes` — which re-baselines
+every suite authored before that rule DOWNWARD, so a red gate on an old suite may be the checker
+moving rather than the skill regressing. Say which run measured any threshold you set or read.
+
 Two things worth reporting rather than silently working around:
 
 - **An existing suite with no distractor rows.** Precision is 1.0 by definition, so half
