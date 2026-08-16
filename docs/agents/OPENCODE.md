@@ -118,6 +118,56 @@ Defaults to `true`, forwarding `--pure` so the sandbox is isolated from host-lev
 OpenCode plugin configuration. This mirrors the rationale behind the Claude agent's
 `setting_sources: []`. Set to `false` to load host plugins deliberately.
 
+`--pure` skips external *plugins*; it does **not** skip configured skill paths, so
+skill injection (below) works under the default `pure: true`.
+
+### `plugins` — skill injection
+
+A `plugins:` entry is a Claude-plugin root, which is how a task ships the skills
+under test:
+
+```yaml
+agent:
+  plugins:
+    - type: "local"
+      path: "$SKILLS_REPO_PATH"
+```
+
+OpenCode has no plugin knob, but it does load skills from `skills.paths` in its
+config, so each local plugin root is mapped to that:
+
+1. `<root>/.claude-plugin/plugin.json` is read for its `skills` field (a string or
+   a list, each relative to the root); Claude Code reads the same field, so one
+   `plugins:` line means the same thing on both harnesses.
+2. Absent a manifest, the convention default `<root>/skills` is used.
+3. A path that is already a bare skills directory (`<root>/<name>/SKILL.md`, no
+   `skills/` subdir) is used as-is.
+
+The resulting directories are passed through `OPENCODE_CONFIG_CONTENT`, which the
+CLI merges as a final local-scope config layer. That seam was chosen over writing
+`<sandbox>/.opencode/skills/` because it writes nothing into the sandbox that is
+later preserved as a run artifact and inspected by file criteria, and because it
+does not depend on how the CLI resolves a project root from `--dir`. An inherited
+`OPENCODE_CONFIG_CONTENT` is merged into, not clobbered. With no `plugins:` entry
+the variable is left exactly as inherited.
+
+> A plugin root is mapped to its *skills subdirectory*, never to the root itself
+> when one exists. `skills.paths` is scanned **recursively**, and a plugin root can
+> contain a self-referential symlink (`UiPath/skills` has `plugins/uipath -> ..`),
+> which resolves skills through an arbitrary path and silently drops duplicate names.
+
+Verify what the agent will actually see, using the same environment it builds:
+
+```bash
+opencode debug skill --pure   # lists every skill the CLI can load
+```
+
+Every way this can resolve to nothing — an unset `$SKILLS_REPO_PATH`, a missing
+directory, a root with no `SKILL.md` under it — is logged as a warning at `start()`,
+and the resolved paths are recorded per task under `environment_info`
+(`opencode_skill_paths`). A run that quietly measures the bare model instead of the
+skills under test otherwise looks entirely normal.
+
 ## Permissions
 
 Every `permission_mode` except `plan` passes `--auto`, auto-approving tool use.
@@ -189,12 +239,14 @@ with an error naming the unrecognized event types it saw instead.
 
 ## Known limitations
 
-- **`allowed_tools` / `disallowed_tools` / `system_prompt` / `system_prompt_file` /
-  `plugins` are not enforced.** The CLI exposes no equivalent knob, so these are
+- **`allowed_tools` / `disallowed_tools` / `system_prompt` / `system_prompt_file`
+  are not enforced.** The CLI exposes no equivalent knob, so these are
   dropped — `start()` logs a warning naming each one it saw (`experiments/default.yaml`
   sets `allowed_tools` on every task, so expect it on a default run). Do not rely on
-  them as a boundary here, and note that skill-injection suites, which depend on
-  `plugins`, cannot run on this harness.
+  them as a boundary here.
+- **Only the *skills* half of a `plugins:` entry is honored** (see below). A Claude
+  plugin's agents, hooks, commands and MCP servers have no OpenCode equivalent and
+  are still dropped.
 - **`max_turns` counts OpenCode's native steps.** One step = one assistant
   generation (`step_start`/`step_finish`) and may carry several tool calls;
   `max_turns: N` allows N complete steps, then the run finalizes cleanly as

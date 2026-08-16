@@ -40,6 +40,7 @@ import signal
 import time
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar, Literal, NoReturn
 
 from coder_eval.agent import Agent
@@ -74,6 +75,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.utils import expand_env_vars
 
 from .registry import AgentRegistry
 
@@ -137,18 +139,46 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "todowrite": "TodoWrite",
     "todoread": "TodoRead",
     "task": "Agent",
+    # OpenCode's native skill loader. Without this entry `skill_triggered` (which
+    # keys on the canonical `Skill`) and any `command_executed` written against
+    # `tool_name: Skill` read false on every OpenCode run — the engagement happened
+    # but no criterion could see it.
+    "skill": "Skill",
 }
 
 # Config fields the OpenCode CLI has no equivalent knob for. `experiments/default.yaml`
 # sets `allowed_tools` on every task, so these are silently dropped by default —
 # warn once at start() rather than letting a task believe it constrained the agent.
+# `plugins` is NOT here: its skills half is honored via _plugin_skill_dirs below.
 _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "system_prompt",
     "system_prompt_file",
     "allowed_tools",
     "disallowed_tools",
-    "plugins",
 )
+
+# --- skill injection ------------------------------------------------------
+#
+# A `plugins:` entry is a Claude-plugin root. Claude Code reads its skills from
+# the `skills` field of `<root>/.claude-plugin/plugin.json` (conventionally
+# `./skills/`). OpenCode has no plugin knob, but it does load skills from
+# `skills.paths` in its config — so mapping the plugin root to that directory is
+# what makes one `plugins:` line mean the same thing on both harnesses.
+#
+# The config is handed over through OPENCODE_CONFIG_CONTENT, which OpenCode
+# merges as a final local-scope layer. That was chosen over writing
+# `<sandbox>/.opencode/skills/` because it (a) writes nothing into the sandbox
+# that is later preserved as run artifacts and inspected by file criteria, and
+# (b) does not depend on how the CLI resolves a project root from `--dir`.
+# Verified orthogonal to `--pure`, which skips external *plugins*, not
+# configured skill paths.
+#
+# Only the skills half of a plugin is honored. A Claude plugin's agents, hooks,
+# commands and MCP servers have no OpenCode equivalent and are still dropped.
+_CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
+_PLUGIN_MANIFEST_RELPATH = (".claude-plugin", "plugin.json")
+_DEFAULT_PLUGIN_SKILLS_SUBDIR = "skills"
+_SKILL_FILE = "SKILL.md"
 
 # ToolEndStatus -> CommandTelemetry.result_status (the persisted tri-state).
 _RESULT_STATUS: dict[ToolEndStatus, Literal["success", "error", "unknown"]] = {
@@ -186,6 +216,86 @@ def _epoch_ms_to_dt(value: Any) -> datetime | None:
         return datetime.fromtimestamp(value / 1000)
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def _manifest_skill_dirs(root: Path) -> list[Path]:
+    """Skill directories a Claude-plugin root declares, in manifest order.
+
+    Reads the ``skills`` field of ``<root>/.claude-plugin/plugin.json`` (a string
+    or a list of strings, each relative to the root) and falls back to the
+    convention default ``<root>/skills`` when the manifest is absent, unreadable,
+    or declares none. Honoring the manifest rather than hardcoding ``skills/``
+    keeps a plugin that relocates its skills working on both harnesses.
+    """
+    manifest = root.joinpath(*_PLUGIN_MANIFEST_RELPATH)
+    declared: list[str] = []
+    if manifest.is_file():
+        try:
+            data: Any = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = None
+        if isinstance(data, dict):
+            value = data.get("skills")
+            if isinstance(value, str):
+                declared = [value]
+            elif isinstance(value, list):
+                declared = [entry for entry in value if isinstance(entry, str)]
+    if not declared:
+        declared = [_DEFAULT_PLUGIN_SKILLS_SUBDIR]
+    return [(root / relative).resolve() for relative in declared]
+
+
+def _plugin_skill_dirs(
+    plugins: list[dict[str, Any]] | None,
+    log: logging.Logger | logging.LoggerAdapter[Any] = logger,
+) -> list[str]:
+    """Resolve ``plugins:`` entries to OpenCode ``skills.paths`` directories.
+
+    Every way this can come up empty is logged rather than passed over: a plugin
+    whose skills never reach the agent still *looks* like a normal run, which is
+    precisely the failure this function exists to close.
+    """
+    resolved: list[str] = []
+    for plugin in plugins or []:
+        if not isinstance(plugin, dict) or plugin.get("type") != "local":
+            log.warning("opencode: ignoring non-local plugin entry %r — only `type: local` maps to skills.", plugin)
+            continue
+        path_str = plugin.get("path")
+        if not path_str:
+            continue
+        expanded = expand_env_vars(str(path_str))
+        root = Path(expanded).resolve()
+        if not root.is_dir():
+            hint = "env var likely unset" if "$" in expanded else "path does not exist"
+            log.warning(
+                "opencode: plugin skills path did not resolve: %r -> %r (%s); no skills injected from it",
+                path_str,
+                expanded,
+                hint,
+            )
+            continue
+        candidates = [directory for directory in _manifest_skill_dirs(root) if directory.is_dir()]
+        # A path that is ALREADY a bare skills directory (<root>/<name>/SKILL.md)
+        # has no `skills/` subdir, so use it as-is. Deliberately not a fallback for
+        # a root that HAS one: `skills.paths` is scanned recursively and a repo
+        # root can contain self-referential symlinks (UiPath/skills has
+        # `plugins/uipath -> ..`), which resolves skills through an arbitrary path
+        # and silently drops duplicate names.
+        if not candidates:
+            candidates = [root]
+        for directory in candidates:
+            if next(directory.glob(f"*/{_SKILL_FILE}"), None) is None:
+                log.warning(
+                    "opencode: no <name>/%s directly under %s (from plugin %r) — the CLI still scans it "
+                    + "recursively, but check the plugin path points at a skills root",
+                    _SKILL_FILE,
+                    directory,
+                    path_str,
+                )
+            as_text = str(directory)
+            if as_text not in resolved:
+                resolved.append(as_text)
+    return resolved
 
 
 class _OpenCodeTurnState:
@@ -638,6 +748,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         self.working_directory: str | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
+        self._skill_dirs: list[str] = []
         self._session_id: str | None = None
         self._process: asyncio.subprocess.Process | None = None
         # Process-group ids (== the CLI's pid under start_new_session) of every
@@ -667,6 +778,22 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 "opencode: %s set but NOT enforced — the CLI has no equivalent knob, so the run is "
                 + "unconstrained by them; do not rely on them as a boundary (see docs/agents/OPENCODE.md).",
                 ", ".join(ignored),
+            )
+        self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger)  # type: ignore[arg-type]
+        if self._skill_dirs:
+            logger.info(
+                "opencode: injecting %d skill path(s) via %s: %s",
+                len(self._skill_dirs),
+                _CONFIG_CONTENT_ENV,
+                self._skill_dirs,
+            )
+        elif self.config.plugins:
+            # Plugins were declared but produced nothing — the run is about to
+            # measure the model without the skills under test. Say so loudly.
+            logger.warning(
+                "opencode: %d plugin(s) declared but 0 skill path(s) resolved — the agent will run "
+                + "WITHOUT them (see docs/agents/OPENCODE.md).",
+                len(self.config.plugins),
             )
         self.working_directory = working_directory
         self._env_path_prepend = list(env_path_prepend or [])
@@ -718,6 +845,10 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
 
     def get_environment_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {"opencode_model": self.config.model, "opencode_pure": self.config.pure}
+        if self._skill_dirs:
+            # Recorded per task so a run's report can be checked for whether the
+            # skills under test actually reached the agent.
+            info["opencode_skill_paths"] = list(self._skill_dirs)
         if self.config.variant:
             info["opencode_variant"] = self.config.variant
         if self._session_id:
@@ -752,7 +883,43 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             env["PATH"] = os.pathsep.join([*self._env_path_prepend, env.get("PATH", "")])
         if self._plugin_tools_dir and "PLUGIN_TOOLS_DIR" not in env:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
+        self._inject_skill_paths(env)
         return env
+
+    def _inject_skill_paths(self, env: dict[str, str]) -> None:
+        """Merge the resolved skill directories into ``OPENCODE_CONFIG_CONTENT``.
+
+        No plugins means the variable is left exactly as inherited, so a run
+        without a ``plugins:`` block behaves byte-for-byte as before. An inherited
+        value is preserved and appended to rather than clobbered, since the host
+        may legitimately configure OpenCode through the same seam.
+        """
+        if not self._skill_dirs:
+            return
+        config: dict[str, Any] = {}
+        inherited = env.get(_CONFIG_CONTENT_ENV)
+        if inherited:
+            try:
+                parsed = json.loads(inherited)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "opencode: inherited %s is not valid JSON; replacing it with the injected skill paths.",
+                    _CONFIG_CONTENT_ENV,
+                )
+            else:
+                if isinstance(parsed, dict):
+                    config = parsed
+                else:
+                    logger.warning(
+                        "opencode: inherited %s is not a JSON object; replacing it with the injected skill paths.",
+                        _CONFIG_CONTENT_ENV,
+                    )
+        skills = config.get("skills")
+        skills = dict(skills) if isinstance(skills, dict) else {}
+        existing = [path for path in skills.get("paths", []) if isinstance(path, str)]
+        skills["paths"] = existing + [path for path in self._skill_dirs if path not in existing]
+        config["skills"] = skills
+        env[_CONFIG_CONTENT_ENV] = json.dumps(config)
 
     # --- the turn ----------------------------------------------------------
 

@@ -466,6 +466,114 @@ class TestCrossHarnessNormalization:
         record = await _run(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["some_new_tool"]
 
+    async def test_native_skill_tool_maps_to_canonical_skill(self, patch_exec, tmp_path):
+        """`skill_triggered` keys on the canonical `Skill`; OpenCode emits lowercase
+        `skill`, so without the mapping a real engagement scores as a miss."""
+        patch_exec(_FakeProcess([self._tool_event("skill")]))
+        record = await _run(_agent(), tmp_path)
+        assert [c.tool_name for c in record.commands] == ["Skill"]
+
+
+def _skill_repo(root, names=("uipath-admin",), *, manifest: str | None = None, nested: bool = True):
+    """Build a plugin root on disk; returns it.
+
+    ``nested`` mirrors the Claude-plugin layout (``<root>/skills/<name>/SKILL.md``);
+    False makes ``root`` itself a bare skills directory.
+    """
+    base = root / "skills" if nested else root
+    for name in names:
+        (base / name).mkdir(parents=True, exist_ok=True)
+        (base / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
+    if manifest is not None:
+        (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+        (root / ".claude-plugin" / "plugin.json").write_text(manifest, encoding="utf-8")
+    return root
+
+
+def _injected_skill_paths(captured) -> list[str]:
+    raw = captured["kwargs"]["env"].get("OPENCODE_CONFIG_CONTENT")
+    return [] if raw is None else json.loads(raw)["skills"]["paths"]
+
+
+class TestSkillInjection:
+    """`plugins:` is how a task ships the skills under test.
+
+    OpenCode has no plugin knob, so before this mapping existed every skill-injection
+    run silently measured the bare model instead — a run that looks entirely normal.
+    """
+
+    async def test_manifest_declared_skills_dir_is_used(self, patch_exec, tmp_path):
+        root = _skill_repo(tmp_path / "plug", manifest='{"name": "uipath", "skills": "./skills/"}')
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        assert _injected_skill_paths(captured) == [str(root / "skills")]
+
+    async def test_default_layout_without_a_manifest(self, patch_exec, tmp_path):
+        root = _skill_repo(tmp_path / "plug")
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        assert _injected_skill_paths(captured) == [str(root / "skills")]
+
+    async def test_bare_skills_directory_is_used_as_is(self, patch_exec, tmp_path):
+        root = _skill_repo(tmp_path / "bare", nested=False)
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        assert _injected_skill_paths(captured) == [str(root)]
+
+    async def test_plugin_root_is_never_added_alongside_its_skills_dir(self, patch_exec, tmp_path):
+        """`skills.paths` is scanned RECURSIVELY. A plugin root can contain a
+        self-referential symlink (UiPath/skills has `plugins/uipath -> ..`), which
+        resolves skills through an arbitrary path and drops duplicate names."""
+        root = _skill_repo(tmp_path / "plug")
+        (root / "plugins").mkdir()
+        (root / "plugins" / "self").symlink_to(root, target_is_directory=True)
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        assert _injected_skill_paths(captured) == [str(root / "skills")]
+
+    async def test_env_untouched_when_no_plugins_declared(self, patch_exec, tmp_path):
+        """A run without `plugins:` must behave byte-for-byte as before."""
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+        assert "OPENCODE_CONFIG_CONTENT" not in captured["kwargs"]["env"]
+
+    async def test_inherited_config_content_is_merged_not_clobbered(self, patch_exec, tmp_path, monkeypatch):
+        root = _skill_repo(tmp_path / "plug")
+        monkeypatch.setenv(
+            "OPENCODE_CONFIG_CONTENT",
+            json.dumps({"username": "host", "skills": {"paths": ["/host/skills"]}}),
+        )
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+
+        config = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["username"] == "host"
+        assert config["skills"]["paths"] == ["/host/skills", str(root / "skills")]
+
+    async def test_unresolved_path_warns_and_injects_nothing(self, patch_exec, tmp_path, caplog):
+        """An unset `$SKILLS_REPO_PATH` is the exact shape of the original defect."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent(plugins=[{"type": "local", "path": "$DEFINITELY_UNSET_REPO/skills"}])
+        with caplog.at_level("WARNING"):
+            await agent.start(str(tmp_path))
+        assert agent._skill_dirs == []
+        assert "env var likely unset" in caplog.text
+        assert "0 skill path(s) resolved" in caplog.text
+
+    async def test_plugins_are_no_longer_announced_as_unenforced(self, patch_exec, tmp_path, caplog):
+        root = _skill_repo(tmp_path / "plug")
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        with caplog.at_level("WARNING"):
+            await _agent(plugins=[{"type": "local", "path": str(root)}]).start(str(tmp_path / "sandbox"))
+        assert "NOT enforced" not in caplog.text
+
+    async def test_resolved_paths_are_recorded_for_audit(self, patch_exec, tmp_path):
+        root = _skill_repo(tmp_path / "plug")
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
+        await agent.start(str(tmp_path / "sandbox"))
+        assert agent.get_environment_info()["opencode_skill_paths"] == [str(root / "skills")]
+
 
 class TestUnsupportedConfigIsAnnounced:
     async def test_start_warns_about_unenforced_fields(self, patch_exec, tmp_path, caplog):

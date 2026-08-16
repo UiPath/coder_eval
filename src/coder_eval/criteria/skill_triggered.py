@@ -63,7 +63,11 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """
     names: set[str] = set()
     if cmd.tool_name == "Skill":
-        skill = cmd.parameters.get("skill", "")
+        # Claude names the parameter `skill`; OpenCode's native skill tool names
+        # the same value `name` (its raw tool name is lowercase `skill`, mapped to
+        # the canonical `Skill` by the OpenCode agent). Read both so one criterion
+        # scores a skill engagement identically on either harness.
+        skill = cmd.parameters.get("skill") or cmd.parameters.get("name") or ""
         if isinstance(skill, str) and skill:
             names.add(skill.split(":")[-1])
     for value in cmd.parameters.values():

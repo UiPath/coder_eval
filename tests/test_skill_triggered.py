@@ -50,6 +50,19 @@ class TestSkillTriggeredChecker:
         )
         assert result.score == 1.0 and result.observed_label == "yes" and result.expected_label == "yes"
 
+    def test_opencode_name_parameter_counts_as_engagement(self) -> None:
+        """OpenCode's native skill tool carries the skill under `name`, not `skill`.
+        Reading only `skill` scored every OpenCode engagement as a miss."""
+        result = _check(
+            expected_skill="uipath-flow", skill_name="uipath-flow", commands=[_cmd("Skill", {"name": "uipath-flow"})]
+        )
+        assert result.score == 1.0 and result.observed_label == "yes"
+
+    def test_opencode_name_parameter_is_scoped_to_the_skill_tool(self) -> None:
+        """`name` is a generic parameter; only a `Skill` call may be read that way."""
+        result = _check(expected_skill="", skill_name="uipath-flow", commands=[_cmd("Write", {"name": "uipath-flow"})])
+        assert result.score == 1.0 and result.observed_label == "no"
+
     def test_no_skill_tn(self) -> None:
         result = _check(expected_skill="", skill_name="uipath-flow", commands=[_cmd("Read", {"file_path": "x"})])
         assert result.score == 1.0 and result.observed_label == "no" and result.expected_label == "no"
