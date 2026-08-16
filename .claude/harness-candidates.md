@@ -604,6 +604,17 @@ with the two `action.yml` items above — one considered change to the action's 
       an A/B baseline. One file, zero exposure. Recorded here so the next review does not re-raise
       it. — checked and refuted in the Plan D scoping pass, confirmed against the file at
       implementation time.
+- [ ] **`estimator_ledger.WATCHED_CONSTANTS` is one-directional — nothing forces a NEW statistical
+      constant onto the list.** Both watch lists have anti-rename parity tests (a renamed constant
+      or a moved fixture directory would make the job match nothing and pass silently), but a
+      newly introduced resample count, alpha or tolerance is unwatched by default, and deleting a
+      tuple entry passes both `make test` and the job. CE039 solved exactly this rot for prose
+      tables with a COVERAGE check — a table no claim names is a failure — and the same shape
+      belongs here: "a module-level constant that looks statistical and is not watched is a
+      failure". Not built with the protocol because "looks statistical" needs a design pass (a
+      name heuristic? a `Final[float]` in two named modules? an explicit opt-out list?), and a
+      noisy version of this rule in a merge-blocking job is worse than none. — caught in the
+      Plan D Phase 6 quality review.
 - [ ] **`agent_judge` silently drops an off-kind judge config's fields.** `_build_agent_config`
       copies the user's `criterion.agent` dump onto a `ClaudeCodeAgentConfig`, but
       `AgentJudgeCriterion.agent` is the four-way `AgentConfig` union — so `type: antigravity`

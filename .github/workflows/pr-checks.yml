@@ -216,6 +216,37 @@ jobs:
         working-directory: evalboard
         run: pnpm verify
 
+  estimator-protocol:
+    # A rendered statistic can step for IDENTICAL data when an estimator or a resample
+    # count changes, and nothing in a run artifact distinguishes that from a real change
+    # in the thing being measured. So a PR touching a watched statistical constant or a
+    # rendered-number snapshot fixture must add a row to `## Estimator changes` in
+    # docs/REPORT_SCHEMA.md. Diff-based, so it cannot live in `make verify` — a working
+    # tree has no base ref — and `pull_request`-only, because without a base ref
+    # $GITHUB_BASE_REF is empty and the fetch below would turn every push red for the
+    # wrong reason. Installs nothing: the checker is stdlib-only by construction.
+    name: Estimator Change Protocol (statistical constants ↔ ledger)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      # No `git fetch`: `fetch-depth: 0` already populates refs/remotes/origin/*, and re-fetching
+      # would advance origin/BASE past the merge commit this run checked out — which is how a
+      # racing PR's ledger row gets credited to this one. The checker resolves the merge base
+      # itself, so both sides of the row count share one baseline.
+      - name: Check the estimator ledger
+        run: python -m tests.lint.estimator_ledger "origin/$GITHUB_BASE_REF"
+
   plugin-validate:
     # Proves the Claude Code plugin marketplace is installable and that the suite
     # `check-skill` scaffolds is real: the manifests pass strict validation, and the

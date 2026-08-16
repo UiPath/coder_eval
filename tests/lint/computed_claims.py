@@ -58,7 +58,11 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+
+# Re-exported: the pipe-table parser moved to its own module on its second consumer
+# (`estimator_ledger.py`). Importing the names back keeps every reader of this module — and
+# every claim below — spelling one name for one parser.
+from tests.lint.markdown_tables import MarkdownTable, parse_markdown_tables, table_signature
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "plugins" / "coder-eval"
@@ -68,14 +72,6 @@ SKILL = PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md"
 # The two surfaces CE039 demands coverage of. Both are read by an agent that spends money on what
 # they say, and both carry arithmetic a reader budgets from.
 COVERED_SURFACES = (METHOD, SKILL)
-
-
-class MarkdownTable(NamedTuple):
-    """One pipe table, with enough position to name it in a failure message."""
-
-    header: list[str]
-    rows: list[list[str]]
-    line: int  # 1-based line of the header row
 
 
 @dataclass(frozen=True)
@@ -89,7 +85,7 @@ class ComputedClaim:
     check: Callable[[str, Path], list[str]]  # (raw surface text, a tmp dir) -> failures; [] holds
 
 
-# --- markdown table parsing --------------------------------------------------
+# --- the typographic normalizer the surfaces need ----------------------------
 
 
 # Written as escapes rather than literally: ruff's RUF001 flags these as ambiguous in source, and
@@ -108,55 +104,6 @@ def _ascii(text: str) -> str:
     deleted the formula" — which is a real failure this must not swallow.
     """
     return text.replace(TIMES, "*").replace(MINUS, "-").replace(EN_DASH, "-")
-
-
-def parse_markdown_tables(text: str) -> list[MarkdownTable]:
-    """Every pipe table in ``text``, skipping separator rows and anything inside a ``` fence.
-
-    Reads RAW text rather than ``_normalized`` text, deliberately: a table is a line structure and
-    collapsing whitespace destroys it. That is legal because
-    ``test_no_sensor_inlines_the_normalization_idiom`` is scoped to ``tests/test_custom_lint.py``
-    by its own ``Path(__file__)`` — do not "fix" this to use ``_normalized``.
-    """
-    tables: list[MarkdownTable] = []
-    header: list[str] | None = None
-    rows: list[list[str]] = []
-    header_line = 0
-    fenced = False
-
-    def _flush() -> None:
-        nonlocal header, rows
-        if header is not None and rows:
-            tables.append(MarkdownTable(header=header, rows=rows, line=header_line))
-        header, rows = None, []
-
-    for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if line.startswith("```"):
-            fenced = not fenced
-            _flush()
-            continue
-        if fenced or not (line.startswith("|") and line.endswith("|")):
-            _flush()
-            continue
-        cells = [c.strip() for c in line.strip("|").split("|")]
-        if all(set(c) <= set("-: ") and c for c in cells):
-            continue  # the ---|--- separator row
-        if header is None:
-            header, header_line = cells, lineno
-        else:
-            rows.append(cells)
-    _flush()
-    return tables
-
-
-def table_signature(table: MarkdownTable) -> str:
-    """The joined header cells — what ``covers`` names.
-
-    Stable under a body edit (a new row, a corrected figure) and changes when the table's SHAPE
-    changes, which is exactly when a claim written against it needs rewriting.
-    """
-    return " | ".join(table.header)
 
 
 # A backticked span holding an arithmetic operator or a ceil() call. `M_train/2` and

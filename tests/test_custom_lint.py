@@ -6458,6 +6458,279 @@ class TestCE043RowSelectorParity:
 
 
 @pytest.mark.lint
+class TestEstimatorLedger:
+    """The estimator-change protocol's pure predicate — the half that does not touch git.
+
+    A rendered statistic can step for IDENTICAL data when an estimator or resample count changes,
+    and nothing in a run artifact distinguishes that from a real change in the measurement. The
+    `## Estimator changes` table in `docs/REPORT_SCHEMA.md` is where such a step becomes
+    attributable, and the `estimator-protocol` CI job demands a row for a PR that causes one.
+
+    Only `main()` shells out; everything asserted here is a pure function of a
+    `path -> diff text` map, so the retro-validation below uses the REAL diff text from the commit
+    that motivated the rule rather than checking out history.
+    """
+
+    BASE_DOC: ClassVar[str] = (
+        "## Estimator changes\n\n| Date | Change | Constant / fixture | Observed step | PR / commit |\n"
+        "| --- | --- | --- | --- | --- |\n| 2026-08-13 | a | b | c | d |\n\n## Next section\n"
+    )
+
+    @staticmethod
+    def _with_extra_row(doc: str) -> str:
+        return doc.replace("\n\n## Next section", "\n| 2026-08-16 | e | f | g | h |\n\n## Next section")
+
+    def test_a_snapshot_change_requires_the_ledger(self) -> None:
+        from tests.lint.estimator_ledger import check
+
+        failures = check(["tests/_fixtures/report_snapshots/run_full.md"], {}, self.BASE_DOC, self.BASE_DOC)
+        assert failures and "run_full.md" in failures[0], failures
+
+    def test_a_constant_change_requires_the_ledger(self) -> None:
+        from tests.lint.estimator_ledger import check
+
+        module = "src/coder_eval/reports_stats.py"
+        failures = check(
+            [module],
+            {module: "-BOOTSTRAP_RESAMPLES = 1000\n+BOOTSTRAP_RESAMPLES = 2000\n"},
+            self.BASE_DOC,
+            self.BASE_DOC,
+        )
+        assert failures and any("BOOTSTRAP_RESAMPLES" in f for f in failures), failures
+
+    def test_a_gate_constant_change_requires_the_ledger(self) -> None:
+        # The watch set is not `reports_stats`-only: every gate constant steps a rendered gate
+        # number exactly the way BOOTSTRAP_RESAMPLES stepped a rendered CI.
+        from tests.lint.estimator_ledger import check
+
+        module = "src/coder_eval/optimize_gate.py"
+        failures = check(
+            [module],
+            {module: "-MATERIALITY_FLOOR = 0.25\n+MATERIALITY_FLOOR = 0.10\n"},
+            self.BASE_DOC,
+            self.BASE_DOC,
+        )
+        assert failures and any("MATERIALITY_FLOOR" in f for f in failures), failures
+
+    def test_a_new_ledger_row_satisfies_it(self) -> None:
+        from tests.lint.estimator_ledger import check
+
+        module = "src/coder_eval/reports_stats.py"
+        assert (
+            check(
+                [module],
+                {module: "-BOOTSTRAP_RESAMPLES = 1000\n+BOOTSTRAP_RESAMPLES = 2000\n"},
+                self.BASE_DOC,
+                self._with_extra_row(self.BASE_DOC),
+            )
+            == []
+        )
+
+    def test_an_unrelated_edit_to_the_page_does_not_satisfy_it(self) -> None:
+        # Why the check is a ROW COUNT and not "the file was touched": the ledger lives in a busy
+        # page, and a typo fix three sections away would otherwise clear the gate.
+        from tests.lint.estimator_ledger import check
+
+        module = "src/coder_eval/reports_stats.py"
+        edited = self.BASE_DOC.replace("## Next section", "## Next section (renamed)")
+        assert edited != self.BASE_DOC
+        assert check([module], {module: "+BOOTSTRAP_RESAMPLES = 2000\n"}, self.BASE_DOC, edited)
+
+    def test_an_unrelated_change_is_clean(self) -> None:
+        from tests.lint.estimator_ledger import check
+
+        assert check(["src/coder_eval/reports.py"], {}, self.BASE_DOC, self.BASE_DOC) == []
+
+    def test_a_comment_only_diff_in_reports_stats_is_clean(self) -> None:
+        # `git diff -U0` hunks are context-free changed lines, so matching on the ASSIGNMENT
+        # keeps a comment reflow beside the constant from firing.
+        from tests.lint.estimator_ledger import check
+
+        module = "src/coder_eval/reports_stats.py"
+        hunk = "-# BOOTSTRAP_RESAMPLES is the one resample count.\n+# BOOTSTRAP_RESAMPLES: the one resample count.\n"
+        assert check([module], {module: hunk}, self.BASE_DOC, self.BASE_DOC) == []
+
+    def test_every_watched_constant_exists_on_its_module(self) -> None:
+        """The anti-rename parity assertion — the single most important test in this phase.
+
+        A renamed constant would make the diff scan match nothing and the job pass **silently**,
+        which is worse than no job at all. It lives here rather than at module import because the
+        CI job installs nothing and the checker must load without `coder_eval`.
+        """
+        import importlib
+
+        from tests.lint.estimator_ledger import WATCHED_CONSTANTS
+
+        missing = []
+        for path, name in WATCHED_CONSTANTS:
+            module_name = path.removeprefix("src/").removesuffix(".py").replace("/", ".")
+            if not hasattr(importlib.import_module(module_name), name):
+                missing.append(f"{module_name}.{name}")
+        assert not missing, (
+            f"{missing} no longer resolve. A renamed watched constant does not fail the "
+            "estimator-protocol job — it makes the job match nothing and pass silently."
+        )
+
+    def test_every_watched_constants_real_source_line_still_matches(self) -> None:
+        """`hasattr` is not enough: the DIFF SCAN is a regex, and a re-declaration can dodge it.
+
+        `BOOTSTRAP_RESAMPLES: Final[int] = 2000` keeps `hasattr` true while changing the shape the
+        scan matches — the same silent pass the parity test above exists to prevent, one layer
+        down. So the pattern is run against each constant's real source line.
+        """
+        from tests.lint.estimator_ledger import WATCHED_CONSTANTS, _assignment_pattern
+
+        repo = Path(__file__).parent.parent
+        unmatched = []
+        for path, name in WATCHED_CONSTANTS:
+            source = (repo / path).read_text(encoding="utf-8")
+            declaration = next((line for line in source.splitlines() if line.startswith(name)), None)
+            if declaration is None or not _assignment_pattern(name).search(f"+{declaration}"):
+                unmatched.append(f"{path}::{name}")
+        assert not unmatched, (
+            f"{unmatched} are declared in a shape the diff scan does not match — the job would "
+            "see the change and say nothing."
+        )
+
+    def test_every_snapshot_directory_still_exists_and_holds_fixtures(self) -> None:
+        """The fixture half's anti-rename guard, and it is not symmetrical with the constants'.
+
+        `git diff --name-only` reports only a rename's POST-image path, so moving a fixture
+        directory disables this half FOREVER while every unit test here — which hardcodes literal
+        paths — stays green.
+        """
+        from tests.lint.estimator_ledger import SNAPSHOT_DIRS, SNAPSHOT_SUFFIXES
+
+        repo = Path(__file__).parent.parent
+        empty = [
+            d
+            for d in SNAPSHOT_DIRS
+            if not any(p.suffix in SNAPSHOT_SUFFIXES for p in (repo / d).glob("*") if p.is_file())
+        ]
+        assert not empty, f"{empty} hold no pinned fixtures — moved, or renamed past the watch list?"
+
+    def test_the_optimize_renders_are_watched(self) -> None:
+        # The estimator-FORM blind spot's only backstop: `bootstrap_p_floor`'s value is rendered
+        # into these fixtures, so a form change lands there even though no constant moved.
+        from tests.lint.estimator_ledger import is_watched_snapshot
+
+        assert is_watched_snapshot("tests/_fixtures/optimize_renders/activation_gate.md")
+        assert is_watched_snapshot("tests/_fixtures/optimize_verdicts/activation_gate.json")
+        assert not is_watched_snapshot("tests/_fixtures/report_snapshots/_snapshot.py")
+        assert not is_watched_snapshot("tests/_fixtures/golden_streams/anything.md")
+
+    def test_estimator_rows_reads_the_real_page(self) -> None:
+        # Anti-vacuity: a broken parser returning 0 would make every row-count comparison pass.
+        from tests.lint.estimator_ledger import LEDGER_DOC, estimator_rows
+
+        page = (Path(__file__).parent.parent / LEDGER_DOC).read_text(encoding="utf-8")
+        assert estimator_rows(page) >= 1
+
+    def test_estimator_rows_finds_the_table_by_signature_not_by_position(self) -> None:
+        # A second table added above the ledger inside the section must not retarget the count.
+        from tests.lint.estimator_ledger import estimator_rows
+
+        decoy = self.BASE_DOC.replace(
+            "## Estimator changes\n\n",
+            "## Estimator changes\n\n| x | y |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |\n\n",
+        )
+        assert estimator_rows(decoy) == 1
+
+    def test_main_passes_and_fails_on_a_real_repository(self, tmp_path: Path) -> None:
+        """`main()` is the merge-blocking half, so it is exercised against real git, not mocked.
+
+        A fixture repo makes the plumbing this rule actually depends on observable: three-dot
+        resolution through the merge base, `--diff-filter=M` on the fixture side, and `git show`
+        of the base doc.
+        """
+        import os
+        import subprocess
+
+        from tests.lint.estimator_ledger import LEDGER_DOC, main
+
+        def run(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+        run("init", "-q", "-b", "main")
+        run("config", "user.email", "t@example.com")
+        run("config", "user.name", "t")
+        doc = tmp_path / LEDGER_DOC
+        doc.parent.mkdir(parents=True)
+        doc.write_text(self.BASE_DOC, encoding="utf-8")
+        stats = tmp_path / "src" / "coder_eval" / "reports_stats.py"
+        stats.parent.mkdir(parents=True)
+        stats.write_text("BOOTSTRAP_RESAMPLES = 1000\n", encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-qm", "base")
+
+        cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            run("checkout", "-qb", "feature")
+            stats.write_text("BOOTSTRAP_RESAMPLES = 2000\n", encoding="utf-8")
+            run("add", "-A")
+            run("commit", "-qm", "bump")
+            assert main("main") == 1, "a watched constant moved with no ledger row and the job passed"
+
+            doc.write_text(self._with_extra_row(self.BASE_DOC), encoding="utf-8")
+            run("add", "-A")
+            run("commit", "-qm", "ledger")
+            assert main("main") == 0, "the ledger gained a row and the job still failed"
+        finally:
+            os.chdir(cwd)
+
+    def test_the_module_imports_under_a_bare_interpreter(self) -> None:
+        """The CI job installs nothing, so the whole import chain must be stdlib-only.
+
+        Asserted by importing it in a subprocess under `-S`, which skips site-packages entirely —
+        so `pydantic` and an installed `coder_eval` are both unreachable, exactly as in the job.
+        `-c` puts the cwd on `sys.path`, which is how the job's `python -m` finds `tests` too. One
+        future `import pydantic` in `tests/__init__.py` would otherwise turn every PR red with a
+        ModuleNotFoundError.
+        """
+        import subprocess
+        import sys
+
+        repo = Path(__file__).parent.parent
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", "import tests.lint.estimator_ledger"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_it_fires_on_the_historical_commit_that_motivated_it(self) -> None:
+        """Retro-validation, with `b306a99`'s real inputs rather than a checkout of history.
+
+        That commit set `BOOTSTRAP_RESAMPLES = 2000` and moved a snapshot's CI upper bound from
+        `[0.850, 0.933]` to `[0.850, 0.950]`. BOTH signals must fire, or the rule was written
+        against a defect it could not have caught.
+        """
+        from tests.lint.estimator_ledger import check
+
+        module = "src/coder_eval/reports_stats.py"
+        snapshot = "tests/_fixtures/report_snapshots/experiment_replicates.md"
+        failures = check(
+            [module, snapshot],
+            {module: "+BOOTSTRAP_RESAMPLES = 2000\n"},
+            self.BASE_DOC,
+            self.BASE_DOC,
+        )
+        assert any("BOOTSTRAP_RESAMPLES" in f for f in failures), failures
+        assert any("experiment_replicates.md" in f for f in failures), failures
+
+    def test_the_failure_message_names_the_escape_hatch(self) -> None:
+        # A row EDITED rather than added does not raise the count, so a pure-correction PR fails.
+        # That is intended, and the message has to say what to do about it.
+        from tests.lint.estimator_ledger import check
+
+        failures = check(["tests/_fixtures/report_snapshots/run_full.md"], {}, self.BASE_DOC, self.BASE_DOC)
+        assert any("step was zero" in f for f in failures), failures
+
+
+@pytest.mark.lint
 class TestCE048NoBareModelCopyUpdate:
     """CE048 — `model_copy(update={...})` is replaced by `models.copy_with` everywhere in `src/`.
 

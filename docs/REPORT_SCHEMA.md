@@ -256,6 +256,41 @@ The cross-variant summary:
 > serialized into `experiment.json`. A consumer that wants CIs must recompute them
 > from `per_replicate_scores`.
 
+## Estimator changes
+
+A rendered statistic can step for **identical data** when an estimator or a resample count
+changes. Nothing in a run artifact distinguishes that from a real change in the thing being
+measured — the interval simply reads differently — so this table is where such a step is
+attributable. It qualifies the callout above: that one tells you to recompute CIs from
+`per_replicate_scores`; this one tells you when the recomputation's answer moved.
+
+The last column is a **PR number**, not a `framework_version`: `python-semantic-release` assigns
+the version at merge, so an author cannot fill a version column truthfully while the change is in
+flight. A PR number is knowable at authoring time and survives — `main` is squash-merged, so every
+subject line carries its `(#NNN)` while the branch SHAs that produced it do not.
+[`CHANGELOG.md`](https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md) maps the squashed
+commit to the release that carried it. A change made on a long-lived branch before its own PR
+merges may cite the branch commit, marked as such; the seed row below is one.
+
+| Date | Change | Constant / fixture | Observed step | PR / commit |
+| --- | --- | --- | --- | --- |
+| 2026-08-13 | One resample count for every bootstrap, including `bootstrap_mean_ci`'s default | `reports_stats.BOOTSTRAP_RESAMPLES` 1000 → 2000 | `experiment_replicates.md`, both variants' CI upper bounds: `[0.850, 0.933]` → `[0.850, 0.950]` and `[0.600, 0.683]` → `[0.600, 0.700]` | `b306a99` (branch commit, pre-squash) |
+
+**A PR that changes a watched constant, or modifies a pinned rendered-number fixture, must add a
+row here** — a CI job (`estimator-protocol` in `.github/workflows/pr-checks.yml`) fails otherwise.
+It is diff-based, so it cannot run in `make verify`: a working tree has no base ref. If a PR moves
+a fixture with no estimator change behind it, add a row saying the step was zero and why.
+
+Where the check is sharp and where it is not, so a green job is not read as more than it is. It
+watches **constant assignments** — `reports_stats`'s `BOOTSTRAP_RESAMPLES` / `DEFAULT_ALPHA` and
+`optimize_gate`'s `MATERIALITY_FLOOR` / `GATE_P_PRECISION` / `GATE_MAX_FAMILY` / `GATE_RESAMPLES` —
+and not estimator **forms**. Changing the expression inside `reports_stats.bootstrap_p_floor`
+(which has already happened once: `1/m` → `2/(m+1)`) steps every rendered p floor and is not
+matched directly; it is caught only because that floor is rendered into a pinned fixture under
+`tests/_fixtures/optimize_renders/`, which the fixture half watches. A form change that reaches no
+pinned fixture is genuinely invisible. And a row records that a step happened; only the diff
+records why.
+
 ## `suite.json` — `SuiteRollup`
 
 Written for dataset-backed suites; its `passed` flag drives the CI exit code.
@@ -325,7 +360,9 @@ respectively), checked after each completed agent turn — see
 - `run.json.task_results` is a flat, untyped denormalization — the typed source of
   truth is each `task.json`.
 - Experiment CIs / significance tests are **not** in `experiment.json` (render-time
-  only); recompute from `per_replicate_scores`.
+  only); recompute from `per_replicate_scores`. When your recomputation disagrees with an older
+  report over the same data, check [Estimator changes](#estimator-changes) before assuming the
+  measurement moved.
 - Judge `transcript` is stripped from `task.json`; follow `transcript_path`.
 - `TokenUsage.total_tokens` is not serialized; sum the buckets (or use the computed
   `input_tokens` + `output_tokens` + cache buckets).

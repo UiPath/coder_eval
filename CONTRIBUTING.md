@@ -113,7 +113,10 @@ jobs that execute PR-supplied code (`quality-gate`, `no-uipath-extra`, `evalboar
 fall back to it **for fork PRs only**, since this repo is public and untrusted code
 should not run on the shared pool image — any new job running PR-supplied code needs
 the same carve-out. `action-dogfood` always uses it, because it is the executable proof
-behind the published Action and must exercise the image integrators actually use.
+behind the published Action and must exercise the image integrators actually use, and
+`plugin-validate` / `estimator-protocol` always use it because they install nothing —
+the safe direction, so they take the stock image unconditionally rather than only on
+fork PRs.
 
 ## Adding Tasks or Criteria
 
