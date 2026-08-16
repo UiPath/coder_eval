@@ -756,3 +756,35 @@ with the two `action.yml` items above — one considered change to the action's 
       — caught in the top-10 review-fixes run, Phase 7.
 
 - [x] **CE050, CE051 and CE052 are TAKEN** by the top-10 review-fixes run: CE050 (escape untrusted text in a Rich-markup `console.print` under `cli/`), CE051 (a lint rule matching an import's module string must route through `tests/lint/import_resolution.py::resolved_module`), CE052 (every task YAML under `templates/` must load through the real `load_task`). CE049 remains reserved by the backlog entry above. The next free id is **CE053** — but re-run `grep -rhoE "CE0[0-9][0-9]" tests/ .claude/ src/ docs/ pyproject.toml | sort -u` before claiming it: `tests/lint/runner.py`'s uniqueness assert covers `ALL_RULES` only, so a class-wired id (CE052 is one) can collide with a `BaseRule`'s without failing anything.
+
+- [ ] **CE025 pins that a live criterion DECLARES its polarities, not that its checker AGREES
+      with the declaration.** `TestCE025LiveVerdictConsistency` asserts a `LiveSuccessCriterion`
+      model has a checker overriding `live_verdict` and vice versa; nothing checks that a verdict
+      the checker actually RETURNS is one `live_decidable_polarities()` declared. A checker
+      returning `"fail"` while its model declares `{"pass"}` produces a verdict that
+      `EarlyStopWatcher._evaluate_impl` classifies as neither a native fail (needs
+      `_fail_trigger[i]`, which is False) nor a budget fail (needs `_budget_expired[i]`) — so a
+      definitively-failed armed criterion whose ceiling is below threshold fires **no stop at
+      all**. Reproduced during the Phase 1 review. Pre-existing, not a regression: the
+      `_budget_drove` arm deleted in Phase 1 never rescued the latched case either, and the
+      unlatched case it did rescue is unreachable (an armed budget and a declarable live-fail are
+      mutually exclusive). Recorded in `_budget_drove`'s docstring rather than papered over.
+      NOT cheap: agreement is a BEHAVIOURAL property — you have to exercise each checker over
+      inputs and compare the returned polarity against the declaration — so it is a property test
+      over the criterion registry, not an AST rule, and it needs a decision about what input
+      corpus is representative. — caught in the top-10 review-fixes run, Phase 1 review.
+
+- [ ] **Nothing requires a new CExxx rule to ship with a test proving it FIRES.** Three guards
+      written during this run were themselves broken in the fail-open direction and only found by
+      review: CE051's docstring exclusion compared `ast.get_docstring`'s *normalised* text against
+      raw `Constant.value` (so it excluded nothing), CE051's GAP violation was anchored on the
+      Module node (line 0, which no `# noqa` can ever suppress), and `resolved_module` FABRICATED
+      module paths for files outside `src/coder_eval` instead of returning `None`. All three
+      looked green. The existing convention — a positive fixture per rule — is real but
+      unenforced, and a rule shipped with only negative fixtures is indistinguishable from a
+      working one. A mechanical version ("every `ALL_RULES` member is constructed somewhere in
+      `tests/test_custom_lint.py`") is cheap but would not have caught any of the three, since all
+      were constructed. The version that WOULD catch them — "at least one test per rule asserts a
+      NON-EMPTY violation list" — needs a reliable way to tie a test function to the rule it
+      exercises and to recognise a non-emptiness assertion, which is heuristic enough to deserve
+      its own design pass. — caught in the top-10 review-fixes run, Phase 6 review.
