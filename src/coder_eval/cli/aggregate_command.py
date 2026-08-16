@@ -16,7 +16,7 @@ from typing import Any
 import typer
 from pydantic import ValidationError
 
-from ..models import SkippedTask, TaskResult
+from ..models import RowSelection, SkippedTask, TaskResult
 from .console import console
 
 
@@ -66,6 +66,7 @@ def aggregate_command(
     task_tags, task_paths, prior = _read_prior_metadata(run_dir)
     start_time, end_time = _resolve_window(results, prior)
     skipped = _recover_skipped_tasks(prior)
+    row_selection = _recover_row_selection(prior)
 
     summary = build_run_summary(
         out_dir.name,
@@ -75,6 +76,7 @@ def aggregate_command(
         task_tags,
         task_paths=task_paths,
         max_parallel=int(prior.get("max_parallel", 1) or 1),
+        row_selection=row_selection,
         skipped_tasks=skipped,
     )
     write_run_summary(summary, out_dir)
@@ -132,6 +134,31 @@ def _recover_skipped_tasks(prior: dict[str, Any]) -> list[SkippedTask]:
         except ValidationError:
             console.print(f"[yellow]Dropping malformed skipped_tasks entry from prior run.json: {entry}[/yellow]")
     return recovered
+
+
+def _recover_row_selection(prior: dict[str, Any]) -> RowSelection | None:
+    """Carry the row-selection provenance over from a prior run.json, or ``None``.
+
+    Same degrade-to-``None`` stance as ``_recover_skipped_tasks``: the prior summary is
+    untrusted (stale, hand-edited, or written by another version), so a malformed value
+    drops rather than aborting the rebuild. ``None`` is the honest answer here — it means
+    "not recorded", which is exactly what an unreadable value leaves us knowing.
+
+    Note an *unknown key* inside the object validates fine and is ignored: ``RowSelection``
+    deliberately does not forbid extras so a run.json from a newer coder-eval stays
+    readable. Only a value that is not an object, or one whose known keys have the wrong
+    type, degrades.
+    """
+    raw = prior.get("row_selection")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        try:
+            return RowSelection.model_validate(raw)
+        except ValidationError:
+            pass
+    console.print(f"[yellow]Dropping malformed row_selection from prior run.json: {raw}[/yellow]")
+    return None
 
 
 def _resolve_window(results: list[TaskResult], prior: dict[str, Any]) -> tuple[datetime, datetime]:

@@ -48,6 +48,7 @@ run-level summary; full per-replicate detail lives in each `task.json`.
 | `tasks_token_budget_exceeded` / `tasks_cost_budget_exceeded` | `int` | Sub-counters of `tasks_failed` (not part of the invariant). |
 | `skipped_tasks` | `list[{path, reason}]` | Load failures / `skip: true` opt-outs. |
 | `max_parallel` | `int` | Concurrency used. |
+| `row_selection` | `{split, max_rows, sample_per_stratum} \| null` | Which dataset rows this run selected (`--split` / `--sample` / `--sample-per-stratum`). **Tri-state:** `null` means *not recorded* (a run predating the field), which is NOT the same as an object whose `split` is `null` (no `--split` was passed). Records what was **requested on the command line** — a task's own `dataset.sample_per_stratum` is not reflected here. Unknown keys inside the object are ignored rather than rejected, so a newer writer's fourth selector cannot break an older reader. |
 | `task_results` | `list[dict]` | Flat per-replicate rows — see below. |
 | `framework_version` | `str` | Coder Eval version chip. |
 | `environment_info` | `dict` | Version/dependency info (may nest, e.g. `tool_plugins`). |

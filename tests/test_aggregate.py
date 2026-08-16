@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
-from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TaskResult
+from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, RowSelection, RunSummary, TaskResult
 from coder_eval.orchestration.batch import build_run_summary, recover_task_results, write_run_summary
 from coder_eval.path_utils import build_task_run_dir
 
@@ -345,3 +345,107 @@ def test_aggregate_cli_output_rejects_a_file(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["aggregate", str(tmp_path), "-o", str(a_file)])
 
     assert result.exit_code != 0  # Typer rejects before our code runs (no raw OSError traceback)
+
+
+# --- row-selection provenance (run.json carries which rows the run executed) ---
+
+
+def test_build_run_summary_records_the_row_selection() -> None:
+    summary = build_run_summary(
+        "r",
+        [_task_result("a", FinalStatus.SUCCESS)],
+        datetime(2026, 1, 1),
+        datetime(2026, 1, 1),
+        row_selection=RowSelection(split="test", sample_per_stratum=3),
+    )
+    assert summary.row_selection is not None
+    assert summary.row_selection.split == "test"
+    assert summary.row_selection.sample_per_stratum == 3
+    # The round trip is the contract: reports.py and reports_junit.py both read this
+    # back through model_validate_json rather than from the live object.
+    recovered = RunSummary.model_validate_json(summary.model_dump_json())
+    assert recovered.row_selection == summary.row_selection
+
+
+def test_build_run_summary_without_a_row_selection_records_none() -> None:
+    """Pre-feature parity: `None` is "not recorded", and it must stay the default.
+
+    Every existing fixture and every caller that does not know the run's config keeps
+    producing exactly this, so nothing downstream moves for them.
+    """
+    summary = build_run_summary(
+        "r", [_task_result("a", FinalStatus.SUCCESS)], datetime(2026, 1, 1), datetime(2026, 1, 1)
+    )
+    assert summary.row_selection is None
+    assert RunSummary.model_validate_json(summary.model_dump_json()).row_selection is None
+
+
+def test_write_run_summary_persists_the_row_selection(tmp_path: Path) -> None:
+    summary = build_run_summary(
+        "r",
+        [_task_result("a", FinalStatus.SUCCESS)],
+        datetime(2026, 1, 1),
+        datetime(2026, 1, 1),
+        row_selection=RowSelection(split="train", max_rows=5),
+    )
+    write_run_summary(summary, tmp_path)
+    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert run_json["row_selection"] == {"split": "train", "max_rows": 5, "sample_per_stratum": None}
+
+
+def test_aggregate_cli_carries_the_prior_row_selection(tmp_path: Path) -> None:
+    """A rebuild must not silently drop the provenance — that would turn a recorded
+    `--split test` run into an indistinguishable "not recorded" one."""
+    _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
+    (tmp_path / "run.json").write_text(
+        json.dumps({"row_selection": {"split": "test", "sample_per_stratum": 2}, "task_results": []}),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert run_json["row_selection"]["split"] == "test"
+    assert run_json["row_selection"]["sample_per_stratum"] == 2
+
+
+def test_aggregate_cli_has_no_row_selection_when_the_prior_run_json_carried_none(tmp_path: Path) -> None:
+    _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
+
+    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert run_json["row_selection"] is None
+
+
+@pytest.mark.parametrize("bad", ["train", ["train"], 3, {"max_rows": "not-an-int"}])
+def test_aggregate_cli_degrades_a_malformed_row_selection_rather_than_aborting(tmp_path: Path, bad: object) -> None:
+    """Same degrade-to-None stance as the skipped-task recovery: the prior summary is
+    untrusted, and a rebuild that aborts on it is worse than one that says "not recorded"."""
+    _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
+    (tmp_path / "run.json").write_text(json.dumps({"row_selection": bad, "task_results": []}), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Dropping malformed row_selection" in result.output
+    assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))["row_selection"] is None
+
+
+def test_aggregate_cli_keeps_an_unknown_selector_key_rather_than_rejecting_it(tmp_path: Path) -> None:
+    """The forward-compat half: a run.json written by a NEWER coder-eval carrying a fourth
+    selector must still rebuild. RowSelection deliberately does not forbid extras, so the
+    unknown key is ignored and the known ones survive — it is not a validation failure."""
+    _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
+    (tmp_path / "run.json").write_text(
+        json.dumps({"row_selection": {"split": "test", "sample_by_vibes": 7}, "task_results": []}),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Dropping malformed row_selection" not in result.output
+    assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))["row_selection"]["split"] == "test"

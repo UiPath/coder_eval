@@ -2267,3 +2267,29 @@ async def test_cleanup_workspace_dir_none_uses_move_on_write(tmp_path):
     expected = run_dir / "artifacts" / task.task_id
     assert orchestrator.result.sandbox_path == str(expected)
     assert (expected / "out.txt").read_text(encoding="utf-8") == "x"
+
+
+@pytest.mark.asyncio
+async def test_run_batch_records_the_configs_row_selection_on_the_summary(tmp_path):
+    """The one line that connects row selection end to end: `run_batch` -> `run.json`.
+
+    Everything either side of it is covered (CLI -> BatchRunConfig in
+    tests/test_cli_row_selectors.py, build_run_summary -> run.json in tests/test_aggregate.py),
+    but a dropped `row_selection=config.row_selection` at the run_batch call site would leave
+    every real run recording "not recorded" while both neighbours stayed green.
+    """
+    import json
+
+    from coder_eval.models import RowSelection
+    from coder_eval.orchestration.batch import run_batch
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    config = BatchRunConfig(
+        run_dir=tmp_path / "run",
+        row_selection=RowSelection(split="test", sample_per_stratum=2),
+    )
+    summary, _ = await run_batch([], config)
+
+    assert summary.row_selection == RowSelection(split="test", sample_per_stratum=2)
+    on_disk = json.loads((tmp_path / "run" / "run.json").read_text(encoding="utf-8"))
+    assert on_disk["row_selection"] == {"split": "test", "max_rows": None, "sample_per_stratum": 2}

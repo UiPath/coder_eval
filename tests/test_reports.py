@@ -1307,3 +1307,51 @@ def test_generate_markdown_renders_both_markers_when_both_fire():
     assert "max_turns exhausted" in report_md
     assert "expected_turns exceeded" in report_md
     assert "7/5" in report_md
+
+
+# --- row-selection provenance in the run.md header ----------------------------
+
+
+def _summary_with_selection(row_selection):
+    from coder_eval.models import RunSummary
+
+    return RunSummary(
+        run_id="2026-08-15_12-00-00",
+        start_time=datetime(2026, 8, 15, 12, 0, 0),
+        end_time=datetime(2026, 8, 15, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[_make_task_result("t", "SUCCESS", 1.0, 10.0)],
+        row_selection=row_selection,
+        framework_version="test",
+    )
+
+
+def test_run_md_names_every_requested_selector():
+    from coder_eval.models import RowSelection
+
+    md = ReportGenerator.generate_markdown(
+        _summary_with_selection(RowSelection(split="test", max_rows=5, sample_per_stratum=3))
+    )
+    assert "**Rows**: subset (--split test, --sample 5, --sample-per-stratum 3)" in md
+
+
+def test_run_md_names_only_the_selectors_that_were_requested():
+    from coder_eval.models import RowSelection
+
+    md = ReportGenerator.generate_markdown(_summary_with_selection(RowSelection(split="train")))
+    assert "**Rows**: subset (--split train)" in md
+    assert "--sample" not in md
+
+
+@pytest.mark.parametrize("selection", [None, "empty"])
+def test_run_md_prints_no_rows_line_without_a_requested_selector(selection):
+    """A full-suite run and a provenance-less run stay byte-identical to a pre-provenance
+    report — the whole point of gating the line on `requested` rather than on presence."""
+    from coder_eval.models import RowSelection
+
+    md = ReportGenerator.generate_markdown(_summary_with_selection(RowSelection() if selection == "empty" else None))
+    assert "**Rows**:" not in md

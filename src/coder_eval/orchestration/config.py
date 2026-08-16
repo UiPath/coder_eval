@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from coder_eval.models import PreservationMode
+from coder_eval.models import PreservationMode, RowSelection
 
 
 def resolve_preservation_mode(explicit: PreservationMode | None, driver: str) -> PreservationMode:
@@ -71,27 +71,18 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Dataset sampling (for cheap smoke runs on dataset-backed tasks)
-    max_rows: int | None = Field(
-        default=None,
-        ge=1,
-        description="Cap rows per dataset-backed task to first N. Non-dataset tasks unaffected.",
-    )
-    sample_per_stratum: int | None = Field(
-        default=None,
-        ge=1,
+    # Dataset row selection (--split / --sample / --sample-per-stratum), one model rather
+    # than three flat fields so the same declaration is what run.json records. Note the
+    # nested model deliberately does NOT declare extra="forbid" (run.json must stay
+    # forward-compatible — see RowSelection's docstring), so this container's own
+    # extra="forbid" does not reach inside it: a mistyped RowSelection(...) keyword is
+    # caught by pyright at the single construction site, not by validation here.
+    row_selection: RowSelection = Field(
+        default_factory=RowSelection,
         description=(
-            "CLI override (--sample-per-stratum) for dataset.sample_per_stratum: keep up to N "
-            "rows per stratum (stratify_field, default expected_skill). Lets a runner cap a "
-            "stratified dataset without editing the task YAML. Ignored when max_rows is set."
-        ),
-    )
-    split: str | None = Field(
-        default=None,
-        description=(
-            "CLI --split: keep only dataset rows whose dataset.split_field value matches. "
-            "Applied before max_rows / sample_per_stratum. Tasks whose rows carry no split "
-            "label are unaffected."
+            "Which dataset rows this run selects (--split / --sample / --sample-per-stratum). "
+            "Applied in expand_dataset, BEFORE variant resolution, so it takes part in no merge "
+            "layer. Defaults to an empty selection (every row). Non-dataset tasks are unaffected."
         ),
     )
 

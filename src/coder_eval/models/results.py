@@ -22,6 +22,7 @@ from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import FinalStatus
 from coder_eval.models.limits import DEFAULT_STOP_EARLY_GATE_THRESHOLD
+from coder_eval.models.row_selection import RowSelection
 from coder_eval.models.telemetry import (
     CommandStatistics,
     CommandTelemetry,
@@ -1080,6 +1081,20 @@ class RunSummary(BaseModel):
     # Configured concurrency (BatchRunConfig.max_parallel). Defaulted so existing
     # callers and fixtures don't have to set it.
     max_parallel: int = Field(default=1, ge=1, description="Configured max concurrent tasks for this run")
+
+    # Which dataset rows this run selected (BatchRunConfig.row_selection). `None` is a
+    # THIRD state, not a synonym for "no selectors" — see the description.
+    row_selection: RowSelection | None = Field(
+        default=None,
+        description=(
+            "Row selection this run executed under (--split / --sample / --sample-per-stratum). "
+            "``None`` means NOT RECORDED — a run written before this field existed, or a summary "
+            "rebuilt without a readable prior run.json — which is deliberately NOT the same as a "
+            "recorded selection whose ``split`` is null (no ``--split`` was passed). A consumer "
+            "comparing two runs needs that distinction: a recorded null split is one comparable "
+            "value, while an unrecorded one cannot rule out that the two arms ran different row sets."
+        ),
+    )
 
     # Detailed results
     task_results: list[dict[str, Any]] = Field(description="List of task results with {task_id, status, duration}")

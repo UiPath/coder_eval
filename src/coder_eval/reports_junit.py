@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 from .evaluation.judge_context import truncate
-from .models import FinalStatus, RunSummary, SuiteRollup
+from .models import ROW_SELECTOR_FLAGS, FinalStatus, RunSummary, SuiteRollup
 from .path_utils import replicate_subdir_name
 
 
@@ -396,6 +396,20 @@ def _suite_gate_suite(run_dir: Path) -> ET.Element | None:
     return suite
 
 
+def _row_selection_properties(summary: RunSummary) -> list[tuple[str, object]]:
+    """The run's row selectors as ``(name, value)`` pairs, or ``[]`` when none was requested.
+
+    Empty for a full-suite run AND for a run whose provenance was never recorded, so
+    neither emits a ``<properties>`` element at all — a CI consumer diffing reports across
+    the upgrade sees no change for either. Keyed by field name rather than by flag: a
+    property name is a machine-read key, and ``max_rows`` is what the schema calls it.
+    """
+    selection = summary.row_selection
+    if selection is None or not selection.requested:
+        return []
+    return [(field, getattr(selection, field)) for field in ROW_SELECTOR_FLAGS if getattr(selection, field) is not None]
+
+
 def generate_junit_xml(run_dir: Path) -> str:
     """Read ``run_dir`` and return a JUnit XML string.
 
@@ -427,8 +441,17 @@ def generate_junit_xml(run_dir: Path) -> str:
         grouped.setdefault(_variant_of(row), []).append(row)
 
     all_cases: list[ET.Element] = []
+    selection_props = _row_selection_properties(summary)
     for variant, rows in grouped.items():
         suite = ET.SubElement(root, "testsuite", {"name": _xml_safe(variant)})
+        # First child of each variant testsuite, which is where the JUnit schema allows
+        # <properties> — deliberately NOT under <testsuites>, where consumers vary on
+        # whether it is legal at all. Built once above and appended per suite, since every
+        # variant of one run shares the run's selection.
+        if selection_props:
+            properties = ET.SubElement(suite, "properties")
+            for key, value in selection_props:
+                ET.SubElement(properties, "property", {"name": key, "value": _xml_safe(str(value))})
         cases = [_task_case(row, run_dir) for row in rows]
         for case in cases:
             suite.append(case)

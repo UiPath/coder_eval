@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from ..config import Settings, settings
 from ..logging_config import setup_logging
-from ..models import PreservationMode, ResolvedTask, RunSummary, TaskResult
+from ..models import PreservationMode, ResolvedTask, RowSelection, RunSummary, TaskResult
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
@@ -496,9 +496,14 @@ async def _run_all_tasks(
         exclude_tags=exclude_tags,
         agent_type=agent_type,
         overrides=overrides or {},
-        max_rows=max_rows,
-        sample_per_stratum=sample_per_stratum,
-        split=split,
+        # The one production construction site, with literal keywords: RowSelection
+        # deliberately carries no extra="forbid" (run.json stays forward-compatible), so
+        # pyright is what catches a mistyped keyword here.
+        row_selection=RowSelection(
+            split=split,
+            max_rows=max_rows,
+            sample_per_stratum=sample_per_stratum,
+        ),
         repeats=repeats,
         verbose=verbose,
         include_skipped=include_skipped,

@@ -23,6 +23,7 @@ from ..models import (
     FinalStatus,
     PreservationMode,
     ResolvedTask,
+    RowSelection,
     RunSummary,
     SkippedTask,
     TaskDefinition,
@@ -249,6 +250,7 @@ async def run_batch(
         task_tags,
         task_paths=task_paths,
         max_parallel=config.max_parallel,
+        row_selection=config.row_selection,
         skipped_tasks=skipped_tasks or [],
     )
     return summary, all_results
@@ -578,6 +580,7 @@ def _generate_run_summary(
     *,
     task_paths: dict[str, str] | None = None,
     max_parallel: int = 1,
+    row_selection: RowSelection | None = None,
     skipped_tasks: list[SkippedTask] | None = None,
 ) -> RunSummary:
     """Generate run-level summary from batch results.
@@ -589,6 +592,7 @@ def _generate_run_summary(
         end_time: Batch end time.
         task_tags: Optional mapping of task_id -> tags.
         task_paths: Optional mapping of task_id -> source YAML path (string).
+        row_selection: Which dataset rows the run selected, or None when not recorded.
         skipped_tasks: Task YAMLs that failed to load upstream.
 
     Returns:
@@ -602,6 +606,7 @@ def _generate_run_summary(
         task_tags,
         task_paths=task_paths,
         max_parallel=max_parallel,
+        row_selection=row_selection,
         skipped_tasks=skipped_tasks,
     )
     write_run_summary(summary, run_dir)
@@ -617,6 +622,7 @@ def build_run_summary(
     *,
     task_paths: dict[str, str] | None = None,
     max_parallel: int = 1,
+    row_selection: RowSelection | None = None,
     skipped_tasks: list[SkippedTask] | None = None,
 ) -> RunSummary:
     """Aggregate task results into a ``RunSummary`` — pure, no disk I/O.
@@ -669,6 +675,11 @@ def build_run_summary(
         tasks_cost_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.COST_BUDGET_EXCEEDED),
         skipped_tasks=skipped_tasks or [],
         max_parallel=max_parallel,
+        # Defaults to None = "not recorded", which every pre-existing caller and fixture
+        # keeps producing unchanged. Deliberately not `RowSelection()`: an empty selection
+        # is a CLAIM that no selector applied, and only a caller that actually knows the
+        # run's config can make it.
+        row_selection=row_selection,
         task_results=[
             eval_result_to_task_dict(
                 r.result,

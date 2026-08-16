@@ -630,9 +630,9 @@ def resolve_all_tasks(
             expanded_tasks = expand_dataset(
                 task,
                 task_file.parent,
-                max_rows=config.max_rows,
-                sample_per_stratum=config.sample_per_stratum,
-                split=config.split,
+                max_rows=config.row_selection.max_rows,
+                sample_per_stratum=config.row_selection.sample_per_stratum,
+                split=config.row_selection.split,
             )
         except SplitSelectorError:
             # A CLI selector that matched nothing is user error, not repo state: demoted to

@@ -14,6 +14,7 @@ from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
+    RowSelection,
     TaskDefinition,
 )
 from coder_eval.orchestration.config import BatchRunConfig
@@ -731,7 +732,7 @@ class TestResolveAllTasksIntegration:
     def test_max_rows_applies(self, tmp_path: Path) -> None:
         task_file = self._write_task_yaml(tmp_path, "suite", with_dataset=True)
         default_exp, experiment = self._make_experiment(["v1"])
-        config = BatchRunConfig(run_dir=tmp_path / "runs", max_rows=1)
+        config = BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(max_rows=1))
 
         resolved, _ = resolve_all_tasks(
             task_files=[task_file],
@@ -762,7 +763,7 @@ class TestResolveAllTasksIntegration:
         task_file = tmp_path / "suite.yaml"
         task_file.write_text(yaml.safe_dump(data))
         default_exp, experiment = self._make_experiment(["v1"])
-        config = BatchRunConfig(run_dir=tmp_path / "runs", split="train")
+        config = BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(split="train"))
 
         resolved, _ = resolve_all_tasks(
             task_files=[task_file],
@@ -804,7 +805,7 @@ class TestResolveAllTasksIntegration:
             task_files=[labelled, unlabelled],
             experiment=experiment,
             default_experiment=default_exp,
-            config=BatchRunConfig(run_dir=tmp_path / "runs", split="train"),
+            config=BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(split="train")),
         )
         assert not skipped
         assert sorted(rt.task.task_id for rt in resolved) == [
@@ -833,7 +834,7 @@ class TestResolveAllTasksIntegration:
                 task_files=[task_file],
                 experiment=experiment,
                 default_experiment=default_exp,
-                config=BatchRunConfig(run_dir=tmp_path / "runs", split="holdou"),
+                config=BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(split="holdou")),
             )
         assert "no rows in split 'holdou'" in str(exc.value)
         assert "'test', 'train'" in str(exc.value)
@@ -855,7 +856,7 @@ class TestResolveAllTasksIntegration:
             task_files=[labelled, plain],
             experiment=experiment,
             default_experiment=default_exp,
-            config=BatchRunConfig(run_dir=tmp_path / "runs", split="train"),
+            config=BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(split="train")),
         )
         assert skipped == []
         assert sorted(rt.task.task_id for rt in resolved) == ["labelled/row-0", "plain/row-0", "plain/row-1"]
@@ -876,7 +877,7 @@ class TestResolveAllTasksIntegration:
                     task_files=[task_file],
                     experiment=experiment,
                     default_experiment=default_exp,
-                    config=BatchRunConfig(run_dir=tmp_path / "runs", split="holdou"),
+                    config=BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(split="holdou")),
                 )
             except ValueError as e:  # exactly what cli/run_command.py does
                 raise typer.BadParameter(str(e)) from e
@@ -885,7 +886,7 @@ class TestResolveAllTasksIntegration:
     def test_non_dataset_task_unaffected(self, tmp_path: Path) -> None:
         task_file = self._write_task_yaml(tmp_path, "plain", with_dataset=False)
         default_exp, experiment = self._make_experiment(["v1"])
-        config = BatchRunConfig(run_dir=tmp_path / "runs", max_rows=99)
+        config = BatchRunConfig(run_dir=tmp_path / "runs", row_selection=RowSelection(max_rows=99))
 
         resolved, _ = resolve_all_tasks(
             task_files=[task_file],

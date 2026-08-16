@@ -72,7 +72,7 @@ def write_run_json() -> Callable[..., Path]:
     ``eval_result_to_task_dict`` output; only ``task_id`` and ``status`` are
     required per row.
     """
-    from coder_eval.models import FinalStatus, RunSummary, SkippedTask
+    from coder_eval.models import FinalStatus, RowSelection, RunSummary, SkippedTask
 
     def _build(
         run_dir: Path,
@@ -80,6 +80,7 @@ def write_run_json() -> Callable[..., Path]:
         *,
         skipped: list[tuple[str, str]] | None = None,
         run_id: str = "2026-07-21_12-00-00",
+        row_selection: RowSelection | None = None,
     ) -> Path:
         counts = {"succeeded": 0, "failed": 0, "error": 0}
         for row in rows:
@@ -99,6 +100,7 @@ def write_run_json() -> Callable[..., Path]:
             tasks_error=counts["error"],
             skipped_tasks=[SkippedTask(path=p, reason=r) for p, r in (skipped or [])],
             task_results=rows,
+            row_selection=row_selection,
             framework_version="test",
         )
         run_dir.mkdir(parents=True, exist_ok=True)

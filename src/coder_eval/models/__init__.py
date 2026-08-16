@@ -173,6 +173,9 @@ from coder_eval.models.routing import (
     to_bedrock_inference_profile,
 )
 
+# Row selection
+from coder_eval.models.row_selection import ROW_SELECTOR_FLAGS, RowSelection
+
 # Sandbox
 from coder_eval.models.sandbox import (
     RECORD_CLI_DIR,
@@ -345,6 +348,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TaskConfigRecord",
     "RunSummary",
     "SkippedTask",
+    # Row selection (the recorded provenance + its field -> CLI flag map)
+    "ROW_SELECTOR_FLAGS",
+    "RowSelection",
     # Cost helpers, shared by RunSummary's computed fields and the reports so
     # every surface agrees on what a total costs and which rows lost money.
     "row_cost_incomplete",

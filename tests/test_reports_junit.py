@@ -932,3 +932,60 @@ def test_windows_drive_task_id_degrades_to_status_body(write_run_json: Callable[
     write_run_json(run_dir, [{"task_id": "C:/evil", "status": "FAILURE", "variant_id": "v1", "replicate_index": 0}])
     body = _find_testsuite(fromstring(generate_junit_xml(run_dir)), "v1").find("testcase").find("failure").text or ""
     assert "FAILURE" in body  # status-only fallback, no crash
+
+
+# --- row-selection properties (which rows the run actually executed) -----------
+
+
+def _suite_properties(testsuite: Any) -> dict[str, str]:
+    props = testsuite.find("properties")
+    return {p.get("name"): p.get("value") for p in props.findall("property")} if props is not None else {}
+
+
+def test_row_selection_properties_land_on_every_variant_testsuite(
+    write_run_json: Callable[..., Path], tmp_path: Path
+) -> None:
+    from coder_eval.models import RowSelection
+
+    run_dir = tmp_path / "run"
+    rows = [_row("t", "SUCCESS", variant_id="v1"), _row("t", "SUCCESS", variant_id="v2")]
+    write_run_json(run_dir, rows, row_selection=RowSelection(split="test", sample_per_stratum=3))
+
+    root = fromstring(generate_junit_xml(run_dir))
+    for variant in ("v1", "v2"):
+        props = _suite_properties(_find_testsuite(root, variant))
+        assert props == {"split": "test", "sample_per_stratum": "3"}
+    # <properties> must be the FIRST child of the testsuite — that is where the JUnit
+    # schema allows it, and consumers vary on anything else.
+    assert next(iter(_find_testsuite(root, "v1"))).tag == "properties"
+    # Never at the root: <testsuites> is not a legal parent for it.
+    assert root.find("properties") is None
+
+
+def test_no_properties_element_when_no_selector_was_requested(
+    write_run_json: Callable[..., Path], tmp_path: Path
+) -> None:
+    """A full-suite run and an unrecorded one both emit nothing, so a CI consumer
+    diffing reports across this upgrade sees no change for either."""
+    from coder_eval.models import RowSelection
+
+    run_dir = tmp_path / "run"
+    for selection in (None, RowSelection()):
+        write_run_json(run_dir, [_row("t", "SUCCESS", variant_id="v1")], row_selection=selection)
+        root = fromstring(generate_junit_xml(run_dir))
+        assert _find_testsuite(root, "v1").find("properties") is None
+
+
+def test_row_selection_properties_keep_the_xml_parseable(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A split name is user-supplied text, so it goes through _xml_safe like every
+    other attribute the writer emits."""
+    from coder_eval.models import RowSelection
+
+    run_dir = tmp_path / "run"
+    write_run_json(
+        run_dir,
+        [_row("t", "SUCCESS", variant_id="v1")],
+        row_selection=RowSelection(split="te<st>&\x00"),
+    )
+    root = fromstring(generate_junit_xml(run_dir))  # would raise on malformed XML
+    assert _suite_properties(_find_testsuite(root, "v1"))["split"].startswith("te<st>&")

@@ -61,6 +61,21 @@ invoke the run N times and read N run directories; `--repeats` cannot serve that
 (Contrast `experiment.md`'s `## Paired Comparison` block, which averages replicates per row
 before pairing — there `--repeats` is exactly the right tool.)
 
+**Row-selection provenance.** `run.json` carries `row_selection` — the `split` / `max_rows` /
+`sample_per_stratum` this run executed under (`--split` / `--sample` / `--sample-per-stratum`).
+Its **absence** means the run predates the field, which is deliberately NOT the same as a
+recorded `{"split": null, ...}`: the first says nothing about what was selected, the second
+says no selector was passed on the command line.
+
+It records what was **requested on the CLI**, not the effective row set. A task's own
+`dataset.sample_per_stratum` still narrows the run without appearing here — and that draw is
+re-drawn every invocation unless `dataset.sample_seed` is pinned — so a recorded all-`null`
+selection is *not* a promise that every row ran. Read the task YAML for that half.
+
+A consumer comparing two runs must not pair different `split` values — a train run and a test
+run of one suite are two different row sets, and reporting their difference as one measurement
+is the failure this field exists to prevent.
+
 **Scope-marker files** (used to detect what a given path represents):
 
 - `run.json` at the run root → **run scope**. If `experiment.json` (+ `experiment.md`) is also present → multi-variant experiment.

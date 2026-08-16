@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from .models import (
+    ROW_SELECTOR_FLAGS,
     CriterionAggregate,
     CriterionStats,
     EarlyStopReason,
@@ -367,6 +368,19 @@ class ReportGenerator:
             lines.append(f"**Model**: `{models[0]}`")
         elif len(models) > 1:
             lines.append(f"**Models**: {', '.join(f'`{m}`' for m in models)}")
+
+        # Only when a selector was actually REQUESTED. A full-suite run and a run whose
+        # provenance was never recorded both print nothing, so neither moves a byte against
+        # the pre-provenance report. `requested`, not "narrowed": whether a selector removed
+        # a row is a count comparison RunSummary does not carry.
+        selection = summary.row_selection
+        if selection is not None and selection.requested:
+            applied = [
+                f"{flag} {getattr(selection, field)}"
+                for field, flag in ROW_SELECTOR_FLAGS.items()
+                if getattr(selection, field) is not None
+            ]
+            lines.append(f"**Rows**: subset ({', '.join(applied)})")
         return lines
 
     @staticmethod
