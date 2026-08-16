@@ -6969,6 +6969,101 @@ class TestCE046CliFlagsAreDocumented:
 
 
 @pytest.mark.lint
+@pytest.mark.lint
+class TestCE052TemplateTasksLoad:
+    """CE052 — every task YAML under `templates/` must load through the real `load_task`.
+
+    A `@pytest.mark.lint` class rather than a `BaseRule`: it reasons over YAML trees and needs the
+    loader itself, not one `.py` AST at a time — the same shape as CE035/CE036.
+
+    **What it caught.** `templates/ci-outcome-fixture/evals/activation.yaml` declared
+    `suite_thresholds: {recall.yes: 0.7}` with no `dataset:` block, which
+    `check_suite_thresholds_require_dataset` rejects. Nothing referenced the fixture — `grep -rn
+    ci-outcome-fixture tests/ src/ Makefile .github/` returned nothing — so it had never been
+    loaded by anything. The damage is not a red build: `resolve_all_tasks` isolates a malformed
+    task into `skipped_tasks` and the run prints a yellow warning, so the emitted workflow would
+    have run GREEN while silently skipping the one suite that motivates the fixture's
+    `SKILL_SOURCE_PATH` passthrough.
+
+    **DISCOVERY, not an enumerated list**, so a future fixture tree is covered on arrival — the
+    property that would have covered this one. A file is a task when it carries a top-level
+    `task_id:`; everything else (the fixture's `evals/experiments/default.yaml`, which
+    `tasks/skills/ci-outcome.yaml` licenses as "not a valid task") is skipped by CONTENT rather
+    than by filename, and the skip is asserted rather than silent.
+
+    **Complements `TestPluginArtifacts`, does not subsume it.** That class asserts far more about
+    `plugins/coder-eval/reference/templates/` — row counts through `expand_dataset`, criterion
+    shapes, suite-threshold wiring. This asserts only loadability, over a DISCOVERED set. They
+    overlap on two files and neither contains the other; both stay.
+    """
+
+    TEMPLATES = Path(__file__).parent.parent / "templates"
+
+    def _task_yamls(self) -> list[Path]:
+        """Every YAML under `templates/` carrying a top-level `task_id:`."""
+        return [
+            path
+            for path in sorted(self.TEMPLATES.rglob("*.yaml"))
+            if re.search(r"^task_id:", path.read_text(encoding="utf-8"), re.MULTILINE)
+        ]
+
+    def test_the_discovery_set_is_not_empty(self) -> None:
+        """Anti-vacuity, and the CE044/CE045 lesson: a moved directory must report a GAP.
+
+        Without this the whole class passes by finding nothing, which is exactly the state a
+        renamed `templates/` would produce.
+        """
+        assert self.TEMPLATES.is_dir(), "templates/ moved — CE052 would be checking nothing"
+        discovered = self._task_yamls()
+        assert discovered, "no task YAML discovered under templates/ — CE052 is vacuous"
+
+    def test_every_template_task_loads(self) -> None:
+        from coder_eval.orchestration.task_loader import load_task
+
+        failures: list[str] = []
+        for path in self._task_yamls():
+            try:
+                load_task(path)
+            except Exception as exc:  # the report names the file and the reason
+                failures.append(f"{path.relative_to(self.TEMPLATES.parent)}: {exc}")
+        assert not failures, "template task YAML failed to load:\n" + "\n".join(failures)
+
+    def test_a_non_task_yaml_is_skipped_by_content_and_the_skip_is_visible(self) -> None:
+        # The fixture's experiment file is the known non-task. Asserted explicitly so the
+        # content check cannot quietly start skipping real tasks too.
+        experiment = self.TEMPLATES / "ci-outcome-fixture" / "evals" / "experiments" / "default.yaml"
+        assert experiment.is_file(), "fixture moved"
+        assert experiment not in self._task_yamls()
+        all_yaml = set(self.TEMPLATES.rglob("*.yaml"))
+        assert set(self._task_yamls()) == all_yaml - {experiment}, "an unexpected YAML is being skipped"
+
+    def test_the_activation_fixture_carries_both_polarities(self) -> None:
+        """The defect this phase fixed, pinned as behaviour rather than as "it loads".
+
+        `suite_thresholds: {recall.yes: ...}` is a gate on an across-row metric, so the suite
+        needs a dataset — and it needs a DISTRACTOR row too: recall over positives alone is
+        satisfiable by a skill that fires on everything.
+        """
+        from coder_eval.orchestration.task_loader import expand_dataset, load_task
+
+        path = self.TEMPLATES / "ci-outcome-fixture" / "evals" / "activation.yaml"
+        task, _source_yaml = load_task(path)
+        assert task.dataset is not None, "a suite_thresholds criterion needs a dataset: block"
+        rows = expand_dataset(task, path.parent)
+        expected = {row.success_criteria[0].expected_skill for row in rows}  # type: ignore[union-attr]
+        assert "" in expected, "no distractor row — recall.yes alone cannot detect over-firing"
+        assert expected - {""}, "no positive row — recall.yes would have no denominator"
+
+    def test_the_suite_thresholds_validate_against_the_dataset(self) -> None:
+        # The validator that rejected the pre-fix file, exercised on the fixed one.
+        from coder_eval.models.tasks import TaskDefinition
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _source_yaml = load_task(self.TEMPLATES / "ci-outcome-fixture" / "evals" / "activation.yaml")
+        assert isinstance(task, TaskDefinition)
+        assert task.success_criteria[0].suite_thresholds == {"recall.yes": 0.7}
+
+
 class TestImportRulesResolveRelativeImports:
     """The parity table: every import rule must fire on BOTH spellings of one violation.
 

@@ -2,6 +2,12 @@
 # `agent.plugins` path below: it is an environment variable, so the committed suite stays
 # portable — and a workflow that does not pass it through leaves the skill unreachable,
 # every positive row scoring 0, which is a permanent red indistinguishable from real drift.
+#
+# The `dataset:` block is what makes `suite_thresholds` mean anything: a threshold is a gate
+# on an ACROSS-ROW metric, so a criterion declaring one without a dataset is a hard
+# validation error (`check_suite_thresholds_require_dataset`) and the whole task loads as
+# skipped. The rows carry both polarities on purpose — `recall.yes` over positives only
+# would be satisfiable by a skill that fires on everything.
 task_id: "widget-skill-activation"
 description: "Does the agent engage `widget-skill` when it should?"
 tags: [activation]
@@ -18,13 +24,17 @@ run_limits:
   turn_timeout: 120
   task_timeout: 300
 
+dataset:
+  paths:
+    - "activation-rows.jsonl"
+
 initial_prompt: |
-  I need to add a new widget to this project — what's the right way?
+  ${row.prompt}
 
 success_criteria:
   - type: "skill_triggered"
-    description: "widget-skill activation"
+    description: "widget-skill activation for row ${row.id}"
     skill_name: "widget-skill"
-    expected_skill: "widget-skill"
+    expected_skill: "${row.expected_skill}"
     suite_thresholds:
       recall.yes: 0.7

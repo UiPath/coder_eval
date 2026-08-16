@@ -1,0 +1,4 @@
+{"id": "pos-1", "expected_skill": "widget-skill", "prompt": "I need to add a new widget to this project — what's the right way?"}
+{"id": "pos-2", "expected_skill": "widget-skill", "prompt": "How do I wire up another widget so it registers like the existing ones?"}
+{"id": "neg-1", "expected_skill": "", "prompt": "Bump the pytest version in pyproject.toml and re-lock."}
+{"id": "neg-2", "expected_skill": "", "prompt": "What does the README say this library is for?"}
