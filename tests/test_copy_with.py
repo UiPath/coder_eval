@@ -46,7 +46,7 @@ def _floor(**overrides) -> NoiseFloor:
 
 def test_the_hole_this_closes_is_real() -> None:
     """`model_copy(update=)` accepts a key no field declares, silently. Pinned, not assumed."""
-    typo = _floor().model_copy(update={"mde_typo": 9.9})  # noqa: CE048 — this IS the defect under test
+    typo = _floor().model_copy(update={"mde_typo": 9.9})  # CE048 scans src/ only; this IS the defect
 
     assert typo.mde_typo == 9.9  # type: ignore[attr-defined]  # a bare instance attribute...
     assert "mde_typo" not in typo.model_dump()  # ...that model_dump() has never heard of...

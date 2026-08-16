@@ -644,7 +644,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
         """
         lone = {"r0": [("yes", "yes")]}
         verdict = _gate(_shared_dirs(tmp_path, lone, lone))
-        typo = verdict.model_copy(update={"promotd": True})  # noqa: CE048 — this IS the defect
+        typo = verdict.model_copy(update={"promotd": True})  # CE048 scans src/ only; this IS the defect
 
         assert set(typo.model_dump()) == set(type(typo).model_fields), (
             "the model_dump() check the first draft used still passes here — that is why this "

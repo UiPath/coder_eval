@@ -5925,6 +5925,60 @@ class TestCE039ComputedClaims:
         got = evaluate_expression(expr, {"N": 4.0, "M_train": 12.0})
         assert got == 66.0
 
+    def test_the_execution_sign_claim_is_registered(self):
+        # Deleting the claim would otherwise reduce coverage silently — `covers=()` means the
+        # table-coverage rule cannot notice its absence, because it checks a SENTENCE.
+        from tests.lint.computed_claims import CLAIMS
+
+        assert "execution-sign-resolution" in {c.id for c in CLAIMS}
+
+    def test_the_execution_sign_claim_fails_on_a_reworded_sentence(self, tmp_path: Path):
+        """The presence half's self-test, in the style of the wrong-cell matchers above.
+
+        A reworded sign sentence must FAIL loudly and be re-pinned deliberately, rather than
+        quietly stop being checked.
+        """
+        from tests.lint.computed_claims import METHOD, _check_execution_sign_resolution
+
+        text = METHOD.read_text(encoding="utf-8")
+        assert _check_execution_sign_resolution(text, tmp_path / "real") == []
+
+        # Every occurrence: the file states the rule twice, and leaving one behind would make the
+        # sensor look green against a reworded sentence.
+        assert text.count("candidate minus incumbent") >= 2, "the anchor moved — re-derive it"
+        reworded = text.replace("candidate minus incumbent", "the candidate's score less the incumbent's")
+        failures = _check_execution_sign_resolution(reworded, tmp_path / "reworded")
+        assert failures and any("candidate minus incumbent" in f for f in failures), failures
+
+    def test_the_execution_sign_claim_fails_on_a_reversed_verdict(self, tmp_path: Path, monkeypatch):
+        """The behavioural half's self-test, driving the REAL claim function.
+
+        A claim whose behavioural half was reverted to `return []` would pass every other test in
+        this class. So `_exec_gate` — which the claim imports at call time — is swapped for a
+        wrapper that negates `mean_diff` on one declaration order only: exactly the shape a gate
+        reading `first_declared - second_declared` produces, and exactly the defect the method
+        file says promotes the arm that lost.
+        """
+        import tests.test_optimize_gate as gate_tests
+        from tests.lint.computed_claims import METHOD, _check_execution_sign_resolution
+
+        text = METHOD.read_text(encoding="utf-8")
+        real_exec_gate = gate_tests._exec_gate
+
+        def _sign_blind(run_dir, **kwargs):
+            verdict = real_exec_gate(run_dir, **kwargs)
+            # The claim builds each arm's fixture UNDER a named parent, so the marker is in the
+            # path rather than in `run_dir.name` (which is the builder's own "round1-gate").
+            if "declared-candidate-first" in run_dir.as_posix() and verdict.mean_diff is not None:
+                return verdict.model_copy(update={"mean_diff": -verdict.mean_diff})  # CE048 scans src/ only
+            return verdict
+
+        monkeypatch.setattr(gate_tests, "_exec_gate", _sign_blind)
+        failures = _check_execution_sign_resolution(text, tmp_path / "blind")
+        assert failures, "the claim's behavioural half did not notice a sign-blind gate"
+        assert any("candidate first" in f for f in failures), failures
+        assert any("disagree" in f for f in failures), failures
+
     def test_parse_markdown_tables_skips_fenced_blocks(self):
         from tests.lint.computed_claims import parse_markdown_tables
 

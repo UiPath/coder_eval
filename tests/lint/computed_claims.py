@@ -547,6 +547,71 @@ def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
     return failures
 
 
+def _check_execution_sign_resolution(text: str, tmp: Path) -> list[str]:
+    """The method file says the gate resolves the subtraction's sign. Run it and see.
+
+    The sibling of ``interval-from-one-run-dir``, for the other track. Presence first — the
+    sentence must still be there — then the behaviour, because a sentence nobody deleted can still
+    describe code that has stopped doing it.
+
+    This claim's job is to bind the PROSE to the behaviour. ``TestExecutionGateSign``
+    (``tests/test_optimize_gate.py``) is the unit-level guarantee and asserts the same three
+    things deliberately: a weaker check here would not prove the sentence. Neither is redundant
+    with the other — delete the unit test and the behaviour is unpinned; delete this and
+    ``optimize-method.md`` can be reworded into a lie about it, which is exactly what the file
+    warns costs you a promotion of the arm that LOST.
+    """
+    from tests.test_optimize_gate import _WINNER, _exec_gate, _exec_run_dir
+
+    failures: list[str] = []
+    normalized = " ".join(text.split())
+    for token in (
+        "the difference it reports is always",
+        "candidate minus incumbent",
+        "whichever order the experiment file declared its variants in",
+    ):
+        if token not in normalized:
+            failures.append(
+                f"the method file no longer says {token!r} — that sentence is the gate's central "
+                "promise, and a reversed reading promotes the arm that lost"
+            )
+
+    # Distinct sub-directories: `_exec_run_dir` asserts its target does not exist, precisely
+    # because two builds under one parent silently MERGE into one fixture.
+    first = _exec_gate(_exec_run_dir(tmp / "declared-incumbent-first", **_WINNER, declare_incumbent_first=True))
+    second = _exec_gate(_exec_run_dir(tmp / "declared-candidate-first", **_WINNER, declare_incumbent_first=False))
+
+    for order, verdict in (("incumbent first", first), ("candidate first", second)):
+        if verdict.mean_diff is None or verdict.mean_diff <= 0.0:
+            failures.append(
+                f"with the variants declared {order} the gate reports mean_diff={verdict.mean_diff} "
+                "on a fixture where the candidate wins EVERY row — the method file says the sign is "
+                "resolved to candidate minus incumbent whichever order was declared"
+            )
+        # A MISSING interval fails too. This fixture is a clean two-arm win, so `None` here means
+        # the gate refused or could not measure — not an ordering to skip checking.
+        if verdict.ci_low is None or verdict.ci_high is None:
+            failures.append(
+                f"with the variants declared {order} the gate returned no interval "
+                f"([{verdict.ci_low}, {verdict.ci_high}]) on a clean two-arm win — the sentence "
+                "describes bounds that are re-ordered to match the resolved sign, so there must be "
+                "bounds to order"
+            )
+        elif verdict.ci_low > verdict.ci_high:
+            failures.append(
+                f"with the variants declared {order} the interval came back reversed "
+                f"([{verdict.ci_low}, {verdict.ci_high}]) — negating a difference reverses its "
+                "bounds, and the method file says they are re-ordered to match"
+            )
+    if first.mean_diff != second.mean_diff:
+        failures.append(
+            f"the two declaration orders disagree: {first.mean_diff} against {second.mean_diff}. "
+            "Same rows, same scores — so the reading depends on the order the experiment file "
+            "happened to list its variants in, which is the one thing the gate exists to remove"
+        )
+    return failures
+
+
 CLAIMS: list[ComputedClaim] = [
     ComputedClaim(
         id="cost-table",
@@ -589,6 +654,21 @@ CLAIMS: list[ComputedClaim] = [
         ),
         covers=(),
         check=_check_interval_from_one_run_dir,
+    ),
+    ComputedClaim(
+        id="execution-sign-resolution",
+        surface=METHOD,
+        why=(
+            "the file's central promise about the execution gate — that it reports "
+            "candidate-minus-incumbent whichever order the experiment declared its variants in. "
+            "A reversed reading PROMOTES THE ARM THAT LOST, and every subsequent number in the "
+            "ledger corroborates it. This binds the sentence to the behaviour; "
+            "TestExecutionGateSign is the unit-level guarantee and neither replaces the other."
+        ),
+        # `covers=()` deliberately: this claim checks a SENTENCE, not a table. The coverage rule
+        # (`uncovered_tables`) only demands claims for arithmetic-bearing tables.
+        covers=(),
+        check=_check_execution_sign_resolution,
     ),
 ]
 
