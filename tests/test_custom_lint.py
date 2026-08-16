@@ -18,6 +18,8 @@ from typing import ClassVar
 
 import pytest
 
+from tests.lint.cli_flags import help_for, long_flags
+from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.runner import ALL_RULES, check_paths
 
 
@@ -6210,25 +6212,6 @@ class TestCE043RowSelectorParity:
       ``tests/test_cli_row_selectors.py`` is what covers that.
     """
 
-    @staticmethod
-    def _long_flags(fn) -> set[str]:
-        """Every ``--long`` flag the command declares, read off its Typer OptionInfo defaults."""
-        import inspect
-
-        out: set[str] = set()
-        for param in inspect.signature(fn).parameters.values():
-            out.update(getattr(param.default, "param_decls", ()) or ())
-        return {flag for flag in out if flag.startswith("--")}
-
-    @staticmethod
-    def _help_for(fn, flag: str) -> str | None:
-        import inspect
-
-        for param in inspect.signature(fn).parameters.values():
-            if flag in (getattr(param.default, "param_decls", ()) or ()):
-                return getattr(param.default, "help", None)
-        return None
-
     def test_the_flag_map_covers_exactly_the_selector_model(self) -> None:
         from coder_eval.models import ROW_SELECTOR_FLAGS, RowSelection
 
@@ -6248,7 +6231,7 @@ class TestCE043RowSelectorParity:
         from coder_eval.models import ROW_SELECTOR_FLAGS
 
         fn = run_command if command_name == "run_command" else plan_command
-        declared = self._long_flags(fn)
+        declared = long_flags(fn)
         missing = sorted(set(ROW_SELECTOR_FLAGS.values()) - declared)
         assert not missing, (
             f"{command_name} does not declare {missing}. `plan` is the pre-spend preview of what "
@@ -6272,8 +6255,8 @@ class TestCE043RowSelectorParity:
             "max_rows": row_selectors.SAMPLE_HELP,
             "sample_per_stratum": row_selectors.SAMPLE_PER_STRATUM_HELP,
         }[field]
-        run_help = self._help_for(run_command, flag)
-        plan_help = self._help_for(plan_command, flag)
+        run_help = help_for(run_command, flag)
+        plan_help = help_for(plan_command, flag)
         assert run_help is plan_help, (
             f"{flag} is described differently by `run` and `plan`. One flag, two descriptions, is "
             "how the preview and the run drift apart in a reader's head."
@@ -6296,5 +6279,144 @@ class TestCE043RowSelectorParity:
             sample: int | None = typer.Option(None, "--sample"),
         ) -> None: ...
 
-        missing = sorted(set(ROW_SELECTOR_FLAGS.values()) - self._long_flags(_stub))
+        missing = sorted(set(ROW_SELECTOR_FLAGS.values()) - long_flags(_stub))
         assert missing == ["--sample-per-stratum"]
+
+
+@pytest.mark.lint
+class TestCE046CliFlagsAreDocumented:
+    """CE046 — every long `--flag` a CLI command declares must appear in `docs/USER_GUIDE.md`.
+
+    The CE030 doc-parity family, one surface over: CE030 gates a model's fields against its guide
+    section, and a CLI flag is the same contract with a different declaration site. An undocumented
+    flag is a capability the user pays for and cannot find.
+
+    The scan set is DERIVED from `coder_eval.cli.app`, and the only exclusion mechanism is Typer's
+    `hidden=True`. There is deliberately no exemption map: "this command is not part of the
+    user-facing surface" is already declared once, in `cli/__init__.py`, and a second hand-kept
+    list would be that same fact spelled twice.
+
+    **Boundary**, stated so a green run is not mistaken for a proof:
+
+    - it pins DOCUMENTATION, never behaviour — a flag can be documented and do nothing;
+    - short flags (`-j`, `-e`) are out of scope by construction, matching CE043;
+    - a flag Typer DERIVES from the parameter name carries no `param_decls` and is invisible to
+      it — the same blind spot CE043 declares, stated on `tests/lint/cli_flags.py`.
+    """
+
+    GUIDE: ClassVar[Path] = Path(__file__).parent.parent / "docs" / "USER_GUIDE.md"
+
+    def test_every_cli_flag_appears_in_the_user_guide(self) -> None:
+        from tests.lint.cli_flags import documented_commands, undocumented_flags
+
+        missing = undocumented_flags(documented_commands(), self.GUIDE.read_text(encoding="utf-8"))
+        assert not missing, "\n  ".join(["undocumented CLI flags:", *missing])
+
+    def test_the_scan_sees_the_real_commands(self) -> None:
+        # Anti-vacuity: an empty command map or an empty flag set would make the check above pass
+        # while reading nothing.
+        from tests.lint.cli_flags import documented_commands
+
+        commands = documented_commands()
+        assert {"run", "plan"} <= set(commands), sorted(commands)
+        assert "--split" in long_flags(commands["run"])
+
+    def test_the_command_set_is_derived_not_hardcoded(self) -> None:
+        # Compared against `app` directly. A hardcoded expected list here would reintroduce the
+        # checklist the derivation exists to replace — `evaluate` and `aggregate` are easy to miss.
+        from coder_eval.cli import app
+        from tests.lint.cli_flags import documented_commands
+
+        expected = {c.name or c.callback.__name__ for c in app.registered_commands if c.hidden is not True}
+        callback = app.registered_callback
+        if callback is not None and callback.callback is not None and callback.hidden is not True:
+            expected.add(callback.callback.__name__)
+        assert set(documented_commands()) == expected
+
+    def test_a_hidden_command_is_not_scanned(self) -> None:
+        # `_run-task-internal`'s `--input` / `--task-dir` are absent from the guide, correctly:
+        # the command is `hidden=True`, so it never reaches the check and needs no exemption.
+        from tests.lint.cli_flags import documented_commands
+
+        assert "_run-task-internal" not in documented_commands()
+
+    def test_it_catches_an_undocumented_flag(self) -> None:
+        import typer
+
+        from tests.lint.cli_flags import undocumented_flags
+
+        def _stub(nowhere: str | None = typer.Option(None, "--nowhere")) -> None: ...
+
+        missing = undocumented_flags({"stub": _stub}, "a guide that mentions no such flag")
+        assert len(missing) == 1 and "--nowhere" in missing[0], missing
+
+    def test_a_boolean_pair_documented_with_spaces_still_counts(self) -> None:
+        """`--preserve/--no-preserve` arrives as ONE unspaced string; the guide writes it spaced.
+
+        Matching the raw decl would fail on a CORRECTLY documented flag and demand an edit that
+        makes the guide worse — so the decl is split on `/` and each bare name matched alone.
+        """
+        import typer
+
+        from tests.lint.cli_flags import undocumented_flags
+
+        def _stub(preserve: bool = typer.Option(True, "--preserve/--no-preserve")) -> None: ...
+
+        spaced = "the sandbox is kept unless `--preserve / --no-preserve` says otherwise"
+        assert undocumented_flags({"stub": _stub}, spaced) == []
+        assert undocumented_flags({"stub": _stub}, "only `--preserve` here") != []
+
+
+@pytest.mark.lint
+class TestCE047NoBareAssertInCli:
+    """CE047 — no bare `assert` under `src/coder_eval/cli/`.
+
+    `python -O` strips asserts. An internal invariant survives that; argument validation does not,
+    and `plan_command.py` shipped a bare `assert` as its only argument validation. The rule's
+    boundary — why it is scoped to one directory when `src/` holds 77 asserts — is on the rule
+    module.
+    """
+
+    def test_it_fires_on_an_assert_in_cli(self) -> None:
+        source = textwrap.dedent(
+            """
+            def plan_command(paths):
+                assert paths, "at least one path"
+            """
+        )
+        rule = NoBareAssertInCli("src/coder_eval/cli/plan_command.py")
+        violations = rule.check(ast.parse(source))
+        assert len(violations) == 1 and violations[0].rule_id == "CE047", violations
+
+    def test_it_is_silent_outside_cli(self) -> None:
+        source = textwrap.dedent(
+            """
+            def _pair(rows):
+                assert rows, "internal invariant"
+            """
+        )
+        assert NoBareAssertInCli("src/coder_eval/optimize_gate.py").check(ast.parse(source)) == []
+
+    def test_the_scope_match_survives_windows_separators(self) -> None:
+        source = "def f():\n    assert True\n"
+        rule = NoBareAssertInCli("src\\coder_eval\\cli\\run_command.py")
+        assert len(rule.check(ast.parse(source))) == 1
+
+    def test_the_repo_wide_count_in_the_docstring_is_still_true(self) -> None:
+        """The docstring justifies the narrow scope with a measured number; measure it again.
+
+        A boundary that quotes a count is a claim, and a claim that rots is how a rule's scope
+        stops being defensible without anyone noticing.
+        """
+        import tests.lint.rules.ce047_no_bare_assert_in_cli as module
+
+        total = sum(
+            1
+            for path in sorted(SRC.rglob("*.py"))
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Assert)
+        )
+        assert f"**{total}**" in (module.__doc__ or ""), (
+            f"src/ now holds {total} assert statements; CE047's docstring quotes a different number "
+            "to justify its narrow scope."
+        )

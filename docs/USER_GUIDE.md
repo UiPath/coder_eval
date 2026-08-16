@@ -22,6 +22,14 @@ start with the [tutorials](tutorials/README.md); for the task-file schema see th
 
 ## CLI Commands
 
+### Global options
+
+Accepted before any subcommand.
+
+| Flag | Description |
+| --- | --- |
+| `--version` | Print the installed coder-eval version and exit. |
+
 ### `coder-eval run` — execute evaluations
 
 ```bash
@@ -50,6 +58,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--tags, -t` | Only run tasks matching any of these tags (comma-separated) |
 | `--experiment, -e` | Experiment definition YAML for multi-variant comparison (default: `experiments/default.yaml`) |
 | `--log-file` | Write logs to file |
+| `--junit-xml PATH` | Also write a JUnit XML report of task results to `PATH`, for CI test-report ingestion. Written after the run summary is persisted and before the failure exit-code gate. See [CI Gate](CI_GATE.md). |
 | `--backend, -b` | API backend: `direct` or `bedrock` (default: from `API_BACKEND` env var) |
 | `--stream, -s` | Stream LLM events to terminal: `full` or `minimal` (disables progress bar) |
 | `--verbose, -v` | DEBUG-level logging |
