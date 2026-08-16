@@ -75,9 +75,12 @@ Checks task syntax, required CLI tools, API keys, and schema validity without ex
 | `--sample N` | For dataset-backed tasks, preview a fixed-seed random N-row sample (reproducible). Overrides `--sample-per-stratum`. See [Bring Your Own Dataset](DATASETS.md). |
 | `--sample-per-stratum N` | For dataset-backed tasks, preview up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — `plan` warns when that applies. See [Bring Your Own Dataset](DATASETS.md). |
 
-`plan` takes the same three row selectors as `run` and previews **exactly** what `run` would
-select, naming which selector narrowed the set and printing a per-stratum breakdown of the
-selected rows. That parity is enforced by a lint rule, so the two commands cannot drift apart.
+`plan` takes the same three row selectors as `run`, applies them through the same code, and
+previews the rows `run` would select — naming which selector narrowed the set (or reporting a
+selector that was honoured but removed nothing) and printing a per-stratum breakdown. A lint rule
+holds the two commands to the same flag set and the same help text; that the row sets match is
+pinned by a preview-parity test rather than by the rule. For an unseeded stratified sample the
+COUNT is what `run` will execute, not the identity of the rows — `plan` warns when that applies.
 
 ### `coder-eval evaluate` — test criteria without an agent
 

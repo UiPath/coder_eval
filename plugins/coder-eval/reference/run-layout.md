@@ -74,9 +74,20 @@ selection is *not* a promise that every row ran. Read the task YAML for that hal
 A consumer comparing two runs must not pair different `split` values — a train run and a test
 run of one suite are two different row sets, and reporting their difference as one measurement
 is the failure this field exists to prevent. `optimize_gate.activation_gate` enforces exactly
-that: it REFUSES a pair whose arms recorded different splits (`NOT A RESULT`, `promoted=False`),
-and NOTES an unrecorded one rather than assuming it matched. `measure_noise_floor` refuses to
+that: it REFUSES a pair whose arms recorded different splits, and NOTES an unrecorded one rather
+than assuming it matched. The refusal leaves `promoted` at `null` like every other activation
+verdict — `holm_promote` is what forces it to `false` and what makes the block headline
+`NOT A RESULT`; before that the headline is `UNDECIDED` and the reason prints on its own line. `measure_noise_floor` refuses to
 measure across them at all, and a floor measured over any unrecorded run dir is never cached.
+
+One caveat on `--resume`: the field records the selection of the invocation that WROTE the
+summary, so a resumed run stamps its own selectors over results produced by an earlier one. The
+run-config fingerprint warns about that drift separately; the provenance field itself does not
+distinguish the two.
+
+Scope: only `split` is compared by the gate. `max_rows` / `sample_per_stratum` are recorded but
+not gate-checked — a mismatch there shows up as a small `rows_paired` beside a large
+`rows_excluded` rather than as a refusal.
 
 **Scope-marker files** (used to detect what a given path represents):
 

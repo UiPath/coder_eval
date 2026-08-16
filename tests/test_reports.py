@@ -1331,19 +1331,22 @@ def _summary_with_selection(row_selection):
 
 
 def test_run_md_names_every_requested_selector():
+    # "requested", not "subset": `RowSelection.requested` is true when a selector was ASKED FOR,
+    # and `--sample 99` over a 4-row dataset asks for one while narrowing nothing. The model's
+    # docstring forbids reading a subset-claim into the field; printing the word was that misread.
     from coder_eval.models import RowSelection
 
     md = ReportGenerator.generate_markdown(
         _summary_with_selection(RowSelection(split="test", max_rows=5, sample_per_stratum=3))
     )
-    assert "**Rows**: subset (--split test, --sample 5, --sample-per-stratum 3)" in md
+    assert "**Rows**: requested (--split test, --sample 5, --sample-per-stratum 3)" in md
 
 
 def test_run_md_names_only_the_selectors_that_were_requested():
     from coder_eval.models import RowSelection
 
     md = ReportGenerator.generate_markdown(_summary_with_selection(RowSelection(split="train")))
-    assert "**Rows**: subset (--split train)" in md
+    assert "**Rows**: requested (--split train)" in md
     assert "--sample" not in md
 
 

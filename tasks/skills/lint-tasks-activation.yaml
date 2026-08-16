@@ -57,7 +57,8 @@ success_criteria:
     skill_name: "lint-tasks"
     expected_skill: "${row.expected_skill}"
     # MEASURED 2026-08-15 on claude-sonnet-4-6, 28 rows x 2 replicates (56 scored),
-    # run dir runs/rebaseline-lint-tasks, completion_rate 1.000:
+    # NO --split (the FULL suite, both halves), run dir runs/rebaseline-lint-tasks,
+    # completion_rate 1.000:
     #   recall.yes 1.000 · precision.yes 1.000
     # (2 of the 56 replicates ended MAX_TURNS_EXHAUSTED; every criterion on them still scored,
     # so completion_rate is genuinely 1.000 rather than an eroded denominator.)

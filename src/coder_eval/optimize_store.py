@@ -12,10 +12,10 @@ Carved out of :mod:`coder_eval.optimize_gate` on the precedent
 decision layer that also owns its storage cannot be reasoned about separately from it.
 
 **One-way dependency.** This module imports :mod:`coder_eval.models` and nothing else from the
-package — never ``optimize_gate``, which imports it. ``UNRESOLVED_MODEL`` lives here rather than
-with the gate for exactly that reason: it is a cache-key sentinel (``record_noise_floor`` refuses
-to write it, ``lookup_noise_floor`` can never match it), so keeping it in the gate would make this
-module import the gate and close a cycle.
+package — never ``optimize_gate``, which imports it. ``UNRESOLVED_MODEL`` and ``UNRECORDED_SPLIT``
+live here rather than with the gate for exactly that reason: both are cache-key sentinels that
+``record_noise_floor`` refuses to write, so keeping them in the gate would make this module import
+the gate and close a cycle.
 
 Two stated limits of :func:`_atomic_write`, both accepted because this is a local single-agent
 artifact: the read-modify-write around it is not locked, so two concurrent writers lose one set of
@@ -199,11 +199,11 @@ UNRESOLVED_MODEL = "(unresolved)"
 
 # The exact twin of UNRESOLVED_MODEL, one key field over: placeholder for "at least one of the run
 # directories this floor was measured over recorded no row-selection provenance". It can never
-# collide with a real split name. A floor carrying it is never WRITTEN to the cache (it is not
-# blocked from ATTEMPTING a lookup the way UNRESOLVED_MODEL is, and does not need to be: nothing
-# carrying this value is ever written, so no lookup can match. The asymmetry costs one scan and is
-# stated rather than removed.)
-# It is kept out of the cache — a floor measured over runs that MIGHT have used different splits is not a floor for any
-# one of them, and storing it would accumulate entries that can never match their own lookup.
-# PUBLIC because the gate imports it.
+# collide with a real split name. A floor carrying it is never WRITTEN to the cache: a floor
+# measured over runs that MIGHT have used different splits is not a floor for any one of them, and
+# storing it would accumulate entries that can never match their own lookup.
+#
+# Unlike UNRESOLVED_MODEL it is not blocked from ATTEMPTING a lookup, and does not need to be —
+# nothing carrying this value is ever written, so no lookup can match. The asymmetry costs one
+# scan and is stated rather than removed. PUBLIC because the gate imports it.
 UNRECORDED_SPLIT = "(unrecorded)"

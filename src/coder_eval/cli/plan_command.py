@@ -8,6 +8,7 @@ from typing import Any
 import typer
 from rich.markup import escape
 
+from ..models import ROW_SELECTOR_FLAGS
 from ..models.tasks import TaskDefinition, UnknownTaskFieldWarning
 from ..orchestration.task_loader import (
     STRATIFIED_CAUSE_PREFIXES,
@@ -75,12 +76,30 @@ def _preview_dataset(
     labels = [row_split_label(r, task.dataset.split_field) for r in rows]
     labelled = [x for x in labels if x is not None]
 
+    # Two different questions, and the line answers whichever applies:
+    #   what NARROWED  -> `outcome.applied`, the selector code's own report;
+    #   what was ASKED  -> the arguments, when nothing narrowed.
+    # Printing only the first was a regression: `--split test` on an all-test suite is HONOURED
+    # and removes nothing, so the line became byte-identical to passing no selector at all and a
+    # user could no longer confirm the flag had been read. It also contradicted `run.md`, which
+    # records what was REQUESTED — the two surfaces described one invocation two ways.
+    requested = [
+        f"{flag} {value}"
+        for flag, value in (
+            (ROW_SELECTOR_FLAGS["split"], split_name),
+            (ROW_SELECTOR_FLAGS["max_rows"], max_rows),
+            (ROW_SELECTOR_FLAGS["sample_per_stratum"], sample_per_stratum),
+        )
+        if value is not None
+    ]
     if outcome.applied:
         suffix = f" ({escape(', '.join(outcome.applied))})"
     elif split_name is not None and not labelled:
         # Do not imply the selector did something. It did not: an unlabelled task passes
         # through --split untouched, because --split is global to the invocation.
         suffix = f" (--split {escape(split_name)}: not labelled, all rows kept)"
+    elif requested:
+        suffix = f" (requested {escape(', '.join(requested))}; removed no rows)"
     else:
         suffix = ""
     console.print(f"  [dim]Dataset: {len(rows)} rows -> {len(expanded)} selected{suffix}[/dim]")

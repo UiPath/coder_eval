@@ -380,7 +380,11 @@ class ReportGenerator:
                 for field, flag in ROW_SELECTOR_FLAGS.items()
                 if getattr(selection, field) is not None
             ]
-            lines.append(f"**Rows**: subset ({', '.join(applied)})")
+            # "requested", never "subset": `RowSelection.requested` is true when a selector was
+            # ASKED FOR, and `--sample 99` over a 4-row dataset asks for one while narrowing
+            # nothing. The model's own docstring forbids reading a subset-claim into this field,
+            # and printing the word here was that exact misread.
+            lines.append(f"**Rows**: requested ({', '.join(applied)})")
         return lines
 
     @staticmethod

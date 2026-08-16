@@ -4727,7 +4727,7 @@ class TestCrossSplitRendering:
         block = render_markdown(self._refused(tmp_path))
         assert "**UNDECIDED" in block
         assert "**NOT A RESULT:** " in block
-        assert "DIFFERENT row selections" in block
+        assert "DIFFERENT --split values" in block
 
     def test_an_ordinary_discreteness_refusal_still_says_cannot_separate(self, tmp_path: Path) -> None:
         """Regression guard for the new branch: that one carries a p and keeps its own headline.
@@ -4771,6 +4771,25 @@ class TestAllNegativeSubsetNote:
         absent = render_markdown(self._decided(tmp_path / "a", ("no", "no")))
         unengaged = render_markdown(self._decided(tmp_path / "b", ("yes", "no")))
         assert absent != unengaged
+
+    def test_a_wiring_fault_with_no_pairs_does_not_get_the_all_negative_note(self, tmp_path: Path) -> None:
+        """`any()` over an empty iterable is False, so an unguarded check fires here too.
+
+        A mistyped `criterion_index` scores nothing on either arm. That already has its own note
+        naming the index; adding "no row expects or observes 'yes' — check `expected_skill` and
+        your --split" puts two contradictory remedies in one block, on the commonest wiring error
+        this gate has a dedicated message for. It also breaks the note's own justification: with
+        no pairs `n_discordant` is None, so the zero-discordant path does NOT refuse, and the
+        "it is already refused anyway" argument does not hold.
+        """
+        rows = {f"r{i}": [("yes", "no")] for i in range(6)}
+        dirs = _shared_dirs(tmp_path, rows, rows)
+        verdict = _gate(dirs, criterion_index=9, n_resamples=_FAST_RESAMPLES)
+
+        assert verdict.rows_paired == 0 and verdict.n_discordant is None
+        assert not any("undefined on BOTH arms" in note for note in verdict.notes)
+        # The note that SHOULD be there still is.
+        assert any("criterion_index=9" in note for note in verdict.notes)
 
     def test_the_note_changes_no_decision(self, tmp_path: Path) -> None:
         """A note, not a refusal: the zero-discordant path still owns the outcome."""

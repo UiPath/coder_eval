@@ -13,8 +13,8 @@ runs one way in both cases:
   produces. The gate does **not** import it — a decision layer that depended on its own
   presentation would make the split cosmetic, which a layering test pins.
 - :mod:`coder_eval.optimize_store` owns the ``measurements.json`` sidecar. This module imports
-  exactly two names from it (``UNRESOLVED_MODEL``, ``lookup_noise_floor``), which is the only edge
-  between the three.
+  exactly three names from it (``UNRESOLVED_MODEL``, ``UNRECORDED_SPLIT``,
+  ``lookup_noise_floor``), which is the only edge between the three.
 
 What stays here is everything that DECIDES: the statistics, the two gates, the Holm wrappers, the
 three fronts, the search loop and the leak preflight. ``regression_check`` and
@@ -1300,13 +1300,21 @@ def activation_gate(
     # data sources, not drift: that track takes ONE run_dir holding both variants, so both arms
     # share one run.json and one split by construction and a cross-split pair is unrepresentable
     # there.
+    # SCOPE: `--split` only, and the message says so rather than claiming "row selections".
+    # `run.json` also records `max_rows` / `sample_per_stratum`, and those are NOT compared here.
+    # The gap is real but narrower: a `--sample` draw is fixed-seed, so two arms at DIFFERENT
+    # counts do score largely disjoint rows — however that shows up downstream as a small
+    # `rows_paired` beside a large `rows_excluded`, which the block already reports, whereas a
+    # split mismatch can leave both arms fully paired on rows that merely happen to share ids.
+    # Widening the comparison is a behaviour change beyond what this preflight was scoped to and
+    # is recorded in `.claude/harness-candidates.md` rather than smuggled in here.
     incumbent_provenance = read_split_provenance(incumbent_run_dirs)
     candidate_provenance = read_split_provenance(candidate_run_dirs)
     union = incumbent_provenance.recorded | candidate_provenance.recorded
     if len(union) > 1:
         splits = _format_splits(union)
         refusal = (
-            f"the two arms recorded DIFFERENT row selections (splits: {splits}) — "
+            f"the two arms recorded DIFFERENT --split values ({splits}) — "
             f"{incumbent_variant!r} over {', '.join(str(d) for d in incumbent_run_dirs)} and "
             f"{candidate_variant!r} over {', '.join(str(d) for d in candidate_run_dirs)}. "
             "They did not score the same rows, so their difference is not an effect. Re-run both "
@@ -1405,7 +1413,15 @@ def activation_gate(
     #
     # `--split` is how this now arises in practice: a test split can select an all-negative subset
     # of a suite that has positive rows in train.
-    if not any(TARGET_LABEL in pair for pair in (*paired.incumbent_pairs, *paired.candidate_pairs)):
+    # Guarded on there BEING pairs. `any()` over an empty iterable is False, so without this the
+    # note also fires when the arms scored NOTHING — a wiring fault that already has its own note
+    # naming a mistyped `criterion_index`. The block then carried two contradictory remedies
+    # ("check expected_skill / your --split" against "fix the criterion index"), on the commonest
+    # wiring error this gate has a dedicated message for. It also falsified the comment below:
+    # with no pairs, `n_discordant` is None rather than 0, so the zero-discordant path does NOT
+    # refuse and the "already refused" argument does not hold.
+    scored_pairs = (*paired.incumbent_pairs, *paired.candidate_pairs)
+    if scored_pairs and not any(TARGET_LABEL in pair for pair in scored_pairs):
         notes.append(
             f"no row scored here expects or observes {TARGET_LABEL!r}, so f1.{TARGET_LABEL} is "
             + "undefined on BOTH arms and reads 0.000 by the criterion layer's convention — the "
@@ -1925,17 +1941,16 @@ def execution_gate(
     # one split by construction and a cross-split pair is unrepresentable here. There is nothing to
     # refuse; there is still something worth stating, because "which rows did this gate run score?"
     # is the question a reader of a promotion ledger asks weeks later.
-    _execution_provenance = read_split_provenance([run_dir])
-    if _execution_provenance.unrecorded:
+    run_provenance = read_split_provenance([run_dir])
+    if run_provenance.unrecorded:
         notes.append(
             f"row-selection provenance is missing from {run_dir} (it predates the run.json "
             + "`row_selection` field, or it could not be read), so which rows this gate scored is "
             + "not recorded. Both arms still share one run directory, so they cannot disagree."
         )
-    elif _execution_provenance.value is not None:
+    elif run_provenance.value is not None:
         notes.append(
-            f"both arms ran under --split {_execution_provenance.value!r} (one run directory, so "
-            + "they cannot disagree)."
+            f"both arms ran under --split {run_provenance.value!r} (one run directory, so " + "they cannot disagree)."
         )
 
     # Read by `_verdict`'s construction at CALL time, so EVERY return path reports it.

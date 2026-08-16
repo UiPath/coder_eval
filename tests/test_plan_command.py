@@ -464,17 +464,40 @@ class TestPlanCommandRowSelectors:
         assert exit_code == 0
         assert "4 rows" in printed and "2 selected" in printed and "--sample 2" in printed
 
-    def test_sample_at_or_above_the_row_count_names_nothing(self, tmp_path: Path) -> None:
-        """`--sample 99` over 4 rows REQUESTS a sample and narrows nothing. Naming it would
-        claim a subset the run does not take."""
+    def test_sample_at_or_above_the_row_count_is_reported_as_removing_no_rows(self, tmp_path: Path) -> None:
+        """`--sample 99` over 4 rows is HONOURED and narrows nothing — and the line must say both.
+
+        Naming it as a CAUSE would claim a subset the run does not take. Saying nothing at all is
+        the opposite failure, and was a regression: the line became byte-identical to passing no
+        selector, so a user could not confirm the flag had been read, and it contradicted
+        `run.md`, which records what was requested.
+        """
         task_file = tmp_path / "task.yaml"
         task_file.write_text("placeholder")
         task = _make_dataset_task([{"id": f"r{i}"} for i in range(4)])
         printed, exit_code = self._run(task, task_file, sample=99)
         assert exit_code == 0
         assert "4 rows -> 4 selected" in printed
-        # No parenthetical cause at all: `applied` is empty, so nothing is named.
-        assert "--sample" not in printed
+        assert "requested --sample 99; removed no rows" in printed
+
+    def test_no_selector_at_all_prints_no_parenthetical(self, tmp_path: Path) -> None:
+        """The genuinely-silent case, so "removed no rows" cannot creep onto every line."""
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": f"r{i}"} for i in range(4)])
+        printed, exit_code = self._run(task, task_file)
+        assert exit_code == 0
+        assert "4 rows -> 4 selected" in printed
+        assert "requested" not in printed and "--sample" not in printed
+
+    def test_a_honoured_split_that_removes_nothing_is_still_reported(self, tmp_path: Path) -> None:
+        """The case that regressed: every row is in the selected split."""
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": "a", "split": "test"}, {"id": "b", "split": "test"}])
+        printed, exit_code = self._run(task, task_file, split="test")
+        assert exit_code == 0
+        assert "requested --split test; removed no rows" in printed
 
     def test_sample_per_stratum_narrows_and_is_named(self, tmp_path: Path) -> None:
         task_file = tmp_path / "task.yaml"

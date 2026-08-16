@@ -168,8 +168,12 @@ success_criteria:
     # instead — plausibly enough that nothing else looks wrong. recall.yes is the right
     # metric here: of the rows that should have engaged the skill, how many did. Every row
     # of an outcome suite is a positive, so anything below 1.0 means the round is a mixture.
-    # MEASURED 2026-08-15 on claude-sonnet-4-6, 10 rows x 1 replicate, completion_rate 1.000:
+    # MEASURED 2026-08-15 on claude-sonnet-4-6, 10 rows x 1 replicate, NO --split (the FULL
+    # suite: 6 train + 4 test), completion_rate 1.000:
     #   recall.yes 1.000, TWICE (runs/rebaseline-ci-outcome-2 and -3).
+    # NOTE this gate has NOT been measured on `--split test` alone, which is what the `ci`
+    # skill now tells users to run a CI gate on. Gating 4 test rows against a 1.0 recall bar
+    # measured over 10 is a different, tighter test — re-measure before relying on it.
     # Two measurements because the first landed within one row's worth (1/10) of this 1.0
     # gate, where a single non-engagement fails it; both came back 1.000, so the gate holds.
     # Re-measured after the delivered-body `skill_triggered` rule; it did not move this suite.
@@ -212,8 +216,8 @@ success_criteria:
     includes:
       - "${row.expected_snippet}"
       - "${row.expected_snippet_2}"
-    # MEASURED 2026-08-15 on claude-sonnet-4-6, 10 rows x 1 replicate, twice
-    # (runs/rebaseline-ci-outcome-2 and -3), both identical:
+    # MEASURED 2026-08-15 on claude-sonnet-4-6, 10 rows x 1 replicate, NO --split (the FULL
+    # suite), twice (runs/rebaseline-ci-outcome-2 and -3), both identical:
     #   mean 1.000 · completion_rate 1.000
     # Thresholds left unchanged: `measured - 0.10` is 0.90, above the committed 0.7.
     suite_thresholds:
