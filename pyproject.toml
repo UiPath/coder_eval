@@ -187,7 +187,8 @@ external = [
     "CE037",
     "CE038",
     "CE039",
-]  # custom architectural lint rules (tests/lint/)
+    "CE045",
+]  # custom architectural lint rules (tests/lint/); an id needs listing once a real `# noqa` names it
 
 [tool.ruff.lint.pylint]
 # Function-size ceiling: gates NEW growth past these bounds (a god-function must

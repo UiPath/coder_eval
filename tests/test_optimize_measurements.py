@@ -74,7 +74,11 @@ class TestTheNarrativeLedgerIsLeftAlone:
         test fails the moment someone starts schematizing it.
         """
         history = REPO_ROOT / ".optimize-skill" / "ci" / "history.json"
-        if not history.exists():
+        # `.optimize-skill/` is gitignored, so this skip fires in every clone. What is left behind
+        # it is only the ledger's SHAPE, which needs the real file to assert anything about. The
+        # load-bearing half — the whole-package scan proving no code path names history.json —
+        # moved to `test_no_code_path_names_the_narrative_ledger`, which never skips.
+        if not history.exists():  # noqa: CE045
             pytest.skip("the worked ci ledger is not present in this checkout")
 
         # It is a free-form ARRAY carrying keys no model declares — proof that validating it
@@ -87,9 +91,17 @@ class TestTheNarrativeLedgerIsLeftAlone:
         with pytest.raises(ValueError):
             OptimizeMeasurements.model_validate_json(history.read_text(encoding="utf-8"))
 
-        # And no code path names it. Asserted over the whole package rather than one module, and
-        # with comments and docstrings stripped, so the guard cannot be satisfied by moving the
-        # parse somewhere else or evaded by a mention that is only prose.
+    def test_no_code_path_names_the_narrative_ledger(self) -> None:
+        """No code path names `history.json`. Runs unconditionally — it needs no ledger present.
+
+        It lived behind `test_existing_history_json_is_left_alone`'s skip until CE045 was written,
+        which meant this — the half that guards a real architectural decision rather than the shape
+        of one checked-in file — had never run in CI.
+
+        Asserted over the whole package rather than one module, and with comments and docstrings
+        stripped, so the guard cannot be satisfied by moving the parse somewhere else or evaded by
+        a mention that is only prose.
+        """
         offenders = []
         for module in sorted((REPO_ROOT / "src" / "coder_eval").rglob("*.py")):
             tree = ast.parse(module.read_text(encoding="utf-8"))

@@ -5812,6 +5812,271 @@ class TestCE039ComputedClaims:
 
 
 @pytest.mark.lint
+class TestCE044EvaluatorDispatch:
+    """CE044 — the restricted evaluator's operator whitelist and its dispatch must agree.
+
+    `computed_claims.evaluate_expression` shipped with `case _: return lhs / rhs`, so widening
+    `_ALLOWED_OPS` by one line would have made it compute a cost-table cell with DIVISION and
+    report the result as true — in the one sensor class whose entire purpose is catching
+    arithmetic that lies.
+
+    The scanner lives in `tests/lint/evaluator_dispatch.py`; its boundary is stated there. Wired
+    as a test class rather than a `BaseRule` because its subject is a file under `tests/`, and the
+    `ALL_RULES` sweep runs over `src/` only.
+    """
+
+    CLAIMS_MODULE: ClassVar[Path] = Path(__file__).parent / "lint" / "computed_claims.py"
+
+    def test_the_real_evaluator_has_no_dispatch_gap(self) -> None:
+        from tests.lint.evaluator_dispatch import dispatch_gaps
+
+        gaps = dispatch_gaps(self.CLAIMS_MODULE)
+        assert not gaps, "the whitelist and the dispatch have drifted:\n  " + "\n  ".join(gaps)
+
+    def test_it_reads_the_real_whitelist(self) -> None:
+        # Anti-vacuity: the rule reads `_ALLOWED_OPS` and `evaluate_expression` BY NAME, so a
+        # rename would leave it checking an empty set against an empty set.
+        from tests.lint.evaluator_dispatch import whitelisted_ops
+
+        allowed = whitelisted_ops(ast.parse(self.CLAIMS_MODULE.read_text(encoding="utf-8")))
+        assert "Div" in allowed and len(allowed) >= 4, allowed
+
+    def test_it_reports_a_renamed_whitelist_rather_than_passing(self, tmp_path: Path) -> None:
+        # The vacuous-sensor failure mode: a rename must FAIL, never quietly check nothing.
+        module = tmp_path / "renamed.py"
+        module.write_text(
+            textwrap.dedent(
+                """
+                import ast
+
+                _OPERATORS = (ast.Add,)
+
+                def evaluate_expression(src, env):
+                    match src:
+                        case ast.Add():
+                            return 1.0
+                    raise ValueError(src)
+                """
+            ),
+            encoding="utf-8",
+        )
+        from tests.lint.evaluator_dispatch import dispatch_gaps
+
+        gaps = dispatch_gaps(module)
+        assert gaps and any("_ALLOWED_OPS" in g for g in gaps), gaps
+
+    def test_catches_a_whitelisted_operator_with_no_case(self, tmp_path: Path) -> None:
+        module = tmp_path / "widened.py"
+        module.write_text(
+            textwrap.dedent(
+                """
+                import ast
+
+                _ALLOWED_OPS = (ast.Add, ast.Mod)
+
+                def evaluate_expression(src, env):
+                    match src:
+                        case ast.Add():
+                            return 1.0
+                        case _:
+                            raise ValueError(src)
+                """
+            ),
+            encoding="utf-8",
+        )
+        from tests.lint.evaluator_dispatch import dispatch_gaps
+
+        gaps = dispatch_gaps(module)
+        assert len(gaps) == 1 and "Mod" in gaps[0], gaps
+
+    def test_catches_a_returning_wildcard(self, tmp_path: Path) -> None:
+        # The shipped defect, reproduced: a wildcard that RETURNS silently computes an unhandled
+        # operator as division.
+        module = tmp_path / "wildcard.py"
+        module.write_text(
+            textwrap.dedent(
+                """
+                import ast
+
+                _ALLOWED_OPS = (ast.Add,)
+
+                def evaluate_expression(src, env):
+                    match src:
+                        case ast.Add():
+                            return 1.0
+                        case _:
+                            return 2.0
+                """
+            ),
+            encoding="utf-8",
+        )
+        from tests.lint.evaluator_dispatch import dispatch_gaps
+
+        gaps = dispatch_gaps(module)
+        assert len(gaps) == 1 and "case _" in gaps[0], gaps
+
+    def test_an_operator_matched_only_by_an_outer_pattern_is_not_a_gap(self) -> None:
+        """`USub` is matched by `case ast.UnaryOp(op=ast.USub(), ...)`, never by the inner dispatch.
+
+        A scanner scoped to the operator `match` would report a false gap on it from day one, so
+        patterns are collected across every nested `match` in the function.
+        """
+        from tests.lint.evaluator_dispatch import _evaluator, handled_ops
+
+        fn = _evaluator(ast.parse(self.CLAIMS_MODULE.read_text(encoding="utf-8")))
+        assert fn is not None
+        assert "USub" in handled_ops(fn)
+
+
+@pytest.mark.lint
+class TestCE045SkipOnIgnoredPath:
+    """CE045 — a test may not skip itself on a path this repository does not track.
+
+    `test_existing_history_json_is_left_alone` guarded on `.optimize-skill/ci/history.json`, which
+    is gitignored: the file exists in the author's working tree and in no clone, so the test passed
+    locally and skipped in CI every time. What it took with it was a whole-package AST scan that
+    had therefore never run there.
+
+    The scanner lives in `tests/lint/skip_guards.py`; its boundary is stated there. Wired as a test
+    class rather than a `BaseRule` because its subject is `tests/`, and the `ALL_RULES` sweep runs
+    over `src/` only.
+    """
+
+    REPO: ClassVar[Path] = Path(__file__).parent.parent
+
+    @staticmethod
+    def _prefixes(gitignore: Path):
+        from tests.lint.skip_guards import gitignored_prefixes
+
+        return gitignored_prefixes(gitignore)
+
+    def test_the_tree_has_no_unsuppressed_ignored_skip_guard(self) -> None:
+        from tests.lint.skip_guards import find_ignored_skip_guards
+
+        hits = find_ignored_skip_guards(
+            sorted((self.REPO / "tests").rglob("*.py")), self._prefixes(self.REPO / ".gitignore")
+        )
+        assert not hits, "\n  ".join(["a test skips itself on a path no clone has:", *hits])
+
+    def test_it_finds_the_real_subject_once_the_noqa_is_removed(self, tmp_path: Path) -> None:
+        """The anti-vacuity test, run against the REAL file in its real shape.
+
+        The guard it targets is `not history.exists()` and carries zero string constants, so a
+        scanner reading only the `if` test would report nothing and this whole class would pass
+        vacuously. Stripping the suppression from a copy of the real source proves two things at
+        once: the scanner resolves the path through the local assignment, and the `# noqa` is what
+        silences it rather than blindness.
+        """
+        from tests.lint.skip_guards import find_ignored_skip_guards
+
+        real = self.REPO / "tests" / "test_optimize_measurements.py"
+        source = real.read_text(encoding="utf-8")
+        stripped = source.replace("  # noqa: CE045", "")
+        assert stripped != source, "the noqa marker moved — re-derive this anchor from the real file"
+
+        copy = tmp_path / "test_optimize_measurements.py"
+        copy.write_text(stripped, encoding="utf-8")
+        hits = find_ignored_skip_guards([copy], self._prefixes(self.REPO / ".gitignore"))
+        assert len(hits) == 1 and ".optimize-skill" in hits[0], hits
+
+    def test_catches_a_skip_on_a_gitignored_path_via_a_local_assignment(self, tmp_path: Path) -> None:
+        # The REAL shape: the literal is on the assignment line, not inside the `if`. A fixture
+        # written the other way round passes on a blind scanner.
+        from tests.lint.skip_guards import find_ignored_skip_guards
+
+        (tmp_path / ".gitignore").write_text(".optimize-skill/\n", encoding="utf-8")
+        module = tmp_path / "test_thing.py"
+        module.write_text(
+            textwrap.dedent(
+                """
+                import pytest
+
+                ROOT = __import__("pathlib").Path(".")
+
+                def test_thing():
+                    p = ROOT / ".optimize-skill" / "x.json"
+                    if not p.exists():
+                        pytest.skip("absent")
+                    assert p.read_text()
+                """
+            ),
+            encoding="utf-8",
+        )
+        hits = find_ignored_skip_guards([module], self._prefixes(tmp_path / ".gitignore"))
+        assert len(hits) == 1 and "test_thing" in hits[0], hits
+
+    def test_a_skip_on_a_tracked_path_is_clean(self, tmp_path: Path) -> None:
+        from tests.lint.skip_guards import find_ignored_skip_guards
+
+        (tmp_path / ".gitignore").write_text(".optimize-skill/\n", encoding="utf-8")
+        module = tmp_path / "test_thing.py"
+        module.write_text(
+            textwrap.dedent(
+                """
+                import pytest
+
+                ROOT = __import__("pathlib").Path(".")
+
+                def test_thing():
+                    p = ROOT / "docs" / "USER_GUIDE.md"
+                    if not p.exists():
+                        pytest.skip("absent")
+                """
+            ),
+            encoding="utf-8",
+        )
+        assert find_ignored_skip_guards([module], self._prefixes(tmp_path / ".gitignore")) == []
+
+    def test_a_noqa_suppresses_it(self, tmp_path: Path) -> None:
+        from tests.lint.skip_guards import find_ignored_skip_guards
+
+        (tmp_path / ".gitignore").write_text(".optimize-skill/\n", encoding="utf-8")
+        module = tmp_path / "test_thing.py"
+        module.write_text(
+            textwrap.dedent(
+                """
+                import pytest
+
+                ROOT = __import__("pathlib").Path(".")
+
+                def test_thing():
+                    p = ROOT / ".optimize-skill" / "x.json"
+                    if not p.exists():  # noqa: CE045
+                        pytest.skip("absent")
+                """
+            ),
+            encoding="utf-8",
+        )
+        assert find_ignored_skip_guards([module], self._prefixes(tmp_path / ".gitignore")) == []
+
+    def test_the_skip_message_alone_never_fires_it(self, tmp_path: Path) -> None:
+        # Matched on the reconstructed path SEGMENT, never with `in` against the guard's text —
+        # otherwise the rule fires on the skip's own message.
+        from tests.lint.skip_guards import find_ignored_skip_guards
+
+        (tmp_path / ".gitignore").write_text(".optimize-skill/\n", encoding="utf-8")
+        module = tmp_path / "test_thing.py"
+        module.write_text(
+            textwrap.dedent(
+                """
+                import pytest
+
+                def test_thing(flag):
+                    if not flag:
+                        pytest.skip("no .optimize-skill working tree here")
+                """
+            ),
+            encoding="utf-8",
+        )
+        assert find_ignored_skip_guards([module], self._prefixes(tmp_path / ".gitignore")) == []
+
+    def test_gitignored_prefixes_ignores_globs_and_negations(self, tmp_path: Path) -> None:
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# a comment\n\n*.log\n!keep/\nnested/path/\n.optimize-skill/\nruns/\n", encoding="utf-8")
+        assert self._prefixes(gitignore) == {".optimize-skill", "runs"}
+
+
+@pytest.mark.lint
 class TestHolmRejectionsIsConfined:
     """`holm_rejections` may be called only from `optimize_gate`, and only by its two wrappers.
 

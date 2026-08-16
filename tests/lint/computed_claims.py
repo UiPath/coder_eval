@@ -38,6 +38,13 @@ three commits and ~50 token sensors, and was found by a human reading it: it del
 no presence sensor could see it, and it carries no arithmetic, so this rule could not either. CE039
 checks that a table's numbers are TRUE; nothing here checks that the prose parses as English.
 
+``_ALLOWED_OPS`` and ``_compute``'s operator dispatch are **two halves of one decision** and must be
+widened together. The whitelist admits an operator; the dispatch is what actually computes it, and a
+wildcard arm returning a value would silently compute an unhandled operator as something else —
+which is how ``ast.Mod`` in the whitelist would have been reported as *division* by the one sensor
+class whose entire purpose is catching arithmetic that lies. The wildcard therefore raises, and
+**CE044** (``tests/lint/evaluator_dispatch.py``) pins the parity between the two halves.
+
 Like CE026-CE031 and CE033-CE038 this is **not** a ``BaseRule`` in ``tests/lint/runner.py`` (that
 runner is an AST walk over ``src/**/*.py``); it reasons over Markdown and is wired as
 ``tests/test_custom_lint.py::TestCE039ComputedClaims``.
@@ -227,8 +234,13 @@ def evaluate_expression(src: str, env: dict[str, float]) -> float:
                         return lhs - rhs
                     case ast.Mult():
                         return lhs * rhs
-                    case _:
+                    case ast.Div():
                         return lhs / rhs
+                    case _:  # pragma: no cover - unreachable while _ALLOWED_OPS and this dispatch agree
+                        raise ValueError(
+                            f"{src!r} uses {type(op).__name__}, which the whitelist admits but this "
+                            "dispatch does not handle — widen both together (CE044)"
+                        )
         raise ValueError(f"{src!r} contains an unevaluatable {type(node).__name__} node")
 
     return _compute(tree)
