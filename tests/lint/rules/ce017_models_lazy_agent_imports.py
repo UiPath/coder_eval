@@ -19,6 +19,7 @@ Add ``# noqa: CE017`` for a deliberate exception.
 import ast
 import re
 
+from tests.lint.import_resolution import resolved_module
 from tests.lint.rules.base import BaseRule
 
 
@@ -36,10 +37,13 @@ class ModelsLazyAgentImports(BaseRule):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         # col_offset == 0 == an unconditional module-level statement. Function-local
         # and TYPE_CHECKING-guarded imports are indented (col_offset > 0) and allowed.
-        if self._in_models and node.col_offset == 0 and node.module and _BANNED.match(node.module):
+        # Routed through `resolved_module` (CE051): `from ..agents import X` inside models/ read
+        # as the module `"agents"` and evaded the pattern entirely.
+        module = resolved_module(node, self.filepath)
+        if self._in_models and node.col_offset == 0 and module and _BANNED.match(module):
             self.violation(
                 node,
-                f"architectural violation: '{node.module}' imported at module level in models/; "
+                f"architectural violation: '{module}' imported at module level in models/; "
                 "import coder_eval.agents/plugins lazily (inside the function) instead.",
             )
         self.generic_visit(node)

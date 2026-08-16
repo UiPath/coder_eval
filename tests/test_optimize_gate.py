@@ -112,6 +112,7 @@ from coder_eval.reports_stats import (
     bootstrap_p_floor,
     holm_rejections,
 )
+from tests.lint.import_resolution import resolved_module
 
 
 SUITE = "my-skill-activation"
@@ -875,7 +876,16 @@ def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None
 
     ``inside_type_checking`` filters to imports inside (True) or outside (False) an
     ``if TYPE_CHECKING:`` body; ``None`` takes both.
+
+    Routed through ``resolved_module`` (CE051). Matching ``node.module`` alone made this blind to
+    the RELATIVE spelling, which is how most of ``src/`` imports — and these three modules are
+    siblings, so ``from .optimize_gate import CostQualityPoint`` in ``reports_optimize.py`` is the
+    natural way to write the very import this pins. ``node.module`` would then be
+    ``"optimize_gate"``, the ``startswith("coder_eval")`` test would be False, and both layering
+    tests would pass over a broken boundary — the same fail-open shape, on what CLAUDE.md calls
+    out as pinned "by a test, not by this sentence".
     """
+    path = str((Path(__file__).parent.parent / "src" / "coder_eval" / f"{module}.py").resolve())
     tree = ast.parse(_module_source(module))
     guarded: set[int] = set()
     for node in ast.walk(tree):
@@ -884,11 +894,14 @@ def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None
 
     found: dict[str, set[str]] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom) or not (node.module or "").startswith("coder_eval"):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        resolved = resolved_module(node, path)
+        if not (resolved or "").startswith("coder_eval"):
             continue
         if inside_type_checking is not None and (id(node) in guarded) != inside_type_checking:
             continue
-        found.setdefault(node.module or "", set()).update(alias.name for alias in node.names)
+        found.setdefault(resolved or "", set()).update(alias.name for alias in node.names)
     return found
 
 

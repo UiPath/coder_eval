@@ -206,6 +206,7 @@ from coder_eval.models.tasks import (
     ReferenceSource,
     SimulationConfig,
     TaskDefinition,
+    UnknownTaskFieldWarning,
 )
 
 # Telemetry
@@ -393,6 +394,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "merge_strategy_of",
     # Tasks
     "TaskDefinition",
+    "UnknownTaskFieldWarning",
     "DEFAULT_SIMULATION_STOP_TOKEN",
     "DEFAULT_SIMULATOR_MODEL",
     "NORMALIZED_CRITERION_ALIASES",

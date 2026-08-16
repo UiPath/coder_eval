@@ -166,7 +166,7 @@ target-version = "py313"
 extend-exclude = ["tasks/samples"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF", "PLR0915", "PLR0912"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF", "PLR0915", "PLR0912", "C90"]
 external = [
     "CE001",
     "CE002",
@@ -187,9 +187,11 @@ external = [
     "CE037",
     "CE038",
     "CE039",
+    "CE041",
     "CE045",
     "CE048",
     "CE050",
+    "CE051",
 ]  # custom architectural lint rules (tests/lint/). Partial and inert: ruff does not flag an
 # unknown code under RUF100, so an unlisted id (CE001, CE047, …) is silently accepted too.
 
@@ -199,6 +201,20 @@ external = [
 # tracked, not auto-decomposed (decomposition is separate out-of-scope work).
 max-statements = 80
 max-branches = 25
+
+[tool.ruff.lint.mccabe]
+# A RATCHET, not a target. Set ONE above the worst function in the tree, so it costs no refactor
+# today and still fails a NEW function above it. Deliberately no per-file-ignores: a second entry
+# in such a list means the ceiling is wrong, not that a file is special.
+#
+# Measured at this commit: `isolation/docker_runner.py::_build_argv` 29,
+# `reports_experiment.py::generate_variant_report` 24,
+# `orchestrator.py::_simulation_dialog_loop` 22, `agents/claude_code_agent.py::communicate` 21 —
+# everything else is under 20. Note `optimize_gate.py`, long the worst offender, is now clean at
+# 18: the module split retired it, which is why this carries no exemption for it.
+#
+# Lowering this toward 20 is tracked in .claude/harness-candidates.md, one function at a time.
+max-complexity = 30
 
 [tool.ruff.lint.per-file-ignores]
 "tests/lint/**" = ["N802"]  # visit_* methods must match AST node class names (PascalCase required by ast.NodeVisitor)

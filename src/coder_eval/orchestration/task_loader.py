@@ -82,7 +82,14 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
     task_data = yaml.safe_load(raw_yaml)
 
     try:
-        task = TaskDefinition(**task_data)
+        # CE041 exemption: `task_data` is `yaml.safe_load` output. `TaskDefinition` is the ONE
+        # target here that does NOT declare extra="forbid" (the top-level schema is deliberately
+        # in soft launch), so an unknown key is dropped rather than raised — but not silently:
+        # `_warn_on_unknown_fields` emits an UnknownTaskFieldWarning that `coder-eval plan`
+        # renders inline. Converting to model_validate must preserve the
+        # "Invalid task definition: ..." message the handler below produces; recorded as a
+        # follow-up in .claude/harness-candidates.md.
+        task = TaskDefinition(**task_data)  # noqa: CE041
         # Resolve relative template paths
         task = resolve_template_paths(task, task_file.parent)
         task = resolve_initial_prompt_file(task, task_file.parent)
@@ -716,6 +723,12 @@ def expand_dataset_with_selection(
         data["row_id"] = row_id
         data["task_id"] = f"{task.task_id}/{row_id}"
         data["dataset"] = None
-        expanded.append(TaskDefinition(**data))
+        # CE041 exemption: `data` is a dump of an already-validated task with the row's fields
+        # substituted in, so a dict is genuinely the input shape. Four keys just above are
+        # hand-written literals rather than dump output, and `TaskDefinition` is the one target
+        # without extra="forbid" — so a typo in one of THOSE would be dropped at construction
+        # rather than raised. Not silently: the `mode="before"` `_warn_on_unknown_fields`
+        # validator still fires, exactly as on the YAML path above.
+        expanded.append(TaskDefinition(**data))  # noqa: CE041
 
     return expanded, outcome

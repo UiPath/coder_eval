@@ -9,8 +9,7 @@ from typing import Any
 import typer
 from rich.markup import escape
 
-from ..models import ROW_SELECTOR_FLAGS
-from ..models.tasks import TaskDefinition, UnknownTaskFieldWarning
+from ..models import ROW_SELECTOR_FLAGS, TaskDefinition, UnknownTaskFieldWarning
 from ..orchestration.task_loader import (
     STRATIFIED_CAUSE_PREFIXES,
     expand_dataset_with_selection,

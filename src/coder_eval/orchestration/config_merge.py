@@ -28,16 +28,20 @@ from typing import Any, Literal, overload
 from pydantic import BaseModel
 
 from ..models import (
+    AppendOrder,
     BaseAgentConfig,
     ClaudeCodeAgentConfig,
     CodexAgentConfig,
     ConfigLineageEntry,
+    MergeStrategy,
     RunLimits,
     SandboxConfig,
     TaskDefinition,
+    append_order_of,
+    classify_annotation,
+    merge_strategy_of,
     parse_agent_config,
 )
-from ..models.merge_strategy import AppendOrder, MergeStrategy, append_order_of, classify_annotation, merge_strategy_of
 
 
 # Layer sources, ordered low -> high precedence. A subset of
@@ -378,12 +382,17 @@ def resolve_root(
     when no layer set anything for ``run_limits`` (an empty block is dropped)."""
     model_types = _root_model_types(root)  # raises MergeError for an unknown root
     merged = merge_layers(model_types, layers, lineage_root=root, lineage=lineage)
+    # CE041 exemption (x3 below): `merged` is the merge engine's OUTPUT, a dict by construction, so a dict
+    # is genuinely the input shape here. All three targets declare extra="forbid" (the docstring
+    # above says so), which is the runtime half of CE041's two-sided guard: a key this engine
+    # produced wrongly raises rather than landing at a default. The static half is what these
+    # exemptions give up, and the follow-up is recorded in .claude/harness-candidates.md.
     if root == "agent":
-        return parse_agent_config(**merged)
+        return parse_agent_config(**merged)  # noqa: CE041
     if root == "run_limits":
-        return RunLimits(**merged) if merged else None
+        return RunLimits(**merged) if merged else None  # noqa: CE041
     # root == "sandbox" — the only remaining RootName member.
-    return SandboxConfig(**merged) if merged else None
+    return SandboxConfig(**merged) if merged else None  # noqa: CE041
 
 
 # ---------------------------------------------------------------------------

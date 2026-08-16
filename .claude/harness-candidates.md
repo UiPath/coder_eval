@@ -724,3 +724,33 @@ with the two `action.yml` items above — one considered change to the action's 
       better shape and the larger change — `EvaluationResult` would gain a field, and every
       reader of a run dir could then answer "which selection produced this row?" directly.
       — caught in the top-10 review-fixes run, Phase 4.
+
+- [ ] **The eight CE041 splat sites are exempted, not converted.** CE041 now fires (it never had
+      — it reported 0 against 8 real model-constructor splats until `resolved_module` landed), and
+      all eight carry a reasoned `# noqa: CE041` rather than the `Model.model_validate(payload)`
+      the rule's message asks for. That was a deliberate scope call: converting them changes the
+      raised exception type on YAML-parsing paths, so each call site's `except` clause and
+      user-facing message has to be traced — `task_loader.py:85` in particular is wrapped in a
+      handler producing `ValueError: Invalid task definition: ...` that other code and tests
+      depend on. What makes the exemptions honest rather than a dodge, and what a converter must
+      re-check: `ExperimentDefinition`, `SimulationConfig`, `RunLimits`, `SandboxConfig` and the
+      agent configs all declare `extra="forbid"`, so a mistyped key RAISES there today rather than
+      landing at a default; `TaskDefinition` is the one that does not (its top-level schema is in
+      soft launch) but it emits `UnknownTaskFieldWarning` via `_warn_on_unknown_fields`, which
+      `coder-eval plan` renders inline. So no site is silently wrong — the noqas give up the
+      STATIC half of the guard only. Sites: `cli/evaluate_command.py`, `orchestration/config_merge.py`
+      (x3), `orchestration/experiment.py` (x2), `orchestration/task_loader.py` (x2).
+      — caught in the top-10 review-fixes run, Phase 6.
+
+- [ ] **Ratchet ruff `C90` down from 30 toward 20, one function at a time.** `C90` is now enabled
+      at `max-complexity = 30` — one above the worst function in the tree — so it costs no
+      refactor and still fails a NEW god-function. It is a floor under the debt, not a fix for it.
+      Four functions sit above 20 and each needs its own decomposition and review:
+      `isolation/docker_runner.py::_build_argv` (29), `reports_experiment.py::generate_variant_report`
+      (24), `orchestrator.py::_simulation_dialog_loop` (22),
+      `agents/claude_code_agent.py::communicate` (21). Lower the ceiling by one step per landed
+      refactor; do NOT add a `per-file-ignores` entry instead — a second entry in that list means
+      the ceiling is wrong, not that a file is special. Note the plan that introduced `C90`
+      assumed `optimize_gate.py` would need the exemption; by the time it landed the module split
+      had already brought that file to 18, so the exemption was never needed.
+      — caught in the top-10 review-fixes run, Phase 7.

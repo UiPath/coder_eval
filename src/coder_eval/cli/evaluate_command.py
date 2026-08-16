@@ -82,7 +82,12 @@ def evaluate_command(
     if task.agent is None:
         task.agent = parse_agent_config(type=AgentKind.CLAUDE_CODE)
     elif task.agent.type is None:
-        task.agent = parse_agent_config(**{**task.agent.model_dump(exclude_unset=True), "type": AgentKind.CLAUDE_CODE})
+        # CE041 exemption: a dict IS the input here (a dump plus one override), and every agent
+        # config model declares extra="forbid", so a mistyped key RAISES rather than landing at a
+        # default. See the follow-up in .claude/harness-candidates.md for the model_validate move.
+        task.agent = parse_agent_config(  # noqa: CE041
+            **{**task.agent.model_dump(exclude_unset=True), "type": AgentKind.CLAUDE_CODE}
+        )
 
     if not work_dir.is_dir():
         console.print(f"[red]✗ Work directory is not a directory:[/red] {escape(str(work_dir))}")

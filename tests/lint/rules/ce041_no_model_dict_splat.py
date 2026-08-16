@@ -50,16 +50,28 @@ say), and prefer ``Model.model_validate(payload)`` there, which validates rather
 
 import ast
 
+from tests.lint.import_resolution import resolved_module
 from tests.lint.rules.base import BaseRule
 
 
 _MODELS_MODULE = "coder_eval.models"
 
 
-def _imports_models(node: ast.ImportFrom) -> bool:
-    """True for ``from coder_eval.models import ...`` and its submodules."""
-    module = node.module or ""
-    return module == _MODELS_MODULE or module.startswith(f"{_MODELS_MODULE}.")
+def _imports_models(node: ast.ImportFrom, filepath: str) -> bool:
+    """True for ``from coder_eval.models import ...`` and its submodules, relative form included.
+
+    Routed through :func:`tests.lint.import_resolution.resolved_module` (CE051). This used to read
+    ``node.module`` alone, which for ``from ..models import X`` is the string ``"models"`` — so the
+    guard was False and the rule saw nothing. That was not a corner case: it is how most of
+    ``src/`` imports models, and CE041 consequently reported **0 violations against 8 real
+    model-constructor splats** and had never fired.
+
+    Resolution assumes the file sits under a ``coder_eval/`` package root; ``resolved_module``
+    returns ``None`` when it does not, and this degrades to "not a models import" rather than
+    guessing.
+    """
+    module = resolved_module(node, filepath)
+    return bool(module) and (module == _MODELS_MODULE or module.startswith(f"{_MODELS_MODULE}."))
 
 
 class NoModelDictSplat(BaseRule):
@@ -70,7 +82,7 @@ class NoModelDictSplat(BaseRule):
         self._model_names: set[str] = set()
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if _imports_models(node):
+        if _imports_models(node, self.filepath):
             # The bound name, so `as` renames are still tracked to the call site that uses them.
             self._model_names |= {alias.asname or alias.name for alias in node.names}
         self.generic_visit(node)

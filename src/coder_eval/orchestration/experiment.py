@@ -119,7 +119,12 @@ def load_experiment(experiment_file: Path) -> ExperimentDefinition:
         data = yaml.safe_load(f)
 
     try:
-        exp = ExperimentDefinition(**data)
+        # CE041 exemption: `data` is `yaml.safe_load` output, so a dict is the input. This is the
+        # riskiest of the eight sites, and what makes it safe today is `ExperimentDefinition`'s
+        # extra="forbid": a mistyped YAML key raises here rather than landing at a default.
+        # `model_validate(data)` is the better shape and would change the raised exception type,
+        # so it is a recorded follow-up rather than a drive-by.
+        exp = ExperimentDefinition(**data)  # noqa: CE041
         _resolve_experiment_template_paths(exp, experiment_file.parent)
         return exp
     except Exception as e:
@@ -165,7 +170,8 @@ def _resolve_simulation(
     # No lineage passed → merge_layers emits no per-field entries; we record the
     # single coarse `simulation` entry below instead.
     merged = merge_layers((SimulationConfig,), sim_layers, lineage_root="simulation")
-    resolved = SimulationConfig(**merged)
+    # CE041 exemption: merge-engine output again, and SimulationConfig declares extra="forbid".
+    resolved = SimulationConfig(**merged)  # noqa: CE041
 
     most_specific: ConfigSource | None = next((src for src, patch in reversed(sim_specs) if patch is not None), None)
     if most_specific is not None:
