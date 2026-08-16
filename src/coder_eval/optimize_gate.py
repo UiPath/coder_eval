@@ -195,6 +195,29 @@ def load_arm_rows(run_dirs: Sequence[Path], variant_id: str, suite_id: str) -> d
     return _pool([load_suite_rows(run_dir, variant_id, suite_id) for run_dir in run_dirs])
 
 
+def _require_valid_criterion_index(criterion_index: int | None) -> None:
+    """Reject a negative criterion index at the API boundary.
+
+    Selection is POSITIONAL, so a negative index does not fail — it silently grades the criterion
+    that many places from the END of every row's result list and returns a confident number for
+    the wrong criterion. The internal guards bound only above (``criterion_index >= len(...)``),
+    which is correct for the overflow case (rows legitimately differ in criteria count, so an
+    over-long index skips the row) and blind to this one. ``None`` is the documented "use the row's
+    weighted score" sentinel and stays legal.
+
+    Raised, not clamped: the skill drives this module from an inline ``python`` snippet, so a wrong
+    index is an authoring error that has to be loud rather than coerced into a different
+    measurement. Called at the module's PUBLIC entry points only — duplicating the lower bound at
+    every read site is the DRY problem this avoids, and the ``ge=0`` on the verdict models is the
+    mechanical half for the persisted values.
+    """
+    if criterion_index is not None and criterion_index < 0:
+        raise ValueError(
+            f"criterion_index must be >= 0, got {criterion_index}. Selection is positional "
+            + "(success_criteria[i]); a negative index would silently grade a different criterion."
+        )
+
+
 def _label_pairs(results: list[EvaluationResult], criterion_index: int) -> list[tuple[str, str]]:
     """``(expected_label, observed_label)`` for one criterion INSTANCE across some results.
 
@@ -559,6 +582,7 @@ def noise_floor_mde(
     To RECORD what this measured, call :func:`measure_noise_floor` instead — it returns the whole
     keyed record, including the row count, which this function does not expose.
     """
+    _require_valid_criterion_index(criterion_index)
     measured = measure_noise_floor(
         run_dirs=run_dirs,
         variant_id=variant_id,
@@ -753,6 +777,7 @@ def measure_noise_floor(
     the rows are loaded, because the row count is part of the key. Loading is cheap, the bootstrap
     is not.
     """
+    _require_valid_criterion_index(criterion_index)
     if len(run_dirs) < 2:
         return _no_floor(f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}")
 
@@ -1276,6 +1301,7 @@ def activation_gate(
     statistic at all: that returns ``promoted=False`` outright, because there is no p-value for a
     family decision to correct.)
     """
+    _require_valid_criterion_index(criterion_index)
     paired = _load_and_pair(
         incumbent_run_dirs=incumbent_run_dirs,
         candidate_run_dirs=candidate_run_dirs,
@@ -1910,10 +1936,14 @@ def execution_gate(
     interval bounds are swapped along with it. The method file warns twice that a reversed reading
     promotes the arm that lost; this is that warning, implemented.
 
-    **Every state that is not a decision sets** ``gate_refusal``, which forces ``promoted=False``,
-    takes the headline and drops the verdict out of the Holm family. Never an exception, and never
-    a silent zero. Four kinds of cause, recorded MOST-SPECIFIC-FIRST because a later one is often
-    the earlier one's consequence:
+    **Every state that is not a decision sets** ``gate_refusal``, which forces ``promoted=False``
+    and takes the headline. Never an exception, and never a silent zero. It does NOT by itself
+    drop the verdict out of the Holm family: membership is ``p_value is not None`` and nothing
+    else, so a refusal that still MEASURED a p stays in and keeps ``m`` honest for its siblings
+    (see :func:`holm_promote_execution`). The causes meaning there was no comparison at all
+    already carry no p, so those leave by the ordinary rule rather than by a second one. Four
+    kinds of cause, recorded MOST-SPECIFIC-FIRST because a later one is often the earlier one's
+    consequence:
 
     - **No comparison to make** — both arms named the same variant; a missing, unreadable or
       malformed ``experiment.json``; an experiment declaring other than exactly two variants;
@@ -1931,6 +1961,7 @@ def execution_gate(
 
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
+    _require_valid_criterion_index(engagement_criterion_index)
     notes: list[str] = []
     # The run's row-selection provenance, as a NOTE and never a refusal — deliberately unlike
     # `activation_gate`, and the asymmetry is a consequence of the data sources rather than drift:
@@ -2432,12 +2463,19 @@ def holm_promote_execution(
     across every verdict a round predeclared it would gate, exactly as :func:`holm_promote` does on
     the other track. Correcting per candidate would degenerate to an uncorrected ``p <= alpha``.
 
-    **``promoted`` is Holm rejecting AND the difference favouring the candidate AND the interval
-    excluding zero AND no refusal — nothing else.** Guardrails and integrity checks stay advisory in
-    the model and gating in the render, which is how :func:`holm_promote` already treats guardrails:
-    folding them into ``promoted`` would make :func:`render_execution_markdown`'s BLOCKED headline
-    unreachable, and that headline is the thing that stops a reader promoting past a doubled row
-    cost. The refusal conjunct is not of that kind — see below.
+    **``promoted`` is Holm rejecting AND ``verdict.separated`` AND no refusal AND no failed
+    integrity check or guardrail.** The veto lives in the DECISION, not only in the render: a
+    caller reading ``promoted`` must not be able to promote a candidate whose rendered block says
+    BLOCKED. Folding it in is only safe because the STATISTICAL half has its own name —
+    ``ExecutionGateVerdict.separated``, the property :func:`render_execution_markdown` keys its
+    BLOCKED headline on. Read ``promoted`` there instead and that headline becomes unreachable the
+    moment this fold lands, silently degrading a blocked winner to the ordinary NOT PROMOTED rung.
+
+    This is where the two tracks diverge, deliberately: :func:`holm_promote` folds its SIBLING
+    checks in but leaves its cost/latency guardrails advisory for the skill's prose to gate. Both
+    of this track's lists veto, because its ``integrity_checks`` are engagement / completion-rate
+    reads — a promotion cannot be correct in spite of a sample that did not engage the thing under
+    test. The refusal conjunct is not of either kind — see below.
 
     A verdict with no ``p_value`` is outside the family and comes back ``promoted=False``.
 
@@ -2474,39 +2512,60 @@ def holm_promote_execution(
             # negative result directly under a refusal headline.
             if verdict.gate_refusal is None:
                 notes.append(_NOTE_OUTSIDE_FAMILY)
-            decided.append(copy_with(verdict, promoted=False, holm_alpha=alpha, notes=notes))
+            # Outside the family, so nothing was rejected — False rather than None, which would
+            # read as "Holm has not run" on a verdict it has.
+            decided.append(copy_with(verdict, promoted=False, holm_rejected=False, holm_alpha=alpha, notes=notes))
             continue
 
-        favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
-        excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
         # READ, never re-derived: `execution_gate` sets this where each condition is already
         # computed. It is LOAD-BEARING rather than belt-and-braces — a zero-variance verdict has
-        # p = 0.0000 and a zero-width interval, so all three conjuncts above hold at once.
+        # p = 0.0000 and a zero-width interval, so `separated` holds on it too.
         refused = verdict.gate_refusal is not None
-        promoted = i in rejected_at and favours_candidate and excludes_zero and not refused
+        # A failed integrity check or guardrail VETOES the promotion; it is not merely reported.
+        # `separated` (on the model) stays the statistical half, so the renderer can still tell a
+        # blocked winner from an ordinary loss — folding the veto in here without that split is
+        # what would silently retire the BLOCKED headline.
+        #
+        # ASYMMETRY WITH `holm_promote`, deliberate and pre-existing: the activation track folds
+        # its `sibling_checks` into `promoted` but leaves its cost/latency `guardrails` advisory
+        # (its docstring says so — the skill's prose gates on them there). Here BOTH lists veto,
+        # because this track's `integrity_checks` are engagement/completion-rate reads that a
+        # promotion cannot be correct in spite of.
+        blocked = any(not check.passed for check in (*verdict.integrity_checks, *verdict.guardrails))
+        rejected = i in rejected_at
+        promoted = rejected and verdict.separated and not refused and not blocked
 
         # Every negative-result rung is guarded, this ladder and the `p_value is None` one above:
         # a refused verdict whose difference happens to favour the incumbent would otherwise print
         # an ordinary negative-result note directly under a refusal headline — two contradictory
         # claims in one block.
+        #
+        # Kept on the two COMPONENTS rather than on `separated`, so a candidate that merely lost
+        # still reads "the paired difference favours the incumbent" instead of the blunter
+        # "did not separate" — which of the two failed is the whole content of the note.
+        favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
+        excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
         if not refused:
-            if i in rejected_at and not favours_candidate:
+            if rejected and not favours_candidate:
                 notes.append(
                     "not promoted: the paired difference favours the incumbent. (The sign is already "
                     + "resolved as candidate - incumbent, so this reads the way it looks.)"
                 )
-            elif i in rejected_at and not excludes_zero:
+            elif rejected and not excludes_zero:
                 notes.append(_NOTE_CI_CONTAINS_ZERO)
-            elif i not in rejected_at:
+            elif not rejected:
                 notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
         for check in (*verdict.integrity_checks, *verdict.guardrails):
             if not check.passed:
                 notes.append(
-                    f"{check.name} FAILED — this blocks the promotion even if the statistic separated. "
-                    + "It is reported here and gated in the rendered block, not folded into `promoted`."
+                    f"{check.name} FAILED — this forces `promoted = False` even where the statistic "
+                    + "separated. It is named here so the block says WHICH check vetoed the promotion "
+                    + "and why; the rendered headline reports it as BLOCKED BY A GUARDRAIL, which "
+                    + "`ExecutionGateVerdict.separated` is what keeps distinguishable from an "
+                    + "ordinary loss."
                 )
         notes.append(_note_holm_family(len(family), alpha))
-        decided.append(copy_with(verdict, promoted=promoted, holm_alpha=alpha, notes=notes))
+        decided.append(copy_with(verdict, promoted=promoted, holm_rejected=rejected, holm_alpha=alpha, notes=notes))
     return decided
 
 
@@ -2546,6 +2605,7 @@ def arm_row_scores(
     reads that criterion's score (the activation track). A row an arm produced no score for is
     left ABSENT from the vector rather than recorded as 0.0 — see :func:`pareto_front`.
     """
+    _require_valid_criterion_index(criterion_index)
     arms: list[ArmRowScores] = []
     for variant_id in variant_ids:
         rows = _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
@@ -2927,6 +2987,7 @@ def cost_quality_points(
     reads that criterion's score (the activation track). The same switch ``arm_row_scores``
     already has, rather than a second track parameter.
     """
+    _require_valid_criterion_index(criterion_index)
     arms = arm_row_scores(
         run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
     )

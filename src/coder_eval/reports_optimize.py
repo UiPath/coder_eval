@@ -184,7 +184,25 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
       paired *t* does not have — a shared string would make the two indistinguishable in a ledger
       read back weeks later.
     - **BLOCKED BY A GUARDRAIL** — the statistic separated but something non-primary failed. Below
-      the refusal, since reading a guardrail presupposes a statistic that separated.
+      the refusal, since reading a guardrail presupposes a statistic that separated. Its condition
+      is ``holm_rejected and separated and failed``, and all three conjuncts are load-bearing:
+
+      * NEVER ``promoted`` — the guardrail is folded into ``promoted`` by
+        ``holm_promote_execution``, so a blocked candidate arrives here with ``promoted is False``
+        and reading that field would drop it silently into the ``NOT PROMOTED`` rung below, the one
+        rung it must never be confused with ("it lost" and "it won and was vetoed" call for
+        opposite next actions).
+      * ``separated`` alone is not enough either, and that is the trap on the other side.
+        ``separated`` is a property of the verdict and deliberately excludes the FAMILY decision,
+        so at ``m > 1`` a p between ``alpha/m`` and ``alpha`` leaves ``ci_low > 0`` while Holm
+        rejects nothing. Measured: two candidates at p = 0.03 in a family of two, identical in
+        every statistic, rendered ``BLOCKED BY A GUARDRAIL`` and ``NOT PROMOTED`` purely because
+        one carried a failing cost check — sending that reader to fix cost when the real problem
+        is power, with the note ladder printing the contradicting "did not clear the Holm
+        threshold" line directly underneath. ``holm_rejected`` is the field that closes it.
+
+      Both fields live on ``ExecutionGateVerdict`` rather than as helpers here, precisely so this
+      file needs no runtime import of ``optimize_gate``.
     - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
 
     ``UNDECIDED`` outranking the refusal is right — a verdict Holm never saw has no decision to
@@ -199,7 +217,7 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
         headline = "UNDECIDED — holm_promote_execution has not been applied, so this verdict decides nothing"
     elif verdict.gate_refusal is not None:
         headline = f"NOT A RESULT — {verdict.gate_refusal}"
-    elif verdict.promoted and failed:
+    elif verdict.holm_rejected and verdict.separated and failed:
         headline = (
             "BLOCKED BY A GUARDRAIL — the paired comparison separated, but "
             + f"{', '.join(failed)} failed. Do not promote on this block."

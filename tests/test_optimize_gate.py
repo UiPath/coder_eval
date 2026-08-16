@@ -555,6 +555,19 @@ class TestActivationGate:
         assert "never firing" in note
         assert holm_promote([verdict])[0].promoted is False
 
+    def test_negative_criterion_index_raises_rather_than_grading_the_last_criterion(self, tmp_path: Path) -> None:
+        # The lower bound the internal `>= len(...)` guards cannot see. Selection is POSITIONAL,
+        # so -1 does not fail — it grades the LAST criterion on every row and returns a confident
+        # number for a criterion nobody asked about.
+        incumbent, candidate = self._clear_win()
+        with pytest.raises(ValueError, match="criterion_index must be >= 0, got -1"):
+            _gate(_shared_dirs(tmp_path, incumbent, candidate), criterion_index=-1)
+
+    def test_criterion_index_zero_is_legal(self, tmp_path: Path) -> None:
+        # The boundary the guard must NOT reject.
+        incumbent, candidate = self._clear_win()
+        assert _gate(_shared_dirs(tmp_path, incumbent, candidate), criterion_index=0).rows_paired > 0
+
     def test_sibling_recall_drop_blocks_promotion(self, tmp_path: Path) -> None:
         # Criterion 0 is the target (candidate wins outright); criterion 1 is a sibling the
         # candidate annexes on half the rows — a false negative there, so recall.yes drops.
@@ -1288,6 +1301,118 @@ class TestRegressionCheck:
     def test_results_come_back_in_corpus_order(self) -> None:
         arm = ArmRowScores(variant_id="cand", row_scores={"pos-2": 0.0, "pos-1": 0.0, "pos-3": 0.0})
         assert [row.row_id for row, _score in regression_check(self._CORPUS, arm)] == ["pos-1", "pos-2", "pos-3"]
+
+
+class TestCriterionIndexIsBoundedBelow:
+    """The lower bound. The internal guards bound only ABOVE (``criterion_index >= len(...)``),
+    which is right for the overflow case — rows legitimately differ in criteria count, so an
+    over-long index degrades to "skip the row" — and blind to a negative one. Python's positional
+    indexing then silently grades ``success_criteria_results[-1]``: the LAST criterion on every
+    row, reported as a confident number for the criterion the caller named. The skill drives all of
+    this from an inline ``python`` snippet, so a wrong index is an authoring error that has to be
+    loud rather than coerced into a different measurement.
+    """
+
+    def test_activation_gate_rejects_a_negative_index(self, tmp_path: Path) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
+            activation_gate(
+                incumbent_run_dirs=run_dirs,
+                candidate_run_dirs=run_dirs,
+                incumbent_variant="incumbent",
+                candidate_variant="candidate",
+                suite_id=SUITE,
+                criterion_index=-1,
+                n_resamples=_FAST_RESAMPLES,
+            )
+
+    def test_execution_gate_rejects_a_negative_index(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -2"):
+            _exec_gate(run_dir, engagement_criterion_index=-2)
+
+    def test_arm_row_scores_rejects_a_negative_index(self, tmp_path: Path) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
+            arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=-1)
+
+    def test_cost_quality_points_rejects_a_negative_index(self, tmp_path: Path) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
+            cost_quality_points(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=-1)
+
+    def test_noise_floor_mde_rejects_a_negative_index(self, tmp_path: Path) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
+            noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=-1)
+
+    def test_measure_noise_floor_rejects_a_negative_index(self, tmp_path: Path) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
+            measure_noise_floor(
+                run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=-1, model="m"
+            )
+
+    def test_none_stays_legal_on_the_index_optional_entry_points(self, tmp_path: Path) -> None:
+        # `None` is the documented "use the row's weighted_score" sentinel, not a missing value.
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        assert arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE) != []
+        assert cost_quality_points(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE) is not None
+
+    def test_an_over_long_index_still_degrades_rather_than_raising(self, tmp_path: Path) -> None:
+        # The anti-over-fix pin: only the LOWER bound became an error. Rows legitimately differ in
+        # criteria count, so an index past the end must keep skipping the row.
+        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        scores = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=9)
+        assert scores[0].row_scores == {}
+
+    def test_minus_one_used_to_grade_the_last_criterion_of_each_row(self, tmp_path: Path) -> None:
+        """The defect witnessed, not merely asserted — on rows whose criteria lists DIFFER.
+
+        Every other test here uses single-criterion rows, where `-1` and `0` select the same
+        result and the bug is invisible. Here row `r1` carries two criteria and `r2` one, so
+        `success_criteria_results[-1]` is a DIFFERENT criterion on the two rows — and on `r1` it is
+        a `file_check`, not the `skill_triggered` the caller named. `_label_pairs` keeps only
+        `ClassificationCriterionResult`s, so before the guard this returned a confident F1
+        computed over a silently different, silently smaller set of rows.
+        """
+        run_dir = tmp_path / "run-0"
+        _write_row(run_dir, "incumbent", "r1", _eval_result("r1", [("yes", "no")], extra_basic=True))
+        _write_row(run_dir, "incumbent", "r2", _eval_result("r2", [("yes", "yes")]))
+
+        rows = load_suite_rows(run_dir, "incumbent", SUITE)
+        # What `-1` would have selected: `file_check` on r1 (dropped by _label_pairs, so the row
+        # vanishes from the sample) and the row's only classification result on r2.
+        assert [type(rows[rid][0].success_criteria_results[-1]).__name__ for rid in ("r1", "r2")] == [
+            "CriterionResult",
+            "ClassificationCriterionResult",
+        ]
+        # Index 0 — what the caller asked for — is a classification result on BOTH rows.
+        assert all(len(_label_pairs(rows[rid], 0)) == 1 for rid in ("r1", "r2"))
+        # And the boundary now refuses to answer the question at all.
+        with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
+            arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent"], suite_id=SUITE, criterion_index=-1)
+
+    def test_the_persisted_verdict_cannot_carry_a_negative_index(self) -> None:
+        # The mechanical half, on the model rather than at the boundary: a recorded verdict can
+        # never claim a negative position even if some future caller bypassed the guard.
+        with pytest.raises(ValidationError, match="greater than or equal to 0"):
+            ActivationGateVerdict(
+                incumbent_variant="i",
+                candidate_variant="c",
+                suite_id=SUITE,
+                criterion_index=-1,
+                confidence=0.95,
+                n_resamples=10,
+                rows_paired=0,
+                rows_excluded=0,
+                mean_diff=None,
+                ci_low=None,
+                ci_high=None,
+                p_value=None,
+                p_floor=None,
+                n_discordant=None,
+            )
 
 
 class TestArmRowScores:
@@ -2961,15 +3086,25 @@ class TestExecutionGateMde:
         # The anti-over-fire half. `_WINNER` cannot witness this: its floor is 2.8e-17, so
         # "difference above the floor" is satisfied by any non-zero win at all and the assertion
         # would pass on a 1e-9 one. This fixture prices a real floor and clears it by a margin.
-        incumbent = {"r0": [0.1, 0.5], "r1": [0.2, 0.3], "r2": [0.0, 0.55], "r3": [0.25, 0.35], "r4": [0.15, 0.45]}
+        # Every shifted CANDIDATE value must land in [0.5, 1.0], and the fixture asserts it rather
+        # than trusting the arithmetic. Above 1.0 the score fails EvaluationResult validation,
+        # `load_suite_rows` logs and SKIPS that task.json, and the arm trips the completion_rate
+        # integrity check — `r2`'s 0.55 shifted to 1.01 and did exactly that, a replicate silently
+        # missing here for the fixture's whole life. Below 0.5 `_scored_result` labels the row
+        # `no`, so the arm did not engage the skill on it and the engagement check trips — `r2`'s
+        # 0.0 shifted to 0.46 and did THAT. Both were invisible while a failed check was advisory;
+        # both block the promotion now, which is the point of the change this fixture now backs.
+        incumbent = {"r0": [0.1, 0.5], "r1": [0.2, 0.3], "r2": [0.05, 0.5], "r3": [0.25, 0.35], "r4": [0.15, 0.45]}
         candidate = {
             row: [round(v + 0.42 + 0.02 * i, 3) for v in values] for i, (row, values) in enumerate(incumbent.items())
         }
+        assert all(0.5 <= v <= 1.0 for values in candidate.values() for v in values), "fixture drifted out of range"
         decided = holm_promote_execution(
             [_exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))]
         )[0]
         assert decided.mde is not None and decided.mde > 0.05, "fixture drifted — the floor must be REAL"
         assert decided.mean_diff is not None and abs(decided.mean_diff) > 2 * decided.mde
+        assert all(check.passed for check in (*decided.integrity_checks, *decided.guardrails))
         assert decided.gate_refusal is None and decided.promoted is True
 
     def test_a_candidate_that_merely_does_not_help_is_a_negative_result_not_a_refusal(self, tmp_path: Path) -> None:
@@ -3110,6 +3245,149 @@ class TestExecutionGateRefusesAZeroVarianceSample:
         assert not any("favours the incumbent" in note for note in decided.notes)
 
 
+# A materially worse cost guardrail — the veto every headline-rung fixture below leans on.
+_FAILING_GUARDRAIL = GuardrailCheck(
+    name="cost (USD/row)",
+    incumbent=1.0,
+    candidate=3.0,
+    relative_change=2.0,
+    tolerance=MATERIALITY_FLOOR,
+    ci_low=1.5,
+    ci_high=2.5,
+    passed=False,
+)
+
+
+class TestEveryExecutionHeadlineRungIsReachable:
+    """All five rungs, one verdict each, asserted on the headline LINE.
+
+    Folding the guardrail veto into `promoted` retires the BLOCKED rung the moment the renderer
+    reads `promoted` for it — silently, because the block still renders and still says something
+    plausible ("NOT PROMOTED"). The two rungs it collapses are the two a reader must never
+    confuse: "it lost" and "it won and was vetoed" call for opposite next actions. The rungs are
+    parametrized from one table so a future reorder cannot make one unreachable without failing
+    here, and `test_blocked_and_not_promoted_differ_only_by_separated` pins the collapse itself.
+    """
+
+    def _verdict(self, **overrides) -> ExecutionGateVerdict:
+        base: dict[str, object] = {
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "cand",
+            "suite_id": EXEC_SUITE,
+            "confidence": 0.95,
+            "n_resamples": _FAST_RESAMPLES,
+            "rows_paired": 8,
+            "rows_excluded": 0,
+            "mean_diff": 0.2,
+            "ci_low": 0.1,
+            "ci_high": 0.3,
+            "effect_size": 1.1,
+            "p_value": 0.001,
+        }
+        # CE041 scans `src/` only; a test building a verdict from a base dict is the documented
+        # legitimate splat.
+        return ExecutionGateVerdict(**{**base, **overrides})
+
+    # One row per rung, top of the ladder down. `apply_holm=False` is the UNDECIDED rung: the
+    # renderer must not be handed a decided verdict for it, since `promoted is None` IS the rung.
+    _RUNGS: ClassVar[list[tuple[str, dict, str]]] = [
+        ("undecided", {}, "UNDECIDED"),
+        ("not-a-result", {"gate_refusal": "there is no experiment file", "p_value": None}, "NOT A RESULT"),
+        ("blocked", {"guardrails": [_FAILING_GUARDRAIL]}, "BLOCKED BY A GUARDRAIL"),
+        # `failed` alone cannot tell this rung from the one above it — the primary reason here is
+        # that the candidate LOST, and `separated` is the only thing that distinguishes them.
+        (
+            "lost-and-blocked",
+            {"mean_diff": -0.2, "ci_low": -0.3, "ci_high": -0.1, "guardrails": [_FAILING_GUARDRAIL]},
+            "NOT PROMOTED",
+        ),
+        ("promoted", {}, "PROMOTED"),
+    ]
+
+    @pytest.mark.parametrize(("rung", "overrides", "expected"), _RUNGS, ids=[r[0] for r in _RUNGS])
+    def test_the_rung_is_reachable(self, rung: str, overrides: dict, expected: str) -> None:
+        verdict = self._verdict(**overrides)
+        # The UNDECIDED rung is the un-decided verdict itself; every other rung is post-Holm.
+        decided = verdict if rung == "undecided" else holm_promote_execution([verdict])[0]
+        assert _headline(render_execution_markdown(decided)).startswith(expected)
+
+    def test_an_underpowered_candidate_is_not_blocked_however_its_guardrails_read(self) -> None:
+        """The trap on the far side of the fold: `separated` alone must not reach the BLOCKED rung.
+
+        `separated` is a property of ONE verdict and deliberately excludes the family decision, so
+        at m > 1 a p between alpha/m and alpha leaves `ci_low > 0` while Holm rejects nothing.
+        Two candidates identical in every statistic then rendered opposite headlines purely
+        because one carried a failing cost check — telling that reader to fix cost when the real
+        problem is power, directly above a note saying the p did not clear the Holm threshold.
+        """
+        # Family of 2 at p = 0.03: the step-down's first threshold is alpha/2 = 0.025, so NEITHER
+        # is rejected. The only difference between the arms is the guardrail.
+        blocked_arm, clean_arm = holm_promote_execution(
+            [self._verdict(p_value=0.03, guardrails=[_FAILING_GUARDRAIL]), self._verdict(p_value=0.03)]
+        )
+        assert (blocked_arm.separated, clean_arm.separated) == (True, True)
+        assert (blocked_arm.holm_rejected, clean_arm.holm_rejected) == (False, False)
+        headlines = [_headline(render_execution_markdown(v)) for v in (blocked_arm, clean_arm)]
+        assert headlines == ["NOT PROMOTED", "NOT PROMOTED"], "identical statistics must read identically"
+
+    def test_blocked_and_not_promoted_differ_only_by_separated(self) -> None:
+        # The pair the fold could collapse: both are `promoted is False`, and only `separated`
+        # keeps their headlines apart.
+        blocked = holm_promote_execution([self._verdict(guardrails=[_FAILING_GUARDRAIL])])[0]
+        lost = holm_promote_execution(
+            [self._verdict(mean_diff=-0.2, ci_low=-0.3, ci_high=-0.1, guardrails=[_FAILING_GUARDRAIL])]
+        )[0]
+        assert (blocked.promoted, lost.promoted) == (False, False)
+        assert (blocked.separated, lost.separated) == (True, False)
+
+    def test_a_refusal_outranks_a_failed_guardrail(self) -> None:
+        # A zero-variance verdict has p = 0.0 and a zero-width interval, so `separated` holds on
+        # it — the refusal must still win the headline.
+        decided = holm_promote_execution(
+            [self._verdict(gate_refusal="zero variance in the paired differences", guardrails=[_FAILING_GUARDRAIL])]
+        )[0]
+        assert decided.separated is True and decided.promoted is False
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+
+    def test_a_blocked_candidate_stays_in_the_holm_family(self) -> None:
+        # The veto must not change `m` for its siblings: a blocked candidate was still TESTED, and
+        # dropping it would LOOSEN alpha/m for everyone else.
+        # p values chosen so the family SIZE decides: at m=2 the step-down's first threshold is
+        # alpha/2 = 0.025, which 0.03 misses, so neither is rejected; the sibling alone clears
+        # alpha/1 = 0.05. Dropping the blocked verdict would therefore PROMOTE the sibling.
+        blocked = self._verdict(p_value=0.03, guardrails=[_FAILING_GUARDRAIL])
+        sibling = self._verdict(p_value=0.04)
+        decided = holm_promote_execution([blocked, sibling])
+        assert decided[0].promoted is False
+        assert all("family of 2" in " ".join(v.notes) for v in decided)
+        # Rank-sensitive, unlike `holm_alpha` (which stores the family-wide input and would read
+        # 0.05 either way): dropping the blocked verdict would leave a family of ONE, and p = 0.02
+        # clears alpha/1 while it does not clear alpha/2. The sibling's decision is the witness.
+        assert decided[1].promoted is False
+        assert holm_promote_execution([sibling])[0].promoted is True
+
+    @pytest.mark.parametrize(
+        ("overrides", "expected"),
+        [
+            ({}, True),
+            ({"mean_diff": None}, False),
+            ({"ci_low": None}, False),
+            ({"mean_diff": -0.2, "ci_low": -0.3, "ci_high": -0.1}, False),
+            ({"ci_low": 0.0}, False),  # touching zero is not excluding it
+            ({"mean_diff": 0.0}, False),
+        ],
+        ids=["separated", "no-mean", "no-ci-low", "favours-incumbent", "ci-touches-zero", "zero-diff"],
+    )
+    def test_separated_is_the_two_component_conjunction(self, overrides: dict, expected: bool) -> None:
+        assert self._verdict(**overrides).separated is expected
+
+    def test_separated_is_not_a_serialized_field(self) -> None:
+        # A property, never a stored field: nothing new is written, so no construction site can set
+        # it inconsistently with the numbers it derives from.
+        assert "separated" not in ExecutionGateVerdict.model_fields
+        assert "separated" not in self._verdict().model_dump()
+
+
 class TestHolmPromoteExecution:
     def _verdict(self, p: float, **overrides) -> ExecutionGateVerdict:
         base = {
@@ -3191,8 +3469,9 @@ class TestHolmPromoteExecution:
         assert decided.promoted is False
         assert not any("outside the family" in note for note in decided.notes)
 
-    def test_a_failed_guardrail_leaves_promoted_true_and_is_noted(self) -> None:
-        # Load-bearing: folding guardrails into `promoted` makes the BLOCKED headline unreachable.
+    def test_a_failed_guardrail_forces_promoted_false_and_is_noted(self) -> None:
+        # The veto now lives in the DECISION, not only in the render. What keeps the BLOCKED
+        # headline reachable is `separated` — the statistical half, unaffected by the guardrail.
         failing = GuardrailCheck(
             name="cost (USD/row)",
             incumbent=1.0,
@@ -3204,7 +3483,8 @@ class TestHolmPromoteExecution:
             passed=False,
         )
         decided = holm_promote_execution([self._verdict(0.001, guardrails=[failing])])[0]
-        assert decided.promoted is True
+        assert decided.promoted is False
+        assert decided.separated is True
         assert any("cost (USD/row) FAILED" in note for note in decided.notes)
         assert "BLOCKED BY A GUARDRAIL" in render_execution_markdown(decided)
 
@@ -3229,9 +3509,11 @@ class TestRenderExecutionMarkdown:
         candidate = {**_WINNER["candidate"], "r3": [0.6, 0.2]}
         run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=candidate)
         decided = holm_promote_execution([_exec_gate(run_dir, n_resamples=_FAST_RESAMPLES)])[0]
-        # Unconditional: `promoted` must stay True for the BLOCKED headline to be reachable at all,
-        # so a guard here would turn the plan's required assertion into a silent no-op.
-        assert decided.promoted is True
+        # Unconditional on BOTH halves, so neither assertion can become a silent no-op: the check
+        # vetoes the promotion, and `separated` records that the statistic itself came out — which
+        # is what makes the BLOCKED headline reachable rather than an ordinary NOT PROMOTED.
+        assert decided.promoted is False
+        assert decided.separated is True
         text = render_execution_markdown(decided)
         assert "BLOCKED BY A GUARDRAIL" in text
         assert "engagement" in text
@@ -3924,6 +4206,7 @@ def _full_execution_verdict() -> ExecutionGateVerdict:
         p_value=0.01,
         gate_refusal="refused",
         holm_alpha=0.05,
+        holm_rejected=True,  # rejected at its rank, yet not promoted — the refusal is what vetoed
         promoted=False,  # as above: a refusal forces this False
         mde=0.2,
         integrity_checks=[_full_guardrail_check()],

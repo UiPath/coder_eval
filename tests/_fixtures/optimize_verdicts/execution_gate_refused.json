@@ -11,8 +11,9 @@
   "ci_high": 0.5,
   "effect_size": null,
   "p_value": 0.0,
-  "gate_refusal": "the two arms differed by exactly 0.500 on every one of the 4 paired row(s), so the paired differences carry zero variance. A paired t on a constant non-zero difference reports p = 0.0000 and a zero-width interval whatever the effect actually is — every promotion condition holds at once and none of them measured anything. This is not a result about the candidate. Add rows whose difference the two arms do NOT agree on, or add replicates so within-row spread can appear; a larger family or a smaller alpha cannot help.",
+  "gate_refusal": "the two arms differed by exactly 0.500 on every one of the 4 paired row(s), so the paired differences carry zero variance. A paired t on a constant non-zero difference reports p = 0.0000 and a zero-width interval whatever the effect actually is \u2014 every promotion condition holds at once and none of them measured anything. This is not a result about the candidate. Add rows whose difference the two arms do NOT agree on, or add replicates so within-row spread can appear; a larger family or a smaller alpha cannot help.",
   "holm_alpha": null,
+  "holm_rejected": null,
   "promoted": null,
   "mde": 0.0,
   "integrity_checks": [
@@ -52,7 +53,7 @@
       "ci_high": null,
       "rate": null,
       "passed": true,
-      "note": "no cost recorded on at least one arm — guardrail not evaluated"
+      "note": "no cost recorded on at least one arm \u2014 guardrail not evaluated"
     },
     {
       "name": "latency (seconds/row)",
