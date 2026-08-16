@@ -32,17 +32,20 @@ from coder_eval.models import (
     ExecutionGateVerdict,
     ExperimentResult,
     FileCheckCriterion,
+    FileExistsCriterion,
     FinalStatus,
     GuardrailCheck,
     NoiseFloor,
     OptimizeMeasurements,
     RegressionRow,
+    ResolvedTask,
     RoundScores,
     RowSelection,
     RunSummary,
     SkillTriggeredCriterion,
     TaskDefinition,
     TokenUsage,
+    copy_with,
 )
 from coder_eval.optimize_gate import (
     _NOTE_OUTSIDE_FAMILY,
@@ -169,16 +172,53 @@ def _write_run_provenance(run_dir: Path, split: str | None = None) -> None:
     # its READER, and this hand-wrote its WRITER — so renaming `RunSummary.row_selection` or
     # `RowSelection.split` would have moved both in lockstep, leaving every test green while
     # production went 100% "unrecorded". Deriving the payload here is what breaks that symmetry.
-    payload = {_RUN_SELECTION_KEY: RowSelection(split=split).model_dump(mode="json")}
+    payload = {_RUN_SELECTION_KEY: RowSelection(split=split).model_dump(mode="json"), "task_results": []}
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _write_row(run_dir: Path, variant: str, row_id: str, result: EvaluationResult, replicate: int = 0) -> Path:
+def _record_task_result(run_dir: Path, variant: str, task_id: str, replicate: int) -> None:
+    """Append one executed row to ``run.json``'s ``task_results``, as a real run does.
+
+    The tree-reconciliation preflight asks whether run.json describes the rows on disk, so a
+    fixture that writes rows without recording them models a CONTAMINATED run dir. Every builder
+    goes through ``_write_row``, which calls this, so the ordinary fixture is a clean one and the
+    contaminated case is built deliberately (``_write_row(..., record=False)``).
+
+    Only the three keys the reconciliation reads, on the same "do not re-implement the writer"
+    grounds as ``_write_run_provenance`` above. ``replicate_index`` is load-bearing: the
+    reconciliation keys on ``(row, replicate)``, so a fixture omitting it would send every entry
+    down the permissive whole-row path and leave the replicate half of the check untested.
+    """
+    path = run_dir / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.setdefault("task_results", []).append(
+        {"task_id": task_id, "variant_id": variant, "replicate_index": replicate}
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_row(
+    run_dir: Path,
+    variant: str,
+    row_id: str,
+    result: EvaluationResult,
+    replicate: int = 0,
+    *,
+    record: bool = True,
+) -> Path:
+    """Write one replicate's ``task.json``, recording it in ``run.json`` unless told not to.
+
+    ``record=False`` writes the row to disk WITHOUT recording it — a row left behind by an earlier
+    invocation of a re-used ``--run-dir``, which is exactly what the tree-reconciliation preflight
+    refuses on.
+    """
     task_dir = run_dir / variant / SUITE / row_id / f"{replicate:02d}"
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / "task.json"
     path.write_text(result.model_dump_json(), encoding="utf-8")
     _write_run_provenance(run_dir)
+    if record:
+        _record_task_result(run_dir, variant, f"{SUITE}/{row_id}", replicate)
     return path
 
 
@@ -1842,6 +1882,317 @@ def _tiny_suite(positives: int, distractors: int) -> tuple[dict, dict]:
         incumbent[f"d{i}"] = [("no", "no")]
         candidate[f"d{i}"] = [("no", "no")]
     return incumbent, candidate
+
+
+class TestReusedRunDirIsRefused:
+    """`run.json` is per-INVOCATION; the tree under it is APPEND-ONLY.
+
+    A second `coder-eval run --run-dir <same dir> --split test` leaves the first split's rows on
+    disk while rewriting `row_selection` to say `test`. The cross-split refusal cannot see it —
+    provenance reads clean, single-valued — and because both arms are subdirectories of the SAME
+    run dir the contamination is symmetric: the stale rows pair on both sides, so there is no
+    `rows_excluded` bump and no unpaired-rows note. The only trace is a `rows_paired` larger than
+    the split, which nothing else flags.
+    """
+
+    def _clean(self, tmp_path: Path) -> Path:
+        run_dir = tmp_path / "run-0"
+        for row in ("t1", "t2", "t3"):
+            _write_row(run_dir, "incumbent", row, _eval_result(row, [("yes", "no")]))
+            _write_row(run_dir, "candidate", row, _eval_result(row, [("yes", "yes")]))
+        return run_dir
+
+    def _gate_one(self, run_dir: Path, **kwargs):
+        return activation_gate(
+            incumbent_run_dirs=[run_dir],
+            candidate_run_dirs=[run_dir],
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+            **kwargs,
+        )
+
+    def test_the_defect_end_to_end_a_tree_holding_two_splits_is_refused(self, tmp_path: Path) -> None:
+        """THE test that pins the finding. Before this preflight it returned a confident interval."""
+        run_dir = self._clean(tmp_path)
+        # The earlier invocation's train rows, still on disk, described by no run.json.
+        for row in ("r1", "r2"):
+            _write_row(run_dir, "incumbent", row, _eval_result(row, [("yes", "no")]), record=False)
+            _write_row(run_dir, "candidate", row, _eval_result(row, [("yes", "yes")]), record=False)
+
+        # Symmetric contamination: both arms pair the stale rows, so nothing else notices.
+        assert set(load_suite_rows(run_dir, "incumbent", SUITE)) == {"t1", "t2", "t3", "r1", "r2"}
+
+        verdict = self._gate_one(run_dir)
+        assert verdict.gate_refusal is not None
+        assert (verdict.mean_diff, verdict.ci_low, verdict.ci_high, verdict.p_value) == (None, None, None, None)
+        assert (verdict.incumbent_f1, verdict.candidate_f1) == (None, None)
+        # Per LOCATION, and actionable: how many stale results, across how many rows, WHERE.
+        # A tree-wide arm x dir total would be unreconcilable with the `Rows paired` line the
+        # same block prints four lines below it.
+        assert "2 result(s) across 2 row(s)" in verdict.gate_refusal
+        assert "incumbent" in verdict.gate_refusal and "candidate" in verdict.gate_refusal
+        assert "r1/00" in verdict.gate_refusal and "fresh --run-dir" in verdict.gate_refusal
+
+    def test_it_renders_as_not_a_result_and_carries_no_p(self, tmp_path: Path) -> None:
+        # A wiring refusal, so it joins the `NOT A RESULT` family — distinguishable in a ledger
+        # from the discreteness refusal, which is the only one that ever carries a p.
+        run_dir = self._clean(tmp_path)
+        _write_row(run_dir, "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        decided = holm_promote([self._gate_one(run_dir)])[0]
+        assert decided.p_value is None and decided.promoted is False
+        text = render_markdown(decided)
+        assert "NOT A RESULT" in text
+        assert "CANNOT SEPARATE AT THIS SIZE" not in text
+
+    def test_a_stale_replicate_inside_a_recorded_row_is_refused(self, tmp_path: Path) -> None:
+        """Row ids alone are blind one level down, and the trigger is mundane.
+
+        Re-using a run dir with a smaller `--repeats` leaves the earlier call's `<NN>` dirs inside
+        rows the new run.json DOES record. `load_suite_rows` pools every replicate it finds and
+        `_balance_pair` trims symmetrically — so, again, nothing else flags it and the gate returns
+        a confident interval over contaminated clusters.
+        """
+        run_dir = self._clean(tmp_path)  # every row recorded at replicate 00
+        for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
+            _write_row(run_dir, variant, "t1", _eval_result("t1", [("yes", observed)]), 1, record=False)
+        verdict = self._gate_one(run_dir)
+        assert verdict.gate_refusal is not None
+        assert "t1/01" in verdict.gate_refusal
+
+    def test_a_recorded_replicate_is_not_flagged(self, tmp_path: Path) -> None:
+        # The anti-over-fire half of the replicate key: a legitimate --repeats 2 run records both.
+        run_dir = self._clean(tmp_path)
+        for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
+            for row in ("t1", "t2", "t3"):
+                _write_row(run_dir, variant, row, _eval_result(row, [("yes", observed)]), 1)
+        assert self._gate_one(run_dir).gate_refusal is None
+
+    def test_an_entry_with_no_replicate_index_covers_every_replicate_of_its_row(self, tmp_path: Path) -> None:
+        # Permissive on ambiguity, exactly as for a missing variant_id: an unattributable entry
+        # means "cannot rule this one in", not "this one is stale".
+        run_dir = self._clean(tmp_path)
+        for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
+            _write_row(run_dir, variant, "t1", _eval_result("t1", [("yes", observed)]), 1, record=False)
+        payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        for entry in payload["task_results"]:
+            entry.pop("replicate_index", None)
+        (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert self._gate_one(run_dir).gate_refusal is None
+
+    def test_an_unreadable_suite_directory_degrades_to_a_note(self, tmp_path: Path) -> None:
+        # `iterdir` can raise; the function's contract is to degrade to "cannot tell", exactly as
+        # `read_split_provenance` does for an unreadable run.json.
+        run_dir = self._clean(tmp_path)
+        suite_dir = run_dir / "candidate" / SUITE
+        suite_dir.chmod(0o000)
+        try:
+            verdict = self._gate_one(run_dir)
+        finally:
+            suite_dir.chmod(0o755)
+        assert verdict.gate_refusal is None
+        assert any("cannot be reconciled" in note for note in verdict.notes)
+
+    def test_the_arms_in_different_run_dirs_name_both_locations(self, tmp_path: Path) -> None:
+        inc_dir, cand_dir = tmp_path / "inc", tmp_path / "cand"
+        for run_dir, variant, observed in ((inc_dir, "incumbent", "no"), (cand_dir, "candidate", "yes")):
+            for row in ("t1", "t2", "t3"):
+                _write_row(run_dir, variant, row, _eval_result(row, [("yes", observed)]))
+            _write_row(run_dir, variant, "stale", _eval_result("stale", [("yes", observed)]), record=False)
+        verdict = activation_gate(
+            incumbent_run_dirs=[inc_dir],
+            candidate_run_dirs=[cand_dir],
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None
+        assert str(inc_dir) in verdict.gate_refusal and str(cand_dir) in verdict.gate_refusal
+
+    def test_more_than_three_stale_results_are_truncated_with_an_ellipsis(self, tmp_path: Path) -> None:
+        run_dir = self._clean(tmp_path)
+        for row in ("s1", "s2", "s3", "s4"):
+            _write_row(run_dir, "candidate", row, _eval_result(row, [("yes", "yes")]), record=False)
+        refusal = self._gate_one(run_dir).gate_refusal
+        assert refusal is not None
+        assert "4 result(s) across 4 row(s)" in refusal and "…" in refusal
+
+    def test_an_unreconcilable_sibling_dir_is_named_in_the_refusal(self, tmp_path: Path) -> None:
+        # The note that would say so is unreachable past the refusal's return, so the refusal
+        # itself has to carry it — otherwise its totals silently exclude a whole directory.
+        dirty, opaque = tmp_path / "dirty", tmp_path / "opaque"
+        for run_dir in (dirty, opaque):
+            for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
+                for row in ("t1", "t2", "t3"):
+                    _write_row(run_dir, variant, row, _eval_result(row, [("yes", observed)]))
+        _write_row(dirty, "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        (opaque / "run.json").unlink()
+        verdict = activation_gate(
+            incumbent_run_dirs=[dirty, opaque],
+            candidate_run_dirs=[dirty, opaque],
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None
+        assert "could not be reconciled either way" in verdict.gate_refusal
+
+    def test_a_clean_run_dir_is_neither_refused_nor_noted(self, tmp_path: Path) -> None:
+        # The anti-over-fire test, and the overwhelmingly common path: the guard must not fire by
+        # default, and must not add a note to every block either.
+        verdict = self._gate_one(self._clean(tmp_path))
+        assert verdict.gate_refusal is None
+        assert not any("task_results" in note or "re-used --run-dir" in note for note in verdict.notes)
+
+    def test_a_missing_run_json_degrades_to_a_note(self, tmp_path: Path) -> None:
+        run_dir = self._clean(tmp_path)
+        (run_dir / "run.json").unlink()
+        verdict = self._gate_one(run_dir)
+        assert verdict.gate_refusal is None
+        assert any("cannot be reconciled" in note for note in verdict.notes)
+
+    def test_a_malformed_run_json_degrades_to_a_note(self, tmp_path: Path) -> None:
+        run_dir = self._clean(tmp_path)
+        (run_dir / "run.json").write_text('{"task_results": [', encoding="utf-8")
+        verdict = self._gate_one(run_dir)
+        assert verdict.gate_refusal is None
+        assert any("cannot be reconciled" in note for note in verdict.notes)
+
+    def test_a_run_json_predating_task_results_degrades_to_a_note(self, tmp_path: Path) -> None:
+        # Old run dirs must stay gatable: the one state where contamination is undetectable must
+        # not also be the one state that refuses everything.
+        run_dir = self._clean(tmp_path)
+        (run_dir / "run.json").write_text(json.dumps({_RUN_SELECTION_KEY: {"split": None}}), encoding="utf-8")
+        verdict = self._gate_one(run_dir)
+        assert verdict.gate_refusal is None
+        assert any("cannot be reconciled" in note for note in verdict.notes)
+
+    def test_a_tree_holding_fewer_rows_than_recorded_does_not_refuse(self, tmp_path: Path) -> None:
+        # An interrupted write or a deleted row is not this defect; only rows the run.json never
+        # wrote are. Nothing is unrecorded here, so there is nothing to refuse.
+        run_dir = self._clean(tmp_path)
+        shutil.rmtree(run_dir / "incumbent" / SUITE / "t3")
+        shutil.rmtree(run_dir / "candidate" / SUITE / "t3")
+        assert self._gate_one(run_dir).gate_refusal is None
+
+    def test_an_entry_with_no_variant_id_counts_for_every_variant(self, tmp_path: Path) -> None:
+        # Permissive on ambiguity: the harm is a FALSE refusal blocking a real promotion, and an
+        # unattributable entry means "cannot rule this row in", not "this row is stale".
+        run_dir = self._clean(tmp_path)
+        _write_row(run_dir, "incumbent", "extra", _eval_result("extra", [("yes", "no")]), record=False)
+        _write_row(run_dir, "candidate", "extra", _eval_result("extra", [("yes", "yes")]), record=False)
+        payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        payload["task_results"].append({"task_id": f"{SUITE}/extra"})  # no variant_id
+        (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert self._gate_one(run_dir).gate_refusal is None
+
+    def test_another_suite_in_the_same_run_dir_is_not_mistaken_for_a_stale_row(self, tmp_path: Path) -> None:
+        # A run dir legitimately holds several suites and variants. The reconciliation is scoped to
+        # the arms' own suite, so a sibling suite's rows are neither counted nor blamed.
+        run_dir = self._clean(tmp_path)
+        other = run_dir / "incumbent" / "some-other-suite" / "x" / "00"
+        other.mkdir(parents=True)
+        (other / "task.json").write_text(_eval_result("x", [("yes", "yes")]).model_dump_json(), encoding="utf-8")
+        assert self._gate_one(run_dir).gate_refusal is None
+
+    def test_an_empty_row_directory_is_not_a_row(self, tmp_path: Path) -> None:
+        # A directory holding no task.json is not a scored row — the reconciliation reads names but
+        # still requires the replicate glob to match, so a stray mkdir cannot fabricate a refusal.
+        run_dir = self._clean(tmp_path)
+        (run_dir / "candidate" / SUITE / "leftover-dir").mkdir()
+        assert self._gate_one(run_dir).gate_refusal is None
+
+    def test_an_aggregate_rebuilt_run_dir_does_not_false_positive(self, tmp_path: Path) -> None:
+        """`coder-eval aggregate` rebuilds run.json FROM the tree, so it must never be refused.
+
+        Built through the REAL rebuild path (`recover_task_results` -> `build_run_summary` ->
+        `write_run_summary`), not by hand-writing a run.json that assumes the answer. It is also
+        this check's documented blind spot from the other side: because the record is derived from
+        the tree, an already-contaminated dir is LAUNDERED into a clean reading by an aggregate.
+        That is stated on `reconcile_tree_against_run_json` and accepted.
+        """
+        from coder_eval.orchestration.batch import build_run_summary, recover_task_results, write_run_summary
+
+        run_dir = tmp_path / "resumed"
+        # Rows on disk carrying their own variant_id, as a real run writes them. `record=False`
+        # because the rebuild below is what writes run.json here — that IS the resume path.
+        for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
+            for row in ("t1", "t2", "t3"):
+                result = copy_with(_eval_result(row, [("yes", observed)]), variant_id=variant)
+                _write_row(run_dir, variant, row, result, record=False)
+        (run_dir / "run.json").unlink()  # the interrupted run left none
+
+        recovered = recover_task_results(run_dir)
+        assert len(recovered) == 6, "fixture: the rebuild must see every row on disk"
+        summary = build_run_summary("resumed", recovered, datetime(2026, 8, 16), datetime(2026, 8, 16))
+        write_run_summary(summary, run_dir)
+
+        verdict = self._gate_one(run_dir)
+        assert verdict.gate_refusal is None
+        assert not any("cannot be reconciled" in note for note in verdict.notes)
+        assert verdict.rows_paired == 3
+
+    def test_a_resumed_run_dir_does_not_false_positive(self, tmp_path: Path) -> None:
+        """The one assumption that would have invalidated this preflight, checked on the real path.
+
+        `--resume` does NOT go through `recover_task_results` — that is `aggregate`'s. It calls
+        `partition_for_resume` over the RESOLVED task set, reloads the already-finished ones into
+        `prior_results`, and `run_batch` folds `[*prior_results, *processed]` into the summary. So
+        run.json describes the whole resolved set, including rows this invocation did not execute.
+        Modelled exactly: three rows already on disk from the interrupted run, one more executed
+        now, and the summary built from the union — as `batch.py` does.
+        """
+        from coder_eval.orchestration.batch import build_run_summary, partition_for_resume, write_run_summary
+        from coder_eval.path_utils import build_task_run_dir
+
+        run_dir = tmp_path / "resumed"
+        rows = ("t1", "t2", "t3")
+        for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
+            for row in rows:
+                result = copy_with(_eval_result(row, [("yes", observed)]), variant_id=variant)
+                _write_row(run_dir, variant, row, result, record=False)
+        (run_dir / "run.json").unlink()  # the interrupted run left none
+
+        # `partition_for_resume` reads the RESOLVED set — what this invocation would run — and
+        # finds every one of them already finished on disk.
+        resolved = [
+            ResolvedTask(
+                task=TaskDefinition(
+                    task_id=f"{SUITE}/{row}",
+                    description="row",
+                    initial_prompt="p",
+                    success_criteria=[FileExistsCriterion(path="x", description="x")],
+                ),
+                task_file=Path("t.yaml"),
+                # The PER-TASK dir: `_load_completed_result` reads `rt.run_dir / "task.json"`.
+                run_dir=build_task_run_dir(run_dir, variant, f"{SUITE}/{row}"),
+                variant_id=variant,
+            )
+            for variant in ("incumbent", "candidate")
+            for row in rows
+        ]
+        to_run, prior_results, _prior_resolved = partition_for_resume(resolved)
+        assert (len(to_run), len(prior_results)) == (0, 6), "fixture: every row must read as finished"
+
+        # `run_batch` folds `[*prior_results, *processed]` into the summary; nothing new ran here.
+        summary = build_run_summary("resumed", list(prior_results), datetime(2026, 8, 16), datetime(2026, 8, 16))
+        write_run_summary(summary, run_dir)
+
+        verdict = self._gate_one(run_dir)
+        assert verdict.gate_refusal is None
+        assert not any("cannot be reconciled" in note for note in verdict.notes)
+
+    def test_an_empty_run_dir_is_not_refused(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "empty"
+        run_dir.mkdir()
+        (run_dir / "run.json").write_text(json.dumps({"task_results": []}), encoding="utf-8")
+        assert self._gate_one(run_dir).gate_refusal is None
 
 
 class TestGateRefusal:

@@ -1349,13 +1349,23 @@ come back that way — it keeps `promoted=None` until `holm_promote` forces it t
 refusal reaches you whether or not you remembered the correction.)
 
 **There is a FIFTH headline on this track too, and it is a different fault with a different
-remedy: `NOT A RESULT`.** It means the two arms recorded DIFFERENT `--split` values, so they never
-scored the same rows and their difference is not an effect. Nothing about the candidate is being
-reported. The remedy is neither more rows nor a smaller family: **re-run both arms under one
-`--split` and gate again.** A block whose provenance is merely MISSING is not refused — it carries
-a note saying a cross-split pair could not be ruled out, which is worth repeating to the user when
-you hand back. Tell the two refusals apart by the p: `NOT A RESULT` never has one, because no
-comparison was made.
+remedy: `NOT A RESULT`.** Nothing about the candidate is being reported — the arms did not score
+a comparable set of rows, so their difference is not an effect. **Read the refusal text, because
+there are TWO causes and their remedies differ:**
+
+- *"the two arms recorded DIFFERENT `--split` values"* — they never scored the same rows.
+  Remedy: **re-run both arms under one `--split` and gate again.**
+- *"the run directory tree holds results that no recorded invocation wrote"* — a `--run-dir` was
+  re-used. `run.json` is written per invocation while the tree is append-only, so an earlier
+  call's rows (or replicates) are still on disk and got pooled into both arms. The refusal names
+  which directory and which rows. Remedy: **re-run both arms into a fresh `--run-dir`.** Note the
+  first check cannot catch this one — the surviving `run.json` records a single split perfectly
+  honestly; it is simply not a true statement about the tree.
+
+Neither remedy is more rows or a smaller family. A block whose provenance is merely MISSING is not
+refused — it carries a note saying the fault could not be ruled out, which is worth repeating to
+the user when you hand back. Tell these refusals apart from the sizing one by the p: `NOT A
+RESULT` never has one, because no comparison was made.
 
 **There is a fourth headline, and it is not a negative result: `CANNOT SEPARATE AT THIS SIZE`.**
 It means the smallest p this suite can express is larger than the Holm threshold for that

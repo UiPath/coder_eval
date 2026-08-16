@@ -64,6 +64,7 @@ from coder_eval.models import (
     copy_with,
 )
 from coder_eval.optimize_store import UNRECORDED_SPLIT, UNRESOLVED_MODEL, lookup_noise_floor
+from coder_eval.path_utils import replicate_subdir_name
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
     PairedComparison,
@@ -675,6 +676,116 @@ def read_split_provenance(run_dirs: Sequence[Path]) -> SplitProvenance:
             continue
         recorded.add(split)
     return SplitProvenance(recorded=frozenset(recorded), unrecorded=unrecorded)
+
+
+class TreeReconciliation(NamedTuple):
+    """What one run dir's tree holds for one arm, against what its ``run.json`` says it ran.
+
+    ``unrecorded`` is the ``(row_id, replicate_dir)`` pairs present on disk that ``run.json`` does
+    not describe. ``unknown`` is set when the question could not be asked at all — no ``run.json``,
+    unreadable, or no ``task_results`` — which is a NOTE, never a refusal.
+    """
+
+    unrecorded: frozenset[tuple[str, str]]
+    recorded: int
+    on_disk: int
+    unknown: bool
+
+
+# The replicate level of the suite glob, DERIVED rather than respelled: `TASK_JSON_GLOB` is
+# `<row>/<NN>/task.json` relative to a suite dir, so dropping its first segment gives the same
+# pattern relative to one row dir. Spelling it again would let the two describe different trees,
+# which is the whole reason `_task_json_pattern` exists (CE042).
+_REPLICATE_TASK_JSON_GLOB = TASK_JSON_GLOB.split("/", 1)[1]
+
+
+def reconcile_tree_against_run_json(run_dir: Path, variant_id: str, suite_id: str) -> TreeReconciliation:
+    """Does this ``run.json`` describe the arm's replicates sitting in this tree?
+
+    ``run.json`` is a per-INVOCATION artifact; the tree under it is APPEND-ONLY. Nothing removes a
+    prior invocation's results, so a reused ``--run-dir`` leaves stale ``<row>/<NN>/task.json``
+    behind while ``row_selection`` is rewritten to describe only the latest call. The recorded
+    provenance is then a true statement about an invocation and a FALSE one about the tree the
+    gate globs — and because both arms are subdirectories of the same run dir, the contamination
+    is SYMMETRIC: the stale results pair on both sides, so there is no ``rows_excluded`` bump and
+    no unpaired-rows note. The only trace is a ``rows_paired`` larger than the selected split, or
+    a replicate count larger than the ``--repeats`` asked for, and nothing else flags either.
+
+    Matched by ``(row id, replicate dir)``, not by counting. A fanned row's ``task_id`` is
+    ``f"{suite_id}/{row_id}"`` (``task_loader.expand_dataset``) and ``path_utils.build_task_run_dir``
+    uses that same string as the path segment, so the tree's directory name and ``run.json``'s
+    ``task_id`` correspond by CONSTRUCTION rather than by coincidence. Counts would be blind to a
+    reused dir whose two invocations happened to run the same number of rows, and would need a
+    fixed glob depth the tree does not have — a dataset row sits at
+    ``<variant>/<suite>/<row>/<NN>/`` while a plain task sits at ``<variant>/<task>/<NN>/``, and
+    one run dir can hold both.
+
+    **The REPLICATE half of the key is load-bearing, not thoroughness.** Row ids alone are blind to
+    a stale ``<NN>`` inside a row this run.json does record — the identical defect one level down,
+    triggered by something as mundane as re-using a run dir with a smaller ``--repeats``.
+    ``load_suite_rows`` pools every replicate it finds, ``_balance_pair`` trims symmetrically and
+    therefore not at all, and the gate returns a confident interval over contaminated clusters.
+    ``task_results`` carries ``replicate_index``, so this costs nothing.
+
+    Reads directory NAMES only — no ``task.json`` is parsed — so the tree half costs a listing.
+
+    An entry whose ``variant_id`` is absent counts for EVERY variant, and one whose
+    ``replicate_index`` is absent counts for every replicate of its row. Both ambiguities are
+    resolved permissively on purpose: the harm here is a false refusal blocking a legitimate
+    promotion, not a missed detection, and an unattributable entry means "we cannot rule this one
+    in", not "this one is stale".
+
+    **What this cannot see, stated here rather than left to be discovered.** A ``run.json`` rebuilt
+    by ``coder-eval aggregate`` is rebuilt FROM the tree (``recover_task_results`` walks it), so it
+    describes everything on disk by construction and genuine contamination is laundered into a
+    clean reading. That is accepted: this is strictly better than the nothing it replaces, not a
+    proof. ``--resume`` is a different path and is NOT affected — ``partition_for_resume`` folds
+    ``prior_results`` for the resolved task set into the new summary, so a resume under the SAME
+    selector still describes its whole tree, and a resume under a DIFFERENT one genuinely has
+    contaminated the tree and is refused correctly. Nested sub-run dirs (a subdirectory carrying
+    its own ``run.json``) are not excluded here, unlike ``recover_task_results`` — ``load_suite_rows``
+    is blind to them the same way, so the gate already conflates them and this adds no new gap.
+    """
+    suite_dir = run_dir / variant_id / suite_id
+    on_disk: set[tuple[str, str]] = set()
+    try:
+        row_dirs = [d for d in suite_dir.iterdir() if d.is_dir()] if suite_dir.is_dir() else []
+        for row_dir in row_dirs:
+            on_disk |= {(row_dir.name, task_json.parent.name) for task_json in row_dir.glob(_REPLICATE_TASK_JSON_GLOB)}
+    except OSError:
+        # An unreadable directory is "we cannot tell", exactly like an unreadable run.json. The
+        # contract of this function is to degrade, and `read_split_provenance` catches the same
+        # class of fault beside it.
+        return TreeReconciliation(frozenset(), 0, 0, unknown=True)
+
+    try:
+        payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return TreeReconciliation(frozenset(), 0, len(on_disk), unknown=True)
+    results = payload.get("task_results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        return TreeReconciliation(frozenset(), 0, len(on_disk), unknown=True)
+
+    prefix = f"{suite_id}/"
+    recorded: set[tuple[str, str]] = set()
+    whole_rows: set[str] = set()
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        entry_variant = entry.get("variant_id")
+        if entry_variant is not None and entry_variant != variant_id:
+            continue
+        task_id = entry.get("task_id")
+        if not isinstance(task_id, str) or not task_id.startswith(prefix):
+            continue
+        row_id = task_id[len(prefix) :]
+        replicate = entry.get("replicate_index")
+        if isinstance(replicate, int):
+            recorded.add((row_id, replicate_subdir_name(replicate)))
+        else:
+            whole_rows.add(row_id)
+    unrecorded = frozenset(pair for pair in on_disk if pair not in recorded and pair[0] not in whole_rows)
+    return TreeReconciliation(unrecorded, len(recorded) + len(whole_rows), len(on_disk), unknown=False)
 
 
 def _format_splits(values: Iterable[str | None]) -> str:
@@ -1316,6 +1427,39 @@ def activation_gate(
     # function still adds has to land in the list `_load_and_pair` returned, before either return.
     notes = paired.notes
 
+    def _refuse_activation(refusal: str) -> ActivationGateVerdict:
+        """The row-selection preflight's early exit: every statistic ``None``, the refusal set.
+
+        One helper for BOTH preflight refusals (and any third), because they differ only in the
+        message: twenty identical keywords copied per cause is how two blocks drift, and how
+        adding a field to ``ActivationGateVerdict`` becomes three coordinated edits. Literal
+        keywords, never a splat, so CE041/CE048 still see the construction — the same shape
+        ``execution_gate._refuse`` already has on the other track.
+
+        The loaded counts ARE echoed: the block still says what it read, even though it refuses
+        to compare it. Everything derived from the comparison is ``None``, and there is no
+        ``p_value`` — this is a WIRING refusal, so it renders under ``NOT A RESULT`` and stays
+        distinguishable from the discreteness refusal, the only one that ever carries a p.
+        """
+        return ActivationGateVerdict(
+            incumbent_variant=incumbent_variant,
+            candidate_variant=candidate_variant,
+            suite_id=suite_id,
+            criterion_index=criterion_index,
+            confidence=confidence,
+            n_resamples=n_resamples,
+            rows_paired=len(scored_row_ids),
+            rows_excluded=paired.rows_excluded,
+            incumbent_f1=None,
+            candidate_f1=None,
+            mean_diff=None,
+            ci_low=None,
+            ci_high=None,
+            p_value=None,
+            gate_refusal=refusal,
+            notes=notes,
+        )
+
     # --- Row-selection preflight, BEFORE any bootstrap ---------------------------------
     #
     # The two arms are separate `coder-eval run` invocations, so they can genuinely have scored
@@ -1347,26 +1491,7 @@ def activation_gate(
             "They did not score the same rows, so their difference is not an effect. Re-run both "
             "arms under one --split before gating."
         )
-        return ActivationGateVerdict(
-            incumbent_variant=incumbent_variant,
-            candidate_variant=candidate_variant,
-            suite_id=suite_id,
-            criterion_index=criterion_index,
-            confidence=confidence,
-            n_resamples=n_resamples,
-            # Echoed from _load_and_pair so the block still says what it LOADED, even though it
-            # refuses to compare it.
-            rows_paired=len(scored_row_ids),
-            rows_excluded=paired.rows_excluded,
-            incumbent_f1=None,
-            candidate_f1=None,
-            mean_diff=None,
-            ci_low=None,
-            ci_high=None,
-            p_value=None,
-            gate_refusal=refusal,
-            notes=notes,
-        )
+        return _refuse_activation(refusal)
     # A missing provenance cannot RULE OUT a cross-split pair, so it is said out loud rather than
     # passed over in silence — the one state where the fault is undetectable must not also be the
     # one state that says nothing. Not a refusal: old run dirs stay gatable.
@@ -1381,6 +1506,60 @@ def activation_gate(
             f"row-selection provenance is missing from {missing} of {total_dirs} run directories "
             + "(they predate the run.json `row_selection` field, or it could not be read), so a "
             + "cross-split pair cannot be ruled out for this comparison."
+        )
+
+    # --- Tree reconciliation, the OTHER half of the same preflight ---------------------
+    #
+    # The refusal above compares what the two run.jsons SAY. This one asks whether either run.json
+    # describes the tree it sits on. A reused `--run-dir` defeats the first check completely: the
+    # second invocation rewrites `row_selection` to a single split while the first split's results
+    # stay on disk, so provenance reads clean and the gate pools both splits into one arm. See
+    # `reconcile_tree_against_run_json` for why this matches (row, replicate) rather than counting.
+    stale: dict[str, frozenset[tuple[str, str]]] = {}
+    unknown_dirs = 0
+    for variant, dirs in ((incumbent_variant, incumbent_run_dirs), (candidate_variant, candidate_run_dirs)):
+        for run_dir in dirs:
+            reconciliation = reconcile_tree_against_run_json(run_dir, variant, suite_id)
+            if reconciliation.unknown:
+                unknown_dirs += 1
+            elif reconciliation.unrecorded:
+                stale[f"{run_dir}/{variant}"] = reconciliation.unrecorded
+    if stale:
+        # Reported PER LOCATION, and as distinct rows rather than a tree-wide total. A sum over
+        # (arm x dir) is unreconcilable with the `Rows paired: N` line four lines below it in the
+        # same block — measured, a 22-row suite over 3 dirs and 2 arms reported "124 of 130" — and
+        # the number the reader must act on is how many results in WHICH directory nothing wrote.
+        locations = "; ".join(
+            f"{location}: {len(pairs)} result(s) across {len({row for row, _ in pairs})} row(s)"
+            + f" (e.g. {', '.join(f'{row}/{rep}' for row, rep in sorted(pairs)[:3])}"
+            + f"{', …' if len(pairs) > 3 else ''})"
+            for location, pairs in sorted(stale.items())
+        )
+        refusal = (
+            "the run directory tree holds results that no recorded invocation wrote — "
+            f"{locations}. run.json is written per INVOCATION while the tree is APPEND-ONLY, so a "
+            "re-used --run-dir leaves an earlier call's results behind while `row_selection` is "
+            "rewritten to describe only the latest one. Both arms live under the same run dir, so "
+            "those results pair on BOTH sides and nothing else flags them. Re-run both arms into "
+            "a fresh --run-dir before gating."
+        )
+        if unknown_dirs:
+            # Otherwise the totals above silently exclude a directory that could not be checked at
+            # all, and the note that would have said so is unreachable past this return.
+            refusal += (
+                f" ({unknown_dirs} further run directory/directories record no `task_results` and "
+                "could not be reconciled either way.)"
+            )
+        return _refuse_activation(refusal)
+    if unknown_dirs:
+        # Same stance as the missing-split note above, and for the same reason: the one state
+        # where contamination is undetectable must not also be the one state that refuses
+        # everything. (`reconcile_tree_against_run_json` records the second, quieter version of
+        # the same limit: an `aggregate`-rebuilt run.json launders contamination.)
+        notes.append(
+            f"{unknown_dirs} of {total_dirs} run directories record no `task_results`, so their "
+            + "run.json cannot be reconciled against the results on disk — a re-used --run-dir "
+            + "pooling an earlier invocation's results into this comparison cannot be ruled out."
         )
 
     # The four shared values, hoisted into named locals rather than a keyword dict the two returns

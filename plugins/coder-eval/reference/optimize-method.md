@@ -413,15 +413,26 @@ result**, and the rendered block says `CANNOT SEPARATE AT THIS SIZE`. Read that 
 candidate could have promoted here, however good it was. It is a statement about the suite, and
 reporting it as "not promoted" would be a claim about the candidates that the data cannot support.
 
-**A cross-split pair is refused too, and it is a different kind of refusal.** Before any
-bootstrap, the activation gate reads each run directory's `run.json` and compares what the two
-arms recorded for `--split`. Arms that selected different row sets never scored the same rows, so
-their difference is not an effect at all — the block says `NOT A RESULT`, reports no statistic,
-and the only remedy is to re-run both arms under one `--split`. Tell it apart from the refusal
-below by the p: this one never has one, because no comparison was made. Missing provenance (a run
-directory written before the field existed) is a NOTE, not a refusal — old runs stay gatable, but
-a cross-split pair cannot be ruled out for them. The execution track has no such refusal: it
-takes one run directory holding both arms, so they share one split by construction.
+**A pair that never scored comparable rows is refused too, and it is a different kind of
+refusal.** Before any bootstrap, the activation gate runs a row-selection preflight over each run
+directory. It asks two questions, and a failure of either says `NOT A RESULT` with no statistic:
+
+1. *Did the two arms record different `--split` values?* Arms that selected different row sets
+   never scored the same rows, so their difference is not an effect. Remedy: re-run both arms
+   under one `--split`.
+2. *Does each `run.json` describe the tree it sits on?* `run.json` is written per INVOCATION while
+   the tree beneath it is APPEND-ONLY, so re-using a `--run-dir` leaves an earlier call's rows —
+   or, with a smaller `--repeats`, an earlier call's replicates — on disk while `row_selection` is
+   rewritten to describe only the latest call. Question 1 then passes honestly and the gate pools
+   both selections into each arm. Because both arms live under the same run dir the contamination
+   is symmetric, so no `rows_excluded` bump and no unpaired-rows note appears. Remedy: re-run both
+   arms into a fresh `--run-dir`.
+
+Tell both apart from the sizing refusal below by the p: these never have one, because no
+comparison was made. Missing provenance — a run directory written before the field existed, or one
+recording no `task_results` — is a NOTE, not a refusal: old runs stay gatable, but the fault
+cannot be ruled out for them. The execution track has no cross-split refusal: it takes one run
+directory holding both arms, so they share one split by construction.
 
 **Read which refusal you got, because there are two and their remedies are opposite.** The usual
 one names the largest family size that could still promote, so the honest options are visible:

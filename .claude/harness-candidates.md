@@ -709,3 +709,18 @@ with the two `action.yml` items above — one considered change to the action's 
       decision about whether an intentional `--sample` difference should ever be gateable at all.
       The message and a comment beside the check now state the scope so it is at least not a
       false claim. — caught in the row-selection integrity run, final cross-phase review.
+
+- [ ] **Nothing PREVENTS a run dir from accumulating rows across invocations — the gate only
+      refuses afterwards.** `coder-eval run --run-dir <existing dir>` writes into the tree without
+      noticing that a previous invocation's `<row>/<NN>/task.json` are still there, and rewrites
+      `run.json`'s `row_selection` to describe only the current call. `activation_gate` now
+      reconciles the tree against `run.json` and refuses (`reconcile_tree_against_run_json`), but
+      that is detection at the far end: the user has already paid for both runs, and a run dir
+      *already* contaminated before the check landed stays unusable rather than being repaired.
+      The prevention half is a behaviour change to the primary entry point, which is why it was
+      left out: either `run` refuses a non-empty `--run-dir` unless resuming, or every `task.json`
+      stamps the `--split` (and sampler) that produced it, so a row carries its own provenance and
+      no reconciliation against a per-invocation artifact is needed at all. The second is the
+      better shape and the larger change — `EvaluationResult` would gain a field, and every
+      reader of a run dir could then answer "which selection produced this row?" directly.
+      — caught in the top-10 review-fixes run, Phase 4.
