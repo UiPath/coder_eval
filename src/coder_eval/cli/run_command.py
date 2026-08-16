@@ -687,7 +687,8 @@ async def _run_with_experiment(
             if diffs:
                 detail = "; ".join(f"{k}: {old!r} → {new!r}" for k, (old, new) in sorted(diffs.items()))
                 console.print(
-                    f"[yellow]⚠[/] --resume into {config.run_dir} but the run config changed ({detail}). "
+                    f"[yellow]⚠[/] --resume into {escape(str(config.run_dir))} but the run config "
+                    + f"changed ({escape(detail)}). "
                     + "Already-finalized tasks keep their original-config results, so this run mixes "
                     + "configs — use a fresh --run-dir to keep them separate."
                 )

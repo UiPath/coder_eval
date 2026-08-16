@@ -28,6 +28,13 @@ unit-tested, and a rule routed through it cannot be half-right.
 * It reports a GAP rather than passing vacuously: if no rule file defines ``visit_ImportFrom`` at
   all, that is a renamed or restructured harness and is flagged, mirroring CE044's treatment of a
   renamed ``_ALLOWED_OPS``.
+* Lambdas are collected alongside ``def``s: a matcher written as
+  ``visit_ImportFrom = lambda self, node: … node.module …`` used to drop out of scope entirely,
+  and because the reader set was then empty the anti-vacuity GAP did not fire either — a silent
+  double miss in a rule whose whole job is preventing silent misses.
+* Still NOT matched, and stated rather than left to be found: ``getattr(node, "module", "")``,
+  and a rule that calls the resolver and then discards its result in favour of ``node.module``.
+  The second is the shape a hasty fix takes.
 * It applies only to a rule that matches a FIRST-PARTY module — one whose own non-docstring
   string constants mention ``coder_eval``. A rule matching a third-party package (CE020 matches
   ``claude_agent_sdk``) is exempt by construction rather than by a list, because a relative import
@@ -141,8 +148,14 @@ class ImportFromRulesHandleLevel(BaseRule):
         if _RESOLVER in defined and _RESOLVER_MODULE_MARKER in defined:
             return []
 
-        functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
-        visitors = [f for f in functions if f.name == "visit_ImportFrom"]
+        functions: list[ast.AST] = [
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
+        ]
+        visitors = [
+            f
+            for f in functions
+            if isinstance(f, ast.FunctionDef | ast.AsyncFunctionDef) and f.name == "visit_ImportFrom"
+        ]
         # A helper like CE041's `_imports_models` does the matching on the visitor's behalf, so it
         # is where the violation belongs — reporting the caller would point at the wrong line.
         readers = [f for f in functions if _reads_node_module(f)]

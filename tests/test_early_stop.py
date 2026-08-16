@@ -2104,6 +2104,53 @@ class TestEarlyStopWatcher:
         assert watcher.should_stop() is False
         assert watcher.info is None
 
+    def test_a_sibling_call_dispatched_in_the_same_message_also_holds_the_budget(self) -> None:
+        """PARALLEL dispatch — the shape Claude actually emits, and the hole `in_flight` misses.
+
+        Claude emits every `ToolStartEvent` of one assistant message before any result. So a
+        message dispatching `Read, Read, Read, Skill` resolves its three Reads while the Skill sits
+        outstanding — and `in_flight` names only the call being evaluated, so that Skill is
+        invisible to it. Measured at `decide_within: 3`, the value the one shipped task uses: the
+        budget expired on the third Read while the Skill that was about to satisfy it was already
+        dispatched. A false FAIL on a positive activation row depresses `recall.yes`, which is the
+        input to the promotion gate this machinery exists to protect.
+        """
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=3)])
+        reads = [_cmd("Read", {"file_path": f"f{i}"}) for i in range(3)]
+        skill = _skill_cmd("date-teller", tool_id="sk-parallel")
+        _feed(watcher, [_agent_start(), _turn_start(), *(_tool_start(c) for c in (*reads, skill))])
+        for read in reads:  # the Reads resolve; the Skill is still outstanding
+            watcher.on_event(_tool_end(read))
+        assert watcher.should_stop() is False, "the budget expired while the deciding call was in flight"
+        # ...and the Skill resolving decides it the way the trajectory actually went.
+        watcher.on_event(_tool_end(skill))
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_the_budget_still_expires_once_every_dispatched_call_resolves(self) -> None:
+        # The anti-over-fix half: outstanding calls DEFER the expiry, they do not cancel it.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=3)])
+        calls = [_cmd("Read", {"file_path": f"f{i}"}) for i in range(3)]
+        _feed(watcher, [_agent_start(), _turn_start(), *(_tool_start(c) for c in calls)])
+        assert watcher.should_stop() is False
+        for call in calls:
+            watcher.on_event(_tool_end(call))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+
+    def test_an_unresolved_orphan_stops_holding_the_budget(self) -> None:
+        # A force-closed orphan is no longer outstanding: it must not defer the budget forever.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
+        orphan = _cmd("Read", {"file_path": "gone"})
+        resolved = _cmd("Bash", {"command": "ls"})
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_start(orphan), _tool_start(resolved)])
+        watcher.on_event(ToolEndEvent(task_id="t", tool=orphan, status=ToolEndStatus.UNRESOLVED))
+        watcher.on_event(_tool_end(resolved))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+
     def test_criterion_decidable_at_tool_start_is_unaffected(self) -> None:
         # The fix is a no-op for a criterion that CAN decide on the call seam:
         # `command_executed` without require_success reads the call's inputs, so

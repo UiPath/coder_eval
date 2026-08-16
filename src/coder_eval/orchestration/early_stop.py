@@ -348,6 +348,10 @@ class EarlyStopWatcher:
         self._collector = EventCollector()
         self._sdk_turn_index = 0
         self._tool_call_index = 0
+        # Tool ids DISPATCHED but not yet resolved. `in_flight` names only the call being
+        # evaluated this round; an assistant message that dispatches several calls at once leaves
+        # its siblings outstanding and invisible to that parameter. See `_collect_verdicts`.
+        self._pending_tool_ids: set[str] = set()
         self._started_monotonic: float | None = None
         # Latched verdicts, aligned with ``_armed``. Once an entry leaves
         # "undecided" (on a RESOLVED round) its checker is never polled again —
@@ -476,9 +480,13 @@ class EarlyStopWatcher:
         elif isinstance(event, ToolStartEvent):
             # Decide on the call, evaluating with it appended as the in-flight
             # command (it has no ToolEnd to count yet, so report it as +1).
+            self._pending_tool_ids.add(event.tool.tool_id)
             self._evaluate_impl(in_flight=event.tool)
             return
         elif isinstance(event, ToolEndEvent):
+            # Discard BEFORE evaluating: this call is no longer outstanding, so if it was the
+            # last one the budget is free to expire on this very round.
+            self._pending_tool_ids.discard(event.tool.tool_id)
             if event.status == ToolEndStatus.UNRESOLVED:
                 # Trajectory parity with the agent's collector (see docstring):
                 # record, but don't count a round or evaluate — a force-closed
@@ -557,11 +565,19 @@ class EarlyStopWatcher:
         serial dispatch the matching ``ToolEndEvent`` evaluates at the SAME
         ``tool_call_index`` (``_tool_call_index`` is incremented before
         ``_evaluate_impl``), so nothing is lost: the budget still expires on
-        completed tool call N, exactly as ``decide_within`` documents. With
-        PARALLEL tool calls the agent emits every ``ToolStartEvent`` of one
-        assistant message before any result, so the deferred expiry lands a
-        round or two later rather than on the same index — the fix only ever
-        DELAYS an expiry, never advances one, so that direction is safe.
+        completed tool call N, exactly as ``decide_within`` documents.
+
+        ``in_flight`` alone is NOT enough, which is why ``_pending_tool_ids``
+        exists. It names only the call being evaluated this round, and Claude
+        emits every ``ToolStartEvent`` of one assistant message before any
+        result — so a message dispatching ``Read, Read, Read, Skill`` resolves
+        its three Reads with the Skill still outstanding and INVISIBLE to that
+        parameter. Measured at ``decide_within: 3`` (the value the one shipped
+        task uses): the budget expired on the third Read while the Skill that
+        was about to satisfy it sat dispatched, producing a false FAIL on a
+        positive activation row — a depressed ``recall.yes`` feeding the very
+        gate this machinery protects. So the expiry is suppressed while ANY
+        dispatched call is unresolved, not merely the one in hand.
 
         The other consequence of counting completed calls: if the last
         dispatched call never returns (a turn timeout or a crash) or every
@@ -607,7 +623,11 @@ class EarlyStopWatcher:
                 raise
             budget = self._budget[i]
             budget_expired = (
-                in_flight is None and verdict == "undecided" and budget is not None and tool_call_index >= budget
+                in_flight is None
+                and not self._pending_tool_ids
+                and verdict == "undecided"
+                and budget is not None
+                and tool_call_index >= budget
             )
             if budget_expired:
                 verdict = "fail"

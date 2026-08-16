@@ -20,15 +20,24 @@ call, in a file whose normalized path contains ``src/coder_eval/cli/``, where th
 BOTH a literal Rich markup tag (``[name]`` or ``[/name]`` in one of its constant parts) AND at
 least one interpolation that is not escaped.
 
-**Any call, not just ``console.print``** — because the SINK is an implementation detail and keying
-on it fails open the moment output is buffered. Measured: the same change that added this rule
-also moved ``plan``'s per-file output behind an ``emit`` sink and a ``detail.append`` list, so five
+**Through ``+`` chains, and any call — not just ``console.print``.** The SINK is an
+implementation detail, and keying on it fails open the moment output is buffered. Measured: the
+same change that added this rule also moved ``plan``'s per-file output behind an ``emit`` sink and
+a ``detail.append`` list, so five
 markup-bearing f-strings in ``plan_command.py`` left the rule's view on the very file it was
 written for. A Rich markup tag in a ``cli/`` f-string is markup because it reaches a console
 eventually; where it is handed off on the way does not change that.
 
+Concatenated operands are flattened before the check, because ``+``-joined multi-line strings are
+this codebase's dominant style (pyright forbids implicit adjacent-string concatenation here) and
+Rich parses the JOINED result as one markup string. Measured: two live unescaped sites —
+``run_command.py``'s ``--resume`` config-drift warning and ``aggregate_command.py``'s summary line
+— sat unflagged because the markup tag and the raw interpolation were in different operands.
+
 **The boundary, stated so a green ``make lint`` is not mistaken for a proof.**
 
+* It flattens ``+`` chains but resolves nothing else: ``.format()``, ``%`` and ``*args`` are not
+  matched.
 * It matches f-strings **at the call site**. ``msg = f"[red]{e}[/red]"`` followed by
   ``console.print(msg)`` is invisible to it, because the rule never resolves a name to its value.
   It does follow ONE hop in the other direction: a local assigned directly from ``escape(...)``
@@ -60,11 +69,13 @@ from tests.lint.violation import Violation
 
 _CLI_PACKAGE = "src/coder_eval/cli/"
 
-# A Rich markup tag: `[name]`, `[/name]`, `[/]`, `[bold red]`, `[link=http://x]`. Deliberately
-# narrow — it must not match `[0]` (a subscript rendered into the text) or `[Errno 66]`, which are
-# ordinary prose and carry no markup meaning, so an f-string containing only those is not the
-# shape this rule is about.
-_MARKUP_TAG = re.compile(r"\[/?[a-zA-Z][a-zA-Z0-9 ._=#:/-]*\]|\[/\]")
+# A Rich markup tag, matching what Rich ACTUALLY parses — verified against the installed rich
+# rather than inferred. An OPENING tag's first character must be lowercase, `#` or `@`, so
+# `[Errno 66]` and `[0]` print literally and are not this rule's shape. A CLOSING tag is `[/`
+# followed by anything, and an unmatched one RAISES `MarkupError` rather than rendering wrong —
+# so an unescaped value carrying `[/whatever]` does not corrupt the diagnostic, it crashes the
+# command that was trying to print it.
+_MARKUP_TAG = re.compile(r"\[/[^\[\]]*\]|\[[a-z#@][^\[\]]*\]")
 
 _FIX = (
     "this f-string carries Rich markup AND an unescaped interpolation. Rich reads `[...]` in the "
@@ -75,11 +86,28 @@ _FIX = (
 )
 
 
-def _has_markup(node: ast.JoinedStr) -> bool:
-    return any(
-        isinstance(part, ast.Constant) and isinstance(part.value, str) and _MARKUP_TAG.search(part.value)
-        for part in node.values
-    )
+def _string_operands(node: ast.expr) -> list[ast.JoinedStr | ast.Constant]:
+    """Every f-string / literal operand of a ``+`` chain, flattened; the node itself otherwise.
+
+    Rich parses the JOINED result as one markup string, so a tag in one operand governs an
+    interpolation in another. Checking each operand alone is what let two live sites through.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _string_operands(node.left) + _string_operands(node.right)
+    return [node] if isinstance(node, ast.JoinedStr | ast.Constant) else []
+
+
+def _has_markup(parts: list[ast.JoinedStr | ast.Constant]) -> bool:
+    constants = [
+        value
+        for part in parts
+        for value in (
+            [part.value]
+            if isinstance(part, ast.Constant)
+            else [piece.value for piece in part.values if isinstance(piece, ast.Constant)]
+        )
+    ]
+    return any(isinstance(value, str) and _MARKUP_TAG.search(value) for value in constants)
 
 
 def _is_escape_call(value: ast.expr) -> bool:
@@ -132,7 +160,9 @@ def _is_numeric(part: ast.FormattedValue) -> bool:
 
     * a numeric format spec (``{n:.2f}``, ``{n:,}``, ``{n:d}``);
     * a call to ``len(...)``, ``round(...)``, ``sum(...)``, ``int(...)``, ``float(...)``;
-    * a numeric literal.
+    * a numeric literal;
+    * arithmetic over any of the above — ``{len(a) - len(b)}`` is a count, and charging a
+      suppression for it would teach the reader that ``noqa`` is bookkeeping.
 
     Everything else is treated as possibly-bracketed, including a bare name holding an int. That
     asymmetry is deliberate: the rule cannot infer types, and the cost of being wrong in this
@@ -143,9 +173,19 @@ def _is_numeric(part: ast.FormattedValue) -> bool:
         text = "".join(p.value for p in spec.values if isinstance(p, ast.Constant) and isinstance(p.value, str))
         if text and _NUMERIC_SPEC.search(text):
             return True
-    value = part.value
+    return _is_numeric_expr(part.value)
+
+
+_NUMERIC_CALLS = frozenset({"len", "round", "sum", "int", "float", "abs", "min", "max"})
+
+
+def _is_numeric_expr(value: ast.expr) -> bool:
+    if isinstance(value, ast.BinOp):
+        return _is_numeric_expr(value.left) and _is_numeric_expr(value.right)
+    if isinstance(value, ast.UnaryOp):
+        return _is_numeric_expr(value.operand)
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-        return value.func.id in {"len", "round", "sum", "int", "float", "abs"}
+        return value.func.id in _NUMERIC_CALLS
     return isinstance(value, ast.Constant) and isinstance(value.value, int | float)
 
 
@@ -172,8 +212,13 @@ class EscapeUntrustedMarkup(BaseRule):
     def visit_Call(self, node: ast.Call) -> None:
         if self._active:
             for arg in node.args:
-                if isinstance(arg, ast.JoinedStr) and _has_markup(arg):
-                    for part in arg.values:
+                operands = _string_operands(arg)
+                if not _has_markup(operands):
+                    continue
+                for operand in operands:
+                    if not isinstance(operand, ast.JoinedStr):
+                        continue
+                    for part in operand.values:
                         if isinstance(part, ast.FormattedValue) and not (
                             self._is_escaped(part.value) or _is_numeric(part)
                         ):

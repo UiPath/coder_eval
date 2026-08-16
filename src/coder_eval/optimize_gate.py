@@ -1421,6 +1421,12 @@ def activation_gate(
     family decision to correct.)
     """
     _require_valid_criterion_index(criterion_index)
+    for index in sibling_indices or ():
+        # Same guard, different parameter NAME — which is exactly why it was missed. `_label_pairs`
+        # bounds only above, so a negative sibling index grades the LAST criterion under a label
+        # reading `criterion -1`, and `holm_promote` folds `sibling_checks` into `promoted`: the
+        # wrong criterion then vetoes, or fails to veto, a promotion.
+        _require_valid_criterion_index(index)
     paired = _load_and_pair(
         incumbent_run_dirs=incumbent_run_dirs,
         candidate_run_dirs=candidate_run_dirs,
@@ -2196,6 +2202,28 @@ def execution_gate(
             f"incumbent_variant and candidate_variant are both {incumbent_variant!r}, so there is no "
             + "comparison to make and no sign to resolve. Name the two arms you meant to compare."
         )
+    # Tree reconciliation, the same preflight `activation_gate` runs and for a sharper reason.
+    # This track has NO cross-split refusal — one run_dir holds both arms, so they share one split
+    # by construction — but a re-used `--run-dir` is fully representable here, and since the
+    # integrity checks and guardrails are folded into `promoted` a stale replicate does not merely
+    # get reported: it FLIPS the answer. Measured on an identical winning candidate, four
+    # unrecorded incumbent replicates moved `completion_rate` from 1.0 to 0.667 and `promoted`
+    # from True to False, with no refusal and no note. Contaminate the candidate arm instead and
+    # the error runs the other way.
+    for variant in (incumbent_variant, candidate_variant):
+        reconciliation = reconcile_tree_against_run_json(run_dir, variant, suite_id)
+        if reconciliation.unrecorded:
+            examples = ", ".join(f"{row}/{rep}" for row, rep in sorted(reconciliation.unrecorded)[:3])
+            _refuse(
+                f"{run_dir}/{variant} holds {len(reconciliation.unrecorded)} result(s) that its "
+                + f"run.json never wrote (e.g. {examples}). run.json is written per INVOCATION "
+                + "while the tree is APPEND-ONLY, so a re-used --run-dir leaves an earlier call's "
+                + "rows — or, with a smaller --repeats, its replicates — on disk. They are pooled "
+                + "into this comparison and into the integrity checks that gate it. Re-run both "
+                + "arms into a fresh --run-dir before gating."
+            )
+            break
+
     incumbent_rows = load_arm_rows([run_dir], incumbent_variant, suite_id)
     candidate_rows = load_arm_rows([run_dir], candidate_variant, suite_id)
     row_ids = sorted(set(incumbent_rows) & set(candidate_rows))
@@ -2744,7 +2772,10 @@ def holm_promote_execution(
                 notes.append(_NOTE_CI_CONTAINS_ZERO)
             elif not rejected:
                 notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
-        for check in (*verdict.integrity_checks, *verdict.guardrails):
+        # Guarded like every rung above it: under a refusal the block's headline is NOT A RESULT,
+        # so a note asserting it "reports it as BLOCKED BY A GUARDRAIL" would contradict the line
+        # four above it. The check still failed; it is simply not what this block is about.
+        for check in (*verdict.integrity_checks, *verdict.guardrails) if not refused else ():
             if not check.passed:
                 notes.append(
                     f"{check.name} FAILED — this forces `promoted = False` even where the statistic "

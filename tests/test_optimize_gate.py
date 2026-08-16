@@ -3547,6 +3547,49 @@ def _headline(text: str) -> str:
     return next(line for line in text.splitlines() if line.startswith("**")).strip("*")
 
 
+class TestExecutionGateRefusesAReusedRunDir:
+    """The execution track reads the SAME append-only tree, and here contamination flips `promoted`.
+
+    This track has no cross-split refusal — one `run_dir` holds both arms, so they share one split
+    by construction — but a re-used `--run-dir` is fully representable, and since Phase 3 folded
+    the integrity checks and guardrails into `promoted` a stale replicate does not merely get
+    reported: it changes the answer.
+    """
+
+    def test_a_stale_replicate_flips_the_verdict_and_is_refused(self, tmp_path: Path) -> None:
+        clean = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path / "clean", **_WINNER))])[0]
+        assert clean.promoted is True and clean.gate_refusal is None, "control drifted"
+
+        dirty_dir = _exec_run_dir(tmp_path / "dirty", **_WINNER)
+        for row in ("r1", "r2", "r3", "r4"):
+            _write_row(dirty_dir, "incumbent", row, _scored_result(row, 0.0), 7, record=False)
+        dirty = holm_promote_execution([_exec_gate(dirty_dir)])[0]
+
+        # Same winning candidate; without the preflight this reported promoted=False on a
+        # completion_rate the stale replicates invented, with no refusal and no note.
+        assert dirty.gate_refusal is not None
+        assert "r1/07" in dirty.gate_refusal and "fresh --run-dir" in dirty.gate_refusal
+        assert dirty.promoted is False
+
+    def test_a_contaminated_candidate_arm_is_refused_too(self, tmp_path: Path) -> None:
+        # The error runs the other way when the CANDIDATE carries the stale rows, so both arms
+        # are reconciled rather than just the incumbent.
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        _write_row(run_dir, "candidate", "r1", _scored_result("r1", 1.0), 7, record=False)
+        verdict = _exec_gate(run_dir)
+        assert verdict.gate_refusal is not None and "candidate" in verdict.gate_refusal
+
+    def test_a_clean_gate_run_dir_is_untouched(self, tmp_path: Path) -> None:
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER))
+        assert verdict.gate_refusal is None
+
+    def test_it_renders_as_not_a_result(self, tmp_path: Path) -> None:
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        _write_row(run_dir, "incumbent", "r1", _scored_result("r1", 0.0), 7, record=False)
+        decided = holm_promote_execution([_exec_gate(run_dir)])[0]
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+
+
 class TestExecutionGateRefusesAZeroVarianceSample:
     """A8: identical per-row differences make every promotion conjunct hold on nothing.
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+import yaml
 
 from tests.lint.cli_flags import help_for, long_flags
 from tests.lint.import_resolution import resolved_module
@@ -6999,13 +7000,29 @@ class TestCE052TemplateTasksLoad:
 
     TEMPLATES = Path(__file__).parent.parent / "templates"
 
+    def _all_yaml(self) -> list[Path]:
+        """Both extensions. A `.yml` task was invisible to the discovery set AND to the
+        completeness assertion below — silently unloaded, which is the exact state this rule
+        exists to prevent."""
+        return sorted([*self.TEMPLATES.rglob("*.yaml"), *self.TEMPLATES.rglob("*.yml")])
+
     def _task_yamls(self) -> list[Path]:
-        """Every YAML under `templates/` carrying a top-level `task_id:`."""
-        return [
-            path
-            for path in sorted(self.TEMPLATES.rglob("*.yaml"))
-            if re.search(r"^task_id:", path.read_text(encoding="utf-8"), re.MULTILINE)
-        ]
+        """Every YAML under `templates/` whose PARSED top level carries a `task_id` key.
+
+        Parsed, not regex-matched: `"task_id":`, `task_id :` and a flow mapping are all valid
+        YAML spellings that `^task_id:` misses. Those at least trip the completeness assertion
+        loudly, but relying on that is relying on a second check to cover the first.
+        """
+        found: list[Path] = []
+        for path in self._all_yaml():
+            try:
+                document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError:
+                found.append(path)  # unparseable: let `load_task` produce the real error
+                continue
+            if isinstance(document, dict) and "task_id" in document:
+                found.append(path)
+        return found
 
     def test_the_discovery_set_is_not_empty(self) -> None:
         """Anti-vacuity, and the CE044/CE045 lesson: a moved directory must report a GAP.
@@ -7028,14 +7045,23 @@ class TestCE052TemplateTasksLoad:
                 failures.append(f"{path.relative_to(self.TEMPLATES.parent)}: {exc}")
         assert not failures, "template task YAML failed to load:\n" + "\n".join(failures)
 
-    def test_a_non_task_yaml_is_skipped_by_content_and_the_skip_is_visible(self) -> None:
-        # The fixture's experiment file is the known non-task. Asserted explicitly so the
-        # content check cannot quietly start skipping real tasks too.
-        experiment = self.TEMPLATES / "ci-outcome-fixture" / "evals" / "experiments" / "default.yaml"
-        assert experiment.is_file(), "fixture moved"
-        assert experiment not in self._task_yamls()
-        all_yaml = set(self.TEMPLATES.rglob("*.yaml"))
-        assert set(self._task_yamls()) == all_yaml - {experiment}, "an unexpected YAML is being skipped"
+    def test_every_non_task_yaml_is_skipped_by_content_and_named_here(self) -> None:
+        """Both known non-tasks are named, so the skip is VISIBLE rather than a silent subtraction.
+
+        Enumerating them is the point: the content check must not be free to start skipping real
+        tasks. `tasks/skills/ci-outcome.yaml` licenses the experiment file as "not a valid task";
+        the workflow is a GitHub Actions file that happens to live under the fixture, and it only
+        became visible here once discovery stopped missing `.yml` entirely.
+        """
+        non_tasks = {
+            self.TEMPLATES / "ci-outcome-fixture" / "evals" / "experiments" / "default.yaml",
+            self.TEMPLATES / "ci-outcome-fixture" / ".github" / "workflows" / "lint.yml",
+        }
+        for path in non_tasks:
+            assert path.is_file(), f"fixture moved: {path}"
+        assert set(self._task_yamls()) == set(self._all_yaml()) - non_tasks, (
+            "an unexpected YAML is being skipped, or a known non-task is now being loaded"
+        )
 
     def test_the_activation_fixture_carries_both_polarities(self) -> None:
         """The defect this phase fixed, pinned as behaviour rather than as "it loads".
@@ -7471,6 +7497,36 @@ class TestCE050EscapeUntrustedMarkup:
         """
         for sink in ('emit(f"[red]{e}[/red]")', 'detail.append(f"[red]{e}[/red]")', 'log(f"[red]{e}[/red]")'):
             assert len(self._check(sink)) == 1, sink
+
+    def test_it_sees_through_a_plus_concatenation(self) -> None:
+        """Rich parses the JOINED result as one markup string, so the tag and the interpolation
+        can sit in different operands — and `+`-joined multi-line strings are this codebase's
+        dominant style, since pyright forbids implicit adjacent-string concatenation here.
+        Measured: two LIVE unescaped sites (`run_command.py`'s --resume drift warning and
+        `aggregate_command.py`'s summary) sat unflagged for exactly this reason.
+        """
+        source = 'console.print(f"[yellow]warn[/yellow] " + f"path {run_dir} changed")'
+        assert len(self._check(source)) == 1
+
+    def test_a_plus_chain_with_no_markup_anywhere_is_silent(self) -> None:
+        assert self._check('console.print(f"warn " + f"path {run_dir}")') == []
+
+    def test_arithmetic_over_counts_is_exempt(self) -> None:
+        # `{len(a) - len(b)}` is a count; charging a suppression for it would teach the reader
+        # that noqa is bookkeeping.
+        assert self._check('console.print(f"[dim]{len(labels) - len(labelled)} of {len(labels)}[/dim]")') == []
+
+    def test_the_tag_pattern_matches_what_rich_actually_treats_as_markup(self) -> None:
+        # Verified against the installed rich, not inferred: an OPENING tag's first character
+        # must be lowercase, `#` or `@`, so `[Errno 66]` prints literally. The earlier pattern
+        # accepted it while MISSING `[#ff0000]` and `[@handler]`, which Rich does parse.
+        assert self._check('console.print(f"[Errno 66] failed: {e}")') == [], "prose is not markup"
+        assert self._check('console.print(f"row [0] failed: {e}")') == [], "a subscript is not markup"
+        for real_tag in ("[#ff0000]", "[@handler]", "[bold]"):
+            assert len(self._check(f'console.print(f"{real_tag}{{e}}[/]")')) == 1, real_tag
+        # A CLOSING tag is `[/` plus anything — and an unmatched one RAISES MarkupError, so an
+        # unescaped value carrying one crashes the command rather than merely rendering wrong.
+        assert len(self._check('console.print(f"[/BOLD] {e}")')) == 1
 
     def test_a_local_assigned_from_escape_counts_as_escaped(self) -> None:
         # Hoisting an escape out of a long line is formatting, not a trust decision, and charging

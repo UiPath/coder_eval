@@ -791,3 +791,16 @@ with the two `action.yml` items above — one considered change to the action's 
       NON-EMPTY violation list" — needs a reliable way to tie a test function to the rule it
       exercises and to recognise a non-emptiness assertion, which is heuristic enough to deserve
       its own design pass. — caught in the top-10 review-fixes run, Phase 6 review.
+
+- [ ] **The Stage A / floor surfaces read the run-dir tree without reconciling it.**
+      `activation_gate` and `execution_gate` both refuse a run dir holding results its own
+      `run.json` never wrote (`reconcile_tree_against_run_json`). `measure_noise_floor`,
+      `noise_floor_mde`, `arm_row_scores` and `cost_quality_points` do not — measured, on
+      contaminated dirs that `activation_gate` correctly refuses, `measure_noise_floor` returned a
+      floor computed over an extra pooled row and `arm_row_scores` returned the stale row in its
+      vector. They are not gates, which is why this was left: each returns a float or a list with
+      nowhere to put a refusal, so closing it needs a decision about the return contract (log and
+      degrade? an optional strict flag? a `Reconciliation` alongside the value?) rather than a
+      copy of the preflight. The floors feed the MDE a gate reports and the vectors feed the three
+      Pareto fronts, so a wrong number here is not cosmetic. — caught in the top-10 review-fixes
+      run, final adversarial review.
