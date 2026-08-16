@@ -1,11 +1,49 @@
 """Configuration models for orchestration."""
 
+import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from coder_eval.models import PreservationMode, RowSelection
+
+
+# The flat field names `row_selection` replaced. Derived from `RowSelection` rather than typed
+# again, minus `split`.
+#
+# `split` is excluded because no RELEASED version ever exposed it: it was added as a flat field in
+# f1b6abb and folded into `row_selection` in d5301a6, both on this unreleased branch, so v0.9.6 —
+# what every out-of-tree caller actually has — carries only `max_rows` and `sample_per_stratum`.
+# Deprecating a spelling nobody could be using would advertise an alias for one release and then
+# remove it, which is pure churn. (Stated precisely because it is checkable and easy to get
+# backwards: a future reader who finds f1b6abb and concludes the exclusion was an oversight would
+# "fix" it and ship an alias for a field that never left the branch.)
+_DEPRECATED_ROW_SELECTORS = tuple(n for n in RowSelection.model_fields if n != "split")
+
+
+def _stacklevel_past_pydantic() -> int:
+    """Frames from this module out to the first caller that is not pydantic.
+
+    A `mode="before"` validator runs underneath a VARIABLE number of pydantic frames — two for
+    keyword construction, a different count for `model_validate` — so no fixed `stacklevel` can
+    point at the caller. Measured with `stacklevel=2`: the warning was attributed to
+    `pydantic/main.py`, and because Python's default filter only surfaces a `DeprecationWarning`
+    raised from `__main__`, an ordinary script constructing `BatchRunConfig(max_rows=5)` printed
+    NOTHING. The alias worked and the migration signal it exists to deliver never arrived — which
+    would make 0.11.0 a hard break nobody was warned about.
+    """
+    depth = 1
+    while True:
+        try:
+            frame = sys._getframe(depth)
+        except ValueError:
+            return 2  # ran off the stack; fall back to the ordinary "my caller" level
+        module = frame.f_globals.get("__name__", "")
+        if module != __name__ and not module.startswith("pydantic"):
+            return depth
+        depth += 1
 
 
 def resolve_preservation_mode(explicit: PreservationMode | None, driver: str) -> PreservationMode:
@@ -85,6 +123,65 @@ class BatchRunConfig(BaseModel):
             "layer. Defaults to an empty selection (every row). Non-dataset tasks are unaffected."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_deprecated_row_selectors(cls, data: Any) -> Any:
+        """Accept the pre-`row_selection` flat spellings for one release.
+
+        ``max_rows`` and ``sample_per_stratum`` used to be fields on this model. Collapsing them
+        into one ``RowSelection`` is right — it is the same declaration ``run.json`` records — but
+        this container declares ``extra="forbid"``, so the old spelling went from *working* to a
+        hard ``ValidationError`` with no deprecation step. ``run_batch`` is a public API and the
+        nightly/dashboard consumer lives in a separate repo, so that break lands out of tree.
+
+        A ``mode="before"`` validator is REQUIRED, not stylistic: ``extra="forbid"`` rejects an
+        unknown key during validation, so a field validator never runs and an
+        ``@model_validator(mode="after")`` never sees it either. This has to fold the keys away
+        before validation looks at them.
+
+        The fold happens pre-validation, so ``model_dump()`` shows only ``row_selection`` — which
+        keeps ``compute_run_fingerprint`` (it dumps the whole config) byte-identical either way. A
+        changed fingerprint would invalidate every existing ``--resume``.
+
+        Passing a flat alias TOGETHER with an explicit ``row_selection`` raises rather than
+        picking one: a caller mid-migration doing both has a bug, and choosing for them hides it.
+
+        Removal: **0.11.0**. Version is 0.9.6 and ``[tool.semantic_release]`` bumps the minor on a
+        ``feat:``, so these ship in 0.10.0 and out-of-tree callers get one full minor of overlap.
+        ``RowSelection`` is the SSOT and deliberately does NOT carry these aliases — one deprecated
+        spelling, in one place, on the container that broke.
+        """
+        if not isinstance(data, dict):
+            return data
+        aliased = {name: data[name] for name in _DEPRECATED_ROW_SELECTORS if name in data}
+        if not aliased:
+            return data
+        # COPY, never pop in place. On `model_validate(payload)` pydantic hands in the caller's own
+        # dict, and rewriting it there is a side effect they never asked for: measured, a caller
+        # who built kwargs from JSON got their `max_rows` replaced by a `RowSelection` object and a
+        # later `json.dumps(payload)` raised TypeError. The raise path below mutated too, so a
+        # caller catching the error and retrying saw a silently altered payload.
+        data = {k: v for k, v in data.items() if k not in aliased}
+        if "row_selection" in data:
+            raise ValueError(
+                f"BatchRunConfig received both row_selection and the deprecated flat {sorted(aliased)}"
+                + " — pass one or the other. The flat spellings fold into row_selection and are"
+                + " removed in 0.11.0."
+            )
+        spelled = ", ".join(f"{name}=..." for name in sorted(aliased))
+        warnings.warn(
+            f"BatchRunConfig({spelled}) is deprecated and will be removed in 0.11.0;"
+            + f" pass row_selection=RowSelection({spelled}) instead.",
+            DeprecationWarning,
+            stacklevel=_stacklevel_past_pydantic(),
+        )
+        # `model_validate`, not a splat (CE041): a dict genuinely IS the input here. The keys are
+        # derived from `RowSelection.model_fields`, so they cannot be wrong — but `RowSelection`
+        # deliberately declares no extra="forbid" (run.json must stay forward-readable), so a
+        # splat would have no runtime guard behind it either.
+        data["row_selection"] = RowSelection.model_validate(aliased)
+        return data
 
     # Replicate count override
     repeats: int | None = Field(

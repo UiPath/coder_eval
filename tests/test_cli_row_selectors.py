@@ -21,6 +21,8 @@ and a sandbox, and the hops above are fully covered without executing an agent.
 
 from __future__ import annotations
 
+import json
+import warnings
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -429,3 +431,142 @@ class TestPlanPreviewsWhatRunExecutes:
         previewed = _preview_dataset(task, task_file, sample_per_stratum=1, emit=lambda _line: None)
 
         assert {t.task_id for t in previewed} == run_ids
+
+
+class TestBatchRunConfigDeprecatedRowSelectors:
+    """`max_rows` / `sample_per_stratum` were FIELDS on this model before `row_selection`.
+
+    Collapsing them into one nested model is right — it is the same declaration `run.json`
+    records — but `BatchRunConfig` declares `extra="forbid"`, so the old spelling went straight
+    from working to a hard `ValidationError` with no deprecation step. `run_batch` is a public API
+    and the nightly/dashboard consumer lives in a separate repo, so that break lands out of tree.
+    """
+
+    def _cfg(self, tmp_path: Path, **kwargs) -> BatchRunConfig:
+        return BatchRunConfig(run_dir=tmp_path, **kwargs)
+
+    def test_max_rows_folds_and_warns(self, tmp_path: Path) -> None:
+        with pytest.warns(DeprecationWarning, match=r"removed in 0\.11\.0"):
+            config = self._cfg(tmp_path, max_rows=5)
+        assert config.row_selection.max_rows == 5
+
+    def test_sample_per_stratum_folds_and_warns(self, tmp_path: Path) -> None:
+        with pytest.warns(DeprecationWarning, match=r"removed in 0\.11\.0"):
+            config = self._cfg(tmp_path, sample_per_stratum=3)
+        assert config.row_selection.sample_per_stratum == 3
+
+    def test_both_aliases_fold_into_one_selection(self, tmp_path: Path) -> None:
+        with pytest.warns(DeprecationWarning):
+            config = self._cfg(tmp_path, max_rows=5, sample_per_stratum=3)
+        assert (config.row_selection.max_rows, config.row_selection.sample_per_stratum) == (5, 3)
+
+    def test_an_alias_together_with_row_selection_raises(self, tmp_path: Path) -> None:
+        # A caller mid-migration passing both has a bug; choosing one for them hides it.
+        with pytest.raises(ValidationError, match="pass one or the other"):
+            self._cfg(tmp_path, max_rows=5, row_selection=RowSelection(max_rows=9))
+
+    def test_no_alias_means_no_warning(self, tmp_path: Path) -> None:
+        # The common path, and it must stay silent — a deprecation that fires on every ordinary
+        # construction is one every caller learns to filter out.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            config = self._cfg(tmp_path)
+        assert config.row_selection == RowSelection()
+
+    def test_an_unknown_key_still_raises(self, tmp_path: Path) -> None:
+        """THE anti-over-fix test: `extra="forbid"` must not be weakened.
+
+        The `mode="before"` validator sees every key, so a too-eager implementation could swallow
+        anything it did not recognise.
+        """
+        with pytest.raises(ValidationError):
+            self._cfg(tmp_path, max_rowz=5)
+
+    def test_split_is_not_an_alias(self, tmp_path: Path) -> None:
+        # `split` WAS briefly a flat field here (f1b6abb -> d5301a6) but only on this unreleased
+        # branch, so no shipped caller can be using it; v0.9.6 carries only max_rows and
+        # sample_per_stratum. Advertising an alias for a spelling that never shipped is churn.
+        with pytest.raises(ValidationError):
+            self._cfg(tmp_path, split="train")
+
+    def test_the_dump_is_identical_either_way(self, tmp_path: Path) -> None:
+        """Fingerprint stability. `compute_run_fingerprint` dumps the whole config, so if the
+        alias survived into the dump every existing `--resume` would see a changed fingerprint.
+        The fold happens pre-validation, so it cannot.
+        """
+        with pytest.warns(DeprecationWarning):
+            aliased = self._cfg(tmp_path, max_rows=5, sample_per_stratum=3)
+        explicit = self._cfg(tmp_path, row_selection=RowSelection(max_rows=5, sample_per_stratum=3))
+        assert aliased.model_dump() == explicit.model_dump()
+        assert "max_rows" not in aliased.model_dump()
+
+    def test_the_alias_list_derives_from_rowselection(self) -> None:
+        # Typed once. A fourth selector added to `RowSelection` must not silently become a
+        # deprecated alias for a spelling that never existed on this model.
+        from coder_eval.orchestration.config import _DEPRECATED_ROW_SELECTORS
+
+        assert set(_DEPRECATED_ROW_SELECTORS) == set(RowSelection.model_fields) - {"split"}
+
+    def test_it_does_not_mutate_the_callers_dict(self, tmp_path: Path) -> None:
+        """`model_validate` hands the validator the CALLER'S dict; popping rewrites it in place.
+
+        Measured before the copy: a caller who built kwargs from JSON got their `max_rows`
+        replaced by a `RowSelection` object, and a later `json.dumps(payload)` raised TypeError —
+        and that caller is exactly the out-of-tree consumer this deprecation exists to protect.
+        """
+        payload: dict[str, Any] = {"run_dir": str(tmp_path), "max_rows": 5}
+        with pytest.warns(DeprecationWarning):
+            BatchRunConfig.model_validate(payload)
+        assert payload == {"run_dir": str(tmp_path), "max_rows": 5}
+        json.dumps(payload)  # would raise if a RowSelection had been spliced in
+
+    def test_the_raise_path_does_not_mutate_either(self, tmp_path: Path) -> None:
+        # A caller catching the error and retrying must not find a silently altered payload.
+        payload: dict[str, Any] = {
+            "run_dir": str(tmp_path),
+            "max_rows": 5,
+            "row_selection": {"max_rows": 9},
+        }
+        before = dict(payload)
+        with pytest.raises(ValidationError):
+            BatchRunConfig.model_validate(payload)
+        assert payload == before
+
+    @pytest.mark.parametrize("via", ["keyword", "model_validate"])
+    def test_the_warning_is_attributed_to_the_caller_not_to_pydantic(self, tmp_path: Path, via: str) -> None:
+        """A deprecation nobody sees is not a deprecation.
+
+        A `mode="before"` validator sits under a VARIABLE number of pydantic frames, so a fixed
+        `stacklevel` cannot point at the caller. With `stacklevel=2` the warning was attributed to
+        `pydantic/main.py` — and Python's default filter only surfaces a `DeprecationWarning`
+        raised from `__main__`, so an ordinary script saw NOTHING while `pytest.warns` still
+        passed. 0.11.0 would then have been a hard break nobody was warned about.
+        """
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            if via == "keyword":
+                BatchRunConfig(run_dir=tmp_path, max_rows=5)
+            else:
+                BatchRunConfig.model_validate({"run_dir": str(tmp_path), "max_rows": 5})
+        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert deprecations, "no DeprecationWarning was emitted"
+        for warning in deprecations:
+            assert Path(warning.filename).name == Path(__file__).name, (
+                f"attributed to {warning.filename}, not the caller — Python's default filter "
+                "would hide it from an out-of-tree caller entirely"
+            )
+
+    def test_the_real_fingerprint_is_identical_either_way(self, tmp_path: Path) -> None:
+        """The invariant named by `test_the_dump_is_identical_either_way`, through the real path.
+
+        `compute_run_fingerprint` dumps with `mode="json"`, not the plain `model_dump()` the
+        sibling test compares — so this calls the actual function rather than a spelling of it.
+        A changed fingerprint invalidates every existing `--resume`.
+        """
+        from coder_eval.orchestration.batch import compute_run_fingerprint
+
+        with pytest.warns(DeprecationWarning):
+            aliased = BatchRunConfig(run_dir=tmp_path, max_rows=5, sample_per_stratum=3)
+        explicit = BatchRunConfig(run_dir=tmp_path, row_selection=RowSelection(max_rows=5, sample_per_stratum=3))
+        args = ("exp", "anthropic", None)
+        assert compute_run_fingerprint(aliased, *args) == compute_run_fingerprint(explicit, *args)
