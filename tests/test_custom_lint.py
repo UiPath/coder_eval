@@ -352,6 +352,42 @@ def test_rule_ids_unique() -> None:
 
 
 @pytest.mark.lint
+def test_rule_ids_are_unique_across_baserules_and_test_classes() -> None:
+    """The uniqueness invariant, extended to the HALF `ALL_RULES` cannot see.
+
+    Roughly a third of the CE rules are not `BaseRule`s at all — CE026-CE031, CE033-CE036,
+    CE038-CE039 and CE043-CE046 are `@pytest.mark.lint` classes, because their subject is Markdown,
+    YAML, a resolved Typer signature or the whole `src/` tree rather than one `.py` AST. Those ids
+    live only in a class NAME, so `runner.py`'s import-time assert (and the test above) cannot see
+    them, and a class-wired id could silently collide with a `BaseRule`'s. A `# noqa` keys on the
+    id string, so a collision means one suppression quietly disarms two rules.
+
+    The subject is the `TestCE<NNN>` class names in this file, where EVERY rule surfaces — a
+    `BaseRule` has one testing it and a class-wired rule IS one. So two rules claiming one number
+    show up as two classes claiming it, whichever kind either is. (A single id appearing both in
+    `ALL_RULES` and on a test class is the normal shape, not a collision.)
+
+    Boundary: a `BaseRule` with no `TestCE<NNN>` class of its own contributes nothing here and
+    could still collide unseen — which is itself a reason to keep the convention.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    class_ids = [
+        m.group(1)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and (m := re.match(r"^Test(CE\d+)", node.name))
+    ]
+
+    assert len(class_ids) > 20, f"only {len(class_ids)} TestCE classes found — has the convention moved?"
+    duplicates = sorted({i for i in class_ids if class_ids.count(i) > 1})
+    assert not duplicates, (
+        f"{duplicates} are claimed by more than one rule. A `# noqa` keys on the id, so one "
+        "suppression would disarm both — renumber the newer one. Note `runner.py`'s import-time "
+        "assert cannot see this: it covers ALL_RULES, and roughly a third of the CE rules are "
+        "`@pytest.mark.lint` classes rather than BaseRules."
+    )
+
+
+@pytest.mark.lint
 class TestCE021GuardedEvaluationResultParse:
     """CE021 flags unguarded EvaluationResult.model_validate_json; allows guarded ones."""
 

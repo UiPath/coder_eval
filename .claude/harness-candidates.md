@@ -607,8 +607,12 @@ with the two `action.yml` items above — one considered change to the action's 
       an A/B baseline. One file, zero exposure. Recorded here so the next review does not re-raise
       it. — checked and refuted in the Plan D scoping pass, confirmed against the file at
       implementation time.
-- [ ] **`estimator_ledger.WATCHED_CONSTANTS` is one-directional — nothing forces a NEW statistical
-      constant onto the list.** Both watch lists have anti-rename parity tests (a renamed constant
+- [ ] **`estimator_ledger.WATCHED_CONSTANTS` is one-directional — nothing forces a statistical
+      constant onto the list.** It shipped with the gap already LIVE, not merely prospective: the
+      final review found `optimize_gate.FLOOR_RESOLUTION` and `NEAR_FLOOR_MULTIPLE` unwatched in a
+      file four of whose constants were, and both move rendered output (the first decides whether
+      an MDE is measurable at all, and therefore whether the execution gate REFUSES). They are
+      watched now; the class is not closed. Both watch lists have anti-rename parity tests (a renamed constant
       or a moved fixture directory would make the job match nothing and pass silently), but a
       newly introduced resample count, alpha or tolerance is unwatched by default, and deleting a
       tuple entry passes both `make test` and the job. CE039 solved exactly this rot for prose
@@ -664,7 +668,11 @@ with the two `action.yml` items above — one considered change to the action's 
       is a heuristic whole-tree rule needing its own design pass — a length threshold, a
       normalisation for source wrapping, and an allowlist sweep before it can land green. Recorded
       here because Plan D lives in an untracked planning file and this is the committed surface. —
-      caught in the optimize-gate module-split run, Phase 3.
+      caught in the optimize-gate module-split run, Phase 3. **A second real instance, Plan D
+      Phase 4:** `early_stop.py` stated the ToolStart decidable-seam claim in BOTH its module
+      docstring and `_on_event_impl`'s, so correcting one left the other contradicting it — and the
+      module copy survived the grep that found the method copy only because it wrapped mid-phrase.
+      A length-and-wrapping-tolerant rule would have caught exactly that.
 - [ ] A raw-substring prose sensor firing on its own documentation. `test_module_imports_no_cli_machinery`
       scans module source for banned tokens (`import typer`, `coder_eval.cli`, …); the new
       `reports_optimize.py` tripped it by *documenting* that it imports no such module. The instance
