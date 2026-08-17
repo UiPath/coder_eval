@@ -4,9 +4,9 @@ Agent-agnostic. Claude Code engages a skill via an explicit ``Skill`` tool call;
 Codex has no such tool — it auto-discovers skills under ``.agents/skills/`` and
 engages one by reading its ``SKILL.md`` / references off disk via shell. Both
 signals are detected here so the criterion scores identically across agents, and
-both require the signal to have actually DELIVERED the body: a refused, in-flight
-or crash-force-closed ``Skill`` call, and a failed or unresolved
-``Read``/``Glob``/``Grep``, loaded nothing and are not engagement.
+both require the signal to have actually DELIVERED the body: a ``Skill`` call and a
+``Read``/``Glob``/``Grep`` are engagement on ``result_status == "success"`` and on nothing
+else, so a refused, in-flight or crash-force-closed one of either loaded nothing.
 
 **The delivered-body rule re-baselines every pre-existing activation suite DOWNWARD.** The same
 traces that used to score ``yes`` for a ``Skill`` call with ``result_status: error`` now score
@@ -16,6 +16,24 @@ rather than the skill. A suite authored before it must be RE-MEASURED before its
 trusted. ``framework_version`` in ``run.json`` is the only attribution a trend line across that
 boundary gets; there is no per-criterion version stamp, so a chart spanning the change will show a
 step that belongs to the checker, not to the agent.
+
+**The file-read half moved in the same direction on 2026-08-16**, and a trend line spanning
+either change looks the same, so both are recorded here. ``Read``/``Glob``/``Grep`` were gated
+by a DENYLIST (``result_status in ("error", None)``) while the ``Skill`` tool beside them used
+an ALLOWLIST, so a crash-force-closed ``"unknown"`` file read counted as engagement while the
+identical crash on a ``Skill`` call did not. Both are the allowlist now, expressed once in
+``_delivered``.
+
+**Nothing recorded re-scores, and the denominator that shows it is the FILE-READ one.** A count
+over all commands would be near-vacuous here: Codex emits none of ``Read``/``Glob``/``Grep`` (see
+``TestPerAgentTelemetryInventory``), so every Codex command in a corpus is structurally incapable
+of carrying the changed pair and inflates the null. Measured instead over the backend that CAN
+produce it — Claude Code, whose ``_finalize_commands`` is what force-closes to ``"unknown"`` —
+across 1,754 ``task.json`` on the authoring machine: **8,706 file-read commands, 8,496
+``"success"``, 210 ``"error"``, 0 ``"unknown"``.** So this closes a LATENT false positive before
+it reached a promotion decision rather than after, and no suite re-baselines. The caveat that
+remains: Antigravity also reaches these tool names and is barely represented in that corpus, so
+the null is a claim about recorded CLAUDE traces, not a proof the pair is unreachable.
 """
 
 from __future__ import annotations
@@ -66,74 +84,86 @@ _SKILL_PATH_RE = re.compile(r"(?=skills[\\/]+([A-Za-z0-9][A-Za-z0-9_-]*)[\\/]+)"
 _FILE_READ_TOOLS = frozenset({"Read", "Glob", "Grep"})
 
 
+def _delivered(cmd: CommandTelemetry) -> bool:
+    """Did this command actually deliver the skill body?
+
+    ONE declaration of the delivered-body rule, applied identically to the ``Skill`` tool
+    (whose result IS the body) and to the file-read tools (whose failure means nothing
+    loaded). It is an ALLOWLIST — engagement counts on ``"success"`` and on nothing else —
+    because a new ``result_status`` value must not fall into the engagement bucket by
+    default. The three currently-reachable exclusions share one meaning:
+
+      - "error"   — for ``Skill``, typically a refusal under ``disable-model-invocation:
+                    true`` ("cannot be used with Skill tool due to disable-model-invocation");
+                    for a file read, an ENOENT or a ``Grep`` that matched nothing. Either
+                    way the agent proceeds on prior knowledge and still produces plausible
+                    output, so nothing downstream looks wrong. Observed on 24 of 24 rows of
+                    a real outcome suite, where it made an entire A/B round measure the
+                    model's background knowledge instead of the skill.
+      - None      — still in flight: the early-stop watcher evaluates on ``ToolStartEvent``,
+                    before any result exists. Counting it would live-pass on the ToolStart
+                    of a ``Read`` that then ENOENTs.
+      - "unknown" — force-closed by a turn crash before any result arrived
+                    (``claude_code_agent._finalize_commands``; ``antigravity_agent``'s orphan
+                    close). No result ever reached the agent.
+
+    Every other tool — ``Bash`` included — is ungated, because a non-zero exit does not
+    imply the file was not read: ``cat SKILL.md | grep foo`` exits 1 AFTER genuinely reading
+    it, and that is the whole off-Claude file-read signal.
+    """
+    if cmd.tool_name == "Skill" or cmd.tool_name in _FILE_READ_TOOLS:
+        return cmd.result_status == "success"
+    return True
+
+
+def _candidate_skill_names(cmd: CommandTelemetry) -> set[str]:
+    """Skill names this command WOULD engage, ignoring whether it delivered.
+
+    Detects both engagement signals so the criterion scores identically across agents:
+
+    - Claude: an explicit ``Skill`` tool call carries the skill in ``parameters['skill']``,
+      optionally namespaced (e.g. ``plugin:uipath-agents``); the namespace is stripped via
+      ``.split(":")[-1]``.
+    - Codex (and any non-Claude agent): no ``Skill`` tool exists, so a skill is engaged by
+      reading its files off disk. Both the repo layout (``.../skills/<name>/...``) and the
+      sandbox symlink (``.agents/skills/<name>/...``) contain the substring
+      ``skills/<name>/``, matched in any string parameter (Bash ``parameters['command']`` or
+      a file-path parameter). The trailing separator required by ``_SKILL_PATH_RE`` prevents
+      prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
+
+    The ``Skill`` branch is AUTHORITATIVE for a ``Skill`` call — it returns rather than also
+    running the path scan, which would otherwise resurrect a call the gate excluded the
+    moment one of its own parameters contained a ``skills/<name>/``-shaped substring. That
+    would restore the false `yes` and break the monotonicity the latch depends on.
+    """
+    if cmd.tool_name == "Skill":
+        skill = cmd.parameters.get("skill", "")
+        return {skill.split(":")[-1]} if isinstance(skill, str) and skill else set()
+    return {
+        name for value in cmd.parameters.values() if isinstance(value, str) for name in _SKILL_PATH_RE.findall(value)
+    }
+
+
 def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """All skill names engaged by ONE command, agent-agnostically (any-skill).
 
-    Detects both engagement signals so the criterion scores identically across
-    agents, and returns the (possibly empty) set of engaged skill names:
+    Returns the (possibly empty) set of engaged skill names — the full set rather than a
+    single-skill yes/no, so callers can detect a *competing* skill engagement.
 
-    - Claude: an explicit ``Skill`` tool call carries the skill in
-      ``parameters['skill']``, optionally namespaced (e.g.
-      ``plugin:uipath-agents``); the namespace is stripped via ``.split(":")[-1]``.
-    - Codex (and any non-Claude agent): no ``Skill`` tool exists, so a skill is
-      engaged by successfully reading its files off disk. Both the repo layout
-      (``.../skills/<name>/...``) and the sandbox symlink
-      (``.agents/skills/<name>/...``) contain the substring ``skills/<name>/``,
-      matched here in any string parameter (Bash ``parameters['command']`` or a
-      file-path parameter). The trailing separator required by ``_SKILL_PATH_RE``
-      prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
-
-    Returning the full set (rather than a single-skill yes/no) lets callers detect
-    a *competing* skill engagement.
+    The delivered-body gate and the name extraction are deliberately separate functions:
+    the gate used to be written twice (an allowlist on the ``Skill`` branch, a denylist on
+    the file-read one), the two drifted, and the drift was a false `yes` on every
+    crash-force-closed file read. One expression cannot disagree with itself.
     """
-    names: set[str] = set()
-    if cmd.tool_name == "Skill":
-        # ALLOWLIST, not a denylist: engagement counts only on a SUCCESSFUL call. For the
-        # ``Skill`` tool the skill body IS the tool result, so anything other than a
-        # delivered result means nothing loaded. The three excluded states share that:
-        #   - "error"   — refused, typically ``disable-model-invocation: true`` ("cannot be
-        #                 used with Skill tool due to disable-model-invocation"). The agent
-        #                 proceeds on prior knowledge and still produces plausible output,
-        #                 so nothing downstream looks wrong. Observed on 24 of 24 rows of a
-        #                 real outcome suite, where it made an entire A/B round measure the
-        #                 model's background knowledge instead of the skill.
-        #   - None      — still in flight: the early-stop watcher evaluates on
-        #                 ``ToolStartEvent``, before any result exists.
-        #   - "unknown" — force-closed by a turn crash before any result arrived.
-        if cmd.result_status != "success":
-            logger.debug(
-                "Skill call for %r did not deliver a body (result_status=%r, %s); not counting it as engagement",
-                cmd.parameters.get("skill"),
-                cmd.result_status,
-                (cmd.result_summary or "")[:120],
-            )
-        else:
-            skill = cmd.parameters.get("skill", "")
-            if isinstance(skill, str) and skill:
-                names.add(skill.split(":")[-1])
-        # This branch is AUTHORITATIVE for a ``Skill`` call — return rather than fall
-        # through to the file-read scan below, which would otherwise resurrect a call the
-        # gate just excluded the moment one of its own parameters contained a
-        # ``skills/<name>/``-shaped substring. That would restore the false `yes` and break
-        # the monotonicity the latch depends on.
-        return names
-    # The file-read signal (Codex, or any agent reading a SKILL.md off disk) is scanned on
-    # every non-``Skill`` command's string parameters, because the body really did reach
-    # the agent.
-    # It is gated only for the three tools whose failure means nothing was loaded: a failed
-    # or in-flight ``Read``/``Glob``/``Grep`` puts the path in ``parameters`` while loading
-    # nothing (a ``Grep`` that matched nothing exits non-zero and did not deliver a body
-    # either — that is intended, not collateral damage). ``None`` is excluded for these
-    # tools too: counting it would reintroduce the live/frozen divergence one branch over,
-    # with the watcher live-passing on the ToolStart of a ``Read`` that then ENOENTs.
-    # ``"unknown"`` still counts here — Codex reconstructs genuinely-executed calls with
-    # that status — and every other tool, ``Bash`` included, is ungated, because a non-zero
-    # exit does not imply the file was not read.
-    if not (cmd.tool_name in _FILE_READ_TOOLS and cmd.result_status in ("error", None)):
-        for value in cmd.parameters.values():
-            if isinstance(value, str):
-                names.update(_SKILL_PATH_RE.findall(value))
-    return names
+    if _delivered(cmd):
+        return _candidate_skill_names(cmd)
+    logger.debug(
+        "%s call did not deliver a skill body (result_status=%r, %s); not counting it as engagement",
+        cmd.tool_name,
+        cmd.result_status,
+        (cmd.result_summary or "")[:120],
+    )
+    return set()
 
 
 def _all_engaged_skill_names(turn_records: list[TurnRecord]) -> set[str]:
@@ -229,10 +259,10 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
           ``"pass"`` for a positive criterion (the expected skill loaded),
           ``"fail"`` for a distractor/negative one (a wrong skill loaded).
 
-        Latching is safe because engagement is computed only from RESOLVED
-        telemetry for the tools whose failure means nothing loaded (a ``Skill``
-        call must have succeeded; a ``Read``/``Glob``/``Grep`` must not have
-        failed or be in flight — see ``_engaged_skill_names``). A command's
+        Latching is safe because engagement is computed only from RESOLVED,
+        SUCCESSFUL telemetry for the tools whose failure means nothing loaded (a
+        ``Skill`` call and a ``Read``/``Glob``/``Grep`` alike must have succeeded
+        — one rule, ``_delivered``). A command's
         contribution can therefore only go absent -> present as it resolves,
         never present -> absent, so a latched verdict never flips and agrees with
         ``_check_impl`` on the frozen trajectory — whether or not the run stopped

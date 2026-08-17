@@ -1180,8 +1180,10 @@ class SkillTriggeredCriterion(LiveSuccessCriterion):
     tool call (the body is delivered AS the tool result, so a refused, in-flight
     or crash-force-closed call loaded nothing), or any agent without that tool
     (e.g. Codex) by reading the skill's files off disk (a command parameter
-    contains ``skills/<skill_name>/``). A ``Read``/``Glob``/``Grep`` that failed
-    or has not resolved does not count — the path is in its parameters, but
+    contains ``skills/<skill_name>/``). The file-read tools take the SAME
+    allowlist as the ``Skill`` tool: a ``Read``/``Glob``/``Grep`` is engagement on
+    ``result_status == "success"`` and on nothing else, so a failed, in-flight or
+    crash-force-closed one does not count — the path is in its parameters, but
     nothing was loaded; ``Bash`` stays ungated, since ``cat … | grep`` exits
     non-zero after genuinely reading the file.
     Otherwise ``"no"``. Expected label is ``"yes"`` iff ``expected_skill == skill_name``.

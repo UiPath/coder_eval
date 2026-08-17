@@ -68,6 +68,13 @@ success_criteria:
     # re-measured before its gate could be trusted — it did not move. Thresholds left as they
     # were: `measured - 0.10` is 0.90, which is ABOVE the committed 0.7, and a re-baseline is
     # not a licence to tighten a gate nobody asked to tighten.
+    # 2026-08-16: the FILE-READ half of that rule moved the same way (a crash-force-closed
+    # `Read`/`Glob`/`Grep` stopped counting, matching the `Skill` half's allowlist). This
+    # suite did NOT move and was not re-measured for it: over 1,754 claude-code task.json on
+    # the authoring machine — the backend that force-closes to "unknown" — the 8,706 file-read
+    # commands split 8,496 "success" / 210 "error" / 0 "unknown", so no recorded run re-scores.
+    # (The file-read denominator is the load-bearing one: a count over ALL commands is inflated
+    # by Codex, which emits none of these tool names at all.) Thresholds unchanged.
     suite_thresholds:
       recall.yes: 0.7
       precision.yes: 0.7

@@ -182,6 +182,14 @@ success_criteria:
     # this gate is green, so there is nothing to repair, and 0.90 over 10 rows would admit a round
     # in which one row never engaged the skill at all — exactly the mixture the comment above says
     # this gate exists to reject. A perfect measurement must not buy a permanent loosening.
+    # 2026-08-16: the FILE-READ half of that rule moved the same way (a crash-force-closed
+    # `Read`/`Glob`/`Grep` stopped counting, matching the `Skill` half's allowlist). This
+    # suite did NOT move and was not re-measured for it: over 1,754 claude-code task.json on
+    # the authoring machine — the backend that force-closes to "unknown" — the 8,706 file-read
+    # commands split 8,496 "success" / 210 "error" / 0 "unknown", so no recorded run re-scores.
+    # (The file-read denominator is the load-bearing one: a count over ALL commands is inflated
+    # by Codex, which emits none of these tool names at all.) Thresholds unchanged, for the
+    # same reason the paragraph above gives.
     # Both runs mounted a PREPARED arm (tmp/ci-arm2, `disable-model-invocation` stripped) —
     # mounting plugins/coder-eval directly scores 0/10 here, which is the documented void
     # measurement described at the top of this file, not a regression.

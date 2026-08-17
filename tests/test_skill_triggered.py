@@ -6,6 +6,14 @@ DOWNWARD, because the same traces that used to score `yes` now score `no`. A sui
 `suite_thresholds` therefore cannot be trusted across that boundary without a fresh measurement —
 see the provenance comments above each `suite_thresholds:` block in `tasks/skills/`, and the
 blast-radius paragraph in `criteria/skill_triggered.py`'s module docstring.
+
+The FILE-READ half of that same rule moved on 2026-08-16 (a crash-force-closed
+`Read`/`Glob`/`Grep` stopped counting, matching the `Skill` half's allowlist). It is the same
+class of change and the same provenance blocks record it — but measured over the backend that
+can produce the pair it re-scores nothing, because the pair never occurs there (the numbers,
+and why the file-read denominator rather than the all-commands one is the honest N, are in
+`criteria/skill_triggered.py`'s module docstring). `TestEngagementTruthTable` is the contract
+that replaced the single remembered branch.
 """
 
 from __future__ import annotations
@@ -15,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from coder_eval.criteria.skill_triggered import SkillTriggeredChecker
+from coder_eval.criteria.skill_triggered import _FILE_READ_TOOLS, SkillTriggeredChecker
 from coder_eval.models import (
     ClassificationCriterionResult,
     CriterionResult,
@@ -182,14 +190,15 @@ class TestSkillTriggeredChecker:
         )
         assert result.observed_label == "yes" and result.score == 1.0
 
-    def test_unknown_read_still_counts(self) -> None:
-        # Codex reconstructs genuinely-executed calls from the rollout with status
-        # "unknown"; for a READ that is a real read, so it keeps counting. Only "error"
-        # and the in-flight None are evidence that nothing loaded.
+    def test_unknown_bash_read_still_counts(self) -> None:
+        # The status gate's scope is file-read-only. `Bash` carries no result_status
+        # contract worth gating on — a crash-force-closed `cat SKILL.md` still read the
+        # file — so "unknown" must not suppress it either. Pins the truth table below as
+        # covering `_FILE_READ_TOOLS` and nothing wider.
         result = _check(
             expected_skill="my-skill",
             skill_name="my-skill",
-            commands=[_cmd("Read", {"file_path": "skills/my-skill/SKILL.md"}, result_status="unknown")],
+            commands=[_cmd("Bash", {"command": "cat skills/my-skill/SKILL.md"}, result_status="unknown")],
         )
         assert result.observed_label == "yes" and result.score == 1.0
 
@@ -235,6 +244,166 @@ class TestSkillTriggeredChecker:
         assert not isinstance(result, ClassificationCriterionResult)
         assert result.score == 0.0
         assert result.error is not None
+
+
+_GATED_TOOLS: tuple[str, ...] = ("Skill", *sorted(_FILE_READ_TOOLS))
+_STATUSES: tuple[str | None, ...] = ("success", "error", None, "unknown")
+
+
+def _engaging_params(tool_name: str) -> dict[str, Any]:
+    """Parameters that make ONE command a would-be engagement of ``my-skill``.
+
+    Derived from the tool name rather than tabulated per case, so adding a tool to
+    ``_FILE_READ_TOOLS`` extends the truth table below without editing it.
+    """
+    if tool_name == "Skill":
+        return {"skill": "my-skill"}
+    return {"file_path": "/x/skills/my-skill/SKILL.md"}
+
+
+class TestEngagementTruthTable:
+    """The delivered-body rule, pinned across every ``(gated tool, result_status)`` pair.
+
+    Replaces ``test_unknown_read_still_counts``, which asserted the opposite for
+    ``Read``/``"unknown"`` on a justification that is false — see
+    ``TestPerAgentTelemetryInventory``. The gate used to be written twice (an allowlist on
+    the ``Skill`` branch, a denylist on the file-read one); it is one expression now, and
+    this is its contract: for the ``Skill`` tool and the three file-read tools alike,
+    engagement iff ``result_status == "success"``.
+    """
+
+    @pytest.mark.parametrize("result_status", _STATUSES)
+    @pytest.mark.parametrize("tool_name", _GATED_TOOLS)
+    def test_engagement_iff_result_status_is_success(self, tool_name: str, result_status: str | None) -> None:
+        engaged = result_status == "success"
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd(tool_name, _engaging_params(tool_name), result_status=result_status)],
+        )
+        case = f"{tool_name}/{result_status}"
+        assert result.observed_label == ("yes" if engaged else "no"), case
+        assert result.score == (1.0 if engaged else 0.0), case
+
+    @pytest.mark.parametrize("result_status", _STATUSES)
+    @pytest.mark.parametrize("tool_name", _GATED_TOOLS)
+    def test_live_verdict_agrees_with_the_frozen_check(self, tool_name: str, result_status: str | None) -> None:
+        # A live/frozen divergence is the failure mode the gate exists to prevent: the
+        # watcher passing a run on a signal the frozen check later scores `no`. Asserted
+        # on the same 16 cases rather than trusted from the shared helper.
+        criterion = SkillTriggeredCriterion(
+            description="did agent invoke a skill?", expected_skill="my-skill", skill_name="my-skill"
+        )
+        turn_records = [_turn([_cmd(tool_name, _engaging_params(tool_name), result_status=result_status)])]
+        live = SkillTriggeredChecker().live_verdict(criterion, turn_records)
+        frozen = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=turn_records[0].commands,
+        )
+        case = f"{tool_name}/{result_status}"
+        # A positive criterion can only ever live-`pass`; its absence is never decidable
+        # mid-run, so the non-engaging cases latch `undecided` rather than `fail`.
+        assert live == ("pass" if frozen.observed_label == "yes" else "undecided"), case
+
+
+class TestLatchMonotonicity:
+    """A command's contribution may go absent -> present as it resolves, never the reverse.
+
+    Load-bearing for ``live_verdict``: a latched verdict that could flip would let the
+    watcher stop a run on a signal the frozen check then scores the other way. The
+    allowlist makes the latch STRICTER, which is the safe direction.
+    """
+
+    def _criterion(self) -> SkillTriggeredCriterion:
+        return SkillTriggeredCriterion(description="d", expected_skill="my-skill", skill_name="my-skill")
+
+    def _read(self, result_status: str | None) -> CommandTelemetry:
+        return _cmd("Read", {"file_path": "/x/skills/my-skill/SKILL.md"}, result_status=result_status)
+
+    def test_in_flight_read_resolving_to_success_goes_undecided_to_pass(self) -> None:
+        checker = SkillTriggeredChecker()
+        criterion = self._criterion()
+        assert checker.live_verdict(criterion, [_turn([self._read(None)])]) == "undecided"
+        assert checker.live_verdict(criterion, [_turn([self._read("success")])]) == "pass"
+
+    def test_in_flight_read_force_closed_to_unknown_stays_undecided(self) -> None:
+        # The crash force-close path (`claude_code_agent._finalize_commands`,
+        # `antigravity_agent`'s orphan close). Nothing was delivered, so the latch must
+        # not advance — and the frozen check must agree.
+        checker = SkillTriggeredChecker()
+        criterion = self._criterion()
+        assert checker.live_verdict(criterion, [_turn([self._read(None)])]) == "undecided"
+        assert checker.live_verdict(criterion, [_turn([self._read("unknown")])]) == "undecided"
+        frozen = _check(expected_skill="my-skill", skill_name="my-skill", commands=[self._read("unknown")])
+        assert frozen.observed_label == "no" and frozen.score == 0.0
+
+
+class TestPerAgentTelemetryInventory:
+    """Which agent can emit which ``(tool_name, result_status)`` pair — DERIVED, not restated.
+
+    The deleted ``test_unknown_read_still_counts`` and its comment justified counting
+    ``Read``/``"unknown"`` as engagement by asserting that Codex reconstructs real calls
+    from the rollout with that status. That claim was a hand-written restatement of the two
+    dicts below, and it was false: Codex emits none of ``Read``/``Glob``/``Grep``, and its
+    rollout reconstruction sets ``"error"`` or ``"success"``, never ``"unknown"`` at all.
+    (The original sentence is deliberately not quoted verbatim here — a grep for it is the
+    cheap check that it is gone.) Importing the dicts
+    rather than re-listing their values is the whole point — a future comment naming a
+    backend as a producer is then checked instead of trusted.
+    """
+
+    def test_codex_emits_none_of_the_file_read_tool_names(self) -> None:
+        from coder_eval.agents import codex_agent
+
+        item_names = set(codex_agent._TOOL_ITEM_NAMES.values())
+        rollout_names = set(codex_agent._ROLLOUT_FN_NAMES.values())
+        # Anti-vacuity first: a rename or an emptied dict must report a GAP, not pass
+        # silently on an empty set (the CE044/CE045 lesson).
+        assert item_names, "codex_agent._TOOL_ITEM_NAMES is empty — renamed or moved?"
+        assert rollout_names, "codex_agent._ROLLOUT_FN_NAMES is empty — renamed or moved?"
+        assert _FILE_READ_TOOLS.isdisjoint(item_names | rollout_names), (
+            "Codex now emits a file-read tool name — the delivered-body rule's rationale "
+            "(only the crash force-close paths produce (file-read, 'unknown')) needs re-checking"
+        )
+
+    def test_antigravity_does_reach_the_file_read_tool_names(self) -> None:
+        # The complement, so the inventory documents WHICH backend can produce the pair
+        # rather than claiming none can: antigravity renames view_file/search_directory/
+        # find_file to Read/Grep/Glob, and its orphan-close path sets "unknown".
+        from coder_eval.agents import antigravity_agent
+
+        mapped = set(antigravity_agent._ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.values())
+        assert mapped, "antigravity_agent._ANTIGRAVITY_TO_CLAUDE_TOOL_MAP is empty — renamed or moved?"
+        assert mapped >= _FILE_READ_TOOLS, sorted(_FILE_READ_TOOLS - mapped)
+
+
+class TestSuiteLevelEffectOfTheGate:
+    """The gate turns a per-row gap into a suite METRIC — assert the metric, not the label.
+
+    ``recall.yes`` is what ``optimize_gate.activation_gate`` promotes on (via ``f1.yes``),
+    so a row whose only engagement is a crash-force-closed read moving from `yes` to `no`
+    is a promotion-decision change, not a cosmetic one.
+    """
+
+    def _rows(self, third_row_status: str) -> list[CriterionResult]:
+        commands_per_row = [
+            [_cmd("Skill", {"skill": "my-skill"})],
+            [_cmd("Read", {"file_path": "/x/skills/my-skill/SKILL.md"})],
+            [_cmd("Read", {"file_path": "/x/skills/my-skill/SKILL.md"}, result_status=third_row_status)],
+        ]
+        return [_check(expected_skill="my-skill", skill_name="my-skill", commands=c) for c in commands_per_row]
+
+    def _recall_yes(self, rows: list[CriterionResult]) -> float:
+        checker = SkillTriggeredChecker()
+        criterion = SkillTriggeredCriterion(description="d", expected_skill="my-skill", skill_name="my-skill")
+        agg = checker.aggregate(criterion, rows)
+        assert agg is not None
+        return agg.metrics["recall.yes"]
+
+    def test_a_crash_force_closed_read_costs_the_suite_a_third_of_its_recall(self) -> None:
+        assert self._recall_yes(self._rows("success")) == pytest.approx(1.0)
+        assert self._recall_yes(self._rows("unknown")) == pytest.approx(2 / 3)
 
 
 class TestSkillTriggeredAnyEngagement:
@@ -392,6 +561,15 @@ class TestSkillTriggeredGoldenCorpus:
             # signals. Historical activation P/R/F1 computed before that change is not
             # directly comparable if any run contained these two shapes — which is what
             # these entries exist to make explicit.
+            #
+            # The third entry (2026-08-16) was appended when the FILE-READ half of the same
+            # rule moved from a denylist to the allowlist the `Skill` half already used, so
+            # a crash-force-closed read stopped counting. The corpus did not go red on its
+            # own — no `"unknown"` file-read case was pinned — so skipping this append would
+            # have made a scoring change invisible here. Measured over the backend that can
+            # produce the pair (1,754 claude-code task.json, 8,706 file-read commands: 8,496
+            # "success" / 210 "error" / 0 "unknown"), no historical run re-scores; the entry
+            # exists so the NEXT change to this policy cannot land silently either.
             (
                 "errored-skill-call-with-no-other-signal",
                 "uipath-admin",
@@ -405,6 +583,14 @@ class TestSkillTriggeredGoldenCorpus:
                 "uipath-admin",
                 "uipath-admin",
                 [_cmd("Read", {"file_path": "skills/uipath-admin/SKILL.md"}, result_status="error")],
+                "no",
+                0.0,
+            ),
+            (
+                "unknown-read-of-skill-path",
+                "uipath-admin",
+                "uipath-admin",
+                [_cmd("Read", {"file_path": "skills/uipath-admin/SKILL.md"}, result_status="unknown")],
                 "no",
                 0.0,
             ),
