@@ -23,7 +23,12 @@ from typing import Any
 
 import pytest
 
-from coder_eval.agents.opencode_agent import OpenCodeAgent, _OpenCodeTurnState, _unwrap
+from coder_eval.agents.opencode_agent import (
+    OpenCodeAgent,
+    _OpenCodeTurnState,
+    _plugin_skill_dirs,
+    _unwrap,
+)
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AssistantMessage, OpenCodeAgentConfig, PermissionMode
 from coder_eval.pricing import calculate_cost
@@ -34,6 +39,9 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
+    TurnEndEvent,
+    TurnEndStatus,
+    TurnStartEvent,
 )
 
 
@@ -619,6 +627,34 @@ class TestTwoEventToolLifecycle:
         assert record.commands[0].parameters == {"command": "ls"}
 
 
+class TestFactoryContract:
+    """`create_agent` calls `agent_class(config, route=route, **kwargs)` through a
+    `cast(Any, ...)`, so pyright checks nothing at the call site. Every parameter
+    must therefore be DECLARED here, or nothing checks it at runtime either.
+    """
+
+    def test_route_is_accepted_positionally_and_by_keyword(self):
+        config = OpenCodeAgentConfig(type="opencode", model="deepseek/deepseek-v4-pro")
+        assert OpenCodeAgent(config, route=None).route is None
+        assert OpenCodeAgent(config, None).route is None
+
+    def test_an_undeclared_kwarg_raises_instead_of_vanishing(self):
+        """The orchestrator gates `cost_log_tags` on `supports_cost_log_tags`
+        precisely because an ungated forward must crash with TypeError. A `**_`
+        sink defeated that: a mis-gated kwarg would be silently dropped, yielding
+        runs with no cost correlation and no error.
+        """
+        config = OpenCodeAgentConfig(type="opencode", model="deepseek/deepseek-v4-pro")
+        assert OpenCodeAgent.supports_cost_log_tags is False
+        with pytest.raises(TypeError):
+            OpenCodeAgent(config, cost_log_tags={"x-ce-run-id": "r1"})  # type: ignore[call-arg]
+
+    def test_a_mistyped_task_id_raises_instead_of_defaulting(self):
+        config = OpenCodeAgentConfig(type="opencode", model="deepseek/deepseek-v4-pro")
+        with pytest.raises(TypeError):
+            OpenCodeAgent(config, task_i="t1")  # type: ignore[call-arg]
+
+
 class TestSandboxEnvironment:
     """`start(env_path_prepend=..., plugin_tools_dir=...)` is the abstract
     `Agent.start()` contract, and the orchestrator ALWAYS supplies both.
@@ -781,6 +817,89 @@ class TestSkillInjection:
         await agent.start(str(tmp_path / "sandbox"))
         assert agent.get_environment_info()["opencode_skill_paths"] == [str(root / "skills")]
 
+    async def test_list_form_manifest_declares_several_dirs(self, patch_exec, tmp_path):
+        """The docstring promises "a string or a list of strings"; only the string
+        form was exercised, so the list form could have been broken on arrival."""
+        root = tmp_path / "plug"
+        for sub in ("skills", "extra"):
+            (root / sub / "s1").mkdir(parents=True)
+            (root / sub / "s1" / "SKILL.md").write_text("---\nname: s1\n---\n", encoding="utf-8")
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "p", "skills": ["./skills", "./extra"]}), encoding="utf-8"
+        )
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        assert _injected_skill_paths(captured) == [str(root / "skills"), str(root / "extra")]
+
+    async def test_list_form_manifest_ignores_non_string_entries(self, patch_exec, tmp_path):
+        root = _skill_repo(tmp_path / "plug", manifest=json.dumps({"skills": [123, "./skills", None]}))
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        assert _injected_skill_paths(captured) == [str(root / "skills")]
+
+    @pytest.mark.parametrize(
+        ("manifest", "case"),
+        [
+            ("{ not json at all", "unparseable"),
+            ('["a", "list"]', "not a JSON object"),
+            ('{"name": "p"}', "no skills field"),
+            ('{"name": "p", "skills": 7}', "skills is not a string or list"),
+        ],
+    )
+    async def test_unusable_manifest_falls_back_to_the_convention(self, patch_exec, tmp_path, manifest, case):
+        """A manifest we cannot read must not lose the skills — `<root>/skills` is
+        the convention default, and silently injecting nothing is the exact failure
+        this whole mapping exists to close."""
+        root = _skill_repo(tmp_path / "plug", manifest=manifest)
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        assert _injected_skill_paths(captured) == [str(root / "skills")], case
+
+    def test_a_non_local_plugin_entry_is_skipped_with_a_warning(self, tmp_path, caplog):
+        """Only `type: local` maps to a directory; anything else has no path to
+        hand OpenCode and must say so rather than vanish.
+
+        Driven through `_plugin_skill_dirs` directly, not the agent: this branch is
+        defensive only — `LocalPluginConfig` pins `type: Literal["local"]`, so
+        pydantic rejects any other value before the agent ever sees it.
+        """
+        root = _skill_repo(tmp_path / "plug")
+        with caplog.at_level("WARNING"):
+            resolved = _plugin_skill_dirs([{"type": "git", "path": str(root)}, {"type": "local", "path": str(root)}])
+
+        assert "ignoring non-local plugin entry" in caplog.text
+        assert resolved == [str(root / "skills")]
+
+    async def test_a_root_with_no_skill_md_warns_but_still_injects(self, patch_exec, tmp_path, caplog):
+        """A directory holding no `<name>/SKILL.md` is suspicious, not fatal — the
+        CLI scans `skills.paths` recursively, so the path is still injected and the
+        warning tells the author to check that the plugin path is a skills root."""
+        root = tmp_path / "plug"
+        (root / "skills").mkdir(parents=True)
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
+        with caplog.at_level("WARNING"):
+            await agent.start(str(tmp_path / "sandbox"))
+
+        assert "no <name>/SKILL.md directly under" in caplog.text
+        assert agent._skill_dirs == [str(root / "skills")]
+
+    @pytest.mark.parametrize("inherited", ["{ not json", '["a", "list"]', '"a string"'])
+    async def test_unusable_inherited_config_is_replaced_with_a_warning(
+        self, patch_exec, tmp_path, monkeypatch, caplog, inherited
+    ):
+        """An inherited value we cannot merge into must not cost us the skills;
+        replacing it is announced so the host knows its config was dropped."""
+        root = _skill_repo(tmp_path / "plug")
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", inherited)
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        with caplog.at_level("WARNING"):
+            await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+
+        assert _injected_skill_paths(captured) == [str(root / "skills")]
+        assert "replacing it with the injected skill paths" in caplog.text
+
 
 class TestUnsupportedConfigIsAnnounced:
     async def test_start_warns_about_unenforced_fields(self, patch_exec, tmp_path, caplog):
@@ -842,6 +961,100 @@ class TestSessionContinuity:
         await agent.communicate("follow up")
         argv = captured2["argv"]
         assert argv[argv.index("--session") + 1] == SESSION
+
+
+class TestErrorEventShapes:
+    """`error` is the CLI's own flat envelope, and its payload shape varies."""
+
+    @staticmethod
+    def _state() -> _OpenCodeTurnState:
+        return _OpenCodeTurnState(task_id="t1", iteration=1, user_input="p", model="m")
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ({"error": {"data": {"message": "provider refused"}, "name": "ProviderError"}}, "provider refused"),
+            ({"error": {"name": "UnknownError"}}, "UnknownError"),  # no data.message -> the name
+            ({"error": {"data": None, "name": "UnknownError"}}, "UnknownError"),
+            ({"error": {"data": "not-a-dict", "name": "UnknownError"}}, "UnknownError"),
+            ({"error": {}}, "unknown error"),
+            ({"error": "plain string"}, "plain string"),
+            ({}, "unknown error"),
+        ],
+    )
+    def test_message_extraction(self, payload, expected):
+        state = self._state()
+        state.on_error(payload)
+        assert state.error_message == expected
+
+
+class TestTokenCastsNeverRaise:
+    """`_handle_line` advertises "Never raises on bad input"; these five casts were
+    the module's only unguarded field reads, and every neighbouring field already
+    warns-and-continues on drift rather than failing.
+
+    Raising here is expensive: `communicate`'s `except Exception` turns it into an
+    AgentCrashError, categorized AGENT_CRASH with max_retries=2, so ONE mistyped
+    bucket burns three full attempts and lands the task as ERROR.
+    """
+
+    @staticmethod
+    def _stream(tokens: dict[str, Any]) -> list[str]:
+        return [
+            _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
+            _evt("step_finish", {"id": "prt_2", "messageID": "msg_1", "reason": "stop", "tokens": tokens}),
+        ]
+
+    @pytest.mark.parametrize(
+        "tokens",
+        [
+            {"input": "abc", "output": 20, "total": 120},  # ValueError on int()
+            {"input": {"nested": 1}, "output": 20},  # TypeError on int()
+            {"input": [5], "output": 20},  # TypeError on int()
+            {"input": 100, "output": 20, "cache": {"read": "lots", "write": None}},
+        ],
+    )
+    async def test_a_non_numeric_bucket_warns_instead_of_crashing(self, patch_exec, tmp_path, tokens, caplog):
+        patch_exec(_FakeProcess(self._stream(tokens)))
+        with caplog.at_level("WARNING"):
+            record = await _run(_agent(), tmp_path)
+
+        assert record.crashed is False
+        assert "unexpected token accounting" in caplog.text
+        # The buckets that WERE readable still land.
+        assert record.token_usage is not None
+
+    async def test_numeric_strings_are_still_accepted(self, patch_exec, tmp_path, caplog):
+        """A stringly-typed but numeric count is a serialization detail, not drift."""
+        patch_exec(_FakeProcess(self._stream({"input": "100", "output": "20", "total": 120})))
+        with caplog.at_level("WARNING"):
+            record = await _run(_agent(), tmp_path)
+
+        assert record.token_usage is not None
+        assert record.token_usage.uncached_input_tokens == 100
+        assert record.token_usage.output_tokens == 20
+        assert "unexpected token accounting" not in caplog.text
+
+    async def test_a_float_count_truncates(self, patch_exec, tmp_path, caplog):
+        """JSON has one number type, so a provider may serialize a count as 100.0."""
+        patch_exec(_FakeProcess(self._stream({"input": 100.0, "output": 20.7, "total": 120})))
+        with caplog.at_level("WARNING"):
+            record = await _run(_agent(), tmp_path)
+
+        assert record.token_usage is not None
+        assert record.token_usage.uncached_input_tokens == 100
+        assert record.token_usage.output_tokens == 20
+        assert "unexpected token accounting" not in caplog.text
+
+    async def test_a_bool_is_not_a_token_count(self, patch_exec, tmp_path, caplog):
+        """`int(True) == 1` would book a phantom token."""
+        patch_exec(_FakeProcess(self._stream({"input": True, "output": 20})))
+        with caplog.at_level("WARNING"):
+            record = await _run(_agent(), tmp_path)
+
+        assert record.token_usage is not None
+        assert record.token_usage.uncached_input_tokens == 0
+        assert "unexpected token accounting" in caplog.text
 
 
 class TestFailurePaths:
@@ -1367,6 +1580,91 @@ class TestExternalCancel:
         assert ends[0].status is AgentEndStatus.CRASHED
         assert ends[0].crash_reason == "turn cancelled"
         assert proc.killed is True  # not abandoned mid-stream — see TestTurnAlwaysReapsTheCli
+
+
+class TestTurnEventsAreBalanced:
+    """`Agent.communicate`'s contract is one TurnStart/TurnEnd pair per inner turn.
+
+    `on_step_start` opens one per CLI step and `on_step_finish` closes it, but a
+    turn that dies (or is cut) between the two left the last TurnStartEvent open
+    forever — a task.log with `>>> Turn start` and no matching `--- Turn end`.
+    All three sibling agents close it from `finalize`.
+    """
+
+    @staticmethod
+    def _pairs(recorder: _EventRecorder) -> tuple[int, int]:
+        starts = len([e for e in recorder.events if isinstance(e, TurnStartEvent)])
+        ends = len([e for e in recorder.events if isinstance(e, TurnEndEvent)])
+        return starts, ends
+
+    async def test_a_clean_turn_is_balanced(self, patch_exec, tmp_path):
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        await _run(_agent(), tmp_path, stream_callback=recorder)
+        assert self._pairs(recorder) == (2, 2)  # HAPPY_STREAM is two steps
+
+    async def test_a_timeout_closes_the_open_step(self, patch_exec, tmp_path):
+        proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
+        patch_exec(proc)
+        recorder = _EventRecorder()
+
+        with pytest.raises(TurnTimeoutError):
+            await _run(_agent(), tmp_path, timeout=0.2, stream_callback=recorder)
+
+        assert self._pairs(recorder) == (1, 1)
+        end = next(e for e in recorder.events if isinstance(e, TurnEndEvent))
+        assert end.status is TurnEndStatus.TIMEOUT
+        assert end.turn_id == "msg_1"
+
+    async def test_a_cancel_closes_the_open_step(self, patch_exec, tmp_path):
+        proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
+        patch_exec(proc)
+        agent = _agent()
+        await agent.start(str(tmp_path))
+        recorder = _EventRecorder()
+
+        task = asyncio.ensure_future(agent.communicate("do the thing", stream_callback=recorder))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            _ = await task
+
+        assert self._pairs(recorder) == (1, 1)
+        end = next(e for e in recorder.events if isinstance(e, TurnEndEvent))
+        assert end.status is TurnEndStatus.CRASHED
+
+    async def test_a_crash_closes_the_open_step(self, patch_exec, tmp_path):
+        patch_exec(_ExplodingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})]))
+        recorder = _EventRecorder()
+
+        with pytest.raises(AgentCrashError):
+            await _run(_agent(), tmp_path, stream_callback=recorder)
+
+        assert self._pairs(recorder) == (1, 1)
+
+    async def test_a_clean_cut_closes_the_open_step(self, patch_exec, tmp_path):
+        """should_stop and max_turns cut between a step's start and its finish too."""
+        proc = _RunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
+        patch_exec(proc)
+        recorder = _EventRecorder()
+
+        await _run(_agent(), tmp_path, should_stop=lambda: True, stream_callback=recorder)
+
+        assert self._pairs(recorder) == (1, 1)
+        end = next(e for e in recorder.events if isinstance(e, TurnEndEvent))
+        assert end.status is TurnEndStatus.STOPPED_EARLY
+
+    async def test_a_completed_step_is_never_closed_twice(self, patch_exec, tmp_path):
+        """Unlike the siblings, completed steps close themselves in `on_step_finish`,
+        so `finalize` must fire ONLY for a straggler."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+
+        assert record.crashed is False
+        starts, ends = self._pairs(recorder)
+        assert starts == ends == 2
+        assert all(e.status is TurnEndStatus.COMPLETED for e in recorder.events if isinstance(e, TurnEndEvent))
 
 
 class TestTurnAlwaysReapsTheCli:

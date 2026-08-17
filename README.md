@@ -11,14 +11,14 @@
 **Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an open-source framework for
 **evaluating and benchmarking AI coding agents and their skills** — built for CLI
 and skill builders — with sandboxing, reproducibility, and data-driven analysis.
-It runs a real agent (**Claude Code**, **Codex**, or **Google Antigravity /
-Gemini**) in a sandbox against declarative YAML tasks, then scores the files and
+It runs a real agent (**Claude Code**, **Codex**, **Google Antigravity /
+Gemini**, or **OpenCode**) in a sandbox against declarative YAML tasks, then scores the files and
 commands it actually produced. Not an "agentic coding" benchmark: it measures how
 effective your CLI and skills are when used by coding agents.
 
 Reach for it when you want to **test whether a Claude Code skill triggers**,
-**A/B-test Claude Code vs. Codex vs. Gemini** (or model vs. model, prompt vs.
-prompt), or **gate CI on coding-agent quality**. Unlike fixed datasets (SWE-bench,
+**A/B-test Claude Code vs. Codex vs. Gemini vs. OpenCode** (or model vs. model,
+prompt vs. prompt), or **gate CI on coding-agent quality**. Unlike fixed datasets (SWE-bench,
 SkillsBench) that rank models on a shared leaderboard, Coder Eval evaluates the
 tasks, skills, and workflows *you* ship — with weighted 0.0–1.0 criteria, a
 `skill_triggered` activation check, an A/B experiment layer, and per-tool cost
@@ -33,14 +33,14 @@ telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
 - **Sandboxed execution** in isolated environments with resource limits
 - **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
 - **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent abstraction** — Claude Code, Codex, and Antigravity (Gemini) today, extensible via a plugin SPI
+- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), and OpenCode today, extensible via a plugin SPI
 - **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
 
 ## What you can do with it
 
 - **Benchmark coding agents** — score an agent across a suite of tasks with weighted scoring and pass/fail thresholds
-- **Compare models & configs** — A/B-test Claude vs. Codex vs. Gemini, model vs. model, tool-on vs. tool-off, prompt vs. prompt
+- **Compare models & configs** — A/B-test Claude vs. Codex vs. Gemini vs. OpenCode, model vs. model, tool-on vs. tool-off, prompt vs. prompt
 - **Evaluate skills** — verify an agent actually engages a target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style)
 - **Keep skills up to date in CI** — re-validate your skills on every change or on a schedule; catch silent regressions when models, prompts, or the skills themselves drift
 - **Gate CI on agent quality** — run the suite in GitHub Actions and fail the build on regressions

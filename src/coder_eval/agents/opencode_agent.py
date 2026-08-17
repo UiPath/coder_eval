@@ -38,7 +38,7 @@ import os
 import shutil
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal, NoReturn
@@ -49,6 +49,7 @@ from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
     AgentKind,
     AgentState,
+    ApiRoute,
     AssistantMessage,
     CommandTelemetry,
     ContentBlock,
@@ -293,7 +294,7 @@ def _manifest_skill_dirs(root: Path) -> list[Path]:
 
 
 def _plugin_skill_dirs(
-    plugins: list[dict[str, Any]] | None,
+    plugins: Sequence[Mapping[str, Any]] | None,
     log: logging.Logger | logging.LoggerAdapter[Any] = logger,
 ) -> list[str]:
     """Resolve ``plugins:`` entries to OpenCode ``skills.paths`` directories.
@@ -304,7 +305,7 @@ def _plugin_skill_dirs(
     """
     resolved: list[str] = []
     for plugin in plugins or []:
-        if not isinstance(plugin, dict) or plugin.get("type") != "local":
+        if not isinstance(plugin, Mapping) or plugin.get("type") != "local":
             log.warning("opencode: ignoring non-local plugin entry %r — only `type: local` maps to skills.", plugin)
             continue
         path_str = plugin.get("path")
@@ -377,6 +378,9 @@ class _OpenCodeTurnState:
         # completed, so one that booked no tokens means the token schema moved.
         self.steps_finished = 0
         self.turn_id: str = ""
+        # True between a step's `step_start` and its `step_finish`. `finalize`
+        # needs it to close a TurnStartEvent the stream never got to close.
+        self.step_open = False
         self.step_started_at: datetime | None = None
         self.step_text_parts: list[str] = []
         self.step_tool_ids: list[str] = []
@@ -412,6 +416,7 @@ class _OpenCodeTurnState:
 
     def on_step_start(self, part: dict[str, Any]) -> None:
         self.step_count += 1
+        self.step_open = True
         self.turn_id = str(part.get("messageID") or f"step_{self.step_count}")
         self.step_started_at = datetime.now()
         self.step_text_parts = []
@@ -599,6 +604,44 @@ class _OpenCodeTurnState:
         self.warned_token_shape = True
         logger.warning("opencode: unexpected token accounting — " + message, *args)
 
+    def _as_int(self, bucket: str, value: Any) -> int:
+        """Coerce one stream-supplied token count, warning instead of raising.
+
+        A bare ``int()`` raises on anything non-numeric (``int("abc")`` ->
+        ``ValueError``; ``int({...})``/``int([...])`` -> ``TypeError``), which
+        ``communicate``'s ``except Exception`` turns into an ``AgentCrashError``
+        — categorized ``AGENT_CRASH`` with ``max_retries=2``, so ONE mistyped
+        bucket burns three full attempts and lands the task as ERROR.
+
+        That is the opposite of the policy every neighbouring field follows:
+        ``_epoch_ms_to_dt`` type-checks, ``state``/``input``/``cost``/``total`` are
+        all ``isinstance``-gated, and ``_fresh_input_slice`` exists specifically to
+        warn-once on token-schema drift rather than fail. A changed type in the
+        very same ``tokens`` dict is drift too, so it is reported the same way and
+        the turn survives on the buckets it could read. It is also what makes
+        ``_handle_line``'s advertised "Never raises on bad input" true.
+        """
+        if isinstance(value, bool) or not isinstance(value, int | float | str):
+            if value is not None:
+                self._warn_token_shape(
+                    "tokens.%s is %r (%s), not a number; counting it as 0 — the CLI's token schema "
+                    + "may have changed, so re-check docs/agents/OPENCODE.md before trusting cost",
+                    bucket,
+                    value,
+                    type(value).__name__,
+                )
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            self._warn_token_shape(
+                "tokens.%s is %r, which is not convertible to a number; counting it as 0 — the CLI's "
+                + "token schema may have changed, so re-check docs/agents/OPENCODE.md before trusting cost",
+                bucket,
+                value,
+            )
+            return 0
+
     def _fresh_input_slice(
         self, tokens: dict[str, Any], raw_in: int, raw_out: int, reasoning: int, cw: int, cr: int
     ) -> int:
@@ -668,14 +711,15 @@ class _OpenCodeTurnState:
 
     def on_step_finish(self, part: dict[str, Any]) -> None:
         self.steps_finished += 1
+        self.step_open = False
         tokens = part.get("tokens")
         tokens = tokens if isinstance(tokens, dict) else {}
         cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
-        raw_in = int(tokens.get("input") or 0)
-        raw_out = int(tokens.get("output") or 0)
-        step_reasoning = int(tokens.get("reasoning") or 0)
-        step_cw = int(cache.get("write") or 0)
-        step_cr = int(cache.get("read") or 0)
+        raw_in = self._as_int("input", tokens.get("input") or 0)
+        raw_out = self._as_int("output", tokens.get("output") or 0)
+        step_reasoning = self._as_int("reasoning", tokens.get("reasoning") or 0)
+        step_cw = self._as_int("cache.write", cache.get("write") or 0)
+        step_cr = self._as_int("cache.read", cache.get("read") or 0)
 
         step_in = self._fresh_input_slice(tokens, raw_in, raw_out, step_reasoning, step_cw, step_cr)
         # Reasoning tokens are billed at the output rate but reported apart from
@@ -739,6 +783,21 @@ class _OpenCodeTurnState:
             )
         )
 
+    def on_error(self, part: dict[str, Any]) -> None:
+        """Record the CLI's own structured error, which ``_settle_turn`` crashes on.
+
+        The payload is the flat envelope (no ``part``), and its shape varies: a
+        nested ``error.data.message`` when the CLI has one, otherwise the error's
+        ``name``. Anything else degrades to its string form rather than raising.
+        """
+        error = part.get("error")
+        if isinstance(error, dict):
+            data = error.get("data")
+            message = (data or {}).get("message") if isinstance(data, dict) else None
+            self.error_message = str(message or error.get("name") or "unknown error")
+        else:
+            self.error_message = str(error or "unknown error")
+
     def close_open_tools(self) -> None:
         """Force-close every tool still awaiting a result (crash/timeout orphans)."""
         for call_id in list(self.open_tools):
@@ -768,6 +827,26 @@ class _OpenCodeTurnState:
         cost = self._resolve_cost()
         if cost is not None:
             usage = usage.model_copy(update={"total_cost_usd": cost})
+        # A step still open here never received its `step_finish` — the turn
+        # died between the two (crash, timeout, cancel) or was cut cleanly
+        # (should_stop, max_turns). Either way its TurnStartEvent must be
+        # closed, or the protocol's one-pair-per-inner-turn contract
+        # (Agent.communicate) is broken and every renderer shows a turn that
+        # opens and never ends. Unlike the siblings, the completed steps have
+        # already closed themselves in `on_step_finish`, so this fires ONLY for
+        # the straggler. TurnEndStatus mirrors AgentEndStatus value-for-value
+        # precisely so this conversion is total.
+        if self.step_open:
+            self.step_open = False
+            self.emit(
+                TurnEndEvent(
+                    task_id=self.task_id,
+                    thread_id=self.thread_id,
+                    turn_id=self.turn_id,
+                    status=TurnEndStatus(status.value),
+                    tokens=None,
+                )
+            )
         self.emit(
             AgentEndEvent(
                 task_id=self.task_id,
@@ -806,10 +885,28 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     def __init__(
         self,
         config: OpenCodeAgentConfig,
+        route: ApiRoute | None = None,
+        *,
         task_id: str = "unknown",
-        **_: Any,
     ) -> None:
+        """Every parameter the agent factory can pass is DECLARED, not absorbed.
+
+        ``create_agent`` calls ``agent_class(config, route=route, **kwargs)`` through
+        a ``cast(Any, ...)``, so pyright checks nothing at the call site; a ``**_``
+        sink on this side would mean nothing checks it at runtime either. The
+        orchestrator depends on that TypeError as a signal — it gates
+        ``cost_log_tags`` on ``supports_cost_log_tags`` precisely "otherwise the
+        agent-agnostic factory would forward it into ... constructors that don't
+        declare it and crash with TypeError" — so a mis-gated kwarg must be loud
+        here rather than silently dropped.
+
+        ``route`` is accepted for factory parity and deliberately unused: the CLI
+        owns its own provider configuration (see ``docs/agents/OPENCODE.md``), so
+        the run's Bedrock/Anthropic routing does not apply to it. ``task_id`` only
+        labels the emitted event stream.
+        """
         self.config = config
+        self.route = route
         self.task_id = task_id
         self.working_directory: str | None = None
         self._env_path_prepend: list[str] = []
@@ -845,7 +942,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 + "unconstrained by them; do not rely on them as a boundary (see docs/agents/OPENCODE.md).",
                 ", ".join(ignored),
             )
-        self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger)  # type: ignore[arg-type]
+        self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger)
         if self._skill_dirs:
             logger.info(
                 "opencode: injecting %d skill path(s) via %s: %s",
@@ -1381,12 +1478,6 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         elif event_type == _STEP_FINISH:
             state.on_step_finish(part)
         elif event_type == _ERROR:
-            error = part.get("error")
-            if isinstance(error, dict):
-                data = error.get("data")
-                message = (data or {}).get("message") if isinstance(data, dict) else None
-                state.error_message = str(message or error.get("name") or "unknown error")
-            else:
-                state.error_message = str(error or "unknown error")
+            state.on_error(part)
         else:
             logger.debug("opencode: unhandled event type %r", event_type)

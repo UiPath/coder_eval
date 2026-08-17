@@ -263,6 +263,35 @@ the run really billed. Two shapes reach it:
 Intentional cuts (`should_stop`, `max_turns`) are exempt: both can land before
 the first event, or between a step's start and its `step_finish`.
 
+## Running in Docker
+
+**Not supported yet — use the default `tempdir` driver.** Unlike the other
+built-in agents, `sandbox: {driver: docker}` does not work with
+`agent: {type: opencode}`, and the failure is loud rather than silent:
+`start()` finds no `opencode` on PATH inside the container and every task dies
+with the install hint, which you cannot act on because that PATH lives in an
+image you did not build.
+
+Two things are missing, both deliberate rather than overlooked:
+
+- **The CLI is not in the image.** `docker/Dockerfile` bakes in `claude-code`
+  (pinned) plus the `codex` and `antigravity` extras. OpenCode is a Node CLI
+  installed with `npm install -g opencode-ai`, so shipping it means adding a
+  pinned version that travels with the coder_eval release tag the way
+  `CLAUDE_CODE_VERSION` does — a release-process decision, not a one-line edit.
+  (Node 22 is already present in the image, so the change itself is small.)
+- **No credentials would reach it.** The docker driver forwards host environment
+  variables through an explicit allowlist (`SandboxConfig.env_passthrough`),
+  which carries per-harness blocks for Codex and Antigravity but none for
+  OpenCode — so `OPENROUTER_API_KEY` and friends are not passed through, and
+  `opencode auth login`'s credential file is not mounted. Even a custom image
+  with the CLI baked in would authenticate against nothing.
+
+Until both land, run OpenCode tasks under `tempdir` (the default) on a host that
+has the CLI and its provider credentials. If you need container isolation now,
+build your own image from `docker/Dockerfile` with the `npm install -g` line
+added and pass the credentials via `sandbox.env_passthrough_extra`.
+
 ## Known limitations
 
 - **`allowed_tools` / `disallowed_tools` / `system_prompt` / `system_prompt_file`
@@ -280,6 +309,10 @@ the first event, or between a step's start and its `step_finish`.
   visible-turn unit Codex/Antigravity use — see
   [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant
   across harnesses.
+- **The `docker` sandbox driver is unsupported.** The CLI is not in the image and
+  no OpenCode credentials are in the `env_passthrough` allowlist — see
+  [Running in Docker](#running-in-docker) for the workaround and what it would
+  take to close.
 - **No sub-agent attribution.** OpenCode's CLI stream does not expose nested agent
   generations, so per-sub-agent token grouping (available for Claude and Codex) is
   not derivable.

@@ -49,11 +49,17 @@ COPY src/ ./src/
 COPY experiments/default.yaml ./experiments/default.yaml
 
 # Codex and Antigravity are always baked into the image -- peers to the
-# claude-code agent installed above -- so all built-in agents ship in every
-# build. `openai-codex` (+ its pinned cli-bin) and `google-antigravity` (which
-# bundles its `localharness` binary as a manylinux wheel) come from public PyPI,
-# so this needs no private-index credentials. The RUN below always passes
-# `--extra codex --extra antigravity`.
+# claude-code agent installed above. `openai-codex` (+ its pinned cli-bin) and
+# `google-antigravity` (which bundles its `localharness` binary as a manylinux
+# wheel) come from public PyPI, so this needs no private-index credentials. The
+# RUN below always passes `--extra codex --extra antigravity`.
+#
+# NOT every built-in agent ships here: `opencode` is registered unconditionally
+# but its CLI is a Node package (`npm install -g opencode-ai`), absent from this
+# image, and no OpenCode credentials are in SandboxConfig.env_passthrough -- so
+# `--driver docker` does not support it. Adding it means a pinned version that
+# travels with the release tag (as CLAUDE_CODE_VERSION does) plus an
+# env_passthrough block; see docs/agents/OPENCODE.md "Running in Docker".
 #
 # CODER_EVAL_UV_EXTRAS carries ADDITIONAL opt-in extras on top of those; it
 # defaults to none. `make docker-image-full` passes `--extra uipath`, which

@@ -3,7 +3,8 @@
 > Coder Eval (`pip install coder-eval`) is an open-source framework for evaluating,
 > benchmarking, and A/B-testing AI coding agents and their Claude Code skills in a
 > sandbox. It uses declarative YAML tasks with weighted, continuous scoring
-> (0.0–1.0), runs real agents (Claude Code, Codex, Google Antigravity/Gemini) with
+> (0.0–1.0), runs real agents (Claude Code, Codex, Google Antigravity/Gemini,
+> OpenCode) with
 > full tool use, captures per-tool cost/token telemetry, and provides CI-ready
 > pass/fail gates. It is not a fixed benchmark or leaderboard — it scores your own
 > tasks, and can verify whether a Claude Code skill actually triggers.
