@@ -1197,6 +1197,23 @@ class TestZeroTelemetryIsLoud:
         with pytest.raises(AgentCrashError, match="cost reported: yes"):
             await _run(_agent(), tmp_path)
 
+    async def test_require_token_telemetry_false_warns_and_scores(self, patch_exec, tmp_path, caplog):
+        """The escape hatch, for a provider that genuinely reports no usage: crashing
+        every turn there would make the harness unusable, not merely imprecise."""
+        patch_exec(_FakeProcess(self._stream_without_tokens()))
+        with caplog.at_level("WARNING"):
+            record = await _run(_agent(require_token_telemetry=False), tmp_path)
+
+        assert record.crashed is False
+        assert "require_token_telemetry is off" in caplog.text
+
+    async def test_the_hatch_never_relaxes_the_vocabulary_check(self, patch_exec, tmp_path):
+        """Vocabulary drift has silently zeroed a whole run before, and no provider
+        quirk explains it — so this arm stays fatal even with the hatch open."""
+        patch_exec(_FakeProcess([json.dumps({"type": "session.next.idle", "properties": {"sessionID": SESSION}})]))
+        with pytest.raises(AgentCrashError, match="no recognized events"):
+            await _run(_agent(require_token_telemetry=False), tmp_path)
+
     async def test_a_cut_before_any_step_finished_is_exempt(self, patch_exec, tmp_path):
         """The arm keys on a step the CLI reported FINISHED. A stop landing between
         a step's start and its `step_finish` is an intentional cut, not drift."""

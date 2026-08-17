@@ -263,6 +263,13 @@ the run really billed. Two shapes reach it:
 Intentional cuts (`should_stop`, `max_turns`) are exempt: both can land before
 the first event, or between a step's start and its `step_finish`.
 
+For a provider or auth mode that genuinely reports no usage — where failing every
+turn would make the harness unusable rather than merely imprecise — set
+`require_token_telemetry: false` (or `-D agent.require_token_telemetry=false`).
+The turn is then warned about and scored. This relaxes only the missing-token
+arm: a stream with **no recognized events** still fails, since no provider quirk
+explains a renamed event vocabulary.
+
 ## Running in Docker
 
 **Not supported yet — use the default `tempdir` driver.** Unlike the other

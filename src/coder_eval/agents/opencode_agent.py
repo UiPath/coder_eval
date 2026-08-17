@@ -1388,13 +1388,20 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     f"It reported {state.steps_finished} finished step(s), none of which carried usable "
                     + f"token counts (cost reported: {'yes' if state.saw_cost else 'no'})."
                 )
-            self._crash_turn(
-                state,
-                collector,
+            message = (
                 f"OpenCode exited cleanly but the turn captured zero token telemetry. {detail} The CLI's "
                 + "event or token schema may have changed — see docs/agents/OPENCODE.md (Telemetry) before "
-                + "trusting any run from this CLI version.",
+                + "trusting any run from this CLI version."
             )
+            # Escape hatch for a provider/auth mode that reports no usage at all,
+            # where crashing every turn would make the harness unusable rather than
+            # merely imprecise. Deliberately does NOT cover `nothing_recognized`:
+            # that arm is vocabulary drift, which has silently zeroed a whole run
+            # before, and no provider quirk can explain it.
+            if not self.config.require_token_telemetry and not nothing_recognized:
+                logger.warning("opencode: %s Scored anyway — require_token_telemetry is off.", message)
+            else:
+                self._crash_turn(state, collector, message)
 
         if stopped_early:
             return AgentEndStatus.STOPPED_EARLY

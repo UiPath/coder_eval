@@ -308,6 +308,18 @@ class OpenCodeAgentConfig(BaseAgentConfig):
             "the Claude agent's `setting_sources: []`. Set False to load host plugins."
         ),
     )
+    require_token_telemetry: bool = Field(
+        default=True,
+        description=(
+            "Fail a turn that finished steps but captured no token counts, instead of scoring "
+            "it. On by default: such a turn is missing from every token aggregate and its "
+            "max_total_tokens / max_usd budget gates can never trip. Set False only for a "
+            "provider or auth mode that genuinely reports no usage, where crashing every turn "
+            "would make the harness unusable — the turn is then warned about and scored. This "
+            "never relaxes the separate event-vocabulary check (a stream with no recognized "
+            "events still fails), since no provider quirk explains that."
+        ),
+    )
 
 
 class NoneAgentConfig(BaseAgentConfig):
