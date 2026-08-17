@@ -1489,7 +1489,11 @@ SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task", "optimize-skill"}
 
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
 # dead weight; a reader that stops reading it has silently forked the rubric.
-RUBRIC_READERS = {"task", "lint-tasks", "init"}
+# `optimize-skill` reads one section rather than the whole file — the grader-fairness
+# questions, which it asks of a baseline's per-row detail while `task` asks the same ones
+# while writing the grader. It restated them until they were consolidated; being in this
+# set is what keeps the pointer from being deleted back into a second copy.
+RUBRIC_READERS = {"task", "lint-tasks", "init", "optimize-skill"}
 
 # Whether each skill must locate a repository's eval tree before it can do anything.
 # All seven currently must, and each for its own reason: `analyze` needs the run store,
@@ -1862,8 +1866,11 @@ def _assert_outcome_suite_shape(
        ``suite_id``), and ``--split`` filters dataset *rows* — so a suite written as
        separate task files gives an optimization round no rollup to rank on and makes
        ``--split test`` silently re-run the train rows.
-    2. **Split counts** as declared, checked through ``expand_dataset(..., split=...)``
-       because ``coder-eval plan`` has no ``--split`` flag to check them from a shell.
+    2. **Split counts** as declared, checked through ``expand_dataset(..., split=...)``. The same
+       question is answerable from a shell — ``coder-eval plan <suite> --split test`` has printed
+       the selected count since CE043, and ``/coder-eval:task``'s step 6 requires an author to run
+       both splits — but a shell command is not a regression test, so the counts are pinned here
+       against the real expander.
     3. **No surviving ``${row.`` anywhere** in the prompt or the expanded criteria —
        substitution has to reach list leaves (``includes: ["${row.x}"]``), not just scalars.
     4. **Every prompt invokes the skill explicitly**, in its opening lines — by slash form,
@@ -4255,6 +4262,119 @@ class TestPluginArtifacts:
         assert "supersedes the one-file-per-task guidance in two places" in text, (
             "task/SKILL.md no longer names how many passages outcome mode overrides, so a third "
             "one can appear without anyone noticing it was left un-overridden"
+        )
+
+    def test_task_skill_has_discrimination_gate(self):
+        # The one error class an A/B cannot detect: a wrong check biases every arm EQUALLY, so the
+        # ranking, the paired test and the confirmation all agree with each other and are all wrong
+        # together. Proving the grader separates a known-good artifact from a known-bad one is the
+        # only place it gets caught, and it has to happen before a stage is paid for.
+        text = _normalized(PLUGIN_ROOT / "skills" / "task" / "SKILL.md")
+        assert "Step 6.5" in text, (
+            "task/SKILL.md no longer has a Step 6.5 — the grader discrimination gate. Four shipped "
+            "surfaces cite it by that number (see test_shipped_surfaces_cite_a_step_that_exists)"
+        )
+        assert "known-good" in text and "known-bad" in text, (
+            "the discrimination gate no longer names both artifacts, so there is nothing to compare"
+        )
+        assert "separation margin" in text, (
+            "the gate no longer requires the MARGIN to be reported. A gate whose result is not "
+            "stated is a step someone can say they did"
+        )
+        # It cites the rubric rather than restating the fairness questions — one copy, asked by
+        # both the skill that writes a grader and the skill that reviews one.
+        assert "task-rubric.md" in text and "Grader fairness" in text, (
+            "Step 6.5 no longer cites the rubric's grader-fairness section, so either the questions "
+            "have been restated here (two copies to drift) or dropped"
+        )
+        # Step 6's split half: `--split` silently drops unlabelled rows, so every metric would be
+        # computed over a smaller suite than the file suggests.
+        # Anchored on the requirement, not on the flag names: `--split test` also appears in the
+        # "Which mode" section, so asserting the flags alone survives deleting Step 6's paragraph.
+        assert "--split train" in text and "Both must exit 0" in text, (
+            "task/SKILL.md's outcome-mode validation no longer plans BOTH splits, so a partly "
+            "labelled dataset ships silently — `--split` keeps the matching rows and DROPS the "
+            "unlabelled ones, and every later metric is computed over the smaller suite"
+        )
+
+    def test_shipped_surfaces_cite_a_step_that_exists(self):
+        # A prose cross-reference nothing guards. `test_bundled_plugin_root_references_resolve`
+        # covers ${CLAUDE_PLUGIN_ROOT} FILE paths in .md files only — it cannot see "step 6.5", and
+        # it does not scan .py at all. These four surfaces are what a user copies, and the step they
+        # point at is the ONE safeguard against a silently-wrong grader.
+        citing = (
+            PLUGIN_ROOT / "reference" / "templates" / "outcome-grader" / "verify.py",
+            PLUGIN_ROOT / "reference" / "templates" / "outcome-grader" / "expectations" / "example-row.json",
+            PLUGIN_ROOT / "reference" / "templates" / "outcome.yaml",
+            PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md",
+        )
+        target = _normalized(PLUGIN_ROOT / "skills" / "task" / "SKILL.md")
+        citers = [path for path in citing if "step 6.5" in _normalized(path).casefold()]
+        assert citers, (
+            "no shipped surface cites the discrimination gate any more — if the step was renumbered, "
+            "this test is looking for the wrong string and guards nothing"
+        )
+        assert "Step 6.5" in target, (
+            f"{[p.name for p in citers]} point at `/coder-eval:task` step 6.5, which that skill no "
+            "longer has. An author following the pointer finds nothing, and the grader ships ungated"
+        )
+
+    def test_task_rubric_carves_out_spec_from_leak_rule(self):
+        # Both halves, so an edit cannot delete one and leave the other. Without the prohibition an
+        # outcome prompt may state the rule under test, which grades transcription; without the
+        # carve-out "follow the spec literally" is ungradeable, because it needs a spec to follow.
+        rubric = _normalized(PLUGIN_ROOT / "reference" / "task-rubric.md")
+        assert "MAY** state the *spec*" in rubric or "MAY** state the spec" in rubric, (
+            "the rubric lost the outcome-suite spec carve-out — an outcome prompt must be allowed to "
+            "name the output path and the format, or the rule 'follow the user's spec' cannot be graded"
+        )
+        assert "MUST NEVER** state a rule the *body*" in rubric or "MUST NEVER" in rubric, (
+            "the rubric lost the prohibition the carve-out narrows, so the carve-out now reads as "
+            "permission to put the graded behaviour in the prompt"
+        )
+        assert "without the skill" in rubric, (
+            "the rubric no longer gives the TEST that separates the two (could an agent without the "
+            "skill satisfy the check from the prompt alone?) — the rule is unappliable without it"
+        )
+
+    def test_grader_fairness_is_declared_once(self):
+        # One declaration, two readers pointing at it from opposite ends: `task` asks these
+        # questions when it WRITES a grader, `optimize-skill` when it reviews a baseline one. Both
+        # restated them at one point; a second copy agrees on ordinary input and drifts exactly
+        # where either was written for.
+        rubric = _normalized(PLUGIN_ROOT / "reference" / "task-rubric.md")
+        for question in ("penalise a legitimate alternative", "charge one mistake twice", "ever FAIL, and ever PASS"):
+            assert question in rubric, f"the rubric's grader-fairness section lost {question!r}"
+        assert "property of the ROW, never of the artifact" in rubric, (
+            "the rubric no longer states which N/A triggers are legitimate. An N/A keyed on the "
+            "ARTIFACT makes the denominator a function of the arm's own output — an arm that "
+            "ignored a requirement is scored out of fewer checks than one that attempted it"
+        )
+        for name in ("task", "optimize-skill"):
+            skill = _normalized(PLUGIN_ROOT / "skills" / name / "SKILL.md")
+            assert "Grader fairness" in skill, (
+                f"{name}/SKILL.md no longer points at the rubric's grader-fairness section"
+            )
+            assert "penalise a legitimate alternative" not in skill, (
+                f"{name}/SKILL.md restates the fairness questions the rubric declares — two copies "
+                "to drift, in the checks that exist to catch a grader nothing else can"
+            )
+
+    def test_optimize_skill_handoff_names_grader(self):
+        # The handoff is the seam. optimize-skill refuses to author a suite (one written by the
+        # thing that will judge it is fitted to it) and points at `task` — so it has to say what
+        # comes back, or a user hands over an ungated instrument and pays for a stage on it.
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        assert "outcome-suite mode" in skill, (
+            "optimize-skill's handoff no longer names task's outcome-suite MODE, so the instruction "
+            "'point at /coder-eval:task' does not say which branch of it to ask for"
+        )
+        assert "grader script" in skill and "expectations" in skill, (
+            "the handoff no longer names the grader among what `task` produces"
+        )
+        assert "separation margin" in skill, (
+            "the handoff no longer asks for the discrimination gate's margin — the number that says "
+            "whether the instrument measures anything at all"
         )
 
     def test_ci_skill_covers_experiments_and_pins(self):

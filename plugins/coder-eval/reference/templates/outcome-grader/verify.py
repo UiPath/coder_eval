@@ -37,7 +37,11 @@ WRITING A CHECK
 
     `None` means NOT APPLICABLE: the check leaves the numerator AND the denominator.
 
-    ***THE N/A TRIGGER MUST BE A PROPERTY OF THE ROW, NEVER OF THE ARTIFACT.*** This is the single
+    ***THE N/A TRIGGER MUST BE A PROPERTY OF THE ROW, NEVER OF THE ARTIFACT.*** (The plugin's
+    `reference/task-rubric.md` § "Grader fairness" declares this rule for reviewers. This file
+    states it in full anyway, rather than pointing at it, because it is COPIED out of the plugin:
+    a rule an author cannot read from where the script now lives is a rule they will not follow.)
+    This is the single
     rule most easily got wrong, and getting it wrong inverts A/B verdicts rather than merely
     biasing them. A check that returns N/A because the artifact is the wrong shape makes the
     DENOMINATOR a function of the arm's own output: an arm that ignores the requirement entirely

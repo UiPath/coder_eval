@@ -4,6 +4,9 @@
 
 - `/coder-eval:task` — applies it to work it just wrote.
 - `/coder-eval:lint-tasks` — applies it to task files already on disk.
+- `/coder-eval:init` — designs a first suite's criteria against it.
+- `/coder-eval:optimize-skill` — reads section 6's grader-fairness questions only, and asks them of
+  a baseline run's per-row detail rather than of a file.
 
 It declares **checks only** — how to rank or report what you find is the reviewing skill's
 business, not this file's.
@@ -120,7 +123,56 @@ still asks, nothing still checks.
 *Seen in the wild:* a task whose prompt asked for three output files after the criteria for
 two of them had been removed as flaky. It scored 1.0 while testing a third of its subject.
 
-## 6. Fixture lifecycle
+## 6. Outcome suites: the spec carve-out, and grader fairness
+
+Fires only on an **outcome suite** — one dataset-backed task measuring whether a skill's *body*
+produces the right outcomes, graded by a script. Skip it for anything else.
+
+### The spec carve-out
+
+Section 1's check 7 forbids a criterion that matches a literal the prompt already dictated. An
+outcome suite narrows that rule rather than escaping it:
+
+- A prompt **MAY** state the *spec* — the output path, the section or column names, the format —
+  because "follow the user's spec literally" is itself one of the graded behaviours and is
+  untestable without a spec to follow. Naming where to write also removes the agent's filename
+  choice from the measurement.
+- A prompt **MUST NEVER** state a rule the *body* is supposed to supply. That is the thing under
+  test, and a prompt that supplies it grades transcription while reading exactly like a skill that
+  worked.
+
+The line between them: if a competent agent **without the skill** could satisfy the check from the
+prompt alone, the prompt has leaked the body.
+
+### Grader fairness — declared here, cited elsewhere
+
+**This section is the canonical home for these checks**, on the same terms as the fixture
+lifecycle below: the skills that author a grader and the skills that review one point here rather
+than restating them.
+
+An unfair grader is the one error class an A/B cannot detect. It biases **every arm equally**, so
+the ranking, the paired test and the confirmation all agree with each other and all of them are
+wrong together. Read the per-row check detail — not just the scores — and ask three questions of
+every check:
+
+- **Does it penalise a legitimate alternative?** A check demanding one implementation of something
+  the body never mandated marks down a correct answer. Measured case: a check requiring a
+  particular spreadsheet function failed every arm that used an ordinary `IF`, which the body
+  permits.
+- **Does it charge one mistake twice?** Two checks whose failure conditions are nested
+  double-weight a single defect and silently reshape the score distribution.
+- **Does every check ever FAIL, and ever PASS, across the suite?** A check that is constant across
+  all rows contributes nothing but dilution. A check no row passes is usually a broken assertion
+  rather than a uniformly bad skill.
+
+And one rule about the checks that do not apply: where a check cannot apply to a row, it must drop
+out of that row's numerator **and denominator** rather than scoring as a failure — but **the reason
+it does not apply must be a property of the ROW, never of the artifact the agent produced**.
+Otherwise the denominator becomes a function of the arm's own output: an arm that ignored the
+requirement entirely drops the check and is scored out of fewer, while an arm that attempted it and
+slipped is scored out of more. The worse artifact wins, and nothing in the report says so.
+
+## 7. Fixture lifecycle
 
 **This section is the canonical home for these checks.** The skills that *apply* this rubric
 point here rather than restating them. (`/coder-eval:analyze` separately diagnoses the same

@@ -199,7 +199,13 @@ Glob the eval tree for tasks that exercise this skill's job.
 
 **No suite → stop and point at `/coder-eval:task`.** Do not author one here, for the same
 reason the activation track hands row design to `/coder-eval:check-skill` — a suite written
-by the thing it will judge is fitted to it. **Hand over the template itself**, not a
+by the thing it will judge is fitted to it. `task`'s **outcome-suite mode** is the branch that
+does this: it emits five artifacts — the suite YAML, the rows JSONL, the fixture directory, the
+grader script and its per-row expectations — and its step 6.5 proves the grader separates a
+known-good artifact from a known-bad one **before** Stage A is paid for. Ask for that separation
+margin; a suite arriving without it has an ungated instrument.
+
+**Hand over the template itself**, not a
 description of its requirements: copy `${CLAUDE_PLUGIN_ROOT}/reference/templates/outcome.yaml`
 and its rows file to where the user wants the suite, and say that is the shape to fill in.
 Relayed requirements come back half-applied and the user pays for a second round trip; the
@@ -492,26 +498,16 @@ biases **every arm equally**, so Stage A's ranking, Stage B's paired *t* and Sta
 with each other and all of them are wrong together. This is the one error class the A/B design
 cannot detect, which is why it is checked by hand, here, once.
 
-Read the per-row criterion detail from the baseline — not just the scores — and ask three
-questions of every check:
-
-- **Does it penalise a legitimate alternative?** A check demanding one implementation of
-  something the body never mandated marks down a correct answer. Measured case: a check
-  requiring a particular spreadsheet function failed every arm that used an ordinary `IF`,
-  which the body permits.
-- **Does it charge one mistake twice?** Two checks whose failure conditions are nested
-  double-weight a single defect and silently reshape the score distribution.
-- **Does every check ever FAIL, and ever PASS, across the baseline?** A check that is constant
-  across all rows contributes nothing but dilution — the same defect as a constant-scoring
-  criterion in `weighted_score`. A check that no row passes is usually a broken assertion
-  rather than a uniformly bad skill.
-
-Where a check cannot apply to a row, make it return *not applicable* and drop it from that
-row's denominator, rather than scoring it as a failure.
+Read the per-row criterion detail from the baseline — not just the scores — and work the three
+questions in `${CLAUDE_PLUGIN_ROOT}/reference/task-rubric.md` § "Grader fairness" against them,
+including its rule about checks that do not apply. They are declared there because
+`/coder-eval:task` asks the same questions when it writes the grader; one copy, asked twice.
 
 Cheapest possible version, and worth doing before the baseline: grade a **known-good** and a
 **known-bad** artifact you build by hand, and assert the scores separate. A grader that scores
-both alike is measuring nothing, and every number after it is decoration.
+both alike is measuring nothing, and every number after it is decoration. `/coder-eval:task`'s
+step 6.5 does exactly this for a suite it authored, and reports the margin — ask for that number
+before spending a stage on a suite you did not write.
 
 ### Activation track only — a second baseline, to price the round
 

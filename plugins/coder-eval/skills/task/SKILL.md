@@ -285,6 +285,12 @@ For each file written, run `coder-eval plan <path>` and fix everything it report
 validates through the real Pydantic models, so a mistyped field name or a missing
 required key surfaces here rather than halfway through a paid run.
 
+**Outcome mode: plan each split too.** Run `coder-eval plan <suite> --split train` and
+`coder-eval plan <suite> --split test`, and check the row counts against what you wrote. Both must
+exit 0. A partly-labelled dataset is the state to catch here: `--split` keeps the matching rows and
+silently DROPS the unlabelled ones, so every later metric is computed over a smaller suite than the
+file suggests, and the run reports nothing wrong.
+
 Then re-read your own work and check:
 
 - every criterion refers to a file or command the prompt actually leads the agent to
@@ -321,6 +327,36 @@ Then interpret the result rather than reporting it:
 
 If the user declines the run, that is a fine outcome — record it as declined in the report
 rather than implying the task is validated.
+
+## Step 6.5 — Prove the instrument discriminates (outcome mode only)
+
+The grader is the measurement. Before anyone pays for a stage, establish that it can tell a good
+artifact from a bad one:
+
+1. **Build a known-good artifact** that satisfies every rule the row grades, and a **known-bad**
+   one that violates most of them. Grade both with the grader, by hand, and **report the separation
+   margin** — the two scores and the gap between them. A grader that scores them alike measures
+   nothing, and every number after it is decoration. (If a rule is about *absence* — "must not use
+   X" — invert: the known-bad artifact is the one that does the forbidden thing.)
+2. **Work the grader-fairness questions in `${CLAUDE_PLUGIN_ROOT}/reference/task-rubric.md` §
+   "Grader fairness"** against what you just saw. They are declared there, not here — this step
+   asks them of a result, the way Step 5 asks the rest of the rubric of a file. Designing against a
+   check and watching it score are different acts.
+3. **This is the only place these errors can be caught.** A wrong check biases every arm of an A/B
+   **equally**, so the ranking, the paired test and the confirmation all agree with each other and
+   are all wrong together. No comparison downstream can surface it.
+
+Two results that mean "fix it now", not "note it":
+
+- **The known-good artifact scores below 1.0.** Either the grader is over-strict or the rules are
+  unsatisfiable. Fix that rather than lowering the bar; a ceiling below 1.0 shrinks every effect
+  the suite can measure.
+- **A row scores 0.0 on the known-good artifact with `0/0 applicable`.** That row declares only
+  checks that do not apply to it, so it measures nothing — and it announces itself here rather than
+  quietly dragging an arm's mean down later.
+
+A narrow but non-zero margin is a number to report, not a failure: suites differ, and there is no
+threshold worth stating. Report the margin either way.
 
 ## Step 7 — Report
 
