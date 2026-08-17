@@ -28,6 +28,7 @@ from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
 from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRulesHandleLevel
+from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_submodule_model_imports import NoSubmoduleModelImports
 from tests.lint.runner import ALL_RULES, check_paths
@@ -6797,6 +6798,108 @@ class TestEstimatorLedger:
 
         failures = check(["tests/_fixtures/report_snapshots/run_full.md"], {}, self.BASE_DOC, self.BASE_DOC)
         assert any("step was zero" in f for f in failures), failures
+
+
+@pytest.mark.lint
+class TestCE054ResultStatusSingleSeam:
+    """CE054 — a criterion module compares `result_status` in exactly ONE place.
+
+    Written after `criteria/skill_triggered.py` spelled the delivered-body predicate twice —
+    an allowlist on the `Skill` branch, a denylist on the file-read branch — and the two
+    drifted, so a crash-force-closed `Read(SKILL.md)` scored as engagement while the identical
+    crash on a `Skill` call did not. That is a false positive on `f1.yes`, which
+    `optimize_gate.activation_gate` promotes on.
+
+    The FIRST test below is the one that matters: both halves of the real bug lived inside a
+    single function, so the per-function spelling of this rule — which is what it was first
+    written as — reported zero on the exact file it exists for. Counting comparison SITES is
+    the invariant; counting enclosing functions is a rule that passes the bug.
+    """
+
+    CRITERION = "src/coder_eval/criteria/skill_triggered.py"
+
+    def _check(self, source: str, path: str | None = None) -> list[object]:
+        return list(ResultStatusSingleSeam(path or self.CRITERION).check(ast.parse(textwrap.dedent(source))))
+
+    def test_it_fires_on_the_pre_fix_shape_with_both_sites_in_one_function(self) -> None:
+        # Reduced from `_engaged_skill_names` as it stood before the fix. Two predicates, one
+        # function, opposite polarities. A per-function seam check returns 0 here.
+        source = """
+            def _engaged_skill_names(cmd):
+                if cmd.tool_name == "Skill":
+                    if cmd.result_status != "success":
+                        return set()
+                    return {cmd.parameters["skill"]}
+                if not (cmd.tool_name in _FILE_READ_TOOLS and cmd.result_status in ("error", None)):
+                    return scan(cmd)
+                return set()
+        """
+        violations = self._check(source)
+        assert len(violations) == 1, violations
+        assert violations[0].rule_id == "CE054"  # type: ignore[attr-defined]
+
+    def test_it_is_silent_on_the_single_seam(self) -> None:
+        source = """
+            def _delivered(cmd):
+                if cmd.tool_name == "Skill" or cmd.tool_name in _FILE_READ_TOOLS:
+                    return cmd.result_status == "success"
+                return True
+        """
+        assert self._check(source) == []
+
+    def test_it_fires_across_functions_too(self) -> None:
+        # The per-function shape IS still caught — counting sites subsumes it.
+        source = """
+            def _delivered(cmd):
+                return cmd.result_status == "success"
+
+            def _other(cmd):
+                return cmd.result_status != "error"
+        """
+        assert len(self._check(source)) == 1
+
+    def test_it_is_scoped_to_the_criteria_package(self) -> None:
+        # `analysis.py` buckets counts for a report and `reports_html` picks a CSS class;
+        # neither decides a score, and both legitimately read the status more than once.
+        source = """
+            def a(c):
+                return c.result_status == "success"
+
+            def b(c):
+                return c.result_status == "error"
+        """
+        assert self._check(source, "src/coder_eval/analysis.py") == []
+        assert self._check(source, "src\\\\coder_eval\\\\analysis.py") == []
+
+    def test_a_non_comparison_read_is_not_matched(self) -> None:
+        # Stated on the rule as a boundary, asserted here so it is not mistaken for coverage.
+        source = """
+            def a(c):
+                return f"{c.result_status}" + describe(c.result_status)
+        """
+        assert self._check(source) == []
+
+    def test_the_tree_has_exactly_one_seam_per_criterion_module(self) -> None:
+        """Anti-vacuity, and the acceptance criterion in test form.
+
+        The rule is satisfied by suppressions as easily as by conversions, so the live count
+        is pinned rather than left to the sweep. Two criterion modules classify
+        `result_status` today — `skill_triggered` (in `_delivered`) and `command_executed` —
+        and each does it once. A zero here would mean the scan stopped finding anything.
+        """
+        criteria_dir = SRC / "coder_eval" / "criteria"
+        assert criteria_dir.is_dir(), "criteria/ moved — CE054 would be checking nothing"
+        with_seam = sorted(
+            path.relative_to(SRC).as_posix()
+            for path in criteria_dir.rglob("*.py")
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Compare)
+            and any(isinstance(n, ast.Attribute) and n.attr == "result_status" for n in (node.left, *node.comparators))
+        )
+        assert with_seam == [
+            "coder_eval/criteria/command_executed.py",
+            "coder_eval/criteria/skill_triggered.py",
+        ], with_seam
 
 
 @pytest.mark.lint

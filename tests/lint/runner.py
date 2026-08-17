@@ -33,6 +33,7 @@ from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
 from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRulesHandleLevel
+from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -89,6 +90,7 @@ ALL_RULES: list[RuleClass] = [
     NoBareModelCopyUpdate,
     EscapeUntrustedMarkup,
     ImportFromRulesHandleLevel,
+    ResultStatusSingleSeam,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

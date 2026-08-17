@@ -883,3 +883,21 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
   scoring fix and does not belong in the same commit. A sensor is also available and is the
   cheaper half: a test asserting no test in the tree compares `allowed_tools`/`ignore_patterns`
   by list equality. — found by the Plan A spike (S6), recorded rather than smuggled in.
+- [ ] **A `result_status` membership DENYLIST has no guard — CE018's shape, one field over.**
+  `CommandTelemetry.result_status` classification is the `FinalStatus.name` problem in a
+  different field, and CE018 already forbids the denylist form there. Not built alongside
+  **CE054** (which confines the comparison to one site per criterion module, and IS built)
+  because the two catch different things and only one of them was the bug: the drift that
+  produced the false positive was between an ALLOWLIST (`!= "success"`) and a DENYLIST
+  (`in ("error", None)`), so a denylist rule catches one of the two sites and the seam rule
+  catches the pair. Independently, `result_status` is a closed
+  `Literal["success","error","unknown"] | None`, so CE018's actual motivating failure — a new
+  enum member silently falling through a stale denylist — requires a model edit a reviewer
+  sees, which is a much weaker case than CE018's own. It would nonetheless be cheap and
+  NON-NOISY: after Phase 1 there is no `result_status` membership test left anywhere in `src/`,
+  and the adjacent shapes are safe by construction (`command_executed.py` and
+  `reports_html.py` use `!= "success"` / `== "success"`, `analysis.py` uses `==`/`is None`
+  chains to bucket report counts). The rule must match the `in` / `not in` form ONLY — a
+  broader "any comparison against a non-`success` literal" version fires on `analysis.py` x3
+  and `codex_agent.py` and should not be built. — raised by the Plan A final review
+  (multi-model + Opus, both independently).
