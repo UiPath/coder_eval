@@ -878,6 +878,21 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         return argv
 
     def _build_env(self) -> dict[str, str]:
+        """The CLI's full environment: the host's, plus the sandbox's contributions.
+
+        The PATH prepend is the mock-shadowing contract (``Agent.start``): the
+        sandbox's mock CLI directories must resolve BEFORE the real binaries, in
+        the order given, or a task grading a mocked CLI silently exercises the
+        real one. ``PLUGIN_TOOLS_DIR`` is advisory and never overrides an
+        inherited value.
+
+        Unlike ``CodexAgent._build_codex_env`` — which hands the SDK a partial
+        dict merged over the real environment, and so must resolve the PATH key
+        case-insensitively — this returns the WHOLE environment, seeded from
+        ``os.environ``, whose keys CPython upper-cases on Windows (``os.py``'s
+        ``encodekey``). ``"PATH"`` is therefore the inherited key on every
+        platform and cannot duplicate a differently-cased one.
+        """
         env = dict(os.environ)
         if self._env_path_prepend:
             env["PATH"] = os.pathsep.join([*self._env_path_prepend, env.get("PATH", "")])
@@ -963,6 +978,10 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         stderr_drain: asyncio.Future[bytes] | None = None
+        # Bound OUTSIDE the try so the teardown in `finally` can tell "never
+        # spawned" (a create_subprocess_exec failure) from "spawned and possibly
+        # still running".
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self._build_argv(user_input),
@@ -1083,7 +1102,39 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         finally:
             if stderr_drain is not None:
                 stderr_drain.cancel()
+            self._reap_orphaned_cli(proc)
             self._process = None
+
+    def _reap_orphaned_cli(self, proc: asyncio.subprocess.Process | None) -> None:
+        """Kill a CLI that is still running as the turn unwinds. No-op otherwise.
+
+        Two exits from :meth:`communicate` reach its ``finally`` with the child
+        ALIVE: the ``except Exception`` crash (a ``StreamReader`` ``ValueError``
+        on an over-long line, a malformed-payload ``TypeError`` in a handler) and
+        an external cancellation — neither passes through the graceful
+        ``await self.kill()`` that the intentional cuts and ``_settle_turn`` use.
+
+        Abandoning it is not merely a leak. ``AgentCrashError`` is categorized
+        ``AGENT_CRASH`` (``max_retries=2``) and the orchestrator's attempt-failure
+        hook only drains ``pending_turn``, so attempt 2 would spawn a SECOND
+        ``opencode --dir <sandbox> --session <same id>`` while attempt 1 is still
+        editing the files the criteria are about to score — and whichever writer
+        won would decide the task's result. ``docker_runner`` kills its container
+        from ``finally`` for the same reason.
+
+        Deliberately synchronous. This runs while a ``CancelledError`` is
+        propagating, where any await can itself be cut short and leave the child
+        alive after all; ``Process.kill()`` and the group sweep deliver their
+        signals with no suspension point. Skipping the SIGTERM courtesy is right
+        for a turn that is already lost — the graceful escalation in :meth:`kill`
+        still owns every path that has something left to flush. ``proc`` is
+        ``None`` when the spawn itself failed, i.e. there is nothing to reap.
+        """
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            proc.kill()
+        self._sweep_process_groups()
 
     async def _settle_turn(
         self,

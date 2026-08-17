@@ -109,6 +109,7 @@ class _FakeProcess:
         self._stderr = stderr
         self.pid = 4242
         self.terminated = False
+        self.killed = False
         self.stdout = self
 
     async def readline(self) -> bytes:
@@ -129,6 +130,7 @@ class _FakeProcess:
         self.returncode = self._final_returncode
 
     def kill(self) -> None:
+        self.killed = True
         self.returncode = self._final_returncode
 
 
@@ -154,6 +156,7 @@ class _RunningProcess(_FakeProcess):
         self._exited.set()
 
     def kill(self) -> None:
+        self.killed = True
         self._exited.set()
 
 
@@ -472,6 +475,68 @@ class TestCrossHarnessNormalization:
         patch_exec(_FakeProcess([self._tool_event("skill")]))
         record = await _run(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["Skill"]
+
+
+class TestSandboxEnvironment:
+    """`start(env_path_prepend=..., plugin_tools_dir=...)` is the abstract
+    `Agent.start()` contract, and the orchestrator ALWAYS supplies both.
+
+    The PATH prepend is the mock-shadowing contract: a task grading a mocked CLI
+    (`cli_called`, invocation-log criteria) only works if the sandbox's mock
+    directories resolve BEFORE the real binaries. An inverted join order leaves
+    the real binary in front, so the mock writes no invocation log and every row
+    scores 0 — with the whole suite still green. It must fail here instead.
+    """
+
+    async def test_prepends_mock_dirs_ahead_of_the_inherited_path(self, patch_exec, tmp_path, monkeypatch):
+        """The dirs land at the FRONT of PATH, in order, with the parent appended."""
+        monkeypatch.setenv("PATH", "/parent/bin")
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent()
+        await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
+        await agent.communicate("do the thing")
+
+        expected = os.pathsep.join(["/sandbox/mocks", "/sandbox/bins", "/parent/bin"])
+        assert captured["kwargs"]["env"]["PATH"] == expected
+
+    async def test_plugin_tools_dir_is_exported(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.delenv("PLUGIN_TOOLS_DIR", raising=False)
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent()
+        await agent.start(str(tmp_path), plugin_tools_dir="/sandbox/tools")
+        await agent.communicate("do the thing")
+
+        assert captured["kwargs"]["env"]["PLUGIN_TOOLS_DIR"] == "/sandbox/tools"
+
+    async def test_inherited_plugin_tools_dir_wins(self, patch_exec, tmp_path, monkeypatch):
+        """The export is advisory: a host that already set it is never overridden."""
+        monkeypatch.setenv("PLUGIN_TOOLS_DIR", "/host/tools")
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent()
+        await agent.start(str(tmp_path), plugin_tools_dir="/sandbox/tools")
+        await agent.communicate("do the thing")
+
+        assert captured["kwargs"]["env"]["PLUGIN_TOOLS_DIR"] == "/host/tools"
+
+    async def test_neither_key_is_touched_without_the_kwargs(self, patch_exec, tmp_path, monkeypatch):
+        """A start() with no sandbox contributions passes the environment through."""
+        monkeypatch.setenv("PATH", "/parent/bin")
+        monkeypatch.delenv("PLUGIN_TOOLS_DIR", raising=False)
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+
+        env = captured["kwargs"]["env"]
+        assert env["PATH"] == "/parent/bin"
+        assert "PLUGIN_TOOLS_DIR" not in env
+
+    async def test_the_host_environment_is_inherited_whole(self, patch_exec, tmp_path, monkeypatch):
+        """The CLI needs the host's provider credentials (OPENROUTER_API_KEY, ...);
+        this builds the full env rather than a merge dict, so nothing is dropped."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+
+        assert captured["kwargs"]["env"]["OPENROUTER_API_KEY"] == "sk-test"
 
 
 def _skill_repo(root, names=("uipath-admin",), *, manifest: str | None = None, nested: bool = True):
@@ -952,7 +1017,22 @@ class _HangingProcess(_FakeProcess):
         self._exited.set()
 
     def kill(self) -> None:
+        self.killed = True
         self._exited.set()
+
+
+class _ExplodingRunningProcess(_HangingProcess):
+    """Raises from ``readline`` mid-stream AND stays alive, like the real CLI.
+
+    ``_ExplodingProcess`` inherits the plain fake's ``wait()``, which reports an
+    exit code the instant it is awaited — so it can never model the case that
+    matters for teardown: the read loop dying while the CLI is still streaming.
+    """
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        raise ValueError("Separator is not found, and chunk exceed the limit")
 
 
 class _EofNoExitProcess(_HangingProcess):
@@ -1044,6 +1124,70 @@ class TestExternalCancel:
         assert len(ends) == 1
         assert ends[0].status is AgentEndStatus.CRASHED
         assert ends[0].crash_reason == "turn cancelled"
+        assert proc.killed is True  # not abandoned mid-stream — see TestTurnAlwaysReapsTheCli
+
+
+class TestTurnAlwaysReapsTheCli:
+    """No exit from `communicate()` may leave the CLI running.
+
+    `AgentCrashError` is categorized AGENT_CRASH (max_retries=2) and the
+    orchestrator's attempt-failure hook only drains `pending_turn` — it never
+    kills the agent. An abandoned CLI therefore means attempt 2 spawns a SECOND
+    `opencode --dir <sandbox> --session <same id>` while attempt 1 is still
+    editing the very files the criteria are about to score, and whichever writer
+    wins decides the task's result.
+
+    The graceful `await self.kill()` already covers the intentional cuts and the
+    timeout; these pin the two paths that reach `finally` with a live child.
+    """
+
+    async def test_read_loop_crash_kills_the_cli(self, patch_exec, tmp_path):
+        """`_crash_turn` is synchronous and raises — nothing below it reaps."""
+        proc = _ExplodingRunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
+        patch_exec(proc)
+
+        with pytest.raises(AgentCrashError, match="OpenCode turn failed"):
+            await _run(_agent(), tmp_path)
+
+        assert proc.killed is True
+
+    async def test_external_cancel_kills_the_cli(self, patch_exec, tmp_path):
+        """The teardown must survive a CancelledError in flight, so it takes no
+        await — an interrupted one would leave the child alive after all."""
+        proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
+        patch_exec(proc)
+        agent = _agent()
+        await agent.start(str(tmp_path))
+
+        task = asyncio.ensure_future(agent.communicate("do the thing"))
+        await asyncio.sleep(0.05)  # let it spawn and read the first event
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            _ = await task
+
+        assert proc.killed is True
+
+    async def test_a_clean_turn_kills_nothing(self, patch_exec, tmp_path):
+        """The happy path is unchanged: the CLI exited, so the guard is a no-op
+        and the server child survives for the next turn's `--session` resume."""
+        proc = _FakeProcess(HAPPY_STREAM)
+        captured = patch_exec(proc)
+        await _run(_agent(), tmp_path)
+
+        assert proc.killed is False
+        assert captured["killpg"] == []
+
+    async def test_a_spawn_failure_has_no_process_to_reap(self, monkeypatch, tmp_path):
+        """`proc` is unbound on this path; the guard must not raise NameError over it."""
+
+        async def boom(*_argv: str, **_kwargs: Any):
+            raise OSError("no fork for you")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
+        monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/opencode")
+
+        with pytest.raises(AgentCrashError, match="no fork for you"):
+            await _run(_agent(), tmp_path)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group teardown (killpg/SIGKILL) is POSIX-only by design")
@@ -1064,6 +1208,16 @@ class TestProcessGroupTeardown:
         assert captured["killpg"] == []  # a clean turn does not kill mid-run state
 
         await agent.stop()
+        assert (4242, signal.SIGKILL) in captured["killpg"]
+
+    async def test_a_crashed_turn_sweeps_the_group_too(self, patch_exec, tmp_path):
+        """Killing the CLI pid alone would orphan the server child it left holding
+        the pipes — across a retried batch, that is the leak that compounds."""
+        captured = patch_exec(_ExplodingRunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})]))
+
+        with pytest.raises(AgentCrashError):
+            await _run(_agent(), tmp_path)
+
         assert (4242, signal.SIGKILL) in captured["killpg"]
 
     async def test_cooperative_stop_sweeps_the_group_too(self, patch_exec, tmp_path):
