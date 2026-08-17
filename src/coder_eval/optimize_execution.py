@@ -855,8 +855,16 @@ def _execution_diagnostics(
                 + "Lower the floor with more replicates or more rows, or find rows where the "
                 + "candidate's effect is larger."
             )
-        else:
+        elif not refused_already and refusal is None:
             # Below the floor AND consistent with zero: the ordinary "it did not help" outcome.
+            #
+            # Guarded like the two advisories below it, and it was the ONE note in this ladder that
+            # was not. It calls itself "an ordinary negative result", which is a negative-result
+            # claim — so under a refusal it contradicted the headline directly above it. Reproduced
+            # through the real gate: a zero-variance refusal ("there is nothing for any test to
+            # separate") printed this sentence beneath `NOT A RESULT`, which is precisely the
+            # defect the activation ladder's guard removed. `promoted` was unaffected (a refusal
+            # forces False), so this was prose only — on the page a user pastes into a ledger.
             notes.append(
                 f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum "
                 + f"detectable effect ({mde:.3f}), and the interval contains zero — so this is an "

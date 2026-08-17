@@ -563,7 +563,7 @@ with the two `action.yml` items above — one considered change to the action's 
 - [x] **CLOSED.** The search loop's accept/revert arithmetic lived in a markdown snippet rather
       than a tested function, against `models/optimize.py`'s own stated principle ("the gate's
       verdict is a typed value the skill prints, instead of arithmetic an agent performs by hand").
-      Now `optimize_gate.search_compare` + `lineage_head_scores` + `render_search_comparison`, with
+      Now `optimize_search.search_compare` + `lineage_head_scores` + `render_search_comparison`, with
       18 unit tests: the four guards (shared-row intersection, no-overlap-before-holes, refuse on a
       hole, corpus regression blocks an accept) are asserted rather than copied. The deferral
       reasoning — that every snippet in this skill is hand-written the same way — was right about
@@ -576,7 +576,7 @@ with the two `action.yml` items above — one considered change to the action's 
       no raise, no log, and the field it was meant to set stays at its default. This is the exact
       hole CE041 closed for *construction*, still open for *update*, and it matters most where it
       is worst: `ActivationGateVerdict.promoted` / `holm_alpha` and their execution-track twins are
-      written ONLY this way (`optimize_gate.holm_promote`, `holm_promote_execution`), so the two
+      written ONLY this way (`optimize_activation.holm_promote`, `holm_promote_execution`), so the two
       fields that ARE the promotion decision are the two the runtime backstop does not cover. Not
       done with CE041 because the fix is not a matching rule: `update=` legitimately takes a dict
       in every one of this repo's ~9 call sites, so a rule that flags the CALL is wrong and one
@@ -611,7 +611,7 @@ with the two `action.yml` items above — one considered change to the action's 
       implementation time.
 - [ ] **`estimator_ledger.WATCHED_CONSTANTS` is one-directional — nothing forces a statistical
       constant onto the list.** It shipped with the gap already LIVE, not merely prospective: the
-      final review found `optimize_gate.FLOOR_RESOLUTION` and `NEAR_FLOOR_MULTIPLE` unwatched in a
+      final review found `optimize_execution.FLOOR_RESOLUTION` and `NEAR_FLOOR_MULTIPLE` unwatched in a
       file four of whose constants were, and both move rendered output (the first decides whether
       an MDE is measurable at all, and therefore whether the execution gate REFUSES). They are
       watched now; the class is not closed. Both watch lists have anti-rename parity tests (a renamed constant
@@ -820,7 +820,7 @@ with the two `action.yml` items above — one considered change to the action's 
 
       **Resolution (Plan B+C Phase 1):** closed, and the return-contract question resolved by
       SPLITTING on it rather than picking one answer. The DETECTION is shared —
-      `optimize_gate._reconcile_arms` is the one sweep every whole-arm reader routes through
+      `optimize_load._reconcile_arms` is the one sweep every whole-arm reader routes through
       (`execution_gate` still calls `reconcile_tree_against_run_json` directly — it works one run
       dir per variant and needs the per-dir result), and `_stale_tree_reason` is the one message
       the readers share — while the RESPONSE follows the return type:
@@ -835,8 +835,8 @@ with the two `action.yml` items above — one considered change to the action's 
       correction the entry itself needed: the four readers are `measure_noise_floor`,
       **`measure_execution_noise_floor`**, `arm_row_scores` and `cost_quality_points` —
       `noise_floor_mde` reaches the tree only through `measure_noise_floor`. **CE053** is the
-      standing guard, and its path scope names all six post-split module names so Phase 7 moving a
-      reader cannot take it out of reach.
+      standing guard, and its path scope is the `optimize_*` PREFIX rather than a list of module
+      names, so Phase 7 moving a reader — or a seventh module — cannot take it out of reach.
 
 - [ ] **A contaminated `ArmRowScores` vector is persisted with no marker.** `arm_row_scores` warns
       to stderr and returns its vector (Plan B+C Phase 1 — `ArmRowScores` has nowhere to put a
@@ -863,7 +863,7 @@ with the two `action.yml` items above — one considered change to the action's 
       | `optimize_fronts.py` | 327 | none |
       | `optimize_search.py` | 286 | none |
 
-      **No E-grade function anywhere in the family**, down from one file of 3,521 lines with one
+      **No E-grade function anywhere in the family**, down from one file of 3,664 lines with one
       E-grade and seven D-grades. Not built here because a ratchet needs a checked-in baseline
       (this table) plus a design pass on what cap a NEW function gets — the existing `C90`
       ceiling is a mccabe number and radon disagrees with it (mccabe peaks at 17 on

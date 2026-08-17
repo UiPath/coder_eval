@@ -397,7 +397,7 @@ class TestPerAgentTelemetryInventory:
 class TestSuiteLevelEffectOfTheGate:
     """The gate turns a per-row gap into a suite METRIC — assert the metric, not the label.
 
-    ``recall.yes`` is what ``optimize_gate.activation_gate`` promotes on (via ``f1.yes``),
+    ``recall.yes`` is what ``optimize_activation.activation_gate`` promotes on (via ``f1.yes``),
     so a row whose only engagement is a crash-force-closed read moving from `yes` to `no`
     is a promotion-decision change, not a cosmetic one.
     """

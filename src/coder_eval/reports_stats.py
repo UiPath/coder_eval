@@ -170,7 +170,7 @@ def fmt_p(p: float | None) -> str:
 BOOTSTRAP_RESAMPLES = 2000
 
 # The family-wise error rate every correction in this codebase controls at. One declaration:
-# `holm_rejections` and `optimize_gate.holm_promote` both default to it, and `GATE_RESAMPLES` is
+# `holm_rejections` and `optimize_activation.holm_promote` both default to it, and `GATE_RESAMPLES` is
 # DERIVED from it — three uses that were three literals before the derivation forced the question.
 DEFAULT_ALPHA = 0.05
 

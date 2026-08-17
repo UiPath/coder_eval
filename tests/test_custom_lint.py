@@ -5777,7 +5777,7 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
     exemption weakening a real check.
 
     The detection PRIMITIVE lives in `coder_eval.leak_detection`, shared with
-    `optimize_gate.candidate_leaks`, which asks the same question pointed the other way. The
+    `optimize_search.candidate_leaks`, which asks the same question pointed the other way. The
     containment direction below is all this rule adds to it.
     """
 
@@ -7179,7 +7179,7 @@ class TestCE054ResultStatusSingleSeam:
     an allowlist on the `Skill` branch, a denylist on the file-read branch — and the two
     drifted, so a crash-force-closed `Read(SKILL.md)` scored as engagement while the identical
     crash on a `Skill` call did not. That is a false positive on `f1.yes`, which
-    `optimize_gate.activation_gate` promotes on.
+    `optimize_activation.activation_gate` promotes on.
 
     The FIRST test below is the one that matters: both halves of the real bug lived inside a
     single function, so the per-function spelling of this rule — which is what it was first

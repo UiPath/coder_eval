@@ -380,8 +380,9 @@ class TestEveryWrongPathMessageDerivesFromTheGlob:
 
     def test_no_message_spells_the_padding_itself(self) -> None:
         # The whole point of the seam: a message may name the glob, never the padding it replaced.
-        source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
-        assert "*/NN/task.json" not in source
+        # Over the WHOLE family: every message that names the glob moved out of `optimize_gate.py`
+        # in the split, which left this scan reading a file with none of its subjects in it.
+        assert "*/NN/task.json" not in _family_source()
         assert TASK_JSON_GLOB == "*/*/task.json"
 
 
@@ -411,6 +412,18 @@ class TestBalancePair:
         assert _balance_pair([0.1, 0.2, 0.3], [0.4, 0.5]) == ([0.1, 0.2], [0.4, 0.5])
 
 
+def _family_source() -> str:
+    """Every decision-family module's source, concatenated.
+
+    Scans that read `optimize_gate.py` alone went VACUOUS the moment the split moved their
+    subjects: proven by mutation, an inlined `min(len(a), len(b))` and a respelled shared note both
+    passed. A whole-family read is what keeps them asserting something — and it is derived from
+    `_OPTIMIZE_RANKS`, so a seventh module joins every scan at once.
+    """
+    root = Path(__file__).parent.parent / "src" / "coder_eval"
+    return "\n".join((root / f"{module}.py").read_text(encoding="utf-8") for module in _OPTIMIZE_RANKS)
+
+
 def test_the_trim_is_declared_once() -> None:
     """`min(len(a), len(b))` may appear in exactly one function: `_balance_pair`.
 
@@ -422,8 +435,7 @@ def test_the_trim_is_declared_once() -> None:
     allowed: a GENERATOR argument rather than two `len` arguments, and a minimum ACROSS rows rather
     than between two arms of one row — a different computation that stays separate.
     """
-    source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    tree = ast.parse(_family_source())
 
     offenders: list[str] = []
     for function in ast.walk(tree):
@@ -464,7 +476,9 @@ class TestBothTracksEmitTheSameHolmNotes:
             assert _note_holm_family(1, DEFAULT_ALPHA) in verdict.notes
 
     def test_neither_wrapper_respells_a_shared_note(self) -> None:
-        source = (Path(__file__).parent.parent / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
+        # Over the WHOLE family: BOTH wrappers left `optimize_gate.py` in the split, so a scan of
+        # that file alone counts zero of everything and passes on a respelled note.
+        source = _family_source()
         for fragment in (
             "the sample could not support a p-value",
             "the Holm-corrected test rejects but the confidence",
@@ -5291,6 +5305,29 @@ class TestExecutionDiagnostics:
     def test_a_healthy_sample_refuses_nothing(self, tmp_path: Path) -> None:
         refusal, notes = self._run(tmp_path)
         assert refusal is None and notes == []
+
+    def test_the_below_mde_negative_result_note_is_suppressed_under_a_refusal(self, tmp_path: Path) -> None:
+        """The ONE note in this ladder that was not guarded, and it calls itself a negative result.
+
+        Below the floor with an interval CONTAINING zero is the ordinary "it did not help" outcome,
+        so the note says "this is an ordinary negative result and not a measurement problem" —
+        which contradicts a `NOT A RESULT` headline directly above it. Reproduced through the real
+        gate on a zero-variance refusal; `promoted` was unaffected, so it was prose only, on the
+        page a user pastes into a promotion ledger.
+
+        The existing suppression tests could not reach it: their contamination fixture also nulls
+        the floor, so `mde is None` and this branch is skipped before the guard matters.
+        """
+        below_mde = {"mean_diff": 0.05, "bounds": [-0.2, 0.3], "mde": 0.5}
+        # Unrefused, the note fires — otherwise the assertion below is vacuous.
+        _refusal, notes = self._run(tmp_path, **below_mde)
+        assert any("ordinary negative result" in n for n in notes), notes
+
+        # Refused BY THE CALLER (the tree-reconciliation cause), and again by a cause found here.
+        for refusing in ({"refused_already": True}, {"effect_size": None, "mean_diff": 0.0}):
+            refusal, notes = self._run(tmp_path, **{**below_mde, **refusing})
+            assert refusing.get("refused_already") or refusal is not None, refusing
+            assert not any("ordinary negative result" in n for n in notes), (refusing, notes)
 
     def test_an_empty_incumbent_arm_refuses(self, tmp_path: Path) -> None:
         refusal, _notes = self._run(tmp_path, incumbent_rows={})

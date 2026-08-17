@@ -719,7 +719,7 @@ consulted in the decision. The narrative above is reported as it was run, and it
 are unchanged: an arm whose best case is a tie cannot separate under either rule.
 
 `coder-eval` computes the current verdict for you — the skill drives
-`optimize_gate.activation_gate` and then one `holm_promote` call over **all** the survivors at
+`optimize_activation.activation_gate` and then one `holm_promote` call over **all** the survivors at
 once, because Holm corrects a *family*: correcting one candidate at a time degenerates to an
 uncorrected `p ≤ alpha` while still looking like a correction.
 

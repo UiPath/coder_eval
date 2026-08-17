@@ -218,7 +218,8 @@ max-branches = 25
 # file the plan that introduced this expected to exempt — never needed one, and the split has now
 # landed: that module is six (`optimize_load` 713, `optimize_gate` 374, `optimize_activation` 1159,
 # `optimize_execution` 1033, `optimize_fronts` 327, `optimize_search` 286), down from one file of
-# 3,521 lines. `radon cc` reports NO E-grade anywhere in the family and seven D-grades spread
+# 3,664 lines (3,291 before this plan's earlier phases added to it). `radon cc` reports NO
+# E-grade anywhere in the family and seven D-grades spread
 # across four modules, the largest concentration being three. mccabe and radon still disagree about
 # these functions — mccabe peaks at 17 on `execution_gate` where radon reports D(30) — which is why
 # the ceiling is a ratchet on new growth rather than a health reading.

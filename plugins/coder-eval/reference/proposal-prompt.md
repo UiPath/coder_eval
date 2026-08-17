@@ -109,7 +109,7 @@ under test happened, and an A/B arm that *deleted* that behaviour would pass it 
 
 **Validation, before the candidate is snapshotted.** Review every generated candidate for train-row
 content it reproduces word for word. The mechanical half is
-`coder_eval.optimize_gate.candidate_leaks(candidate_text, baseline_text, train_rows)`, which
+`coder_eval.optimize_search.candidate_leaks(candidate_text, baseline_text, train_rows)`, which
 reports the substantive spans the candidate adds and the text it was edited from lacks; the skill's
 Step 8 runs it.
 

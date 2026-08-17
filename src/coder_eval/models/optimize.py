@@ -1,6 +1,6 @@
 """Records produced by the `/coder-eval:optimize-skill` promotion gate.
 
-Plain data, produced by :mod:`coder_eval.optimize_gate` rather than parsed from user input —
+Plain data, produced by the `optimize_*` decision family rather than parsed from user input —
 no discriminated union, no criterion type, nothing registered. They exist so the gate's verdict
 is a typed value the skill prints, instead of arithmetic an agent performs by hand.
 """
@@ -13,8 +13,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 # The label whose F1 the activation gate reads. `skill_triggered` emits `yes` / `no`, and
 # "did the skill engage when it should" is the `yes` class.
 #
-# It lives HERE rather than in `optimize_gate` because `NoiseFloor.metric`'s default interpolates
-# it, and this module cannot import the gate — the gate imports these models, and the reverse is a
+# It lives HERE rather than in the gate family because `NoiseFloor.metric`'s default interpolates
+# it, and this module cannot import those — they import these models, and the reverse is a
 # cycle. Same cycle-free-leaf role `models/judge_defaults.py` plays for `DEFAULT_JUDGE_MODEL`.
 TARGET_LABEL = "yes"
 
@@ -78,8 +78,8 @@ class ActivationGateVerdict(BaseModel):
     visible.
 
     ``promoted`` is deliberately ``bool | None``: a single gate cannot decide a family, so
-    :func:`coder_eval.optimize_gate.activation_gate` leaves it ``None`` and only
-    :func:`coder_eval.optimize_gate.holm_promote` — which sees every survivor at once — sets it.
+    :func:`coder_eval.optimize_activation.activation_gate` leaves it ``None`` and only
+    :func:`coder_eval.optimize_activation.holm_promote` — which sees every survivor at once — sets it.
     Rendering a ``None`` as a non-promotion would let a forgotten Holm pass look like an honest
     negative result.
     """
@@ -155,7 +155,7 @@ class ActivationGateVerdict(BaseModel):
             "there was no interval; 0 is the meaningful 'the arms agreed everywhere'. It is the "
             "COUNT that binds, not the rate, and the count is almost flat in the suite size: 3 "
             "discordant rows suffice at 8 paired rows and 4 at 10, 20 or 100 (see "
-            "optimize_gate.min_discordant_rows, which computes it). What does NOT help is adding "
+            "optimize_activation.min_discordant_rows, which computes it). What does NOT help is adding "
             "rows the arms agree on — at a fixed R that RAISES the floor."
         ),
     )
@@ -242,7 +242,7 @@ class ActivationGateVerdict(BaseModel):
 
         The ONE declaration of "the statistic came out in the candidate's favour and its interval
         excludes zero", and the exact twin of :attr:`ExecutionGateVerdict.separated` — same
-        expression, same rationale. :func:`~coder_eval.optimize_gate.holm_promote` needs it to
+        expression, same rationale. :func:`~coder_eval.optimize_activation.holm_promote` needs it to
         decide ``promoted``; ``reports_optimize.render_markdown`` needs it to tell a candidate that
         LOST from one that WON AND WAS BLOCKED. The renderer read ``promoted`` for that second
         question until the guardrail was folded in, at which point the BLOCKED rung became
@@ -266,7 +266,7 @@ class ExecutionGateVerdict(BaseModel):
 
     Mirrors :class:`ActivationGateVerdict`'s conventions deliberately — statistics are ``None``
     rather than fabricated, ``notes`` is the distrust-the-numbers channel, and ``promoted`` is
-    ``None`` until :func:`coder_eval.optimize_gate.holm_promote_execution` has seen the whole
+    ``None`` until :func:`coder_eval.optimize_execution.holm_promote_execution` has seen the whole
     family — but it is a separate flat model rather than a track-discriminated union with it. A
     union would carry ``p_floor`` / ``n_discordant`` / ``criterion_index`` as permanently-``None``
     noise on one side and ``effect_size`` on the other, and every reader would have to know which
@@ -482,7 +482,7 @@ class NoiseFloor(BaseModel):
     suite_id: str = Field(min_length=1, description="Suite the floor was measured on (the pre-fan-out task_id).")
     variant_id: str = Field(min_length=1, description="Arm the null comparison split. Renamed per round, so keyed.")
     model: str = Field(
-        min_length=1, description="Model the rows ran under. Sourced ONLY from optimize_gate.resolve_model."
+        min_length=1, description="Model the rows ran under. Sourced ONLY from optimize_execution.resolve_model."
     )
     metric: str = Field(
         default=f"f1.{TARGET_LABEL}",

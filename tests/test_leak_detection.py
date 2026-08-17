@@ -1,7 +1,7 @@
 """Unit tests for the shared verbatim-leak primitive (`coder_eval.leak_detection`).
 
 The primitive has two consumers pointing in opposite directions — CE036 over a dataset row's
-prompt, `optimize_gate.candidate_leaks` over a candidate skill body — so these tests exercise the
+prompt, `optimize_search.candidate_leaks` over a candidate skill body — so these tests exercise the
 extraction ITSELF rather than either containment direction. The one behavioural difference between
 the consumers is `drop_type`, and it gets its own test.
 """
