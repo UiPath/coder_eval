@@ -86,13 +86,21 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
     - **CANNOT SEPARATE AT THIS SIZE** — ``gate_refusal`` is set and a p WAS computed: the suite's
       discreteness floor exceeds the Holm threshold, so no candidate could promote however good it
       is. It outranks NOT PROMOTED because it is a statement about the suite, not this candidate.
-    - **BLOCKED BY A GUARDRAIL** — the statistic separated but a guardrail failed. Below the
+    - **BLOCKED BY A GUARDRAIL** — the statistic separated but a check failed. Below the
       refusal, since reading a guardrail presupposes a statistic that separated. Its condition is
       ``holm_rejected and separated and failed``, the execution rung's exact shape, and all three
       conjuncts are load-bearing for the reasons
       :func:`render_execution_markdown`'s docstring gives — ``promoted`` now folds the guardrail
       in, so keying on it retires this rung outright, and ``separated`` alone fires for a candidate
-      Holm never rejected.
+      Holm never rejected. ``failed`` spans BOTH veto lists — the sibling checks and the
+      cost/latency guardrails — because both force ``promoted = False``, and a candidate vetoed by
+      either one WON its comparison. Reading ``guardrails`` alone sent a sibling regression to the
+      ``NOT PROMOTED`` rung, where it read as an ordinary loss.
+
+      The headline names a failing sibling check even though the note ladder does not add a
+      ``FAILED — this forces`` line for one. That asymmetry is deliberate: the sibling rung already
+      writes a note saying the candidate "moved the failure rather than fixing it", which is more
+      than the generic sentence would say, and printing both would say it twice.
     - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
 
     **What separates the two refusals is the p, not a second field.** A discreteness refusal is a
@@ -107,7 +115,13 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
     confident ``UNDECIDED`` with the reason nowhere on the page. The execution renderer solved
     exactly this and its comment records why.
     """
-    failed_guardrails = [check.name for check in verdict.guardrails if not check.passed]
+    # BOTH veto lists, exactly as the execution twin unions `integrity_checks` with `guardrails`.
+    # Reading `guardrails` alone was the last place the two tracks disagreed about what `promoted`
+    # means: a candidate that separated, cleared Holm and was vetoed by a failing SIBLING check has
+    # `promoted=False` and used to render NOT PROMOTED — indistinguishable from one that simply
+    # lost, which is the single confusion this rung exists to prevent. "It won and was vetoed" and
+    # "it lost" call for opposite next actions.
+    failed_guardrails = [check.name for check in (*verdict.sibling_checks, *verdict.guardrails) if not check.passed]
     if verdict.promoted is None:
         headline = "UNDECIDED — holm_promote has not been applied, so this verdict decides nothing"
     elif verdict.gate_refusal is not None and verdict.p_value is None:

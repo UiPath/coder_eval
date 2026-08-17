@@ -1,6 +1,6 @@
 ### Activation gate — `candidate` vs `incumbent`
 
-**NOT PROMOTED**
+**BLOCKED BY A GUARDRAIL — the primary comparison separated, but sibling recall.yes [criterion 1] failed. Do not promote on this block.**
 
 - Suite `my-skill-activation`, criterion index 0 (position in `success_criteria`)
 - Rows paired: 8 · discordant: 4 · excluded: 0

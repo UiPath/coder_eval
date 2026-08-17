@@ -1495,6 +1495,46 @@ class TestBothTracksMeanTheSameThingByPromoted:
         assert decided.separated is True, "and the statistic did separate"
         assert decided.promoted is False, "so the guardrail is what vetoed — on BOTH tracks"
 
+    @pytest.mark.parametrize(
+        ("gate", "build", "render", "vetoing"),
+        [
+            # The list that is NOT the cost/latency guardrails on each track — the one whose
+            # failure vetoes without being a "guardrail" by name.
+            pytest.param(holm_promote, _parity_activation, render_markdown, "sibling_checks", id="activation"),
+            pytest.param(
+                holm_promote_execution,
+                _parity_execution,
+                render_execution_markdown,
+                "integrity_checks",
+                id="execution",
+            ),
+        ],
+    )
+    def test_a_candidate_vetoed_by_the_non_guardrail_list_still_headlines_blocked(
+        self, gate, build, render, vetoing
+    ) -> None:
+        """Both veto lists must reach the headline, not just the one called "guardrails".
+
+        The last place the two tracks disagreed about what `promoted` means. `render_markdown`
+        read `verdict.guardrails` alone while its twin unioned `integrity_checks`, so a candidate
+        that separated, cleared Holm and was vetoed by a failing SIBLING check rendered
+        `NOT PROMOTED` — indistinguishable from one that simply lost. "It won and was vetoed" and
+        "it lost" call for opposite next actions, which is the whole reason this rung exists.
+        """
+        failing = GuardrailCheck(
+            name="the check that vetoed",
+            incumbent=1.0,
+            candidate=0.5,
+            relative_change=-0.5,
+            tolerance=0.0,
+            passed=False,
+        )
+        decided = gate([build(**{vetoing: [failing]})])[0]
+        assert decided.separated is True and decided.holm_rejected is True, "it WON the comparison"
+        assert decided.promoted is False, "and the check vetoed it"
+        assert _headline(render(decided)).startswith("BLOCKED BY A GUARDRAIL")
+        assert "the check that vetoed" in _headline(render(decided))
+
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
     def test_the_blocked_block_names_the_failing_check(self, gate, build) -> None:
         decided = gate([build(guardrails=[_failing_cost_check()])])[0]
