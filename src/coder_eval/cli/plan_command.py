@@ -9,7 +9,13 @@ from typing import Any
 import typer
 from rich.markup import escape
 
-from ..models import ROW_SELECTOR_FLAGS, TaskDefinition, UnknownTaskFieldWarning
+from ..models import (
+    ROW_SELECTOR_FLAGS,
+    StarterFilesSource,
+    TaskDefinition,
+    TemplateDirSource,
+    UnknownTaskFieldWarning,
+)
 from ..orchestration.task_loader import (
     STRATIFIED_CAUSE_PREFIXES,
     expand_dataset_with_selection,
@@ -18,6 +24,7 @@ from ..orchestration.task_loader import (
     row_split_label,
     stratum_key,
 )
+from ..sandbox import escapes_sandbox, template_dir_problem
 from .console import console
 from .row_selectors import SAMPLE_HELP, SAMPLE_PER_STRATUM_HELP, SPLIT_HELP
 from .run_helpers import discover_default_tasks
@@ -28,6 +35,11 @@ from .utils import check_api_keys, check_tools
 # empty string into "", which prints as nothing at all — a count with no label. The LABEL is
 # a display concern and lives here; the RULE lives on `stratum_key` and is not restated.
 _EMPTY_STRATUM_LABEL = "(none)"
+
+# A stand-in for the sandbox directory a run would create, so `escapes_sandbox` can be asked its
+# question before one exists. Any absolute path with no symlinks on it works; a non-existent one
+# is chosen so `Path.resolve()` stays purely lexical and the answer cannot depend on this machine.
+_SYNTHETIC_SANDBOX_ROOT = Path("/coder-eval-plan-time-sandbox-root")
 
 
 def _preview_dataset(
@@ -164,6 +176,55 @@ def _print_strata(task: TaskDefinition, selected: list[dict[str, Any]], emit: Ca
     emit(f"  [dim]strata ({escape(field)}): {rendered}[/dim]")  # noqa: CE050
 
 
+def _validate_template_sources(task: TaskDefinition, emit: Callable[[str], None]) -> bool:
+    """Report every template source a run could not mount, and return whether all of them could.
+
+    ``plan`` is the surface an author is told to validate against, and it printed ✓ on a suite
+    whose fixture directory is absent — the failure surfaced only at sandbox setup, as
+    ``RuntimeError: Template directory not found``, after the run had started and tokens were
+    being spent. Both questions asked here are asked through the sandbox's OWN predicates
+    (``template_dir_problem``, ``escapes_sandbox``), never re-implemented: a plan-time copy that
+    drifted loose would either bless a suite that cannot run — the exact defect being closed — or
+    redden a valid one.
+
+    The two source types are checked for different things because they fail differently.
+    ``template_dir`` names a HOST directory, which may be missing or not a directory.
+    ``starter_files`` carries its content INLINE, so it has no host path to stat at all; what it
+    can get wrong is its DESTINATION — an absolute or ``..``-escaping ``path`` that
+    ``_resolve_within_sandbox`` rejects at setup, and which no model validator catches (unlike
+    ``TemplateDirSource.mount_point``, which has one). ``repo`` is a remote clone with nothing
+    local to resolve until it is fetched, so it is skipped.
+
+    Destination paths are checked against a SYNTHETIC root, because the real sandbox does not
+    exist yet — see ``escapes_sandbox`` for why that is the same question and where the two can
+    in principle differ.
+
+    ``template_dir`` paths are NOT re-resolved here. ``load_task`` has already expanded ``$VAR``
+    and made every one absolute (``task_loader.resolve_template_source_paths``, which RAISES on an
+    undefined variable — so an unexpanded one is a load error and never reaches this function).
+    Reading the same string the sandbox will read is the point.
+    """
+    ok = True
+    for index, source in enumerate(task.sandbox.template_sources or []):
+        # `{index:d}` carries a numeric format spec, so the entry's position cannot be read as
+        # markup; every author-supplied value beside it is escape()d. (Rich needs `[a-z#/@]`
+        # after the bracket for a tag, so the literal `[0]` was never at risk either.)
+        if isinstance(source, TemplateDirSource):
+            problem = template_dir_problem(Path(source.path))
+            if problem is not None:
+                emit(f"  [red]sandbox.template_sources[{index:d}]: {escape(problem)}[/red]")
+                ok = False
+        elif isinstance(source, StarterFilesSource):
+            for starter in source.files:
+                if escapes_sandbox(_SYNTHETIC_SANDBOX_ROOT, starter.path):
+                    emit(
+                        f"  [red]sandbox.template_sources[{index:d}]: starter_files path escapes "
+                        + f"the sandbox: {escape(starter.path)}[/red]"
+                    )
+                    ok = False
+    return ok
+
+
 def plan_command(
     task_files: list[Path] | None = typer.Argument(  # noqa: B008
         None,
@@ -188,6 +249,8 @@ def plan_command(
     - Required CLI tools are available (claude, uv)
     - API keys are configured
     - Task configuration is reasonable
+    - Every mounted template source could actually be mounted: a ``template_dir`` exists
+      and is a directory, and a ``starter_files`` destination stays inside the sandbox
     - Dataset-backed tasks expand: row ids validate, ``${row.*}`` substitutions resolve,
       and the selected row count is printed BEFORE any money is spent
 
@@ -294,6 +357,14 @@ def plan_command(
                 detail.append(f"  [dim]Agent: {escape(str(task.agent.type))}[/dim]")
 
             detail.append(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
+
+            # A missing fixture is a hard error, on the same terms as an early-stop config
+            # error below: the FILE is loadable (✓ stays) but a run of it cannot work, so the
+            # exit code flips. Checked on the task's own sources rather than per variant —
+            # an experiment layer can append more, and reporting those once per variant would
+            # print the same missing path N times.
+            if not _validate_template_sources(task, detail.append):
+                all_valid = False
 
             expanded = _preview_dataset(
                 task,

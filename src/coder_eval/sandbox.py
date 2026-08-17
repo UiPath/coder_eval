@@ -30,6 +30,44 @@ from .resources import get_ignore_patterns, should_ignore_path
 logger = logging.getLogger(__name__)
 
 
+def template_dir_problem(path: Path) -> str | None:
+    """Why this template directory cannot be mounted, or ``None`` if it can.
+
+    ONE declaration, TWO consumers pointing in opposite directions: `_apply_template_dir_source`
+    RAISES on it while building a sandbox, and `coder-eval plan` REPORTS it before a run is paid
+    for. A second copy would agree on every ordinary input and diverge exactly where it matters —
+    the day a third precondition is added here, a hand-copied `plan` would keep printing ✓ on a
+    suite that cannot run, which is the failure the plan-time check exists to close.
+
+    The message is the return value rather than the raise, because only one consumer raises. It
+    names the path, so callers need add no locating information of their own.
+    """
+    if not path.exists():
+        return f"Template directory not found: {path}"
+    if not path.is_dir():
+        return f"Template path is not a directory: {path}"
+    return None
+
+
+def escapes_sandbox(sandbox_root: Path, rel: str) -> bool:
+    """Whether ``rel``, joined onto ``sandbox_root``, lands outside it.
+
+    Extracted from `Sandbox._resolve_within_sandbox` for the same reason as
+    `template_dir_problem`: `coder-eval plan` asks the question before a sandbox exists, against a
+    synthetic root, and a second implementation of a path-traversal rule is the last thing this
+    tree needs two of. Equal to the root is allowed — an empty `mount_point` means the root itself.
+
+    Purely lexical when nothing on the path exists yet, which is what makes a synthetic root
+    usable: `Path.resolve()` on a missing path just normalizes it. Against a REAL sandbox it can
+    additionally follow a symlink an earlier template source left behind, so the two callers can
+    in principle disagree on a `..` path that traverses one — the plan-time answer is then the
+    conservative one.
+    """
+    root = sandbox_root.resolve()
+    candidate = (sandbox_root / rel).resolve()
+    return candidate != root and root not in candidate.parents
+
+
 # Entries excluded from Sandbox.capture_to (docker WORKDIR-alignment).
 # Two classes of exclusion:
 #
@@ -393,9 +431,8 @@ class Sandbox:
             Absolute, resolved path that is guaranteed to be inside the sandbox.
         """
         assert self.sandbox_dir is not None, "Sandbox directory not initialized"
-        sandbox_root = self.sandbox_dir.resolve()
         candidate = (self.sandbox_dir / rel).resolve()
-        if candidate != sandbox_root and sandbox_root not in candidate.parents:
+        if escapes_sandbox(self.sandbox_dir, rel):
             raise RuntimeError(f"{field} escapes sandbox: {rel!r} -> {candidate}")
         return candidate
 
@@ -429,11 +466,9 @@ class Sandbox:
         template_path = Path(source.path)
         logger = logging.getLogger(__name__)
 
-        if not template_path.exists():
-            raise RuntimeError(f"Template directory not found: {template_path}")
-
-        if not template_path.is_dir():
-            raise RuntimeError(f"Template path is not a directory: {template_path}")
+        problem = template_dir_problem(template_path)
+        if problem is not None:
+            raise RuntimeError(problem)
 
         mount_root = self._resolve_within_sandbox(source.mount_point, field="Template mount_point")
         mount_root.mkdir(parents=True, exist_ok=True)

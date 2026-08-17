@@ -446,6 +446,301 @@ class TestPlanBannerIsPrintedOnce:
         assert any("early-stop config error" in ln for ln in lines)
 
 
+class TestPlanValidatesTemplateSources:
+    """A mounted template directory that does not exist must be caught BEFORE the run.
+
+    `plan` is sold as the validation surface — `/coder-eval:task` step 6 tells an author to
+    run it and fix everything it reports — and it printed ✓ on a suite whose fixture
+    directory is absent. The failure surfaced only at sandbox setup, as
+    `RuntimeError: Template directory not found`, after the run had started and tokens were
+    being spent. The two conditions asserted here are exactly the two raises in
+    `sandbox.py::_apply_template_dir_source`, moved to plan time.
+    """
+
+    def _run(self, task, task_file: Path):
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        resolved = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved, {}, 1)),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            exit_code = 0
+            try:
+                plan_command(task_files=[task_file])
+            except typer.Exit as e:
+                exit_code = e.exit_code
+        lines = [str(call) for call in mock_console.print.call_args_list]
+        return lines, exit_code
+
+    @staticmethod
+    def _task_mounting(path: Path | str) -> TaskDefinition:
+        # Absolute paths, because that is what `load_task` hands the command: it resolves
+        # every `TemplateDirSource.path` against the task YAML's directory before returning.
+        return TaskDefinition(
+            task_id="mounts-a-template",
+            description="A test task",
+            initial_prompt="Do something",
+            sandbox={"driver": "tempdir", "template_sources": [{"type": "template_dir", "path": str(path)}]},
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        )
+
+    def test_plan_flags_missing_template_dir(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        missing = tmp_path / "outcome-fixture"
+        lines, exit_code = self._run(self._task_mounting(missing), task_file)
+
+        assert exit_code == 1
+        assert any("template directory not found" in ln.lower() and str(missing) in ln for ln in lines), lines
+        # The banner reports whether the FILE is loadable, and it is — same split the
+        # early-stop config error already draws.
+        banners = [ln for ln in lines if "task.yaml" in ln]
+        assert len(banners) == 1 and "✓" in banners[0]
+
+    def test_plan_passes_when_template_dir_exists(self, tmp_path: Path) -> None:
+        # The happy path, so the check cannot be satisfied by always failing.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        lines, exit_code = self._run(self._task_mounting(fixture), task_file)
+
+        assert exit_code == 0
+        assert not [ln for ln in lines if "template" in ln.lower() and "red" in ln], lines
+
+    def test_plan_flags_template_path_that_is_a_file(self, tmp_path: Path) -> None:
+        # The `is_dir()` half: `_apply_template_dir_source` rglobs the path, so a file is
+        # as fatal as an absent one and just as invisible until the sandbox is built.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        not_a_dir = tmp_path / "fixture.txt"
+        not_a_dir.write_text("x")
+        lines, exit_code = self._run(self._task_mounting(not_a_dir), task_file)
+
+        assert exit_code == 1
+        assert any("not a directory" in ln.lower() and str(not_a_dir) in ln for ln in lines), lines
+
+    def test_plan_no_sandbox_block_is_noop(self, tmp_path: Path) -> None:
+        # Most tasks. The check must be a no-op, not a crash and not a line.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = TaskDefinition(
+            task_id="no-sandbox",
+            description="A test task",
+            initial_prompt="Do something",
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        )
+        lines, exit_code = self._run(task, task_file)
+
+        assert exit_code == 0
+        assert not [ln for ln in lines if "template" in ln.lower()], lines
+
+    def test_inline_starter_files_are_not_reported_as_missing_paths(self, tmp_path: Path) -> None:
+        # `starter_files` carries INLINE content and its `path` is a sandbox-relative
+        # DESTINATION — treating it like a host path would fail every task that uses one.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = TaskDefinition(
+            task_id="starter-files",
+            description="A test task",
+            initial_prompt="Do something",
+            sandbox={
+                "driver": "tempdir",
+                "template_sources": [
+                    {"type": "starter_files", "files": [{"path": "src/main.py", "content": "print()\n"}]}
+                ],
+            },
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        )
+        lines, exit_code = self._run(task, task_file)
+
+        assert exit_code == 0
+        assert not [ln for ln in lines if "not found" in ln.lower()], lines
+
+    def test_a_starter_file_escaping_the_sandbox_is_flagged(self, tmp_path: Path) -> None:
+        # `starter_files` has no host path to stat, but it does have a DESTINATION, and an
+        # absolute or `..` one is rejected by `_resolve_within_sandbox` at setup — with no
+        # model validator to catch it first (`TemplateDirSource.mount_point` has one; this
+        # does not). Same class of after-the-money failure as a missing fixture.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = TaskDefinition(
+            task_id="escaping-starter-file",
+            description="A test task",
+            initial_prompt="Do something",
+            sandbox={
+                "driver": "tempdir",
+                "template_sources": [{"type": "starter_files", "files": [{"path": "../escaped.py", "content": "x\n"}]}],
+            },
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        )
+        lines, exit_code = self._run(task, task_file)
+
+        assert exit_code == 1
+        assert any("escapes" in ln and "../escaped.py" in ln for ln in lines), lines
+
+    def test_a_starter_file_path_that_normalizes_back_inside_is_not_flagged(self, tmp_path: Path) -> None:
+        # The false-alarm shape a lexical `".." in path` check would produce: `a/../b` resolves
+        # INSIDE the sandbox and the runtime accepts it, so plan must too. This is why the check
+        # calls the sandbox's own predicate instead of approximating it.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = TaskDefinition(
+            task_id="odd-but-legal-starter-file",
+            description="A test task",
+            initial_prompt="Do something",
+            sandbox={
+                "driver": "tempdir",
+                "template_sources": [
+                    {"type": "starter_files", "files": [{"path": "src/../src/main.py", "content": "x\n"}]}
+                ],
+            },
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        )
+        lines, exit_code = self._run(task, task_file)
+
+        assert exit_code == 0
+        assert not [ln for ln in lines if "escapes" in ln], lines
+
+    def test_the_reported_index_is_the_entry_position_in_the_yaml(self, tmp_path: Path) -> None:
+        # The index has to name the entry the author must edit, so it counts EVERY source, not
+        # only the checkable ones. With a single source the position is always 0, so a
+        # regression that enumerated the filtered list would pass every other test here.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        missing = tmp_path / "outcome-fixture"
+        task = TaskDefinition(
+            task_id="two-sources",
+            description="A test task",
+            initial_prompt="Do something",
+            sandbox={
+                "driver": "tempdir",
+                "template_sources": [
+                    {"type": "starter_files", "files": [{"path": "seed.py", "content": "x\n"}]},
+                    {"type": "template_dir", "path": str(missing)},
+                ],
+            },
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        )
+        lines, exit_code = self._run(task, task_file)
+
+        assert exit_code == 1
+        assert any("template_sources[1]" in ln for ln in lines), lines
+
+    def test_a_relative_template_dir_resolves_against_the_yaml_not_the_cwd(self, tmp_path: Path) -> None:
+        """A `./fixture` beside the task file is valid from ANY working directory.
+
+        Runs the REAL `load_task`, unlike its siblings, because that is the whole question: the
+        check trusts `resolve_template_source_paths` to have made the path absolute relative to
+        the task YAML's directory, exactly as `run` does. A refactor that resolved against the
+        process cwd instead would redden every valid suite planned from elsewhere — and would
+        pass every mocked test in this class.
+        """
+        suite = tmp_path / "suite"
+        suite.mkdir()
+        (suite / "fixture").mkdir()
+        task_file = suite / "task.yaml"
+        yaml = (
+            "task_id: relative-fixture\n"
+            "description: A test task\n"
+            "initial_prompt: Do something\n"
+            "sandbox:\n"
+            "  driver: tempdir\n"
+            "  template_sources:\n"
+            '    - type: "template_dir"\n'
+            '      path: "./fixture"\n'
+            "success_criteria:\n"
+            '  - type: "file_exists"\n'
+            '    description: "check"\n'
+            '    path: "out.txt"\n'
+        )
+        task_file.write_text(yaml, encoding="utf-8")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        resolved = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE))
+
+        def _plan_from(cwd: Path) -> tuple[list[str], int]:
+            import os
+
+            previous = Path.cwd()
+            os.chdir(cwd)
+            try:
+                with (
+                    patch("coder_eval.cli.plan_command.check_tools"),
+                    patch("coder_eval.cli.plan_command.check_api_keys"),
+                    patch(f"{_EXP}.load_experiment", return_value=experiment),
+                    patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved, {}, 1)),
+                    patch("coder_eval.cli.plan_command.console") as mock_console,
+                ):
+                    code = 0
+                    try:
+                        plan_command(task_files=[task_file])
+                    except typer.Exit as e:
+                        code = e.exit_code
+                return [str(call) for call in mock_console.print.call_args_list], code
+            finally:
+                os.chdir(previous)
+
+        lines, exit_code = _plan_from(elsewhere)
+        assert exit_code == 0, lines
+        assert not [ln for ln in lines if "not found" in ln.lower()], lines
+
+        # And the same suite with the fixture removed still fails from that foreign cwd, so the
+        # assertion above cannot be satisfied by a check that silently stopped running.
+        (suite / "fixture").rmdir()
+        lines, exit_code = _plan_from(elsewhere)
+        assert exit_code == 1
+        assert any("Template directory not found" in ln and str(suite / "fixture") in ln for ln in lines), lines
+
+    def test_an_unexpanded_env_var_is_reported_by_the_loader_not_by_this_check(self, tmp_path: Path) -> None:
+        """An undefined `$VAR` in a template path is a PRE-EXISTING load-time error.
+
+        Runs the REAL `load_task` rather than a patched one, because that is the whole
+        question: `resolve_template_source_paths` raises on an undefined variable, so by the
+        time this command holds a `TaskDefinition` every path is expanded and absolute and
+        the new check can never see a `$VAR`. Pinned so a later refactor cannot quietly move
+        the report into the template check and start naming a path nobody wrote.
+        """
+        import os
+
+        assert "CODER_EVAL_NOT_A_REAL_VAR" not in os.environ
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text(
+            "task_id: env-var-template\n"
+            "description: A test task\n"
+            "initial_prompt: Do something\n"
+            "sandbox:\n"
+            "  driver: tempdir\n"
+            "  template_sources:\n"
+            '    - type: "template_dir"\n'
+            '      path: "$CODER_EVAL_NOT_A_REAL_VAR/fixture"\n'
+            "success_criteria:\n"
+            '  - type: "file_exists"\n'
+            '    description: "check"\n'
+            '    path: "out.txt"\n',
+            encoding="utf-8",
+        )
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            plan_command(task_files=[task_file])
+        assert exc_info.value.exit_code == 1
+        lines = [str(call) for call in mock_console.print.call_args_list]
+        assert any("CODER_EVAL_NOT_A_REAL_VAR" in ln for ln in lines), lines
+        assert not [ln for ln in lines if "template directory not found" in ln.lower()], lines
+
+
 class TestPlanEscapesUntrustedMarkup:
     """Rich reads `[...]` in an interpolated VALUE as markup, so a bracket in a task id vanishes."""
 
