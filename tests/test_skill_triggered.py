@@ -815,3 +815,134 @@ class TestRegistry:
 
         init_criteria(validate=True)
         assert "skill_triggered" in CriterionRegistry.list_types()
+
+
+class TestSuppressedEngagementDetails:
+    """A non-engagement row names WHY it did not engage, when there is a why to name.
+
+    `recall.yes` collapsing because every `Skill` call was refused under
+    `disable-model-invocation` and `recall.yes` collapsing because the agent never reached for
+    the skill are the same number in the report and completely different problems: the first
+    invalidates the round, the second is the measurement working. The note is diagnostic only —
+    `score`, `observed_label` and `expected_label` are unaffected.
+    """
+
+    def _details(self, *, expected_skill: str, skill_name: str, commands: list[CommandTelemetry]) -> str:
+        return _check(expected_skill=expected_skill, skill_name=skill_name, commands=commands).details
+
+    def test_a_refused_skill_call_is_named(self) -> None:
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Skill", {"skill": "my-skill"}, result_status="error")],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+        assert "Skill/error x1" in result.details, result.details
+
+    def test_a_crash_force_closed_read_is_named(self) -> None:
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Read", {"file_path": "/x/skills/my-skill/SKILL.md"}, result_status="unknown")],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+        assert "Read/unknown x1" in result.details, result.details
+
+    def test_an_in_flight_call_reads_as_in_flight_not_as_none(self) -> None:
+        # `result_status=None` renders as a word rather than the literal `None`, which in a
+        # report reads as a missing value rather than as the state it is.
+        details = self._details(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Skill", {"skill": "my-skill"}, result_status=None)],
+        )
+        assert "Skill/in-flight x1" in details, details
+
+    def test_nothing_suppressed_leaves_details_byte_identical(self) -> None:
+        # The whole point of appending rather than reformatting: a row with no engagement signal
+        # at all must render exactly as it did before this note existed. Asserted against the
+        # literal shape, not against a prefix check.
+        details = self._details(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Read", {"file_path": "notes.txt"})],
+        )
+        assert details == "observed='no', expected='yes' (skill_name='my-skill')"
+
+    def test_a_row_that_engaged_after_an_earlier_refusal_carries_no_note(self) -> None:
+        # A later success IS engagement. Reporting the earlier refusal on a passing row would
+        # read as a failure — the helper must not run on the `triggered is True` path at all.
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[
+                _cmd("Skill", {"skill": "my-skill"}, tool_id="s1", result_status="error"),
+                _cmd("Skill", {"skill": "my-skill"}, tool_id="s2"),
+            ],
+        )
+        assert result.observed_label == "yes" and result.score == 1.0
+        assert result.details == "observed='yes', expected='yes' (skill_name='my-skill')"
+
+    def test_a_suppressed_distractor_still_passes_and_reads_neutrally(self) -> None:
+        # The distractor/negative case: suppression here means the row scored CORRECTLY. The
+        # note must be an observation, not an accusation — no "failed", "error" or "problem"
+        # framing beyond the raw status token the pair carries.
+        result = _check(
+            expected_skill="",
+            skill_name="my-skill",
+            commands=[_cmd("Skill", {"skill": "my-skill"}, result_status="error")],
+        )
+        assert result.observed_label == "no" and result.score == 1.0
+        assert "not delivered" in result.details, result.details
+        assert "fail" not in result.details.lower(), result.details
+
+    def test_the_note_is_aggregated_and_bounded(self) -> None:
+        # Fifty refused calls must not produce a fifty-entry string: `details` is persisted per
+        # row in task.json and rendered in reports.
+        commands = [_cmd("Skill", {"skill": "my-skill"}, tool_id=f"s{i}", result_status="error") for i in range(50)]
+        commands += [
+            _cmd("Read", {"file_path": "/x/skills/my-skill/SKILL.md"}, tool_id="r1", result_status="unknown"),
+            _cmd("Glob", {"pattern": "/x/skills/my-skill/*"}, tool_id="g1", result_status="error"),
+            _cmd("Grep", {"path": "/x/skills/my-skill/SKILL.md"}, tool_id="p1", result_status=None),
+        ]
+        details = self._details(expected_skill="my-skill", skill_name="my-skill", commands=commands)
+        assert "53 engagement signal(s) not delivered" in details, details
+        assert "Skill/error x50" in details, details
+        # Four distinct pairs, three rendered, the remainder elided rather than listed.
+        assert "+1 more" in details, details
+        assert len(details) < 200, details
+
+    def test_the_note_carries_no_markup_brackets(self) -> None:
+        # `details` flows into report renderers; a `[...]`-shaped count would be read as markup.
+        details = self._details(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Skill", {"skill": "my-skill"}, result_status="error")],
+        )
+        assert "[" not in details and "]" not in details, details
+
+    def test_a_suppressed_call_for_another_skill_is_not_reported(self) -> None:
+        # The helper is keyed on THIS criterion's skill_name. A refused call for a different
+        # skill is not this row's reason for not engaging.
+        details = self._details(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Skill", {"skill": "other-skill"}, result_status="error")],
+        )
+        assert details == "observed='no', expected='yes' (skill_name='my-skill')"
+
+    @pytest.mark.parametrize("result_status", _STATUSES)
+    @pytest.mark.parametrize("tool_name", _GATED_TOOLS)
+    def test_the_truth_table_scores_are_unchanged_by_the_note(self, tool_name: str, result_status: str | None) -> None:
+        # Phase 3's acceptance criterion in test form: re-runs the engagement truth table and
+        # asserts the diagnostic changed no score and no label, only `details`.
+        engaged = result_status == "success"
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd(tool_name, _engaging_params(tool_name), result_status=result_status)],
+        )
+        case = f"{tool_name}/{result_status}"
+        assert result.observed_label == ("yes" if engaged else "no"), case
+        assert result.expected_label == "yes", case
+        assert result.score == (1.0 if engaged else 0.0), case

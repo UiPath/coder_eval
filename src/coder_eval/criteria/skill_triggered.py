@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria._classification_aggregate import overlay_classification_metrics
@@ -82,6 +83,11 @@ _SKILL_PATH_RE = re.compile(r"(?=skills[\\/]+([A-Za-z0-9][A-Za-z0-9_-]*)[\\/]+)"
 # ``Read``/``Grep``/``Glob``, so its file-read engagement decides at the ToolEnd rather than
 # the ToolStart: one evaluation round later, not a lost signal.
 _FILE_READ_TOOLS = frozenset({"Read", "Glob", "Grep"})
+
+# How many distinct ``tool/status`` pairs the non-engagement note in ``details`` renders before
+# eliding the rest. ``details`` is persisted per row and rendered in reports, so the note is
+# bounded rather than proportional to the trajectory.
+_SUPPRESSED_RENDER_LIMIT = 3
 
 
 def _delivered(cmd: CommandTelemetry) -> bool:
@@ -166,6 +172,48 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     return set()
 
 
+def _suppressed_engagements(turn_records: list[TurnRecord], skill_name: str) -> Counter[str]:
+    """``tool/status`` pairs that WOULD have engaged ``skill_name`` but delivered nothing.
+
+    DIAGNOSTIC ONLY — the return value reaches ``details`` and nothing else. It is the exact
+    complement of ``_engaged_skill_names``, built by calling ``_delivered`` and
+    ``_candidate_skill_names`` rather than re-deriving either, so the reason it reports is
+    necessarily the same rule the score applied. A third spelling of the delivered-body
+    predicate is precisely the drift that produced the defect this file was last fixed for.
+
+    Why it is worth reporting at all: a suite whose ``recall.yes`` collapsed because every
+    ``Skill`` call was refused under ``disable-model-invocation`` is indistinguishable, in the
+    report, from one where the agent simply never reached for the skill. The first is a wiring
+    fault that invalidates the round; the second is the measurement working.
+    """
+    return Counter(
+        f"{cmd.tool_name}/{cmd.result_status or 'in-flight'}"
+        for turn in turn_records
+        for cmd in turn.commands
+        if not _delivered(cmd) and skill_name in _candidate_skill_names(cmd)
+    )
+
+
+def _render_suppressed(suppressed: Counter[str]) -> str:
+    """The ``details`` suffix for a non-engagement, or ``""`` when nothing was suppressed.
+
+    Bounded on purpose: a run with fifty refused calls must not produce a fifty-entry string,
+    since ``details`` is persisted per row in ``task.json`` and rendered in reports. Aggregated
+    by ``(tool, status)`` with counts, top ``_SUPPRESSED_RENDER_LIMIT`` pairs, remainder elided.
+
+    Neutrally worded, and that is not cosmetic: on a DISTRACTOR criterion a suppressed
+    engagement means the row correctly scored ``no`` and PASSED, so "suppressed" must read as an
+    observation rather than a fault. Uses ``x`` and parentheses rather than ``[...]`` — this
+    string reaches renderers that interpret square brackets as markup.
+    """
+    if not suppressed:
+        return ""
+    ranked = suppressed.most_common()
+    shown = ", ".join(f"{pair} x{count}" for pair, count in ranked[:_SUPPRESSED_RENDER_LIMIT])
+    elided = "" if len(ranked) <= _SUPPRESSED_RENDER_LIMIT else f", +{len(ranked) - _SUPPRESSED_RENDER_LIMIT} more"
+    return f" — {sum(suppressed.values())} engagement signal(s) not delivered: {shown}{elided}"
+
+
 def _all_engaged_skill_names(turn_records: list[TurnRecord]) -> set[str]:
     """Union of every skill engaged anywhere in the trajectory (any-engagement).
 
@@ -233,11 +281,23 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
         expected = _YES if expected_yes else _NO
 
         filt = f" (skill_name={criterion.skill_name!r})"
+        # Diagnostic suffix only, and ONLY on the non-engagement path: when the skill WAS
+        # engaged, an earlier refused call is not a finding — a later success is engagement, and
+        # reporting the suppression there would read as a failure. `score`, `observed_label` and
+        # `expected_label` above are computed before this line and are untouched by it, and the
+        # prefix is byte-identical to what it was, so nothing that reads the leading
+        # `observed=…, expected=…` sees a change. (`criteria/classification_match.py` emits the
+        # same prefix with no shared formatter — deliberately left duplicated: nothing parses
+        # either, and extracting one for a single appending caller is abstraction for its own
+        # sake.)
+        suppressed = (
+            "" if triggered else _render_suppressed(_suppressed_engagements(turn_records, criterion.skill_name))
+        )
         return ClassificationCriterionResult(
             criterion_type=criterion.type,
             description=criterion.description,
             score=score,
-            details=f"observed={observed!r}, expected={expected!r}{filt}",
+            details=f"observed={observed!r}, expected={expected!r}{filt}{suppressed}",
             observed_label=observed,
             expected_label=expected,
         )
