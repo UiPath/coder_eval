@@ -980,3 +980,28 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
   broader "any comparison against a non-`success` literal" version fires on `analysis.py` x3
   and `codex_agent.py` and should not be built. — raised by the Plan A final review
   (multi-model + Opus, both independently).
+
+- [ ] **CE056 (RESERVED): a grader's answer key must never ship inside a mounted fixture.**
+      Everything under a `template_dir` is copied into every sandbox, so a `run_command` grader's
+      `expectations/` placed there hands the agent exactly what it is being marked against — and
+      the run looks completely normal. Measured on a real suite when it happened by accident: on
+      the same 11 rows the mean went **0.9158 clean -> 0.9461 leaked**, two rows flipping from
+      partial to perfect. That is larger than most effects an optimization round exists to detect,
+      and it inflates **every arm**, so no cross-arm comparison can reveal it.
+      `optimize_search.candidate_leaks` does not cover this — it asks whether a CANDIDATE
+      reproduces train-row text, not whether the FIXTURE ships the marking scheme.
+
+      **Not built now, deliberately: it would pass vacuously.** The only discoverable subject in
+      the tree is the bundled `reference/templates/outcome.yaml`, whose mounted
+      `./outcome-fixture` is a one-file placeholder — so a tree-walking rule would report clean
+      whether or not it worked, which is the exact CE044/CE045 failure. The assertion exists
+      instead as `TestPluginArtifacts::test_outcome_grader_lives_outside_any_mounted_fixture`,
+      scoped to that one file by construction and carrying a non-empty-mount-set GAP check.
+
+      **Promotion trigger:** a SECOND outcome suite with a `run_command` grader appears (in
+      `tasks/`, `templates/`, or the plugin). Fold in the sibling rule rejected for the same
+      one-subject reason at the same time — **a grader criterion must set
+      `score_from_stdout: true`**, since a binary grader over a dozen-odd rows manufactures the
+      execution gate's zero-variance refusal (today's single subject is pinned by
+      `test_outcome_template_grader_slot_is_continuous`). — caught in the
+      2026-08-17 outcome-suite-mode plan, Phase 5.

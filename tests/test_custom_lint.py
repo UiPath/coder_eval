@@ -2451,6 +2451,69 @@ class TestPluginArtifacts:
                 "against the same expectations file"
             )
 
+    def test_outcome_grader_lives_outside_any_mounted_fixture(self):
+        """The answer key must not ship inside the exam.
+
+        Everything under a mounted `template_dir` is copied into EVERY sandbox, so a grader's
+        expectations placed there hand the agent exactly what it is being marked against — and the
+        run still looks completely normal. `outcome.yaml`'s `sandbox:` comment carries the measured
+        cost of that accident; this is the assertion that keeps the shipped layout honest.
+
+        **Why this is not a numbered CE rule.** A tree-walking rule would have exactly one
+        discoverable subject today, and that subject's mounted fixture is a placeholder directory —
+        so the rule would pass whether or not it worked, which is the vacuous-pass failure CE044 and
+        CE045 exist to prevent. It is reserved as CE056 in `.claude/harness-candidates.md`, to be
+        promoted when a second outcome suite with a `run_command` grader appears. Scoped to
+        `outcome.yaml` by construction, deliberately: this is not a repo-wide scan, and
+        `tasks/skills/ci-outcome.yaml` (no `run_command` at all) is not a grader suite.
+        """
+        from coder_eval.models import RepoSource, RunCommandCriterion, StarterFilesSource, TemplateDirSource
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+        # EVERY member of the `TemplateSource` union is decided here, and the `else` is why: a
+        # fourth source type must FAIL this test rather than fall through, or the mount set
+        # silently shrinks on exactly the change that should widen it.
+        mounts: list[Path] = []
+        for source in task.sandbox.template_sources or []:
+            if isinstance(source, TemplateDirSource):
+                mounts.append(Path(source.path).resolve())
+            elif isinstance(source, StarterFilesSource):
+                # Inline content: each `StarterFile.path` is a sandbox DESTINATION, so this source
+                # mounts no host directory and nothing of ours can be under it.
+                continue
+            elif isinstance(source, RepoSource):
+                continue  # a remote clone: no local path exists until it is fetched
+            else:
+                pytest.fail(
+                    f"GAP: {type(source).__name__} is a template source this assertion does not "
+                    "classify. If it copies a host directory into the sandbox, its path must join "
+                    "`mounts`; if it does not, say so — silence here reads as 'checked'"
+                )
+        assert mounts, (
+            "GAP: no mounted directory was discovered on outcome.yaml, so this assertion proves "
+            "nothing. Either the fixture mount was removed or `template_sources` was renamed — "
+            "either way the layout is no longer being checked"
+        )
+
+        graders = [c for c in task.success_criteria if isinstance(c, RunCommandCriterion)]
+        assert graders, "the outcome template ships no `run_command` grader to locate"
+        # The path the template TELLS an author to use, and the scaffold this repo actually ships.
+        # Both matter: the first is what a user copies, the second is what they copy it from.
+        declared = [Path(part) for c in graders for part in c.command.split() if part.endswith(".py")]
+        assert declared, f"no .py path found in the grader command {graders[0].command!r}"
+        bundled = self.GRADER.resolve()
+        for candidate in [*declared, bundled, bundled.parent / "expectations"]:
+            resolved = candidate.resolve() if candidate.is_absolute() else (self.TEMPLATES / candidate).resolve()
+            for mount in mounts:
+                # The PATH RELATIONSHIP, asserted whether or not the mount exists on disk — skipping
+                # a missing directory is how this becomes the vacuous pass it exists to avoid.
+                assert mount != resolved and mount not in resolved.parents, (
+                    f"{resolved} sits under the mounted fixture {mount}, so it is copied into every "
+                    "sandbox. A grader's expectations there tell the agent what it is being marked "
+                    "against, every arm's score rises, and no cross-arm comparison can reveal it"
+                )
+
     def test_outcome_template_scores_artifacts_not_prose(self):
         # "Score outcomes, not prose" is the execution track's core instruction, and the
         # template is what everyone copies. An LLM judge adds variance to the very number
