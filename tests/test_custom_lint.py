@@ -6298,23 +6298,27 @@ class TestCE045SkipOnIgnoredPath:
 
 @pytest.mark.lint
 class TestHolmRejectionsIsConfined:
-    """`holm_rejections` may be called only from `optimize_gate`, and only by its two wrappers.
+    """`holm_rejections` may be called only from `optimize_gate`, and only by `_holm_family`.
 
     Holm is a property of a FAMILY. A call site that sees one candidate at a time degenerates to
-    an uncorrected `p <= alpha` while still looking like a correction — the failure mode both
+    an uncorrected `p <= alpha` while still looking like a correction — the failure mode the two
     wrappers exist to prevent, and one no type or test of theirs can catch from the outside.
 
     CLAUDE.md said `holm_promote` was the ONLY call site until the execution track got its own
-    gate. The honest replacement is "both call sites live in optimize_gate", and that is worth a
-    sensor rather than a sentence — the same reasoning that confines the F1 idiom (CE037).
+    gate, and then "both call sites live in optimize_gate". There is now exactly ONE: the two
+    wrappers spelled the same three-line preamble 700 lines apart, and `_holm_family` is the single
+    declaration they both call. **That is strictly stricter to audit than two were** — the
+    membership rule (`p_value is not None`) and the original-index mapping are stated once, so the
+    two tracks cannot drift on either, and this assertion now fails on a SECOND call site rather
+    than only on a third.
 
     CALL NODES are counted, not files. A file-set assertion was already true before this existed
-    and would have proved nothing; counting calls is what catches a third one appearing INSIDE
+    and would have proved nothing; counting calls is what catches another one appearing INSIDE
     `optimize_gate`, which is exactly where it would be written.
     """
 
     SRC = Path(__file__).parent.parent / "src" / "coder_eval"
-    ALLOWED: ClassVar[set[str]] = {"holm_promote", "holm_promote_execution"}
+    ALLOWED: ClassVar[set[str]] = {"_holm_family"}
 
     @staticmethod
     def _call_sites(tree: ast.AST) -> list[tuple[str, int]]:
@@ -6338,7 +6342,7 @@ class TestHolmRejectionsIsConfined:
                 sites.append((enclosing.get(id(node), "<module>"), node.lineno))
         return sites
 
-    def test_exactly_two_call_sites_both_in_optimize_gate(self):
+    def test_exactly_one_call_site_inside_optimize_gate(self):
         found: dict[str, list[tuple[str, int]]] = {}
         for module in sorted(self.SRC.rglob("*.py")):
             sites = self._call_sites(ast.parse(module.read_text(encoding="utf-8")))
@@ -6347,13 +6351,15 @@ class TestHolmRejectionsIsConfined:
 
         assert set(found) == {"optimize_gate.py"}, (
             f"holm_rejections is called from {sorted(found)}. Holm corrects a FAMILY, so every call "
-            "site has to see the whole family at once — which is why both wrappers live in one "
-            "module. A caller elsewhere is almost certainly correcting one candidate at a time."
+            "site has to see the whole family at once — which is why both wrappers route through "
+            "one helper in one module. A caller elsewhere is almost certainly correcting one "
+            "candidate at a time."
         )
         callers = sorted(name for name, _line in found["optimize_gate.py"])
         assert callers == sorted(self.ALLOWED), (
-            f"holm_rejections is called by {callers}, not {sorted(self.ALLOWED)}. A third call — even "
-            "inside optimize_gate — is a family being decided somewhere that cannot see all of it."
+            f"holm_rejections is called by {callers}, not {sorted(self.ALLOWED)}. A SECOND call — even "
+            "inside optimize_gate — is a family being decided somewhere that cannot see all of it, "
+            "and a second declaration of the membership rule the two tracks must agree on."
         )
 
     def test_a_third_call_inside_the_module_is_caught(self):

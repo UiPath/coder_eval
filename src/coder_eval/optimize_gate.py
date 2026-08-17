@@ -150,6 +150,27 @@ def _task_json_pattern(variant_id: str, suite_id: str) -> str:
     return f"<run>/{variant_id}/{suite_id}/{TASK_JSON_GLOB}"
 
 
+def _wrong_path_reason(variant_id: str, suite_id: str, run_dirs: Sequence[Path]) -> str:
+    """The SILENT-ZERO message: nothing matched, and that is a path fault rather than a result.
+
+    Beside :func:`_task_json_pattern` and for the same reason. Both floors returned this sentence
+    byte-identically, 130 lines apart, and the copies had already diverged: the execution twin
+    appended ``or "no run dirs were given"`` for an empty sequence and the activation one did not,
+    so the same fault read as ``under `` on one track and named the case on the other. The divergence
+    is exactly what duplication produces, so the fuller form is folded in for both — an empty
+    ``run_dirs`` now reads the same either way.
+
+    Two paraphrases elsewhere are deliberately NOT collapsed into this: ``_load_and_pair`` prefixes
+    ``the {arm} arm loaded ZERO rows:`` and ``_execution_diagnostics`` names both arms and carries a
+    guardrail tail. They share this clause; they are not this message.
+    """
+    searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
+    return (
+        f"nothing matched {_task_json_pattern(variant_id, suite_id)} under {searched} — that "
+        + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
+    )
+
+
 def load_suite_rows(run_dir: Path, variant_id: str, suite_id: str) -> dict[str, list[EvaluationResult]]:
     """Every row's replicate results for one arm of one run, keyed by row id.
 
@@ -1043,12 +1064,7 @@ def measure_noise_floor(
     # `not any(per_dir)` rather than the twin's `not rows`: that one pools once, this one keeps the
     # per-invocation maps because it splits them into halves.
     if not any(per_dir):
-        searched = ", ".join(str(d) for d in run_dirs)
-        return _no_floor(
-            f"nothing matched {_task_json_pattern(variant_id, suite_id)} under {searched} — that "
-            + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement",
-            reasons=reasons,
-        )
+        return _no_floor(_wrong_path_reason(variant_id, suite_id, run_dirs), reasons=reasons)
 
     # The null split assumes both halves measure the SAME thing. Pooling a train invocation with
     # a test one breaks that assumption before any arithmetic happens, so refuse rather than
@@ -1148,11 +1164,7 @@ def measure_execution_noise_floor(
     # "no row carries 2+ replicates" would send the reader off to check --repeats instead of the
     # path. Distinguished here for the same reason `activation_gate` distinguishes it.
     if not rows:
-        searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
-        return _no_floor(
-            f"nothing matched {_task_json_pattern(variant_id, suite_id)} under {searched} — that "
-            + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
-        )
+        return _no_floor(_wrong_path_reason(variant_id, suite_id, run_dirs))
 
     # Same refusal as the activation floor, and for the same reason: a null comparison pooled
     # over run directories that selected different row sets is not a floor for any of them.
@@ -1927,6 +1939,42 @@ def _note_holm_family(family_size: int, alpha: float) -> str:
     return f"Holm applied across a family of {family_size} at alpha={alpha}."
 
 
+class _HolmFamily(NamedTuple):
+    """Who was in the family, and whom Holm rejected — by ORIGINAL index in both cases.
+
+    ``members`` is ``[(original_index, p)]`` and ``rejected_at`` a set of ORIGINAL indices, not
+    positions in the filtered vector. That mapping is the whole content of this helper: the family
+    excludes every ``p_value is None`` verdict, so a naive ``enumerate`` over the filtered list
+    shifts every index after the first exclusion and Holm's answer lands on the wrong candidate —
+    silently, since both are plausible-looking ints.
+    """
+
+    members: list[tuple[int, float]]
+    rejected_at: set[int]
+
+
+def _holm_family(verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict], alpha: float) -> _HolmFamily:
+    """The one place :func:`~coder_eval.reports_stats.holm_rejections` is called.
+
+    Both wrappers spelled these three lines identically, 700 lines apart. Holm corrects a FAMILY,
+    so a call site that sees one candidate at a time degenerates to an uncorrected ``p <= alpha``
+    while still looking like a correction — and ``TestHolmRejectionsIsConfined`` asserts the SET of
+    enclosing function names, so one declaration is stricter to audit than two.
+
+    Membership is ``p_value is not None`` and nothing else. A refused verdict that still measured a
+    p stays IN: it was tested however degenerate its sample turned out to be, and dropping it would
+    shrink ``m`` and loosen ``alpha/m`` for its siblings — the uncorrected-``p <= alpha``
+    degeneration approached from the other side.
+
+    Structurally typed over the two verdict models rather than behind a ``Protocol``: both expose
+    ``p_value``, the union is two concrete classes this module already imports, and a protocol here
+    would be a third declaration of "has a p_value" for no reader's benefit.
+    """
+    members = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
+    rejections = holm_rejections([p for _i, p in members], alpha)
+    return _HolmFamily(members, {i for (i, _p), reject in zip(members, rejections, strict=True) if reject})
+
+
 def _note_check_failed(check_name: str) -> str:
     """Which non-primary check vetoed a promotion the statistic had otherwise won.
 
@@ -2040,6 +2088,86 @@ def _refusal_message(verdict: ActivationGateVerdict, *, threshold: float, family
     )
 
 
+def _activation_notes(
+    verdict: ActivationGateVerdict,
+    *,
+    p_value: float,
+    rejected: bool,
+    refusal: str | None,
+    siblings_hold: bool,
+    threshold: float,
+    family_size: int,
+    alpha: float,
+) -> list[str]:
+    """Every note :func:`holm_promote` adds to a MEASURED verdict, in rendered order.
+
+    A pure function of one verdict plus the family facts, extracted because the ladder is what
+    made ``holm_promote`` an E-grade function once the guardrail veto and the refusal guard landed
+    on top of it. Nothing here decides anything: ``promoted`` is computed by the caller and is not
+    read.
+
+    ``p_value`` is passed rather than read off the verdict, making the contract explicit: this
+    ladder runs only on the MEASURED branch, after ``holm_promote`` has already returned for
+    every ``p_value is None`` verdict. Reading ``verdict.p_value`` here would be ``float | None``
+    and would need a coercion that quietly renders ``p = 0.0000`` for a verdict that never had
+    a p at all.
+
+    **Two tiers, and the split is the contract.** The first four rungs are NEGATIVE-RESULT claims —
+    sentences about a candidate that lost — and every one is suppressed under a refusal, because a
+    refusal says the comparison decided nothing and a claim beneath it is a second, contradictory
+    one. Three of the four used to fire regardless. The last two are NOT negative-result claims:
+    the resolution-floor warning is a statement about the draw count and the family note about the
+    family, and both stay true under a refusal, so both sit outside the guard. The execution track
+    draws the line in exactly the same place.
+    """
+    notes: list[str] = []
+    favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
+    # The interval must exclude zero as well as the corrected test rejecting. Holm is the stricter
+    # of the two almost always, so this changes nothing on a typical family — but it keeps "promote
+    # when the interval excludes zero" literally true, which is how the method file states the rule
+    # and how anyone reading the rendered block will check it. Kept apart from `verdict.separated`
+    # so the rungs can say WHICH of the two failed, which is their whole content.
+    excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
+
+    if refusal is None:
+        if rejected and favours_candidate and siblings_hold and not excludes_zero:
+            notes.append(_NOTE_CI_CONTAINS_ZERO)
+        if rejected and not siblings_hold:
+            notes.append(
+                "not promoted: the interval separates but a sibling's recall.yes dropped — this candidate "
+                + "moved the failure rather than fixing it."
+            )
+        if rejected and not favours_candidate:
+            notes.append("not promoted: the interval separates in the incumbent's favour.")
+        if not rejected:
+            notes.append(_note_ordinary_negative(p_value, family_size, alpha))
+        # Names WHICH guardrail vetoed, mirroring the execution track's loop. `sibling_checks` is
+        # deliberately NOT iterated: the rung above is already the single declaration for a sibling
+        # failure. Guarded further on `rejected and separated`, the same conjuncts the BLOCKED
+        # headline is keyed on — on a candidate that merely lost the guardrail forced nothing, so
+        # the note would claim a veto that did not happen.
+        if rejected and verdict.separated:
+            notes += [_note_check_failed(check.name) for check in verdict.guardrails if not check.passed]
+
+    # A p at the resample floor is a resolution statement, not a measurement: the corrected
+    # threshold can sit BELOW what the bootstrap can express, and then no candidate can ever
+    # promote however good it is. Measured: 4 perfect candidates at 8 rows flip from all-rejected
+    # to all-promoted between 2,000 and 20,000 resamples on identical data. OUTSIDE the guard —
+    # it is true whatever the refusal says.
+    estimator_floor = bootstrap_p_floor(verdict.n_resamples)
+    if p_value <= NEAR_FLOOR_MULTIPLE * estimator_floor:
+        notes.append(
+            f"p = {p_value:.4f} is at or near this bootstrap's resolution floor "
+            + f"({estimator_floor:.4f} at {verdict.n_resamples} draws), and the Holm threshold for "
+            + f"this rank is {threshold:.4f}. Where the threshold approaches the floor the decision is "
+            + "being made by the resample count rather than by the data — re-run the gate with a larger "
+            + "n_resamples before believing either answer. A small suite has its own coarser floor: with "
+            + "few positive rows the smallest achievable p is bounded well above the estimator's."
+        )
+    notes.append(_note_holm_family(family_size, alpha))
+    return notes
+
+
 def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_ALPHA) -> list[ActivationGateVerdict]:
     """Decide the whole survivor family at once, and record the decision on each verdict.
 
@@ -2083,9 +2211,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     nothing else: a refused verdict is outside it, so ``m`` (and therefore every sibling's
     ``alpha/m``) is unchanged by its presence.
     """
-    family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
-    rejections = holm_rejections([p for _i, p in family], alpha)
-    rejected_at = {i for (i, _p), reject in zip(family, rejections, strict=True) if reject}
+    family, rejected_at = _holm_family(verdicts, alpha)
 
     decided: list[ActivationGateVerdict] = []
     for i, verdict in enumerate(verdicts):
@@ -2112,67 +2238,26 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         # only remaining asymmetry is that it also has `integrity_checks` to fold in.
         blocked = any(not check.passed for check in verdict.guardrails)
         rejected = i in rejected_at
-        # Kept as separate locals rather than read off `verdict.separated`, so the note rungs below
-        # can say WHICH of the two failed — which is the whole content of those notes. The
-        # execution track keeps them apart for the same reason.
-        favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
-        # The interval must exclude zero as well as the corrected test rejecting. Holm is the
-        # stricter of the two almost always, so this changes nothing on a typical family — but it
-        # keeps "promote when the interval excludes zero" literally true, which is how the method
-        # file states the rule and how anyone reading the rendered block will check it.
-        excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
+        # `verdict.separated` is the two statistical conjuncts as ONE named property. The note
+        # ladder needs them apart, to say WHICH failed — it splits them itself, where the sentences
+        # that depend on the distinction live.
+        #
         # `refusal is None` is LOAD-BEARING, not belt-and-braces. `p_floor` bounds the p's
         # EXPECTATION, so a realized p dips below it on roughly half of all seeds (measured: 16 of
         # 30 on the 6-row fixture at 20,000 draws). Without this conjunction an unpromotable suite
         # promotes on a coin-flip AND carries a refusal — two contradictory claims in one block,
         # and the defect this whole field exists to fix, reborn.
         promoted = rejected and verdict.separated and siblings_hold and not blocked and refusal is None
-        # EVERY negative-result rung is guarded on the refusal, not just the last one. Three of
-        # these four used to fire regardless, so a refused verdict whose difference happened to
-        # favour the incumbent printed `not promoted: the interval separates in the incumbent's
-        # favour.` directly beneath `**CANNOT SEPARATE AT THIS SIZE — … so this is NOT a negative
-        # result about it.**` — two contradictory claims in one block, on the page a user pastes
-        # into a promotion ledger. `promoted` was already correct; the defect was confined to the
-        # rendered prose. `holm_promote_execution` has carried this guard as one `if not refused:`
-        # from the start, and this mirrors it.
-        if refusal is None:
-            if rejected and favours_candidate and siblings_hold and not excludes_zero:
-                notes.append(_NOTE_CI_CONTAINS_ZERO)
-            if rejected and not siblings_hold:
-                notes.append(
-                    "not promoted: the interval separates but a sibling's recall.yes dropped — this candidate "
-                    + "moved the failure rather than fixing it."
-                )
-            if rejected and not favours_candidate:
-                notes.append("not promoted: the interval separates in the incumbent's favour.")
-            if not rejected:
-                notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
-        # Names WHICH guardrail vetoed, mirroring the execution track's loop. `sibling_checks` is
-        # deliberately NOT iterated here: the rung four lines above is already the single
-        # declaration for a sibling failure, and this would print a second sentence about it.
-        #
-        # Guarded on exactly the conditions that make the sentence TRUE — the same three the
-        # BLOCKED headline is keyed on. Under a refusal the headline is not a decision; and on a
-        # candidate that merely LOST the guardrail forced nothing, so the note would claim a veto
-        # that did not happen and cite a headline the block does not carry, which is the "fix cost
-        # when the real problem is power" misdirection the rung's `holm_rejected` conjunct removes.
-        if refusal is None and rejected and verdict.separated:
-            notes += [_note_check_failed(check.name) for check in verdict.guardrails if not check.passed]
-        # A p at the resample floor is a resolution statement, not a measurement: the corrected
-        # threshold can sit BELOW what the bootstrap can express, and then no candidate can ever
-        # promote however good it is. Measured: 4 perfect candidates at 8 rows flip from all-rejected
-        # to all-promoted between 2,000 and 20,000 resamples on identical data.
-        estimator_floor = bootstrap_p_floor(verdict.n_resamples)
-        if verdict.p_value <= NEAR_FLOOR_MULTIPLE * estimator_floor:
-            notes.append(
-                f"p = {verdict.p_value:.4f} is at or near this bootstrap's resolution floor "
-                + f"({estimator_floor:.4f} at {verdict.n_resamples} draws), and the Holm threshold for "
-                + f"this rank is {threshold:.4f}. Where the threshold approaches the floor the decision is "
-                + "being made by the resample count rather than by the data — re-run the gate with a larger "
-                + "n_resamples before believing either answer. A small suite has its own coarser floor: with "
-                + "few positive rows the smallest achievable p is bounded well above the estimator's."
-            )
-        notes.append(_note_holm_family(len(family), alpha))
+        notes += _activation_notes(
+            verdict,
+            p_value=verdict.p_value,
+            rejected=rejected,
+            refusal=refusal,
+            siblings_hold=siblings_hold,
+            threshold=threshold,
+            family_size=len(family),
+            alpha=alpha,
+        )
         # The refusal lives on `gate_refusal` and NOT in `notes`: notes is the "everything the
         # reader needs to distrust the numbers" channel, a refusal is a headline, and duplicating
         # it would print the same sentence twice in one block.
@@ -2952,9 +3037,7 @@ def holm_promote_execution(
     genuine candidate reading NOT PROMOTED because a sibling's sample was degenerate — which is the
     multiplicity that was actually incurred, and the conservative direction.
     """
-    family = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
-    rejections = holm_rejections([p for _i, p in family], alpha)
-    rejected_at = {i for (i, _p), reject in zip(family, rejections, strict=True) if reject}
+    family, rejected_at = _holm_family(verdicts, alpha)
 
     decided: list[ExecutionGateVerdict] = []
     for i, verdict in enumerate(verdicts):

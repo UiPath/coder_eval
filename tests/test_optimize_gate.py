@@ -61,6 +61,7 @@ from coder_eval.optimize_gate import (
     _balance_pair,
     _discreteness_floor,
     _execution_diagnostics,
+    _holm_family,
     _holm_threshold,
     _label_pairs,
     _load_and_pair,
@@ -71,6 +72,7 @@ from coder_eval.optimize_gate import (
     _row_cost_levels,
     _row_costs,
     _sibling_checks,
+    _wrong_path_reason,
     activation_gate,
     arm_row_scores,
     candidate_leaks,
@@ -3112,6 +3114,86 @@ class TestEveryMissingFloorSaysWhy:
         with caplog.at_level(logging.WARNING):
             assert _execution_floor(_weighted_arm(tmp_path, "incumbent", {"r0": [0.1, 0.2]})) is None
         assert "carry 2+ replicates" in caplog.text
+
+
+class TestTheTwoDeduplications:
+    """`_wrong_path_reason` and `_holm_family` each replace a byte-identical copy.
+
+    A dedup that changes user-facing text is a silent report change, so the messages are asserted
+    against pre-change LITERALS rather than against each other — comparing the two call sites to
+    one another would pass just as happily if both had moved together.
+    """
+
+    def test_the_wrong_path_message_is_byte_identical_to_before(self, tmp_path: Path) -> None:
+        expected = (
+            f"nothing matched <run>/incumbent/{SUITE}/*/*/task.json under {tmp_path}/a, {tmp_path}/b — "
+            "that is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
+        )
+        assert _wrong_path_reason("incumbent", SUITE, [tmp_path / "a", tmp_path / "b"]) == expected
+
+    def test_both_floors_emit_that_message_verbatim(self, tmp_path: Path, caplog) -> None:
+        dirs = [tmp_path / "a", tmp_path / "b"]
+        expected = _wrong_path_reason("incumbent", SUITE, dirs)
+        for call in (
+            lambda: measure_noise_floor(
+                run_dirs=dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0, model="m"
+            ),
+            lambda: _execution_floor(dirs),
+        ):
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                assert call() is None
+            assert expected in caplog.text
+
+    def test_the_empty_run_dirs_divergence_is_folded_in(self) -> None:
+        """The ONE real difference the two copies had, and the reason to collapse them.
+
+        The execution twin appended `or "no run dirs were given"` and the activation one did not,
+        so an empty sequence read as a message trailing `under ` on one track and named the case on
+        the other. Both now name it — the fuller form wins, which loses nothing.
+        """
+        assert "under no run dirs were given" in _wrong_path_reason("incumbent", SUITE, [])
+
+    def test_holm_family_maps_original_indices_with_an_excluded_verdict_in_the_middle(self) -> None:
+        """The off-by-one a naive `enumerate` over the filtered list produces.
+
+        The `None`-p verdict is deliberately in the MIDDLE: with it last, filtered and original
+        indices agree and a broken mapping still passes.
+        """
+        verdicts = [
+            _parity_activation(p_value=0.001),
+            _parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None),
+            _parity_activation(p_value=0.002),
+        ]
+        family, rejected_at = _holm_family(verdicts, DEFAULT_ALPHA)
+        assert [i for i, _p in family] == [0, 2], "membership is by ORIGINAL index"
+        assert rejected_at == {0, 2}
+        # And end to end: the excluded verdict is index 1, and its neighbours keep their decisions.
+        decided = holm_promote(verdicts)
+        assert [v.holm_rejected for v in decided] == [True, False, True]
+        assert [v.promoted for v in decided] == [True, False, True]
+
+    def test_holm_family_handles_an_empty_family(self) -> None:
+        verdicts = [_parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None)]
+        family, rejected_at = _holm_family(verdicts, DEFAULT_ALPHA)
+        assert family == [] and rejected_at == set()
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_promoted_vector_is_unchanged_by_the_extraction(self, gate, build) -> None:
+        """Both wrappers decide the same family the same way after routing through one helper.
+
+        Holm's step-down over `[0.001, 0.02, 0.9]` at alpha 0.05: 0.001 <= 0.05/3 rejects,
+        0.02 <= 0.05/2 rejects, 0.9 > 0.05/1 stops. The thresholds are spelled out because the
+        answer is not the one a reader guesses — an uncorrected `p <= alpha` gives the same first
+        two and would pass a test that only asserted the last.
+        """
+        family = [build(p_value=p) for p in (0.001, 0.02, 0.9)]
+        decided = gate(family)
+        assert [v.holm_rejected for v in decided] == [True, True, False]
+        assert [v.promoted for v in decided] == [True, True, False]
+        # And the correction genuinely bites: the same p in a family of FOUR is decided against
+        # alpha/4 = 0.0125 and no longer rejects.
+        assert gate([build(p_value=0.02) for _ in range(4)])[0].holm_rejected is False
 
 
 class TestTheMdeNoteNamesTheRealCause:
