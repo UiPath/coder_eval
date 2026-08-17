@@ -564,6 +564,7 @@ def noise_floor_mde(
     n_resamples: int = GATE_RESAMPLES,
     measurements: OptimizeMeasurements | None = None,
     model: str | None = None,
+    reasons: list[str] | None = None,
 ) -> float | None:
     """The smallest F1 difference this suite at this size can resolve — the minimum detectable effect.
 
@@ -580,11 +581,30 @@ def noise_floor_mde(
     ``model`` comes from :func:`resolve_model` and from nothing else; a ``None`` model never
     caches and never matches, so a mixed-model suite always recomputes.
 
+    Pass ``reasons`` to find out WHY a ``None`` came back. It is a list this appends to, not a
+    changed return type, and that is deliberate: this function is public and imported by the
+    skill's inline snippets, so widening ``float | None`` would break a user's terminal. The
+    parameter is keyword-only and defaults to ``None``, so every existing caller is untouched.
+    FIVE causes are reachable through here — fewer than 2 invocations, a run tree holding results
+    no invocation recorded, a wrong variant/suite/run-dir path, run dirs recording different
+    ``--split`` values, and fewer than 2 rows scored in both halves — and the hardcoded sentence
+    ``activation_gate`` used to print named only the first.
+
+    **At most ONE reason is recorded per call**, because every ``_no_floor`` call site is a
+    ``return``: the first cause to fire ends the function. So a caller reads ``reasons[0]`` and a
+    fresh list per call is the intended use. Reusing one list across arms would silently keep the
+    first arm's cause in front of the second arm's, which the five-cause list above might otherwise
+    suggest is an accumulation. (:func:`_floor_from_clusters` records a
+    sixth, the bootstrap declining, which both floors' own ``< 2`` guards make unreachable from
+    them; it is defence in depth for a direct caller, and it forwards the sink so a future path
+    that does reach it is not silent.)
+
     To RECORD what this measured, call :func:`measure_noise_floor` instead — it returns the whole
     keyed record, including the row count, which this function does not expose.
     """
     _require_valid_criterion_index(criterion_index)
     measured = measure_noise_floor(
+        reasons=reasons,
         run_dirs=run_dirs,
         variant_id=variant_id,
         suite_id=suite_id,
@@ -890,8 +910,20 @@ def _split_mismatch_reason(label: str, provenance: SplitProvenance, run_dirs: Se
     )
 
 
-def _no_floor(reason: str) -> None:
-    """Log why a null comparison could not be made, and return None.
+def _no_floor(reason: str, *, reasons: list[str] | None = None) -> None:
+    """Log why a null comparison could not be made, optionally record it, and return None.
+
+    ``reasons`` is an out-parameter SINK rather than a changed return type, and that is the whole
+    reason it exists: :func:`noise_floor_mde` is public and imported by the skill's inline
+    snippets, so widening its ``float | None`` would break a user's terminal. An optional list the
+    caller passes down costs every existing caller nothing and lets ``activation_gate`` render the
+    ACTUAL cause instead of guessing at one.
+
+    **Only the ACTIVATION floor threads it today**, and that is stated rather than left to be
+    discovered: :func:`measure_execution_noise_floor` calls this function four times and passes
+    nothing, so ``_execution_diagnostics``' "the floor came back unavailable" advisory still names
+    no cause — the same defect on the other track, recorded in ``.claude/harness-candidates.md``
+    rather than half-fixed here.
 
     Both floor functions return ``None`` for several distinct reasons, and the caller is an agent
     about to decide whether to spend money. A silent ``None`` is indistinguishable from a floor of
@@ -902,6 +934,8 @@ def _no_floor(reason: str) -> None:
     An unconfigured ``logging.warning`` reaches stderr through Python's last-resort handler, so the
     agent driving the skill's inline snippet sees this without any logging setup.
     """
+    if reasons is not None:
+        reasons.append(reason)
     logger.warning("No noise floor could be computed: %s", reason)
     return None
 
@@ -912,6 +946,8 @@ def _floor_from_clusters[T](
     statistic: Callable[[list[T]], float],
     probe: NoiseFloor,
     measurements: OptimizeMeasurements | None,
+    *,
+    reasons: list[str] | None = None,
 ) -> NoiseFloor | None:
     """The cache lookup, the bootstrap and the half-width — the half both floors share.
 
@@ -938,7 +974,9 @@ def _floor_from_clusters[T](
         seed=probe.seed,
     )
     if bootstrap is None:
-        return _no_floor(f"the bootstrap declined on {len(clusters_a)} cluster(s) for {probe.suite_id!r} — it needs 2")
+        return _no_floor(
+            f"the bootstrap declined on {len(clusters_a)} cluster(s) for {probe.suite_id!r} — it needs 2", reasons
+        )
     _diff, ci_low, ci_high, _p = bootstrap
     return copy_with(probe, mde=(ci_high - ci_low) / 2.0)
 
@@ -954,6 +992,7 @@ def measure_noise_floor(
     seed: int = 0,
     n_resamples: int = GATE_RESAMPLES,
     measurements: OptimizeMeasurements | None = None,
+    reasons: list[str] | None = None,
 ) -> NoiseFloor | None:
     """The noise floor as a fully-keyed record, ready to hand to :func:`record_noise_floor`.
 
@@ -969,10 +1008,16 @@ def measure_noise_floor(
     Pass ``measurements`` to reuse a stored floor rather than recomputing; the lookup happens after
     the rows are loaded, because the row count is part of the key. Loading is cheap, the bootstrap
     is not.
+
+    Pass ``reasons`` — a fresh list — to find out WHY a ``None`` came back; at most one reason is
+    recorded, since every refusal here is a ``return``. See :func:`noise_floor_mde`, which forwards
+    it, for the five causes and for why this is a sink rather than a widened return type.
     """
     _require_valid_criterion_index(criterion_index)
     if len(run_dirs) < 2:
-        return _no_floor(f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}")
+        return _no_floor(
+            f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}", reasons=reasons
+        )
 
     # The same preflight both gates run, and for the same reason (CE053): a re-used `--run-dir`
     # leaves an earlier invocation's results on disk while `row_selection` is rewritten to describe
@@ -987,7 +1032,7 @@ def measure_noise_floor(
     # channel to surface it in, so the count is deliberately unused here.
     stale, _unknown_dirs = _reconcile_arms([(variant_id, run_dirs)], suite_id)
     if stale:
-        return _no_floor(_stale_tree_reason(stale))
+        return _no_floor(_stale_tree_reason(stale), reasons=reasons)
 
     per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
     # The same wrong-path guard `measure_execution_noise_floor` carries, and for the same reason: a
@@ -1001,7 +1046,8 @@ def measure_noise_floor(
         searched = ", ".join(str(d) for d in run_dirs)
         return _no_floor(
             f"nothing matched {_task_json_pattern(variant_id, suite_id)} under {searched} — that "
-            + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
+            + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement",
+            reasons=reasons,
         )
 
     # The null split assumes both halves measure the SAME thing. Pooling a train invocation with
@@ -1009,7 +1055,7 @@ def measure_noise_floor(
     # report a floor for a row set that does not exist.
     provenance = read_split_provenance(run_dirs)
     if provenance.mismatched:
-        return _no_floor(_split_mismatch_reason("the null split", provenance, run_dirs))
+        return _no_floor(_split_mismatch_reason("the null split", provenance, run_dirs), reasons=reasons)
 
     midpoint = (len(per_dir) + 1) // 2
     first, second = _pool(per_dir[:midpoint]), _pool(per_dir[midpoint:])
@@ -1021,7 +1067,8 @@ def measure_noise_floor(
     if len(scored) < 2:
         return _no_floor(
             f"only {len(scored)} row(s) of {suite_id!r} scored a classification result at criterion "
-            + f"{criterion_index} in BOTH halves of the invocation split — an interval needs 2"
+            + f"{criterion_index} in BOTH halves of the invocation split — an interval needs 2",
+            reasons=reasons,
         )
 
     probe = NoiseFloor(
@@ -1042,7 +1089,9 @@ def measure_noise_floor(
         mde=0.0,
         computed_at=datetime.now(UTC),
     )
-    return _floor_from_clusters([a for a, _b in scored], [b for _a, b in scored], _f1_yes, probe, measurements)
+    return _floor_from_clusters(
+        [a for a, _b in scored], [b for _a, b in scored], _f1_yes, probe, measurements, reasons=reasons
+    )
 
 
 def measure_execution_noise_floor(
@@ -1702,6 +1751,10 @@ def activation_gate(
     )
     # The MDE is a NULL comparison, and only the incumbent supplies one — splitting the
     # candidate's invocations would measure a different arm's noise.
+    #
+    # The sink is what lets the note below name the ACTUAL cause. Five are reachable, and the
+    # sentence this replaces named one of them unconditionally.
+    mde_reasons: list[str] = []
     mde = noise_floor_mde(
         run_dirs=incumbent_run_dirs,
         variant_id=incumbent_variant,
@@ -1710,6 +1763,7 @@ def activation_gate(
         confidence=confidence,
         seed=seed,
         n_resamples=n_resamples,
+        reasons=mde_reasons,
     )
     # THE ALL-NEGATIVE SUBSET. When the target label appears in neither arm's pairs, `f1.yes` is
     # undefined on both arms and reads 0.0 by the ClassificationMetrics convention — so the block
@@ -1793,9 +1847,16 @@ def activation_gate(
             + "as a comfortable win — the suite cannot resolve a difference this size reliably."
         )
     elif mde is None:
+        # The REAL cause, threaded out of `measure_noise_floor` rather than guessed at. This used
+        # to say "(a null comparison needs at least two invocations of the incumbent)"
+        # unconditionally, which is false for five of the six causes — reproduced on an incumbent
+        # with TWO invocations where one row scored in both halves, which rendered "needs at least
+        # two invocations" beside `len(incumbent_run_dirs) == 2`. The generic tail is the fallback
+        # for a `None` that arrived with no reason recorded, which no path produces today.
+        cause = mde_reasons[0] if mde_reasons else "no reason was recorded"
         notes.append(
-            "the minimum detectable effect could not be computed (a null comparison needs at least two "
-            + "invocations of the incumbent), so nothing here says how small a difference this suite can resolve."
+            f"the minimum detectable effect could not be computed ({cause}), so nothing here says "
+            + "how small a difference this suite can resolve."
         )
 
     # Retained as a DIAGNOSTIC, never as the gate: the per-invocation ranges are what the old
@@ -2066,17 +2127,26 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         # promotes on a coin-flip AND carries a refusal — two contradictory claims in one block,
         # and the defect this whole field exists to fix, reborn.
         promoted = rejected and verdict.separated and siblings_hold and not blocked and refusal is None
-        if rejected and favours_candidate and siblings_hold and not excludes_zero:
-            notes.append(_NOTE_CI_CONTAINS_ZERO)
-        if rejected and not siblings_hold:
-            notes.append(
-                "not promoted: the interval separates but a sibling's recall.yes dropped — this candidate "
-                + "moved the failure rather than fixing it."
-            )
-        if rejected and not favours_candidate:
-            notes.append("not promoted: the interval separates in the incumbent's favour.")
-        if not rejected and refusal is None:
-            notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
+        # EVERY negative-result rung is guarded on the refusal, not just the last one. Three of
+        # these four used to fire regardless, so a refused verdict whose difference happened to
+        # favour the incumbent printed `not promoted: the interval separates in the incumbent's
+        # favour.` directly beneath `**CANNOT SEPARATE AT THIS SIZE — … so this is NOT a negative
+        # result about it.**` — two contradictory claims in one block, on the page a user pastes
+        # into a promotion ledger. `promoted` was already correct; the defect was confined to the
+        # rendered prose. `holm_promote_execution` has carried this guard as one `if not refused:`
+        # from the start, and this mirrors it.
+        if refusal is None:
+            if rejected and favours_candidate and siblings_hold and not excludes_zero:
+                notes.append(_NOTE_CI_CONTAINS_ZERO)
+            if rejected and not siblings_hold:
+                notes.append(
+                    "not promoted: the interval separates but a sibling's recall.yes dropped — this candidate "
+                    + "moved the failure rather than fixing it."
+                )
+            if rejected and not favours_candidate:
+                notes.append("not promoted: the interval separates in the incumbent's favour.")
+            if not rejected:
+                notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
         # Names WHICH guardrail vetoed, mirroring the execution track's loop. `sibling_checks` is
         # deliberately NOT iterated here: the rung four lines above is already the single
         # declaration for a sibling failure, and this would print a second sentence about it.
@@ -2631,11 +2701,17 @@ def _execution_diagnostics(
     printed under a refusal headline contradicts it. It is OR-ed with a cause found here, because
     "nothing has refused yet" has to include what this function itself decided three lines up.
 
-    It is **False at the only call site today**, and deliberately a parameter anyway: every cause
-    the gate finds before the statistic returns early, so none of them can reach this ladder. The
-    parameter is what keeps that an accident of the caller rather than an assumption baked in here
-    — a future cause that annotates and falls through would otherwise start printing a floor note
-    under its own refusal headline, which is the exact defect the two guards exist to prevent.
+    **It is reachable as ``True`` today, and the way it used to claim otherwise was a trap.** This
+    docstring said "False at the only call site" — but the TREE-RECONCILIATION cause does not
+    return: it calls ``_refuse`` and then ``break``s out of its variant loop, so control reaches
+    the call site with ``gate_refusal`` already set and ``refused_already=True``. A reader who
+    believed the old sentence would delete the two ``not refused_already`` guards below as dead
+    code, and a contaminated run would immediately print the MDE and tighter-than-floor advisories
+    under a ``NOT A RESULT`` headline — the exact contradiction those guards exist to prevent.
+
+    Every OTHER cause the gate finds before the statistic does return early, so the reconciliation
+    one is currently the only path that arrives here already refused. The parameter keeps that a
+    fact about the caller rather than an assumption baked in here.
     """
     notes: list[str] = []
     refusal: str | None = None

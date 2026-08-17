@@ -838,6 +838,19 @@ with the two `action.yml` items above — one considered change to the action's 
       standing guard, and its path scope names all six post-split module names so Phase 7 moving a
       reader cannot take it out of reach.
 
+- [ ] **The execution track's "the floor came back unavailable" advisory names no cause.**
+      `activation_gate` now threads the real reason out of `measure_noise_floor` through a
+      `reasons` sink, so its MDE note says WHICH of five causes fired instead of naming one
+      unconditionally (Plan B+C Phase 3). `_execution_diagnostics`' twin advisory
+      ("this suite's minimum detectable effect came back unavailable / 0.000") still names none,
+      because `measure_execution_noise_floor` does not thread the sink — the parameter was added
+      and then removed, since nothing called it and speculative surface is worse than a recorded
+      gap. Closing it is the same shape as the activation side: forward `reasons` from
+      `measure_execution_noise_floor`, collect it in `execution_gate`, and pass it into
+      `_execution_diagnostics` beside `mde`. Not done there because that advisory's text is pinned
+      in `optimize_verdicts/execution_gate.json`, so it needs a fixture regeneration and an
+      estimator-ledger row of its own. — caught in the Plan B+C Phase 3 quality review.
+
 ## From 2026-08-16 xlsx execution-track dogfood run
 
 First real `/coder-eval:optimize-skill` execution round against a THIRD-PARTY skill

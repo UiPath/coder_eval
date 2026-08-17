@@ -22,6 +22,7 @@ from unittest import mock
 import pytest
 from pydantic import ValidationError
 
+from coder_eval import optimize_gate
 from coder_eval.leak_detection import LEAK_MIN_CHARS
 from coder_eval.models import (
     ActivationGateVerdict,
@@ -2400,6 +2401,179 @@ class TestReusedRunDirIsRefused:
         assert self._gate_one(run_dir).gate_refusal is None
 
 
+_NEGATIVE_RESULT_FRAGMENTS = (
+    "not promoted:",
+    "did not clear the Holm threshold",
+    "still contains zero",
+    "the interval separates",
+    "FAILED — this forces",
+)
+
+_MDE_ADVISORY_FRAGMENTS = (
+    "minimum detectable effect",
+    "could not be priced",
+    "tighter than this suite's own noise floor",
+)
+
+
+def _negative_result_notes(notes: list[str]) -> list[str]:
+    """Every note that reads as a claim about a CANDIDATE that lost.
+
+    Read from the note LIST, never by `not in` over the rendered page: the block legitimately
+    contains the words "not promoted" in other sentences, and a `.replace()`d-string absence
+    assertion is the vacuity trap this repo has already been bitten by.
+    """
+    return [note for note in notes if any(fragment in note for fragment in _NEGATIVE_RESULT_FRAGMENTS)]
+
+
+class TestARefusalSuppressesNegativeResultProse:
+    """Under a refusal, no note may claim the candidate lost — on EITHER track.
+
+    A refusal says the comparison could not decide anything, so a negative-result note beneath it
+    is a second, contradictory claim in one block — on the page a user pastes into a promotion
+    ledger. `holm_promote_execution` has always guarded its whole ladder with one `if not refused:`;
+    `holm_promote` guarded exactly one of its four rungs, so three fired regardless.
+
+    The cross-product below is the point. Written as hand-picked cases, the three unguarded rungs
+    were individually plausible and nobody noticed the combination; asserting ONE RULE over every
+    combination is what makes the ladder a contract rather than three independently-remembered
+    guards.
+
+    **The MDE axis is deliberately absent from it, and that is a layering fact rather than a gap.**
+    The full invariant is "under a refusal, no negative-result note AND no MDE advisory". Neither
+    `holm_promote` nor `holm_promote_execution` can emit an MDE advisory — those are written in
+    `activation_gate` and `_execution_diagnostics`, before either Holm wrapper runs — so varying
+    `mde` here would add inert cases. The advisory half is asserted where it is producible:
+    `TestExecutionGateRefusesAReusedRunDir::test_refused_already_is_reachable_as_true` and
+    `TestExecutionDiagnostics::test_refused_already_suppresses_both_advisory_notes`, which cover a
+    branch each.
+
+    **On the activation track the exclusion is also a real asymmetry, not only layering.** A
+    discreteness refusal is set inside `holm_promote`, AFTER `activation_gate` has already written
+    its MDE notes, and nothing suppresses them — unlike the execution track, where
+    `refused_already` does. Both are resolution statements, so they reinforce the refusal rather
+    than contradict it and `promoted` is unaffected; it is stated here rather than presented as
+    pure layering.
+    """
+
+    @pytest.mark.parametrize("mean_diff", [0.5, -0.3, 0.0])
+    @pytest.mark.parametrize(("ci_low", "ci_high"), [(0.2, 0.75), (-0.5, -0.1), (-0.05, 0.6)])
+    @pytest.mark.parametrize("p_value", [0.001, 0.9])
+    @pytest.mark.parametrize("failing_sibling", [False, True])
+    def test_the_activation_ladder_is_silent_under_a_refusal(
+        self, mean_diff, ci_low, ci_high, p_value, failing_sibling
+    ) -> None:
+        sibling = [
+            GuardrailCheck(
+                name="sibling recall.yes [criterion 1]",
+                incumbent=1.0,
+                candidate=0.5,
+                relative_change=-0.5,
+                tolerance=0.0,
+                passed=False,
+            )
+        ]
+        # `p_floor` above every Holm threshold in a family of one, so `_refusal_message` fires
+        # whatever the other axes do.
+        refused = _parity_activation(
+            mean_diff=mean_diff,
+            ci_low=ci_low,
+            ci_high=ci_high,
+            p_value=p_value,
+            p_floor=0.9,
+            n_discordant=1,
+            sibling_checks=sibling if failing_sibling else [],
+            guardrails=[_failing_cost_check()],
+        )
+        decided = holm_promote([refused])[0]
+        assert decided.gate_refusal is not None, "the fixture must refuse for this to mean anything"
+        assert decided.promoted is False
+        assert _negative_result_notes(decided.notes) == [], decided.notes
+        assert _headline(render_markdown(decided)).startswith("CANNOT SEPARATE AT THIS SIZE")
+
+    @pytest.mark.parametrize("mean_diff", [0.5, -0.3])
+    @pytest.mark.parametrize(("ci_low", "ci_high"), [(0.2, 0.75), (-0.5, -0.1), (-0.05, 0.6)])
+    @pytest.mark.parametrize("p_value", [0.001, 0.9])
+    def test_the_execution_ladder_is_silent_under_a_refusal(self, mean_diff, ci_low, ci_high, p_value) -> None:
+        refused = _parity_execution(
+            mean_diff=mean_diff,
+            ci_low=ci_low,
+            ci_high=ci_high,
+            p_value=p_value,
+            gate_refusal="the observed difference is below this suite's MDE",
+            guardrails=[_failing_cost_check()],
+        )
+        decided = holm_promote_execution([refused])[0]
+        assert decided.promoted is False
+        assert _negative_result_notes(decided.notes) == [], decided.notes
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            # Three of these four sentences are SHARED `_note_*` declarations, so the expected
+            # fragment is the same on both tracks. The wrong-direction rung is deliberately not
+            # shared — activation says "the interval separates in the incumbent's favour", the
+            # execution track says "the paired difference favours the incumbent", because each
+            # names its own statistic — so only their common prefix is asserted here.
+            ({"p_value": 0.9}, "did not clear the Holm threshold"),
+            ({"mean_diff": -0.3, "ci_low": -0.5, "ci_high": -0.1}, "not promoted:"),
+            ({"ci_low": -0.05}, "still contains zero"),
+            ({"guardrails": [_failing_cost_check()]}, "FAILED — this forces"),
+        ],
+        ids=["lost", "wrong-direction", "ci-contains-zero", "vetoed"],
+    )
+    def test_the_same_verdicts_do_produce_those_notes_without_a_refusal(self, gate, build, kwargs, expected) -> None:
+        """Anti-vacuity for the suppression tests above, and for the fragment list itself.
+
+        If `_NEGATIVE_RESULT_FRAGMENTS` stopped matching anything the suppression assertions would
+        pass over an empty list forever — indistinguishable from a working guard. Every case here
+        is witnessed against a verdict that genuinely earns a negative-result note. Three of the
+        four pin the exact shared sentence; the wrong-direction case pins only the `"not promoted:"`
+        prefix the two tracks share, because each names its own statistic after it.
+        """
+        decided = gate([build(**kwargs)])[0]
+        assert decided.gate_refusal is None, "this half must NOT refuse"
+        notes = _negative_result_notes(decided.notes)
+        assert notes, decided.notes
+        assert any(expected in note for note in notes), notes
+
+    def test_the_reproduced_contradiction_is_gone(self) -> None:
+        """The exact verdict the reviewer reproduced against shipped code.
+
+        It rendered `**CANNOT SEPARATE AT THIS SIZE — … so this is NOT a negative result about
+        it.**` with `not promoted: the interval separates in the incumbent's favour.` directly
+        beneath. `promoted` was already correctly False — the defect was confined to the prose.
+        """
+        verdict = _parity_activation(
+            p_value=0.01, p_floor=0.2, mean_diff=-0.3, ci_low=-0.5, ci_high=-0.1, rows_paired=6, n_discordant=1
+        )
+        decided = holm_promote([verdict])[0]
+        assert decided.gate_refusal is not None
+        assert _negative_result_notes(decided.notes) == [], decided.notes
+        assert decided.promoted is False
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_family_and_near_floor_notes_survive_a_refusal(self, gate, build) -> None:
+        """They are NOT negative-result rungs, and must not be swept into the guard.
+
+        "Holm applied across a family of N" stays true under a refusal, and the execution track
+        keeps its family note outside `if not refused:` for exactly that reason. Sweeping them in
+        would leave a refused block unable to say what family it was decided in.
+        """
+        refusing = {"p_floor": 0.9, "n_discordant": 1} if build is _parity_activation else {"gate_refusal": "refused"}
+        decided = gate([build(**refusing)])[0]
+        assert decided.gate_refusal is not None
+        assert any("Holm applied across a family of" in note for note in decided.notes)
+        if build is _parity_activation:
+            # The near-floor note is the other rung that must NOT be swept in: it is a statement
+            # about the DRAW COUNT's resolution, which stays true whatever the refusal says. The
+            # fixture's p = 0.001 against a 2,000-draw floor of 0.0010 puts it inside
+            # NEAR_FLOOR_MULTIPLE, so this is a real witness rather than a vacuous branch.
+            assert any("at or near this bootstrap's resolution floor" in note for note in decided.notes)
+
+
 class TestGateRefusal:
     """A suite that structurally cannot separate is REFUSED, not reported as a negative result."""
 
@@ -2938,6 +3112,90 @@ class TestEveryMissingFloorSaysWhy:
         with caplog.at_level(logging.WARNING):
             assert _execution_floor(_weighted_arm(tmp_path, "incumbent", {"r0": [0.1, 0.2]})) is None
         assert "carry 2+ replicates" in caplog.text
+
+
+class TestTheMdeNoteNamesTheRealCause:
+    """`activation_gate`'s MDE note used to name ONE cause unconditionally, and there are five.
+
+    It said "(a null comparison needs at least two invocations of the incumbent)" whatever had
+    actually happened — reproduced against shipped code on an incumbent with TWO invocations where
+    one row scored in both halves, which rendered that sentence beside `len(run_dirs) == 2`. The
+    reason is threaded out through `noise_floor_mde(reasons=...)`, an additive keyword-only sink,
+    so the public `float | None` return the skill's snippets import is unchanged.
+
+    Five REACHABLE causes, each witnessed below. `_floor_from_clusters` records a sixth — the
+    bootstrap declining on fewer than 2 clusters — which both floors' own `< 2` guards make
+    unreachable from them, so it is deliberately not tested through this surface.
+    """
+
+    ROWS: ClassVar[dict[str, list[tuple[str, str]]]] = {f"r{i}": [("yes", "yes" if i else "no")] for i in range(4)}
+
+    def _reasons(self, **kwargs) -> list[str]:
+        reasons: list[str] = []
+        noise_floor_mde(**{"criterion_index": 0, "n_resamples": _FAST_RESAMPLES, "reasons": reasons, **kwargs})
+        return reasons
+
+    def test_too_few_invocations(self, tmp_path: Path) -> None:
+        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
+        assert "at least 2 invocations" in " ".join(
+            self._reasons(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE)
+        )
+
+    def test_a_contaminated_tree(self, tmp_path: Path) -> None:
+        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        _write_row(dirs[-1], "incumbent", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        reasons = self._reasons(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE)
+        assert "no recorded invocation wrote" in " ".join(reasons)
+
+    def test_a_wrong_path(self, tmp_path: Path) -> None:
+        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        reasons = self._reasons(run_dirs=dirs, variant_id="typo", suite_id=SUITE)
+        assert "wrong variant id" in " ".join(reasons)
+
+    def test_a_cross_split_pair(self, tmp_path: Path) -> None:
+        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        for run_dir, split in zip(dirs, ("train", "test"), strict=True):
+            payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            payload["row_selection"] = {"split": split}
+            (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert "DIFFERENT row selections" in " ".join(
+            self._reasons(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE)
+        )
+
+    def test_too_few_rows_scored_in_both_halves(self, tmp_path: Path) -> None:
+        dirs = _write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=2)
+        assert "in BOTH halves of the invocation split" in " ".join(
+            self._reasons(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE)
+        )
+
+    def test_the_gate_renders_the_threaded_cause_not_the_hardcoded_one(self, tmp_path: Path) -> None:
+        """The reproduction: TWO invocations, so the old sentence was simply false.
+
+        One row scores in both halves, so the floor declines on the row count — and the block used
+        to blame the invocation count in front of a reader who could see there were two.
+        """
+        incumbent = {"only": [("yes", "yes")], "other": [("yes", "no")]}
+        candidate = {"only": [("yes", "yes")], "other": [("yes", "yes")]}
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate, invocations=2)
+        # Strip one row from the incumbent's second invocation so only one row scores in BOTH.
+        shutil.rmtree(run_dirs[1] / "incumbent" / SUITE / "other")
+        verdict = _gate(run_dirs)
+        assert verdict.mde is None
+        note = next(n for n in verdict.notes if "minimum detectable effect could not be computed" in n)
+        assert "in BOTH halves of the invocation split" in note
+        assert "at least two invocations" not in note, note
+        assert len(run_dirs) == 2, "the old sentence was false in front of a reader who could count"
+
+    def test_the_reasons_keyword_is_additive(self, tmp_path: Path) -> None:
+        """Every existing caller keeps working untouched — the whole point of a sink."""
+        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        without = noise_floor_mde(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0)
+        collected: list[str] = []
+        with_sink = noise_floor_mde(
+            run_dirs=dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0, reasons=collected
+        )
+        assert without == with_sink
+        assert collected == [], "a floor that WAS measured records no reason"
 
 
 class TestStageAReadersReconcileTheTree:
@@ -3921,6 +4179,40 @@ class TestExecutionGateRefusesAReusedRunDir:
         decided = holm_promote_execution([_exec_gate(run_dir)])[0]
         assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
 
+    def test_refused_already_is_reachable_as_true(self, tmp_path: Path) -> None:
+        """The test whose absence let `_execution_diagnostics`'s docstring call two guards dead.
+
+        That docstring said `refused_already` is "False at the only call site today". It is not:
+        the tree-reconciliation cause calls `_refuse` and then `break`s rather than returning, so
+        control reaches the diagnostics ladder with `gate_refusal` already set. A reader who
+        believed the docstring would delete the two `not refused_already` guards as unreachable,
+        and this contaminated run would immediately print the MDE and tighter-than-floor advisories
+        under a `NOT A RESULT` headline.
+
+        It witnesses ONE of the two advisories — the two branches are mutually exclusive on any
+        single fixture (`could not be priced` needs `mde < FLOOR_RESOLUTION`, tighter-than-floor
+        needs `mde >= FLOOR_RESOLUTION`), so no fixture can cover both. The other half is covered
+        by `TestExecutionDiagnostics::test_refused_already_suppresses_both_advisory_notes`.
+        """
+        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        _write_row(run_dir, "incumbent", "r1", _scored_result("r1", 0.0), 7, record=False)
+
+        seen: list[bool] = []
+        real = _execution_diagnostics
+
+        def _spy(**kwargs):
+            seen.append(kwargs["refused_already"])
+            return real(**kwargs)
+
+        with mock.patch.object(optimize_gate, "_execution_diagnostics", _spy):
+            decided = holm_promote_execution([_exec_gate(run_dir)])[0]
+
+        assert seen == [True], "the reconciliation cause must reach the ladder already refused"
+        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert not any(fragment in note for note in decided.notes for fragment in _MDE_ADVISORY_FRAGMENTS), (
+            decided.notes
+        )
+
 
 class TestExecutionGateRefusesAZeroVarianceSample:
     """A8: identical per-row differences make every promotion conjunct hold on nothing.
@@ -4773,11 +5065,25 @@ class TestExecutionDiagnostics:
         assert not any("came back unavailable" in n for n in notes)
 
     def test_it_neither_refuses_nor_builds_a_verdict_itself(self) -> None:
-        # Two setters for one field is the state `_refuse` collapsed; a helper that reached back
-        # into the gate's closure could not be tested without building a gate around it.
-        source = inspect.getsource(_execution_diagnostics)
-        assert "_verdict(" not in source
-        assert "gate_refusal" not in source
+        """Two setters for one field is the state `_refuse` collapsed.
+
+        A helper that reached back into the gate's closure could not be tested without building a
+        gate around it, so this pins that it does neither.
+
+        Scanned over the CODE with the docstring removed, not over the raw source. The naive form
+        punished the one thing it should reward: explaining, in this function's own docstring, what
+        `gate_refusal` is and why `refused_already` is reachable. A sensor that fires on
+        documentation of the invariant it guards is one an author routes around.
+        """
+        tree = ast.parse(textwrap.dedent(inspect.getsource(_execution_diagnostics)))
+        function = tree.body[0]
+        assert isinstance(function, ast.FunctionDef)
+        body = function.body[1:] if ast.get_docstring(function) is not None else function.body
+        code = "\n".join(ast.unparse(node) for node in body)
+        assert "_verdict(" not in code
+        assert "gate_refusal" not in code
+        # Anti-vacuity: the scan must still SEE the body it is checking.
+        assert "_refuse(" in code
 
 
 _RENDER_PINS = Path(__file__).parent / "_fixtures" / "optimize_renders"
