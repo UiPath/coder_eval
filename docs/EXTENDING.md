@@ -220,6 +220,18 @@ Notes:
   LiveSuccessCriterion)` directly, no separate checker-side flag. A lint rule
   (`tests/test_custom_lint.py::TestCE025LiveVerdictConsistency`) keeps the
   model subclassing and the checker's `live_verdict` override paired.
+- Your `live_verdict` must be **deterministic** (a pure function of the
+  `turn_records` prefix — no wall-clock, randomness, or hidden instance state)
+  and **monotonic** (once it returns `"pass"`/`"fail"` for some prefix, every
+  longer prefix returns that same verdict) — `EarlyStopWatcher`'s verdict
+  latching and deferred stops silently depend on both. Lint rule CE036
+  (`tests/lint/live_verdict_contract.py`) enforces this by replaying each live
+  criterion against every prefix of recorded trajectories, and **fails until
+  you add `ContractCase` fixtures** for the new type in the same change,
+  reaching every polarity its instances claim via
+  `live_decidable_polarities()`. An out-of-tree plugin criterion is invisible
+  to CE036's union walk — reuse `contract_violations` from that module in your
+  plugin's own test suite instead.
 
 > A duplicate `criterion_type` **overwrites** the earlier checker with a warning (not
 > a hard error, unlike agents) — keep type strings unique.

@@ -38,6 +38,11 @@ plugin-reference:  ## Regenerate the plugin's bundled criteria reference from th
 
 typecheck:  ## Run type checking with pyright
 	uv run pyright
+	# The CE036 contract engine executes checker code and feeds the early-stop
+	# design; it is the one tests/ surface worth type-checking. Explicit file
+	# args bypass the config's tests/ exclude (exclude beats include, so listing
+	# them in `include` would be a silent no-op).
+	uv run pyright tests/lint/live_verdict_contract.py tests/_fixtures/live_criteria.py
 
 test:  ## Run test suite (excludes live + lint tests; run `make lint` for those)
 	uv run pytest -n auto -m "not live and not lint" tests/

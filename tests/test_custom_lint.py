@@ -2964,3 +2964,210 @@ class TestCE035WorkflowOutputParity:
         assert len(findings) == 1
         assert findings[0].line == 7, f"expected line 7, got {findings[0].line}"
         assert str(findings[0]).startswith(f"{wf}:7 — ")
+
+
+@pytest.mark.lint
+class TestCE036LiveVerdictContract:
+    """CE036 — every live-observable criterion's `live_verdict` must be deterministic
+    and monotonic (GitHub issue #61 item 2).
+
+    `EarlyStopWatcher` latches verdicts, defers the fail-stop, and attributes pass-stop
+    flips against the previous round — all correct only while `live_verdict` never
+    contradicts an earlier decision and never varies for identical input. That contract
+    was documented on `LiveVerdict`/`BaseCriterion.live_verdict` but unenforced: a third
+    criterion implementing it non-monotonically would type-check, pass CE025, and
+    silently corrupt the stop logic.
+
+    Monotonicity over arbitrary Python is undecidable, so there is no sound static rule
+    to write. This replays each criterion against every prefix of a recorded trajectory
+    and asserts the property directly. The fixture table lives in
+    `tests/lint/live_verdict_contract.py`; the coverage checks below are what stop it
+    from decaying into a vacuous always-"undecided" replay.
+
+    Honest limit (documented on the helper module too): this proves the contract on the
+    trajectories an author supplied, not in general.
+    """
+
+    def test_real_criteria_honor_the_contract(self):
+        """Every case for every live criterion type, replayed prefix by prefix."""
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+        from tests.lint.live_verdict_contract import CASES, contract_violations
+
+        init_criteria(validate=False)
+        violations = [
+            violation
+            for criterion_type, cases in CASES.items()
+            for case in cases
+            for violation in contract_violations(CriterionRegistry.get_checker(criterion_type)(), case)
+        ]
+        assert not violations, "live_verdict contract violations:\n" + "\n".join(f"  {v}" for v in violations)
+
+    def test_every_live_criterion_type_has_cases(self):
+        """A new LiveSuccessCriterion with no fixtures enforces nothing — fail instead."""
+        from tests.lint.live_verdict_contract import missing_case_types
+
+        missing = missing_case_types()
+        assert not missing, (
+            "live-observable criterion types with no live_verdict contract cases: "
+            + ", ".join(missing)
+            + "\n\nAdd ContractCase entries to CASES in tests/lint/live_verdict_contract.py demonstrating "
+            + "every polarity the type's instances can decide."
+        )
+
+    def test_fixtures_exercise_every_decidable_polarity(self):
+        """Claiming a polarity is live-decidable but never demonstrating it is a gap."""
+        from tests.lint.live_verdict_contract import polarity_gaps
+
+        gaps = polarity_gaps()
+        assert not gaps, "untested live_verdict decision paths:\n" + "\n".join(f"  {g}" for g in gaps)
+
+    # --- The harness must actually fire; a green replay proves nothing on its own --- #
+
+    @staticmethod
+    def _positive_case(label: str, reaches: str):
+        from coder_eval.models import SkillTriggeredCriterion
+        from tests.lint.live_verdict_contract import ContractCase, cmd
+
+        return ContractCase(
+            label=label,
+            criterion=SkillTriggeredCriterion(
+                type="skill_triggered",
+                description="synthetic",
+                skill_name="alpha",
+                expected_skill="alpha",
+            ),
+            commands=(
+                cmd("Bash", {"command": "ls"}, sequence_number=0),
+                cmd("Bash", {"command": "pwd"}, sequence_number=1),
+            ),
+            reaches=reaches,
+        )
+
+    @staticmethod
+    def _checker(live_verdict_impl):
+        from coder_eval.criteria.base import BaseCriterion
+
+        class _Synthetic(BaseCriterion):
+            criterion_type = "synthetic_live"
+
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                raise NotImplementedError
+
+            def live_verdict(self, criterion, turn_records):
+                return live_verdict_impl(turn_records)
+
+        return _Synthetic()
+
+    def test_detects_a_non_monotonic_live_verdict(self):
+        """Decides "pass" on a short prefix, then contradicts itself on a longer one."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        checker = self._checker(lambda records: "pass" if len(records[0].commands) == 1 else "undecided")
+        violations = contract_violations(checker, self._positive_case("synthetic", "undecided"))
+        assert any("NON-MONOTONIC" in v for v in violations), violations
+
+    def test_detects_a_non_deterministic_live_verdict(self):
+        """Same input, different answer — e.g. a wall-clock or RNG read."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        flips = iter(range(1000))
+        checker = self._checker(lambda _records: "pass" if next(flips) % 2 else "undecided")
+        violations = contract_violations(checker, self._positive_case("synthetic", "undecided"))
+        assert any("NON-DETERMINISTIC" in v for v in violations), violations
+
+    def test_detects_a_raising_live_verdict(self):
+        """A raise mid-walk becomes ONE labeled violation (case + prefix length) and the
+        walk continues — the later prefixes still replay, so the terminal "pass" here is
+        judged normally and the raise is the only breach reported."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        def raises_mid_trajectory(records):
+            n = len(records[0].commands)
+            if n == 1:
+                raise ValueError("boom")
+            return "pass" if n == 2 else "undecided"
+
+        checker = self._checker(raises_mid_trajectory)
+        violations = contract_violations(checker, self._positive_case("synthetic", "pass"))
+        assert len(violations) == 1, violations
+        assert "RAISED" in violations[0] and "prefix length 1" in violations[0], violations
+
+    def test_detects_a_fixture_that_stopped_exercising_its_decision_path(self):
+        """Fixture rot: the case claims a decision the trajectory no longer reaches."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        checker = self._checker(lambda _records: "undecided")
+        violations = contract_violations(checker, self._positive_case("synthetic", "pass"))
+        assert any("declares 'pass'" in v for v in violations), violations
+
+    def test_detects_a_verdict_outside_the_instance_declared_polarities(self):
+        """A positive skill_triggered instance can only live-pass; deciding "fail" means
+        the watcher would treat a live trigger as inert."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        checker = self._checker(lambda _records: "fail")
+        violations = contract_violations(checker, self._positive_case("synthetic", "fail"))
+        assert any("live_decidable_polarities" in v for v in violations), violations
+
+    def test_detects_a_live_type_with_no_cases(self):
+        """The completeness check must fail on an empty table, not pass vacuously."""
+        from tests.lint.live_verdict_contract import missing_case_types
+
+        assert missing_case_types({}) == ["command_executed", "skill_triggered"]
+
+    def test_detects_an_all_undecided_fixture_set(self):
+        """A type whose only case never decides claims coverage it does not have."""
+        from tests.lint.live_verdict_contract import polarity_gaps
+
+        gaps = polarity_gaps({"skill_triggered": (self._positive_case("synthetic", "undecided"),)})
+        assert len(gaps) == 1
+        assert "'pass'" in gaps[0]
+
+    def test_real_criteria_hold_under_permutation(self):
+        """Determinism + monotonicity must survive seeded reorderings of every case."""
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+        from tests.lint.live_verdict_contract import CASES, permuted_violations
+
+        init_criteria(validate=False)
+        violations = [
+            violation
+            for criterion_type, cases in CASES.items()
+            for case in cases
+            for violation in permuted_violations(CriterionRegistry.get_checker(criterion_type)(), case)
+        ]
+        assert not violations, "live_verdict permutation violations:\n" + "\n".join(f"  {v}" for v in violations)
+
+    def test_permutation_layer_detects_an_order_sensitive_verdict(self):
+        """A recency bug (verdict read off the LATEST command) is monotone on an
+        ordering that happens to end with the match — only a reordering exposes it.
+        This is the exact bug shape the counterfactual experiment injected."""
+        from coder_eval.models import SkillTriggeredCriterion
+        from tests.lint.live_verdict_contract import ContractCase, cmd, contract_violations, permuted_violations
+
+        def recency_verdict(records):
+            commands = records[0].commands
+            if commands and commands[-1].parameters.get("command") == "pwd":
+                return "pass"
+            return "undecided"
+
+        checker = self._checker(recency_verdict)
+        case = ContractCase(
+            label="synthetic recency",
+            criterion=SkillTriggeredCriterion(
+                type="skill_triggered",
+                description="synthetic",
+                skill_name="alpha",
+                expected_skill="alpha",
+            ),
+            commands=(
+                cmd("Bash", {"command": "ls"}, sequence_number=0),
+                cmd("Bash", {"command": "cat x"}, sequence_number=1),
+                cmd("Bash", {"command": "pwd"}, sequence_number=2),
+            ),
+            reaches="pass",
+        )
+        # Clean on the authored ordering (it decides only on the final prefix)...
+        assert not [v for v in contract_violations(checker, case) if "NON-MONOTONIC" in v]
+        # ...caught under permutation.
+        violations = permuted_violations(checker, case)
+        assert any("NON-MONOTONIC" in v for v in violations), violations
