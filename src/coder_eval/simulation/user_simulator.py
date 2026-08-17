@@ -214,6 +214,12 @@ class UserSimulator:
             setting_sources=[],
             permission_mode="default",
             system_prompt=self._system_prompt,
+            # The roleplay persona IS the simulator's entire identity: 'replace'
+            # keeps the claude_code coding-agent preset from prefixing it (which
+            # would contradict the persona's own "stay in character" instruction
+            # and change every dialog-mode evaluation). Mirrors the judge seam
+            # in criteria/agent_judge.py.
+            system_prompt_mode="replace",
         )
         # parse_agent_config returns a union, but type=CLAUDE_CODE guarantees ClaudeCodeAgentConfig
         assert isinstance(agent_config, ClaudeCodeAgentConfig)

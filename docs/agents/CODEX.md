@@ -213,6 +213,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 | **SDK Type** | Subprocess (CLI via JSON generator) | Sync client (app-server subprocess) |
 | **Command Tracking** | Full telemetry (tool name, params, duration) | Streamed telemetry: shell → `Bash`, apply_patch → `Write` |
 | **Model Selection** | Direct via `--model` or config | `agent.model` pinned into `thread_start` |
+| **System prompt** | `system_prompt` appended to the default prompt (SDK `claude_code` preset) | `system_prompt` passed as `developer_instructions` on top of the Codex base prompt |
 | **Session Resume** | `--resume {session_id}` | Via thread ID |
 | **Permissions** | `permission_mode` + `allowed_tools` | `permission_mode` → sandbox/approval + `allowed_tools`/`disallowed_tools` → thread config |
 | **Tool Enforcement** | Not enforced by Coder Eval wrapper | `enabled_tools` honored; `disabled_tools` NOT enforced by the SDK |
@@ -229,6 +230,20 @@ Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).
 4. **Authentication** - Requires `CODEX_API_KEY` in the environment (point it at whichever endpoint's key you use — OpenAI, gateway, or Azure); the agent calls `login_api_key` when a key is present. `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` are NOT read.
 5. **Model field** - `TurnRecord.model_used` reflects the pinned `agent.model`; the Codex `Turn` payload itself doesn't carry the resolved model.
 6. **Skills with Windows paths** - Symlink creation may fail on Windows; agent falls back to copying (slower).
+7. **No `system_prompt_mode`** - `replace` semantics are Claude-Code-only. `system_prompt` is always appended as `developer_instructions`; setting `system_prompt_mode` on a Codex `agent:` block is a validation error (unknown field).
+
+## Migrating tasks that set `system_prompt`
+
+`system_prompt` was previously **ignored** on Codex tasks — silently dropped, so the
+task ran on Codex's base prompt alone. It is now forwarded as
+`developer_instructions`, layered on top of that base prompt. Any Codex task setting
+the field now actually receives those instructions, so **scores are not comparable
+across this boundary**. Two things to check:
+
+- A prompt written for Claude (naming `Read`/`Grep`/`Glob`, or Claude tool etiquette)
+  is now live on Codex, where those tool names don't exist.
+- There is **no opt-out** (see Known Limitations #7). To restore the old behavior,
+  remove `system_prompt` from the Codex variant — otherwise re-baseline.
 
 ## Future Enhancements
 

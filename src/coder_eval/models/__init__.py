@@ -15,6 +15,8 @@ from coder_eval.models.agent_config import (
     NoneAgentConfig,
     OpenCodeAgentConfig,
     ResolvedAgentConfig,
+    SystemPromptMode,
+    SystemPromptSemantics,
     parse_agent_config,
 )
 
@@ -219,6 +221,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "NoneAgentConfig",
     "OpenCodeAgentConfig",
     "ResolvedAgentConfig",
+    "SystemPromptMode",
+    "SystemPromptSemantics",
     "parse_agent_config",
     # Enums
     "AgentKind",

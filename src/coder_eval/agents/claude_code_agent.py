@@ -28,6 +28,10 @@ from claude_agent_sdk import (
 # its kill target and timeouts will no longer be enforced at the agent layer.
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
+# SystemPromptPreset is not re-exported from the SDK root, so claude_agent_sdk.types
+# is the only import route (same treatment as evaluation/verdict_tool.py).
+from claude_agent_sdk.types import SystemPromptPreset
+
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
 from coder_eval.agents.registry import AgentRegistry
@@ -47,6 +51,7 @@ from coder_eval.models import (
     DirectRoute,
     LiteLLMRoute,
     ResultSummary,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -660,6 +665,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     # ANTHROPIC_CUSTOM_HEADERS for the proxy-side actual-cost join (LiteLLM backend).
     supports_cost_log_tags: ClassVar[bool] = True
 
+    # One warning per agent for a replace-mode config with no prompt to replace
+    # with: _resolve_system_prompt() runs on every query and once per env-info
+    # snapshot, and a per-turn repeat would bury the rest of task.log.
+    _warned_prompt_mode_downgrade: bool = False
+
     def __init__(
         self,
         config: ClaudeCodeAgentConfig,
@@ -1173,6 +1183,19 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if "ToolSearch" not in disallowed_tools:
             disallowed_tools.append("ToolSearch")
 
+        # The SDK maps system_prompt=None to `--system-prompt ""` (an explicit
+        # EMPTY custom prompt) and a plain string to a full replacement — either
+        # way Claude Code's default behavioral guidance (parallel tool-call
+        # batching, conciseness) is lost. So ALWAYS send the claude_code preset:
+        # without `append` the CLI runs its default prompt; with it the configured
+        # prompt is appended. exclude_dynamic_sections keeps the prompt static
+        # across runs (the per-run tempdir path would otherwise be baked into the
+        # system prompt, breaking prompt caching and run comparability); the SDK
+        # re-injects the stripped sections into the first user message.
+        # system_prompt_mode="replace" (judge sub-agents) opts out of the preset:
+        # the configured prompt IS the entire system prompt.
+        system_prompt = self._resolve_system_prompt()
+
         # as_posix(), not str(): bash on Windows strips backslashes from unquoted
         # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
         options = ClaudeAgentOptions(
@@ -1192,7 +1215,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             # summing per-message values undercounts by 10x+. Without this flag
             # StreamEvents are suppressed by the SDK.
             include_partial_messages=True,
-            system_prompt=self.config.system_prompt,
+            system_prompt=system_prompt,
             setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
             resume=self._session_id,
             settings=json.dumps(self.config.claude_settings)
@@ -1215,6 +1238,49 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             transport = SubprocessCLITransport(prompt=user_input, options=options)
 
         return options, transport, effective_model
+
+    def _resolve_system_prompt(self) -> str | SystemPromptPreset:
+        """The system-prompt VALUE that actually goes on the wire.
+
+        Single source of truth for both the options builder and the
+        ``system_prompt_semantics`` run-record marker (derived from this value,
+        never re-computed), so the persisted regime can never disagree with what
+        was sent. Returning the value rather than a mode string is what lets the
+        caller skip a type-narrowing re-check of the invariant resolved here.
+
+        ``replace`` requires a configured prompt (the config validator rejects
+        the pair at load, but a mutated or hand-built config falls back to the
+        preset here — fail open to append).
+        """
+        if self.config.system_prompt_mode == "replace":
+            if self.config.system_prompt is not None:
+                return self.config.system_prompt
+            if not self._warned_prompt_mode_downgrade:
+                # Warn once per agent so the downgrade is visible in task.log
+                # rather than only inferable from run.json's marker.
+                self._warned_prompt_mode_downgrade = True
+                logger.warning(
+                    "system_prompt_mode='replace' with no system_prompt — falling back to the claude_code "
+                    + "preset (append regime). run.json records the regime actually used."
+                )
+        preset = SystemPromptPreset(type="preset", preset="claude_code", exclude_dynamic_sections=True)
+        if self.config.system_prompt is not None:
+            preset["append"] = self.config.system_prompt
+        return preset
+
+    def get_environment_info(self) -> dict[str, Any]:
+        """Record which system-prompt regime built this run's prompts.
+
+        ``append`` = the claude_code preset (dynamic sections excluded) with the
+        configured system_prompt, if any, appended; ``replace`` = the configured
+        prompt is the ENTIRE system prompt (judge sub-agents). Unlike the other
+        agents this is per-config, not fixed, so it overrides the base ClassVar
+        with the resolved value. Runs from before this marker existed used
+        replace-on-set / empty-on-unset semantics — trend dashboards must not
+        pool scores across that boundary.
+        """
+        semantics: SystemPromptSemantics = "replace" if isinstance(self._resolve_system_prompt(), str) else "append"
+        return {**super().get_environment_info(), "system_prompt_semantics": semantics}
 
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""

@@ -76,6 +76,28 @@ logger = logging.getLogger(__name__)
 _WAIT_FOR_GRACE_SECONDS = 2.0
 
 
+def _close_subprocess_transport(proc: asyncio.subprocess.Process | None) -> None:
+    """Release a finished subprocess's pipe transport deterministically.
+
+    ``asyncio`` gives ``Process`` no public way to do this: the transport is held
+    privately and is only closed when the object is garbage-collected. On
+    Windows' Proactor loop ``_ProactorBasePipeTransport.__del__`` then emits
+    ``ResourceWarning: unclosed transport`` — one per pipe — which a strict test
+    run surfaces as ``PytestUnraisableExceptionWarning`` attributed to whichever
+    test happened to be running when the GC fired, not to the code that leaked.
+    That is exactly the shape of the intermittent Windows CI failures in
+    ``test_pre_run`` / ``test_post_run`` / ``test_preservation_mode``.
+
+    Best-effort and idempotent: a second ``close()`` is a no-op, and any error is
+    swallowed because releasing a pipe must never turn into a task failure.
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is None:
+        return
+    with suppress(Exception):
+        transport.close()
+
+
 async def _pump_stream(
     stream: asyncio.StreamReader | None,
     log_fn: Callable[..., None],
@@ -2172,6 +2194,9 @@ class Orchestrator:
             start = time.time()
             logger.info("Running %s command: %s", human.lower(), cmd.command)
 
+            # Bound outside the try so the `finally` can tell "never spawned"
+            # (a create_subprocess_shell failure) from "spawned, needs closing".
+            proc: asyncio.subprocess.Process | None = None
             try:
                 proc = await asyncio.create_subprocess_shell(
                     cmd.command,
@@ -2246,6 +2271,13 @@ class Orchestrator:
                 if fail_on_error:
                     raise RuntimeError(f"{human} command failed: {cmd.command!r}") from e
                 logger.warning("%s command '%s' failed: %s", human, cmd.command, e)
+            finally:
+                # Every exit from this iteration -- normal, `continue` from the
+                # timeout branch, or a raised RuntimeError -- must release the
+                # two pipes this command opened. Without it they survive until
+                # GC, which on Windows reports as an unraisable ResourceWarning
+                # against an unrelated test. See _close_subprocess_transport.
+                _close_subprocess_transport(proc)
 
     async def _run_pre_run_commands(self) -> None:
         """Execute pre-run commands inside the sandbox before evaluation.

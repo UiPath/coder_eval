@@ -26,6 +26,7 @@ import {
     TOKEN_COLUMN_HELP,
 } from "@/app/_components/col-help";
 import { type Unit, UnitToggle } from "@/app/_components/unit-toggle";
+import { withSource } from "@/app/_lib/source-param";
 import { TableScroll } from "@/app/_components/scroll-table";
 import { StatusPill } from "@/lib/pills";
 import { displayedTurns } from "@/lib/turns";
@@ -1449,9 +1450,11 @@ const ARTIFACT_CAP = 50;
 function ArtifactList({
     runId,
     items,
+    sourceId,
 }: {
     runId: string;
     items: ArtifactRef[];
+    sourceId: string;
 }) {
     return (
         <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg bg-white">
@@ -1462,9 +1465,12 @@ function ArtifactList({
                 >
                     <KindChip kind={a.kind} />
                     <a
-                        href={`/api/file?run=${encodeURIComponent(
-                            runId,
-                        )}&path=${encodeURIComponent(a.relPath)}`}
+                        href={withSource(
+                            `/api/file?run=${encodeURIComponent(
+                                runId,
+                            )}&path=${encodeURIComponent(a.relPath)}`,
+                            sourceId,
+                        )}
                         className="text-studio-blue hover:underline truncate"
                         download
                     >
@@ -1482,9 +1488,13 @@ function ArtifactList({
 export function ArtifactsSection({
     runId,
     artifacts,
+    sourceId,
 }: {
     runId: string;
     artifacts: ArtifactRef[];
+    // Artifact relPaths resolve under the source's cache dir, so /api/file needs
+    // the same source the task detail was read with.
+    sourceId: string;
 }) {
     const head = artifacts.slice(0, ARTIFACT_CAP);
     const rest = artifacts.slice(ARTIFACT_CAP);
@@ -1496,7 +1506,11 @@ export function ArtifactsSection({
             {artifacts.length === 0 ? (
                 <div className="text-sm text-gray-500">none</div>
             ) : (
-                <ArtifactList runId={runId} items={head} />
+                <ArtifactList
+                    runId={runId}
+                    items={head}
+                    sourceId={sourceId}
+                />
             )}
             {rest.length > 0 && (
                 <Expandable
@@ -1506,7 +1520,11 @@ export function ArtifactsSection({
                         </span>
                     }
                 >
-                    <ArtifactList runId={runId} items={rest} />
+                    <ArtifactList
+                        runId={runId}
+                        items={rest}
+                        sourceId={sourceId}
+                    />
                 </Expandable>
             )}
         </section>

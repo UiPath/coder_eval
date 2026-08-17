@@ -6,7 +6,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, assert_never
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from .models import (
     CriterionAggregate,
@@ -57,11 +57,44 @@ def resolve_agent_settings(task_dicts: list[dict[str, Any]]) -> tuple[dict[str, 
     return None, False
 
 
-def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -> list[tuple[str, str]]:
+def _unwrap_system_prompt(value: Any) -> tuple[str | None, Literal["replace"] | None]:
+    """Reduce a persisted ``sdk_options.system_prompt`` value to (text, regime).
+
+    Claude Code append-mode runs persist a ``SystemPromptPreset`` dict
+    (``{'type': 'preset', 'preset': 'claude_code', ..., 'append': <text>}``);
+    replace-mode runs persist a plain string. Returns the configured prompt
+    text (None when nothing was configured — a bare preset dict carries no
+    custom prompt and gets no row).
+
+    The second element is a FALLBACK regime for runs predating the
+    ``system_prompt_semantics`` marker, inferred from the wire value's shape.
+    Callers pass the marker when the run has one; only then is the regime
+    authoritative (a non-Claude agent persists a plain string in either regime).
+    """
+    if isinstance(value, dict):
+        append = value.get("append")
+        return (str(append) if append is not None else None), None
+    if isinstance(value, str):
+        return value, "replace"
+    return None, None
+
+
+def collect_agent_settings_rows(
+    settings_source: dict[str, Any],
+    is_sdk: bool,
+    *,
+    system_prompt_semantics: str | None = None,
+) -> list[tuple[str, str]]:
     """Extract ordered label/value pairs from an agent settings dict.
 
     Shared by markdown and HTML reporters so field ordering, defaulting,
     and truncation stay consistent between the two formats.
+
+    ``system_prompt_semantics`` is the run's recorded regime
+    (``environment_info``). When present it is reported verbatim, so an append
+    run is visibly an append run rather than indistinguishable from a
+    pre-marker one; when absent (older runs) the regime is inferred from the
+    persisted prompt's shape and only surfaced if it was ``replace``.
     """
     rows: list[tuple[str, str]] = [
         ("Permission Mode", str(settings_source.get("permission_mode", "N/A"))),
@@ -87,11 +120,15 @@ def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -
         betas = settings_source.get("betas")
         if betas:
             rows.append(("Betas", ", ".join(betas)))
-        if settings_source.get("system_prompt") is not None:
-            prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
+        prompt_text, inferred_mode = _unwrap_system_prompt(settings_source.get("system_prompt"))
+        if prompt_text is not None:
+            prompt_str = prompt_text.replace("\n", " ")
             if len(prompt_str) > SYSTEM_PROMPT_PREVIEW_CHARS:
                 prompt_str = prompt_str[:SYSTEM_PROMPT_PREVIEW_CHARS] + "..."
             rows.append(("System Prompt", prompt_str))
+        prompt_mode = system_prompt_semantics or inferred_mode
+        if prompt_mode is not None:
+            rows.append(("System Prompt Mode", prompt_mode))
 
     plugins = settings_source.get("plugins")
     if isinstance(plugins, list):
@@ -535,7 +572,12 @@ class ReportGenerator:
         settings_source, is_sdk = resolve_agent_settings(summary.task_results)
         if settings_source:
             lines.append("")
-            lines.extend(ReportGenerator._generate_agent_settings_section(settings_source, is_sdk))
+            semantics = (summary.environment_info or {}).get("system_prompt_semantics")
+            lines.extend(
+                ReportGenerator._generate_agent_settings_section(
+                    settings_source, is_sdk, system_prompt_semantics=semantics
+                )
+            )
 
         # Installed Tools section (per-task tool versions from sandbox npm packages etc.)
         installed_tools_lines = ReportGenerator._generate_installed_tools_section(summary.task_results)
@@ -549,10 +591,17 @@ class ReportGenerator:
         return "\n".join(lines)
 
     @staticmethod
-    def _generate_agent_settings_section(settings_source: dict[str, Any], is_sdk: bool) -> list[str]:
+    def _generate_agent_settings_section(
+        settings_source: dict[str, Any],
+        is_sdk: bool,
+        *,
+        system_prompt_semantics: str | None = None,
+    ) -> list[str]:
         """Generate Agent Settings markdown lines from a settings dict."""
         lines = ["## Agent Settings", ""]
-        for label, value in collect_agent_settings_rows(settings_source, is_sdk):
+        for label, value in collect_agent_settings_rows(
+            settings_source, is_sdk, system_prompt_semantics=system_prompt_semantics
+        ):
             lines.append(f"- **{label}**: {value}")
         return lines
 

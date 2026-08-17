@@ -226,26 +226,57 @@ def resolve_variant_initial_prompt_file(variant: ExperimentVariant, base_dir: Pa
     variant.initial_prompt = content
 
 
-def resolve_agent_system_prompt(agent_config: AgentConfig | BaseAgentConfig | None, base_dir: Path) -> None:
-    """Resolve system_prompt_file to inline system_prompt. Mutates in place."""
-    if agent_config is None:
-        return
-    if agent_config.system_prompt_file is not None:
-        prompt_path = Path(agent_config.system_prompt_file)
-        if not prompt_path.is_absolute():
-            prompt_path = (base_dir / prompt_path).resolve()
-        if not prompt_path.exists():
-            raise FileNotFoundError(f"system_prompt_file not found: {prompt_path}")
-        content = prompt_path.read_text(encoding="utf-8").strip()
-        # Clear file field BEFORE setting inline to avoid mutual-exclusivity validator
-        agent_config.system_prompt_file = None
-        agent_config.system_prompt = content
+def resolve_agent_system_prompt[T: AgentConfig | BaseAgentConfig | None](agent_config: T, base_dir: Path) -> T:
+    """Inline ``system_prompt_file`` into ``system_prompt``, returning the resolved config.
+
+    Returns a NEW config rather than mutating in place because the swap has no
+    valid sequential order: ``BaseAgentConfig`` sets ``validate_assignment=True``,
+    and the two prompt fields are constrained against each other in both
+    directions — clearing the file first leaves ``(mode='replace', prompt=None,
+    file=None)``, which ``check_replace_mode_has_prompt`` rejects, while setting
+    the prompt first leaves both populated, which ``check_prompt_exclusivity``
+    rejects. A single ``model_copy(update=...)`` applies both edits at once so no
+    half-updated state is ever validated.
+
+    Args:
+        agent_config: Config to resolve; ``None`` and configs without a
+            ``system_prompt_file`` are returned unchanged.
+        base_dir: Directory that relative ``system_prompt_file`` paths resolve against.
+
+    Returns:
+        The resolved config — the same object when there was nothing to inline.
+
+    Raises:
+        FileNotFoundError: If ``system_prompt_file`` does not exist.
+        ValueError: If the file is blank under ``system_prompt_mode: replace``.
+    """
+    if agent_config is None or agent_config.system_prompt_file is None:
+        return agent_config
+    prompt_path = Path(agent_config.system_prompt_file)
+    if not prompt_path.is_absolute():
+        prompt_path = (base_dir / prompt_path).resolve()
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"system_prompt_file not found: {prompt_path}")
+    # A whitespace-only file is no prompt at all — mirror the normalization
+    # _blank_prompt_is_no_prompt applies to inline prompts (model_copy skips
+    # validators, so this seam has to apply it itself).
+    content = prompt_path.read_text(encoding="utf-8").strip() or None
+    # ...which means model_copy also skips check_replace_mode_has_prompt, so a
+    # blank file under `replace` would reach the agent as (replace, no prompt)
+    # and silently downgrade to the append preset at runtime. Reject it here
+    # instead: the file is the only prompt the config had, and the docs promise
+    # this combination fails at load.
+    if content is None and getattr(agent_config, "system_prompt_mode", "append") == "replace":
+        raise ValueError(
+            f"system_prompt_file {prompt_path} is empty; system_prompt_mode='replace' requires a "
+            + "prompt to replace the Claude Code default with"
+        )
+    return agent_config.model_copy(update={"system_prompt": content, "system_prompt_file": None})
 
 
 def resolve_system_prompt_files(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
     """Resolve system_prompt_file on agent config."""
-    if task.agent is not None:
-        resolve_agent_system_prompt(task.agent, base_dir)
+    task.agent = resolve_agent_system_prompt(task.agent, base_dir)
     return task
 
 

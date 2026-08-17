@@ -16,6 +16,12 @@ agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write", "Edit"]
+  # 'replace' preserves this task's judged baseline across the append-semantics
+  # change: the prompt below was written to BE the entire system prompt ("nothing
+  # else — no preamble", "ignore any project context"), which the coding-agent
+  # preset's own guidance would work against. This is the deliberate exception the
+  # migration note describes, not a pattern for new tasks.
+  system_prompt_mode: replace
   system_prompt: |
     You are a literal-minded assistant. Follow the user's instructions exactly.
     When the user asks you to echo or repeat a string, reply with that exact
