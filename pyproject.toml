@@ -193,6 +193,7 @@ external = [
     "CE050",
     "CE051",
     "CE052",
+    "CE053",
 ]  # custom architectural lint rules (tests/lint/). Partial and inert: ruff does not flag an
 # unknown code under RUF100, so an unlisted id (CE001, CE047, …) is silently accepted too.
 

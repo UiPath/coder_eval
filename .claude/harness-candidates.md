@@ -805,7 +805,7 @@ with the two `action.yml` items above — one considered change to the action's 
       exercises and to recognise a non-emptiness assertion, which is heuristic enough to deserve
       its own design pass. — caught in the top-10 review-fixes run, Phase 6 review.
 
-- [ ] **The Stage A / floor surfaces read the run-dir tree without reconciling it.**
+- [x] **The Stage A / floor surfaces read the run-dir tree without reconciling it.**
       `activation_gate` and `execution_gate` both refuse a run dir holding results its own
       `run.json` never wrote (`reconcile_tree_against_run_json`). `measure_noise_floor`,
       `noise_floor_mde`, `arm_row_scores` and `cost_quality_points` do not — measured, on
@@ -817,6 +817,26 @@ with the two `action.yml` items above — one considered change to the action's 
       copy of the preflight. The floors feed the MDE a gate reports and the vectors feed the three
       Pareto fronts, so a wrong number here is not cosmetic. — caught in the top-10 review-fixes
       run, final adversarial review.
+
+      **Resolution (Plan B+C Phase 1):** closed, and the return-contract question resolved by
+      SPLITTING on it rather than picking one answer. The DETECTION is shared —
+      `optimize_gate._reconcile_arms` is the one sweep every whole-arm reader routes through
+      (`execution_gate` still calls `reconcile_tree_against_run_json` directly — it works one run
+      dir per variant and needs the per-dir result), and `_stale_tree_reason` is the one message
+      the readers share — while the RESPONSE follows the return type:
+      `measure_noise_floor` and `measure_execution_noise_floor` return `None` through the existing
+      `_no_floor` channel, and `arm_row_scores` logs a WARNING and returns its vector, because
+      `ArmRowScores` has no field a refusal could live in. A shared `_refuse_or_warn` helper was
+      considered and rejected — it would take a mode flag, which is two functions in a trench coat.
+      Two readers deliberately do NOT reconcile and carry a reasoned `# noqa: CE053` naming who
+      reconciles for them: `_load_and_pair` (its only caller `activation_gate` sweeps both arms
+      first) and `cost_quality_points` (it reaches the tree through `arm_row_scores`, so a second
+      sweep would read every `run.json` twice per arm and warn twice about one fault). The
+      correction the entry itself needed: the four readers are `measure_noise_floor`,
+      **`measure_execution_noise_floor`**, `arm_row_scores` and `cost_quality_points` —
+      `noise_floor_mde` reaches the tree only through `measure_noise_floor`. **CE053** is the
+      standing guard, and its path scope names all six post-split module names so Phase 7 moving a
+      reader cannot take it out of reach.
 
 ## From 2026-08-16 xlsx execution-track dogfood run
 

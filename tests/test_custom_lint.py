@@ -28,6 +28,7 @@ from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
 from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRulesHandleLevel
+from tests.lint.rules.ce053_run_tree_readers_reconcile import RunTreeReadersReconcile
 from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_submodule_model_imports import NoSubmoduleModelImports
@@ -6798,6 +6799,190 @@ class TestEstimatorLedger:
 
         failures = check(["tests/_fixtures/report_snapshots/run_full.md"], {}, self.BASE_DOC, self.BASE_DOC)
         assert any("step was zero" in f for f in failures), failures
+
+
+@pytest.mark.lint
+class TestCE053RunTreeReadersReconcile:
+    """CE053 — a run-tree reader in the optimize family reconciles, or says why not.
+
+    Written after `measure_noise_floor`, `measure_execution_noise_floor` and `arm_row_scores`
+    were measured returning confident numbers over dirs `activation_gate` correctly refused.
+    The failure is silent in every case — a contaminated tree loads, parses and returns.
+    """
+
+    GATE = "src/coder_eval/optimize_gate.py"
+
+    def _check(self, source: str, path: str | None = None) -> list[object]:
+        return list(RunTreeReadersReconcile(path or self.GATE).check(ast.parse(textwrap.dedent(source))))
+
+    def test_it_fires_on_a_reader_that_never_reconciles(self) -> None:
+        source = """
+            def measure_noise_floor(run_dirs, variant_id, suite_id):
+                per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
+                return _floor(per_dir)
+        """
+        violations = self._check(source)
+        assert len(violations) == 1, violations
+        assert violations[0].rule_id == "CE053"  # type: ignore[attr-defined]
+
+    def test_it_is_silent_when_the_reader_reconciles(self) -> None:
+        source = """
+            def measure_noise_floor(run_dirs, variant_id, suite_id):
+                stale, _unknown = _reconcile_arms([(variant_id, run_dirs)], suite_id)
+                if stale:
+                    return None
+                return [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
+        """
+        assert self._check(source) == []
+
+    def test_the_primitive_call_also_satisfies_it(self) -> None:
+        # `execution_gate`'s grain: one run dir per variant, and it needs the per-dir result.
+        source = """
+            def execution_gate(run_dir, incumbent_variant, candidate_variant, suite_id):
+                for variant in (incumbent_variant, candidate_variant):
+                    if reconcile_tree_against_run_json(run_dir, variant, suite_id).unrecorded:
+                        return None
+                return load_arm_rows([run_dir], incumbent_variant, suite_id)
+        """
+        assert self._check(source) == []
+
+    def test_one_violation_per_function_however_many_reads(self) -> None:
+        # `_load_and_pair` reads twice, once per arm. Two noqas for one fault would be noise.
+        source = """
+            def _load_and_pair(incumbent_run_dirs, candidate_run_dirs, a, b, suite_id):
+                inc = [load_suite_rows(d, a, suite_id) for d in incumbent_run_dirs]
+                cand = [load_suite_rows(d, b, suite_id) for d in candidate_run_dirs]
+                return inc, cand
+        """
+        assert len(self._check(source)) == 1
+
+    def test_the_primitive_itself_is_exempt(self) -> None:
+        # `load_arm_rows` composes `load_suite_rows`; reconciling here would run the sweep once
+        # per composing gate rather than once per gate.
+        source = """
+            def load_arm_rows(run_dirs, variant_id, suite_id):
+                return _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
+        """
+        assert self._check(source) == []
+
+    def test_a_nested_reader_is_folded_into_its_enclosing_function(self) -> None:
+        # `execution_gate`'s `_verdict` closure reads nothing, but the shape matters: a nested def
+        # must not be judged apart from the body that reconciled for it.
+        source = """
+            def execution_gate(run_dir, variant, suite_id):
+                reconcile_tree_against_run_json(run_dir, variant, suite_id)
+
+                def _inner():
+                    return load_arm_rows([run_dir], variant, suite_id)
+
+                return _inner()
+        """
+        assert self._check(source) == []
+
+    def test_it_is_scoped_to_the_optimize_family(self) -> None:
+        source = """
+            def somewhere_else(run_dirs, variant_id, suite_id):
+                return [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
+        """
+        assert self._check(source, "src/coder_eval/reports.py") == []
+        assert self._check(source, "tests/test_optimize_gate.py") == []
+
+    def test_a_noqa_on_the_read_suppresses_it(self, tmp_path: Path) -> None:
+        """The escape hatch, through the real runner rather than the rule in isolation.
+
+        Suppression is `runner._is_suppressed`'s job, and it scans the lines the violation SPANS —
+        so this also pins that the rule anchors at the READ rather than at the `def`, where a
+        stray noqa anywhere in the function body would silence it.
+        """
+        # Under a `coder_eval/` segment, because the rule's scope is a PATH regex.
+        package = tmp_path / "coder_eval"
+        package.mkdir()
+        module = package / "optimize_fronts.py"
+        module.write_text(
+            "def a_reader(run_dirs, variant_id, suite_id):\n"
+            "    # someone else reconciles for this one\n"
+            "    return [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]  # noqa: CE053\n",
+            encoding="utf-8",
+        )
+        assert check_paths([module], [RunTreeReadersReconcile]) == []
+        # And without it, the same file is a violation — so the assertion above is not vacuous.
+        module.write_text(
+            "def a_reader(run_dirs, variant_id, suite_id):\n"
+            "    return [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]\n",
+            encoding="utf-8",
+        )
+        assert len(check_paths([module], [RunTreeReadersReconcile])) == 1
+
+    @pytest.mark.parametrize(
+        "module",
+        [
+            "optimize_gate",
+            "optimize_load",
+            "optimize_activation",
+            "optimize_execution",
+            "optimize_fronts",
+            "optimize_search",
+            # Not a planned module — the prefix scope is what makes a SEVENTH one covered too.
+            # An enumerated scope fails OPEN here: zero violations reads exactly like a clean tree.
+            "optimize_something_nobody_has_written_yet",
+        ],
+    )
+    def test_every_module_of_the_optimize_family_is_in_scope(self, module: str) -> None:
+        """Scope is the `optimize_*` PREFIX, so a reader cannot move out of the rule's reach.
+
+        Most of these do not exist yet. That is the point: a rule scoped to today's file names
+        would go silent on exactly the change that redistributes these readers.
+        """
+        source = """
+            def a_reader(run_dirs, variant_id, suite_id):
+                return [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
+        """
+        assert len(self._check(source, f"src/coder_eval/{module}.py")) == 1
+
+    def test_every_optimize_module_on_disk_is_in_scope(self) -> None:
+        """Parity, so the scope cannot drift away from the family it is named for."""
+        on_disk = sorted(p.name for p in (SRC / "coder_eval").glob("optimize_*.py"))
+        assert on_disk, "no optimize_*.py modules — CE053 would be checking nothing"
+        out_of_scope = [name for name in on_disk if not RunTreeReadersReconcile(f"src/coder_eval/{name}")._in_scope]
+        assert out_of_scope == [], out_of_scope
+
+    def test_the_violation_anchors_at_the_earliest_read(self) -> None:
+        """The anchor is where the `# noqa: CE053` must sit, so it has to be the FIRST read.
+
+        `ast.walk` is breadth-first, so a read nested inside an `if` is visited after a shallower
+        read below it — anchoring on walk order put the violation on the later line.
+        """
+        source = """
+            def a_reader(run_dirs, variant_id, suite_id):
+                if run_dirs:
+                    first = load_suite_rows(run_dirs[0], variant_id, suite_id)
+                second = load_arm_rows(run_dirs, variant_id, suite_id)
+                return first, second
+        """
+        violations = self._check(source)
+        assert len(violations) == 1
+        # Line 4 of the dedented source (1 = `def`), the nested read — not the flat one on line 5.
+        assert violations[0].line == 4  # type: ignore[attr-defined]
+
+    def test_the_live_suppression_set_is_exactly_the_two_documented_ones(self) -> None:
+        """Anti-vacuity, and the acceptance criterion in test form.
+
+        The rule is satisfied by suppressions as easily as by reconciles, so the live set is
+        pinned by FUNCTION NAME rather than counted. A zero here would mean the path regex
+        stopped matching, which is byte-identical to a clean tree.
+        """
+        suppressed: list[str] = []
+        for path in sorted((SRC / "coder_eval").rglob("optimize_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            reported = {v.line for v in RunTreeReadersReconcile(str(path)).check(tree)}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and reported & set(
+                    range(node.lineno, (node.end_lineno or node.lineno) + 1)
+                ):
+                    suppressed.append(node.name)
+        assert sorted(suppressed) == ["_load_and_pair", "cost_quality_points"], suppressed
+        # And every one of them is genuinely suppressed rather than merely absent from `make lint`.
+        assert check_paths([SRC], [RunTreeReadersReconcile]) == []
 
 
 @pytest.mark.lint

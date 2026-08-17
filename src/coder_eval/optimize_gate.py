@@ -788,6 +788,88 @@ def reconcile_tree_against_run_json(run_dir: Path, variant_id: str, suite_id: st
     return TreeReconciliation(unrecorded, len(recorded) + len(whole_rows), len(on_disk), unknown=False)
 
 
+def _reconcile_arms(
+    arms: Sequence[tuple[str, Sequence[Path]]], suite_id: str
+) -> tuple[dict[str, frozenset[tuple[str, str]]], int]:
+    """Reconcile every ``(variant, run dirs)`` arm: stale results keyed by location, plus unknowns.
+
+    The WHOLE-ARM sweep, and the one declaration of it: :func:`activation_gate`'s preflight, both
+    noise floors and :func:`arm_row_scores` all route through it. :func:`execution_gate` is the one
+    reader that does NOT and cannot — it works one run dir per variant and needs each dir's own
+    :class:`TreeReconciliation` to name the single location its richer refusal quotes, so it calls
+    :func:`reconcile_tree_against_run_json` directly. CE053 therefore accepts either name.
+
+    What is deliberately NOT shared is the RESPONSE, which differs by return type: a gate refuses,
+    a floor returns ``None`` through :func:`_no_floor`, and ``ArmRowScores`` has nowhere to put a
+    refusal so it warns and continues. One helper spanning all three would take a mode flag, which
+    is two functions in a trench coat.
+
+    ``unknown`` is counted rather than collected: a run dir whose ``run.json`` is missing,
+    unreadable or predates ``task_results`` cannot be reconciled either way, which is always a NOTE
+    and never a refusal — old run dirs stay gatable. **The debug line for it is emitted HERE**, once,
+    because it says the same thing for every caller and was a verbatim six-line copy in the two
+    floors. A caller that owes the USER a note rather than a log builds its own — only
+    ``activation_gate`` does, since only its return type has a ``notes`` channel to put one in.
+    """
+    stale: dict[str, frozenset[tuple[str, str]]] = {}
+    unknown_dirs = 0
+    total_dirs = 0
+    for variant, dirs in arms:
+        for run_dir in dirs:
+            total_dirs += 1
+            reconciliation = reconcile_tree_against_run_json(run_dir, variant, suite_id)
+            if reconciliation.unknown:
+                unknown_dirs += 1
+            elif reconciliation.unrecorded:
+                stale[f"{run_dir}/{variant}"] = reconciliation.unrecorded
+    if unknown_dirs:
+        # `debug`, not `warning`: a floor that WAS measured must not log through the channel
+        # `_no_floor` uses to say it was not.
+        logger.debug(
+            "%d of %d run directories for %s record no `task_results`, so contamination could not be ruled out",
+            unknown_dirs,
+            total_dirs,
+            ", ".join(repr(variant) for variant, _dirs in arms),
+        )
+    return stale, unknown_dirs
+
+
+def _stale_locations(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
+    """The stale results PER LOCATION — never a tree-wide total.
+
+    A sum over (arm x dir) is unreconcilable with the ``Rows paired: N`` line in the same block —
+    measured, a 22-row suite over 3 dirs and 2 arms reported "124 of 130" — and the number the
+    reader must act on is how many results in WHICH directory nothing wrote.
+    """
+    return "; ".join(
+        f"{location}: {len(pairs)} result(s) across {len({row for row, _ in pairs})} row(s)"
+        + f" (e.g. {', '.join(f'{row}/{rep}' for row, rep in sorted(pairs)[:3])}"
+        + f"{', …' if len(pairs) > 3 else ''})"
+        for location, pairs in sorted(stale.items())
+    )
+
+
+def _stale_tree_reason(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
+    """Why a tree holding unrecorded results is not something to measure over.
+
+    Shared by both noise floors (which REFUSE with it, through :func:`_no_floor`) and by
+    :func:`arm_row_scores` (which WARNS with it and continues). Sharing the message is what makes
+    the two responses read alike in a log; the responses themselves stay separate — see
+    :func:`_reconcile_arms`.
+
+    Deliberately NOT shared with the two gates' refusals, which say more: ``activation_gate``'s
+    names both arms and appends an unreconcilable-directory tail, ``execution_gate``'s names the
+    one variant it broke on. Those are decisions a user acts on; this is a measurement declining.
+    """
+    return (
+        f"the run directory tree holds results that no recorded invocation wrote — {_stale_locations(stale)}. "
+        + "run.json is written per INVOCATION while the tree is APPEND-ONLY, so a re-used --run-dir leaves an "
+        + "earlier call's results behind while `row_selection` is rewritten to describe only the latest one. "
+        + "They are pooled into this measurement, which is therefore over a row set no invocation ran. Re-run "
+        + "into a fresh --run-dir."
+    )
+
+
 def _format_splits(values: Iterable[str | None]) -> str:
     """The recorded splits as one readable list, ``None`` first.
 
@@ -892,6 +974,21 @@ def measure_noise_floor(
     if len(run_dirs) < 2:
         return _no_floor(f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}")
 
+    # The same preflight both gates run, and for the same reason (CE053): a re-used `--run-dir`
+    # leaves an earlier invocation's results on disk while `row_selection` is rewritten to describe
+    # only the latest one, so the halves this splits are pooled over a row set no invocation ran.
+    # Measured on dirs `activation_gate` correctly refuses, this returned a floor computed over an
+    # extra pooled row — and the floor decides whether a round runs at all.
+    #
+    # BEFORE the load, so a contaminated tree costs no parse; a WRONG path leaves nothing on disk
+    # to be unrecorded, so the wrong-path message below still wins its own case.
+    # An `unknown` dir is a NOTE, never a refusal — the module's settled missing-provenance stance,
+    # so old run dirs stay measurable. `_reconcile_arms` logs it; this function has no `notes`
+    # channel to surface it in, so the count is deliberately unused here.
+    stale, _unknown_dirs = _reconcile_arms([(variant_id, run_dirs)], suite_id)
+    if stale:
+        return _no_floor(_stale_tree_reason(stale))
+
     per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
     # The same wrong-path guard `measure_execution_noise_floor` carries, and for the same reason: a
     # mistyped variant, suite or run directory is the documented SILENT-ZERO failure mode, and
@@ -990,6 +1087,13 @@ def measure_execution_noise_floor(
     that is worth checking rather than treating as a green light — it is what a suite whose rows
     are deterministic looks like, and also what one whose rows all failed identically looks like.
     """
+    # The activation floor's preflight, on this track's split axis and for a sharper reason: the
+    # replicate half of the reconciliation keys on `<NN>`, and a re-used `--run-dir` with a smaller
+    # `--repeats` leaves exactly the stale replicates this splits into halves. See its twin above.
+    stale, _unknown_dirs = _reconcile_arms([(variant_id, run_dirs)], suite_id)
+    if stale:
+        return _no_floor(_stale_tree_reason(stale))
+
     rows = _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
     # A mistyped variant, suite or run directory is the documented SILENT-ZERO failure mode, and
     # "no row carries 2+ replicates" would send the reader off to check --repeats instead of the
@@ -1264,7 +1368,10 @@ def _load_and_pair(
     copied because pydantic COPIES the list at construction, so a note appended after the model is
     built is silently discarded — the gate must therefore hold this exact list until its return.
     """
-    incumbent_by_dir = [load_suite_rows(d, incumbent_variant, suite_id) for d in incumbent_run_dirs]
+    # CE053: this reader does NOT reconcile, and its only caller is why. `activation_gate` runs the
+    # sweep itself, over both arms at once, and REFUSES before reading a statistic — reconciling
+    # here as well would read every run.json twice per arm for one fault.
+    incumbent_by_dir = [load_suite_rows(d, incumbent_variant, suite_id) for d in incumbent_run_dirs]  # noqa: CE053
     candidate_by_dir = [load_suite_rows(d, candidate_variant, suite_id) for d in candidate_run_dirs]
     incumbent_rows = _pool(incumbent_by_dir)
     candidate_rows = _pool(candidate_by_dir)
@@ -1529,26 +1636,11 @@ def activation_gate(
     # second invocation rewrites `row_selection` to a single split while the first split's results
     # stay on disk, so provenance reads clean and the gate pools both splits into one arm. See
     # `reconcile_tree_against_run_json` for why this matches (row, replicate) rather than counting.
-    stale: dict[str, frozenset[tuple[str, str]]] = {}
-    unknown_dirs = 0
-    for variant, dirs in ((incumbent_variant, incumbent_run_dirs), (candidate_variant, candidate_run_dirs)):
-        for run_dir in dirs:
-            reconciliation = reconcile_tree_against_run_json(run_dir, variant, suite_id)
-            if reconciliation.unknown:
-                unknown_dirs += 1
-            elif reconciliation.unrecorded:
-                stale[f"{run_dir}/{variant}"] = reconciliation.unrecorded
+    stale, unknown_dirs = _reconcile_arms(
+        ((incumbent_variant, incumbent_run_dirs), (candidate_variant, candidate_run_dirs)), suite_id
+    )
     if stale:
-        # Reported PER LOCATION, and as distinct rows rather than a tree-wide total. A sum over
-        # (arm x dir) is unreconcilable with the `Rows paired: N` line four lines below it in the
-        # same block — measured, a 22-row suite over 3 dirs and 2 arms reported "124 of 130" — and
-        # the number the reader must act on is how many results in WHICH directory nothing wrote.
-        locations = "; ".join(
-            f"{location}: {len(pairs)} result(s) across {len({row for row, _ in pairs})} row(s)"
-            + f" (e.g. {', '.join(f'{row}/{rep}' for row, rep in sorted(pairs)[:3])}"
-            + f"{', …' if len(pairs) > 3 else ''})"
-            for location, pairs in sorted(stale.items())
-        )
+        locations = _stale_locations(stale)
         refusal = (
             "the run directory tree holds results that no recorded invocation wrote — "
             f"{locations}. run.json is written per INVOCATION while the tree is APPEND-ONLY, so a "
@@ -2824,8 +2916,21 @@ def arm_row_scores(
     ``criterion_index=None`` reads the row's ``weighted_score`` (the execution track); an index
     reads that criterion's score (the activation track). A row an arm produced no score for is
     left ABSENT from the vector rather than recorded as 0.0 — see :func:`pareto_front`.
+
+    **A contaminated tree WARNS rather than refusing** (CE053), and that is a consequence of the
+    return type rather than a softer stance: ``ArmRowScores`` is a vector with nowhere to put a
+    refusal, and the three fronts computed from it take a list. Both noise floors, which return
+    ``NoiseFloor | None``, refuse on the same detection. The message is the same either way
+    (:func:`_stale_tree_reason`) so the two read alike in a log.
     """
     _require_valid_criterion_index(criterion_index)
+    # ONE sweep over every arm before any load. It does NOT save a `run.json` parse — reconciling
+    # is per (variant, dir) either way — but it collects every location into one message, so a run
+    # dir carrying both arms reports one warning naming both rather than one warning per arm for
+    # what is a single re-used `--run-dir`.
+    stale, _unknown_dirs = _reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
+    if stale:
+        logger.warning("Row scores may be over a contaminated tree: %s", _stale_tree_reason(stale))
     arms: list[ArmRowScores] = []
     for variant_id in variant_ids:
         rows = _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
@@ -3213,7 +3318,10 @@ def cost_quality_points(
     )
     points: list[CostQualityPoint] = []
     for arm in arms:
-        rows = load_arm_rows(run_dirs, arm.variant_id, suite_id)
+        # CE053: reached through `arm_row_scores` above, which reconciles every arm in one sweep.
+        # A second reconcile here would read every run.json twice per arm and warn twice about one
+        # fault — measured, and the reason the suppression is the record rather than a second call.
+        rows = load_arm_rows(run_dirs, arm.variant_id, suite_id)  # noqa: CE053
         scored_ids = sorted(arm.row_scores)
         levels = _row_cost_levels([_row_costs(rows.get(rid, [])) for rid in scored_ids])
         points.append(

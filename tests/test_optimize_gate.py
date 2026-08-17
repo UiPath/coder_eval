@@ -2748,6 +2748,156 @@ class TestEveryMissingFloorSaysWhy:
         assert "carry 2+ replicates" in caplog.text
 
 
+class TestStageAReadersReconcileTheTree:
+    """CE053 in behaviour: every run-tree reader either refuses or warns on a contaminated tree.
+
+    Both gates already refused a run dir holding results its own `run.json` never wrote. The four
+    Stage A / floor readers did not — measured, on dirs `activation_gate` correctly refuses,
+    `measure_noise_floor` returned a floor computed over an extra pooled row and `arm_row_scores`
+    returned the stale row in its vector. The floor decides whether a round runs at all; the
+    vectors feed all three Pareto fronts.
+
+    The RESPONSE differs by return type and that asymmetry is the phase's whole decision: a
+    `NoiseFloor | None` can refuse, an `ArmRowScores` has nowhere to put a refusal.
+    """
+
+    ROWS: ClassVar[dict[str, list[tuple[str, str]]]] = {
+        "r1": [("yes", "yes")],
+        "r2": [("yes", "no")],
+        "r3": [("no", "no")],
+    }
+
+    def _contaminate(self, run_dirs: list[Path], variant: str = "incumbent") -> None:
+        """One row nothing recorded, in the LAST dir — an earlier invocation of a re-used --run-dir."""
+        _write_row(run_dirs[-1], variant, "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+
+    def test_the_activation_floor_refuses_and_names_the_directory_and_a_pair(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        self._contaminate(run_dirs)
+        with caplog.at_level(logging.WARNING):
+            floor = measure_noise_floor(
+                run_dirs=run_dirs,
+                variant_id="incumbent",
+                suite_id=SUITE,
+                criterion_index=0,
+                model="claude-haiku-4-5",
+                n_resamples=_FAST_RESAMPLES,
+            )
+        assert floor is None
+        assert f"{run_dirs[-1]}/incumbent" in caplog.text
+        assert "stale/00" in caplog.text, "the (row, replicate) pair is what a reader acts on"
+
+    def test_the_execution_floor_refuses_the_same_way(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        run_dirs = _weighted_arm(tmp_path, "incumbent", {f"r{i}": [0.1 * i, 0.2 * i, 0.3] for i in range(4)})
+        _write_row(run_dirs[0], "incumbent", "stale", _scored_result("stale", 1.0), 7, record=False)
+        with caplog.at_level(logging.WARNING):
+            assert _execution_floor(run_dirs) is None
+        assert f"{run_dirs[0]}/incumbent" in caplog.text
+        assert "stale/07" in caplog.text
+
+    def test_arm_row_scores_warns_and_still_returns_a_vector(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The warn-not-refuse half: `ArmRowScores` has no field a refusal could live in, so the
+        # answer is still produced — with the same message the floors refuse with.
+        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
+        self._contaminate(run_dirs)
+        with caplog.at_level(logging.WARNING):
+            arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
+        assert [a.variant_id for a in arms] == ["incumbent"]
+        assert set(arms[0].row_scores) == {"r1", "r2", "r3", "stale"}
+        assert "results that no recorded invocation wrote" in caplog.text
+        assert f"{run_dirs[-1]}/incumbent" in caplog.text
+
+    def test_cost_quality_points_warns_exactly_once(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """The regression guard for the double-reconcile the plan rejected (S8).
+
+        `cost_quality_points` reaches the tree through `arm_row_scores`, which reconciles. A
+        second reconcile here would read every run.json twice per arm and warn twice about one
+        fault — so the suppression is the record, and this test is what keeps it true.
+        """
+        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
+        self._contaminate(run_dirs)
+        with caplog.at_level(logging.WARNING):
+            cost_quality_points(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
+        assert caplog.text.count("results that no recorded invocation wrote") == 1
+
+    def test_one_warning_per_sweep_however_many_arms_share_a_run_dir(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Both arms live under one run dir, as a real experiment writes them. Reconciling inside
+        # the per-arm loop would read that dir's run.json once per arm.
+        run_dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        self._contaminate(run_dirs, "candidate")
+        with caplog.at_level(logging.WARNING):
+            arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent", "candidate"], suite_id=SUITE, criterion_index=0)
+        assert caplog.text.count("Row scores may be over a contaminated tree") == 1
+
+    def test_a_clean_tree_is_byte_identical_and_silent(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        with caplog.at_level(logging.WARNING):
+            floor = measure_noise_floor(
+                run_dirs=run_dirs,
+                variant_id="incumbent",
+                suite_id=SUITE,
+                criterion_index=0,
+                model="claude-haiku-4-5",
+                n_resamples=_FAST_RESAMPLES,
+            )
+            arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
+        assert floor is not None and floor.n_rows == 3
+        assert set(arms[0].row_scores) == {"r1", "r2", "r3"}
+        assert caplog.text == ""
+
+    def test_an_unknown_run_dir_does_not_refuse(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """A `run.json` that records no `task_results` is a NOTE, never a refusal.
+
+        The module's settled missing-provenance stance: old run dirs stay measurable, and the one
+        state where contamination is undetectable must not also be the one that refuses everything.
+        Asserted at WARNING level, because a floor that WAS measured must not log as if it was not.
+        """
+        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        for run_dir in run_dirs:
+            payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            payload.pop("task_results", None)
+            (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            floor = measure_noise_floor(
+                run_dirs=run_dirs,
+                variant_id="incumbent",
+                suite_id=SUITE,
+                criterion_index=0,
+                model="claude-haiku-4-5",
+                n_resamples=_FAST_RESAMPLES,
+            )
+            arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
+        assert floor is not None
+        assert set(arms[0].row_scores) == {"r1", "r2", "r3"}
+        assert caplog.text == ""
+
+    def test_a_wrong_path_still_blames_the_path_not_the_tree(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The reconcile runs BEFORE the load, so the ordering has to be checked: a wrong variant
+        # leaves nothing on disk to be unrecorded, and the wrong-path message must still win.
+        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        with caplog.at_level(logging.WARNING):
+            assert (
+                measure_noise_floor(
+                    run_dirs=run_dirs,
+                    variant_id="typo",
+                    suite_id=SUITE,
+                    criterion_index=0,
+                    model="claude-haiku-4-5",
+                )
+                is None
+            )
+        assert "wrong variant id, a wrong suite id or a wrong run directory" in caplog.text
+        assert "no recorded invocation wrote" not in caplog.text
+
+
 class TestInstanceBestFront:
     """GEPA's frontier, beside ours. Neither set contains the other, and that is the point."""
 
