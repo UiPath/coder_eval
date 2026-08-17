@@ -29,6 +29,7 @@ from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.evaluation.sub_agent import SubAgentRunner
 from coder_eval.models import (
     AgentJudgeCriterion,
+    AgentKind,
     ClaudeCodeAgentConfig,
     JudgeVerdict,
     TurnRecord,
@@ -1337,3 +1338,148 @@ def test_claude_code_agent_accepts_extra_mcp_servers() -> None:
     assert agent._extra_mcp_servers == {
         "a": {"type": "sdk", "name": "a", "instance": agent._extra_mcp_servers["a"]["instance"]}
     }
+
+
+# --- judge kind is enforced by the schema, not by convention ---
+
+
+class TestJudgeAgentKindIsNarrowed:
+    """`AgentJudgeCriterion.agent` accepts `type: "claude-code"` and nothing else.
+
+    The field used to be the four-way `AgentConfig` union, with a comment beside it saying a
+    plugin kind was "deliberately not accepted as a judge". The comment was the only thing
+    saying so, and the gap between it and the annotation was reachable: an off-kind block
+    supplies fields the judge's own model does not declare, and `_build_agent_config`'s
+    `model_copy(update=)` set them as bare instance attributes — absent from `model_dump()`
+    entirely — while writing `type: antigravity` and `model: gemini-3` onto a config handed
+    straight to the Claude Code SDK. The annotation enforces it now, at task load.
+    """
+
+    def test_an_off_kind_agent_block_is_rejected_on_the_task_load_path(self) -> None:
+        # Validated from a DICT, which is what a task YAML actually supplies. That distinction
+        # decides which error pydantic raises: an already-constructed off-kind INSTANCE yields
+        # only the generic `model_type` ("Input should be a valid dictionary or instance of
+        # ClaudeCodeAgentConfig"), while the mapping a loader hands over yields the two errors
+        # that name what is wrong with the block.
+        with pytest.raises(ValidationError) as excinfo:
+            AgentJudgeCriterion.model_validate(
+                {
+                    "type": "agent_judge",
+                    "description": "x",
+                    "prompt": "grade",
+                    "agent": {"type": "antigravity", "model": "gemini-3", "thinking_level": "high"},
+                }
+            )
+        # A USEFUL error, not merely "it raised". Asserted on the structured errors rather than
+        # on `str(exc)`: every pydantic message contains the substring "type" as boilerplate
+        # (`[type=literal_error, input_value=…]`), so a substring check on the rendered text
+        # passes for any failure at all and pins nothing.
+        by_location = {".".join(str(p) for p in err["loc"]): err["type"] for err in excinfo.value.errors()}
+        assert by_location.get("agent.type") == "literal_error", by_location
+        # And the field that used to be smuggled through as a bare instance attribute is now
+        # named as the extra it is, rather than silently accepted.
+        assert by_location.get("agent.thinking_level") == "extra_forbidden", by_location
+
+    def test_an_off_kind_agent_instance_is_rejected_too(self) -> None:
+        # The programmatic path (a test or a caller building the criterion directly). Weaker
+        # error by construction — pydantic sees an instance of the wrong model and says so
+        # without inspecting its fields — so this asserts the rejection, not the message.
+        with pytest.raises(ValidationError):
+            AgentJudgeCriterion(
+                description="x",
+                prompt="grade",
+                agent=parse_agent_config(type="antigravity", model="gemini-3", thinking_level="high"),
+            )
+
+    def test_claude_code_judge_block_is_accepted(self) -> None:
+        criterion = AgentJudgeCriterion(
+            description="x",
+            prompt="grade",
+            agent=parse_agent_config(type="claude-code", model="claude-haiku-4-5-20251001"),
+        )
+        assert criterion.agent.type is AgentKind.CLAUDE_CODE
+
+    def test_the_default_is_the_hardened_judge_config(self) -> None:
+        # The default_factory already returned this exact type; narrowing the annotation must
+        # not have disturbed it.
+        assert isinstance(AgentJudgeCriterion(description="x", prompt="grade").agent, ClaudeCodeAgentConfig)
+
+
+class TestBuiltJudgeConfigCarriesNoBareAttributes:
+    """Every config the builder can produce is a whole, dump-complete `ClaudeCodeAgentConfig`.
+
+    A field that lands outside `model_dump()` is invisible to every consumer that serializes
+    the config while `getattr` still reads it back, so the dump is what is asserted here.
+
+    Scope, stated so this is not read as more than it is: the off-kind INPUT is unconstructible
+    once the annotation is narrowed, so `getattr(cfg, "thinking_level", None) is None` would
+    hold under any overlay implementation. The guard against the annotation being widened again
+    is `TestJudgeAgentKindIsNarrowed`, not this class; what this class pins is that the overlay
+    swap left every reachable input yielding the same complete config.
+    """
+
+    def _built_config(self, sandbox: Sandbox, direct_route: DirectRoute, **agent_kwargs: object) -> object:
+        criterion = AgentJudgeCriterion(
+            description="x",
+            prompt="grade",
+            **({"agent": parse_agent_config(type="claude-code", **agent_kwargs)} if agent_kwargs else {}),  # type: ignore[arg-type]
+        )
+        mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
+        with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+            SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+        (agent_config,) = mock_cls.call_args.args
+        return agent_config
+
+    @pytest.mark.parametrize(
+        "agent_kwargs",
+        [
+            {},
+            {"model": "claude-haiku-4-5-20251001"},
+            {"permission_mode": "plan"},
+            {"sdk_options": {"effort": "low"}},
+        ],
+        ids=["defaults", "model-only", "permission-mode-only", "sdk-options-only"],
+    )
+    def test_every_reachable_input_yields_a_claude_code_config_with_nothing_off_dump(
+        self, sandbox: Sandbox, direct_route: DirectRoute, agent_kwargs: dict[str, object]
+    ) -> None:
+        cfg = cast(ClaudeCodeAgentConfig, self._built_config(sandbox, direct_route, **agent_kwargs))
+        assert cfg.type is AgentKind.CLAUDE_CODE
+        dumped = cfg.model_dump()
+        assert {"type", "model"} <= set(dumped)
+        # `thinking_level` is the field the off-kind path used to smuggle in. It is not a
+        # ClaudeCodeAgentConfig field, so reading it back at all means it landed off-dump.
+        assert getattr(cfg, "thinking_level", None) is None
+
+    def test_a_partial_override_keeps_every_hardened_default(self, sandbox: Sandbox, direct_route: DirectRoute) -> None:
+        # Read the expectations from the factory rather than restating them: a hardcoded list
+        # here would pass while the real defaults drifted underneath it.
+        from coder_eval.evaluation.verdict_tool import SUBMIT_VERDICT_MCP_TOOL_NAME
+        from coder_eval.models.criteria import _default_judge_agent_config
+
+        defaults = _default_judge_agent_config()
+        cfg = cast(
+            ClaudeCodeAgentConfig,
+            self._built_config(sandbox, direct_route, model="claude-haiku-4-5-20251001"),
+        )
+        assert cfg.model == "claude-haiku-4-5-20251001"
+        assert cfg.permission_mode == defaults.permission_mode
+        # SETS, never lists: `_build_agent_config` builds both of these through a set literal,
+        # so their order is hash-randomized per interpreter run and a list comparison is flaky.
+        assert set(cfg.allowed_tools or []) == {*(defaults.allowed_tools or []), SUBMIT_VERDICT_MCP_TOOL_NAME}
+        assert set(cfg.ignore_patterns) >= set(defaults.ignore_patterns)
+        # And the security floors the overlay change must not have disturbed.
+        assert cfg.setting_sources == []
+
+    def test_the_type_survives_as_an_enum_member_through_the_dump_and_back(
+        self, sandbox: Sandbox, direct_route: DirectRoute
+    ) -> None:
+        # `_build_agent_config` validates `{**defaults.model_dump(), **user_overrides}`, and a
+        # plain `model_dump()` yields `AgentKind.CLAUDE_CODE` (the member) rather than the
+        # string. Pinned so a future switch to `model_dump(mode="json")` surfaces here rather
+        # than as a discriminator miss at load.
+        from coder_eval.models.criteria import _default_judge_agent_config
+
+        assert _default_judge_agent_config().model_dump()["type"] is AgentKind.CLAUDE_CODE
+        cfg = cast(ClaudeCodeAgentConfig, self._built_config(sandbox, direct_route))
+        assert cfg.type is AgentKind.CLAUDE_CODE

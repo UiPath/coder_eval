@@ -31,6 +31,7 @@ from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRules
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_submodule_model_imports import NoSubmoduleModelImports
 from tests.lint.runner import ALL_RULES, check_paths
+from tests.lint.task_yaml_discovery import all_yaml, task_yamls
 
 
 SRC = Path(__file__).parent.parent / "src"
@@ -1380,7 +1381,6 @@ class TestCE028DocIndexParity:
         assert any(p.doc == "DIALOG_MODE.md" for p in nav)
 
     def test_nav_loader_does_not_mutate_global_safeloader(self):
-        import yaml
 
         from tests.lint.doc_indexes import load_nav
 
@@ -1389,7 +1389,6 @@ class TestCE028DocIndexParity:
             yaml.safe_load("x: !ENV [A, b]")
 
     def test_python_object_tags_are_still_rejected(self):
-        import yaml
 
         from tests.lint.doc_indexes import load_nav
 
@@ -1994,7 +1993,6 @@ def _snippet_binding_failures(markdown: str) -> list[str]:
 
 def _skill_frontmatter(path: Path) -> dict:
     """Parse a SKILL.md's YAML frontmatter block."""
-    import yaml
 
     text = path.read_text(encoding="utf-8")
     assert text.startswith("---\n"), f"{path} does not open with a YAML frontmatter fence"
@@ -2598,7 +2596,6 @@ class TestPluginArtifacts:
         # pass reads as "one criterion, no content check" and flags. The worked example is
         # in the repo (reference/templates/activation.yaml), so the carve-out cannot be
         # written vaguely: it must be structural, since the file may be renamed.
-        import yaml
 
         text = (PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md").read_text(encoding="utf-8")
         for token in ("dataset:", "skill_triggered", "classification_match", "suite_thresholds"):
@@ -6836,11 +6833,14 @@ class TestCE048NoBareModelCopyUpdate:
         assert NoBareModelCopyUpdate("src/coder_eval/models/copy_with.py").check(ast.parse(source)) == []
         assert NoBareModelCopyUpdate("src\\coder_eval\\models\\copy_with.py").check(ast.parse(source)) == []
 
-    def test_only_the_canonical_module_and_one_documented_exemption_remain(self) -> None:
+    def test_only_the_canonical_module_remains(self) -> None:
         """Anti-vacuity, and the acceptance criterion in test form.
 
         The rule is satisfied by suppressions as easily as by conversions, so the number of live
-        `model_copy(update=)` calls in `src/` is pinned rather than left to the sweep.
+        `model_copy(update=)` calls in `src/` is pinned rather than left to the sweep. There is
+        now exactly one, and it is the helper's own — `criteria/agent_judge.py` held the last
+        exemption until `AgentJudgeCriterion.agent` narrowed to a single model and its overlay
+        became a `model_validate` of a merged dump.
         """
         offenders = [
             path.relative_to(SRC).as_posix()
@@ -6852,9 +6852,7 @@ class TestCE048NoBareModelCopyUpdate:
             and any(k.arg == "update" for k in node.keywords)
         ]
         assert offenders == [
-            # The one documented exemption: a dict VARIABLE from user YAML, plus deep=True.
-            "coder_eval/criteria/agent_judge.py",
-            # And the canonical module, which is the thing that checks the keys.
+            # The canonical module, which is the thing that checks the keys — and nothing else.
             "coder_eval/models/copy_with.py",
         ], offenders
 
@@ -6992,6 +6990,12 @@ class TestCE052TemplateTasksLoad:
     `tasks/skills/ci-outcome.yaml` licenses as "not a valid task") is skipped by CONTENT rather
     than by filename, and the skip is asserted rather than silent.
 
+    The discovery itself lives in `tests/lint/task_yaml_discovery.py` — a shared reader on the
+    `markdown_tables.py` / `import_resolution.py` precedent — because
+    `tests/test_task_yaml_discovery.py` asks the identical question of `tasks/`. Both halves
+    (parse rather than regex; glob BOTH extensions) were got wrong independently before they
+    were shared, and each failure mode is a task silently vanishing from the set.
+
     **Complements `TestPluginArtifacts`, does not subsume it.** That class asserts far more about
     `plugins/coder-eval/reference/templates/` — row counts through `expand_dataset`, criterion
     shapes, suite-threshold wiring. This asserts only loadability, over a DISCOVERED set. They
@@ -7001,28 +7005,10 @@ class TestCE052TemplateTasksLoad:
     TEMPLATES = Path(__file__).parent.parent / "templates"
 
     def _all_yaml(self) -> list[Path]:
-        """Both extensions. A `.yml` task was invisible to the discovery set AND to the
-        completeness assertion below — silently unloaded, which is the exact state this rule
-        exists to prevent."""
-        return sorted([*self.TEMPLATES.rglob("*.yaml"), *self.TEMPLATES.rglob("*.yml")])
+        return all_yaml(self.TEMPLATES)
 
     def _task_yamls(self) -> list[Path]:
-        """Every YAML under `templates/` whose PARSED top level carries a `task_id` key.
-
-        Parsed, not regex-matched: `"task_id":`, `task_id :` and a flow mapping are all valid
-        YAML spellings that `^task_id:` misses. Those at least trip the completeness assertion
-        loudly, but relying on that is relying on a second check to cover the first.
-        """
-        found: list[Path] = []
-        for path in self._all_yaml():
-            try:
-                document = yaml.safe_load(path.read_text(encoding="utf-8"))
-            except yaml.YAMLError:
-                found.append(path)  # unparseable: let `load_task` produce the real error
-                continue
-            if isinstance(document, dict) and "task_id" in document:
-                found.append(path)
-        return found
+        return task_yamls(self.TEMPLATES)
 
     def test_the_discovery_set_is_not_empty(self) -> None:
         """Anti-vacuity, and the CE044/CE045 lesson: a moved directory must report a GAP.

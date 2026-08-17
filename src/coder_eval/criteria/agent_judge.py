@@ -286,27 +286,29 @@ def _build_agent_config(
     user_overrides = criterion.agent.model_dump(exclude_unset=True)
     if "sdk_options" in user_overrides:
         user_overrides["sdk_options"] = {**defaults.sdk_options, **user_overrides["sdk_options"]}
-    # The one exempt `model_copy(update=)` in src/ (CE048): the update is a dict VARIABLE built
-    # from the user's YAML — there are no literal keywords to write — and the call needs
-    # `deep=True`, neither of which `copy_with` expresses. `system_prompt_file` / `system_prompt_mode`
-    # must be forced in the SAME update: they are mutually exclusive with `system_prompt` and
-    # BaseAgentConfig sets validate_assignment=True, so sequential assignment raises on the
-    # intermediate state.
+    # `model_validate` rather than `model_copy(update=)`: the latter skips validation by design
+    # and so never checks the update's KEYS. This was the tree's last CE048 suppression, and
+    # retiring it leaves that call shape in exactly one place — `models/copy_with.py`, the
+    # function that checks the keys.
     #
-    # The key hole is NOT closed here, and that is worth saying rather than assuming away:
-    # `criterion.agent` is the four-way `AgentConfig` union while `defaults` is always a
-    # `ClaudeCodeAgentConfig`, so a judge configured `type: antigravity` supplies `thinking_level`,
-    # which this model does not declare — it lands as a bare instance attribute, absent from
-    # `model_dump()`, silently. Narrowing that is a behaviour decision about what an off-kind judge
-    # config should DO (reject it, or coerce it), not a mechanical conversion, so it is recorded in
-    # `.claude/harness-candidates.md` rather than smuggled in here.
-    config = defaults.model_copy(  # noqa: CE048
-        update={
+    # An off-kind judge block cannot reach this point any more: `AgentJudgeCriterion.agent` is
+    # narrowed to `ClaudeCodeAgentConfig`, so it is rejected at task load. Validating a full dump
+    # under the user's set fields also constructs fresh nested objects, which is the property
+    # `deep=True` was there for — no mutable default is shared with `defaults`.
+    #
+    # The one behavioural delta, stated rather than left to be rediscovered: validating a FULL
+    # dump marks every field as set, so `config.model_fields_set` is now the whole model and
+    # `config.model_dump(exclude_unset=True)` is a full dump. Inert today — no consumer of the
+    # built judge config reads either (`SubAgentRunner` and `ClaudeCodeAgent` read values, and
+    # this config is never persisted) — but it is the shape that would matter if one did.
+    config = ClaudeCodeAgentConfig.model_validate(
+        {
+            **defaults.model_dump(),
             **user_overrides,
             # Force the judge's own prompt in replace mode regardless of user YAML
             # (see the note on _SYSTEM_PROMPT for why, and SubAgentRunner.__init__
             # for the enforcement point). system_prompt_file must be cleared in the
-            # SAME update: it is mutually exclusive with system_prompt, and
+            # SAME payload: it is mutually exclusive with system_prompt, and
             # BaseAgentConfig has validate_assignment=True, so a user YAML that set
             # it would make a sequential assignment raise on the intermediate state.
             "system_prompt": system_prompt,
@@ -318,8 +320,7 @@ def _build_agent_config(
             # PreToolUse) or MCP subprocesses that run with the evaluator's
             # credentials BEFORE the allowed_tools gate kicks in.
             "setting_sources": [],
-        },
-        deep=True,
+        }
     )
     # SECURITY: ensure the ignore_patterns floor is present even if the
     # user supplied their own list. Set-union guarantees idempotence and

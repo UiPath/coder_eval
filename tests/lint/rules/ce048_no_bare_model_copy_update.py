@@ -28,8 +28,12 @@ source where a reader and a rename can see them. CE041's own docstring named *up
 it left open; this closes it at runtime and keeps the call shape from coming back.
 
 The intended fix is ``copy_with(model, field=value)``. A genuine dict update — one built from user
-YAML, or one needing ``deep=True`` — keeps ``model_copy(update=)`` under a ``# noqa: CE048`` naming
-the reason; ``criteria/agent_judge.py`` is the one such site in the tree.
+YAML, or one needing ``deep=True`` — may keep ``model_copy(update=)`` under a ``# noqa: CE048``
+naming the reason, but **no such site remains**: ``criteria/agent_judge.py`` was the one, and it
+took the other available shape, ``Model.model_validate({**defaults.model_dump(), **overrides})``,
+once its field was narrowed from a union to a single model. That form re-runs the validators, so
+it checks the values as well as the keys — prefer it wherever the cost is affordable, and reach
+for a suppression only where it is not.
 """
 
 import ast

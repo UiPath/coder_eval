@@ -1199,7 +1199,8 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
   include_dialog: false              # Opt-in: include the full user<->agent conversation (recommended for simulation)
   max_turns: 5
   turn_timeout: 300
-  agent:                              # Nested AgentConfig — same shape as task.agent
+  agent:                              # Judge agent — a ClaudeCodeAgentConfig, no other kind
+    type: "claude-code"               # REQUIRED, and the only accepted value (see below)
     model: "claude-sonnet-5"
     permission_mode: "bypassPermissions"
     allowed_tools: ["Bash", "Read", "Grep", "Glob"]
@@ -1220,7 +1221,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `max_file_chars` | `20000` | Per-file truncation for pre-attached files |
 | `max_turns` | `50` | Judge's inner-loop turn limit |
 | `turn_timeout` | `300` | Wall-clock timeout (seconds) |
-| `agent` | hardened judge defaults | Nested `AgentConfig` — `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `ignore_patterns`, `sdk_options`. A partial block (e.g. only `model:`) still applies the judge security defaults for missing fields, and the security floor (`.claude` / `.mcp.json` / `_reference` ignore patterns, `setting_sources=[]`) is always enforced. |
+| `agent` | hardened judge defaults | Nested `ClaudeCodeAgentConfig` — `type` (**required, and must be `"claude-code"`**), `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `ignore_patterns`, `sdk_options`. `agent_judge` spawns a Claude Code SDK sub-agent, so any other kind — built-in or plugin — is rejected with a `ValidationError` at task load rather than silently coerced. A partial block (e.g. only `type:` and `model:`) still applies the judge security defaults for missing fields, and the security floor (`.claude` / `.mcp.json` / `_reference` ignore patterns, `setting_sources=[]`) is always enforced. |
 | `capture_transcript` | `true` | Persist a `JudgeTranscript` (tool calls + token usage + raw verdict + rendered prompts) to a sibling `judge-<idx>.yaml`. Set `false` to drop the trajectory log when on-disk size matters; the `findings` on the result persist regardless. |
 | `max_transcript_chars` | `100000` | Aggregate cap on captured transcript text (verdict + prompt + system + tool detail/result-preview lines, split 60/30/10 with tool calls prioritized). Exceeding it marks the transcript `truncated=True`. |
 

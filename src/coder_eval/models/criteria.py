@@ -15,7 +15,7 @@ from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
+from coder_eval.models.agent_config import ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.sandbox import RECORD_CLI_LOG
@@ -52,7 +52,7 @@ def _reject_removed_verdict_channel(data: Any) -> Any:
 
 
 def _default_judge_agent_config() -> ClaudeCodeAgentConfig:
-    """Build the default judge AgentConfig.
+    """Build the default judge ClaudeCodeAgentConfig.
 
     The returned ``ignore_patterns`` extend ``JUDGE_SECURITY_IGNORE_FLOOR``
     with developer-noise dirs (``.git``, ``node_modules``, ...). The security
@@ -1534,14 +1534,22 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         ge=10,
         description="Wall-clock timeout for the judge turn (seconds). Minimum 10.",
     )
-    # Intentionally the closed built-in AgentConfig union, NOT ResolvedAgentConfig:
-    # agent_judge spawns a Claude Code SDK sub-agent (SubAgentRunner) with evaluator
-    # credentials, so a plugin agent kind is deliberately not accepted as a judge.
-    agent: AgentConfig = Field(
+    # NOT the four-way AgentConfig union and NOT ResolvedAgentConfig: agent_judge spawns a
+    # Claude Code SDK sub-agent (SubAgentRunner) with evaluator credentials, so no other kind
+    # — plugin or built-in — is accepted as a judge. The annotation is what ENFORCES that; it
+    # used to be the union with this comment stating the intent beside it, and the gap between
+    # the two was reachable: a `type: antigravity` block supplied `thinking_level`, which
+    # `_build_agent_config` then copied onto a ClaudeCodeAgentConfig as a bare instance
+    # attribute — absent from model_dump(), with `model: gemini-3` handed to the Claude SDK.
+    # Narrowing does not change what a VALID block looks like: ClaudeCodeAgentConfig.type is
+    # `Literal[AgentKind.CLAUDE_CODE]` with no default, so `type: "claude-code"` was already
+    # mandatory.
+    agent: ClaudeCodeAgentConfig = Field(
         default_factory=_default_judge_agent_config,
         description=(
-            "Judge agent configuration (built-in kinds only — agent_judge runs a Claude Code "
-            "sub-agent). Defaults to a sonnet, bypass-permissions, read-only toolkit suitable "
+            'Judge agent configuration. Only `type: "claude-code"` is accepted — agent_judge '
+            "runs a Claude Code sub-agent, and any other kind (built-in or plugin) is rejected "
+            "at task load. Defaults to a sonnet, bypass-permissions, read-only toolkit suitable "
             "for investigation-style judging. Override fields per task as needed. For security, "
             "the judge always runs with setting_sources=[] regardless of what this field "
             "declares — see _build_agent_config."

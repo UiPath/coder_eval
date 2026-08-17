@@ -588,7 +588,9 @@ with the two `action.yml` items above — one considered change to the action's 
       **Resolution (Plan D Phase 3):** the helper, not the convention. `models/copy_with.py`
       takes literal keywords and raises on an unknown field name; **CE048** forbids the bare call
       shape in `src/`; all 21 call sites converted, with one documented exemption
-      (`criteria/agent_judge.py` — a dict VARIABLE from user YAML, plus `deep=True`). The
+      (`criteria/agent_judge.py` — a dict VARIABLE from user YAML, plus `deep=True`; **that
+      exemption was retired in Plan A Phase 2** and `src/` now holds exactly one live
+      `model_copy(update=)`, the helper's own). The
       re-validating convention was rejected: it re-runs every validator on every field on paths
       that run once per candidate per round. Note the inventory here said "~9 call sites" and the
       plan's single-line grep said 17 — the AST count is **22**, because four are wrapped across
@@ -622,7 +624,7 @@ with the two `action.yml` items above — one considered change to the action's 
       name heuristic? a `Final[float]` in two named modules? an explicit opt-out list?), and a
       noisy version of this rule in a merge-blocking job is worse than none. — caught in the
       Plan D Phase 6 quality review.
-- [ ] **`agent_judge` silently drops an off-kind judge config's fields.** `_build_agent_config`
+- [x] **`agent_judge` silently drops an off-kind judge config's fields.** `_build_agent_config`
       copies the user's `criterion.agent` dump onto a `ClaudeCodeAgentConfig`, but
       `AgentJudgeCriterion.agent` is the four-way `AgentConfig` union — so `type: antigravity`
       supplies `thinking_level`, which `ClaudeCodeAgentConfig` does not declare. Verified: it lands
@@ -634,6 +636,17 @@ with the two `action.yml` items above — one considered change to the action's 
       decision — reject an off-kind judge config, or coerce it to the judge's own kind — rather
       than a mechanical conversion, and either answer changes what a currently-accepted task YAML
       does. — caught in the Plan D Phase 3 quality review.
+      **Resolution (Plan A Phase 2): REJECT.** `AgentJudgeCriterion.agent` is narrowed from the
+      four-way union to `ClaudeCodeAgentConfig`, so an off-kind block is a `ValidationError` at
+      task load rather than a silent coercion. Coercion was rejected because the offending field
+      is meaningless on the target model — there is nothing to coerce `thinking_level` INTO, and
+      `model: gemini-3` reaching the Claude SDK is not a config to repair. Blast radius measured
+      as zero: every in-tree `agent:` block under an `agent_judge` criterion already spells
+      `type: "claude-code"`, and all 46 task YAMLs load under the narrowed schema. Out-of-tree
+      YAML carrying a non-Claude judge block was already silently broken; it now fails loudly.
+      The overlay at the same site moved to
+      `ClaudeCodeAgentConfig.model_validate({**defaults.model_dump(), **user_overrides})`,
+      retiring the tree's last `# noqa: CE048`.
 - [ ] A no-op "absence" assertion: `assert "X" not in text.replace("NOT X", "")` is vacuous whenever
       the fixture cannot contain `X` at all, and reads as a strong guard. The named instance —
       `tests/test_optimize_gate.py`'s `render_search_comparison` blocked-path test — **is FIXED**
@@ -852,3 +865,21 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
   the tree-local editable install BOTH report `0.9.6`; only the second accepts `plan --split`.
   Step 1 already warns about this in prose and it still cost a cycle — the check it describes
   should be a copy-pasteable command in the skill rather than a paragraph.
+
+## From Plan A (scoring-correctness fixes, 2026-08-16)
+
+- [ ] **`agent_judge`'s `allowed_tools` and `ignore_patterns` are order-nondeterministic across
+  processes.** `criteria/agent_judge.py` builds both through a set literal
+  (`list({*config.allowed_tools, SUBMIT_VERDICT_MCP_TOOL_NAME})`, and the same shape for the
+  ignore-patterns floor), and Python's string hash randomization reorders a set per interpreter
+  run. Measured three consecutive runs of the same config: `['mcp__…', 'Glob', 'Bash', 'Grep',
+  'Read']`, `['Glob', 'Grep', 'mcp__…', 'Bash', 'Read']`, `['Glob', 'Bash', 'Grep', 'mcp__…',
+  'Read']`. Behaviourally harmless — both are membership sets downstream, and neither affects
+  cost or scoring — but it has two real costs: **any test asserting LIST equality on either is
+  flaky in CI** (Plan A's own prescribed test would have been, and now compares as a `set`), and
+  the persisted `agent_config` dump in `task.json` differs run-to-run for byte-identical config,
+  which is noise in any artifact diff. The fix is one `sorted(...)` per line. Not taken in Plan A
+  because it changes the bytes of a persisted artifact, which is a different decision from a
+  scoring fix and does not belong in the same commit. A sensor is also available and is the
+  cheaper half: a test asserting no test in the tree compares `allowed_tools`/`ignore_patterns`
+  by list equality. — found by the Plan A spike (S6), recorded rather than smuggled in.

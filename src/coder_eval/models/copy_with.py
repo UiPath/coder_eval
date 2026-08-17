@@ -29,7 +29,11 @@ Three things this deliberately does **not** do:
    on paths (``holm_promote``) that run once per candidate per round.
 2. **It does not accept a dict.** A genuine dict update — one built from user YAML, say, or one
    needing ``deep=True`` — keeps ``model_copy(update=)`` under an explicit ``# noqa: CE048``
-   naming the reason. ``criteria/agent_judge.py`` is the one such site.
+   naming the reason. There is **no such site in the tree**: ``criteria/agent_judge.py`` was the
+   one, and it moved to ``model_validate({**defaults.model_dump(), **user_overrides})`` once its
+   field was narrowed to a single model. That is the other shape a dict update can take, and it
+   is the better one wherever re-running the validators is affordable — it checks the VALUES too,
+   which this function deliberately does not.
 3. **It does not admit an extra on an ``extra="allow"`` model.** ``CriterionResult`` declares
    ``extra="allow"`` so its subclasses may carry undeclared fields, and there
    ``model_copy(update=)`` routes an unknown key into ``__pydantic_extra__`` where it DOES survive
