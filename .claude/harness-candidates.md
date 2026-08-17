@@ -838,6 +838,18 @@ with the two `action.yml` items above — one considered change to the action's 
       standing guard, and its path scope names all six post-split module names so Phase 7 moving a
       reader cannot take it out of reach.
 
+- [ ] **A contaminated `ArmRowScores` vector is persisted with no marker.** `arm_row_scores` warns
+      to stderr and returns its vector (Plan B+C Phase 1 — `ArmRowScores` has nowhere to put a
+      refusal). `record_round_scores` then writes that vector into `measurements.json`, and
+      `lineage_head_scores` reads it back rounds later, when the run dirs may be gone and the
+      warning is long out of scrollback. Nothing marks the stored vector and `render_row_matrix`
+      prints no footnote, so the only trace of contamination is a stderr line from the snippet that
+      produced it. The plan's B1 table asserts "no field can carry a refusal"; that is true only
+      because no field was added — a defaulted `stale: bool = False` on `ArmRowScores` is additive
+      under `extra="forbid"`. Not done here because it ripples into `RoundScores`,
+      `record_round_scores` and the matrix footnotes, which is a scoped change rather than a guard.
+      — caught in the Plan B+C Phase 1 quality review.
+
 - [ ] **CE055: a module-size / complexity ratchet over the optimize family.** The six-module split
       landed (Plan B+C Phase 7), and this is the baseline it would ratchet against, measured at
       that commit:

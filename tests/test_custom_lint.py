@@ -3294,6 +3294,64 @@ class TestPluginArtifacts:
         )
         assert _snippet_binding_failures(markdown) == []
 
+    # Claims the code RETIRED, which must not creep back into prose. Each entry is
+    # (fragment, why it is false now). The whole sensor family asserts tokens are PRESENT;
+    # nothing asserted that a retired claim is ABSENT, and that gap cost this repo twice in one
+    # change — the "guardrails gate in the procedure" assertion had to be removed from six
+    # surfaces, and a SEVENTH (the activation-track twin, `SKILL.md`) was missed by the plan's own
+    # enumeration and by every existing sensor, surviving until a reviewer read the file.
+    #
+    # Matched against the NORMALIZED text, so a line wrap cannot hide a claim.
+    _RETIRED_CLAIMS = (
+        (
+            "guardrails gate here, in the procedure",
+            "the guardrails gate in `holm_promote` / `holm_promote_execution` — in the library, "
+            "not in the skill's prose",
+        ),
+        (
+            "stay advisory in the model",
+            "a failing guardrail FORCES `promoted = False` on both tracks",
+        ),
+        (
+            "the cost/latency guardrails stay advisory",
+            "both tracks fold their guardrails into `promoted`",
+        ),
+    )
+
+    @pytest.mark.parametrize(
+        "surface",
+        [
+            "skills/optimize-skill/SKILL.md",
+            "reference/optimize-method.md",
+        ],
+    )
+    def test_no_surface_revives_a_retired_guardrail_claim(self, surface: str):
+        """A retired claim must stay retired — the ABSENCE half this sensor family lacked.
+
+        `promoted` folds both veto lists on both tracks now, so any prose telling a reader that
+        the guardrails gate "in the procedure", or that they "stay advisory in the model", sends
+        them to check `.passed` by eye on a field that already decided it. That is worse than a
+        stale sentence: it is a sentence that instructs.
+        """
+        text = _normalized(PLUGIN_ROOT / surface)
+        revived = [(claim, why) for claim, why in self._RETIRED_CLAIMS if claim in text]
+        assert not revived, "\n  ".join(
+            [f"{surface} revives a retired claim:", *(f"{claim!r} — but {why}" for claim, why in revived)]
+        )
+
+    def test_the_retired_claim_sensor_would_fire(self, tmp_path: Path):
+        """Anti-vacuity, through the REAL reader: a fragment that cannot match guards nothing.
+
+        Fed HARD-WRAPPED, because that is how these documents are written and a raw substring
+        check would pass on exactly the text it exists to catch — the reason every sensor here
+        reads its surface through `_normalized`.
+        """
+        for claim, _why in self._RETIRED_CLAIMS:
+            wrapped = "prose that says\nthe " + claim.replace(" ", "\n") + "\nand should fail"
+            surface = tmp_path / "surface.md"
+            surface.write_text(wrapped, encoding="utf-8")
+            assert claim in _normalized(surface), claim
+
     def test_optimize_method_quotes_no_tolerance_numbers(self):
         # The guardrails are bootstrap-derived; the ONE tolerance constant lives in the module.
         # A figure hand-copied into the prose is a second declaration of it — the same shape as the
