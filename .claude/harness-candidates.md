@@ -804,3 +804,51 @@ with the two `action.yml` items above — one considered change to the action's 
       copy of the preflight. The floors feed the MDE a gate reports and the vectors feed the three
       Pareto fronts, so a wrong number here is not cosmetic. — caught in the top-10 review-fixes
       run, final adversarial review.
+
+## From 2026-08-16 xlsx execution-track dogfood run
+
+First real `/coder-eval:optimize-skill` execution round against a THIRD-PARTY skill
+(Anthropic's `xlsx`, 24-row outcome suite). Working tree: `tmp/xlsx-opt/`, plan and run
+log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are defects in
+**shipped guidance**, not in the experiment.
+
+- [ ] **The engagement criterion halves every effect the execution gate measures.** The
+  bundled `reference/templates/outcome.yaml` stacks `skill_triggered` on every row at the
+  default `weight: 1.0`. That criterion scores exactly 1.0 on every row *by design* — it is a
+  gate, and the same skill requires `recall.yes: 1.0`. `weighted_score` averages it with the
+  real grader, so a measured 0.16 difference reaches `execution_gate`'s paired *t* as 0.08.
+  Nothing in `optimize-skill` or the template mentions it, and the template's own recommended
+  shape is what causes it. Measured on the xlsx suite: a row grading 0.857 reports 0.929.
+  Fix is guidance, not code: the template should set a near-zero weight and say why.
+- [ ] **...and the obvious fix is rejected by a validator, so two shipped instructions
+  conflict.** `weight: 0` raises "weight=0 makes the criterion informational (non-gating), so
+  it cannot also set suite_thresholds". The template tells you to gate on `recall.yes` AND the
+  method tells you the gate compares `weighted_score` — you cannot satisfy both cleanly.
+  Worked around with `weight: 0.05` (~5% shrinkage rather than ~50%). Decide which of the two
+  gives: either the validator learns that a zero-weight criterion may still carry
+  `suite_thresholds`, or the template stops stacking a constant-scoring criterion into the
+  compared statistic and documents the near-zero weight instead.
+- [ ] **No preflight on whether the INSTRUMENT is fair.** `optimize-skill` hard-gates
+  engagement but has nothing on "is the grader discriminating and unbiased". Two checks in
+  this run's grader were wrong in ways only the baseline could reveal: one penalised a
+  legitimate alternative implementation (nested `IF` where the body never mandates `IFS`), one
+  double-charged a single mistake (a workbook with no formulas failed both "use formulas" and
+  "recalculate"). **Both biased every arm equally**, so no cross-arm comparison could ever have
+  surfaced them — the same blind spot `skill-creator`'s analyzer calls a "non-discriminating
+  assertion". Candidate: a Step 6.5 that requires grading a known-good and known-bad artifact
+  and asserting the scores separate, before any stage is paid for.
+- [ ] **Answer-key leakage into the fixture is unguarded, and measurably inflates scores.**
+  `candidate_leaks` checks whether a CANDIDATE reproduces train-row text; nothing checks
+  whether the FIXTURE ships the grader's expectations into the sandbox. Reproduced
+  accidentally here (a row generator wrote `expectations/*.json` under the fixture root, which
+  is copied into every sandbox). Measured against a clean run on the same 11 rows:
+  **mean 0.9158 clean -> 0.9461 leaked**, two rows flipping partial->perfect. That is larger
+  than most effects the gate exists to detect. Candidate: a lint/preflight that fails when a
+  `run_command` criterion's script or data lives under a `template_dir` the sandbox mounts.
+- [ ] **`--sample 1` is the missing cheap preflight.** One row for ~$0.50 proved the whole
+  pipeline (skill engages, artifact lands, grader scores) before any stage. `optimize-skill`
+  Step 6 goes straight to a full baseline. Pure guidance fix, one sentence.
+- [ ] **`plan --split` is a capability the version string does not carry.** The PATH binary and
+  the tree-local editable install BOTH report `0.9.6`; only the second accepts `plan --split`.
+  Step 1 already warns about this in prose and it still cost a cycle — the check it describes
+  should be a copy-pasteable command in the skill rather than a paragraph.

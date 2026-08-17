@@ -433,9 +433,53 @@ metric is computed over a smaller suite than the file suggests.
 
 ## Step 6 — Baseline
 
+**Run ONE row first.** A whole baseline is the wrong thing to discover a wiring fault with,
+and on the execution track it is the wrong thing to discover it with *expensively*:
+
+```bash
+coder-eval run <suite> --split train --sample 1 -D run_limits.stop_early=false \
+  --run-dir <runs>/smoke-1
+```
+
+One row costs one row and proves the three things that are otherwise found the hard way: the
+skill engages, the artifact lands where a criterion looks for it, and the criteria return a
+score rather than an error. Read the engagement result and the criterion detail before
+spending the other N−1. Then take the row's **measured** cost and re-set `run_limits.max_usd`
+from it — the number in the suite before this point is a guess, and a cap set close to the
+typical row fabricates body failures that never happened.
+
 ```bash
 coder-eval run <suite> --split train -D run_limits.stop_early=false --run-dir <runs>/baseline-1
 ```
+
+### Execution track only — audit the INSTRUMENT before you audit the body
+
+Engagement being 1.0 says the skill ran. It says nothing about whether the thing scoring the
+artifacts is *fair*, and an unfair grader is invisible to every comparison downstream: it
+biases **every arm equally**, so Stage A's ranking, Stage B's paired *t* and Stage C all agree
+with each other and all of them are wrong together. This is the one error class the A/B design
+cannot detect, which is why it is checked by hand, here, once.
+
+Read the per-row criterion detail from the baseline — not just the scores — and ask three
+questions of every check:
+
+- **Does it penalise a legitimate alternative?** A check demanding one implementation of
+  something the body never mandated marks down a correct answer. Measured case: a check
+  requiring a particular spreadsheet function failed every arm that used an ordinary `IF`,
+  which the body permits.
+- **Does it charge one mistake twice?** Two checks whose failure conditions are nested
+  double-weight a single defect and silently reshape the score distribution.
+- **Does every check ever FAIL, and ever PASS, across the baseline?** A check that is constant
+  across all rows contributes nothing but dilution — the same defect as a constant-scoring
+  criterion in `weighted_score`. A check that no row passes is usually a broken assertion
+  rather than a uniformly bad skill.
+
+Where a check cannot apply to a row, make it return *not applicable* and drop it from that
+row's denominator, rather than scoring it as a failure.
+
+Cheapest possible version, and worth doing before the baseline: grade a **known-good** and a
+**known-bad** artifact you build by hand, and assert the scores separate. A grader that scores
+both alike is measuring nothing, and every number after it is decoration.
 
 ### Activation track only — a second baseline, to price the round
 

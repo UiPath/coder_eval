@@ -118,6 +118,19 @@ run_limits:
 #     will act at all. A skill that stops on a missing directory scores zero on every row
 #     of EVERY arm, which ties the whole round at the floor while reading exactly like
 #     "all my candidates are bad".
+# EVERYTHING UNDER THE FIXTURE IS COPIED INTO EVERY SANDBOX, INCLUDING THE ANSWER KEY.
+#
+# If a criterion below grades against a script or a data file, keep that file OUTSIDE this
+# directory and reference it by absolute path. A grader's expectations — the sheet names,
+# the strings, the thresholds a row is scored on — placed under the fixture root hands the
+# agent exactly what it is being marked against, and the run still looks completely normal.
+#
+# Measured when this happened by accident on a real suite: on the same 11 rows the mean went
+# 0.9158 clean -> 0.9461 leaked, with two rows flipping from partial to perfect. That is
+# larger than most effects an optimization round exists to detect, and it inflates every arm,
+# so no cross-arm comparison reveals it. `optimize_gate.candidate_leaks` does NOT cover this:
+# it checks whether a CANDIDATE reproduces train-row text, not whether the FIXTURE ships the
+# marking scheme.
 sandbox:
   template_sources:
     # REPLACE: a directory beside this file holding the starting repository every
@@ -189,6 +202,25 @@ success_criteria:
     description: "my-skill engaged for row ${row.id}"
     skill_name: "my-skill"
     expected_skill: "${row.expected_skill}"
+    # THE WEIGHT IS LOAD-BEARING, and the default of 1.0 is WRONG here.
+    #
+    # This criterion scores exactly 1.0 on every row by design — that is what the
+    # `recall.yes: 1.0` threshold below demands. But `weighted_score` averages every
+    # criterion by weight, and `weighted_score` is precisely what the execution gate's
+    # paired *t* compares. At weight 1.0 beside a single outcome criterion, a real
+    # measured difference of 0.16 arrives at the gate as 0.08: **every effect is halved**,
+    # the suite looks perfectly healthy, and the instrument is quietly detuned. Measured on
+    # a real suite: a row grading 0.857 reported a `weighted_score` of 0.929.
+    #
+    # `weight: 0.0` would remove the dilution entirely, but the schema REJECTS a
+    # zero weight beside `suite_thresholds` (a zero-weight criterion is informational and
+    # may not also arm a pass/fail gate). So use a small non-zero weight: engagement is a
+    # PRECONDITION rather than a quality dimension, so near-zero is the honest weighting
+    # anyway, and 0.05 shrinks a measured effect by ~5% instead of ~50%.
+    #
+    # Add one outcome criterion and the dilution gets worse, not better — recompute rather
+    # than assuming this number transfers.
+    weight: 0.05
     # Engagement is a GATE, not a read-out, and this is the line that makes it one. An
     # outcome suite where the skill did not run measures the model's background knowledge
     # instead — plausibly enough that nothing else looks wrong. recall.yes is the right
