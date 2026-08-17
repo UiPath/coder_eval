@@ -512,10 +512,11 @@ Read the difference against the floor, and do not quote such a p as confidence.
 
 #### Cost and latency guardrails
 
-Both tracks carry them, and they are **derived from the measured spread, not from a percentage
-threshold**. The same paired cluster bootstrap runs over each row's cost and each row's duration,
-and a guardrail fails only when the *optimistic* end of that interval is still a material
-increase — so an arm has to be reliably more expensive, not merely more expensive in this sample.
+Both tracks carry them, both tracks **gate** on them, and they are **derived from the measured
+spread, not from a percentage threshold**. The same paired cluster bootstrap runs over each row's
+cost and each row's duration, and a guardrail fails only when the *optimistic* end of that interval
+is still a material increase — so an arm has to be reliably more expensive, not merely more
+expensive in this sample.
 
 **Do not write a percentage into this file.** A fixed tolerance is precisely what the measured
 run-to-run spread rules out: at the per-row variability these suites actually show, a
@@ -536,8 +537,10 @@ cost — passes with a stated reason rather than silently, because a missing mea
 read as a pass on the merits.
 
 **Cost is a veto here and an objective elsewhere, and the two must not be confused.** The
-guardrail above **gates**: a candidate that materially increases what a row costs does not
-promote, whatever its F1 did. Stage A additionally renders a quality × cost front, which is
+guardrail above **gates**, on both tracks and in the tool rather than in this file: a candidate
+that materially increases what a row costs does not promote, whatever its F1 did, and the gate's
+own `promoted` field carries that veto so a caller reading it cannot ship what the rendered block
+calls BLOCKED. Stage A additionally renders a quality × cost front, which is
 **advisory**: it is the second axis of a shortlist, it shows which trades exist, and it decides
 nothing. Adding the second did not weaken the first — the promote-only-when list below is
 unchanged, and a cheaper arm on that front is a trade to offer the user, **never a promotion** the

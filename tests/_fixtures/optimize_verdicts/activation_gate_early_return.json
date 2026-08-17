@@ -17,6 +17,7 @@
   "n_discordant": null,
   "gate_refusal": null,
   "holm_alpha": null,
+  "holm_rejected": null,
   "promoted": false,
   "range_non_overlap": false,
   "mde": 0.0,

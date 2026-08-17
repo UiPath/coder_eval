@@ -1502,10 +1502,11 @@ minimum detectable effect, the sibling checks, the cost and latency guardrails, 
 range-overlap diagnostic — which is reported, and is **not** the gate.
 
 **A failing guardrail blocks the promotion even though the statistic separated.** The library
-decides the primary comparison; the guardrails gate here, in the procedure. The block says so
-itself — a verdict that separated but breached a guardrail renders as **BLOCKED BY A
-GUARDRAIL** rather than PROMOTED — and the rule behind it is in the method file's promote-only-when
-list. Do not talk yourself past it: a description that wins two points of F1 by making every row
+decides that too: a breached guardrail FORCES `promoted = False`, so the field and the block agree
+and you never have to check `.passed` by eye. A verdict that separated, cleared Holm and breached a
+guardrail renders as **BLOCKED BY A GUARDRAIL** rather than PROMOTED — a different headline from
+the plain NOT PROMOTED a candidate that simply lost gets, because the two call for opposite next
+actions — and the rule behind it is in the method file's promote-only-when list. Do not talk yourself past it: a description that wins two points of F1 by making every row
 cost twice as much is a trade, and the user is the one who gets to decide whether to take it.
 
 ### Stage B, execution track — run the gate, do not resolve the sign by hand
@@ -1594,9 +1595,9 @@ difference against the floor and do not quote that p as confidence.
 read the reporter's own `## Paired Comparison` block, that one still subtracts in *declaration
 order* — quote its header verbatim there, or read this block instead.
 
-**Read the block, not `.passed` by eye.** On this track a failing guardrail or integrity check
-FORCES `promoted = False` — unlike the activation track, where the cost/latency guardrails stay
-advisory in the model and this procedure is what gates them. It renders as **BLOCKED BY A
+**Read the block, not `.passed` by eye.** A failing guardrail or integrity check FORCES
+`promoted = False`, on this track and on the activation track alike — both gates mean the same
+thing by that field, so you can carry one habit between them. It renders as **BLOCKED BY A
 GUARDRAIL** when the comparison had otherwise WON: the difference favours the candidate, the
 interval excludes zero, and Holm rejected at this candidate's rank. A candidate that failed a
 check but did *not* clear Holm reads **NOT PROMOTED** instead, and that is the honest headline —

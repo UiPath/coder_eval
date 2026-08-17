@@ -1240,27 +1240,89 @@ class TestMdeAndGuardrailsInTheVerdict:
         assert "x incumbent" in text
 
 
+def _headline(text: str) -> str:
+    """The rendered block's headline, unwrapped from its bold markers.
+
+    Reading the headline LINE rather than asserting a substring is absent from the whole block:
+    "PROMOTED" is a substring of "NOT PROMOTED", so a `not in` over the block is either wrong or a
+    no-op depending on the fixture, and both failure modes already exist in this file.
+
+    It got sharper once the failed-check note began quoting the headline's own words ("the rendered
+    headline reports it as BLOCKED BY A GUARDRAIL"): `"BLOCKED" not in block` now matches that
+    SENTENCE and passes on a block whose headline is something else entirely. Assert on the
+    discriminating line, never on a substring of the whole page.
+    """
+    return next(line for line in text.splitlines() if line.startswith("**")).strip("*")
+
+
+def _failing_cost_check() -> GuardrailCheck:
+    """A measured, material cost breach — the check both tracks must now veto on."""
+    return GuardrailCheck(
+        name="cost (USD/row)",
+        incumbent=1.0,
+        candidate=2.0,
+        relative_change=1.0,
+        tolerance=MATERIALITY_FLOOR,
+        ci_low=0.6,
+        ci_high=1.4,
+        passed=False,
+    )
+
+
+def _parity_activation(**overrides) -> ActivationGateVerdict:
+    """A separating activation verdict, ready for `holm_promote`."""
+    base = {
+        "incumbent_variant": "incumbent",
+        "candidate_variant": "cand",
+        "suite_id": SUITE,
+        "criterion_index": 0,
+        "confidence": 0.95,
+        "n_resamples": BOOTSTRAP_RESAMPLES,
+        "rows_paired": 12,
+        "rows_excluded": 0,
+        "incumbent_f1": 0.4,
+        "candidate_f1": 0.9,
+        "mean_diff": 0.5,
+        "ci_low": 0.2,
+        "ci_high": 0.75,
+        "p_value": 0.001,
+    }
+    return ActivationGateVerdict(**{**base, **overrides})
+
+
+def _parity_execution(**overrides) -> ExecutionGateVerdict:
+    """The execution twin of `_parity_activation`, on the same numbers."""
+    base = {
+        "incumbent_variant": "incumbent",
+        "candidate_variant": "cand",
+        "suite_id": EXEC_SUITE,
+        "confidence": 0.95,
+        "n_resamples": BOOTSTRAP_RESAMPLES,
+        "rows_paired": 12,
+        "rows_excluded": 0,
+        "mean_diff": 0.5,
+        "ci_low": 0.2,
+        "ci_high": 0.75,
+        "effect_size": 1.1,
+        "p_value": 0.001,
+    }
+    return ExecutionGateVerdict(**{**base, **overrides})
+
+
+# The two tracks' (gate, verdict factory) pairs, so a parity claim is asserted over both rather
+# than written twice and allowed to drift — which is the defect this whole phase closes.
+_TRACKS = [
+    pytest.param(holm_promote, _parity_activation, id="activation"),
+    pytest.param(holm_promote_execution, _parity_execution, id="execution"),
+]
+
+
 class TestPromotionIsNotOverstated:
     """Two ways the rendered block could claim more than the tool decided."""
 
-    def _verdict(self, **overrides) -> ActivationGateVerdict:
-        base = {
-            "incumbent_variant": "incumbent",
-            "candidate_variant": "cand",
-            "suite_id": SUITE,
-            "criterion_index": 0,
-            "confidence": 0.95,
-            "n_resamples": BOOTSTRAP_RESAMPLES,
-            "rows_paired": 12,
-            "rows_excluded": 0,
-            "incumbent_f1": 0.4,
-            "candidate_f1": 0.9,
-            "mean_diff": 0.5,
-            "ci_low": 0.2,
-            "ci_high": 0.75,
-            "p_value": 0.001,
-        }
-        return ActivationGateVerdict(**{**base, **overrides})
+    # The same separating verdict the cross-track parity class builds. It was a byte-identical
+    # second copy of that base dict, which is the duplication `_TRACKS` exists to remove.
+    _verdict = staticmethod(_parity_activation)
 
     def test_an_interval_containing_zero_never_promotes(self) -> None:
         # Holm can reject at a corrected alpha while the reported interval still contains zero.
@@ -1271,6 +1333,43 @@ class TestPromotionIsNotOverstated:
         assert any("still contains zero" in note for note in decided.notes)
 
     def test_a_failed_guardrail_never_renders_as_promoted(self) -> None:
+        decided = holm_promote([self._verdict(guardrails=[_failing_cost_check()])])[0]
+        # INVERTED, deliberately, and kept rather than deleted because it is the REACHABILITY
+        # PROOF for the BLOCKED rung: it is the one test that builds a verdict which separates,
+        # clears Holm, and carries a failing guardrail. `promoted` used to read True here — the
+        # guardrails gated in the skill's prose and not in the field — so a caller reading the
+        # field could ship a candidate the rendered block said was blocked. The veto now lives in
+        # the decision, and the headline still has to tell "it won and was vetoed" apart from
+        # "it lost", which is what `holm_rejected and separated` keys it on.
+        assert decided.promoted is False
+        assert decided.holm_rejected is True
+        assert decided.separated is True
+        text = render_markdown(decided)
+        # On the HEADLINE, not merely somewhere in the block — the notes quote the headline's own
+        # words, so a whole-page substring test would pass on the wrong rung.
+        assert _headline(text).startswith("BLOCKED BY A GUARDRAIL —")
+        assert "cost (USD/row)" in text
+        assert "Do not promote on this block" in text
+        # And the block names WHICH check vetoed, so the reader is not left to diff the lists.
+        assert any("cost (USD/row) FAILED" in note for note in decided.notes)
+
+    def test_an_empty_guardrail_list_does_not_block(self) -> None:
+        # `any(...)` over `[]` is False, so a suite with no cost telemetry at all still promotes.
+        # Worth pinning: the veto was added by folding a list into `promoted`, and an empty list
+        # is the commonest shape on a suite whose turns recorded no cost.
+        decided = holm_promote([self._verdict(guardrails=[])])[0]
+        assert decided.promoted is True
+        assert _headline(render_markdown(decided)) == "PROMOTED"
+
+    def test_a_separated_blocked_candidate_holm_never_rejected_reads_not_promoted(self) -> None:
+        """The BLOCKED rung must not OVER-fire — the trap on the other side of `promoted`.
+
+        `separated` is a property of one verdict and deliberately excludes the FAMILY decision, so
+        at `m > 1` a p between `alpha/m` and `alpha` leaves `ci_low > 0` while Holm rejects
+        nothing. Keying BLOCKED on `separated` alone then sends the reader to fix cost when the
+        real problem is power — measured on the execution track with two candidates at p = 0.03 in
+        a family of two. `holm_rejected` is the conjunct that closes it.
+        """
         failing = GuardrailCheck(
             name="cost (USD/row)",
             incumbent=1.0,
@@ -1281,14 +1380,12 @@ class TestPromotionIsNotOverstated:
             ci_high=1.4,
             passed=False,
         )
-        decided = holm_promote([self._verdict(guardrails=[failing])])[0]
-        # `promoted` stays the primary statistic's decision — the guardrails gate in the
-        # procedure — but the headline must not invite the reader to ship it anyway.
-        assert decided.promoted is True
-        text = render_markdown(decided)
-        assert "BLOCKED BY A GUARDRAIL" in text
-        assert "cost (USD/row)" in text
-        assert "Do not promote on this block" in text
+        # Two identical candidates at p = 0.03: alpha/2 = 0.025, so Holm rejects neither.
+        decided = holm_promote([self._verdict(p_value=0.03, guardrails=[failing]) for _ in range(2)])
+        for verdict in decided:
+            assert verdict.separated is True, "the statistic did separate"
+            assert verdict.holm_rejected is False, "but the family correction rejected nothing"
+            assert _headline(render_markdown(verdict)) == "NOT PROMOTED"
 
     def test_a_passing_guardrail_still_reads_promoted(self) -> None:
         passing = GuardrailCheck(
@@ -1302,8 +1399,103 @@ class TestPromotionIsNotOverstated:
             passed=True,
         )
         text = render_markdown(holm_promote([self._verdict(guardrails=[passing])])[0])
-        assert "**PROMOTED**" in text
-        assert "BLOCKED" not in text
+        assert _headline(text) == "PROMOTED"
+
+
+class TestBothTracksMeanTheSameThingByPromoted:
+    """`promoted` is ONE contract now, asserted over both tracks rather than stated twice.
+
+    The activation track used to fold its `sibling_checks` into `promoted` while leaving the
+    cost/latency `guardrails` advisory for the skill's prose to gate — so a candidate that
+    materially raised what a row costs read `promoted=True`, and a caller reading the field could
+    ship what the rendered block called BLOCKED. The execution track already vetoed. These are the
+    sensors that stop the two drifting apart again.
+    """
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_a_failing_guardrail_forces_promoted_false(self, gate, build) -> None:
+        decided = gate([build(guardrails=[_failing_cost_check()])])[0]
+        assert decided.holm_rejected is True, "Holm did reject it"
+        assert decided.separated is True, "and the statistic did separate"
+        assert decided.promoted is False, "so the guardrail is what vetoed — on BOTH tracks"
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_blocked_block_names_the_failing_check(self, gate, build) -> None:
+        decided = gate([build(guardrails=[_failing_cost_check()])])[0]
+        assert any("cost (USD/row) FAILED" in note for note in decided.notes)
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_failed_check_note_stays_off_a_candidate_that_simply_lost(self, gate, build) -> None:
+        """The note claims a veto and cites the BLOCKED headline — both false on a plain loss.
+
+        `promoted` is already False for a candidate Holm never rejected, so a failing guardrail
+        forced nothing, and the headline is NOT PROMOTED. Printing the note there is the same
+        misdirection the BLOCKED rung's `holm_rejected` conjunct exists to remove: it sends the
+        reader to fix cost when the real problem is power. The failing check is still visible in
+        the rendered Guardrails list on this path — only the CLAIM is withheld.
+        """
+        decided = gate([build(p_value=0.9, guardrails=[_failing_cost_check()])])[0]
+        assert decided.holm_rejected is False
+        assert decided.promoted is False
+        assert not any("FAILED" in note for note in decided.notes), decided.notes
+        # And the ordinary negative result is what the block DOES say.
+        assert any("did not clear the Holm threshold" in note for note in decided.notes)
+
+    @pytest.mark.parametrize(
+        ("gate", "build", "refusing"),
+        [
+            # Each track refuses through its OWN mechanism, and they are not interchangeable.
+            # `holm_promote` RECOMPUTES `gate_refusal` from the discreteness floor and overwrites
+            # whatever the verdict arrived with, so setting the field directly is unreachable
+            # there — a suite whose floor exceeds its Holm threshold is the reachable state.
+            # `execution_gate` sets the field itself and `holm_promote_execution` only reads it.
+            pytest.param(holm_promote, _parity_activation, {"p_floor": 0.9, "n_discordant": 1}, id="activation"),
+            pytest.param(
+                holm_promote_execution, _parity_execution, {"gate_refusal": "no comparison was made"}, id="execution"
+            ),
+        ],
+    )
+    def test_the_failed_check_note_stays_off_a_refused_verdict(self, gate, build, refusing) -> None:
+        # Under a refusal the headline is not a decision at all, so a note asserting the block
+        # "reports it as BLOCKED BY A GUARDRAIL" contradicts the line above it.
+        decided = gate([build(guardrails=[_failing_cost_check()], **refusing)])[0]
+        assert decided.gate_refusal is not None, "the fixture must actually refuse"
+        assert decided.promoted is False
+        assert not any("FAILED" in note for note in decided.notes), decided.notes
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_an_empty_guardrail_list_does_not_block(self, gate, build) -> None:
+        assert gate([build()])[0].promoted is True
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_holm_rejected_is_recorded_on_the_measured_branch(self, gate, build) -> None:
+        # A p that clears alpha/1 and one that does not, in a family of one each.
+        assert gate([build(p_value=0.001)])[0].holm_rejected is True
+        assert gate([build(p_value=0.9)])[0].holm_rejected is False
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_holm_rejected_is_false_not_none_outside_the_family(self, gate, build) -> None:
+        """`None` would read as "Holm has not run" on a verdict it has."""
+        decided = gate([build(p_value=None, mean_diff=None, ci_low=None, ci_high=None)])[0]
+        assert decided.holm_rejected is False
+        assert decided.promoted is False
+
+    # Deliberately NOT parametrized over `_TRACKS`: `separated` is a property of the VERDICT and
+    # no gate is involved, so pairing it with a gate would run every case twice for nothing.
+    @pytest.mark.parametrize("build", [_parity_activation, _parity_execution], ids=["activation", "execution"])
+    @pytest.mark.parametrize(
+        ("mean_diff", "ci_low", "expected"),
+        [
+            (0.5, 0.2, True),
+            # The two boundaries. `> 0.0` on both, so a bound sitting exactly ON zero has not
+            # excluded it and a zero difference does not favour the candidate.
+            (0.5, 0.0, False),
+            (0.0, 0.2, False),
+            (-0.5, -0.2, False),
+        ],
+    )
+    def test_separated_agrees_across_both_verdict_types(self, build, mean_diff, ci_low, expected) -> None:
+        assert build(mean_diff=mean_diff, ci_low=ci_low).separated is expected
 
 
 def _scored_result(row_id: str, score: float) -> EvaluationResult:
@@ -3687,16 +3879,6 @@ def _uniform_shift(n_rows: int, *, shift: float = 0.5) -> dict[str, dict[str, li
     }
 
 
-def _headline(text: str) -> str:
-    """The rendered block's headline, unwrapped from its bold markers.
-
-    Reading the headline LINE rather than asserting a substring is absent from the whole block:
-    "PROMOTED" is a substring of "NOT PROMOTED", so a `not in` over the block is either wrong or a
-    no-op depending on the fixture, and both failure modes already exist in this file.
-    """
-    return next(line for line in text.splitlines() if line.startswith("**")).strip("*")
-
-
 class TestExecutionGateRefusesAReusedRunDir:
     """The execution track reads the SAME append-only tree, and here contamination flips `promoted`.
 
@@ -3938,11 +4120,17 @@ class TestEveryExecutionHeadlineRungIsReachable:
     def test_separated_is_the_two_component_conjunction(self, overrides: dict, expected: bool) -> None:
         assert self._verdict(**overrides).separated is expected
 
-    def test_separated_is_not_a_serialized_field(self) -> None:
+    @pytest.mark.parametrize(
+        ("model", "build"),
+        [(ActivationGateVerdict, _parity_activation), (ExecutionGateVerdict, _parity_execution)],
+        ids=["activation", "execution"],
+    )
+    def test_separated_is_not_a_serialized_field(self, model, build) -> None:
         # A property, never a stored field: nothing new is written, so no construction site can set
-        # it inconsistently with the numbers it derives from.
-        assert "separated" not in ExecutionGateVerdict.model_fields
-        assert "separated" not in self._verdict().model_dump()
+        # it inconsistently with the numbers it derives from. Asserted on BOTH verdicts — the
+        # activation twin was added later, and a symmetry claim needs both halves witnessed.
+        assert "separated" not in model.model_fields
+        assert "separated" not in build().model_dump()
 
 
 class TestHolmPromoteExecution:
@@ -4043,7 +4231,9 @@ class TestHolmPromoteExecution:
         assert decided.promoted is False
         assert decided.separated is True
         assert any("cost (USD/row) FAILED" in note for note in decided.notes)
-        assert "BLOCKED BY A GUARDRAIL" in render_execution_markdown(decided)
+        # On the HEADLINE: the note above quotes the headline's own words, so a whole-page
+        # substring test passes whichever rung the block actually took.
+        assert _headline(render_execution_markdown(decided)).startswith("BLOCKED BY A GUARDRAIL")
 
 
 class TestRenderExecutionMarkdown:
@@ -4072,7 +4262,8 @@ class TestRenderExecutionMarkdown:
         assert decided.promoted is False
         assert decided.separated is True
         text = render_execution_markdown(decided)
-        assert "BLOCKED BY A GUARDRAIL" in text
+        # The headline, not the page — the failed-check note quotes this phrase too.
+        assert _headline(text).startswith("BLOCKED BY A GUARDRAIL")
         assert "engagement" in text
 
     def test_renders_a_missing_effect_size_as_a_dash(self, tmp_path: Path) -> None:
@@ -4736,6 +4927,7 @@ def _full_activation_verdict() -> ActivationGateVerdict:
         n_discordant=4,
         gate_refusal="refused",
         holm_alpha=0.05,
+        holm_rejected=True,  # rejected at its rank, yet not promoted — the refusal is what vetoed
         # False, not True: a refusal forces `promoted=False`, and a carrier fixture that pairs a
         # refusal with a promotion is a state no gate can emit.
         promoted=False,
@@ -4807,6 +4999,10 @@ class TestTypedConstruction:
         # is invisible to a comparison that never looks at it.
         dumped = instance.model_dump()
         assert model.model_validate(dumped) == instance
+        # And through the NARROWER dump too. `exclude_unset=True` drops every field left at its
+        # default, so it is the shape that would silently lose a newly-added stored field whose
+        # writer forgot to set it — `holm_rejected` is exactly that shape on both verdicts.
+        assert model.model_validate(instance.model_dump(exclude_unset=True)) == instance
         # And every OPTIONAL field is genuinely exercised. Compared against the real resolved
         # default — `field.get_default(call_default_factory=True)`, which covers `default=None` and
         # `default_factory=list` alike. Reading `field.default` instead excludes exactly those two,

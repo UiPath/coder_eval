@@ -176,20 +176,38 @@ class ActivationGateVerdict(BaseModel):
     holm_alpha: float | None = Field(
         default=None, description="The family-wise alpha holm_promote applied. None until it has run."
     )
+    holm_rejected: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the Holm step-down rejected THIS verdict's null at its rank in the family. "
+            "None until holm_promote has run. The exact twin of "
+            "ExecutionGateVerdict.holm_rejected, and stored for the same reason: it is NOT "
+            "derivable from the fields beside it, because `holm_alpha` records the family-wide "
+            "alpha and never the rank-dependent threshold — a reader holding `p_value` and "
+            "`holm_alpha` cannot tell a rejection from a near miss, since the family SIZE is what "
+            "decides and only the function that saw the whole family knows it. It is recorded "
+            "because `promoted` alone conflates three different negatives (lost, underpowered, "
+            "vetoed) and the rendered block has to tell them apart: BLOCKED BY A GUARDRAIL means "
+            "`holm_rejected and separated` with a check failing, and without this field that "
+            "headline also fires on a candidate the family correction simply never rejected — "
+            "sending the reader to fix cost when the real problem is power."
+        ),
+    )
     promoted: bool | None = Field(
         default=None,
         description=(
-            "None means gated but undecided — holm_promote has not been applied. It folds the "
-            "SIBLING checks in (a candidate that moved the failure has not fixed it) but leaves the "
-            "cost/latency guardrails advisory, which the skill's prose gates on. So on THIS track "
-            "`promoted` is not safe to ship on alone: a candidate that materially raised what a "
-            "row costs still reads True here, and reference/optimize-method.md states that "
-            "guardrail as GATING — a claim enforced in prose, not in this field. Check "
-            "`all(c.passed for c in guardrails)` beside it, or read the rendered block, which "
-            "headlines BLOCKED BY A GUARDRAIL over a True `promoted`. Note this differs from "
-            "ExecutionGateVerdict.promoted, which folds in BOTH of its lists and therefore IS "
-            "safe alone — so do not carry a habit from one gate to the other; read each field's "
-            "own description."
+            "None means gated but undecided — holm_promote has not been applied. Otherwise it is "
+            "the WHOLE decision: `holm_rejected` AND `separated` (the difference favours the "
+            "candidate and the interval excludes zero) AND every SIBLING check passing AND every "
+            "cost/latency GUARDRAIL passing AND `gate_refusal` unset. A failed check FORCES False, "
+            "so this field alone is safe to ship on. What it cannot tell you is WHY: lost, "
+            "underpowered and vetoed all read False, and `holm_rejected` / `separated` are what "
+            "tell those apart. The two tracks now AGREE about what `promoted` means — the "
+            "cost/latency guardrails used to gate in the skill's prose rather than in this field, "
+            "so a candidate that materially raised what a row costs read True. What still differs is "
+            "only what each track HAS to check: there are no `integrity_checks` on this track "
+            "(engagement and completion rate are execution-track concepts), and no `p_floor` on "
+            "that one."
         ),
     )
     range_non_overlap: bool = Field(
@@ -207,11 +225,40 @@ class ActivationGateVerdict(BaseModel):
         default_factory=list, description="Per-sibling recall.yes regression checks. A failure blocks promotion."
     )
     guardrails: list[GuardrailCheck] = Field(
-        default_factory=list, description="Cost / latency guardrails. Advisory here, gating in the skill's prose."
+        default_factory=list,
+        description=(
+            "Cost / latency guardrails. A failure forces `promoted = False` in `holm_promote` and "
+            "is named in the rendered block's BLOCKED headline — the same standing they have on "
+            "the execution track."
+        ),
     )
     notes: list[str] = Field(
         default_factory=list, description="Everything the reader needs to distrust or qualify the numbers above."
     )
+
+    @property
+    def separated(self) -> bool:
+        """True when the paired comparison itself separated, guardrails aside.
+
+        The ONE declaration of "the statistic came out in the candidate's favour and its interval
+        excludes zero", and the exact twin of :attr:`ExecutionGateVerdict.separated` — same
+        expression, same rationale. :func:`~coder_eval.optimize_gate.holm_promote` needs it to
+        decide ``promoted``; ``reports_optimize.render_markdown`` needs it to tell a candidate that
+        LOST from one that WON AND WAS BLOCKED. The renderer read ``promoted`` for that second
+        question until the guardrail was folded in, at which point the BLOCKED rung became
+        unsatisfiable and a blocked candidate degraded silently to the ordinary ``NOT PROMOTED``
+        headline — the one thing a reader must not confuse it with.
+
+        Note what it deliberately does NOT include: the Holm rejection. Holm is a property of the
+        FAMILY and this is a property of one verdict, so folding ``i in rejected_at`` in here would
+        put a family decision on a model that cannot see the family. :attr:`holm_rejected` carries
+        that half, stored, because it cannot be derived here.
+
+        A property rather than a stored field on purpose: nothing new is serialized, so no
+        construction site can set it inconsistently with the numbers it derives from — the same
+        reason ``SearchComparison.accepted`` is a property over ``beats`` / ``blocker``.
+        """
+        return self.mean_diff is not None and self.mean_diff > 0.0 and self.ci_low is not None and self.ci_low > 0.0
 
 
 class ExecutionGateVerdict(BaseModel):
@@ -321,7 +368,8 @@ class ExecutionGateVerdict(BaseModel):
         default=None,
         description=(
             "Whether the Holm step-down rejected THIS verdict's null at its rank in the family. "
-            "None until holm_promote_execution has run. Deliberately NOT derivable from the fields "
+            "None until holm_promote_execution has run. The exact twin of "
+            "ActivationGateVerdict.holm_rejected. Deliberately NOT derivable from the fields "
             "beside it: `holm_alpha` records the family-wide alpha, never the rank-dependent "
             "threshold, so a reader holding `p_value` and `holm_alpha` cannot tell a rejection "
             "from a near miss — the family SIZE is what decides, and only the function that saw "
@@ -343,9 +391,10 @@ class ExecutionGateVerdict(BaseModel):
             "anything at all — AND every integrity check and guardrail passing. A failed check "
             "FORCES False, so this field alone is safe to ship on. What it cannot tell you is "
             "WHY: lost, underpowered and vetoed all read False, and `holm_rejected` / `separated` "
-            "are what tell those apart. (This differs from ActivationGateVerdict, where sibling "
-            "checks are folded in but the cost/latency guardrails stay advisory for the skill's "
-            "prose to gate.)"
+            "are what tell those apart. ActivationGateVerdict.promoted now means the SAME thing; "
+            "what differs between the two is only which lists each track has — there are no "
+            "`integrity_checks` over there, since engagement and completion rate are concepts of "
+            "this track."
         ),
     )
     mde: float | None = Field(
@@ -381,12 +430,13 @@ class ExecutionGateVerdict(BaseModel):
         """True when the paired comparison itself separated, guardrails aside.
 
         The ONE declaration of "the statistic came out in the candidate's favour and its interval
-        excludes zero". ``holm_promote_execution`` needs it to decide ``promoted``;
-        ``reports_optimize.render_execution_markdown`` needs it to tell a candidate that LOST from
-        one that WON AND WAS BLOCKED. Before this existed the renderer read ``promoted`` for the
-        second question, which stopped working the moment the guardrail was folded in — a blocked
-        candidate would have silently degraded to the ordinary ``NOT PROMOTED`` headline, which is
-        the one thing a reader must not confuse it with.
+        excludes zero" on this track, and the exact twin of
+        :attr:`ActivationGateVerdict.separated`. ``holm_promote_execution`` needs it to decide
+        ``promoted``; ``reports_optimize.render_execution_markdown`` needs it to tell a candidate
+        that LOST from one that WON AND WAS BLOCKED. Before this existed the renderer read
+        ``promoted`` for the second question, which stopped working the moment the guardrail was
+        folded in — a blocked candidate would have silently degraded to the ordinary
+        ``NOT PROMOTED`` headline, which is the one thing a reader must not confuse it with.
 
         Note what it deliberately does NOT include: the Holm rejection. Holm is a property of the
         FAMILY and this is a property of one verdict, so folding ``i in rejected_at`` in here would

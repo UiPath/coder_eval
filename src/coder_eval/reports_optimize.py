@@ -83,7 +83,12 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
       discreteness floor exceeds the Holm threshold, so no candidate could promote however good it
       is. It outranks NOT PROMOTED because it is a statement about the suite, not this candidate.
     - **BLOCKED BY A GUARDRAIL** — the statistic separated but a guardrail failed. Below the
-      refusal, since reading a guardrail presupposes a statistic that separated.
+      refusal, since reading a guardrail presupposes a statistic that separated. Its condition is
+      ``holm_rejected and separated and failed``, the execution rung's exact shape, and all three
+      conjuncts are load-bearing for the reasons
+      :func:`render_execution_markdown`'s docstring gives — ``promoted`` now folds the guardrail
+      in, so keying on it retires this rung outright, and ``separated`` alone fires for a candidate
+      Holm never rejected.
     - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
 
     **What separates the two refusals is the p, not a second field.** A discreteness refusal is a
@@ -106,11 +111,16 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
         headline = f"NOT A RESULT — {verdict.gate_refusal}"
     elif verdict.gate_refusal is not None:
         headline = f"CANNOT SEPARATE AT THIS SIZE — {verdict.gate_refusal}"
-    elif verdict.promoted and failed_guardrails:
-        # `promoted` here already includes the sibling checks; what it does NOT include is the
-        # cost/latency guardrails, which gate in the procedure. A
-        # bare "PROMOTED" over a failing guardrail is the misread this line exists to prevent —
-        # the reader prints the block and ships a candidate that doubled what a row costs.
+    elif verdict.holm_rejected and verdict.separated and failed_guardrails:
+        # NEVER `promoted`, and never `separated` alone — the execution rung's exact shape, and
+        # both exclusions fix a different bug. `promoted` now folds the guardrail in, so keying on
+        # it makes this condition unsatisfiable and drops a blocked winner silently into the
+        # `NOT PROMOTED` rung below, the one rung it must never be confused with ("it lost" and
+        # "it won and was vetoed" call for opposite next actions). `separated` alone fires for a
+        # candidate Holm never rejected — measured on the other track: two candidates at p = 0.03
+        # in a family of two, identical in every statistic, rendered BLOCKED and NOT PROMOTED
+        # purely because one carried a failing cost check, sending that reader to fix cost when
+        # the real problem was power.
         headline = (
             "BLOCKED BY A GUARDRAIL — the primary comparison separated, but "
             + f"{', '.join(failed_guardrails)} failed. Do not promote on this block."
