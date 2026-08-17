@@ -3866,6 +3866,67 @@ class TestPluginArtifacts:
             "is read at review time too, and must not contradict the authoring skill"
         )
 
+    def test_task_skill_documents_outcome_mode(self):
+        # `/coder-eval:optimize-skill`'s execution track says "no suite -> stop and point at
+        # /coder-eval:task". That instruction was unfollowable: `task` had no notion of a
+        # dataset, a row or a split, and its guidance was explicitly one-file-per-task — the
+        # precise anti-pattern, since N task files yield no suite.json rollup and `--split test`
+        # silently re-runs the train rows. This asserts the mode exists and names what it emits.
+        text = _normalized(PLUGIN_ROOT / "skills" / "task" / "SKILL.md")
+        assert "Outcome-suite mode" in text, (
+            "task/SKILL.md no longer documents outcome-suite mode — optimize-skill's execution "
+            "track hands suite authoring here and has nothing to hand it to"
+        )
+        assert "dataset-backed" in text and "one ROW per scenario" in text, (
+            "task/SKILL.md does not state the dataset-backed, one-row-per-scenario constraint, "
+            "which is the whole structural difference between the modes"
+        )
+        # Step 2.5 is what makes the rows DERIVED from the skill rather than invented beside it.
+        assert "Rule inventory" in text and "R1" in text, (
+            "task/SKILL.md no longer requires a numbered rule table (Step 2.5) — without it the "
+            "rows are whatever the author thought of, and nothing says what the suite covers"
+        )
+        assert "checked mechanically" in text, (
+            "the rule table no longer asks how each rule could be checked MECHANICALLY, which is "
+            "what turns an inventory into criteria"
+        )
+        # All five artifacts, by the names the rest of the plugin uses for them.
+        for artifact in ("suite YAML", "rows JSONL", "fixture directory", "grader script", "expectations"):
+            assert artifact in text, (
+                f"task/SKILL.md's outcome-mode file list no longer names the {artifact!r} — an "
+                "artifact nobody is told to write is an artifact that does not get written"
+            )
+        assert "OUTSIDE the fixture" in text, (
+            "task/SKILL.md no longer says the grader and its expectations live OUTSIDE the fixture "
+            "directory. Everything under the fixture is copied into every sandbox, so the answer "
+            "key ships with the exam — measured at +0.030 mean on a real suite"
+        )
+
+    def test_task_skill_supersedes_one_file_per_task(self):
+        # A parity sensor, not two independent ones: the ORIGINAL guidance and its outcome-mode
+        # OVERRIDE must both be present. Deleting either alone is the failure — the first leaves
+        # default mode undocumented, the second leaves outcome mode contradicting the file it is
+        # written in, and a reader following the wrong half writes N task files that produce no
+        # rollup.
+        text = _normalized(PLUGIN_ROOT / "skills" / "task" / "SKILL.md")
+        assert "One file per task" in text, (
+            "task/SKILL.md lost the default-mode one-file-per-task guidance that outcome mode "
+            "declares itself an exception to"
+        )
+        assert "several** task files" in text, (
+            "task/SKILL.md lost the 'a single request can produce several task files' guidance — "
+            "the other passage outcome mode supersedes"
+        )
+        assert "In outcome mode this is replaced" in text, (
+            "Step 4 still says 'One file per task' with no outcome-mode override beside it. The "
+            "two passages must be superseded WHERE THEY ARE READ; a rule stated only at the top "
+            "of the file is not read by someone who jumped to Step 4"
+        )
+        assert "supersedes the one-file-per-task guidance in two places" in text, (
+            "task/SKILL.md no longer names how many passages outcome mode overrides, so a third "
+            "one can appear without anyone noticing it was left un-overridden"
+        )
+
     def test_ci_skill_covers_experiments_and_pins(self):
         # Two silent-wrong-answer bugs in an emitted workflow. Omitting the experiment
         # drops the `agent:` config it supplies, so the gate measures something other than

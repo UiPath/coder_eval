@@ -13,6 +13,32 @@ Good tasks use simple prompts: state the goal and the expected output, then let 
 agent work out the approach. A single request can produce **several** task files —
 "create tasks for all the registry subcommands" means one task per subcommand.
 
+## Which mode
+
+**Default mode** is everything below: one task file per thing being tested.
+
+**Outcome-suite mode** produces a single dataset-backed suite that measures whether a *skill's
+body* produces the right outcomes — the execution track's instrument. Take this branch when the
+request names a **skill under test** and asks for an outcome, execution or A/B suite for it, or
+when it arrives from `/coder-eval:optimize-skill`. If it names a skill but not a suite, or a suite
+but not a skill, **ask which is meant** — the two modes differ in how many files you write, so a
+wrong guess is not a detail the user can overlook.
+
+Outcome mode **supersedes the one-file-per-task guidance in two places**, and this is the whole
+structural difference between the modes:
+
+- the paragraph directly above ("A single request can produce **several** task files"), and
+- Step 4's "One file per task, named after the task ID"
+
+become **one dataset-backed task, one ROW per scenario**. The reason is mechanical, not stylistic:
+`suite.json` is written only for tasks the dataset expander touched (rollups group on `suite_id`,
+which nothing but the expander sets), so a directory of separate task files produces **no rollup**
+and an optimization round has nothing to rank on. And `--split` filters dataset **rows** — a task
+with no `dataset:` block is untouched by it, so `--split test` over separate files silently re-runs
+the train rows, at full price, with no error anywhere.
+
+Every other step below applies in both modes. The outcome-mode additions are marked.
+
 ## Step 1 — Understand the request, and check the CLI is there
 
 Run `coder-eval --version` first. Steps 6 and 7 both shell out to it, and finding that out
@@ -57,6 +83,43 @@ Two limits on that:
 - **Precedence covers style, not soundness.** If a local convention would produce a
   criterion that cannot fail, the rubric's correctness checks still bite — follow the
   convention where you can, say plainly where you did not and why.
+
+## Step 2.5 — Rule inventory (outcome mode only)
+
+An outcome suite measures whether a skill's **body** was followed, so the rows have to come from
+what the body actually says. Read the target `SKILL.md` and everything under its `references/`,
+and extract four things:
+
+- **Components** — the testable units the skill teaches.
+- **Workflow steps** — its `### Step N` headings, or whatever lifecycle it declares.
+- **Critical rules** — a `## Critical Rules` section if it has one. Most skills do not: fall back to
+  the rules scattered through the other sections, **mark those implicit**, and say so in Step 7's
+  report, because an implicit rule is one you inferred and the user may disagree.
+- **Anti-patterns** — a `## Anti-Patterns` / `## What NOT to Do` section (`SKILL.md` only).
+
+Produce a numbered table, and keep it — Step 4 and Step 7 both read it:
+
+| # | Rule | Source | How it could be checked mechanically |
+|---|---|---|---|
+| R1 | … | SKILL.md § Step 2 (explicit) | … |
+
+**Every row you go on to write must name the rules it exercises.** That is what makes the suite
+derived from the skill rather than invented beside it, and it is what lets you answer "what is
+this suite actually covering?" without re-reading everything.
+
+Two outcomes worth naming rather than working around:
+
+- **A rule no mechanical check can reach** ("the output looks polished") — leave it out of the
+  grader and list it as ungraded in the report. Do not reach for `llm_judge` to cover it; that adds
+  variance to the very number an optimization round reads.
+- **Fewer than about eight extractable rules** — say so before writing anything. A split halves each
+  side, so a thin inventory yields a suite that confirms nothing while reading as if it did. Offer
+  a thicker one or a stated-thin one; do not quietly produce four rows.
+
+If the target skill sets `disable-model-invocation: true`, the Skill tool refuses the call and the
+body is never loaded — every row would then measure the model's background knowledge. That is out
+of scope here: `/coder-eval:optimize-skill` already treats it (the line is removed in every arm's
+snapshot). Say it applies and carry on.
 
 ## Step 3 — Design the task
 
@@ -132,11 +195,29 @@ Rules that matter:
 **Tags** — keep them portable: a difficulty tag (`smoke`, `basic`, `intermediate`) plus
 whatever domain vocabulary the repository's existing tasks already use.
 
+**Outcome mode — start from the template, do not re-derive it.** Copy
+`${CLAUDE_PLUGIN_ROOT}/reference/templates/outcome.yaml` and `outcome-rows.jsonl` to where the
+suite belongs and fill in every `REPLACE:` marker. That file is the single source of truth for the
+suite's fields, and it already carries the reasoning for the plugin mount, `disallowed_tools`, the
+weighted engagement gate, the run limits and `split_field` — read it there rather than expecting it
+here. Only two things are yours to decide, and neither is in the template:
+
+- **Rows derive from the Step 2.5 table.** One row per scenario, each naming the rules (R1…Rn) it
+  exercises. A scenario nobody can trace back to a rule is a scenario measuring taste.
+- **The split is assigned deterministically and never re-rolled.** Sort the rows by id, then walk
+  the sorted list repeating `train, train, train, test, test` — 60/40, reproducible by anyone
+  holding the same rows. (Alternating would give 50/50; write out the pattern rather than
+  describing a ratio, so the file cannot say one thing and the rows do another.) Re-drawing the
+  split between rounds leaks the test half into development, which is the one failure that makes
+  every later confirmation meaningless — and it is invisible, because the numbers keep looking
+  fine.
+
 ## Step 4 — Write the file(s)
 
 One file per task, named after the task ID with underscores
 (`registry-list-processes` → `registry_list_processes.yaml`), in the repository's task
-directory.
+directory. **In outcome mode this is replaced** by the one-suite rule stated under "Which mode"
+above, and by the five artifacts below.
 
 <!-- lint-skip: doc-yaml -->
 ```yaml
@@ -162,6 +243,26 @@ success_criteria:
 
 Add `template_sources` if the task needs starter files (a codebase to modify, a fixture
 to read).
+
+**Outcome mode writes five artifacts, not one:**
+
+| # | Artifact | Notes |
+|---|---|---|
+| 1 | the suite YAML | from `outcome.yaml`; one dataset-backed task |
+| 2 | the rows JSONL | one row per scenario, `train`/`test` labelled, naming its rules |
+| 3 | the fixture directory | the one starting repository every row works from |
+| 4 | the grader script | from the bundled `outcome-grader/verify.py` scaffold |
+| 5 | its per-row expectations | one JSON file per row id, beside the grader |
+
+**4 and 5 live OUTSIDE the fixture directory**, and the grader slot in `outcome.yaml` therefore
+addresses the script by absolute path. The reason is stated in full in `outcome.yaml`, next to the
+mount it constrains — in short, everything under the fixture is copied into every sandbox, so
+expectations placed there hand the agent exactly what it is being marked against, and the run still
+looks completely normal.
+
+The fixture's *contents* are yours to design and this skill does not author them: state what it
+must satisfy — `outcome.yaml`'s `sandbox:` comment declares the constraints, including the one that
+ties every arm to the floor when it is missed — then build it or ask for it.
 
 ## Step 5 — Could this pass for the wrong reason?
 
@@ -237,6 +338,9 @@ Then:
 - **Your answer to the framing question** — the cheapest path to full marks, and why the
   criteria do not accept it. One or two sentences, not a restatement of the rubric.
 - **Which rubric checks you applied**, and what any of them changed.
+- **Outcome mode:** the Step 2.5 rule table, marking which rules were **implicit** (inferred rather
+  than declared by the skill) and which are **ungraded** because no mechanical check reaches them.
+  Both are judgements the user may disagree with, and neither is visible in the files you wrote.
 - **What the run showed**, if it happened — particularly if it scored 1.000 and what you
   concluded about that.
 - Any assumptions you made.
