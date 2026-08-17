@@ -127,6 +127,21 @@ Then route on the evidence, not on preference:
 body change can move activation (the listing sees the whole file's frontmatter, and a body
 rewrite often tempts a description tweak alongside it). One variable per round.
 
+**And never change the MODEL between the diagnosis and the stage that tests it.** This is the same
+"two variables, one measurement" error as running both tracks, and it is easier to walk into
+because the motive is cost rather than curiosity: a cheaper model looks like a free saving, and its
+noise floor and failure *taxonomy* may genuinely transfer. What does **not** transfer is the set of
+failing ROWS — and hypotheses are written against rows, not taxonomies. Measured on one suite, two
+models shared all four failing rule families while disagreeing on which rows carried them, so a
+candidate authored against model A's failures was scored on rows that model B had never got wrong.
+The round cost full price and tested nothing.
+
+So pick the model **before** Step 7, and keep it for the whole round. Switching is legitimate — it
+is often the right call, since a cheaper, noisier model can be the better instrument once you price
+it — but a switch **invalidates every row-level hypothesis derived before it**, so re-diagnose on
+the new model rather than carrying the old hypotheses across. Record the model in the ledger beside
+the track: a round whose ledger does not name its model cannot be reproduced or trusted.
+
 State which track you are on before spending anything, and carry it in the ledger.
 
 ## Step 4 — Find the suite
@@ -388,6 +403,23 @@ and an errored row is **excluded** from the criterion aggregate rather than scor
 never appears as a low number at all — only as `completion_rate` below 1.0. The first
 corrupts the score; the second corrupts the denominator, silently. Set outcome caps
 generously enough that only a genuinely runaway row hits either.
+
+**Read the error CATEGORY before diagnosing an errored row, because the commonest cause is not the
+agent.** Hitting a provider quota — an org spend cap, a session limit — surfaces on every affected
+row as an ordinary agent failure (`error_category: agent_crash`), which reads exactly like model
+instability and invites you to blame the candidate. It happened twice in one round here. The tells
+are that the errors start mid-run and then affect *every* subsequent row regardless of arm, and
+that `error_message` names the limit; the arms that ran first survive intact, so a quota truncation
+also lands **asymmetrically across arms**, which is the state most likely to produce a confident
+wrong comparison.
+
+So before reading any stage's result, count errored rows per arm. Two rules:
+
+- **An arm missing rows another arm has is not comparable to it.** Do not compute a difference
+  across an asymmetric row set; re-run the truncated arms first.
+- **A stage whose replicates were truncated is void, not degraded.** A `--repeats 3` gate that
+  landed one replicate per row is a single-replicate triage wearing a gate's headline. Re-run it
+  rather than gating on what survived.
 
 ## Step 5 — Split the rows
 
@@ -886,7 +918,17 @@ control score reads as a body failure rather than as a skill that never ran.
 
 Run it **once per suite, not once per round** — it is a property of the suite and the skill, not
 of the round — and record its numbers in the ledger so later rounds reuse them instead of
-re-spending. `${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md` carries the hard stop that
+re-spending.
+
+**Budget its WALL-CLOCK separately from its cost, because the two do not scale together.** The cost
+table prices it at `6 × M_train`, which is right for tokens and wrong for time: the control arm is
+also **slower per run** than every other stage, because an emptied body gives the agent no
+procedure and it explores more turns before settling. Measured on one suite, 66 s/row for the
+control against 102 s/row for the incumbent — so the arm that is six times the run count can be
+appreciably more than six times the wait. Say so when you state the projected count, or the user
+budgets for a coffee and gets an afternoon.
+
+`${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md` carries the hard stop that
 follows from it: if the incumbent does not beat the control with a confidence interval excluding
 zero, stop and fix the skill's premise rather than its wording.
 
@@ -950,6 +992,18 @@ replicates per row, so the floor costs one more single-replicate baseline — `+
 directories you hand it before splitting: a second baseline gives every row its second replicate,
 which is all the null split needs. That is
 one more reason to run the control arm first.
+
+**But a two-replicate floor is CONSERVATIVE, and not comparable to a three-replicate one.** With
+two replicates the null split is forced to 1-v-1, which is the noisiest split available, so the
+floor it returns overstates the true one. Measured on one suite, same rows and same model:
+**0.0607 at two replicates against 0.0414 at three — a 47% overestimate.** `NoiseFloor` carries
+`n_replicates` precisely so you can see which you are holding; read it before quoting the number.
+
+Two consequences, and the second is the expensive one. A conservative floor makes you *under*-claim,
+which is the safe direction — but it will also tell you a real effect is invisible and send you to
+buy rows you did not need. And **never compare two floors measured at different replicate counts**:
+choosing between two models or two suites on that basis compares their sampling designs, not their
+noise. Level the replicate count first, or say plainly that the comparison is not one.
 
 ## Step 9 — Materialize as an experiment
 
