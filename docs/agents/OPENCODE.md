@@ -227,15 +227,41 @@ on; an unmapped tool keeps its own name. This is what lets one
 call's `command` parameter) score identically whether the run used Claude, Codex
 or OpenCode.
 
+Tool **argument keys** are normalized the same way, because `command_executed`
+serializes `parameters` to JSON for every tool but `Bash` — so a criterion like
+`{type: command_executed, tool_name: Read, command_pattern: 'file_path.*app\.py'}`
+would otherwise match on Claude and score 0 on OpenCode for identical behaviour:
+
+| Canonical tool | OpenCode key | Recorded as |
+|---|---|---|
+| `Read` / `Write` / `Edit` | `path` (or `filePath`) | `file_path` |
+| `Edit` | `oldString` / `newString` / `replaceAll` | `old_string` / `new_string` / `replace_all` |
+| `Skill` | `name` | `skill` |
+
+Both file-path spellings are accepted because the CLI has moved between versions
+(a 2026-08-13 capture emitted `filePath`; current builds register `path`).
+`Bash`'s `command` and the search tools' `path` already match Claude's names and
+pass through untouched, as does every unlisted key.
+
 > These event names are the CLI's own compact vocabulary. They are **not** the
 > `session.next.*` names in the OpenAPI schema served by `opencode serve` — that
 > describes the HTTP/SSE surface and does not apply here.
 
-Vocabulary drift is crashed, not scored: a turn whose CLI exits cleanly but whose
-stream contained **no recognized events** captured zero telemetry (zero turns,
-tokens and cost) while file-based criteria could still pass on whatever the agent
-did — a success that silently vanishes from every aggregate. The turn is failed
-with an error naming the unrecognized event types it saw instead.
+Drift is crashed, not scored: a turn whose CLI exits cleanly but which captured
+**no token telemetry** is failed rather than reported as a clean empty success.
+File-based criteria could otherwise still pass on whatever the agent did, giving
+a SUCCESS that silently vanishes from every token aggregate — and whose
+`run_limits.max_total_tokens` / `max_usd` gates could never trip no matter what
+the run really billed. Two shapes reach it:
+
+- the stream contained **no recognized events** (an upgrade renamed the
+  vocabulary) — the error names the unrecognized event types it saw;
+- events were recognized but **every finished step carried no usable token
+  counts** (a provider or auth mode that omits `tokens`) — the error reports the
+  finished-step count and whether cost was present.
+
+Intentional cuts (`should_stop`, `max_turns`) are exempt: both can land before
+the first event, or between a step's start and its `step_finish`.
 
 ## Known limitations
 
@@ -280,13 +306,17 @@ providers are all excluded by your account's privacy/guardrail configuration.
 Verify independently with a direct API call, then adjust at
 [openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy).
 
-**Task fails with `emitted no recognized events`** — the CLI exited cleanly but
-nothing on its stdout matched the event vocabulary above, so the turn would have
-scored with zero telemetry; the harness fails it instead. The error names the
-event types it did see. Check the raw stream with
-`opencode run --format json ... > raw.jsonl` and compare the `type` values
-against the table above — an OpenCode upgrade that renames them needs a matching
-harness update.
+**Task fails with `captured zero token telemetry`** — the CLI exited cleanly but
+the turn booked no tokens, so it would have scored with nothing in any aggregate;
+the harness fails it instead. Check the raw stream with
+`opencode run --format json ... > raw.jsonl`:
+
+- if the error says *no recognized events*, compare the `type` values against the
+  table above — an OpenCode upgrade that renames them needs a matching harness
+  update;
+- if it reports finished steps with no usable token counts, inspect a
+  `step_finish` payload's `tokens` object — a provider or auth mode that omits
+  usage, or a renamed bucket, produces this.
 
 ## References
 

@@ -146,6 +146,41 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "skill": "Skill",
 }
 
+# OpenCode per-tool INPUT-arg key -> canonical (Claude) key. Mirrors
+# antigravity_agent's _ANTIGRAVITY_ARG_RENAME and completes what _TOOL_NAME_MAP
+# starts: normalizing the tool NAME alone still leaves a `command_executed` with
+# a non-Bash `tool_name` matching against a differently-keyed JSON blob (see
+# criteria/command_executed.py, which falls back to `json.dumps(parameters)` for
+# every tool but Bash), so the same task scores differently per harness. Keyed by
+# the canonical tool name (post _TOOL_NAME_MAP); unlisted keys pass through.
+#
+# `bash` needs no entry: OpenCode already names it `command`, which is why the
+# Bash-only shell-aware extraction in command_executed.py was correct as-is.
+# `glob`/`grep`/`list` also need none — their `path` already matches Claude's.
+#
+# BOTH file-path spellings are mapped because the CLI has MOVED: a live capture
+# on 2026-08-13 emitted `filePath` (see the fixture in tests/test_opencode_agent.py),
+# while the tool schemas registered by the CLI installed at the time of writing
+# read `path` (`read`/`write`/`edit` all take `{path, ...}`). Accepting both keeps
+# telemetry canonical across the CLI versions a run might use, and neither
+# spelling collides with a legitimate parameter of these three tools.
+_OPENCODE_ARG_RENAME: dict[str, dict[str, str]] = {
+    "Read": {"path": "file_path", "filePath": "file_path"},
+    "Write": {"path": "file_path", "filePath": "file_path"},
+    "Edit": {
+        "path": "file_path",
+        "filePath": "file_path",
+        "oldString": "old_string",
+        "newString": "new_string",
+        "replaceAll": "replace_all",
+    },
+    # The skill loader's argument. With this rename, `skill_triggered` reads the
+    # agent-agnostic `parameters["skill"]` on every harness instead of carrying a
+    # per-harness alternative list in a criterion that must know nothing about
+    # harnesses.
+    "Skill": {"name": "skill"},
+}
+
 # Config fields the OpenCode CLI has no equivalent knob for. `experiments/default.yaml`
 # sets `allowed_tools` on every task, so these are silently dropped by default —
 # warn once at start() rather than letting a task believe it constrained the agent.
@@ -216,6 +251,18 @@ def _epoch_ms_to_dt(value: Any) -> datetime | None:
         return datetime.fromtimestamp(value / 1000)
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def _canonical_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Rename a tool call's argument keys to the canonical cross-agent vocabulary.
+
+    Order is preserved and unlisted keys pass through untouched, so this only ever
+    re-labels what ``_OPENCODE_ARG_RENAME`` names for this tool.
+    """
+    rename = _OPENCODE_ARG_RENAME.get(tool_name)
+    if not rename:
+        return params
+    return {rename.get(key, key): value for key, value in params.items()}
 
 
 def _manifest_skill_dirs(root: Path) -> list[Path]:
@@ -324,6 +371,11 @@ class _OpenCodeTurnState:
         self.messages: list[TranscriptMessage] = []
         self.text_parts: list[str] = []
         self.step_count = 0
+        # Steps the CLI reported as FINISHED (`step_finish`), as opposed to
+        # `step_count`, which counts the ones it started. `_settle_turn` needs the
+        # distinction: a finished step is the CLI's own claim that a generation
+        # completed, so one that booked no tokens means the token schema moved.
+        self.steps_finished = 0
         self.turn_id: str = ""
         self.step_started_at: datetime | None = None
         self.step_text_parts: list[str] = []
@@ -396,21 +448,23 @@ class _OpenCodeTurnState:
         state = part.get("state")
         state = state if isinstance(state, dict) else {}
         call_id = str(part.get("callID") or f"call_{self.sequence + 1}")
+        times = state.get("time") if isinstance(state.get("time"), dict) else {}
+        started = _epoch_ms_to_dt(times.get("start"))
+        params = state.get("input")
+        params = params if isinstance(params, dict) else {}
 
         telemetry = self.open_tools.get(call_id)
         if telemetry is None:
             self.sequence += 1
-            times = state.get("time") if isinstance(state.get("time"), dict) else {}
-            started = _epoch_ms_to_dt(times.get("start"))
-            params = state.get("input")
             raw_tool = str(part.get("tool") or "unknown")
+            tool_name = _TOOL_NAME_MAP.get(raw_tool.lower(), raw_tool)
             telemetry = CommandTelemetry(
-                tool_name=_TOOL_NAME_MAP.get(raw_tool.lower(), raw_tool),
+                tool_name=tool_name,
                 tool_id=call_id,
                 assistant_turn_index=self.step_count,
                 timestamp=started or datetime.now(),
                 execution_started_at=started,
-                parameters=params if isinstance(params, dict) else {},
+                parameters=_canonical_params(tool_name, params),
                 sequence_number=self.sequence,
             )
             self.open_tools[call_id] = telemetry
@@ -418,6 +472,17 @@ class _OpenCodeTurnState:
             self.emit(
                 ToolStartEvent(task_id=self.task_id, thread_id=self.thread_id, turn_id=self.turn_id, tool=telemetry)
             )
+        else:
+            # A SECOND event for a call already open — the pending/running-then-
+            # completed lifecycle. The first event routinely carries no `input`
+            # (the CLI has not finished assembling the call), so freezing the
+            # first event's view would leave `parameters` permanently `{}` and
+            # zero every `command_executed` row while the run looked normal.
+            # Later evidence wins; absent evidence never clears what we have.
+            if params:
+                telemetry.parameters = _canonical_params(telemetry.tool_name, params)
+            if started is not None:
+                telemetry.execution_started_at = started
 
         status_text = str(state.get("status") or "").lower()
         output = state.get("output")
@@ -602,6 +667,7 @@ class _OpenCodeTurnState:
         return raw_in
 
     def on_step_finish(self, part: dict[str, Any]) -> None:
+        self.steps_finished += 1
         tokens = part.get("tokens")
         tokens = tokens if isinstance(tokens, dict) else {}
         cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
@@ -1151,7 +1217,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
 
         Raises ``AgentCrashError`` (via :meth:`_crash_turn`) when the stream carried
         a structured error, when the process died with neither a structured error
-        nor an intentional stop, or when a clean exit recognized no events at all
+        nor an intentional stop, or when a clean exit captured no token telemetry
         (a zero-telemetry turn must not score — see the guard below). Raises
         ``TurnTimeoutError`` when the turn deadline elapses while waiting for the
         exit.
@@ -1192,22 +1258,45 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
             self._crash_turn(state, collector, f"OpenCode exited non-zero: {detail}")
 
-        # A clean exit that recognized NO events captured zero telemetry — zero
-        # turns, zero tokens, zero cost — while file-based criteria can still
-        # pass on whatever the agent did, producing a SUCCESS that is silently
-        # missing from every aggregate. This already happened once (the harness
-        # parsed the `session.next.*` server vocabulary instead of the CLI's),
-        # so vocabulary drift is crashed loudly instead of scored. Intentional
-        # cuts (should_stop / max_turns) are exempt: they can land before the
-        # first event.
-        if not stopped_early and not state.max_turns_exhausted and state.recognized_events == 0:
-            seen = ", ".join(sorted(state.unrecognized_types)) or "none (stdout carried no JSON events)"
+        # A clean exit that captured NO token telemetry must not score. File-based
+        # criteria can still pass on whatever the agent did, producing a SUCCESS
+        # that is silently missing from every aggregate — and, worse, one whose
+        # `run_limits.max_total_tokens` / `max_usd` gates could never have tripped
+        # no matter how much the run actually billed. This already happened once
+        # (the harness parsed the `session.next.*` server vocabulary instead of
+        # the CLI's), so drift is crashed loudly instead of scored.
+        #
+        # The condition is the TELEMETRY, not the event vocabulary. Keying on
+        # `recognized_events == 0` alone left the identical outcome reachable one
+        # layer down: a `step_finish` carrying no `tokens` key (a provider or auth
+        # mode that omits usage) recognizes three events, books an all-zero
+        # `TokenUsage`, and `EventCollector` then maps that to `token_usage=None`
+        # — a COMPLETED turn with no tokens, no cost and no warning.
+        #
+        # Intentional cuts (should_stop / max_turns) are exempt: both can land
+        # before the first event, or between a step's start and its `step_finish`.
+        #
+        # The second arm keys on a step the CLI reported as FINISHED — its own
+        # claim that a generation completed — rather than on `usage.is_empty()`
+        # alone, which would also condemn a stream that was cut before any step
+        # could finish.
+        nothing_recognized = state.recognized_events == 0
+        finished_without_tokens = state.steps_finished > 0 and state.usage.is_empty()
+        if not stopped_early and not state.max_turns_exhausted and (nothing_recognized or finished_without_tokens):
+            if nothing_recognized:
+                seen = ", ".join(sorted(state.unrecognized_types)) or "none (stdout carried no JSON events)"
+                detail = f"It emitted no recognized events at all. Unrecognized event types seen: {seen}."
+            else:
+                detail = (
+                    f"It reported {state.steps_finished} finished step(s), none of which carried usable "
+                    + f"token counts (cost reported: {'yes' if state.saw_cost else 'no'})."
+                )
             self._crash_turn(
                 state,
                 collector,
-                "OpenCode exited cleanly but emitted no recognized events, so the turn captured zero "
-                + f"telemetry. Unrecognized event types seen: {seen}. The CLI's event vocabulary may have "
-                + "changed — see docs/agents/OPENCODE.md (Telemetry) before trusting any run from this CLI version.",
+                f"OpenCode exited cleanly but the turn captured zero token telemetry. {detail} The CLI's "
+                + "event or token schema may have changed — see docs/agents/OPENCODE.md (Telemetry) before "
+                + "trusting any run from this CLI version.",
             )
 
         if stopped_early:

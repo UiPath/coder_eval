@@ -33,6 +33,7 @@ from coder_eval.streaming.events import (
     AgentStartEvent,
     ToolEndEvent,
     ToolEndStatus,
+    ToolStartEvent,
 )
 
 
@@ -259,7 +260,9 @@ class TestHappyPath:
         assert cmd.tool_name == "Read"
         assert cmd.tool_id == "call_1"
         assert cmd.result_status == "success"
-        assert cmd.parameters == {"filePath": "main.py"}
+        # ...including the ARGUMENT keys: the fixture's native `filePath` is
+        # recorded under Claude's `file_path` (see TestCrossHarnessNormalization).
+        assert cmd.parameters == {"file_path": "main.py"}
         assert cmd.result_summary == "print('hi')"
         # Duration comes from state.time, not our parse instant (17ms in fixture).
         assert cmd.duration_ms == pytest.approx(17, abs=1)
@@ -475,6 +478,145 @@ class TestCrossHarnessNormalization:
         patch_exec(_FakeProcess([self._tool_event("skill")]))
         record = await _run(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["Skill"]
+
+    @staticmethod
+    def _tool_with_input(tool: str, params: dict[str, Any]) -> str:
+        return _evt(
+            "tool_use",
+            {
+                "id": "prt_2",
+                "messageID": "msg_1",
+                "type": "tool",
+                "tool": tool,
+                "callID": f"call_{tool}",
+                "state": {"status": "completed", "input": params, "output": "ok"},
+            },
+        )
+
+    @pytest.mark.parametrize(
+        ("tool", "native", "expected"),
+        [
+            # The CLI installed at the time of writing registers `{path, ...}` for
+            # all three file tools; a 2026-08-13 capture emitted `filePath`. Both
+            # spellings must land on Claude's `file_path`.
+            ("read", {"path": "main.py"}, {"file_path": "main.py"}),
+            ("read", {"filePath": "main.py"}, {"file_path": "main.py"}),
+            ("write", {"path": "a.py", "content": "x"}, {"file_path": "a.py", "content": "x"}),
+            (
+                "edit",
+                {"path": "a.py", "oldString": "a", "newString": "b", "replaceAll": True},
+                {"file_path": "a.py", "old_string": "a", "new_string": "b", "replace_all": True},
+            ),
+            ("skill", {"name": "uipath-flow"}, {"skill": "uipath-flow"}),
+        ],
+    )
+    async def test_argument_keys_map_to_canonical(self, patch_exec, tmp_path, tool, native, expected):
+        """Normalizing the tool NAME is only half the job.
+
+        `command_executed` serializes `parameters` to JSON for every tool but Bash
+        (criteria/command_executed.py), so a criterion like
+        `{tool_name: Read, command_pattern: 'file_path.*app\\.py'}` matches on Claude
+        and scores 0 on OpenCode for identical agent behaviour.
+        """
+        patch_exec(_FakeProcess([self._tool_with_input(tool, native)]))
+        record = await _run(_agent(), tmp_path)
+        assert record.commands[0].parameters == expected
+
+    @pytest.mark.parametrize(
+        ("tool", "native"),
+        [
+            ("bash", {"command": "pytest -q"}),  # already canonical
+            ("grep", {"pattern": "x", "path": "src"}),  # `path` is Claude's key here too
+            ("list", {"path": "src"}),
+            ("some_new_tool", {"whatever": 1}),  # unmapped tool: untouched
+        ],
+    )
+    async def test_already_canonical_keys_are_left_alone(self, patch_exec, tmp_path, tool, native):
+        """The rename is per-tool: `path` means `file_path` on Read/Write/Edit and
+        stays `path` on the search tools, which is exactly Claude's split."""
+        patch_exec(_FakeProcess([self._tool_with_input(tool, native)]))
+        record = await _run(_agent(), tmp_path)
+        assert record.commands[0].parameters == native
+
+
+class TestTwoEventToolLifecycle:
+    """The CLI may emit `pending`/`running` before `completed` for one callID.
+
+    The first event routinely carries no `input` — the call is not assembled yet —
+    so freezing the first event's view leaves `parameters` permanently `{}`.
+    `command_executed` reads `parameters["command"]` for `tool_name: Bash`, so that
+    criterion would score 0 on every row while the run looked entirely normal.
+    """
+
+    @staticmethod
+    def _event(status: str, state_extra: dict[str, Any]) -> str:
+        return _evt(
+            "tool_use",
+            {
+                "id": "prt_2",
+                "messageID": "msg_1",
+                "type": "tool",
+                "tool": "bash",
+                "callID": "call_1",
+                "state": {"status": status, **state_extra},
+            },
+        )
+
+    async def test_the_completion_supplies_the_parameters(self, patch_exec, tmp_path):
+        patch_exec(
+            _FakeProcess(
+                [
+                    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
+                    self._event("running", {}),
+                    self._event(
+                        "completed",
+                        {
+                            "input": {"command": "pytest -q"},
+                            "output": "ok",
+                            "time": {"start": 1786663018214, "end": 1786663018231},
+                        },
+                    ),
+                ]
+            )
+        )
+        record = await _run(_agent(), tmp_path)
+
+        assert len(record.commands) == 1  # one tool, not two
+        cmd = record.commands[0]
+        assert cmd.tool_name == "Bash"
+        assert cmd.parameters == {"command": "pytest -q"}
+        assert cmd.result_status == "success"
+        assert cmd.execution_started_at is not None
+
+    async def test_one_tool_start_end_pair_is_emitted(self, patch_exec, tmp_path):
+        patch_exec(
+            _FakeProcess(
+                [
+                    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
+                    self._event("pending", {}),
+                    self._event("completed", {"input": {"command": "ls"}, "output": "ok"}),
+                ]
+            )
+        )
+        recorder = _EventRecorder()
+        await _run(_agent(), tmp_path, stream_callback=recorder)
+
+        assert len([e for e in recorder.events if isinstance(e, ToolStartEvent)]) == 1
+        assert len([e for e in recorder.events if isinstance(e, ToolEndEvent)]) == 1
+
+    async def test_a_later_event_without_input_never_clears_what_we_have(self, patch_exec, tmp_path):
+        """Absent evidence is not evidence of absence — the first event's args stay."""
+        patch_exec(
+            _FakeProcess(
+                [
+                    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
+                    self._event("running", {"input": {"command": "ls"}}),
+                    self._event("completed", {"output": "ok"}),
+                ]
+            )
+        )
+        record = await _run(_agent(), tmp_path)
+        assert record.commands[0].parameters == {"command": "ls"}
 
 
 class TestSandboxEnvironment:
@@ -757,12 +899,17 @@ class TestFailurePaths:
 
 
 class TestZeroTelemetryIsLoud:
-    """A clean exit that recognized no events must crash, not score.
+    """A clean exit that captured no token telemetry must crash, not score.
 
     An earlier version of this harness parsed the `session.next.*` server
     vocabulary instead of the CLI's and reported SUCCESS 1.0 with zero turns,
     zero tokens and zero cost — indistinguishable from a real pass in every
-    aggregate. Vocabulary drift must be an ERROR, not a quiet empty success.
+    aggregate. Drift must be an ERROR, not a quiet empty success.
+
+    The guard keys on the TELEMETRY, not the event vocabulary: recognizing the
+    event names is not the property worth protecting, and checking them alone
+    left the identical outcome reachable one layer down (see
+    `test_finished_step_without_tokens_crashes`).
     """
 
     async def test_unrecognized_vocabulary_crashes_and_names_the_types(self, patch_exec, tmp_path):
@@ -802,6 +949,55 @@ class TestZeroTelemetryIsLoud:
         patch_exec(proc)
         record = await _run(_agent(), tmp_path, should_stop=lambda: True)
         assert record.crashed is False
+
+    @staticmethod
+    def _stream_without_tokens(**finish_extra: Any) -> list[str]:
+        """HAPPY_STREAM's shape with the `tokens` key absent from every step."""
+        return [
+            _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
+            _evt("text", {"id": "prt_2", "messageID": "msg_1", "type": "text", "text": "Done."}),
+            _evt("step_finish", {"id": "prt_3", "messageID": "msg_1", "reason": "stop", **finish_extra}),
+        ]
+
+    async def test_finished_step_without_tokens_crashes(self, patch_exec, tmp_path):
+        """The event vocabulary is fine and three events are recognized — but the
+        turn still captured nothing.
+
+        `EventCollector` maps an all-zero, costless `TokenUsage` to
+        `token_usage=None`, so this is a COMPLETED turn a file-based criterion can
+        score SUCCESS on, absent from every token aggregate, whose
+        `run_limits.max_total_tokens` / `max_usd` gates could never trip no matter
+        what the run really billed.
+        """
+        patch_exec(_FakeProcess(self._stream_without_tokens()))
+        agent = _agent()
+
+        with pytest.raises(AgentCrashError, match="zero token telemetry") as exc:
+            await _run(agent, tmp_path)
+        assert "1 finished step(s)" in str(exc.value)
+        assert agent.pending_turn is not None  # telemetry captured so far still parked
+
+    async def test_cost_without_tokens_still_crashes(self, patch_exec, tmp_path):
+        """Reported cost does not excuse missing tokens: the USD gate might trip,
+        but every token gate and aggregate is still silently blind."""
+        patch_exec(_FakeProcess(self._stream_without_tokens(cost=0.004)))
+        with pytest.raises(AgentCrashError, match="cost reported: yes"):
+            await _run(_agent(), tmp_path)
+
+    async def test_a_cut_before_any_step_finished_is_exempt(self, patch_exec, tmp_path):
+        """The arm keys on a step the CLI reported FINISHED. A stop landing between
+        a step's start and its `step_finish` is an intentional cut, not drift."""
+        proc = _RunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"})])
+        patch_exec(proc)
+        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        assert record.crashed is False
+
+    async def test_real_tokens_are_never_condemned(self, patch_exec, tmp_path):
+        """The guard must not fire on the ordinary path it lives beside."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        record = await _run(_agent(), tmp_path)
+        assert record.crashed is False
+        assert record.token_usage is not None
 
 
 class _ExplodingProcess(_FakeProcess):
@@ -984,6 +1180,52 @@ class TestCooperativeStop:
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=1)
         assert record.max_turns_exhausted is True
+
+    async def test_a_cap_the_run_stays_under_is_not_exhausted(self, patch_exec, tmp_path):
+        """The OTHER direction, which decides `FinalStatus`.
+
+        HAPPY_STREAM is exactly 2 steps, so `max_turns=2` is the boundary: an
+        off-by-one here (`>` becoming `>=`, or counting finished steps instead of
+        started ones) reports MAX_TURNS_EXHAUSTED — orchestrator.py turns the flag
+        straight into `FinalStatus.MAX_TURNS_EXHAUSTED` — for a run that finished
+        well inside its budget. A spurious exhaustion also suppresses the non-zero-
+        exit and zero-telemetry crash guards, which are both conditioned on it, so
+        the run would score silently instead of failing loudly.
+        """
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        record = await _run(_agent(), tmp_path, max_turns=2)
+
+        assert record.max_turns_exhausted is False
+        assert record.assistant_turn_count == 2
+        # Both steps' telemetry is present — the cap did not truncate the stream.
+        assert record.token_usage is not None
+        assert record.token_usage.output_tokens == 57
+
+    async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        record = await _run(_agent(), tmp_path)
+        assert record.max_turns_exhausted is False
+        assert record.assistant_turn_count == 2
+
+    async def test_the_deciding_step_is_kept_whole(self, patch_exec, tmp_path):
+        """`max_turns=1` cuts at the START of step 2, so step 1 survives complete.
+
+        Asserting only the flag would let a cut that discards the step that earned
+        the budget pass — the run would report exhaustion with none of the
+        telemetry that reached it.
+        """
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        record = await _run(_agent(), tmp_path, max_turns=1)
+
+        assert record.max_turns_exhausted is True
+        assert len(record.commands) == 1  # step 1's tool call
+        usage = record.token_usage
+        assert usage is not None
+        # Step 1's buckets exactly (nested convention: 100-10-5=85 fresh input).
+        assert usage.uncached_input_tokens == 85
+        assert usage.output_tokens == 20
+        assert usage.cache_creation_input_tokens == 5
+        assert usage.cache_read_input_tokens == 10
 
 
 class _HangingProcess(_FakeProcess):
