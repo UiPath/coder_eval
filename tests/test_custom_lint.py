@@ -1934,11 +1934,14 @@ _PYTHON_FENCE = re.compile(r"```python\n(.*?)```", re.DOTALL)
 
 
 def _snippet_binding_failures(markdown: str) -> list[str]:
-    """Every `coder_eval` call in a shipped snippet whose KEYWORDS no longer bind, as strings.
+    """Every shipped snippet import that no longer RESOLVES, and every call whose KEYWORDS no
+    longer bind, as strings.
 
     A prose sensor sees a snippet's tokens, not its call signatures: a renamed or removed keyword
     argument leaves every token in place and fails in the user's terminal after they have paid for
-    the runs the snippet was meant to read.
+    the runs the snippet was meant to read. A MOVED name is the same failure one step earlier, and
+    it is checked first — over the import map rather than inside the call loop, for the two reasons
+    the comment there gives.
 
     Imports are collected across the WHOLE file first (a snippet may import in one fence and call
     in another), then each fence's calls are bound with `Signature.bind_partial` — keywords only,
@@ -1962,6 +1965,32 @@ def _snippet_binding_failures(markdown: str) -> list[str]:
                 origins[cleaned] = module
 
     failures: list[str] = []
+    # EXISTENCE first, over the `origins` map rather than inside the call loop below — and the
+    # placement is the whole point, because that loop is blind to a moved name for TWO independent
+    # reasons. (1) A name that no longer exists resolves to `None`, which is not callable, so the
+    # loop's `if not callable(target): continue` skips it silently. (2) The loop only ever visits
+    # names used as `ast.Call` funcs, so a name IMPORTED BUT NEVER CALLED — `CostQualityPoint`,
+    # `SearchComparison`, `TASK_JSON_GLOB`, `GATE_RESAMPLES`, `MATERIALITY_FLOOR` — never reaches
+    # it at all. Either way a broken import fails in the user's terminal, after they have paid for
+    # the runs the snippet was meant to read.
+    #
+    # It also RESOLVES each name once, into `bound`, which the call loop then reads instead of
+    # importing again. That is not tidiness: `import_module` raises `ModuleNotFoundError` on a
+    # module that does not exist, and the call loop's copy was unguarded — so a snippet importing
+    # from a mistyped module CRASHED this sensor rather than reporting it, which is the precise
+    # failure it exists to prevent. Found by simulating the module split against the real file.
+    bound: dict[str, object] = {}
+    for name, module in sorted(origins.items()):
+        try:
+            imported = importlib.import_module(module)
+        except ImportError as exc:
+            failures.append(f"`from {module} import {name}` — the module does not import: {exc}")
+            continue
+        if not hasattr(imported, name):
+            failures.append(f"`from {module} import {name}` — {module} has no attribute {name!r}")
+            continue
+        bound[name] = getattr(imported, name)
+
     for index, source in enumerate(_PYTHON_FENCE.findall(markdown), start=1):
         try:
             tree = ast.parse(textwrap.dedent(source))
@@ -1980,9 +2009,13 @@ def _snippet_binding_failures(markdown: str) -> list[str]:
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
                 continue
             name = node.func.id
-            if name in shadowed or name not in origins:
+            if name in shadowed or name not in bound:
+                # `not in bound` covers both "never imported here" and "imported but unresolvable",
+                # the second of which the existence pass has already reported.
                 continue
-            target = getattr(importlib.import_module(origins[name]), name, None)
+            target = bound[name]
+            # Kept: `UNRESOLVED_MODEL` / `UNRECORDED_SPLIT` are strings the skill imports, and a
+            # name that resolves to a non-callable has no signature to bind against.
             if not callable(target):
                 continue
             keywords = {kw.arg: None for kw in node.keywords if kw.arg is not None}
@@ -3160,6 +3193,90 @@ class TestPluginArtifacts:
         )
         failures = _snippet_binding_failures(markdown)
         assert len(failures) == 1 and "bogus_kwarg" in failures[0], failures
+
+    def test_the_snippet_binder_catches_a_moved_name(self):
+        """The hole the call loop leaves, hole 1: a moved name resolves to `None`.
+
+        The call loop skips it via `if not callable(target): continue`, so a snippet importing a
+        name that no longer exists reported NOTHING. This is the sensor the module split depends
+        on — every one of the skill's imports is about to change module.
+        """
+        markdown = (
+            "```python\n"
+            "from coder_eval.optimize_gate import a_name_that_moved\n\n"
+            "a_name_that_moved(suite_id='s')\n"
+            "```\n"
+        )
+        failures = _snippet_binding_failures(markdown)
+        assert len(failures) == 1, failures
+        assert "a_name_that_moved" in failures[0] and "has no attribute" in failures[0]
+
+    def test_the_snippet_binder_catches_a_moved_name_that_is_never_called(self):
+        """The hole the call loop leaves, hole 2, and it is independent of the first.
+
+        The loop only visits names used as `ast.Call` funcs, so a name imported for a type
+        annotation or a constant is invisible to it however broken. `CostQualityPoint`,
+        `SearchComparison`, `TASK_JSON_GLOB`, `GATE_RESAMPLES` and `MATERIALITY_FLOOR` are all
+        imported-not-called in the shipped skill, which is why the check runs over the import map.
+        """
+        markdown = "```python\nfrom coder_eval.optimize_gate import A_CONSTANT_THAT_MOVED\n```\n"
+        failures = _snippet_binding_failures(markdown)
+        assert len(failures) == 1 and "A_CONSTANT_THAT_MOVED" in failures[0], failures
+
+    def test_the_snippet_binder_catches_a_nonexistent_module(self):
+        # `import_module` RAISES here; reporting rather than propagating keeps one bad fence from
+        # taking every other snippet's check down with it.
+        markdown = "```python\nfrom coder_eval.nonexistent import thing\n```\n"
+        failures = _snippet_binding_failures(markdown)
+        assert len(failures) == 1 and "does not import" in failures[0], failures
+
+    def test_a_nonexistent_module_whose_name_is_also_called_is_reported_not_raised(self):
+        """The crash the call loop used to produce, and the reason this sensor exists at all.
+
+        With a call present, the loop reached its own `import_module` — unguarded — and a mistyped
+        module name raised `ModuleNotFoundError` straight out of the sensor instead of reporting a
+        failure. Found by simulating the module split against the real `SKILL.md`: every import
+        re-pointed at a module that does not exist yet, which is exactly what a half-finished
+        Phase 7 looks like.
+        """
+        markdown = (
+            "```python\nfrom coder_eval.optimize_nonexistent import activation_gate\n\n"
+            "activation_gate(suite_id='s')\n```\n"
+        )
+        failures = _snippet_binding_failures(markdown)
+        assert len(failures) == 1 and "does not import" in failures[0], failures
+
+    def test_the_binder_reports_rather_than_crashes_on_a_wholesale_module_rename(self):
+        """The Phase 7 rehearsal, on the REAL file: the sensor must survive being wrong."""
+        raw = (PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8")
+        mutated = raw.replace("from coder_eval.optimize_gate import", "from coder_eval.optimize_nowhere import")
+        assert mutated != raw, "the anchor moved — re-derive it from the skill's snippets"
+        failures = _snippet_binding_failures(mutated)
+        assert len(failures) >= 15, failures
+        assert all("does not import" in f for f in failures), failures
+
+    def test_a_real_non_callable_import_stays_silent(self):
+        """`UNRESOLVED_MODEL` and `UNRECORDED_SPLIT` are strings the shipped skill imports.
+
+        The call loop's `not callable` skip must survive: it exists for exactly these, and the new
+        existence check must not start reporting them.
+        """
+        markdown = "```python\nfrom coder_eval.optimize_store import UNRESOLVED_MODEL, UNRECORDED_SPLIT\n```\n"
+        assert _snippet_binding_failures(markdown) == []
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [
+            "```python\nfrom coder_eval.optimize_gate import (\n    load_arm_rows,\n    gone_missing,\n)\n```\n",
+            "```python\nfrom coder_eval.optimize_gate import load_arm_rows, gone_missing\n```\n",
+        ],
+        ids=["parenthesized", "single-line"],
+    )
+    def test_both_import_forms_are_covered(self, markdown):
+        # `origins` is built by two separate regexes; a check that only saw one form would go
+        # silent on half the skill's imports.
+        failures = _snippet_binding_failures(markdown)
+        assert len(failures) == 1 and "gone_missing" in failures[0], failures
 
     def test_the_snippet_binder_skips_a_shadowed_name(self):
         # A snippet that rebinds an imported name locally must not be bound against the import.
