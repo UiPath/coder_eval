@@ -215,11 +215,13 @@ max-branches = 25
 # everything else is under 20.
 #
 # No per-file-ignore exists because the CEILING is 30, and nothing else. `optimize_gate.py` — the
-# file the plan that introduced this expected to exempt — peaks at 17 (`execution_gate`), but that
-# was ALREADY true before this change and is not a mccabe result worth reading as health: the
-# module split remains undone (3250 lines, `radon cc` still reports one E-grade and seven D-grade
-# functions), so mccabe and radon simply disagree about that file. Do not read the absence of an
-# exemption as evidence the split landed.
+# file the plan that introduced this expected to exempt — never needed one, and the split has now
+# landed: that module is six (`optimize_load` 713, `optimize_gate` 374, `optimize_activation` 1159,
+# `optimize_execution` 1033, `optimize_fronts` 327, `optimize_search` 286), down from one file of
+# 3,521 lines. `radon cc` reports NO E-grade anywhere in the family and seven D-grades spread
+# across four modules, the largest concentration being three. mccabe and radon still disagree about
+# these functions — mccabe peaks at 17 on `execution_gate` where radon reports D(30) — which is why
+# the ceiling is a ratchet on new growth rather than a health reading.
 #
 # Lowering this toward 20 is tracked in .claude/harness-candidates.md, one function at a time.
 max-complexity = 30

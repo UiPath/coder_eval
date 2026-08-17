@@ -1,7 +1,7 @@
 """The optimize gate's PRESENTATION half — every markdown block the skill prints verbatim.
 
 Joins the ``reports.py`` / ``reports_experiment.py`` / ``reports_junit.py`` family, and is split
-from :mod:`coder_eval.optimize_gate` on the precedent :mod:`coder_eval.leak_detection` already set:
+from the optimize-gate family on the precedent :mod:`coder_eval.leak_detection` already set:
 the gate decides, this renders the decision, and a decision layer that also owns its presentation
 cannot be reviewed as one.
 
@@ -10,8 +10,8 @@ estimator, and **no runtime import of** ``optimize_gate``. A renderer that reach
 directory or recomputes a statistic is a gate with a table on it, and the module boundary would
 then document a separation that does not exist.
 
-The two NamedTuples it renders (:class:`~coder_eval.optimize_gate.SearchComparison`,
-:class:`~coder_eval.optimize_gate.CostQualityPoint`) stay with the code that PRODUCES them and are
+The two NamedTuples it renders (:class:`~coder_eval.optimize_search.SearchComparison`,
+:class:`~coder_eval.optimize_fronts.CostQualityPoint`) stay with the code that PRODUCES them and are
 imported here under ``if TYPE_CHECKING`` only — exactly the shape
 ``reports_stats.PairedComparison`` → ``reports_experiment`` already has.
 
@@ -38,7 +38,11 @@ if TYPE_CHECKING:
     # `reports_stats.PairedComparison` does for `reports_experiment`. A runtime import here
     # would make the presentation layer depend on the decision layer and turn the split
     # cosmetic — which is what `test_the_presentation_module_makes_no_decisions` pins.
-    from coder_eval.optimize_gate import CostQualityPoint, SearchComparison
+    #
+    # TWO modules now, not one: the decision layer was split by track, and these two are produced
+    # at its top rank — the fronts and the search loop.
+    from coder_eval.optimize_fronts import CostQualityPoint
+    from coder_eval.optimize_search import SearchComparison
 
 
 def _fmt(value: float | None, spec: str = ".3f") -> str:

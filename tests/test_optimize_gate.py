@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from pydantic import ValidationError
 
-from coder_eval import optimize_gate
+from coder_eval import optimize_execution
 from coder_eval.leak_detection import LEAK_MIN_CHARS
 from coder_eval.models import (
     ActivationGateVerdict,
@@ -48,54 +48,64 @@ from coder_eval.models import (
     TokenUsage,
     copy_with,
 )
+from coder_eval.optimize_activation import (
+    _activation_preflight,
+    _discreteness_floor,
+    _holm_threshold,
+    _refusal_message,
+    _sibling_checks,
+    activation_gate,
+    derive_sibling_indices,
+    holm_promote,
+    measure_noise_floor,
+    min_discordant_rows,
+    noise_floor_mde,
+)
+from coder_eval.optimize_execution import (
+    _execution_diagnostics,
+    execution_gate,
+    holm_promote_execution,
+    measure_execution_noise_floor,
+    resolve_model,
+)
+from coder_eval.optimize_fronts import (
+    CostQualityPoint,
+    arm_row_scores,
+    cost_quality_front,
+    cost_quality_points,
+    instance_best_front,
+    pareto_front,
+)
 from coder_eval.optimize_gate import (
     _NOTE_OUTSIDE_FAMILY,
     GATE_MAX_FAMILY,
     GATE_P_PRECISION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
-    TASK_JSON_GLOB,
-    CostQualityPoint,
-    SearchComparison,
-    SplitProvenance,
-    _activation_preflight,
-    _balance_pair,
-    _discreteness_floor,
-    _execution_diagnostics,
     _holm_family,
-    _holm_threshold,
+    _note_holm_family,
+    _note_ordinary_negative,
+    cost_latency_guardrails,
+)
+from coder_eval.optimize_load import (
+    TASK_JSON_GLOB,
+    SplitProvenance,
+    _balance_pair,
     _label_pairs,
     _load_and_pair,
     _median,
-    _note_holm_family,
-    _note_ordinary_negative,
-    _refusal_message,
     _row_cost_levels,
     _row_costs,
-    _sibling_checks,
     _wrong_path_reason,
-    activation_gate,
-    arm_row_scores,
-    candidate_leaks,
-    cost_latency_guardrails,
-    cost_quality_front,
-    cost_quality_points,
-    derive_sibling_indices,
-    execution_gate,
-    holm_promote,
-    holm_promote_execution,
-    instance_best_front,
-    lineage_head_scores,
     load_arm_rows,
     load_suite_rows,
-    measure_execution_noise_floor,
-    measure_noise_floor,
-    min_discordant_rows,
-    noise_floor_mde,
-    pareto_front,
     read_split_provenance,
+)
+from coder_eval.optimize_search import (
+    SearchComparison,
+    candidate_leaks,
+    lineage_head_scores,
     regression_check,
-    resolve_model,
     search_compare,
 )
 from coder_eval.optimize_store import UNRECORDED_SPLIT, record_noise_floor
@@ -865,7 +875,31 @@ class TestRenderMarkdown:
 # The three modules the optimize gate was split into. Named once: two module-scoped assertions and
 # the layering tests below all reason over the same surface, and a list that drifted would leave a
 # new module silently unchecked by whichever one forgot it.
-_OPTIMIZE_MODULES = ("optimize_gate", "optimize_store", "reports_optimize")
+# The whole optimize family, in RANK order, plus the two siblings that were never part of the
+# split. Every layering test iterates this, so a new module is covered by all of them at once —
+# which is why the split's structural assertions needed no new tests, only a longer tuple.
+_OPTIMIZE_MODULES = (
+    "optimize_load",
+    "optimize_gate",
+    "optimize_activation",
+    "optimize_execution",
+    "optimize_fronts",
+    "optimize_search",
+    "optimize_store",
+    "reports_optimize",
+)
+
+# The DECISION layer's six modules, at their ranks. An import may only point at a STRICTLY lower
+# rank: `activation -> execution` is acyclic and still wrong, because the two tracks are meant to
+# be independently readable.
+_OPTIMIZE_RANKS = {
+    "optimize_load": 0,
+    "optimize_gate": 1,
+    "optimize_activation": 2,
+    "optimize_execution": 2,
+    "optimize_fronts": 3,
+    "optimize_search": 3,
+}
 
 
 def _module_source(module: str) -> str:
@@ -925,7 +959,12 @@ def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
     assert runtime.get("coder_eval.reports_stats", set()) == {"bootstrap_p_floor"}
 
     deferred = _coder_eval_imports("reports_optimize", inside_type_checking=True)
-    assert deferred.get("coder_eval.optimize_gate") == {"CostQualityPoint", "SearchComparison"}
+    # TWO modules since the split, and the pair is asserted whole rather than per-module: what
+    # matters is that these are the ONLY names it defers, wherever they now live.
+    assert deferred == {
+        "coder_eval.optimize_fronts": {"CostQualityPoint"},
+        "coder_eval.optimize_search": {"SearchComparison"},
+    }, deferred
 
     # No filesystem call anywhere in the module.
     tree = ast.parse(_module_source("reports_optimize"))
@@ -951,44 +990,77 @@ def test_the_store_module_imports_only_models() -> None:
     assert set(_coder_eval_imports("optimize_store")) <= {"coder_eval.models"}
 
 
-def test_a_moved_name_is_gone_from_the_gate() -> None:
-    """No name the two new modules define survives on `optimize_gate` except a deliberate re-import.
+def test_a_moved_name_lives_in_exactly_one_module() -> None:
+    """No name one family module defines survives on another except a deliberate re-import.
 
-    DERIVED on both sides, never a hand-written list — a list here would be a second declaration of
-    each module's contents, which is the exact defect this plan removed three of. The module's own
-    contents come from enumerating it (with a `__module__` filter, so a name it merely IMPORTS does
-    not count as one it defines); the permitted survivors come from parsing the gate's OWN import
-    statements. A leftover copy is therefore caught, while the two names the gate genuinely imports
-    back are not mistaken for one.
+    **This is the split's contract**, and it is what forbids a re-export facade: a module that
+    kept a copy of a moved name would let every old import keep working and make the split
+    cosmetic. Widened from two modules to the whole family rather than duplicated — the loop was
+    already derived on both sides, so growing it covered five new modules for free.
 
-    `ruff` keeps that permitted set minimal for free: an unused back-import is F401.
+    DERIVED on both sides, never a hand-written list: each module's contents come from enumerating
+    it (with a `__module__` filter, so a name it merely IMPORTS does not count as one it defines),
+    and the permitted survivors come from parsing the OTHER module's own import statements.
+    `ruff` keeps that permitted set minimal for free — an unused back-import is F401.
     """
-    import coder_eval.optimize_gate as gate
-    import coder_eval.optimize_store as store
-    import coder_eval.reports_optimize as presentation
+    import importlib
 
-    gate_imports = _coder_eval_imports("optimize_gate")
-    for module in (store, presentation):
+    modules = {name: importlib.import_module(f"coder_eval.{name}") for name in _OPTIMIZE_MODULES}
+    imports = {name: _coder_eval_imports(name) for name in _OPTIMIZE_MODULES}
+
+    for owner, module in modules.items():
         defined = [
             name
             for name, value in vars(module).items()
             if not name.startswith("__") and getattr(value, "__module__", None) == module.__name__
         ]
-        assert defined, f"{module.__name__} defines nothing — the enumeration is not doing its job"
-        back_imported = gate_imports.get(module.__name__, set())
-        leftovers = [name for name in defined if hasattr(gate, name) and name not in back_imported]
-        assert not leftovers, f"{module.__name__} names still defined on optimize_gate: {leftovers}"
+        assert defined, f"{owner} defines nothing — the enumeration is not doing its job"
+        for other, other_module in modules.items():
+            if other == owner:
+                continue
+            back_imported = imports[other].get(f"coder_eval.{owner}", set())
+            leftovers = [n for n in defined if hasattr(other_module, n) and n not in back_imported]
+            assert not leftovers, f"{owner} names still defined on {other}: {leftovers}"
 
-    # The one edge between the three non-model modules. THREE names now: `UNRECORDED_SPLIT` joined
-    # the two the split originally left, and for the same reason `UNRESOLVED_MODEL` is over there —
-    # it is a cache-key sentinel the STORE refuses to write, so declaring it in the gate would make
-    # the store import the gate and close a cycle.
-    assert gate_imports.get("coder_eval.optimize_store") == {
-        "UNRECORDED_SPLIT",
-        "UNRESOLVED_MODEL",
-        "lookup_noise_floor",
-    }
-    assert "coder_eval.reports_optimize" not in gate_imports
+
+def test_the_import_graph_respects_the_rank_order() -> None:
+    """Strictly downward, never sideways — and acyclicity alone would not say that.
+
+    `optimize_activation -> optimize_execution` is perfectly acyclic and still wrong: the two
+    tracks are meant to be independently readable, which is the whole reason the split is BY TRACK.
+    So the assertion is on the RANKS, not on the absence of cycles.
+    """
+    for module, rank in _OPTIMIZE_RANKS.items():
+        for imported in _coder_eval_imports(module):
+            target = imported.removeprefix("coder_eval.")
+            if target not in _OPTIMIZE_RANKS:
+                continue
+            assert _OPTIMIZE_RANKS[target] < rank, (
+                f"{module} (rank {rank}) imports {target} (rank {_OPTIMIZE_RANKS[target]}) — "
+                "an import must point at a STRICTLY lower rank"
+            )
+
+
+def test_the_store_edge_is_sentinels_and_one_lookup() -> None:
+    """The family -> store edge, which is the only one out of the decision layer.
+
+    `UNRESOLVED_MODEL` and `UNRECORDED_SPLIT` live in the store rather than in the gate because
+    they are cache-key sentinels the STORE refuses to write — declaring them here would make the
+    store import the family and close a cycle.
+    """
+    edge = {module: _coder_eval_imports(module).get("coder_eval.optimize_store", set()) for module in _OPTIMIZE_RANKS}
+    assert edge == {
+        "optimize_load": {"UNRECORDED_SPLIT"},
+        "optimize_gate": {"UNRESOLVED_MODEL", "lookup_noise_floor"},
+        "optimize_activation": {"UNRESOLVED_MODEL"},
+        "optimize_execution": {"UNRESOLVED_MODEL"},
+        "optimize_fronts": set(),
+        "optimize_search": set(),
+    }, edge
+    # And nothing in the family imports the RENDERER: a decision layer depending on its own
+    # presentation is what would make that split cosmetic too.
+    for module in _OPTIMIZE_RANKS:
+        assert "coder_eval.reports_optimize" not in _coder_eval_imports(module), module
 
 
 def test_module_imports_no_cli_machinery() -> None:
@@ -4161,7 +4233,7 @@ class TestExecutionGateIntegrity:
     def test_the_gate_reads_no_suite_json(self, tmp_path: Path) -> None:
         # The positional read of `criterion_aggregates` the planning spike falsified: that list is
         # FILTERED, so position i there is not criterion i. Nothing here may depend on it.
-        import coder_eval.optimize_gate as gate
+        from coder_eval import optimize_execution as gate
 
         # A PATH JOIN is what a read looks like — `run_dir / ... / "suite.json"`. Both functions
         # also NAME the file in prose (a docstring, and the wrong-index note that tells a user the
@@ -4395,7 +4467,7 @@ class TestExecutionGateRefusesAReusedRunDir:
             seen.append(kwargs["refused_already"])
             return real(**kwargs)
 
-        with mock.patch.object(optimize_gate, "_execution_diagnostics", _spy):
+        with mock.patch.object(optimize_execution, "_execution_diagnostics", _spy):
             decided = holm_promote_execution([_exec_gate(run_dir)])[0]
 
         assert seen == [True], "the reconciliation cause must reach the ladder already refused"

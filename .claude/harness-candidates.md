@@ -838,6 +838,26 @@ with the two `action.yml` items above — one considered change to the action's 
       standing guard, and its path scope names all six post-split module names so Phase 7 moving a
       reader cannot take it out of reach.
 
+- [ ] **CE055: a module-size / complexity ratchet over the optimize family.** The six-module split
+      landed (Plan B+C Phase 7), and this is the baseline it would ratchet against, measured at
+      that commit:
+
+      | module | lines | D-grade functions |
+      |---|---|---|
+      | `optimize_load.py` | 713 | `_load_and_pair` D(30) |
+      | `optimize_gate.py` | 374 | `cost_latency_guardrails` D(24) |
+      | `optimize_activation.py` | 1159 | `_sibling_checks` D(23), `activation_gate` D(23) |
+      | `optimize_execution.py` | 1033 | `execution_gate` D(30), `_execution_diagnostics` D(29), `holm_promote_execution` D(21) |
+      | `optimize_fronts.py` | 327 | none |
+      | `optimize_search.py` | 286 | none |
+
+      **No E-grade function anywhere in the family**, down from one file of 3,521 lines with one
+      E-grade and seven D-grades. Not built here because a ratchet needs a checked-in baseline
+      (this table) plus a design pass on what cap a NEW function gets — the existing `C90`
+      ceiling is a mccabe number and radon disagrees with it (mccabe peaks at 17 on
+      `execution_gate` where radon reports D(30)), so a ratchet has to pick one metric and say
+      why. Deferred to Plan D, which is where the decision belongs.
+
 - [ ] **The execution track's "the floor came back unavailable" advisory names no cause.**
       `activation_gate` now threads the real reason out of `measure_noise_floor` through a
       `reasons` sink, so its MDE note says WHICH of five causes fired instead of naming one

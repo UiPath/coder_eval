@@ -544,7 +544,9 @@ Compute it and report it *before* proposing anything:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import load_arm_rows, noise_floor_mde, resolve_model
+from coder_eval.optimize_load import load_arm_rows
+from coder_eval.optimize_activation import noise_floor_mde
+from coder_eval.optimize_execution import resolve_model
 from coder_eval.optimize_store import load_measurements
 
 baseline_dirs = [Path("<runs>/baseline-1"), Path("<runs>/baseline-2")]
@@ -590,7 +592,7 @@ requirement is knowable now, and it is not a row count — it is how many rows t
 **disagreeing** on. Print it before proposing anything:
 
 ```python
-from coder_eval.optimize_gate import min_discordant_rows
+from coder_eval.optimize_activation import min_discordant_rows
 from coder_eval.reports_stats import DEFAULT_ALPHA
 
 survivors = 3  # how many candidates you plan to gate at Stage B
@@ -853,7 +855,7 @@ rather than after a stage:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import candidate_leaks
+from coder_eval.optimize_search import candidate_leaks
 from coder_eval.orchestration.task_loader import expand_dataset, load_task
 
 suite = Path("<the suite yaml>")
@@ -954,8 +956,8 @@ floor** free — it is arithmetic over a run directory that already exists. Read
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import (
-    load_arm_rows,
+from coder_eval.optimize_load import load_arm_rows
+from coder_eval.optimize_execution import (
     measure_execution_noise_floor,
     resolve_model,
 )
@@ -1145,8 +1147,8 @@ mechanical:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import (
-    arm_row_scores,
+from coder_eval.optimize_fronts import arm_row_scores
+from coder_eval.optimize_search import (
     lineage_head_scores,
     search_compare,
 )
@@ -1288,7 +1290,7 @@ discard. Only the per-row vectors tell them apart, so print them:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import arm_row_scores, instance_best_front, pareto_front
+from coder_eval.optimize_fronts import arm_row_scores, instance_best_front, pareto_front
 from coder_eval.reports_optimize import render_row_matrix
 
 arms = arm_row_scores(
@@ -1343,7 +1345,7 @@ show it:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import regression_check
+from coder_eval.optimize_search import regression_check
 from coder_eval.optimize_store import load_measurements
 
 # Defined here rather than reused from Step 6: that snippet is activation-only, so on the
@@ -1378,7 +1380,7 @@ reason that is an artefact of the procedure.
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import cost_quality_front, cost_quality_points
+from coder_eval.optimize_fronts import cost_quality_front, cost_quality_points
 from coder_eval.reports_optimize import render_cost_quality
 
 points = cost_quality_points(
@@ -1416,7 +1418,7 @@ in Step 1:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import activation_gate, holm_promote
+from coder_eval.optimize_activation import activation_gate, holm_promote
 from coder_eval.reports_optimize import render_markdown
 
 # The three --run-dir paths from the three invocations above, as Path objects.
@@ -1518,7 +1520,7 @@ readings the method's promote-only-when list requires and a human used to check 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_gate import execution_gate, holm_promote_execution
+from coder_eval.optimize_execution import execution_gate, holm_promote_execution
 from coder_eval.reports_optimize import render_execution_markdown
 
 # ONE run dir per candidate: the paired statistic fires only for exactly two variants, so each
@@ -1689,13 +1691,15 @@ been paid for. **Which floor you record depends on the track**, so take the matc
 from pathlib import Path
 
 from coder_eval.models import RegressionRow, RoundScores
-from coder_eval.optimize_gate import (
-    instance_best_front,
-    load_arm_rows,
+from coder_eval.optimize_load import load_arm_rows
+from coder_eval.optimize_activation import measure_noise_floor
+from coder_eval.optimize_execution import (
     measure_execution_noise_floor,
-    measure_noise_floor,
-    pareto_front,
     resolve_model,
+)
+from coder_eval.optimize_fronts import (
+    instance_best_front,
+    pareto_front,
 )
 from coder_eval.optimize_store import (
     UNRESOLVED_MODEL,

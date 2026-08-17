@@ -17,10 +17,14 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import ArmRowScores, NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores
-from coder_eval.optimize_gate import (
-    GATE_RESAMPLES,
+from coder_eval.optimize_activation import (
     measure_noise_floor,
     noise_floor_mde,
+)
+from coder_eval.optimize_gate import (
+    GATE_RESAMPLES,
+)
+from coder_eval.optimize_search import (
     regression_check,
 )
 from coder_eval.optimize_store import (
@@ -602,13 +606,30 @@ class TestTargetLabelMoved:
         assert TARGET_LABEL == "yes"
         assert "TARGET_LABEL" in models.__all__
 
-    def test_the_gate_imports_it_rather_than_redeclaring_it(self) -> None:
-        import coder_eval.optimize_gate as gate
+    @pytest.mark.parametrize(
+        "module",
+        ["optimize_load", "optimize_gate", "optimize_activation", "optimize_execution"],
+    )
+    def test_the_family_imports_it_rather_than_redeclaring_it(self, module: str) -> None:
+        """Every module in the family that reads the label must import it, not respell it.
+
+        Parametrized across the split rather than pinned to one module: the decision layer is six
+        modules now, and a re-declaration in any of them is the same defect — two equal string
+        constants that agree today and diverge silently the moment either moves, with a gate then
+        reading an F1 for a class the criterion never emits.
+        """
+        import importlib
+
         from coder_eval.models import TARGET_LABEL
 
-        assert gate.TARGET_LABEL is TARGET_LABEL
-        source = (REPO_ROOT / "src" / "coder_eval" / "optimize_gate.py").read_text(encoding="utf-8")
-        assert "TARGET_LABEL = " not in source, "optimize_gate re-declares TARGET_LABEL — it must import it"
+        imported = importlib.import_module(f"coder_eval.{module}")
+        source = (REPO_ROOT / "src" / "coder_eval" / f"{module}.py").read_text(encoding="utf-8")
+        if not hasattr(imported, "TARGET_LABEL"):
+            # A module that does not read the label at all is fine; it just must not declare one.
+            assert "TARGET_LABEL = " not in source, f"{module} declares TARGET_LABEL without using it"
+            return
+        assert imported.TARGET_LABEL is TARGET_LABEL
+        assert "TARGET_LABEL = " not in source, f"{module} re-declares TARGET_LABEL — it must import it"
 
     def test_the_criterion_that_produces_the_label_imports_it_too(self) -> None:
         """The gate reads `f1.yes`; `skill_triggered` is what emits that `yes`.

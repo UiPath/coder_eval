@@ -3130,9 +3130,14 @@ class TestPluginArtifacts:
         for module, line in re.findall(r"from (coder_eval[\w.]*) import ([^(\n]+)", raw):
             imported.setdefault(module, set()).update(n.strip() for n in line.split(",") if n.strip())
 
-        assert "coder_eval.optimize_gate" in imported, (
-            "optimize-skill's SKILL.md no longer imports anything from coder_eval.optimize_gate — "
-            "either the snippets are gone or the import line changed shape and this sensor is blind"
+        # The DECISION layer is six modules since the split, and the snippets import from five of
+        # them. Asserting the family rather than one name keeps this from going blind the next time
+        # a name moves — which is exactly what it did when `optimize_gate` stopped exporting the
+        # gates themselves.
+        family = {m for m in imported if m.startswith("coder_eval.optimize_")}
+        assert len(family) >= 4, (
+            f"optimize-skill's SKILL.md imports from only {sorted(family)} — either the snippets "
+            "are gone or the import line changed shape and this sensor is blind"
         )
         for module, names in sorted(imported.items()):
             loaded = importlib.import_module(module)
@@ -3187,7 +3192,7 @@ class TestPluginArtifacts:
         # The self-test. Without it the binder could be reverted to a no-op with everything green.
         markdown = (
             "```python\n"
-            "from coder_eval.optimize_gate import activation_gate\n\n"
+            "from coder_eval.optimize_activation import activation_gate\n\n"
             "activation_gate(suite_id='s', bogus_kwarg=1)\n"
             "```\n"
         )
@@ -3203,7 +3208,7 @@ class TestPluginArtifacts:
         """
         markdown = (
             "```python\n"
-            "from coder_eval.optimize_gate import a_name_that_moved\n\n"
+            "from coder_eval.optimize_activation import a_name_that_moved\n\n"
             "a_name_that_moved(suite_id='s')\n"
             "```\n"
         )
@@ -3219,7 +3224,7 @@ class TestPluginArtifacts:
         `SearchComparison`, `TASK_JSON_GLOB`, `GATE_RESAMPLES` and `MATERIALITY_FLOOR` are all
         imported-not-called in the shipped skill, which is why the check runs over the import map.
         """
-        markdown = "```python\nfrom coder_eval.optimize_gate import A_CONSTANT_THAT_MOVED\n```\n"
+        markdown = "```python\nfrom coder_eval.optimize_activation import A_CONSTANT_THAT_MOVED\n```\n"
         failures = _snippet_binding_failures(markdown)
         assert len(failures) == 1 and "A_CONSTANT_THAT_MOVED" in failures[0], failures
 
@@ -3249,7 +3254,7 @@ class TestPluginArtifacts:
     def test_the_binder_reports_rather_than_crashes_on_a_wholesale_module_rename(self):
         """The Phase 7 rehearsal, on the REAL file: the sensor must survive being wrong."""
         raw = (PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8")
-        mutated = raw.replace("from coder_eval.optimize_gate import", "from coder_eval.optimize_nowhere import")
+        mutated = raw.replace("from coder_eval.optimize_", "from coder_eval.nowhere_optimize_")
         assert mutated != raw, "the anchor moved — re-derive it from the skill's snippets"
         failures = _snippet_binding_failures(mutated)
         assert len(failures) >= 15, failures
@@ -3267,8 +3272,8 @@ class TestPluginArtifacts:
     @pytest.mark.parametrize(
         "markdown",
         [
-            "```python\nfrom coder_eval.optimize_gate import (\n    load_arm_rows,\n    gone_missing,\n)\n```\n",
-            "```python\nfrom coder_eval.optimize_gate import load_arm_rows, gone_missing\n```\n",
+            "```python\nfrom coder_eval.optimize_load import (\n    load_arm_rows,\n    gone_missing,\n)\n```\n",
+            "```python\nfrom coder_eval.optimize_load import load_arm_rows, gone_missing\n```\n",
         ],
         ids=["parenthesized", "single-line"],
     )
@@ -3282,7 +3287,7 @@ class TestPluginArtifacts:
         # A snippet that rebinds an imported name locally must not be bound against the import.
         markdown = (
             "```python\n"
-            "from coder_eval.optimize_gate import activation_gate\n\n"
+            "from coder_eval.optimize_activation import activation_gate\n\n"
             "activation_gate = lambda **kw: None\n"
             "activation_gate(bogus_kwarg=1)\n"
             "```\n"

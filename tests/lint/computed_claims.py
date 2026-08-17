@@ -394,7 +394,7 @@ def _check_sizing_table(text: str, _tmp: Path) -> list[str]:
     essentially regardless of suite size"), over a range the table does not enumerate. A mirror of
     the table alone could only detect an edit; this can detect that the table is wrong.
     """
-    from coder_eval.optimize_gate import min_discordant_rows
+    from coder_eval.optimize_activation import min_discordant_rows
     from coder_eval.reports_stats import DEFAULT_ALPHA
 
     table = next((t for t in parse_markdown_tables(text) if table_signature(t) == _SIZING_SIGNATURE), None)
@@ -456,7 +456,7 @@ def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
             "directory — the false version of this claim ('the statistic cannot be') shipped once"
         )
 
-    from coder_eval.optimize_gate import activation_gate
+    from coder_eval.optimize_activation import activation_gate
 
     def _gate(run_dirs: list[Path]):
         return activation_gate(
