@@ -490,9 +490,11 @@ def test_get_state_returns_current_state():
 # without a live SDK. These mirror the notification shapes the real stream emits.
 # ---------------------------------------------------------------------------
 
+import json  # noqa: E402
 import os  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
+import stat  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
@@ -1072,6 +1074,33 @@ class TestCodexCollabSubAgent:
         assert nested[0].content_blocks[0].text == "5050"
         assert nested[0].model == "gpt-5.5"
 
+    async def test_subagent_rollout_recovery_reads_isolated_codex_home(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "host-codex"))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        agent._setup_login_shell_home()
+        isolated = agent._codex_home()
+        seen: list[tuple[Path, str]] = []
+
+        async def capture_home(home, thread_id, *, attempts=20):
+            seen.append((home, thread_id))
+            return None
+
+        monkeypatch.setattr(agent, "_await_rollout_file", capture_home)
+        try:
+            await agent._recover_subagent_tool_calls(
+                [("child-thread", "spawn-call", "gpt-5.6")],
+                {},
+                [],
+                [],
+                SimpleNamespace(on_event=lambda _event: None),
+                "task",
+                "turn",
+            )
+            assert seen == [(isolated, "child-thread")]
+            assert isolated != tmp_path / "host-codex"
+        finally:
+            agent._cleanup_login_shell_home()
+
     async def test_wait_only_records_no_subagent(self, monkeypatch, tmp_path):
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         # A wait with no preceding spawn (defensive) must not invent a sub-agent.
@@ -1369,6 +1398,40 @@ class TestCodexGenericToolCapture:
         mcp_tel = next(c for c in record.commands if c.tool_name == "Mcp")
         assert "read_file" in (mcp_tel.result_summary or "")
 
+    @pytest.mark.parametrize(
+        ("action", "expected_parameters"),
+        [
+            (
+                SimpleNamespace(type="openPage", url="https://example.com/docs"),
+                {"url": "https://example.com/docs"},
+            ),
+            (
+                SimpleNamespace(type="findInPage", url="https://example.com/docs", pattern="guardrails"),
+                {"url": "https://example.com/docs", "pattern": "guardrails"},
+            ),
+        ],
+    )
+    async def test_web_page_actions_become_webfetch(self, action, expected_parameters):
+        web = SimpleNamespace(
+            type="webSearch",
+            id="ws_fetch",
+            query="",
+            action=SimpleNamespace(root=action),
+        )
+        notifications = [
+            _item_notification("item/started", web),
+            _item_notification("item/completed", web),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("open the documentation")
+
+        assert len(record.commands) == 1
+        telemetry = record.commands[0]
+        assert telemetry.tool_name == "WebFetch"
+        assert telemetry.parameters == expected_parameters
+
     async def test_failed_mcp_call_records_error(self):
         mcp = SimpleNamespace(
             type="mcpToolCall",
@@ -1570,10 +1633,10 @@ class TestLoginShellMockPathHome:
     ``/etc/zprofile``'s path_helper), which unconditionally RESETS PATH —
     silently dropping the mock-CLI prepend passed via the app-server env, so
     bare commands resolve to the REAL CLIs (real-tenant contamination). The
-    agent therefore generates a per-task HOME whose ``.bash_profile``/
+    agent therefore generates a per-start isolated HOME whose ``.bash_profile``/
     ``.profile`` (bash/sh) and ``.zshenv``/``.zprofile``/``.zshrc`` (zsh) run
     AFTER that chain and restore the prepend; ``_build_codex_env`` points HOME
-    and ZDOTDIR at it and pins CODEX_HOME so codex state stays put."""
+    and ZDOTDIR at it and pins CODEX_HOME to an isolated sibling directory."""
 
     ALL_PROFILE_NAMES = (".bash_profile", ".profile", ".zshenv", ".zprofile", ".zshrc")
     ZSH_PROFILE_NAMES = (".zshenv", ".zprofile", ".zshrc")
@@ -1747,55 +1810,176 @@ class TestLoginShellMockPathHome:
         finally:
             agent._cleanup_login_shell_home()
 
-    def test_no_login_home_without_mock_dirs(self, monkeypatch):
+    def test_runtime_home_exists_without_mock_dirs_and_has_no_empty_path_export(self, monkeypatch, tmp_path):
         self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
         agent = self._agent_with_prepend([])
         agent._setup_login_shell_home()
-        assert agent._login_shell_home is None
+        try:
+            home = agent._login_shell_home
+            assert agent._runtime_root is not None
+            assert home is not None and home.parent == agent._runtime_root
+            assert agent._codex_home().parent == agent._runtime_root
+            for name in self.ALL_PROFILE_NAMES:
+                content = (home / name).read_text(encoding="utf-8")
+                assert "export PATH=" not in content
+        finally:
+            agent._cleanup_login_shell_home()
 
-    def test_no_login_home_on_unsupported_platform(self, monkeypatch):
+    def test_runtime_home_exists_on_unsupported_platform_without_profiles(self, monkeypatch):
         self._force_posix(monkeypatch, supported=False)
         agent = self._agent_with_prepend(["/sandbox/mocks"])
         agent._setup_login_shell_home()
-        assert agent._login_shell_home is None
+        try:
+            home = agent._login_shell_home
+            assert home is not None and home.is_dir()
+            assert not any((home / name).exists() for name in self.ALL_PROFILE_NAMES)
+        finally:
+            agent._cleanup_login_shell_home()
 
     def test_build_codex_env_sets_home_and_pins_codex_home(self, monkeypatch, tmp_path):
         monkeypatch.delenv("CODEX_API_KEY", raising=False)
         monkeypatch.setenv("PATH", "/parent/bin")
+        monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
         agent = self._agent_with_prepend(["/sandbox/mocks"])
-        agent._login_shell_home = tmp_path / "login-home"
+        agent._setup_login_shell_home()
 
-        env = agent._build_codex_env()
-        assert env is not None
-        assert env["HOME"] == str(tmp_path / "login-home")
-        # zsh (macOS default shell) picks its dotfiles via ZDOTDIR, not HOME.
-        assert env["ZDOTDIR"] == str(tmp_path / "login-home")
-        # Codex state (auth, rollout sessions) must NOT move with HOME — the
-        # harness reads the same _codex_home() for sub-agent rollout recovery.
-        assert env["CODEX_HOME"] == str(agent._codex_home())
+        try:
+            env = agent._build_codex_env()
+            assert env is not None
+            root = agent._runtime_root
+            assert root is not None
+            assert Path(env["HOME"]).parent == root
+            assert Path(env["ZDOTDIR"]).parent == root
+            assert Path(env["CODEX_HOME"]).parent == root
+            assert env["CODEX_HOME"] == str(agent._codex_home())
+        finally:
+            agent._cleanup_login_shell_home()
 
-    def test_build_codex_env_creates_missing_codex_home(self, monkeypatch, tmp_path):
-        """The codex binary hard-errors on an explicitly set CODEX_HOME that
-        does not exist (unset, it materializes the ~/.codex default itself).
-        Runners that auth via CODEX_API_KEY never ran ``codex login``, so the
-        dir may not exist — pinning it must create it first."""
+    def test_runtime_codex_home_exposes_only_host_auth(self, monkeypatch, tmp_path):
         monkeypatch.delenv("CODEX_API_KEY", raising=False)
-        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "state" / ".codex"))
-        agent = self._agent_with_prepend(["/sandbox/mocks"])
-        agent._login_shell_home = tmp_path / "login-home"
+        host_codex_home = tmp_path / "host-codex"
+        (host_codex_home / "skills" / "stale").mkdir(parents=True)
+        (host_codex_home / "skills" / "stale" / "SKILL.md").write_text("stale", encoding="utf-8")
+        (host_codex_home / "plugins").mkdir()
+        (host_codex_home / "config.toml").write_text("model = 'wrong'", encoding="utf-8")
+        (host_codex_home / "auth.json").write_text('{"token":"secret"}', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(host_codex_home))
+        agent = self._agent_with_prepend([])
+        agent._setup_login_shell_home()
 
-        env = agent._build_codex_env()
-        assert env is not None
-        assert Path(env["CODEX_HOME"]).is_dir()
+        try:
+            isolated = agent._codex_home()
+            assert isolated.parent == agent._runtime_root
+            auth_copy = isolated / "auth.json"
+            assert auth_copy.read_text(encoding="utf-8") == '{"token":"secret"}'
+            assert not auth_copy.is_symlink()
+            if os.name == "posix":
+                assert stat.S_IMODE(agent._runtime_root.stat().st_mode) == 0o700
+                assert stat.S_IMODE(agent._login_shell_home.stat().st_mode) == 0o700
+                assert stat.S_IMODE(isolated.stat().st_mode) == 0o700
+                assert stat.S_IMODE(auth_copy.stat().st_mode) == 0o600
+            assert not (isolated / "config.toml").exists()
+            assert not (isolated / "plugins").exists()
+            assert not (isolated / "skills").exists()
 
-    def test_build_codex_env_without_login_home_leaves_home_alone(self, monkeypatch):
+            auth_copy.write_text('{"token":"mutated"}', encoding="utf-8")
+            assert (host_codex_home / "auth.json").read_text(encoding="utf-8") == '{"token":"secret"}'
+            auth_copy.unlink()
+            auth_copy.write_text('{"token":"replacement"}', encoding="utf-8")
+            assert (host_codex_home / "auth.json").read_text(encoding="utf-8") == '{"token":"secret"}'
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_api_key_runtime_does_not_expose_host_auth(self, monkeypatch, tmp_path):
         monkeypatch.setenv("CODEX_API_KEY", "k")
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
-        env = agent._build_codex_env()
-        assert env is not None
-        assert "HOME" not in env
-        assert "ZDOTDIR" not in env
-        assert "CODEX_HOME" not in env
+        host_codex_home = tmp_path / "host-codex"
+        host_codex_home.mkdir()
+        (host_codex_home / "auth.json").write_text('{"token":"host"}', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(host_codex_home))
+        agent = self._agent_with_prepend([])
+        agent._setup_login_shell_home()
+
+        try:
+            assert not (agent._codex_home() / "auth.json").exists()
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_host_auth_copy_does_not_attempt_symlink(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        host_codex_home = tmp_path / "host-codex"
+        host_codex_home.mkdir()
+        (host_codex_home / "auth.json").write_text('{"token":"host"}', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(host_codex_home))
+        monkeypatch.setattr(
+            Path,
+            "symlink_to",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("auth must never be symlinked")),
+        )
+        agent = self._agent_with_prepend([])
+        agent._setup_login_shell_home()
+
+        try:
+            exposed = agent._codex_home() / "auth.json"
+            assert exposed.is_file()
+            assert not exposed.is_symlink()
+            assert exposed.read_text(encoding="utf-8") == '{"token":"host"}'
+        finally:
+            agent._cleanup_login_shell_home()
+
+    @pytest.mark.skipif(
+        os.name == "nt" or not hasattr(os, "symlink"),
+        reason="host auth symlink compatibility requires POSIX symlink support",
+    )
+    def test_symlinked_host_auth_is_resolved_but_isolated_auth_is_still_a_copy(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        credential_store = tmp_path / "credential-store"
+        credential_store.mkdir()
+        source = credential_store / "codex-auth.json"
+        source.write_text('{"token":"host"}', encoding="utf-8")
+        host_codex_home = tmp_path / "host-codex"
+        host_codex_home.mkdir()
+        (host_codex_home / "auth.json").symlink_to(source)
+        monkeypatch.setenv("CODEX_HOME", str(host_codex_home))
+        agent = self._agent_with_prepend([])
+        agent._setup_login_shell_home()
+
+        try:
+            auth_copy = agent._codex_home() / "auth.json"
+            assert auth_copy.read_text(encoding="utf-8") == '{"token":"host"}'
+            assert not auth_copy.is_symlink()
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_same_name_user_skill_is_absent_but_task_local_skill_remains(self, monkeypatch, tmp_path):
+        """The app-server HOME must not expose a stale user skill, while the
+        task-local .agents/skills link remains Codex-discoverable from cwd."""
+        self._force_posix(monkeypatch)
+        host_home = tmp_path / "host-home"
+        stale = host_home / ".agents" / "skills" / "guardrails"
+        stale.mkdir(parents=True)
+        (stale / "SKILL.md").write_text("stale user skill", encoding="utf-8")
+        plugin = tmp_path / "plugin"
+        current = plugin / "guardrails"
+        current.mkdir(parents=True)
+        (current / "SKILL.md").write_text("task-local skill", encoding="utf-8")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("HOME", str(host_home))
+
+        agent = self._agent_with_prepend([])
+        agent.working_directory = workspace
+        agent._setup_login_shell_home()
+        agent._setup_skills(str(plugin))
+        try:
+            env = agent._build_codex_env()
+            assert env is not None
+            isolated_user_skill = Path(env["HOME"]) / ".agents" / "skills" / "guardrails" / "SKILL.md"
+            task_skill = workspace / ".agents" / "skills" / "guardrails" / "SKILL.md"
+            assert not isolated_user_skill.exists()
+            assert task_skill.read_text(encoding="utf-8") == "task-local skill"
+        finally:
+            agent._cleanup_login_shell_home()
 
     def test_setup_is_rerunnable_and_cleanup_removes_dir(self, monkeypatch, tmp_path):
         self._force_posix(monkeypatch)
@@ -1803,15 +1987,16 @@ class TestLoginShellMockPathHome:
         agent = self._agent_with_prepend(["/sandbox/mocks"])
 
         agent._setup_login_shell_home()
-        first = agent._login_shell_home
+        first = agent._runtime_root
         assert first is not None
         agent._setup_login_shell_home()  # retried start() must not leak the old dir
-        second = agent._login_shell_home
+        second = agent._runtime_root
         assert second is not None
         assert not first.exists()
 
         agent._cleanup_login_shell_home()
         assert agent._login_shell_home is None
+        assert agent._runtime_root is None
         assert not second.exists()
 
     def test_failed_profile_write_rolls_back_temp_home(self, monkeypatch, tmp_path):
@@ -1840,7 +2025,28 @@ class TestLoginShellMockPathHome:
             agent._setup_login_shell_home()
 
         assert agent._login_shell_home is None
+        assert agent._runtime_root is None
         assert created and not Path(created[0]).exists()
+
+    def test_failed_runtime_permission_hardening_rolls_back_temp_root(self, monkeypatch):
+        agent = self._agent_with_prepend([])
+        created: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracking_mkdtemp(*args, **kwargs):
+            path = Path(real_mkdtemp(*args, **kwargs))
+            created.append(path)
+            return str(path)
+
+        monkeypatch.setattr("coder_eval.agents.codex_agent.tempfile.mkdtemp", tracking_mkdtemp)
+        monkeypatch.setattr(Path, "chmod", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("chmod failed")))
+
+        with pytest.raises(OSError, match="chmod failed"):
+            agent._setup_login_shell_home()
+
+        assert agent._runtime_root is None
+        assert agent._login_shell_home is None
+        assert created and not created[0].exists()
 
     def test_kill_sync_cleans_login_home(self, monkeypatch, tmp_path):
         """The watchdog's terminal kill path must not leak the temp HOME."""
@@ -1850,13 +2056,14 @@ class TestLoginShellMockPathHome:
         agent.codex_client = SimpleNamespace(close=lambda: None)
 
         agent._setup_login_shell_home()
-        home = agent._login_shell_home
-        assert home is not None
+        root = agent._runtime_root
+        assert root is not None
 
         agent.kill_sync()
 
         assert agent._login_shell_home is None
-        assert not home.exists()
+        assert agent._runtime_root is None
+        assert not root.exists()
 
     async def test_start_creates_and_stop_cleans_login_home(self, monkeypatch, tmp_path):
         """start() must compose the pieces: generated HOME + pinned CODEX_HOME
@@ -1879,18 +2086,114 @@ class TestLoginShellMockPathHome:
         await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks"])
 
         home = agent._login_shell_home
+        root = agent._runtime_root
         assert home is not None and (home / ".bash_profile").is_file()
+        assert root is not None
         config = captured.get("config")
         assert config is not None and config.env is not None
         assert config.env["HOME"] == str(home)
         assert config.env["ZDOTDIR"] == str(home)
         assert config.env["CODEX_HOME"] == str(agent._codex_home())
+        assert Path(config.env["CODEX_HOME"]).parent == root
         path_key = next(k for k in config.env if k.upper() == "PATH")
         assert config.env[path_key].startswith("/sandbox/mocks")
 
         await agent.stop()
         assert agent._login_shell_home is None
-        assert not home.exists()
+        assert agent._runtime_root is None
+        assert not root.exists()
+
+    async def test_windows_app_server_isolates_home_but_tool_policy_restores_host_homes(self, monkeypatch, tmp_path):
+        import openai_codex
+
+        self._force_posix(monkeypatch, supported=False)
+        monkeypatch.setattr(CodexAgent, "_is_windows", staticmethod(lambda: True))
+        original_home = 'C:\\Users\\Eval "Runner"'
+        original_profile = "D:\\Profiles\\Eval\\line\nbreak"
+        monkeypatch.setenv("HOME", original_home)
+        monkeypatch.setenv("USERPROFILE", original_profile)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-host-codex"))
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        captured: dict = {}
+
+        def fake_codex(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(close=lambda: None)
+
+        monkeypatch.setattr(openai_codex, "Codex", fake_codex)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        await agent.start(str(tmp_path))
+
+        try:
+            config = captured["config"]
+            root = agent._runtime_root
+            assert root is not None and config.env is not None
+            assert Path(config.env["HOME"]).parent == root
+            assert Path(config.env["USERPROFILE"]).parent == root
+            assert original_home not in config.env.values()
+            assert original_profile not in config.env.values()
+            assert config.config_overrides == (
+                "shell_environment_policy.set="
+                + "{ HOME = "
+                + json.dumps(original_home)
+                + ", USERPROFILE = "
+                + json.dumps(original_profile)
+                + " }",
+            )
+        finally:
+            await agent.stop()
+
+    async def test_retried_start_closes_old_client_before_removing_its_runtime(self, monkeypatch, tmp_path):
+        import openai_codex
+
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-host-codex"))
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        close_observations: list[bool] = []
+        first_root: list[Path] = []
+        call_count = 0
+
+        def fake_codex(**_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_root.append(agent._runtime_root)
+                return SimpleNamespace(close=lambda: close_observations.append(first_root[0].exists()))
+            return SimpleNamespace(close=lambda: None)
+
+        monkeypatch.setattr(openai_codex, "Codex", fake_codex)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        await agent.start(str(tmp_path))
+        await agent.start(str(tmp_path))
+
+        try:
+            assert close_observations == [True]
+            assert not first_root[0].exists()
+        finally:
+            await agent.stop()
+
+    async def test_failed_start_cleans_runtime_root(self, monkeypatch, tmp_path):
+        import openai_codex
+
+        self._force_posix(monkeypatch)
+        created: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracking_mkdtemp(*args, **kwargs):
+            path = Path(real_mkdtemp(*args, **kwargs))
+            created.append(path)
+            return str(path)
+
+        monkeypatch.setattr("coder_eval.agents.codex_agent.tempfile.mkdtemp", tracking_mkdtemp)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+
+        with pytest.raises(RuntimeError, match="Failed to initialize Codex client: boom"):
+            await agent.start(str(tmp_path))
+
+        assert created and not created[0].exists()
+        assert agent._runtime_root is None
+        assert agent._login_shell_home is None
 
     @pytest.mark.skipif(
         os.name != "posix" or not shutil.which("bash"),

@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import shutil
+import stat
 import tempfile
 import time
 from collections.abc import Callable
@@ -66,6 +67,8 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
     "Read": "shell",
     "Grep": "shell",
     "Glob": "shell",
+    "WebFetch": "web_search",
+    "WebSearch": "web_search",
 }
 
 # Approval mode — the SAME for every permission mode (no per-mode mapping).
@@ -170,6 +173,7 @@ _ROLLOUT_TOOL_OUTPUT_TYPES = frozenset({"function_call_output", "custom_tool_cal
 # ("StopIteration interacts badly with generators…") that escapes ``except
 # StopIteration`` — masking the real turn-failure reason on the stream-end path.
 _STREAM_DONE = object()
+_WEB_FETCH_ACTION_TYPES = frozenset({"openpage", "findinpage", "open_page", "find_in_page"})
 
 
 def _ms_to_dt(ms: int | None) -> datetime:
@@ -183,6 +187,34 @@ def _status_value(status: Any) -> str:
     """Normalize a Codex status (enum or str) to its lowercase string value."""
     value = getattr(status, "value", status)
     return str(value).lower() if value is not None else ""
+
+
+def _web_search_action(root: Any) -> Any:
+    """Return a web-search item's concrete action, unwrapping the SDK RootModel."""
+    action = getattr(root, "action", None)
+    return getattr(action, "root", action)
+
+
+def _web_search_tool_name(root: Any) -> str:
+    """Classify page navigation as WebFetch while retaining searches as WebSearch."""
+    action_type = _status_value(getattr(_web_search_action(root), "type", None))
+    return "WebFetch" if action_type in _WEB_FETCH_ACTION_TYPES else "WebSearch"
+
+
+def _web_search_parameters(root: Any) -> dict[str, Any]:
+    """Extract useful search/page-action inputs from a Codex webSearch item."""
+    action = _web_search_action(root)
+    parameters: dict[str, Any] = {}
+    if action is not None:
+        for key in ("url", "pattern", "query", "queries"):
+            value = getattr(action, key, None)
+            if value not in (None, "", []):
+                parameters[key] = value
+    if "query" not in parameters and "queries" not in parameters:
+        query = getattr(root, "query", None)
+        if query not in (None, ""):
+            parameters["query"] = query
+    return parameters
 
 
 def _fresh_input_tokens(raw_input: int, cached: int) -> int:
@@ -238,7 +270,7 @@ def _message_uncached_input(m: AssistantMessage) -> int:
 # supported"), so this is a fixed constant, not an operator knob.
 _CODEX_WIRE_API = "responses"
 
-# Login-shell profile files generated into the per-task HOME (see
+# Login-shell profile files generated into the per-start isolated HOME (see
 # _setup_login_shell_home). ``.bash_profile`` is what ``bash -l`` reads;
 # ``.profile`` covers ``sh``/``dash`` login shells. The zsh trio covers macOS,
 # where zsh is the default shell: ``.zshenv`` runs in EVERY zsh, ``.zprofile``
@@ -499,7 +531,7 @@ class _CodexTurnState:
             tool_id = item_id or f"{root_type}_{self.next_sequence}"
             self.seq_by_id[tool_id] = self.next_sequence
             start_tel = CommandTelemetry(
-                tool_name=self._agent._tool_name(root_type),
+                tool_name=self._agent._tool_name(root_type, root),
                 tool_id=tool_id,
                 timestamp=datetime.now(),
                 parameters=self._agent._tool_parameters(root, root_type),
@@ -525,9 +557,16 @@ class _CodexTurnState:
             tool_id = getattr(root, "id", None) or f"{root_type}_{self.next_sequence}"
             seq = self.seq_by_id.get(tool_id, self.next_sequence)
             # This tool is now resolved — drop it from the orphan set.
-            self.open_tools.pop(tool_id, None)
+            provisional = self.open_tools.pop(tool_id, None)
 
             telemetry, is_error = self._agent._telemetry_for_item(root, root_type, tool_id, seq)
+            # Some Codex items (notably webSearch) acquire their concrete action
+            # only at item/completed. Upgrade the ToolStart telemetry object in
+            # place so callbacks retaining that reference see the final canonical
+            # name/parameters too.
+            if provisional is not None and telemetry is not None:
+                provisional.tool_name = telemetry.tool_name
+                provisional.parameters.update(telemetry.parameters)
             if telemetry:
                 self.commands.append(telemetry)
             self.emit.on_event(
@@ -536,7 +575,7 @@ class _CodexTurnState:
                     turn_id=self.turn_id,
                     tool=telemetry
                     or CommandTelemetry(
-                        tool_name=self._agent._tool_name(root_type),
+                        tool_name=self._agent._tool_name(root_type, root),
                         tool_id=tool_id,
                         timestamp=datetime.now(),
                         sequence_number=seq,
@@ -728,7 +767,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._thread_usage_baseline = _ThreadTotals()
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
+        self._runtime_root: Path | None = None
         self._login_shell_home: Path | None = None
+        self._isolated_codex_home: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -757,6 +798,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
+        # start() is retried by the orchestrator. Reap the previous SDK process
+        # before replacing its runtime root so it cannot keep using a deleted
+        # HOME/CODEX_HOME.
+        self._close_client()
+        self.thread = None
         self._setup_login_shell_home()
         self._state = AgentState.WORKING
 
@@ -765,13 +811,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
             # Build CodexConfig with environment variables for custom API configuration
             env_override = self._build_codex_env()
-            config = CodexConfig(env=env_override) if env_override else None
+            config = CodexConfig(
+                env=env_override,
+                config_overrides=self._build_codex_config_overrides(),
+            )
 
-            # Initialize the Codex client (context manager compatible). Close any
-            # prior client first: start() is driven through execute_with_retry, so
-            # a retried start would otherwise orphan the previous app-server
-            # subprocess + reader threads (reaped only at final cleanup).
-            self._close_client()
+            # Initialize the Codex client (context manager compatible).
             self.codex_client = Codex(config=config)
             self._log.debug("Codex client initialized")
 
@@ -794,8 +839,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log_config_enforcement()
 
         except ImportError as e:
+            self._close_client()
+            self._cleanup_login_shell_home()
             raise RuntimeError("Codex SDK not installed. Install with: pip install 'coder-eval[codex]'") from e
         except Exception as e:
+            self._close_client()
+            self._cleanup_login_shell_home()
             raise RuntimeError(f"Failed to initialize Codex client: {e}") from e
 
     async def communicate(
@@ -1192,22 +1241,46 @@ class CodexAgent(Agent[CodexAgentConfig]):
             env[path_key] = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key, "")])
             self._log.debug(f"PATH prepend: {os.pathsep.join(self._env_path_prepend)}")
         if self._login_shell_home is not None:
-            # Point login shells at the generated profile dir (see
-            # _setup_login_shell_home) while pinning codex state (auth, rollout
-            # sessions) to its real location — _codex_home() reads the same
-            # resolution for sub-agent rollout recovery, so both sides agree.
+            # Point the app-server and login shells at the per-start runtime
+            # (see _setup_login_shell_home). CODEX_HOME contains only isolated
+            # run state plus an optional auth.json bridge; host config, plugins,
+            # skills, and sessions are deliberately absent. _codex_home() reads
+            # this same directory for sub-agent rollout recovery.
             # HOME steers bash/sh; ZDOTDIR steers zsh (the macOS default
             # shell), which ignores HOME for dotfile selection when it is set.
             env["HOME"] = str(self._login_shell_home)
             env["ZDOTDIR"] = str(self._login_shell_home)
-            # The binary hard-errors on an explicitly set CODEX_HOME that does
-            # not exist (unset, it materializes the ~/.codex default itself) —
-            # hosts that auth via CODEX_API_KEY never ran `codex login`, so
-            # the dir may not exist yet. Create it before pinning.
+            if self._is_windows():
+                # Codex also uses USERPROFILE for global discovery on Windows.
+                # Tool subprocesses get the host values back through
+                # shell_environment_policy (see _build_codex_config_overrides).
+                env["USERPROFILE"] = str(self._login_shell_home)
             codex_home = self._codex_home()
             codex_home.mkdir(parents=True, exist_ok=True)
             env["CODEX_HOME"] = str(codex_home)
         return env if env else None
+
+    @staticmethod
+    def _is_windows() -> bool:
+        return os.name == "nt"
+
+    def _build_codex_config_overrides(self) -> tuple[str, ...]:
+        """Restore host home variables only inside Windows tool subprocesses.
+
+        The app-server keeps isolated HOME/USERPROFILE so Codex cannot discover
+        user-global skills or config. Windows shells do not have POSIX startup
+        profiles where we can restore the original homes, so Codex's supported
+        shell environment policy supplies them only to spawned tools. Values
+        are JSON-quoted, which is valid TOML basic-string syntax and safely
+        handles Windows separators, quotes, and control characters.
+        """
+        if not self._is_windows():
+            return ()
+        restore = {key: os.environ[key] for key in ("HOME", "USERPROFILE") if os.environ.get(key)}
+        if not restore:
+            return ()
+        entries = ", ".join(f"{key} = {json.dumps(value)}" for key, value in restore.items())
+        return (f"shell_environment_policy.set={{ {entries} }}",)
 
     @staticmethod
     def _login_shell_profiles_supported() -> bool:
@@ -1215,7 +1288,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return os.name == "posix"
 
     def _setup_login_shell_home(self) -> None:
-        """Create a per-task HOME whose profiles restore the mock PATH prepend.
+        """Create a per-start runtime with isolated HOME and CODEX_HOME.
 
         Codex issues every shell command through the user's default shell as a
         login shell: ``bash -lc`` on Linux, ``zsh -lc`` on macOS (its default
@@ -1225,17 +1298,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
         which unconditionally RESETS PATH, silently dropping the mock-CLI
         prepend passed via the app-server environment, so bare commands
         resolve to the REAL CLIs (real-tenant contamination). The per-user
-        dotfiles are sourced AFTER that chain, so a generated per-task HOME
-        (wired up in ``_build_codex_env``; codex state stays in CODEX_HOME)
-        gets the last word and re-prepends the mock dirs:
+        dotfiles are sourced AFTER that chain, so generated profiles in the
+        isolated HOME (wired up in ``_build_codex_env``) get the last word and
+        optionally re-prepend the mock dirs:
         ``.bash_profile``/``.profile`` for bash/sh (selected via env HOME) and
         ``.zshenv``/``.zprofile``/``.zshrc`` for zsh (selected via env
         ZDOTDIR; ``.zshrc`` also feeds codex's shell snapshot, which sources
-        it explicitly). Per-task rather than the user's real dotfiles so
-        parallel tasks with different mocks cannot collide. No-op without mock
-        dirs or on non-POSIX hosts: Windows codex shells through PowerShell
-        (``-NoProfile``) or ``cmd /c``, neither of which re-sources a profile
-        chain that resets PATH, so the plain env prepend survives there as-is.
+        it explicitly). The runtime is created even without mock dirs and on
+        non-POSIX hosts because HOME/CODEX_HOME isolation is also the skill
+        provenance boundary: user config, plugins, skills, and historical
+        sessions must not enter an eval. Only a validated host ``auth.json`` is
+        exposed when CODEX_API_KEY is absent.
 
         Bash uses the env HOME only to PICK the profile file; the generated
         profile's first act is to export the ORIGINAL home back, so the
@@ -1246,36 +1319,87 @@ class CodexAgent(Agent[CodexAgentConfig]):
         keeps it - ZDOTDIR stays exported).
         """
         self._cleanup_login_shell_home()
-        if not (self._env_path_prepend and self._login_shell_profiles_supported()):
-            return
         original_home = os.environ.get("HOME", "")
         # Where the user's REAL zsh dotfiles live: their own ZDOTDIR when set,
         # else their home (zsh's fallback).
         original_zdotdir = os.environ.get("ZDOTDIR", "") or original_home
         # The profile only ever executes under a POSIX shell, so the PATH
         # separator is ':' regardless of the host building it.
-        quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
-        export_line = f'export PATH={quoted_prepend}:"$PATH"'
-        # Track the dir BEFORE writing so a failed write can't orphan it —
-        # the except below (and any later cleanup) always sees it.
-        home = Path(tempfile.mkdtemp(prefix="coder-eval-codex-home-"))
+        export_line = ""
+        if self._env_path_prepend:
+            quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
+            export_line = f'export PATH={quoted_prepend}:"$PATH"'
+        # Track the root BEFORE creating children so any failure is cleaned.
+        runtime_root = Path(tempfile.mkdtemp(prefix="coder-eval-codex-runtime-"))
+        self._runtime_root = runtime_root
+        home = runtime_root / "home"
+        codex_home = runtime_root / "codex"
         self._login_shell_home = home
+        self._isolated_codex_home = codex_home
         try:
-            for name in _LOGIN_PROFILE_NAMES:
-                content = self._login_profile_content(
-                    name,
-                    original_home,
-                    export_line,
-                    original_zdotdir=original_zdotdir,
-                    generated_home=str(home),
-                )
-                # newline="\n": the profile must stay LF-only no matter which host
-                # builds it, or bash sees literal \r at end of line.
-                (home / name).write_text(content, encoding="utf-8", newline="\n")
+            # POSIX gets explicit owner-only modes. Windows chmod does not model
+            # ACLs; there the fresh mkdtemp tree inherits the current user's
+            # temp-directory ACL, and no path is reused or shared.
+            runtime_root.chmod(0o700)
+            home.mkdir(mode=0o700)
+            codex_home.mkdir(mode=0o700)
+            self._copy_host_auth(codex_home)
+            if self._login_shell_profiles_supported():
+                for name in _LOGIN_PROFILE_NAMES:
+                    content = self._login_profile_content(
+                        name,
+                        original_home,
+                        export_line,
+                        original_zdotdir=original_zdotdir,
+                        generated_home=str(home),
+                    )
+                    # newline="\n": the profile must stay LF-only no matter which host
+                    # builds it, or bash sees literal \r at end of line.
+                    (home / name).write_text(content, encoding="utf-8", newline="\n")
         except Exception:
             self._cleanup_login_shell_home()
             raise
-        self._log.debug(f"Login-shell mock-PATH home: {home}")
+        self._log.debug("Codex isolated runtime: %s", runtime_root)
+
+    def _copy_host_auth(self, isolated_codex_home: Path) -> None:
+        """Copy only the host auth file into the isolated CODEX_HOME.
+
+        A copy, never a symlink or hard link, ensures SDK token refreshes and
+        atomic replacements cannot mutate host credentials. On platforms with
+        ``O_NOFOLLOW``, opening the source rejects a symlink swap; ``fstat``
+        verifies the opened object itself is a regular file on every platform.
+        The exclusive target uses 0600 from creation on POSIX, avoiding a
+        permissions window before the final defensive chmod. On Windows it
+        remains protected by the fresh runtime tree's inherited user ACL.
+        """
+        if os.getenv("CODEX_API_KEY"):
+            return
+        source = self._host_codex_home() / "auth.json"
+        try:
+            source = source.resolve(strict=True)
+        except OSError:
+            return
+        source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            source_fd = os.open(source, source_flags)
+        except OSError:
+            return
+        try:
+            if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+                return
+            target = isolated_codex_home / "auth.json"
+
+            def private_opener(path: str, flags: int) -> int:
+                return os.open(path, flags, 0o600)
+
+            with os.fdopen(source_fd, "rb") as source_file:
+                source_fd = -1
+                with open(target, "xb", opener=private_opener) as target_file:
+                    shutil.copyfileobj(source_file, target_file)
+            target.chmod(0o600)
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
 
     @staticmethod
     def _login_profile_content(
@@ -1340,15 +1464,20 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     f"if [ -r {orig}/.profile ]; then . {orig}/.profile",
                     "fi",
                 ]
-        lines.append(export_line)
+        if export_line:
+            lines.append(export_line)
         return "\n".join(lines) + "\n"
 
     def _cleanup_login_shell_home(self) -> None:
-        """Remove the generated per-task HOME (best-effort, idempotent)."""
-        home, self._login_shell_home = self._login_shell_home, None
-        if home is None:
-            return
-        shutil.rmtree(home, ignore_errors=True)
+        """Remove the per-start runtime (best-effort, idempotent)."""
+        runtime_root, self._runtime_root = self._runtime_root, None
+        login_home, self._login_shell_home = self._login_shell_home, None
+        self._isolated_codex_home = None
+        if runtime_root is not None:
+            shutil.rmtree(runtime_root, ignore_errors=True)
+        elif login_home is not None:
+            # Compatibility for callers/tests that injected a standalone home.
+            shutil.rmtree(login_home, ignore_errors=True)
 
     def _build_thread_options(self) -> dict[str, Any]:
         """Build thread_start options from agent config.
@@ -1661,8 +1790,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return rebuilt
 
     @staticmethod
-    def _tool_name(root_type: str | None) -> str:
+    def _tool_name(root_type: str | None, root: Any = None) -> str:
         """Friendly tool label for a Codex item type (falls back to the raw type)."""
+        if root_type == "webSearch":
+            return _web_search_tool_name(root)
         return _TOOL_ITEM_NAMES.get(root_type or "", root_type or "Tool")
 
     def _tool_parameters(self, root: Any, root_type: str | None) -> dict[str, Any]:
@@ -1693,7 +1824,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 params["arguments"] = args
             return params
         if root_type == "webSearch":
-            return {"query": getattr(root, "query", "")}
+            return _web_search_parameters(root)
         if root_type == "imageView":
             return {"path": str(getattr(root, "path", ""))}
         if root_type == "imageGeneration":
@@ -1735,7 +1866,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             duration_ms = getattr(root, "duration_ms", None)
             return (
                 CommandTelemetry(
-                    tool_name=self._tool_name(root_type),
+                    tool_name=self._tool_name(root_type, root),
                     tool_id=tool_id,
                     timestamp=datetime.now(),
                     duration_ms=float(duration_ms) if duration_ms is not None else None,
@@ -1760,7 +1891,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
             messages = [s.message for s in states.values() if getattr(s, "message", None)]
             return f"collab {op}: {'; '.join(messages)[:200]}" if messages else f"collab {op}"
         if root_type == "webSearch":
-            return f"query: {getattr(root, 'query', '')}"
+            parameters = _web_search_parameters(root)
+            return "; ".join(f"{key}: {value}" for key, value in parameters.items())
         if root_type in ("mcpToolCall", "dynamicToolCall"):
             return f"{getattr(root, 'server', '') or getattr(root, 'namespace', '')}:{getattr(root, 'tool', '')}".strip(
                 ":"
@@ -1888,9 +2020,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 self._log.debug("CodexAgent: sub-agent recovery failed for %s: %s", thread_id, exc)
 
     @staticmethod
-    def _codex_home() -> Path:
-        """Codex data directory (rollouts live under ``<home>/sessions``)."""
+    def _host_codex_home() -> Path:
+        """Host Codex data directory, consulted only for ``auth.json``."""
         return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+    def _codex_home(self) -> Path:
+        """This agent's Codex data directory (rollouts under ``sessions``)."""
+        return self._isolated_codex_home or self._host_codex_home()
 
     async def _await_rollout_file(self, home: Path, thread_id: str, *, attempts: int = 20) -> Path | None:
         """Locate a thread's rollout file, polling briefly for the async flush.

@@ -47,8 +47,14 @@ class TestToolNameMapping:
     def test_glob_maps_to_shell(self):
         assert _CLAUDE_TO_CODEX_TOOL_MAP["Glob"] == "shell"
 
+    def test_webfetch_maps_to_web_search(self):
+        assert _CLAUDE_TO_CODEX_TOOL_MAP["WebFetch"] == "web_search"
+
+    def test_websearch_maps_to_web_search(self):
+        assert _CLAUDE_TO_CODEX_TOOL_MAP["WebSearch"] == "web_search"
+
     def test_all_tools_mapped(self):
-        expected_tools = {"Bash", "Write", "Edit", "Read", "Grep", "Glob"}
+        expected_tools = {"Bash", "Write", "Edit", "Read", "Grep", "Glob", "WebFetch", "WebSearch"}
         assert expected_tools.issubset(set(_CLAUDE_TO_CODEX_TOOL_MAP.keys()))
 
 
@@ -104,3 +110,56 @@ class TestCodexTurnState:
         # A tool_use block was recorded into the open buffer (cut at the next
         # tokenUsage flush, not here), joinable to the command by tool_id.
         assert any(b.block_type == "tool_use" and b.tool_use_id == "c1" for b in state.open_blocks)
+
+    def test_web_open_page_start_is_webfetch_with_url(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
+        state, _commands, _messages = self._state(agent)
+        action = SimpleNamespace(root=SimpleNamespace(type="openPage", url="https://example.com/docs"))
+        web_root = SimpleNamespace(type="webSearch", id="ws-open", query="", action=action)
+
+        state.on_item_started(_item_notification("item/started", web_root))
+
+        telemetry = state.open_tools["ws-open"]
+        assert telemetry.tool_name == "WebFetch"
+        assert telemetry.parameters == {"url": "https://example.com/docs"}
+
+    def test_web_open_page_completion_upgrades_provisional_websearch(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
+        state, commands, _messages = self._state(agent)
+        started = SimpleNamespace(type="webSearch", id="ws-late-action", query="", action=None)
+        completed = SimpleNamespace(
+            type="webSearch",
+            id="ws-late-action",
+            query="",
+            action=SimpleNamespace(
+                root=SimpleNamespace(type="openPage", url="https://example.com/late"),
+            ),
+        )
+
+        state.on_item_started(_item_notification("item/started", started))
+        provisional = state.open_tools["ws-late-action"]
+        assert provisional.tool_name == "WebSearch"
+
+        state.on_item_completed(_item_notification("item/completed", completed))
+
+        assert provisional.tool_name == "WebFetch"
+        assert provisional.parameters == {"url": "https://example.com/late"}
+        assert commands[0].tool_name == "WebFetch"
+        assert commands[0].parameters == {"url": "https://example.com/late"}
+
+    def test_explicit_search_action_remains_websearch_and_preserves_queries(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
+        state, _commands, _messages = self._state(agent)
+        action = SimpleNamespace(
+            root=SimpleNamespace(type="search", query="guardrails", queries=["guardrails", "uipath guardrails"])
+        )
+        web_root = SimpleNamespace(type="webSearch", id="ws-search", query="guardrails", action=action)
+
+        state.on_item_started(_item_notification("item/started", web_root))
+
+        telemetry = state.open_tools["ws-search"]
+        assert telemetry.tool_name == "WebSearch"
+        assert telemetry.parameters == {
+            "query": "guardrails",
+            "queries": ["guardrails", "uipath guardrails"],
+        }
