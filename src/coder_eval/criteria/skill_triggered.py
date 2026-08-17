@@ -99,19 +99,27 @@ def _delivered(cmd: CommandTelemetry) -> bool:
     because a new ``result_status`` value must not fall into the engagement bucket by
     default. The three currently-reachable exclusions share one meaning:
 
-      - "error"   — for ``Skill``, typically a refusal under ``disable-model-invocation:
-                    true`` ("cannot be used with Skill tool due to disable-model-invocation");
-                    for a file read, an ENOENT or a ``Grep`` that matched nothing. Either
-                    way the agent proceeds on prior knowledge and still produces plausible
-                    output, so nothing downstream looks wrong. Observed on 24 of 24 rows of
-                    a real outcome suite, where it made an entire A/B round measure the
-                    model's background knowledge instead of the skill.
+      - "error"   — the tool itself reported failure. On Claude this is exactly the SDK's
+                    ``ToolResultBlock.is_error`` (``claude_code_agent``), nothing more
+                    inferred. For ``Skill`` it is typically a refusal under
+                    ``disable-model-invocation: true`` ("cannot be used with Skill tool due
+                    to disable-model-invocation"); for a file read, an ENOENT. The agent then
+                    proceeds on prior knowledge and still produces plausible output, so
+                    nothing downstream looks wrong. Observed on 24 of 24 rows of a real
+                    outcome suite, where it made an entire A/B round measure the model's
+                    background knowledge instead of the skill.
+                    NOTE a ``Grep``/``Glob`` that matched NOTHING is not an SDK error — it
+                    records ``"success"`` and therefore counts. That is the status of a
+                    search that ran, not of a body that loaded, and closing it would mean
+                    reading the result rather than the status. Out of scope here and stated
+                    so the allowlist is not read as covering more than it does.
       - None      — still in flight: the early-stop watcher evaluates on ``ToolStartEvent``,
                     before any result exists. Counting it would live-pass on the ToolStart
                     of a ``Read`` that then ENOENTs.
-      - "unknown" — force-closed by a turn crash before any result arrived
-                    (``claude_code_agent._finalize_commands``; ``antigravity_agent``'s orphan
-                    close). No result ever reached the agent.
+      - "unknown" — force-closed before any result arrived, by a turn crash
+                    (``claude_code_agent._finalize_commands``), an orphan close
+                    (``antigravity_agent``, ``codex_agent.close_open_tools``) or a Codex
+                    command with no exit code. No result ever reached the agent.
 
     Every other tool — ``Bash`` included — is ungated, because a non-zero exit does not
     imply the file was not read: ``cat SKILL.md | grep foo`` exits 1 AFTER genuinely reading
@@ -197,14 +205,19 @@ def _suppressed_engagements(turn_records: list[TurnRecord], skill_name: str) -> 
 def _render_suppressed(suppressed: Counter[str]) -> str:
     """The ``details`` suffix for a non-engagement, or ``""`` when nothing was suppressed.
 
-    Bounded on purpose: a run with fifty refused calls must not produce a fifty-entry string,
-    since ``details`` is persisted per row in ``task.json`` and rendered in reports. Aggregated
-    by ``(tool, status)`` with counts, top ``_SUPPRESSED_RENDER_LIMIT`` pairs, remainder elided.
+    Bounded by TWO different mechanisms, worth keeping apart because only one of them is this
+    constant: the ``Counter`` bounds the COUNT (fifty refused calls aggregate to one entry), and
+    ``_SUPPRESSED_RENDER_LIMIT`` bounds the CARDINALITY. The cardinality has a structural ceiling
+    of twelve anyway — ``_delivered`` returns ``True`` for every tool outside
+    ``{Skill} | _FILE_READ_TOOLS``, so only four tools x three non-success statuses can ever
+    appear — so the limit is what keeps a worst-case note at ~155 characters rather than ~299.
+    ``details`` is persisted per row in ``task.json`` and rendered in reports.
 
     Neutrally worded, and that is not cosmetic: on a DISTRACTOR criterion a suppressed
-    engagement means the row correctly scored ``no`` and PASSED, so "suppressed" must read as an
-    observation rather than a fault. Uses ``x`` and parentheses rather than ``[...]`` — this
-    string reaches renderers that interpret square brackets as markup.
+    engagement means the row correctly scored ``no`` and PASSED, so it must read as an
+    observation rather than a fault. Uses ``x`` and parentheses rather than ``[...]``: every
+    renderer of ``details`` in the tree today escapes or is plain text, so this is a
+    defence-in-depth choice rather than a live bug being avoided.
     """
     if not suppressed:
         return ""
@@ -231,8 +244,8 @@ def _all_engaged_skill_names(turn_records: list[TurnRecord]) -> set[str]:
       that also fires an off-target skill (and a negative row that fires any
       target skill) is penalized on that skill's confusion cell.
 
-    Order is irrelevant to a set union; the scan is left in ``sequence_number``
-    order purely for determinism.
+    Order is irrelevant to a set union; commands are scanned in their recorded
+    list order, which nothing here sorts or depends on.
     """
     names: set[str] = set()
     for turn in turn_records:

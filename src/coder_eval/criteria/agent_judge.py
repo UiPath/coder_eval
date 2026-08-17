@@ -271,8 +271,9 @@ def _build_agent_config(
     *,
     system_prompt: str,
 ) -> ClaudeCodeAgentConfig:
-    # When YAML supplies a partial `agent:` block (e.g. only ``model:``),
-    # Pydantic constructs a fresh AgentConfig from those keys and the judge
+    # When YAML supplies a partial `agent:` block (e.g. only ``type:`` and ``model:`` — the
+    # discriminator is required, so a block without it never loads at all),
+    # Pydantic constructs a fresh config from those keys and the judge
     # defaults from _default_judge_agent_config never apply. Overlay the
     # user-set fields on top of a fresh judge default so missing keys keep
     # the hardened defaults (read-only toolkit, bypassPermissions, etc.).
@@ -286,15 +287,18 @@ def _build_agent_config(
     user_overrides = criterion.agent.model_dump(exclude_unset=True)
     if "sdk_options" in user_overrides:
         user_overrides["sdk_options"] = {**defaults.sdk_options, **user_overrides["sdk_options"]}
-    # `model_validate` rather than `model_copy(update=)`: the latter skips validation by design
-    # and so never checks the update's KEYS. This was the tree's last CE048 suppression, and
-    # retiring it leaves that call shape in exactly one place — `models/copy_with.py`, the
-    # function that checks the keys.
+    # `model_validate` rather than `model_copy(update=)`, and the reason is NOT that it closes
+    # the key hole — that is worth stating plainly, because it is the obvious framing and it is
+    # wrong. `AgentJudgeCriterion.agent` is narrowed to `ClaudeCodeAgentConfig`, so
+    # `model_dump(exclude_unset=True)` above can only ever produce this model's own field names;
+    # the NARROWING is what rejects an off-kind block, at task load, and `model_copy(update=)`
+    # would already be key-safe here.
     #
-    # An off-kind judge block cannot reach this point any more: `AgentJudgeCriterion.agent` is
-    # narrowed to `ClaudeCodeAgentConfig`, so it is rejected at task load. Validating a full dump
-    # under the user's set fields also constructs fresh nested objects, which is the property
-    # `deep=True` was there for — no mutable default is shared with `defaults`.
+    # What the swap actually buys: it re-runs the VALUE validators, and it retires the tree's
+    # last CE048 suppression, leaving that call shape in exactly one place —
+    # `models/copy_with.py`, the function that checks the keys. Validating a full dump also
+    # constructs fresh nested objects, which is the property `deep=True` was there for, so no
+    # mutable default is shared with `defaults`.
     #
     # The one behavioural delta, stated rather than left to be rediscovered: validating a FULL
     # dump marks every field as set, so `config.model_fields_set` is now the whole model and

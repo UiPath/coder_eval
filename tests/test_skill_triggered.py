@@ -191,10 +191,12 @@ class TestSkillTriggeredChecker:
         assert result.observed_label == "yes" and result.score == 1.0
 
     def test_unknown_bash_read_still_counts(self) -> None:
-        # The status gate's scope is file-read-only. `Bash` carries no result_status
-        # contract worth gating on — a crash-force-closed `cat SKILL.md` still read the
-        # file — so "unknown" must not suppress it either. Pins the truth table below as
-        # covering `_FILE_READ_TOOLS` and nothing wider.
+        # The status gate's scope is file-read-only, and `Bash` engagement is inferred from
+        # the COMMAND TEXT independently of status. `"unknown"` is genuinely inconclusive
+        # here — it cannot show the read happened — but gating on it would make the whole
+        # cross-agent file-read signal depend on telemetry that may never report completion,
+        # and the same argument that keeps `"error"` counting applies. Pins the truth table
+        # below as covering `_FILE_READ_TOOLS` and nothing wider.
         result = _check(
             expected_skill="my-skill",
             skill_name="my-skill",
@@ -255,9 +257,18 @@ def _engaging_params(tool_name: str) -> dict[str, Any]:
 
     Derived from the tool name rather than tabulated per case, so adding a tool to
     ``_FILE_READ_TOOLS`` extends the truth table below without editing it.
+
+    The keys match what each tool ACTUALLY records — `Glob` takes a `pattern`, `Grep` a
+    `pattern` plus a `path`, only `Read` a `file_path`. The scan reads every string parameter
+    so a single `file_path` would work for all three, but a fixture that does not look like
+    real telemetry hides the day one of them stops carrying a skill path at all.
     """
     if tool_name == "Skill":
         return {"skill": "my-skill"}
+    if tool_name == "Glob":
+        return {"pattern": "/x/skills/my-skill/*"}
+    if tool_name == "Grep":
+        return {"pattern": "foo", "path": "/x/skills/my-skill/"}
     return {"file_path": "/x/skills/my-skill/SKILL.md"}
 
 
@@ -345,8 +356,13 @@ class TestPerAgentTelemetryInventory:
     The deleted ``test_unknown_read_still_counts`` and its comment justified counting
     ``Read``/``"unknown"`` as engagement by asserting that Codex reconstructs real calls
     from the rollout with that status. That claim was a hand-written restatement of the two
-    dicts below, and it was false: Codex emits none of ``Read``/``Glob``/``Grep``, and its
-    rollout reconstruction sets ``"error"`` or ``"success"``, never ``"unknown"`` at all.
+    dicts below, and it was false in the half that mattered: Codex emits none of
+    ``Read``/``Glob``/``Grep``, so it cannot produce the changed pair at all — whatever
+    statuses it sets. (Codex *does* set ``"unknown"``, via ``close_open_tools`` and a command
+    with no exit code; that is not the point, and asserting it here would be another
+    hand-written restatement. The tool-name disjointness below is the whole load-bearing
+    claim, and it is what the asserts check.)
+
     (The original sentence is deliberately not quoted verbatim here — a grep for it is the
     cheap check that it is gone.) Importing the dicts
     rather than re-listing their values is the whole point — a future comment naming a
@@ -898,27 +914,49 @@ class TestSuppressedEngagementDetails:
 
     def test_the_note_is_aggregated_and_bounded(self) -> None:
         # Fifty refused calls must not produce a fifty-entry string: `details` is persisted per
-        # row in task.json and rendered in reports.
+        # row in task.json and rendered in reports. Two DIFFERENT mechanisms bound this and it
+        # is worth keeping them apart: the COUNT is bounded by the Counter (fifty identical
+        # pairs aggregate to one entry) while the CARDINALITY is bounded by
+        # `_SUPPRESSED_RENDER_LIMIT`. Only the max-cardinality case below exercises the second.
         commands = [_cmd("Skill", {"skill": "my-skill"}, tool_id=f"s{i}", result_status="error") for i in range(50)]
         commands += [
             _cmd("Read", {"file_path": "/x/skills/my-skill/SKILL.md"}, tool_id="r1", result_status="unknown"),
             _cmd("Glob", {"pattern": "/x/skills/my-skill/*"}, tool_id="g1", result_status="error"),
-            _cmd("Grep", {"path": "/x/skills/my-skill/SKILL.md"}, tool_id="p1", result_status=None),
+            _cmd("Grep", {"pattern": "foo", "path": "/x/skills/my-skill/"}, tool_id="p1", result_status=None),
         ]
         details = self._details(expected_skill="my-skill", skill_name="my-skill", commands=commands)
         assert "53 engagement signal(s) not delivered" in details, details
         assert "Skill/error x50" in details, details
         # Four distinct pairs, three rendered, the remainder elided rather than listed.
         assert "+1 more" in details, details
+
+    def test_the_note_is_bounded_at_maximum_cardinality(self) -> None:
+        # The genuine worst case, and the only fixture on which a length assertion does work:
+        # every gated tool x every non-success status. `_delivered` returns True for all other
+        # tools, so 4 x 3 = 12 pairs is the structural ceiling. Measured: ~299 chars unbounded,
+        # ~155 bounded — so a raised `_SUPPRESSED_RENDER_LIMIT` fails here rather than passing
+        # on a three-pair fixture that never reached the limit.
+        commands = [
+            _cmd(tool, _engaging_params(tool), tool_id=f"{tool}{i}", result_status=status)
+            for i, (tool, status) in enumerate((t, s) for t in _GATED_TOOLS for s in _STATUSES if s != "success")
+        ]
+        details = self._details(expected_skill="my-skill", skill_name="my-skill", commands=commands)
+        assert "12 engagement signal(s) not delivered" in details, details
+        assert "+9 more" in details, details
         assert len(details) < 200, details
 
     def test_the_note_carries_no_markup_brackets(self) -> None:
-        # `details` flows into report renderers; a `[...]`-shaped count would be read as markup.
+        # `details` flows into report renderers; a `[...]`-shaped count would be read as
+        # markup by any of them that does not escape first.
         details = self._details(
             expected_skill="my-skill",
             skill_name="my-skill",
             commands=[_cmd("Skill", {"skill": "my-skill"}, result_status="error")],
         )
+        # Require the note to EXIST before pinning its shape. Without this the test is a
+        # formatting assertion about a string it never demands, so removing the note
+        # entirely leaves it green — which is exactly how it read before this line.
+        assert "Skill/error x1" in details, details
         assert "[" not in details and "]" not in details, details
 
     def test_a_suppressed_call_for_another_skill_is_not_reported(self) -> None:
