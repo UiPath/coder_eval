@@ -838,6 +838,20 @@ with the two `action.yml` items above — one considered change to the action's 
       standing guard, and its path scope is the `optimize_*` PREFIX rather than a list of module
       names, so Phase 7 moving a reader — or a seventh module — cannot take it out of reach.
 
+- [ ] **A dotted `coder_eval.<module>.<name>` reference in PROSE is unchecked.** The snippet
+      sensor (`tests/test_custom_lint.py::_snippet_binding_failures`) resolves imports inside
+      ` ```python ` fences only. The six-module split (Plan B+C Phase 7) left **fourteen** files
+      naming a moved symbol by its old dotted path — including
+      `plugins/coder-eval/reference/proposal-prompt.md`, which told the proposer to call
+      `coder_eval.optimize_gate.candidate_leaks(...)` (now `optimize_search`, so the import
+      raises), and two Pydantic FIELD DESCRIPTIONS, which are public model documentation. All
+      were found by a reviewer reading files, not by any sensor. The guard is a scan for
+      `coder_eval\.[\w.]+\.[A-Za-z_]\w*` across `src/`, `docs/`, `plugins/` and `.claude/`,
+      resolving each through `importlib` — the same existence check the fence sensor already
+      does, one syntax over. Not built here because the reference forms vary (`:func:` roles,
+      backticked prose, bare dotted paths) and deciding which are claims about the API versus
+      incidental mentions needs a design pass. — caught in the Plan B+C final cross-phase review.
+
 - [ ] **A contaminated `ArmRowScores` vector is persisted with no marker.** `arm_row_scores` warns
       to stderr and returns its vector (Plan B+C Phase 1 — `ArmRowScores` has nowhere to put a
       refusal). `record_round_scores` then writes that vector into `measurements.json`, and
