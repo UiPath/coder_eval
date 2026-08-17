@@ -1551,6 +1551,118 @@ def _load_and_pair(
     )
 
 
+def _activation_preflight(
+    *,
+    incumbent_run_dirs: Sequence[Path],
+    candidate_run_dirs: Sequence[Path],
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+) -> tuple[str | None, list[str]]:
+    """Both row-selection preflights: a refusal message, or notes to carry forward.
+
+    Returns a refusal STRING rather than a verdict, because building one needs
+    ``scored_row_ids``, ``rows_excluded`` and the caller's ``notes`` list — none of which this
+    function has, and all of which ``_refuse_activation`` closes over. The caller extends its notes
+    and then refuses.
+
+    **Refusal PRECEDENCE is program order and is load-bearing.** The cross-split check returns
+    before tree reconciliation runs, so a pair that is both cross-split AND contaminated reports the
+    cross-split cause — the more specific one, and the one whose remedy ("re-run both arms under one
+    --split") a reader can act on without first understanding the other. The missing-provenance note
+    is likewise appended BEFORE the reconciliation loop, so a block carries its caveats in the order
+    the checks ran.
+    """
+    notes: list[str] = []
+
+    # --- Row-selection preflight, BEFORE any bootstrap ---------------------------------
+    #
+    # The two arms are separate `coder-eval run` invocations, so they can genuinely have scored
+    # different row sets. Pairing a train run against a test run is not a weak comparison, it is
+    # not a comparison at all — the arms never saw the same rows — so this refuses outright
+    # rather than reporting a number with a caveat.
+    #
+    # This asymmetry with `execution_gate` (which only NOTES the split) is a consequence of the
+    # data sources, not drift: that track takes ONE run_dir holding both variants, so both arms
+    # share one run.json and one split by construction and a cross-split pair is unrepresentable
+    # there.
+    # SCOPE: `--split` only, and the message says so rather than claiming "row selections".
+    # `run.json` also records `max_rows` / `sample_per_stratum`, and those are NOT compared here.
+    # The gap is real but narrower: a `--sample` draw is fixed-seed, so two arms at DIFFERENT
+    # counts do score largely disjoint rows — however that shows up downstream as a small
+    # `rows_paired` beside a large `rows_excluded`, which the block already reports, whereas a
+    # split mismatch can leave both arms fully paired on rows that merely happen to share ids.
+    # Widening the comparison is a behaviour change beyond what this preflight was scoped to and
+    # is recorded in `.claude/harness-candidates.md` rather than smuggled in here.
+    incumbent_provenance = read_split_provenance(incumbent_run_dirs)
+    candidate_provenance = read_split_provenance(candidate_run_dirs)
+    union = incumbent_provenance.recorded | candidate_provenance.recorded
+    if len(union) > 1:
+        splits = _format_splits(union)
+        return (
+            f"the two arms recorded DIFFERENT --split values ({splits}) — "
+            f"{incumbent_variant!r} over {', '.join(str(d) for d in incumbent_run_dirs)} and "
+            f"{candidate_variant!r} over {', '.join(str(d) for d in candidate_run_dirs)}. "
+            "They did not score the same rows, so their difference is not an effect. Re-run both "
+            "arms under one --split before gating."
+        ), notes
+    # A missing provenance cannot RULE OUT a cross-split pair, so it is said out loud rather than
+    # passed over in silence — the one state where the fault is undetectable must not also be the
+    # one state that says nothing. Not a refusal: old run dirs stay gatable.
+    missing = incumbent_provenance.unrecorded + candidate_provenance.unrecorded
+    total_dirs = len(incumbent_run_dirs) + len(candidate_run_dirs)
+    if missing:
+        # "directories" unconditionally: `_load_and_pair` does NOT return early on an empty arm
+        # (it notes zero rows and continues), so `total_dirs == 1` is reachable via an empty arm.
+        # A plural on a count of one is a cosmetic wart; a comment claiming an invariant that does
+        # not hold is worse, so this says which it is.
+        notes.append(
+            f"row-selection provenance is missing from {missing} of {total_dirs} run directories "
+            + "(they predate the run.json `row_selection` field, or it could not be read), so a "
+            + "cross-split pair cannot be ruled out for this comparison."
+        )
+
+    # --- Tree reconciliation, the OTHER half of the same preflight ---------------------
+    #
+    # The refusal above compares what the two run.jsons SAY. This one asks whether either run.json
+    # describes the tree it sits on. A reused `--run-dir` defeats the first check completely: the
+    # second invocation rewrites `row_selection` to a single split while the first split's results
+    # stay on disk, so provenance reads clean and the gate pools both splits into one arm. See
+    # `reconcile_tree_against_run_json` for why this matches (row, replicate) rather than counting.
+    stale, unknown_dirs = _reconcile_arms(
+        ((incumbent_variant, incumbent_run_dirs), (candidate_variant, candidate_run_dirs)), suite_id
+    )
+    if stale:
+        locations = _stale_locations(stale)
+        refusal = (
+            "the run directory tree holds results that no recorded invocation wrote — "
+            f"{locations}. run.json is written per INVOCATION while the tree is APPEND-ONLY, so a "
+            "re-used --run-dir leaves an earlier call's results behind while `row_selection` is "
+            "rewritten to describe only the latest one. Both arms live under the same run dir, so "
+            "those results pair on BOTH sides and nothing else flags them. Re-run both arms into "
+            "a fresh --run-dir before gating."
+        )
+        if unknown_dirs:
+            # Otherwise the totals above silently exclude a directory that could not be checked at
+            # all, and the note that would have said so is unreachable past this return.
+            refusal += (
+                f" ({unknown_dirs} further run directory/directories record no `task_results` and "
+                "could not be reconciled either way.)"
+            )
+        return refusal, notes
+    if unknown_dirs:
+        # Same stance as the missing-split note above, and for the same reason: the one state
+        # where contamination is undetectable must not also be the one state that refuses
+        # everything. (`reconcile_tree_against_run_json` records the second, quieter version of
+        # the same limit: an `aggregate`-rebuilt run.json launders contamination.)
+        notes.append(
+            f"{unknown_dirs} of {total_dirs} run directories record no `task_results`, so their "
+            + "run.json cannot be reconciled against the results on disk — a re-used --run-dir "
+            + "pooling an earlier invocation's results into this comparison cannot be ruled out."
+        )
+    return None, notes
+
+
 def activation_gate(
     *,
     incumbent_run_dirs: Sequence[Path],
@@ -1642,92 +1754,19 @@ def activation_gate(
             notes=notes,
         )
 
-    # --- Row-selection preflight, BEFORE any bootstrap ---------------------------------
-    #
-    # The two arms are separate `coder-eval run` invocations, so they can genuinely have scored
-    # different row sets. Pairing a train run against a test run is not a weak comparison, it is
-    # not a comparison at all — the arms never saw the same rows — so this refuses outright
-    # rather than reporting a number with a caveat.
-    #
-    # This asymmetry with `execution_gate` (which only NOTES the split) is a consequence of the
-    # data sources, not drift: that track takes ONE run_dir holding both variants, so both arms
-    # share one run.json and one split by construction and a cross-split pair is unrepresentable
-    # there.
-    # SCOPE: `--split` only, and the message says so rather than claiming "row selections".
-    # `run.json` also records `max_rows` / `sample_per_stratum`, and those are NOT compared here.
-    # The gap is real but narrower: a `--sample` draw is fixed-seed, so two arms at DIFFERENT
-    # counts do score largely disjoint rows — however that shows up downstream as a small
-    # `rows_paired` beside a large `rows_excluded`, which the block already reports, whereas a
-    # split mismatch can leave both arms fully paired on rows that merely happen to share ids.
-    # Widening the comparison is a behaviour change beyond what this preflight was scoped to and
-    # is recorded in `.claude/harness-candidates.md` rather than smuggled in here.
-    incumbent_provenance = read_split_provenance(incumbent_run_dirs)
-    candidate_provenance = read_split_provenance(candidate_run_dirs)
-    union = incumbent_provenance.recorded | candidate_provenance.recorded
-    if len(union) > 1:
-        splits = _format_splits(union)
-        refusal = (
-            f"the two arms recorded DIFFERENT --split values ({splits}) — "
-            f"{incumbent_variant!r} over {', '.join(str(d) for d in incumbent_run_dirs)} and "
-            f"{candidate_variant!r} over {', '.join(str(d) for d in candidate_run_dirs)}. "
-            "They did not score the same rows, so their difference is not an effect. Re-run both "
-            "arms under one --split before gating."
-        )
-        return _refuse_activation(refusal)
-    # A missing provenance cannot RULE OUT a cross-split pair, so it is said out loud rather than
-    # passed over in silence — the one state where the fault is undetectable must not also be the
-    # one state that says nothing. Not a refusal: old run dirs stay gatable.
-    missing = incumbent_provenance.unrecorded + candidate_provenance.unrecorded
-    total_dirs = len(incumbent_run_dirs) + len(candidate_run_dirs)
-    if missing:
-        # "directories" unconditionally: `_load_and_pair` does NOT return early on an empty arm
-        # (it notes zero rows and continues), so `total_dirs == 1` is reachable via an empty arm.
-        # A plural on a count of one is a cosmetic wart; a comment claiming an invariant that does
-        # not hold is worse, so this says which it is.
-        notes.append(
-            f"row-selection provenance is missing from {missing} of {total_dirs} run directories "
-            + "(they predate the run.json `row_selection` field, or it could not be read), so a "
-            + "cross-split pair cannot be ruled out for this comparison."
-        )
-
-    # --- Tree reconciliation, the OTHER half of the same preflight ---------------------
-    #
-    # The refusal above compares what the two run.jsons SAY. This one asks whether either run.json
-    # describes the tree it sits on. A reused `--run-dir` defeats the first check completely: the
-    # second invocation rewrites `row_selection` to a single split while the first split's results
-    # stay on disk, so provenance reads clean and the gate pools both splits into one arm. See
-    # `reconcile_tree_against_run_json` for why this matches (row, replicate) rather than counting.
-    stale, unknown_dirs = _reconcile_arms(
-        ((incumbent_variant, incumbent_run_dirs), (candidate_variant, candidate_run_dirs)), suite_id
+    refusal, preflight_notes = _activation_preflight(
+        incumbent_run_dirs=incumbent_run_dirs,
+        candidate_run_dirs=candidate_run_dirs,
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
     )
-    if stale:
-        locations = _stale_locations(stale)
-        refusal = (
-            "the run directory tree holds results that no recorded invocation wrote — "
-            f"{locations}. run.json is written per INVOCATION while the tree is APPEND-ONLY, so a "
-            "re-used --run-dir leaves an earlier call's results behind while `row_selection` is "
-            "rewritten to describe only the latest one. Both arms live under the same run dir, so "
-            "those results pair on BOTH sides and nothing else flags them. Re-run both arms into "
-            "a fresh --run-dir before gating."
-        )
-        if unknown_dirs:
-            # Otherwise the totals above silently exclude a directory that could not be checked at
-            # all, and the note that would have said so is unreachable past this return.
-            refusal += (
-                f" ({unknown_dirs} further run directory/directories record no `task_results` and "
-                "could not be reconciled either way.)"
-            )
+    # EXTEND, never re-bind: `notes` is the SAME list object `_load_and_pair` returned, and pydantic
+    # copies it at construction — so `notes = notes + preflight_notes` would leave every later
+    # append landing in a list no verdict ever sees.
+    notes.extend(preflight_notes)
+    if refusal is not None:
         return _refuse_activation(refusal)
-    if unknown_dirs:
-        # Same stance as the missing-split note above, and for the same reason: the one state
-        # where contamination is undetectable must not also be the one state that refuses
-        # everything. (`reconcile_tree_against_run_json` records the second, quieter version of
-        # the same limit: an `aggregate`-rebuilt run.json launders contamination.)
-        notes.append(
-            f"{unknown_dirs} of {total_dirs} run directories record no `task_results`, so their "
-            + "run.json cannot be reconciled against the results on disk — a re-used --run-dir "
-            + "pooling an earlier invocation's results into this comparison cannot be ruled out."
-        )
 
     # The four shared values, hoisted into named locals rather than a keyword dict the two returns
     # splat. Three are expensive (two bootstraps and a sibling scan); `p_floor` is pure arithmetic

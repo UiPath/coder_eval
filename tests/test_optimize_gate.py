@@ -58,6 +58,7 @@ from coder_eval.optimize_gate import (
     CostQualityPoint,
     SearchComparison,
     SplitProvenance,
+    _activation_preflight,
     _balance_pair,
     _discreteness_floor,
     _execution_diagnostics,
@@ -3114,6 +3115,114 @@ class TestEveryMissingFloorSaysWhy:
         with caplog.at_level(logging.WARNING):
             assert _execution_floor(_weighted_arm(tmp_path, "incumbent", {"r0": [0.1, 0.2]})) is None
         assert "carry 2+ replicates" in caplog.text
+
+
+class TestActivationPreflight:
+    """The two row-selection preflights as a unit, rather than through two bootstraps.
+
+    Extracted from `activation_gate` verbatim — every pre-existing preflight test passes unmodified,
+    which is the extraction's own acceptance criterion. These add what testing it through the gate
+    could not: the precedence between the two causes, and the notes-list identity contract.
+    """
+
+    ROWS: ClassVar[dict[str, list[tuple[str, str]]]] = {f"r{i}": [("yes", "yes" if i else "no")] for i in range(3)}
+
+    def _preflight(self, incumbent: list[Path], candidate: list[Path]) -> tuple[str | None, list[str]]:
+        return _activation_preflight(
+            incumbent_run_dirs=incumbent,
+            candidate_run_dirs=candidate,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+        )
+
+    def _split(self, run_dirs: list[Path], split: str | None) -> None:
+        for run_dir in run_dirs:
+            payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            payload["row_selection"] = {"split": split}
+            (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_a_clean_pair_refuses_nothing_and_notes_nothing(self, tmp_path: Path) -> None:
+        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        assert self._preflight(dirs, dirs) == (None, [])
+
+    def test_a_cross_split_pair_refuses(self, tmp_path: Path) -> None:
+        inc = _write_arm(tmp_path / "i", "incumbent", self.ROWS, invocations=1)
+        cand = _write_arm(tmp_path / "c", "candidate", self.ROWS, invocations=1)
+        self._split(inc, "train")
+        self._split(cand, "test")
+        refusal, _notes = self._preflight(inc, cand)
+        assert refusal is not None and "DIFFERENT --split values" in refusal
+
+    def test_a_contaminated_tree_refuses(self, tmp_path: Path) -> None:
+        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        _write_row(dirs[0], "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        refusal, _notes = self._preflight(dirs, dirs)
+        assert refusal is not None and "no recorded invocation wrote" in refusal
+
+    def test_the_cross_split_cause_wins_when_both_hold(self, tmp_path: Path) -> None:
+        """PRECEDENCE, and it is program order rather than an accident.
+
+        A pair that is both cross-split and contaminated must report the cross-split cause: it is
+        the more specific one, and its remedy ("re-run both arms under one --split") is actionable
+        without first understanding the other. Reversing the two checks would silently swap which
+        message a user acts on.
+        """
+        inc = _write_arm(tmp_path / "i", "incumbent", self.ROWS, invocations=1)
+        cand = _write_arm(tmp_path / "c", "candidate", self.ROWS, invocations=1)
+        self._split(inc, "train")
+        self._split(cand, "test")
+        _write_row(cand[0], "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        refusal, _notes = self._preflight(inc, cand)
+        assert refusal is not None
+        assert "DIFFERENT --split values" in refusal
+        assert "no recorded invocation wrote" not in refusal
+
+    def test_missing_provenance_is_a_note_not_a_refusal(self, tmp_path: Path) -> None:
+        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        (dirs[0] / "run.json").unlink()
+        refusal, notes = self._preflight(dirs, dirs)
+        assert refusal is None, "old run dirs stay gatable"
+        assert any("row-selection provenance is missing" in note for note in notes)
+
+    def test_an_unreconcilable_dir_is_a_note_not_a_refusal(self, tmp_path: Path) -> None:
+        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        payload = json.loads((dirs[0] / "run.json").read_text(encoding="utf-8"))
+        payload.pop("task_results", None)
+        (dirs[0] / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+        refusal, notes = self._preflight(dirs, dirs)
+        assert refusal is None
+        assert any("record no `task_results`" in note for note in notes)
+
+    def test_the_unknown_count_survives_inside_a_refusal(self, tmp_path: Path) -> None:
+        # Both halves must reach the reader: a refusal whose totals silently exclude a directory
+        # that could not be checked is a refusal a user cannot reconcile with the tree.
+        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=2)
+        _write_row(dirs[0], "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        payload = json.loads((dirs[1] / "run.json").read_text(encoding="utf-8"))
+        payload.pop("task_results", None)
+        (dirs[1] / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+        refusal, _notes = self._preflight(dirs, dirs)
+        assert refusal is not None
+        assert "no recorded invocation wrote" in refusal
+        assert "could not be reconciled either way" in refusal
+
+    def test_the_notes_list_the_caller_holds_is_the_one_that_reaches_the_verdict(self, tmp_path: Path) -> None:
+        """The identity contract the extraction had to preserve.
+
+        `activation_gate` holds the SAME list object `_load_and_pair` returned, because pydantic
+        COPIES it at construction — so a note appended after the model is built is silently
+        discarded. Returning a fresh list and `extend`-ing preserves that; re-binding `notes` to a
+        concatenation would not, and every later note would land in a list no verdict ever sees.
+        """
+        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        (dirs[0] / "run.json").unlink()
+        verdict = _gate(dirs)
+        # The preflight's note AND a note `_load_and_pair` wrote before it are both on the verdict,
+        # which can only happen if one list carried both.
+        assert any("row-selection provenance is missing" in note for note in verdict.notes)
+        # And a note the gate appends AFTER the preflight also survives.
+        assert any("minimum detectable effect" in note for note in verdict.notes)
 
 
 class TestTheTwoDeduplications:
