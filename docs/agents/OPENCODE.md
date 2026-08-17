@@ -243,6 +243,14 @@ Both file-path spellings are accepted because the CLI has moved between versions
 `Bash`'s `command` and the search tools' `path` already match Claude's names and
 pass through untouched, as does every unlisted key.
 
+> **The tool vocabulary varies by MODEL, not just by harness.** OpenCode exposes a
+> provider-specific tool set: a GPT-family model edits via `apply_patch` where
+> DeepSeek uses `write`/`edit`. `apply_patch` is therefore mapped to `Write` (as
+> `codex_agent` does), so one `tool_name: Write` criterion reads the same on
+> either. Its argument is a patch envelope (`patchText`), not a file path, so a
+> `command_pattern` written against `file_path` will not match it — assert on
+> `tool_name` alone, or on the resulting file with `file_exists`/`file_contains`.
+
 > These event names are the CLI's own compact vocabulary. They are **not** the
 > `session.next.*` names in the OpenAPI schema served by `opencode serve` — that
 > describes the HTTP/SSE surface and does not apply here.

@@ -474,6 +474,21 @@ class TestCrossHarnessNormalization:
         record = await _run(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["Bash", "Write"]
 
+    async def test_gpt_family_apply_patch_maps_to_write(self, patch_exec, tmp_path):
+        """OpenCode's tool set is provider-specific, so the vocabulary varies by
+        MODEL within this one harness.
+
+        A live 174-task run showed DeepSeek using write/edit 199 times and
+        apply_patch 0, while GPT-5.6 used apply_patch 120 times and write/edit 0.
+        Unmapped, every `tool_name: Write` / `tool_name: Edit` criterion scores 0
+        on a GPT-family model that edited the file correctly — the suite in that
+        run carries 33 Write and 30 Edit criteria. Mirrors codex_agent's
+        `_TOOL_ITEM_NAMES["apply_patch"] = "Write"`.
+        """
+        patch_exec(_FakeProcess([self._tool_with_input("apply_patch", {"patchText": "*** Begin Patch\n"})]))
+        record = await _run(_agent(), tmp_path)
+        assert [c.tool_name for c in record.commands] == ["Write"]
+
     async def test_unknown_tool_passes_through(self, patch_exec, tmp_path):
         """An unmapped tool still surfaces under its own name rather than vanishing."""
         patch_exec(_FakeProcess([self._tool_event("some_new_tool")]))

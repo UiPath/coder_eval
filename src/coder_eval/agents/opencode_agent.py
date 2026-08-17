@@ -140,6 +140,15 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "todowrite": "TodoWrite",
     "todoread": "TodoRead",
     "task": "Agent",
+    # The GPT-family edit tool. OpenCode exposes a provider-specific tool set, so
+    # the vocabulary varies by MODEL within this one harness: a live 174-task run
+    # showed DeepSeek using write/edit 199 times and apply_patch 0, while GPT-5.6
+    # used apply_patch 120 times and write/edit 0. Unmapped, every
+    # `tool_name: Write` / `tool_name: Edit` criterion scores 0 on a GPT-family
+    # model that edited the file correctly. Maps to `Write` to match codex_agent's
+    # `_TOOL_ITEM_NAMES["apply_patch"] = "Write"`, so one criterion reads the same
+    # on both harnesses.
+    "apply_patch": "Write",
     # OpenCode's native skill loader. Without this entry `skill_triggered` (which
     # keys on the canonical `Skill`) and any `command_executed` written against
     # `tool_name: Skill` read false on every OpenCode run — the engagement happened
