@@ -225,9 +225,11 @@ For criterion fields beyond this template, read
 
 ## Step 6 — Validate before spending anything
 
-`coder-eval plan <path-to-activation.yaml>` must exit 0. It is a schema check only —
-it does not read the dataset file — so also confirm the JSONL sits next to the YAML
-and has one object per line.
+`coder-eval plan <path-to-activation.yaml>` must exit 0. It expands the dataset, so a JSONL that is
+missing, misplaced or malformed fails here rather than mid-run — read the row count it prints and
+check it against what you wrote, because a suite that resolves to fewer rows than you intended is
+the one failure that still exits 0 (a `--split` over partly-labelled rows silently drops the
+unlabelled ones).
 
 ## Step 7 — Run
 

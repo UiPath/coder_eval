@@ -698,6 +698,105 @@ class TestPlanValidatesTemplateSources:
         assert exit_code == 1
         assert any("Template directory not found" in ln and str(suite / "fixture") in ln for ln in lines), lines
 
+    def test_every_template_source_type_is_classified(self) -> None:
+        """A new `TemplateSource` variant must FAIL here rather than be silently unchecked.
+
+        `_validate_template_sources` skips what it does not recognise, which is the right runtime
+        behaviour and the wrong thing to leave unguarded: a fourth source type that copies host
+        files into the sandbox would join the union and be blessed by `plan` on day one. The GAP
+        belongs in a test, not in a `raise` on a user-facing path.
+        """
+        import typing
+
+        from coder_eval.models.templates import TemplateSource
+
+        members = {m.__name__ for m in typing.get_args(typing.get_args(TemplateSource)[0])}
+        decided = {
+            "TemplateDirSource",  # a HOST directory: must exist and be a directory
+            "StarterFilesSource",  # inline content: only its sandbox DESTINATION can be wrong
+            "RepoSource",  # a remote clone: nothing local exists until it is fetched
+        }
+        assert members == decided, (
+            f"`TemplateSource` gained or lost a member ({members ^ decided}). Decide what `plan` "
+            "should check for it in `_validate_template_sources` — if it copies host files into "
+            "the sandbox, an unmountable one must flip the exit code — then list it here"
+        )
+
+    def test_a_variant_supplied_template_dir_is_validated_too(self, tmp_path: Path) -> None:
+        """`template_sources` merges by APPEND, so a variant can add a mount the task never had.
+
+        Checking only the task's own sources left `plan -e <exp>` printing "All tasks are valid!"
+        for a suite whose run dies at sandbox setup — the exact failure this check exists to move
+        earlier, one config layer up.
+        """
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        task = self._task_mounting(fixture)
+
+        missing = tmp_path / "variant-fixture"
+        resolved = TaskDefinition(
+            task_id="mounts-a-template",
+            description="A test task",
+            initial_prompt="Do something",
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
+            sandbox={
+                "driver": "tempdir",
+                "template_sources": [
+                    {"type": "template_dir", "path": str(fixture)},
+                    {"type": "template_dir", "path": str(missing)},
+                ],
+            },
+            success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        )
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved, {}, 1)),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            exit_code = 0
+            try:
+                plan_command(task_files=[task_file])
+            except typer.Exit as e:
+                exit_code = e.exit_code
+        lines = [str(call) for call in mock_console.print.call_args_list]
+
+        assert exit_code == 1
+        assert any(str(missing) in ln for ln in lines), lines
+
+    def test_one_bad_mount_is_reported_once_across_variants(self, tmp_path: Path) -> None:
+        # The task's own missing fixture reappears in every variant's MERGED source list, so
+        # without de-duplication a three-variant experiment prints the same path three times and
+        # buries whatever else the file has to say.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        missing = tmp_path / "outcome-fixture"
+        task = self._task_mounting(missing)
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="a"), ExperimentVariant(variant_id="b")])
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(task, {}, 1)),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            exit_code = 0
+            try:
+                plan_command(task_files=[task_file])
+            except typer.Exit as e:
+                exit_code = e.exit_code
+        lines = [str(call) for call in mock_console.print.call_args_list]
+
+        assert exit_code == 1
+        named = [ln for ln in lines if "Template directory not found" in ln]
+        assert len(named) == 1, f"the same missing mount was reported {len(named)} times: {named}"
+
     def test_an_unexpanded_env_var_is_reported_by_the_loader_not_by_this_check(self, tmp_path: Path) -> None:
         """An undefined `$VAR` in a template path is a PRE-EXISTING load-time error.
 

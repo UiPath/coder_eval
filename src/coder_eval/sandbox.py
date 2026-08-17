@@ -60,8 +60,9 @@ def escapes_sandbox(sandbox_root: Path, rel: str) -> bool:
     Purely lexical when nothing on the path exists yet, which is what makes a synthetic root
     usable: `Path.resolve()` on a missing path just normalizes it. Against a REAL sandbox it can
     additionally follow a symlink an earlier template source left behind, so the two callers can
-    in principle disagree on a `..` path that traverses one — the plan-time answer is then the
-    conservative one.
+    in principle disagree on a `..` path that traverses one. The plan-time answer is then the
+    PERMISSIVE one — `plan` says "does not escape" and the runtime still raises. A false negative,
+    not a false alarm: this check can miss such a path, and never reddens a valid suite.
     """
     root = sandbox_root.resolve()
     candidate = (sandbox_root / rel).resolve()

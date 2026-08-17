@@ -73,7 +73,8 @@ WHERE THE FILES LIVE
     check reads the same file for every arm, so it contributes no signal and only dilution.
 
     Running it by hand (which is how the discrimination gate is performed) resolves the artifact
-    against YOUR shell's cwd, so `cd` to the directory holding the artifact first.
+    against YOUR shell's cwd, so `cd` to the directory the paths in your expectations are relative
+    TO — the sandbox root, not the directory the artifact itself sits in.
 
 BEYOND TEXT AND JSON
     The sandbox venv installs only what `sandbox.python.env_packages` names, and that list is sized
@@ -89,7 +90,6 @@ import contextlib
 import io
 import json
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -142,23 +142,32 @@ def check_mentions(doc: Artifact, params: dict[str, Any]) -> tuple[bool | None, 
 
 
 def check_json_field(doc: Artifact, params: dict[str, Any]) -> tuple[bool | None, str]:
-    """`params["field"]` exists in the JSON artifact, and every occurrence equals `params["equals"]`.
+    """`params["field"]` is present in the JSON artifact, and equals `params["equals"]` if given.
 
     N/A only when the row declares no `field`. An artifact that is not JSON FAILS rather than
     dropping out — the row asked a question about structure, and "I wrote prose instead" is an
     answer, not an inapplicable question. See the module docstring for why that direction matters.
 
-    It searches by KEY at any depth rather than by a fixed path, so nesting the same field one level
-    deeper does not fail an otherwise-correct artifact. That generosity covers RELOCATION, not
-    REPETITION: `equals` therefore requires EVERY occurrence to match, or an artifact reporting two
-    failed jobs and one succeeded one would pass a `status == ok` check on the strength of the third.
+    **It answers from the SHALLOWEST occurrences of the key only**, which is the rule that keeps it
+    from marking down a correct artifact, and the three cases it balances:
+
+    * *Relocation* — a body that nests its report one level deeper (`{"result": {"status": "ok"}}`)
+      still answers, because the search is by key rather than by a fixed path.
+    * *Repetition* — several occurrences at that same level ALL have to match, or an artifact
+      reporting two failed jobs and one succeeded one would pass `status == ok` on the third.
+    * *Unrelated detail* — a deeper `meta.cache.status` is not an answer to a question about the
+      report's status, and counting it would mark down the arm whose body produced the RICHER
+      artifact. That is failure mode one in the rubric's grader-fairness section, in the check that
+      ships beside it.
     """
     field = params.get("field")
     if field is None:
         return None, "this row declares no field"
+    if not isinstance(field, str):
+        raise TypeError(f"`field` must be a string key, got {type(field).__name__}: {field!r}")
     if doc.data is None:
         return False, f"{field!r} unanswerable — the artifact is not a JSON object or array"
-    found = list(_values_for_key(doc.data, field))
+    found = _shallowest_values_for_key(doc.data, field)
     if not found:
         return False, f"{field!r} is absent"
     if "equals" not in params:
@@ -167,16 +176,25 @@ def check_json_field(doc: Artifact, params: dict[str, Any]) -> tuple[bool | None
     return ok, f"every {field!r} {'==' if ok else '!='} {params['equals']!r} (found {found})"
 
 
-def _values_for_key(node: Any, key: str) -> Iterator[Any]:
-    """Every value stored under `key`, at any depth."""
-    if isinstance(node, dict):
-        for name, value in node.items():
-            if name == key:
-                yield value
-            yield from _values_for_key(value, key)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _values_for_key(item, key)
+def _shallowest_values_for_key(root: Any, key: str) -> list[Any]:
+    """Every value stored under `key` at the shallowest depth it occurs, or `[]`.
+
+    Breadth-first, and it does NOT descend past a level that answered: once the key is found, a
+    deeper key of the same name belongs to some other part of the document.
+    """
+    level = [root]
+    while level:
+        found = [node[key] for node in level if isinstance(node, dict) and key in node]
+        if found:
+            return found
+        deeper: list[Any] = []
+        for node in level:
+            if isinstance(node, dict):
+                deeper.extend(node.values())
+            elif isinstance(node, list):
+                deeper.extend(node)
+        level = deeper
+    return []
 
 
 # REPLACE / EXTEND: the checks your rows actually need. The two above are worked examples, not a
@@ -221,6 +239,11 @@ def _run_checks(doc: Artifact, checks: dict[str, Any]) -> tuple[int, int, list[s
                 raise TypeError(f"returned {verdict!r}; a check must return True, False or None")
         except Exception as exc:  # a raising check is a FAILING check, never a crashed grader
             verdict, detail = False, f"raised {exc!r}"
+        # ONE CHECK, ONE LINE. A detail carrying a newline — a check's own multi-line message, or
+        # artifact text quoted into one — would otherwise split into extra lines that can read as
+        # further PASS/FAIL results. The score line is unaffected, but the detail stream is what a
+        # human reads to decide whether the grader is fair, and it must not be forgeable.
+        detail = " ".join(str(detail).splitlines())
         for line in chatter.getvalue().splitlines():
             details.append(f"     (stdout from {key}: {line})")
         if verdict is None:
@@ -243,12 +266,14 @@ def main(argv: list[str]) -> int:
     if not spec_file.is_file():
         return _report(0.0, f"no expectations file for row {row_id!r} at {spec_file}")
     try:
-        spec = json.loads(spec_file.read_text(encoding="utf-8", errors="replace"))
+        spec = json.loads(spec_file.read_text(encoding="utf-8-sig", errors="replace"))
     except ValueError as exc:
         return _report(0.0, f"expectations file {spec_file} is not valid JSON: {exc}")
     if not isinstance(spec, dict) or not isinstance(spec.get("path"), str):
         return _report(0.0, f"expectations file {spec_file} must be an object with a string `path`")
-    checks = spec.get("checks") or {}
+    # `spec.get("checks", {})`, never `... or {}`: a falsy non-dict (`[]`, `""`, `0`) would fold
+    # into an empty dict and reach the author as "0/0 applicable" rather than as the typo it is.
+    checks = spec.get("checks", {})
     if not isinstance(checks, dict):
         return _report(0.0, f"expectations file {spec_file}: `checks` must be an object, got {type(checks).__name__}")
 
@@ -258,7 +283,10 @@ def main(argv: list[str]) -> int:
         why = "is a directory" if artifact_path.is_dir() else "not found"
         return _report(0.0, f"artifact {why}: {artifact_path} (cwd {Path.cwd()})")
     try:
-        text = artifact_path.read_text(encoding="utf-8", errors="replace")
+        # `utf-8-sig` strips a BOM if there is one and is a no-op otherwise. Without it a
+        # BOM-prefixed JSON artifact fails `json.loads` and every structural check scores it as
+        # prose — a WRONG score for a correct artifact, which is worse than a crash.
+        text = artifact_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError as exc:
         return _report(0.0, f"artifact {artifact_path} could not be read: {exc}")
 

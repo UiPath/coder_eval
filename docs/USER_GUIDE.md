@@ -76,8 +76,10 @@ coder-eval plan tasks/*.yaml   # validate specific tasks
 ```
 
 Checks task syntax, required CLI tools, API keys, and schema validity without executing. It also
-checks that every template source a run would mount *can* be mounted — a `template_dir` that does
-not exist used to surface only after the run started, as a sandbox-setup error.
+checks the local template sources a run would mount — that each `template_dir` exists and is a
+directory (on the task and on every resolved variant), and that no `starter_files` destination
+escapes the sandbox. A missing fixture used to surface only after the run started, as a
+sandbox-setup error. A `repo` source is not checked: nothing is fetched at plan time.
 
 | Flag | Description |
 | --- | --- |

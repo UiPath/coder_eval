@@ -920,7 +920,13 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
   gives: either the validator learns that a zero-weight criterion may still carry
   `suite_thresholds`, or the template stops stacking a constant-scoring criterion into the
   compared statistic and documents the near-zero weight instead.
-- [ ] **No preflight on whether the INSTRUMENT is fair.** `optimize-skill` hard-gates
+- [x] **DONE (2026-08-17, outcome-suite-mode plan Phase 4): No preflight on whether the INSTRUMENT
+  is fair.** Shipped as `/coder-eval:task` **Step 6.5** — build a known-good and a known-bad
+  artifact, grade both, report the SEPARATION MARGIN, before any stage is paid for — with the three
+  fairness questions consolidated into `reference/task-rubric.md` § "Grader fairness" (one
+  declaration; `task` and `optimize-skill` both point at it) and guarded by
+  `test_task_skill_has_discrimination_gate` / `test_grader_fairness_is_declared_once`. The original
+  entry follows. `optimize-skill` hard-gates
   engagement but has nothing on "is the grader discriminating and unbiased". Two checks in
   this run's grader were wrong in ways only the baseline could reveal: one penalised a
   legitimate alternative implementation (nested `IF` where the body never mandates `IFS`), one
@@ -937,6 +943,11 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
   **mean 0.9158 clean -> 0.9461 leaked**, two rows flipping partial->perfect. That is larger
   than most effects the gate exists to detect. Candidate: a lint/preflight that fails when a
   `run_command` criterion's script or data lives under a `template_dir` the sandbox mounts.
+  **RESERVED AS CE056 (see the entry at the end of this file), and partially closed:** the shipped
+  layout is asserted by `TestPluginArtifacts::test_outcome_grader_lives_outside_any_mounted_fixture`
+  and the grader template now addresses its script through `$TASK_DIR`, beside the suite rather than
+  inside the fixture. What remains un-guarded — and what CE056's promotion trigger waits for — is
+  the general tree-walking rule, which today has one discoverable subject and would pass vacuously.
 - [ ] **`--sample 1` is the missing cheap preflight.** One row for ~$0.50 proved the whole
   pipeline (skill engages, artifact lands, grader scores) before any stage. `optimize-skill`
   Step 6 goes straight to a full baseline. Pure guidance fix, one sentence.
@@ -982,6 +993,9 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
   (multi-model + Opus, both independently).
 
 - [ ] **CE056 (RESERVED): a grader's answer key must never ship inside a mounted fixture.**
+      (The same rule as the "Answer-key leakage into the fixture is unguarded" entry above, which
+      states the measurement in its original context; this entry is the ID reservation and the
+      promotion trigger. Do not treat them as two candidates.)
       Everything under a `template_dir` is copied into every sandbox, so a `run_command` grader's
       `expectations/` placed there hands the agent exactly what it is being marked against — and
       the run looks completely normal. Measured on a real suite when it happened by accident: on
@@ -1005,3 +1019,24 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       execution gate's zero-variance refusal (today's single subject is pinned by
       `test_outcome_template_grader_slot_is_continuous`). — caught in the
       2026-08-17 outcome-suite-mode plan, Phase 5.
+
+- [ ] **Nothing binds a shipped surface's PROSE cross-reference to the step it names.**
+      `test_bundled_plugin_root_references_resolve` checks `${CLAUDE_PLUGIN_ROOT}` FILE paths in
+      `.md` files only — it cannot see "see `/coder-eval:task` step 6.5", and it does not scan `.py`
+      or `.json` surfaces at all. Four shipped files cited step 6.5 while it did not yet exist, and
+      an author following the pointer would have found nothing at the one moment the safeguard
+      matters. Closed for THIS reference by `test_shipped_surfaces_cite_a_step_that_exists`, which
+      is bespoke: it hardcodes the four citing files and the string "step 6.5". The general rule —
+      extract `<skill> step N.N` / `§ <heading>` references from every bundled surface and assert
+      the target exists — is a Markdown-structure walk over headings, which is why it is deferred
+      rather than written here. — caught in the 2026-08-17 outcome-suite-mode plan, Phase 3 review.
+
+- [ ] **Nothing binds a CLI command's DESCRIPTION to what it does.** CE046 pins that every visible
+      long flag appears in `docs/USER_GUIDE.md`, but nothing checks the prose around it. `plan`
+      gained filesystem validation while the guide still called it "task syntax, required CLI
+      tools, API keys, and schema validity" — and `check-skill/SKILL.md` has said "`plan` is a
+      schema check only — it does not read the dataset file" since before the dataset preview
+      landed, which was already false. Both were fixed by hand, twice, by reading. A rule would
+      have to compare a docstring's claims with a command's behaviour, which is not mechanically
+      decidable; the tractable subset is a sensor per claim, on the CE039 `ComputedClaim` model.
+      — caught in the 2026-08-17 outcome-suite-mode plan, Phase 1 and final reviews.

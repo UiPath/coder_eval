@@ -176,7 +176,11 @@ def _print_strata(task: TaskDefinition, selected: list[dict[str, Any]], emit: Ca
     emit(f"  [dim]strata ({escape(field)}): {rendered}[/dim]")  # noqa: CE050
 
 
-def _validate_template_sources(task: TaskDefinition, emit: Callable[[str], None]) -> bool:
+def _validate_template_sources(
+    task: TaskDefinition,
+    emit: Callable[[str], None],
+    reported: set[str],
+) -> bool:
     """Report every template source a run could not mount, and return whether all of them could.
 
     ``plan`` is the surface an author is told to validate against, and it printed ✓ on a suite
@@ -186,6 +190,12 @@ def _validate_template_sources(task: TaskDefinition, emit: Callable[[str], None]
     (``template_dir_problem``, ``escapes_sandbox``), never re-implemented: a plan-time copy that
     drifted loose would either bless a suite that cannot run — the exact defect being closed — or
     redden a valid one.
+
+    Called once for the task's own sources and once per RESOLVED variant, because
+    ``template_sources`` merges by APPEND: an experiment's ``defaults:`` or a variant can add a
+    mount the task never declared, and a suite that cannot run is a suite that cannot run whichever
+    layer supplied the fixture. ``reported`` carries the messages already printed for this file, so
+    the task's own missing fixture is named once rather than once per variant.
 
     The two source types are checked for different things because they fail differently.
     ``template_dir`` names a HOST directory, which may be missing or not a directory.
@@ -211,17 +221,68 @@ def _validate_template_sources(task: TaskDefinition, emit: Callable[[str], None]
         # after the bracket for a tag, so the literal `[0]` was never at risk either.)
         if isinstance(source, TemplateDirSource):
             problem = template_dir_problem(Path(source.path))
-            if problem is not None:
+            if problem is not None and problem not in reported:
                 emit(f"  [red]sandbox.template_sources[{index:d}]: {escape(problem)}[/red]")
+                reported.add(problem)
                 ok = False
         elif isinstance(source, StarterFilesSource):
             for starter in source.files:
-                if escapes_sandbox(_SYNTHETIC_SANDBOX_ROOT, starter.path):
-                    emit(
-                        f"  [red]sandbox.template_sources[{index:d}]: starter_files path escapes "
-                        + f"the sandbox: {escape(starter.path)}[/red]"
-                    )
+                escape_report = f"starter_files path escapes the sandbox: {starter.path}"
+                if escapes_sandbox(_SYNTHETIC_SANDBOX_ROOT, starter.path) and escape_report not in reported:
+                    emit(f"  [red]sandbox.template_sources[{index:d}]: {escape(escape_report)}[/red]")
+                    reported.add(escape_report)
                     ok = False
+    return ok
+
+
+def _report_variants(
+    exp_def: Any,
+    default_exp: Any,
+    task: TaskDefinition,
+    emit: Callable[[str], None],
+    reported_mounts: set[str],
+) -> bool:
+    """Print each variant's resolved agent, and return whether every variant is runnable.
+
+    Two failure grades, preserved exactly: a generic resolution failure is SOFT (red text, exit 0),
+    while an early-stop config error or an unmountable template source is HARD. The ✓ banner stays
+    either way — it reports whether the FILE is loadable, and it is; the red line beneath names the
+    variant that is not.
+
+    Lifted out of ``plan_command`` when validating the merged sources pushed that function over the
+    statement ceiling. It is also where the per-variant checks belong: everything here is a fact
+    about a variant rather than about the file.
+    """
+    from ..orchestration.early_stop import EarlyStopConfigError, validate_early_stop
+    from ..orchestration.experiment import resolve_task_for_variant
+    from ..orchestration.run_limits import validate_run_limits
+
+    ok = True
+    for variant in exp_def.variants:
+        variant_id = escape(str(variant.variant_id))
+        try:
+            # Resolve the FIRST expanded row for a dataset-backed task: that is the shape a run
+            # actually resolves, and it is where a criterion that only becomes invalid after
+            # ${row.*} substitution shows up.
+            resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
+            # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
+            validate_early_stop(resolved)
+            for message in validate_run_limits(resolved):
+                emit(f"    [yellow]⚠[/yellow] [yellow]Variant '{variant_id}': {escape(message)}[/yellow]")
+            # The MERGED sources: a fixture an experiment's `defaults:` or this variant appended is
+            # one a run of this variant would mount, and one `plan` used to bless.
+            # `reported_mounts` suppresses the task's own entries, already named above.
+            if not _validate_template_sources(resolved, emit, reported_mounts):
+                ok = False
+            agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
+            agent_model = resolved.agent.model if resolved.agent else None
+            model_str = f" ({agent_model})" if agent_model else ""
+            emit(f"    [dim]Variant '{variant_id}': {escape(agent_type)}{escape(model_str)}[/dim]")
+        except EarlyStopConfigError as e:
+            emit(f"    [red]Variant '{variant_id}': early-stop config error - {escape(str(e))}[/red]")
+            ok = False
+        except Exception as e:
+            emit(f"    [red]Variant '{variant_id}': resolution failed - {escape(str(e))}[/red]")
     return ok
 
 
@@ -289,10 +350,10 @@ def plan_command(
     # Check API keys
     check_api_keys()
 
-    # Lazy import to avoid circular dependency at module level
-    from ..orchestration.early_stop import EarlyStopConfigError, validate_early_stop
-    from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
-    from ..orchestration.run_limits import validate_run_limits
+    # Lazy import to avoid circular dependency at module level. The per-variant half of this
+    # (`resolve_task_for_variant`, `validate_early_stop`) moved to `_report_variants`, which
+    # imports them the same lazy way — tests patch them on the SOURCE module, so both work.
+    from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment
 
     # Always load experiment (defaults to experiments/default.yaml)
     exp_path = experiment if isinstance(experiment, Path) else DEFAULT_EXPERIMENT_PATH
@@ -360,10 +421,11 @@ def plan_command(
 
             # A missing fixture is a hard error, on the same terms as an early-stop config
             # error below: the FILE is loadable (✓ stays) but a run of it cannot work, so the
-            # exit code flips. Checked on the task's own sources rather than per variant —
-            # an experiment layer can append more, and reporting those once per variant would
-            # print the same missing path N times.
-            if not _validate_template_sources(task, detail.append):
+            # exit code flips. Checked on the task's own sources here and on each RESOLVED
+            # variant below — `template_sources` merges by APPEND, so a variant can add a mount
+            # the task never declared. `reported` is what keeps one bad path to one line.
+            reported_mounts: set[str] = set()
+            if not _validate_template_sources(task, detail.append, reported_mounts):
                 all_valid = False
 
             expanded = _preview_dataset(
@@ -387,33 +449,8 @@ def plan_command(
                 else:
                     warnings.showwarning(w.message, w.category, w.filename, w.lineno)
 
-            # Show resolved agent per variant
-            for variant in exp_def.variants:
-                variant_id = escape(str(variant.variant_id))
-                try:
-                    # Resolve the FIRST expanded row for a dataset-backed task: that is the
-                    # shape a run actually resolves, and it is where a criterion that only
-                    # becomes invalid after ${row.*} substitution shows up.
-                    resolved, _lineage, _ = resolve_task_for_variant(default_exp, expanded[0], exp_def, variant)
-                    # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
-                    validate_early_stop(resolved)
-                    for message in validate_run_limits(resolved):
-                        console.print(
-                            f"    [yellow]⚠[/yellow] [yellow]Variant '{variant.variant_id}': {message}[/yellow]"
-                        )
-                    agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
-                    agent_model = resolved.agent.model if resolved.agent else None
-                    model_str = f" ({agent_model})" if agent_model else ""
-                    detail.append(f"    [dim]Variant '{variant_id}': {escape(agent_type)}{escape(model_str)}[/dim]")
-                except EarlyStopConfigError as e:
-                    # A hard config error (unlike generic per-variant resolution
-                    # failures, which stay soft): flip the plan exit code. The banner stays ✓ —
-                    # it reports whether the FILE is loadable, and this file is; the red line
-                    # right beneath it names the variant that is not.
-                    detail.append(f"    [red]Variant '{variant_id}': early-stop config error - {escape(str(e))}[/red]")
-                    all_valid = False
-                except Exception as e:
-                    detail.append(f"    [red]Variant '{variant_id}': resolution failed - {escape(str(e))}[/red]")
+            if not _report_variants(exp_def, default_exp, expanded[0], detail.append, reported_mounts):
+                all_valid = False
 
         except Exception as e:
             loaded = False

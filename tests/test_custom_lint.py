@@ -2268,6 +2268,20 @@ class TestPluginArtifacts:
         assert score == 0.0
         assert expected in output, output
 
+    def test_outcome_grader_keeps_one_check_to_one_detail_line(self, tmp_path: Path):
+        # A detail carrying a newline would split into extra lines that read as further check
+        # results. Here the forged text arrives through the artifact, quoted back by `mentions`'
+        # "missing [...]" detail — so the line count is a fact about the OUTPUT FORMAT, not about
+        # what a well-behaved check happens to return.
+        forged = "absent\nPASS mentions#ghost: all present"
+        spec = {"path": "out/report.md", "checks": {"mentions": {"all_of": [forged]}}}
+        score, output, code = self._grade(tmp_path, spec, "nothing here\n")
+        assert code == 0 and score == 0.0
+        lines = output.splitlines()
+        # score + summary + exactly one detail line
+        assert len(lines) == 3, f"one check produced {len(lines) - 2} detail lines: {lines}"
+        assert not any(line.startswith("PASS") for line in lines), lines
+
     def test_outcome_grader_labels_let_one_check_be_declared_twice(self, tmp_path: Path):
         # JSON object keys are unique, so two `mentions` entries would silently collapse to the
         # last one — halving the denominator with no message. The `#label` suffix is what lets a
@@ -2450,6 +2464,15 @@ class TestPluginArtifacts:
                 "the grader command does not interpolate ${row.id}, so every row would be graded "
                 "against the same expectations file"
             )
+            # PORTABLE, not absolute. `$TASK_DIR` is exported into every `run_command` and is
+            # mounted symmetrically under `driver: docker`; a hardcoded host path exists on the
+            # author's machine only, and its absence scores 0.0 on every row of every arm — which
+            # reads exactly like a skill whose body is bad.
+            assert "$TASK_DIR/" in grader.command, (
+                f"the grader command {grader.command!r} does not address the script through "
+                "$TASK_DIR. An absolute host path breaks on a colleague's machine, in CI, and "
+                "under driver: docker, and all three failures look like a bad skill body"
+            )
 
     def test_outcome_grader_lives_outside_any_mounted_fixture(self):
         """The answer key must not ship inside the exam.
@@ -2500,7 +2523,14 @@ class TestPluginArtifacts:
         assert graders, "the outcome template ships no `run_command` grader to locate"
         # The path the template TELLS an author to use, and the scaffold this repo actually ships.
         # Both matter: the first is what a user copies, the second is what they copy it from.
-        declared = [Path(part) for c in graders for part in c.command.split() if part.endswith(".py")]
+        # `$TASK_DIR` is the suite YAML's own directory, exported into every `run_command` — the
+        # portable spelling, expanded here the way the sandbox's shell would.
+        declared = [
+            Path(part.replace("$TASK_DIR", str(self.TEMPLATES)))
+            for c in graders
+            for part in c.command.split()
+            if part.endswith(".py")
+        ]
         assert declared, f"no .py path found in the grader command {graders[0].command!r}"
         bundled = self.GRADER.resolve()
         for candidate in [*declared, bundled, bundled.parent / "expectations"]:
@@ -4387,11 +4417,13 @@ class TestPluginArtifacts:
         # outcome prompt may state the rule under test, which grades transcription; without the
         # carve-out "follow the spec literally" is ungradeable, because it needs a spec to follow.
         rubric = _normalized(PLUGIN_ROOT / "reference" / "task-rubric.md")
-        assert "MAY** state the *spec*" in rubric or "MAY** state the spec" in rubric, (
+        assert "MAY** state the *spec*" in rubric, (
             "the rubric lost the outcome-suite spec carve-out — an outcome prompt must be allowed to "
             "name the output path and the format, or the rule 'follow the user's spec' cannot be graded"
         )
-        assert "MUST NEVER** state a rule the *body*" in rubric or "MUST NEVER" in rubric, (
+        # No weaker fallback: a bare "MUST NEVER" is satisfied by any unrelated sentence in the
+        # rubric, so the disjunct that was here loosened the sensor to nothing.
+        assert "MUST NEVER** state a rule the *body*" in rubric, (
             "the rubric lost the prohibition the carve-out narrows, so the carve-out now reads as "
             "permission to put the graded behaviour in the prompt"
         )

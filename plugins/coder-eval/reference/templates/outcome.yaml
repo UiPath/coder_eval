@@ -252,15 +252,22 @@ success_criteria:
   # the contract, and `/coder-eval:task` step 6.5 is the gate that proves your copy of it
   # discriminates before a stage is paid for.
   #
-  # REPLACE the absolute path. The grader and its `expectations/` must live OUTSIDE the fixture
-  # above — see the `sandbox:` comment — and `run_command` executes with CWD set to the sandbox, so
-  # a relative path would resolve inside it, which is exactly where the grader deliberately is not.
+  # `$TASK_DIR` is this file's own directory, exported into every `run_command`. Use it rather than
+  # a hardcoded absolute path, for three reasons that all produce the same failure — 0.0 on every
+  # row of every arm, which reads exactly like a skill whose body is bad:
+  #   - `run_command` executes with CWD set to the SANDBOX, so a bare relative path resolves inside
+  #     it, which is precisely where the grader deliberately is not (see the `sandbox:` comment);
+  #   - an absolute host path does not exist on a colleague's machine or in CI;
+  #   - under `sandbox.driver: docker` the task directory is mounted into the container at the same
+  #     path, and an arbitrary absolute path is not mounted at all.
+  # So keep the grader beside this file (`<suite dir>/outcome-grader/`) — outside the fixture, and
+  # reachable by the same name everywhere.
   #
   # `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md` lists every criterion type. Prefer any of them
   # over `llm_judge` / `agent_judge`, which add variance to the very number the gate reads.
   - type: "run_command"
     description: "row ${row.id}'s artifact follows the skill body's rules"
-    command: "python3 /REPLACE/abs/path/to/outcome-grader/verify.py ${row.id}"
+    command: "python3 $TASK_DIR/outcome-grader/verify.py ${row.id}"
     score_from_stdout: true
     # The grader reads files and runs no model; 180s is slack, not a budget.
     timeout: 180

@@ -254,11 +254,14 @@ to read).
 | 4 | the grader script | from `${CLAUDE_PLUGIN_ROOT}/reference/templates/outcome-grader/verify.py` |
 | 5 | its per-row expectations | one JSON file per row id, beside the grader |
 
-**4 and 5 live OUTSIDE the fixture directory**, and the grader slot in `outcome.yaml` therefore
-addresses the script by absolute path. The reason is stated in full in `outcome.yaml`, next to the
-mount it constrains — in short, everything under the fixture is copied into every sandbox, so
-expectations placed there hand the agent exactly what it is being marked against, and the run still
-looks completely normal.
+**4 and 5 live OUTSIDE the fixture directory** — put them beside the suite YAML, in
+`outcome-grader/`, and address them as `$TASK_DIR/outcome-grader/verify.py` as the template does.
+Not a hardcoded absolute path: `$TASK_DIR` survives another machine, CI, and `driver: docker`
+(which mounts the task directory but not an arbitrary host path), and all three of those failures
+look identical — 0.0 on every row of every arm. The reason they are outside the fixture at all is
+stated in full in `outcome.yaml`, next to the mount it constrains: everything under the fixture is
+copied into every sandbox, so expectations placed there hand the agent exactly what it is being
+marked against, and the run still looks completely normal.
 
 The fixture's *contents* are yours to design and this skill does not author them: state what it
 must satisfy — `outcome.yaml`'s `sandbox:` comment declares the constraints, including the one that
@@ -286,10 +289,11 @@ validates through the real Pydantic models, so a mistyped field name or a missin
 required key surfaces here rather than halfway through a paid run.
 
 **Outcome mode: plan each split too.** Run `coder-eval plan <suite> --split train` and
-`coder-eval plan <suite> --split test`, and check the row counts against what you wrote. Both must
-exit 0. A partly-labelled dataset is the state to catch here: `--split` keeps the matching rows and
-silently DROPS the unlabelled ones, so every later metric is computed over a smaller suite than the
-file suggests, and the run reports nothing wrong.
+`coder-eval plan <suite> --split test`. Both must exit 0 — **and then READ THE ROW COUNTS**, because
+exit 0 is not the whole answer here: a partly-labelled dataset plans clean. `--split` keeps the
+matching rows and silently DROPS the unlabelled ones, so the counts, not the exit code, are what
+tell you every later metric would be computed over a smaller suite than the file suggests. `plan`
+prints a ⚠ when it happens; the counts are how you confirm it did not.
 
 Then re-read your own work and check:
 
