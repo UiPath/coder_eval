@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "One file per row, named <row id>.json — `verify.py <row_id>` reads exactly this name.",
+    "REPLACE this file with one per row in outcome-rows.jsonl (core-1.json, regression-1.json, ...).",
+    "",
+    "`path` is the artifact, resolved against the SANDBOX (the grader's cwd at run time).",
+    "",
+    "`checks` maps a check to its params. The key is a name from verify.py's CHECKS table,",
+    "optionally suffixed with #<label> so one check can be declared several times — three",
+    "`mentions#...` checks below rather than one with three needles, because each check is pass",
+    "or fail and the score is passed/applicable: a row with ONE check can only score 0.0 or 1.0,",
+    "which is the zero-variance shape an outcome suite exists to avoid. Several independent",
+    "checks are what make the row continuous.",
+    "",
+    "A name with no entry in CHECKS is SKIPPED and excluded from the denominator, so a typo here",
+    "cannot inflate a row — but it cannot fail one either, which is why the discrimination gate",
+    "grades a known-good artifact and expects 1.0.",
+    "",
+    "`json_field` below declares no `field`, which is how a check opts OUT of a row when the same",
+    "expectations are templated across rows: it returns NOT APPLICABLE and leaves the numerator",
+    "and the denominator. Note what makes that legal — the trigger is this FILE declaring nothing,",
+    "never the artifact being the wrong shape. See verify.py's docstring: an N/A that keys on the",
+    "artifact lets an arm shrink its own denominator by ignoring a requirement."
+  ],
+  "path": "REPLACE/output/report.md",
+  "checks": {
+    "mentions#core": {
+      "all_of": ["REPLACE: the thing the body's main instruction should have produced"]
+    },
+    "mentions#detail": {
+      "all_of": ["REPLACE: a second, independent thing — never boilerplate the prompt dictated"]
+    },
+    "mentions#regression": {
+      "all_of": ["REPLACE: something that already worked and must keep working"]
+    },
+    "json_field": {}
+  }
+}

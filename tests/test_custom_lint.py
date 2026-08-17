@@ -2114,6 +2114,336 @@ class TestPluginArtifacts:
             invocation="my-plugin:my-skill",
         )
 
+    # --- The shipped grader scaffold -------------------------------------------------------
+    #
+    # These shell out to `outcome-grader/verify.py` and assert its BEHAVIOUR, because it is the
+    # execution track's measuring instrument: a grader that is subtly wrong biases every arm of an
+    # A/B equally, so no cross-arm comparison can reveal it. They live in this class rather than a
+    # module of their own to sit beside the other shipped-artifact assertions — the scaffold is a
+    # plugin artifact, and the question is the same one asked of `outcome.yaml` next door.
+
+    GRADER = PLUGIN_ROOT / "reference" / "templates" / "outcome-grader" / "verify.py"
+
+    @staticmethod
+    def _grade(
+        tmp_path: Path,
+        spec: object,
+        artifact: str | None,
+        *,
+        row: str = "r1",
+        artifact_path: str | None = None,
+    ) -> tuple[float, str, int]:
+        """Run the shipped scaffold over one fabricated row, returning (score, output, exit code).
+
+        Copies the scaffold rather than pointing at it in place: the grader resolves its
+        expectations relative to ITSELF, so writing fixtures beside the real one would leave files
+        in the plugin tree. The artifact is written under `cwd`, which is what `run_command` sets
+        to the sandbox.
+        """
+        import json
+        import shutil
+        import subprocess
+        import sys
+
+        grader_dir = tmp_path / "grader"
+        # `parents=True`: callers pass a SUBdirectory of the fixture when one test grades two
+        # artifacts (the discrimination margin), and that parent has not been created.
+        grader_dir.mkdir(parents=True)
+        shutil.copy(TestPluginArtifacts.GRADER, grader_dir / "verify.py")
+        (grader_dir / "expectations").mkdir()
+        (grader_dir / "expectations" / f"{row}.json").write_text(json.dumps(spec), encoding="utf-8")
+
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+        if artifact is not None:
+            # `artifact_path` for the malformed-spec cases, where the spec cannot supply one.
+            relative = artifact_path or (spec["path"] if isinstance(spec, dict) else None)
+            assert isinstance(relative, str), "pass artifact_path when the spec carries no usable one"
+            target = sandbox / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(artifact, encoding="utf-8")
+
+        completed = subprocess.run(
+            [sys.executable, str(grader_dir / "verify.py"), row],
+            cwd=sandbox,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        first = completed.stdout.splitlines()[0]
+        return float(first), completed.stdout, completed.returncode
+
+    def test_outcome_grader_prints_float_on_first_line(self, tmp_path: Path):
+        # The protocol `score_from_stdout` reads: line 1 parses as a float in [0.0, 1.0], every
+        # later line is detail. A grader that printed its detail first would score 0.0 with the
+        # criterion reporting a parse error, on every row of every arm.
+        spec = {"path": "out/report.md", "checks": {"mentions": {"all_of": ["alpha"]}}}
+        score, output, code = self._grade(tmp_path, spec, "# Report\n\nalpha\n")
+        assert code == 0
+        assert 0.0 <= score <= 1.0
+        assert score == 1.0, output
+        assert len(output.splitlines()) > 1, "the score line carries no detail — a 0.0 would be unreadable"
+
+    def test_outcome_grader_na_drops_from_denominator(self, tmp_path: Path):
+        # THE load-bearing rule. A check that does not apply must leave the numerator AND the
+        # denominator: scoring it as a failure charges the row for a question nobody asked, and
+        # scoring it as a pass inflates every arm equally — which is worse, because it is
+        # invisible to every comparison downstream.
+        #
+        # The fixture is one PASS + one FAIL + one N/A, so the two failure modes are separated
+        # NUMERICALLY (0.5 here; 1/3 if the N/A were counted as a failure, 2/3 as a pass) rather
+        # than only by a substring in the detail lines.
+        artifact = "# Report\n\nalpha\n"
+        with_na = {
+            "path": "out/report.md",
+            "checks": {
+                "mentions#hit": {"all_of": ["alpha"]},
+                "mentions#miss": {"all_of": ["absent"]},
+                "json_field": {},  # declares no field: N/A
+            },
+        }
+        without = {
+            "path": "out/report.md",
+            "checks": {"mentions#hit": {"all_of": ["alpha"]}, "mentions#miss": {"all_of": ["absent"]}},
+        }
+        na_score, na_output, _ = self._grade(tmp_path / "a", with_na, artifact)
+        plain_score, _, _ = self._grade(tmp_path / "b", without, artifact)
+        assert na_score == plain_score == 0.5, na_output
+        assert "N/A" in na_output and "1/2 applicable" in na_output, na_output
+
+    def test_outcome_grader_na_never_depends_on_the_artifact(self, tmp_path: Path):
+        """Two arms answering one row must be scored over the SAME denominator.
+
+        The defect this pins is the one that inverts an A/B verdict rather than merely biasing it.
+        When a check returns N/A because the ARTIFACT is the wrong shape, an arm that ignored the
+        requirement entirely drops that check and is scored 1/1, while an arm that complied and got
+        one field wrong is scored 1/2 — the worse artifact wins, and nothing in the report says so.
+
+        So the N/A trigger must be a property of the ROW. Here the row asks for JSON; the arm that
+        did not produce JSON must FAIL that question, not escape it.
+        """
+        spec = {
+            "path": "out/report.md",
+            "checks": {"mentions": {"all_of": ["summary"]}, "json_field": {"field": "status", "equals": "ok"}},
+        }
+        complied, complied_out, _ = self._grade(tmp_path / "a", spec, '{"summary": "did it", "status": "failed"}')
+        ignored, ignored_out, _ = self._grade(tmp_path / "b", spec, "# summary\n\nprose, not JSON\n")
+        assert "1/2 applicable" in complied_out, complied_out
+        assert "1/2 applicable" in ignored_out, ignored_out
+        assert complied == ignored == 0.5, (complied_out, ignored_out)
+
+    def test_outcome_grader_rejects_a_string_where_a_list_is_required(self, tmp_path: Path):
+        # `"all_of": "one needle"` — the most natural slip in a hand-written expectations file.
+        # Iterating a string yields CHARACTERS, so every check would report "all present" against
+        # any artifact of moderate length: a silent 1.0 on every row of every arm, which is exactly
+        # the class of defect this instrument exists to avoid.
+        spec = {"path": "out/report.md", "checks": {"mentions": {"all_of": "runs a lint step"}}}
+        score, output, code = self._grade(tmp_path, spec, "An unrelated summary sentence.\n")
+        assert code == 0
+        assert score == 0.0, output
+        assert "must be a LIST" in output, output
+
+    @pytest.mark.parametrize(
+        ("spec", "expected"),
+        [
+            ({"paths": "out/report.md", "checks": {}}, "string `path`"),
+            ({"path": "out/report.md", "checks": [1, 2]}, "`checks` must be an object"),
+            ([1, 2], "string `path`"),
+        ],
+        ids=["path-key-typo", "checks-is-a-list", "spec-is-a-list"],
+    )
+    def test_outcome_grader_reports_a_malformed_expectations_file(self, tmp_path: Path, spec, expected: str):
+        # Author errors in the expectations file must report a score and a reason, never a
+        # traceback: coder-eval checks the exit code BEFORE parsing the score line, so a crashed
+        # grader is a 0.0 whose cause is not in the report.
+        score, output, code = self._grade(tmp_path, spec, "x\n", artifact_path="out/report.md")
+        assert code == 0
+        assert score == 0.0
+        assert expected in output, output
+
+    def test_outcome_grader_labels_let_one_check_be_declared_twice(self, tmp_path: Path):
+        # JSON object keys are unique, so two `mentions` entries would silently collapse to the
+        # last one — halving the denominator with no message. The `#label` suffix is what lets a
+        # row carry several independent checks of one kind, which is also what makes it continuous.
+        spec = {
+            "path": "out/report.md",
+            "checks": {"mentions#a": {"all_of": ["alpha"]}, "mentions#b": {"all_of": ["absent"]}},
+        }
+        score, output, code = self._grade(tmp_path, spec, "alpha only\n")
+        assert code == 0
+        assert score == 0.5, output
+        assert "mentions#a" in output and "mentions#b" in output, output
+
+    def test_outcome_grader_score_line_is_read_by_the_real_criterion(self, tmp_path: Path):
+        # End to end through `RunCommandChecker._score_from_stdout`, not this file's own
+        # `float(stdout.splitlines()[0])`: the tests would otherwise agree with the grader about a
+        # protocol neither shares with the code that actually reads it.
+        from coder_eval.criteria.run_command import RunCommandChecker
+        from coder_eval.models import RunCommandCriterion
+
+        spec = {
+            "path": "out/report.md",
+            "checks": {"mentions#a": {"all_of": ["alpha"]}, "mentions#b": {"all_of": ["absent"]}},
+        }
+        _score, stdout, code = self._grade(tmp_path, spec, "alpha only\n")
+        criterion = RunCommandCriterion(description="grader", command="python3 verify.py r1", score_from_stdout=True)
+        result = RunCommandChecker()._score_from_stdout(criterion, code, stdout, "")
+        assert result.error is None, result.error
+        assert result.score == 0.5
+        assert "mentions#b" in (result.details or ""), "the detail lines did not survive into the criterion result"
+
+    def test_shipped_example_expectations_declares_real_checks(self, tmp_path: Path):
+        # The shipped example is the shape every author copies, and nothing else in the tree reads
+        # it: a JSON syntax error or a check name absent from CHECKS would ship green.
+        import json
+
+        example = self.GRADER.parent / "expectations" / "example-row.json"
+        spec = json.loads(example.read_text(encoding="utf-8"))
+        assert isinstance(spec.get("path"), str) and isinstance(spec.get("checks"), dict)
+
+        source = self.GRADER.read_text(encoding="utf-8")
+        for key in spec["checks"]:
+            name = key.split("#", 1)[0]
+            assert f'"{name}": check_' in source, (
+                f"the example declares check {name!r}, which verify.py's CHECKS table does not "
+                "register — an author copying this file gets a SKIP and a silently smaller denominator"
+            )
+
+        # And it must be CONTINUOUS: a row whose applicable checks number one can only score 0.0 or
+        # 1.0, which is the zero-variance shape the execution gate refuses to rule on.
+        applicable = [k for k, params in spec["checks"].items() if params]
+        assert len(applicable) >= 3, (
+            f"the example row declares only {len(applicable)} applicable checks, so it teaches a "
+            "near-binary grader — the defect `score_from_stdout` was chosen to avoid"
+        )
+
+    def test_outcome_grader_missing_artifact_scores_zero_and_exits_zero(self, tmp_path: Path):
+        # BOTH halves, because they are separate failures. `_score_from_stdout` checks the exit
+        # code BEFORE it parses line 1 and returns early, so a non-zero exit discards whatever the
+        # grader computed — the score becomes 0.0 no matter what the first line said.
+        spec = {"path": "out/report.md", "checks": {"mentions": {"all_of": ["alpha"]}}}
+        score, output, code = self._grade(tmp_path, spec, None)
+        assert score == 0.0
+        assert code == 0, "a non-zero exit discards the score line before it is ever parsed"
+        assert "artifact not found" in output, output
+
+    def test_outcome_grader_missing_expectations_file_scores_zero_and_exits_zero(self, tmp_path: Path):
+        import shutil
+        import subprocess
+        import sys
+
+        grader_dir = tmp_path / "grader"
+        grader_dir.mkdir()
+        shutil.copy(self.GRADER, grader_dir / "verify.py")
+        (grader_dir / "expectations").mkdir()
+        completed = subprocess.run(
+            [sys.executable, str(grader_dir / "verify.py"), "no-such-row"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert completed.returncode == 0
+        assert float(completed.stdout.splitlines()[0]) == 0.0
+        assert "no expectations file" in completed.stdout
+
+    def test_outcome_grader_all_na_does_not_divide_by_zero(self, tmp_path: Path):
+        # 0/0 is neither a perfect row nor a failed one — it is a row that measured NOTHING.
+        # Printing 1.0 here would read as perfect; raising would take the whole run down. It
+        # prints 0.0 and says so, which is what makes `/coder-eval:task`'s discrimination gate
+        # catch such a row for free: the known-GOOD artifact scores 0.0 on it.
+        spec = {"path": "out/report.md", "checks": {"mentions": {"all_of": []}, "json_field": {}}}
+        score, output, code = self._grade(tmp_path, spec, "# Report\n\nanything\n")
+        assert code == 0
+        assert score == 0.0
+        assert "0/0 applicable" in output, output
+
+    def test_outcome_grader_unknown_check_excluded_from_denominator(self, tmp_path: Path):
+        # A typo'd check name must not silently inflate the score by counting as a pass, and must
+        # not fail a row for a check the author never wrote. It is skipped, loudly.
+        spec = {
+            "path": "out/report.md",
+            "checks": {"mentions": {"all_of": ["alpha"]}, "menshuns": {"all_of": ["never present"]}},
+        }
+        score, output, code = self._grade(tmp_path, spec, "# Report\n\nalpha\n")
+        assert code == 0
+        assert score == 1.0
+        assert "SKIP unknown check" in output and "1/1 applicable" in output, output
+
+    def test_outcome_grader_a_raising_check_fails_that_check_only(self, tmp_path: Path):
+        # One bad check must not crash the grader or zero an otherwise-scored row. `mentions`
+        # raises on a non-list `all_of`, which is the cheapest real instance.
+        spec = {
+            "path": "out/report.md",
+            "checks": {"mentions#ok": {"all_of": ["alpha"]}, "mentions#broken": {"all_of": 5}},
+        }
+        score, output, code = self._grade(tmp_path, spec, "alpha\n")
+        assert code == 0
+        assert score == 0.5, output
+        assert "raised" in output, output
+
+    def test_outcome_grader_discriminates_a_good_artifact_from_a_bad_one(self, tmp_path: Path):
+        # The instrument's whole purpose, asserted as a SEPARATION rather than as two scores: a
+        # grader that scores a compliant and a violating artifact alike measures nothing, and
+        # every number after it is decoration. This is the test-shaped twin of the discrimination
+        # gate `/coder-eval:task` step 6.5 requires an author to perform by hand.
+        spec = {"path": "out/report.md", "checks": {"mentions": {"all_of": ["alpha", "beta"]}}}
+        good, _, _ = self._grade(tmp_path / "good", spec, "# Report\n\nAlpha and BETA.\n")
+        bad, _, _ = self._grade(tmp_path / "bad", spec, "# Report\n\nneither one.\n")
+        assert good - bad == 1.0, f"separation margin is {good - bad}, not 1.0"
+
+    def test_outcome_grader_is_stdlib_only(self):
+        # The sandbox venv installs only what `sandbox.python.env_packages` names, and that list is
+        # sized for the AGENT's needs. A third-party import here fails at grading time, on every
+        # row, after the whole arm has been paid for.
+        import ast
+        import sys
+
+        tree = ast.parse(self.GRADER.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        unresolved: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                # Through the ONE resolver (CE051) rather than reading `node.module`. Every import
+                # in a standalone script is absolute, so the resolver just passes it through — but
+                # a scan that is right only for the input it was written against is precisely how
+                # `resolved_module` came to exist.
+                module = resolved_module(node, str(self.GRADER))
+                if module is None:
+                    unresolved.append(ast.unparse(node))
+                else:
+                    imported.add(module.split(".")[0])
+        assert imported, "no imports found — the scan is looking at the wrong file"
+        assert not unresolved, (
+            f"the shipped grader uses a relative import ({unresolved}), which cannot resolve: it is "
+            "copied to a path of the user's choosing and run as a standalone script"
+        )
+        outsiders = sorted(name for name in imported if name not in sys.stdlib_module_names)
+        assert not outsiders, f"the shipped grader imports non-stdlib modules: {outsiders}"
+
+    def test_outcome_template_grader_slot_is_continuous(self):
+        # Through the real loader, not a grep: the point is that the criterion the models BUILD
+        # carries `score_from_stdout`, not that the file contains the string. A binary grader over
+        # a dozen rows manufactures the execution gate's zero-variance refusal — two arms of
+        # different quality score identically and the gate reports it cannot separate them.
+        from coder_eval.models import RunCommandCriterion
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+        graders = [c for c in task.success_criteria if isinstance(c, RunCommandCriterion)]
+        assert graders, "the outcome template ships no `run_command` grader slot"
+        for grader in graders:
+            assert grader.score_from_stdout, (
+                f"the grader slot {grader.description!r} is BINARY. `score_from_stdout: true` is "
+                "what gives the execution gate a continuous per-row score to compare"
+            )
+            assert "${row.id}" in grader.command, (
+                "the grader command does not interpolate ${row.id}, so every row would be graded "
+                "against the same expectations file"
+            )
+
     def test_outcome_template_scores_artifacts_not_prose(self):
         # "Score outcomes, not prose" is the execution track's core instruction, and the
         # template is what everyone copies. An LLM judge adds variance to the very number

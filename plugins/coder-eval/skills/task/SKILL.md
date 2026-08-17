@@ -251,7 +251,7 @@ to read).
 | 1 | the suite YAML | from `outcome.yaml`; one dataset-backed task |
 | 2 | the rows JSONL | one row per scenario, `train`/`test` labelled, naming its rules |
 | 3 | the fixture directory | the one starting repository every row works from |
-| 4 | the grader script | from the bundled `outcome-grader/verify.py` scaffold |
+| 4 | the grader script | from `${CLAUDE_PLUGIN_ROOT}/reference/templates/outcome-grader/verify.py` |
 | 5 | its per-row expectations | one JSON file per row id, beside the grader |
 
 **4 and 5 live OUTSIDE the fixture directory**, and the grader slot in `outcome.yaml` therefore

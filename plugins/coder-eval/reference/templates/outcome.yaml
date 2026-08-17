@@ -243,21 +243,33 @@ success_criteria:
       mean: 0.7
       completion_rate: 1.0
 
-  # OPTIONAL third slot — uncomment when a file's contents cannot express the assertion
-  # and something has to actually run. Add `verify_cmd` to each row.
+  # The GRADER, and the reason this slot is not a pass/fail one. A binary criterion over a
+  # dozen-odd rows manufactures the execution gate's zero-variance refusal: two arms of genuinely
+  # different quality both score 1.0 (or both 0.0), every paired difference is zero, and the gate
+  # correctly reports that it cannot separate them. `score_from_stdout` reads a float from the
+  # grader's first stdout line, which is what gives the comparison something to see. Start from
+  # `${CLAUDE_PLUGIN_ROOT}/reference/templates/outcome-grader/verify.py`; its module docstring is
+  # the contract, and `/coder-eval:task` step 6.5 is the gate that proves your copy of it
+  # discriminates before a stage is paid for.
   #
-  # Left commented out on purpose: for most suites `file_check` above already asserts what
-  # this would, and a row-supplied shell command drags quoting and
-  # what-is-installed-in-the-sandbox concerns into every copy of this template.
+  # REPLACE the absolute path. The grader and its `expectations/` must live OUTSIDE the fixture
+  # above — see the `sandbox:` comment — and `run_command` executes with CWD set to the sandbox, so
+  # a relative path would resolve inside it, which is exactly where the grader deliberately is not.
   #
-  # `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md` lists every criterion type. Prefer any
-  # of them over `llm_judge` / `agent_judge`, which add variance to the very number the
-  # gate reads.
-  #
-  # - type: "run_command"
-  #   description: "row ${row.id}'s artifact actually works"
-  #   command: "${row.verify_cmd}"
-  #   expected_exit_code: 0
+  # `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md` lists every criterion type. Prefer any of them
+  # over `llm_judge` / `agent_judge`, which add variance to the very number the gate reads.
+  - type: "run_command"
+    description: "row ${row.id}'s artifact follows the skill body's rules"
+    command: "python3 /REPLACE/abs/path/to/outcome-grader/verify.py ${row.id}"
+    score_from_stdout: true
+    # The grader reads files and runs no model; 180s is slack, not a budget.
+    timeout: 180
+    # No `mean` gate until you have a baseline: the grader is new, and a threshold guessed before
+    # the first run fails the suite for the instrument's calibration rather than the body's
+    # quality. `completion_rate` is gated from the start because an arm that lost rows computed
+    # its score over a different denominator and is not comparable to one that did not.
+    suite_thresholds:
+      completion_rate: 1.0
 
 # One last thing about the rows: cover what already WORKS, not only what is broken. A body
 # edit can silently break behaviour that used to pass, and only a row that covers it will
