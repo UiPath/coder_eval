@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.10.1 (2026-08-18)
+
+### Continuous Integration
+
+- Bump gh-action-pypi-publish to v1.14.2 to accept Metadata-Version 2.5
+  ([#123](https://github.com/UiPath/coder_eval/pull/123),
+  [`a65ee69`](https://github.com/UiPath/coder_eval/commit/a65ee69a65f97bb3e7e2fbff942c2a110b3c07ee))
+
+
 ## v0.10.0 (2026-08-18)
 
 ### Bug Fixes
