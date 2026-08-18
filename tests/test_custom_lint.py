@@ -61,6 +61,48 @@ class TestCE016NoComputedTokenUsageKwargs:
 
 
 @pytest.mark.lint
+class TestCE043NoCommandOutputTruncation:
+    """CE043 flags truncation of captured command output inside agents/, only."""
+
+    @staticmethod
+    def _run(src: str, *, in_agents: bool = True):
+        import ast
+
+        from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
+
+        path = "src/coder_eval/agents/codex_agent.py" if in_agents else "src/coder_eval/reports_html.py"
+        return NoCommandOutputTruncation(path).check(ast.parse(src))
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "output[:100]",
+            "aggregated_output[:512]",
+            "command_item.aggregated_output[:100]",
+            "proc_stdout[:80]",
+            "result.stderr[:200]",
+            'f"Output: {output[:100]}"',
+        ],
+    )
+    def test_flags_output_truncation_in_agents(self, expr: str):
+        assert self._run(f"x = {expr}"), f"expected CE043 to flag {expr!r}"
+
+    def test_allows_untruncated_output(self):
+        assert not self._run('summary = f"Output: {output}"')
+        assert not self._run("summary = aggregated_output")
+
+    def test_ignores_non_output_slices(self):
+        # Legit error/orchestration summaries that are NOT captured command output.
+        assert not self._run("detail = summary.result[:200]")
+        assert not self._run("msg = content_str[:200]")
+        assert not self._run("s = '; '.join(messages)[:200]")
+
+    def test_scoped_to_agents_only(self):
+        # The same pattern outside agents/ is not this rule's concern (display code).
+        assert not self._run("preview = output[:100]", in_agents=False)
+
+
+@pytest.mark.lint
 class TestCE017ModelsLazyAgentImports:
     """CE017 flags only module-level agents/plugins imports inside models/."""
 
