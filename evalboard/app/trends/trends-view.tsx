@@ -12,6 +12,7 @@ import { passClassRatio } from "@/lib/pass-rate";
 import { displayedTurns, fmtTurnsCount } from "@/lib/turns";
 import {
     expectedTimeTitle,
+    fmtTimeRatioCell,
     timeCellClasses,
     timeRatio,
     tintForTimeRatio,
@@ -228,6 +229,12 @@ function HistoryTable({
                         <th className="py-1 pr-3 font-medium text-right">
                             Duration
                         </th>
+                        <th
+                            className="py-1 pr-3 font-medium text-right"
+                            title="duration ÷ this task's expected time on that harness"
+                        >
+                            vs Exp
+                        </th>
                         <th className="py-1 pr-3 font-medium text-right">
                             Cost
                         </th>
@@ -277,6 +284,14 @@ function HistoryTable({
                                 </span>
                             </td>
                             <td
+                                className={`py-1 pr-3 text-right tabular-nums ${e.matureSkipped ? "text-gray-400" : "text-gray-700"}`}
+                                title={e.matureSkipped ? MATURE_TOOLTIP : undefined}
+                            >
+                                {e.matureSkipped
+                                    ? "—"
+                                    : fmtDuration(e.durationSeconds)}
+                            </td>
+                            <td
                                 className={`py-1 pr-3 text-right tabular-nums ${
                                     e.matureSkipped
                                         ? "text-gray-400"
@@ -297,7 +312,12 @@ function HistoryTable({
                             >
                                 {e.matureSkipped
                                     ? "—"
-                                    : fmtDuration(e.durationSeconds)}
+                                    : fmtTimeRatioCell(
+                                          timeRatio(
+                                              e.durationSeconds,
+                                              e.expectedSeconds,
+                                          ),
+                                      )}
                             </td>
                             <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
                                 {e.matureSkipped

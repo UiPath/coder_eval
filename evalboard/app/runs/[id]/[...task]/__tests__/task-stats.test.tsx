@@ -11,35 +11,43 @@ function renderDuration(seconds: number | null, expected: number | null) {
 }
 
 describe("DurationStat", () => {
-    test("red text and the ratio in the tooltip when > +50% (ratio 2.4)", () => {
+    test("red ratio beside the time when > 2x expected (ratio 2.4)", () => {
         renderDuration(240, 100);
         const dd = screen.getByText("4m00s");
         expect(dd.tagName).toBe("DD");
-        expect(dd.className).toContain("text-rose-700");
-        expect(dd.className).not.toContain("bg-");
+        const ratio = screen.getByText("2.4×");
+        expect(ratio.className).toContain("text-rose-700");
+        expect(ratio.className).not.toContain("bg-");
         expect(dd).toHaveAttribute(
             "title",
             "2.40x expected · expected time: 1m40s",
         );
     });
 
-    test("yellow text between 1.5x and 2x expected (ratio 1.8)", () => {
+    test("yellow ratio between 1.5x and 2x expected (ratio 1.8)", () => {
         renderDuration(180, 100);
-        expect(screen.getByText("3m00s").className).toContain("text-amber-700");
+        expect(screen.getByText("1.8×").className).toContain("text-amber-700");
     });
 
-    test("green text at or under 1.5x expected (ratio 1.2)", () => {
+    test("green ratio at or under 1.5x expected (ratio 1.2)", () => {
         renderDuration(120, 100);
-        expect(screen.getByText("2m00s").className).toContain(
+        expect(screen.getByText("1.2×").className).toContain(
             "text-emerald-700",
         );
     });
 
-    test("an unscored task is untinted and says why", () => {
+    test("the time itself is never tinted, so the ratio carries the signal", () => {
+        renderDuration(240, 100);
+        const dd = screen.getByText("4m00s");
+        expect(dd.className).toContain("text-gray-900");
+        expect(dd.className).not.toMatch(/text-(rose|amber|emerald)-/);
+    });
+
+    test("an unscored task shows no ratio and says why", () => {
         renderDuration(120, null);
         const dd = screen.getByText("2m00s");
         expect(dd.className).toContain("text-gray-900");
-        expect(dd.className).not.toMatch(/text-(rose|amber|emerald)-/);
+        expect(screen.queryByText(/×$/)).toBeNull();
         expect(dd).toHaveAttribute(
             "title",
             "no expected time yet (needs a passing run on this harness)",

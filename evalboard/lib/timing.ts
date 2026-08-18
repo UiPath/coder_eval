@@ -105,6 +105,13 @@ export function fmtTimeRatio(ratio: number | null): string {
     return ratio == null ? "—" : `${ratio.toFixed(2)}x expected`;
 }
 
+// Ratio as a table cell: `1.8×`, or an em dash for an unscored task. One decimal,
+// not two: the baseline is a min over a handful of runs (p10 over ten), and a
+// task's own night-to-night spread is wider than the digit a second decimal adds.
+export function fmtTimeRatioCell(ratio: number | null): string {
+    return ratio == null ? "—" : `${ratio.toFixed(1)}×`;
+}
+
 // Title text for a duration cell: what the task was measured against, or why it
 // was not measured at all.
 export function expectedTimeTitle(expectedSeconds: number | null): string {

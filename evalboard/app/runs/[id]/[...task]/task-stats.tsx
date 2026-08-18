@@ -3,14 +3,15 @@ import {
     expectedTimeTitle,
     fmtTaskSeconds,
     fmtTimeRatio,
+    fmtTimeRatioCell,
     timeCellClasses,
     timeRatio,
     tintForTimeRatio,
 } from "@/lib/timing";
 
-// Duration against the time this task is expected to need. Tinted, because this
-// is where efficiency is read now; the ratio is spelled out in the hover so the
-// color is never the only signal.
+// Duration against the time this task is expected to need. The ratio is printed
+// beside the time rather than left to a hover, so the color is never the only
+// signal that a task ran slow.
 export function DurationStat({
     durationSeconds,
     expectedSeconds,
@@ -25,7 +26,7 @@ export function DurationStat({
                 Duration
             </dt>
             <dd
-                className={`mt-0.5 tabular-nums font-medium ${timeCellClasses(tintForTimeRatio(ratio))}`}
+                className="mt-0.5 tabular-nums font-medium text-gray-900"
                 title={
                     ratio != null
                         ? `${fmtTimeRatio(ratio)} · ${expectedTimeTitle(expectedSeconds)}`
@@ -33,6 +34,13 @@ export function DurationStat({
                 }
             >
                 {fmtTaskSeconds(durationSeconds)}
+                {ratio != null && (
+                    <span
+                        className={`ml-1.5 text-xs ${timeCellClasses(tintForTimeRatio(ratio))}`}
+                    >
+                        {fmtTimeRatioCell(ratio)}
+                    </span>
+                )}
             </dd>
         </div>
     );

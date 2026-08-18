@@ -5,7 +5,7 @@
 // client JS.
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { fmtTaskSeconds } from "@/lib/timing";
+import { fmtTaskSeconds, TIME_BUDGET_TOLERANCE } from "@/lib/timing";
 import { humanizeTaskId } from "@/lib/format";
 import { passBarClass, passClassRatio } from "@/lib/pass-rate";
 import { HarnessSelector } from "@/app/_components/harness-selector";
@@ -543,7 +543,7 @@ export function WatchlistView({
                                         expected
                                     </span>
                                     <span
-                                        className={`ml-auto font-semibold rounded-full px-2.5 py-0.5 text-[11px] border ${r.avgTimeRatio > 1.5 ? "bg-red-50 text-red-700 border-red-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}
+                                        className={`ml-auto font-semibold rounded-full px-2.5 py-0.5 text-[11px] border ${r.avgTimeRatio > 1 + TIME_BUDGET_TOLERANCE ? "bg-red-50 text-red-700 border-red-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}
                                     >
                                         {r.avgTimeRatio.toFixed(1)}×
                                     </span>
