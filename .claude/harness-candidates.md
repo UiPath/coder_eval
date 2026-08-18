@@ -1040,3 +1040,19 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       have to compare a docstring's claims with a command's behaviour, which is not mechanically
       decidable; the tractable subset is a sensor per claim, on the CE039 `ComputedClaim` model.
       — caught in the 2026-08-17 outcome-suite-mode plan, Phase 1 and final reviews.
+
+- [ ] **Nothing checks that a CE039 `ComputedClaim` still fails on a MUTATED table.** The
+      `headroom-ceiling` claim shipped able to pass over a table trimmed to a single row: every
+      remaining cell recomputed correctly, so the check returned `[]` while the table said the
+      opposite of what the claim exists to assert (deleting the one non-gap rule leaves "three of
+      four were unpromotable" describing three rows that are all gaps). Fixed for that claim by
+      asserting the rule set against the fixture and deriving the headline count from the cells —
+      both bespoke. The general rule is a MUTATION test over the registry: for each claim, perturb
+      each covered table (drop a body row, bump a numeric cell) and assert the check now fails.
+      Deferred rather than written because the perturbation has to be claim-shaped to be fair — a
+      dropped row is caught by the cost table's exact-label lookup and by the sizing table's
+      per-row recompute, but the halving table iterates whatever rows it finds, so a naive
+      row-drop mutation would report a gap in a pre-existing claim rather than in the harness, and
+      deciding whether that gap is real is the actual work. `covers` already gives the rule its
+      table set, so the registry half is free. — caught in the 2026-08-17 outcome-suite
+      measurement-quality plan, Phase 3 review.
