@@ -384,8 +384,9 @@ with the two `action.yml` items above — one considered change to the action's 
   `timeout is None`. Caught independently by two reviewers (`bai-uipath`, `uipreliga`)
   on the PR, both citing the exact same arithmetic mismatch. **Not promoted in this
   pass**, but a stronger candidate than most entries here: `uipreliga` proposed a
-  generic whole-tree rule (proposed as CE035, renumbered CE042 here — CE035 shipped as
-  the workflow-outputs resolver on the published-action branch) — for every sleep-loop under
+  generic whole-tree rule (proposed as CE035, renumbered CE065 here — CE035 shipped as
+  the workflow-outputs resolver on the published-action branch, and CE042 as the
+  replicate-padding seam on the optimize-skill branch) — for every sleep-loop under
   `src/coder_eval/agents/**`, assert its own cycle-count × interval either references a
   timeout-derived name or is provably below `experiments/default.yaml`'s baseline — that
   would catch this class of bug in ANY agent, not just this one (confirmed zero
@@ -395,7 +396,7 @@ with the two `action.yml` items above — one considered change to the action's 
 
 ## From 2026-08-04 published-action verification review
 
-- [ ] **CE041 — `VAR=$(… | grep …)` under `set -e` followed by an emptiness check
+- [ ] **CE061 — `VAR=$(… | grep …)` under `set -e` followed by an emptiness check
   is a dead diagnostic.** With `set -euo pipefail`, a pipeline whose `grep` matches
   nothing exits 1, so the assignment aborts the step *before* the
   `if [ -z "$VAR" ]; then echo "::error::…"` branch that was written to report it —
@@ -407,7 +408,7 @@ with the two `action.yml` items above — one considered change to the action's 
   `verify-published-action.yml`; **`actionlint` + shellcheck do NOT flag it**
   (verified against the exact snippet), so the actionlint candidate above does not
   subsume this one.
-- [ ] **CE036 — ban the skipped-green job gate.** Fail a job-level `if:` in
+- [ ] **CE062 — ban the skipped-green job gate.** Fail a job-level `if:` in
   `.github/workflows/**` whose only discriminator is an emptiness/equality test on
   `needs.<job>.outputs.<key>`. A lost output on a partial "Re-run failed jobs" resolves
   the job to SKIPPED-**green**, so an operator sees a green re-run while nothing ran.
@@ -415,14 +416,14 @@ with the two `action.yml` items above — one considered change to the action's 
   `publish-pypi`'s `if: needs.release.outputs.version != ''` (dead *and* dangerous — a
   skipped publish also skipped `promote`) was removed in the follow-up review. CE035
   catches the *typo* class; this catches the *shape*. Escape hatch: inline
-  `# noqa: CE036 — <reason>` for value-driven gates that cannot strand a release.
-- [ ] **CE037 — `if: failure()` is wrong in a job containing a `continue-on-error`
+  `# noqa: CE062 — <reason>` for value-driven gates that cannot strand a release.
+- [ ] **CE063 — `if: failure()` is wrong in a job containing a `continue-on-error`
   step.** Require `always()` (or a reference to the tolerated step's
   `steps.<id>.outcome`) on diagnostic/upload steps in such a job. Fixed by hand in
   `verify-published-action.yml`: the run dir was discarded in exactly the tolerated-red
   case the gate is designed around, because a tolerated red leaves the job green and
   `failure()` never fires. Pure YAML shape check, ~30 lines.
-- [ ] **CE040 — cap inline `run:` bodies; oversized decision logic belongs in
+- [ ] **CE064 — cap inline `run:` bodies; oversized decision logic belongs in
   `.github/scripts/`.** `verify-published-action.yml`'s parity step (~70 lines, 7
   decision points) and its e2e gate (~66 lines, switching from bash to a `python3`
   heredoc mid-step) are 10-20-branch units invisible to `make check`, `make lint`,

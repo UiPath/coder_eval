@@ -3069,7 +3069,7 @@ class TestPluginArtifacts:
         assert rows, "the outcome template ships no rows"
         # `row_split_label`, not `r.get("split")`: truthiness would report a legitimate
         # `"split": 0` as unlabelled, which is a SECOND definition of "labelled" competing
-        # with the runtime's. CE035 exists precisely to have one.
+        # with the runtime's. CE060 exists precisely to have one.
         assert all(row_split_label(r, "split") is not None for r in rows), (
             "every template row must carry a `split` — a PARTLY labelled dataset is the one bad "
             "state: --split keeps the matching rows and drops the unlabelled ones, shrinking the "
@@ -3320,7 +3320,7 @@ class TestPluginArtifacts:
         ]
         # `row_split_label`, not `r.get("split")`: truthiness would report a legitimate
         # `"split": 0` as unlabelled, which is a SECOND definition of "labelled" competing
-        # with the runtime's. CE035 exists precisely to have one.
+        # with the runtime's. CE060 exists precisely to have one.
         assert all(row_split_label(r, "split") is not None for r in rows), (
             "every template row must carry a `split` — a PARTLY labelled dataset is the one "
             "bad state: --split keeps the matching rows and drops the unlabelled ones, "
@@ -6778,8 +6778,8 @@ class TestCE036LiveVerdictContract:
 
 
 @pytest.mark.lint
-class TestCE035SplitLabelsAllOrNothing:
-    """CE035 — a dataset's split field must be on every row or on none, never on some.
+class TestCE060SplitLabelsAllOrNothing:
+    """CE060 — a dataset's split field must be on every row or on none, never on some.
 
     `optimize-skill` calls a partly-labelled dataset "the dangerous state, because it does
     not look like one", and it is right: ``--split`` keeps the rows whose label matches and
@@ -7074,9 +7074,9 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
 
 
 def _dataset_task(rows: list[dict], *, prompt: str = "${row.id}", criteria=None, split_field: str = "split"):
-    """A minimal dataset-backed task over inline rows, for the CE035/CE036 fixtures.
+    """A minimal dataset-backed task over inline rows, for the CE060/CE036 fixtures.
 
-    One builder for both rules: CE035 needs varying rows, CE036 varying prompts AND
+    One builder for both rules: CE060 needs varying rows, CE036 varying prompts AND
     criteria, and a per-class copy would fork the moment either grew a parameter.
     Inline ``rows`` deliberately — no JSONL file, so the fixtures never touch disk.
     """
@@ -9249,7 +9249,7 @@ class TestCE052TemplateTasksLoad:
     """CE052 — every task YAML under `templates/` must load through the real `load_task`.
 
     A `@pytest.mark.lint` class rather than a `BaseRule`: it reasons over YAML trees and needs the
-    loader itself, not one `.py` AST at a time — the same shape as CE035/CE036.
+    loader itself, not one `.py` AST at a time — the same shape as CE060/CE036.
 
     **What it caught.** `templates/ci-outcome-fixture/evals/activation.yaml` declared
     `suite_thresholds: {recall.yes: 0.7}` with no `dataset:` block, which

@@ -111,7 +111,7 @@ run_limits:
 # instruction in the body observable.
 #
 # The fixture lives under `templates/`, NOT beside this file, and that is deliberate:
-# anything matching `tasks/**/*.yaml` is loaded as a real TaskDefinition by CE034, CE035,
+# anything matching `tasks/**/*.yaml` is loaded as a real TaskDefinition by CE034, CE060,
 # test_tags and test_yaml_migration — and this fixture must contain an experiment file,
 # which is not a valid task. A fixture placed beside its suite would break all four.
 sandbox:

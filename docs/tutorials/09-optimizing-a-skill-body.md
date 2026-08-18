@@ -58,7 +58,7 @@ dataset:
 
 Label every row or none. A *partly* labelled dataset is the one genuinely bad state: `--split`
 keeps the rows that match and silently drops the unlabelled ones, so the run succeeds and every
-metric is computed over a smaller suite than the file suggests. `CE035` fails the build on it.
+metric is computed over a smaller suite than the file suggests. `CE060` fails the build on it.
 
 ### One fixture, and the variation lives in the prompt
 

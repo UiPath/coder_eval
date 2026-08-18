@@ -90,7 +90,7 @@ def _preview_dataset(
     # already in hand.
     rows = load_dataset_rows(task.dataset, task_file.parent)
     # `row_split_label` is the runtime's single definition of "labelled" (select_rows and
-    # CE035 call it too) — do not re-derive the rule here.
+    # CE060 call it too) — do not re-derive the rule here.
     labels = [row_split_label(r, task.dataset.split_field) for r in rows]
     labelled = [x for x in labels if x is not None]
 
