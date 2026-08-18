@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import itertools
 from abc import ABC, abstractmethod
 from typing import Annotated, Any, ClassVar, Literal, Self
 
@@ -676,23 +677,20 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if any(not tokens for tokens in self.verb_spellings):
             msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
             raise ValueError(msg)
-        spellings = self.verb_spellings
-        for outer, first in enumerate(spellings):
-            for inner, second in enumerate(spellings):
-                if outer >= inner:
-                    continue
-                if first == second:
-                    msg = f"cli_called verb_any_of lists {' '.join(first)!r} twice"
-                    raise ValueError(msg)
-                for shorter, longer in ((first, second), (second, first)):
-                    if longer[: len(shorter)] == shorter:
-                        msg = (
-                            f"cli_called verb_any_of entry {' '.join(shorter)!r} is a prefix of "
-                            f"{' '.join(longer)!r}; the shorter one already accepts every invocation "
-                            "the longer one does, so drop the longer entry or list only the verbs "
-                            "you mean."
-                        )
-                        raise ValueError(msg)
+        for first, second in itertools.combinations(self.verb_spellings, 2):
+            if first == second:
+                msg = f"cli_called verb_any_of lists {' '.join(first)!r} twice"
+                raise ValueError(msg)
+            # Sorting by length is total here: two DISTINCT entries of equal length
+            # cannot prefix each other, since an equal-length prefix is the same list.
+            shorter, longer = sorted((first, second), key=len)
+            if longer[: len(shorter)] == shorter:
+                msg = (
+                    f"cli_called verb_any_of entry {' '.join(shorter)!r} is a prefix of "
+                    f"{' '.join(longer)!r}; the shorter one already accepts every invocation the "
+                    "longer one does, so drop the longer entry or list only the verbs you mean."
+                )
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
