@@ -559,6 +559,128 @@ def _check_execution_sign_resolution(text: str, tmp: Path) -> list[str]:
     return failures
 
 
+# --- claim 5: the headroom-ceiling table ------------------------------------
+
+_HEADROOM_SIGNATURE = "rule | rows failing | headroom | ceiling | against the 0.0255 floor"
+_FLOOR_IN_HEADER = re.compile(r"(\d+\.\d+)")
+
+
+def _check_headroom_ceilings(text: str, _tmp: Path) -> list[str]:
+    """The Step 7 ceiling table, RECOMPUTED from the code and the round it was measured on.
+
+    A reader decides what to spend on from this table. It claims three of four rules were
+    unpromotable by arithmetic, and if the formula drifts that advice silently INVERTS — the
+    cheapest possible mistake to make and the most expensive to notice, because every number
+    downstream keeps agreeing with itself.
+
+    Three things are checked, and they fail on different edits:
+
+    * each cell against :func:`~coder_eval.optimize_fronts.headroom_ceiling` over the real vector,
+      so the table cannot drift from the estimator OR from the round;
+    * the ceiling cell's own expression, evaluated, so a hand-edited number fails;
+    * the DENOMINATOR of that expression against the suite's full row count — the single property
+      the whole block rests on, since dividing by the rows that failed reports a per-row lift and
+      makes every rule look promotable.
+    """
+    from coder_eval.optimize_fronts import headroom_ceiling
+    from tests.test_optimize_gate import HEADROOM_ROW_SCORES, HEADROOM_RULE_ROWS
+
+    table = next((t for t in parse_markdown_tables(text) if table_signature(t) == _HEADROOM_SIGNATURE), None)
+    if table is None:
+        return [f"the ceiling table ({_HEADROOM_SIGNATURE}) is gone or changed shape — nothing to check"]
+
+    failures: list[str] = []
+    for token, why in (
+        ("suite gap, not a hypothesis", "the rule the table exists to state — a candidate cannot fix a gap"),
+        ("3 * floor * n_rows", "the inverse sizing rule: how much headroom a rule needs to be worth writing for"),
+    ):
+        if token not in _ascii(" ".join(text.split())):
+            failures.append(f"the skill no longer says {token!r} — {why}")
+
+    # The table must cover EVERY rule the round attributed, and the prose's headline count must
+    # follow from the cells. Without this the table can be trimmed to a single row — deleting the
+    # one rule that is NOT a gap — and every remaining cell still recomputes correctly, leaving the
+    # claim green over a table that says the opposite of what it was written to say.
+    listed = [_ascii(row[0]).strip("` ") for row in table.rows if row]
+    if set(listed) != set(HEADROOM_RULE_ROWS):
+        failures.append(
+            f"the ceiling table lists {sorted(listed)}; the measured round attributed "
+            f"{sorted(HEADROOM_RULE_ROWS)}. A trimmed table recomputes cell by cell and still lies."
+        )
+
+    floor_match = _FLOOR_IN_HEADER.search(table.header[4] if len(table.header) > 4 else "")
+    if floor_match is None:
+        return [*failures, f"the ceiling table's last column no longer names the floor: {table.header}"]
+    floor = float(floor_match.group(1))
+    n_rows = len(HEADROOM_ROW_SCORES)
+
+    for row in table.rows:
+        if len(row) != len(table.header):
+            failures.append(f"the ceiling row {row!r} does not carry every column")
+            continue
+        rule = _ascii(row[0]).strip("` ")
+        if rule not in HEADROOM_RULE_ROWS:
+            failures.append(f"the ceiling table names rule {rule!r}, which the measured round did not attribute")
+            continue
+        want = headroom_ceiling(HEADROOM_ROW_SCORES, rule=rule, rows=HEADROOM_RULE_ROWS[rule])
+
+        if int(_ascii(row[1]).strip("` ")) != want.n_failing:
+            failures.append(f"ceiling table {rule}: rows-failing reads {row[1]}, the round has {want.n_failing}")
+        if float(_ascii(row[2]).strip("` ")) != round(want.headroom, 3):
+            failures.append(f"ceiling table {rule}: headroom reads {row[2]}, recomputes to {want.headroom:.3f}")
+
+        spans = _spans(row[3])
+        if not spans:
+            failures.append(f"ceiling table {rule}: the ceiling cell states no `headroom / n_rows` expression")
+            continue
+        # The denominator, checked SYMBOLICALLY before the value: dividing by the rows that failed
+        # is the wrong-but-plausible edit, and it yields a bigger number that still "adds up".
+        denominator = spans[0].split("/")[-1].strip()
+        if denominator != str(n_rows):
+            failures.append(
+                f"ceiling table {rule}: the ceiling divides by {denominator!r}, not by the suite's "
+                f"{n_rows} rows. A subset denominator is a per-row LIFT and makes every rule look promotable"
+            )
+        if round(evaluate_expression(spans[0], {}), 4) != round(want.ceiling, 4):
+            failures.append(f"ceiling table {rule}: `{spans[0]}` does not evaluate to the computed {want.ceiling:.4f}")
+
+        stated = _ascii(row[3]).split("=")[-1].strip("` ")
+        if float(stated) != round(want.ceiling, 4):
+            failures.append(f"ceiling table {rule}: ceiling reads {stated}, recomputes to {want.ceiling:.4f}")
+
+        # `_ascii` rewrites the U+00D7 the cell is written with, so the multiplier is parsed by
+        # LEADING NUMBER rather than by splitting on a character the normalizer moves.
+        ratio_match = _FLOOR_IN_HEADER.match(_ascii(row[4]).strip())
+        if ratio_match is None:
+            failures.append(f"ceiling table {rule}: {row[4]!r} states no multiple of the floor")
+            continue
+        ratio = float(ratio_match.group(1))
+        if round(want.ceiling / floor, 2) != ratio:
+            failures.append(
+                f"ceiling table {rule}: stated {ratio}x the floor, recomputes to {want.ceiling / floor:.2f}x"
+            )
+        # The verdict half. A gap and a live rule call for opposite next actions, so a row whose
+        # ratio and whose words disagree is worse than one with a stale number.
+        if (want.ceiling < floor) != ("gap" in row[4].casefold()):
+            failures.append(f"ceiling table {rule}: {row[4]!r} contradicts its own {want.ceiling / floor:.2f}x")
+
+    # The surrounding prose's headline number, DERIVED rather than matched: "three of those four"
+    # is the sentence a reader acts on, and it is a fact about the cells above it.
+    gaps = sum(
+        1
+        for rule, rows in HEADROOM_RULE_ROWS.items()
+        if headroom_ceiling(HEADROOM_ROW_SCORES, rule=rule, rows=rows).ceiling < floor
+    )
+    words = {1: "one", 2: "two", 3: "three", 4: "four"}
+    claim = f"{words.get(gaps, gaps)} of those {words.get(len(HEADROOM_RULE_ROWS), len(HEADROOM_RULE_ROWS))}"
+    if claim not in " ".join(text.split()).casefold():
+        failures.append(
+            f"the prose beside the ceiling table no longer says {claim!r} candidates were "
+            f"unpromotable — the cells above it recompute to {gaps} gaps"
+        )
+    return failures
+
+
 CLAIMS: list[ComputedClaim] = [
     ComputedClaim(
         id="cost-table",
@@ -601,6 +723,17 @@ CLAIMS: list[ComputedClaim] = [
         ),
         covers=(),
         check=_check_interval_from_one_run_dir,
+    ),
+    ComputedClaim(
+        id="headroom-ceiling",
+        surface=SKILL,
+        why=(
+            "the table a reader decides what to spend on. It claims three of four rules were "
+            "unpromotable by arithmetic; if the formula drifts, that advice silently inverts — and "
+            "every number downstream keeps agreeing with itself."
+        ),
+        covers=(_HEADROOM_SIGNATURE,),
+        check=_check_headroom_ceilings,
     ),
     ComputedClaim(
         id="execution-sign-resolution",

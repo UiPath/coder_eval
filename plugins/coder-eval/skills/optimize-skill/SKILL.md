@@ -727,6 +727,76 @@ finding that actually tells you what to write. If the repository has sibling ski
 suite has no sibling rows, say the sibling half of the gate cannot be evaluated, and offer
 to hand back to `/coder-eval:check-skill` to add them.
 
+### Can this suite resolve the improvement at all? — execution track
+
+**Read this before writing a single candidate.** A candidate for rule `R` can only gain where the
+incumbent lost, so the rows failing `R` bound the whole effect — and the suite mean the gate
+compares divides that by **every** row, including the ones already at ceiling:
+
+    max_effect(R) = SUM over rows failing R of (1 − score)  /  n_rows
+
+If that number is below the suite's noise floor, **the rule is a suite gap, not a hypothesis.** No
+wording of a candidate can promote it, and the remedy is rows that fail the rule, not more
+candidates. Measured on a real 15-row round against a floor of 0.0255:
+
+| rule | rows failing | headroom | ceiling | against the 0.0255 floor |
+|---|---|---|---|---|
+| `R1` | 2 | 0.450 | `0.450 / 15` = 0.0300 | 1.18× — the only rule worth a candidate |
+| `R6` | 2 | 0.334 | `0.334 / 15` = 0.0223 | 0.87× — a suite gap |
+| `R7` | 2 | 0.286 | `0.286 / 15` = 0.0191 | 0.75× — a suite gap |
+| `R8` | 1 | 0.143 | `0.143 / 15` = 0.0095 | 0.37× — a suite gap |
+
+Three of those four candidates were written, run and gated anyway, at roughly $40 — off a baseline
+and a noise floor that had **already been paid for**. The arithmetic was available before a word of
+any of them was written.
+
+The inverse is the sizing rule: a rule needs about `3 * floor * n_rows` of headroom for a
+comfortable margin, because a candidate cannot be expected to capture *all* of a rule's headroom
+and a ceiling merely at the floor demands a perfect one. Note which way `n_rows` points — **every
+row that PASSES a rule makes that rule harder to promote**, which is why one row per rule is the
+worst possible suite shape and why `/coder-eval:task` tells an author to write depth instead.
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_execution import measure_execution_noise_floor, resolve_model
+from coder_eval.optimize_fronts import arm_row_scores, headroom_ceiling
+from coder_eval.optimize_load import load_arm_rows, rule_row_map
+from coder_eval.optimize_store import UNRESOLVED_MODEL, load_measurements
+from coder_eval.reports_optimize import render_headroom_ceilings
+
+run_dirs = [Path("<runs>/baseline-1")]
+suite_id = "<the suite's task_id>"
+grader_index = 2  # the grader's POSITION in the suite's success_criteria, not its name
+
+arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=suite_id)
+rows = load_arm_rows(run_dirs, "incumbent", suite_id)
+rule_map = rule_row_map(rows, grader_index)
+
+# `None` at the first round is expected — one replicate cannot split against itself. Re-print this
+# block once the control arm has given the suite a second replicate.
+floor = measure_execution_noise_floor(
+    run_dirs=run_dirs, variant_id="incumbent", suite_id=suite_id,
+    model=resolve_model(rows) or UNRESOLVED_MODEL,
+    measurements=load_measurements(Path(".optimize-skill/<skill>/measurements.json")),
+)
+ceilings = [headroom_ceiling(arms[0].row_scores, rule=rule, rows=rule_map[rule]) for rule in sorted(rule_map)]
+# No attribution: fall back to the SUITE-level ceiling rather than printing an empty table, which
+# reads as "no rule has any headroom" when it means "nobody asked".
+ceilings = ceilings or [headroom_ceiling(arms[0].row_scores)]
+print(render_headroom_ceilings(ceilings, None if floor is None else floor.mde))
+```
+
+**If `rule_map` comes back empty, attribution is unavailable** — an older grader, or a
+`grader_index` pointing at a different criterion. Say so, and fall back to the suite-level ceiling
+— the snippet's last two lines already do it, and the block then reports one row for the whole
+suite. Rule attribution comes from the grader's `RULES` line; `/coder-eval:task` writes it from the
+Step 2.5 rule inventory.
+
+**It advises and never blocks.** The attribution is authored, so a mistyped rule id moves rows
+between rules — and a wrong annotation must not be able to veto a real promotion. What the block is
+for is telling you what to stop paying for.
+
 ## Step 8 — Propose 3–5 candidates
 
 **Generate them against `${CLAUDE_PLUGIN_ROOT}/reference/proposal-prompt.md`** — the shape of the
@@ -1295,8 +1365,15 @@ arms = arm_row_scores(
     suite_id="<the suite's task_id>",
     criterion_index=0,  # omit on the execution track to read each row's weighted_score
 )
-print(render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms)))
+print(render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms), n_replicates=1))
 ```
+
+**`n_replicates` is not decoration — Stage A is a ranking device, not a measurement.** Pass the
+number of replicates each cell averages (Stage A is one pass, so `1`), and at one the block says
+so in the output rather than leaving it to be remembered. Measured on a real round: a
+single-replicate matrix reported **+0.0392 against a 0.0255 floor** and pushed the incumbent off
+the Pareto front, while the replicated gate over the same rows returned **0.000, p = 0.9977**. The
+matrix was not wrong to rank as it did; it was read as if it had measured something.
 
 The **Pareto front** is the arms nothing else beat everywhere. Read it as the shortlist rather
 than the ranking: an arm on the front was not beaten everywhere by any other arm, and an arm off it
@@ -1403,6 +1480,49 @@ less sits on this front by construction** — nothing dominates an arm nobody is
 cost. The emptied-body control is the clearest case, so if you add it to `variant_ids` to see where
 it lands, expect it on the front and do not read that as a result. The snippet above lists only the
 incumbent and the candidates, which is the comparison you are actually making.
+
+### Read the per-row replicates before you read the verdict — execution track
+
+A suite mean can hide the two findings that matter most, and the verdict block has no channel for
+either. Print the per-row replicate values beside it:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_load import load_arm_rows
+from coder_eval.reports_optimize import render_row_replicates
+
+suite_id = "<the suite's task_id>"
+gate_dirs = [Path(f"<runs>/round1-gate-{n}") for n in (1, 2, 3)]
+grader_index = 2  # the criterion whose score you are comparing; omit the index to read weighted_score
+
+
+def replicates(variant: str) -> dict[str, list[float]]:
+    """Row id -> that arm's per-replicate scores. The CALLER chooses the criterion."""
+    rows = load_arm_rows(gate_dirs, variant, suite_id)
+    return {
+        row_id: [r.success_criteria_results[grader_index].score for r in results]
+        for row_id, results in sorted(rows.items())
+    }
+
+
+print(render_row_replicates(replicates("incumbent"), replicates("<the candidate>")))
+```
+
+Two readings the mean cannot give you:
+
+- **A row with zero variance on BOTH arms and a non-zero delta is a reproducible behavioural
+  change** — the most informative row in the run, and precisely what a merge candidate should be
+  built from. Measured: one row went `[0.76, 0.76, 0.76]` → `[1.00, 1.00, 1.00]` (+0.238) while
+  another went `[0.86, 0.86, 0.86]` → `[0.59, 0.59, 0.59]` (−0.272). They cancelled to a suite
+  delta of **+0.0001**, and "the difference is noise" is the opposite of what happened.
+- **A row whose mean delta is exactly 0.0 is dead for this comparison.** The block counts them. A
+  suite that is mostly dead rows resolves nothing however many rows it has, and that is a suite
+  problem to fix in `/coder-eval:task`, not a candidate problem to fix in Step 8.
+
+Rows present on one arm only render as holes and never as zeros, and arms carrying different
+replicate counts on a row are named rather than silently paired — a row weighted 3-v-2 has
+reweighted the comparison on its own.
 
 ### Stage B, activation track — run the gate, do not do the arithmetic
 

@@ -10,6 +10,7 @@ import ast
 import inspect
 import json
 import logging
+import math
 import random
 import re
 import shutil
@@ -70,9 +71,11 @@ from coder_eval.optimize_execution import (
 )
 from coder_eval.optimize_fronts import (
     CostQualityPoint,
+    RuleCeiling,
     arm_row_scores,
     cost_quality_front,
     cost_quality_points,
+    headroom_ceiling,
     instance_best_front,
     pareto_front,
 )
@@ -96,10 +99,12 @@ from coder_eval.optimize_load import (
     _median,
     _row_cost_levels,
     _row_costs,
+    _rules_verdicts,
     _wrong_path_reason,
     load_arm_rows,
     load_suite_rows,
     read_split_provenance,
+    rule_row_map,
 )
 from coder_eval.optimize_search import (
     SearchComparison,
@@ -110,13 +115,17 @@ from coder_eval.optimize_search import (
 )
 from coder_eval.optimize_store import UNRECORDED_SPLIT, record_noise_floor
 from coder_eval.reports_optimize import (
+    CEILING_MARGIN,
     COST_FRONT_ADVISORY,
+    SINGLE_REPLICATE_CAVEAT,
     _front_summary,
     _render_checks,
     render_cost_quality,
     render_execution_markdown,
+    render_headroom_ceilings,
     render_markdown,
     render_row_matrix,
+    render_row_replicates,
     render_search_comparison,
 )
 from coder_eval.reports_stats import (
@@ -976,7 +985,7 @@ def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
     # TWO modules since the split, and the pair is asserted whole rather than per-module: what
     # matters is that these are the ONLY names it defers, wherever they now live.
     assert deferred == {
-        "coder_eval.optimize_fronts": {"CostQualityPoint"},
+        "coder_eval.optimize_fronts": {"CostQualityPoint", "RuleCeiling"},
         "coder_eval.optimize_search": {"SearchComparison"},
     }, deferred
 
@@ -3766,6 +3775,97 @@ class TestInstanceBestFront:
         assert "Instance-best" not in render_row_matrix(arms, pareto_front(arms))
 
 
+class TestRowMatrixReplicateLabelling:
+    def _arm(self, name: str, **rows: float) -> ArmRowScores:
+        return ArmRowScores(variant_id=name, row_scores=rows)
+
+    def _arms(self) -> list[ArmRowScores]:
+        return [self._arm("incumbent", r1=0.5, r2=0.5), self._arm("cand-a", r1=1.0, r2=0.4)]
+
+    def test_row_matrix_unchanged_without_n_replicates(self) -> None:
+        # Byte-identical to today's output when the new keyword is omitted, so the shipped call
+        # site and its pinned renders are untouched. The same contract `instance_best` has.
+        arms = self._arms()
+        assert render_row_matrix(arms, pareto_front(arms)) == render_row_matrix(
+            arms, pareto_front(arms), n_replicates=None
+        )
+        assert "replicate" not in render_row_matrix(arms, pareto_front(arms))
+
+    def test_row_matrix_warns_at_single_replicate(self) -> None:
+        # A Stage A matrix over one draw per cell reads exactly like a measurement. Measured: it
+        # reported +0.0392 against a 0.0255 floor, and the replicated gate returned p = 0.9977.
+        arms = self._arms()
+        text = render_row_matrix(arms, pareto_front(arms), n_replicates=1)
+        assert SINGLE_REPLICATE_CAVEAT in text
+        assert "RANKS, it does not MEASURE" in text
+
+    def test_row_matrix_no_warning_at_three(self) -> None:
+        arms = self._arms()
+        text = render_row_matrix(arms, pareto_front(arms), n_replicates=3)
+        assert SINGLE_REPLICATE_CAVEAT not in text
+        assert "mean of 3 replicate(s)" in text
+
+    def test_the_caveat_is_declared_once_and_read_by_the_skill(self) -> None:
+        # The MATERIALITY_FLOOR / COST_FRONT_ADVISORY shape: the sensor IMPORTS the constant rather
+        # than retyping it, so the claim cannot exist in two files at two vintages.
+        skill = (
+            Path(__file__).parent.parent / "plugins" / "coder-eval" / "skills" / "optimize-skill" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert "ranking device" in skill, "the skill no longer says Stage A ranks rather than measures"
+        assert "0.9977" in SINGLE_REPLICATE_CAVEAT
+
+
+class TestRowReplicates:
+    def test_row_replicates_flags_zero_variance_rows(self) -> None:
+        """The most informative rows in a run, and the ones a suite mean destroys.
+
+        The real pair: +0.238 on one row and -0.272 on another, both perfectly reproducible,
+        cancelling to a suite delta of +0.0001. "The difference is noise" is the opposite of what
+        happened there, and no verdict block can express it.
+        """
+        text = render_row_replicates(
+            {"up": [0.76, 0.76, 0.76], "down": [0.86, 0.86, 0.86]},
+            {"up": [1.00, 1.00, 1.00], "down": [0.59, 0.59, 0.59]},
+        )
+        assert "Zero variance on BOTH arms" in text
+        assert "down, up" in text
+        assert "+0.240" in text and "-0.270" in text
+
+    def test_row_replicates_single_replicate_shows_undefined_not_zero(self) -> None:
+        # A spread over one draw is UNDEFINED, not zero. Printing 0.0 would fire the
+        # zero-variance flag on every row of a single-replicate run, where it means nothing.
+        text = render_row_replicates({"r1": [0.5]}, {"r1": [1.0]})
+        assert "spread" not in text
+        assert "Zero variance" not in text
+
+    def test_row_replicates_counts_dead_rows(self) -> None:
+        text = render_row_replicates({"a": [0.5, 0.5], "b": [1.0, 0.0]}, {"a": [0.5, 0.5], "b": [0.0, 1.0]})
+        assert "2 row(s) dead for this comparison" in text
+        assert "a, b" in text
+
+    def test_row_replicates_treats_one_armed_row_as_a_hole(self) -> None:
+        # A hole is never a zero — the convention ArmRowScores and the row matrix already use. A
+        # row counted at 0.0 would fabricate the largest delta in the table.
+        text = render_row_replicates({"only-incumbent": [0.5]}, {})
+        assert "(hole)" in text
+        assert "dead for this comparison" not in text
+
+    def test_row_replicates_reports_unequal_replicate_counts(self) -> None:
+        text = render_row_replicates({"r1": [1.0, 1.0, 1.0]}, {"r1": [0.5, 0.5]})
+        assert "r1 (3 v 2)" in text
+        assert "shifts the comparison on its own" in text
+
+    def test_row_replicates_with_no_rows(self) -> None:
+        assert render_row_replicates({}, {}) == "_No rows to compare._"
+
+    def test_a_zero_delta_row_is_dead_but_not_reproducible(self) -> None:
+        # Both flags key on the same row and would be contradictory together: a row that did not
+        # move is not a reproducible CHANGE, whatever its variance.
+        text = render_row_replicates({"a": [0.5, 0.5]}, {"a": [0.5, 0.5]})
+        assert "dead for this comparison" in text
+        assert "Zero variance on BOTH arms" not in text
+
+
 def _cost_quality_arm(tmp_path: Path, variant: str, per_row: dict[str, tuple[float, float | None]]) -> Path:
     """One arm's rows as (weighted_score, cost) pairs. A None cost records no cost at all."""
     run_dir = tmp_path / "run-0"
@@ -3992,6 +4092,257 @@ class TestOneRowCostDefinition:
     def test_an_empty_cluster_is_absent_not_zero(self) -> None:
         # `mean([])` is 0.0, so an unfiltered empty cluster would read as "this row cost nothing".
         assert _row_cost_levels([[1.0], [], [3.0]]) == [1.0, 3.0]
+
+
+# ---------------------------------------------------------------------------
+# The headroom ceiling — what a suite can resolve, before a candidate is written
+# ---------------------------------------------------------------------------
+
+
+# The real vector from `runs/baseline-3` (Sonnet, 15 rows) and the rule attribution measured with
+# it, NOT a fixture reverse-engineered to hit the answer. It is the round the ceiling was derived
+# from, and `tests/lint/computed_claims.py` imports both names to check the skill's Step 7 table
+# against the code — so the fixture, the function and the prose cannot drift apart in pairs.
+HEADROOM_ROW_SCORES = {
+    "budget-variance": 1.000,
+    "clean-inventory": 1.000,
+    "cumulative-revenue": 1.000,
+    "dept-cost-ranking": 0.857,
+    "extend-existing-budget": 0.857,
+    "growth-projection": 0.833,
+    "loaded-cost": 0.857,
+    "opex-ratio": 1.000,
+    "order-value-lookup": 1.000,
+    "region-product-pivot": 1.000,
+    "sales-summary": 1.000,
+    "sku-labels": 0.750,
+    "tier-classification": 1.000,
+    "top-regions": 0.800,
+    "two-sheet-model": 0.833,
+}
+HEADROOM_RULE_ROWS = {
+    "R1": {"sku-labels", "top-regions"},
+    "R6": {"growth-projection", "two-sheet-model"},
+    "R7": {"dept-cost-ranking", "loaded-cost"},
+    "R8": {"extend-existing-budget"},
+}
+# The floor that round measured, and what the ceilings were compared against.
+HEADROOM_FLOOR = 0.0255
+
+
+def _grader_result(row_id: str, score: float, rules: dict[str, str] | None, *, line: str | None = None):
+    """One replicate whose grader criterion carries a `RULES` line, wrapped as `run_command` does.
+
+    The details block mirrors `criteria/run_command.py::_build_exec_details`: the grader's stdout
+    is embedded and a `Stderr:` section follows it, so the `RULES` line is NOT the details' last
+    line. A reader that took `splitlines()[-1]` would find nothing on a real run directory.
+    """
+    if line is None:
+        line = "RULES " + json.dumps(rules or {}, sort_keys=True, separators=(",", ":"))
+    stdout = f"{score:.4f}\n1/1 applicable checks passed\n{line}" if line else f"{score:.4f}\n"
+    details = f"Score: {score:.3f}\nCommand: verify.py\nExit code: 0 (expected: 0)\nStdout:\n{stdout}\nStderr: (empty)"
+    return EvaluationResult(
+        task_id=f"{SUITE}/{row_id}",
+        task_description="row",
+        agent_type="claude-code",
+        started_at=datetime(2026, 8, 17, 12, 0, 0),
+        final_status=FinalStatus.SUCCESS,
+        iteration_count=1,
+        success_criteria_results=[
+            CriterionResult(
+                criterion_type="run_command", description=f"grader for {row_id}", score=score, details=details
+            )
+        ],
+    )
+
+
+class TestHeadroomCeiling:
+    def test_headroom_ceiling_uses_full_row_count_as_denominator(self) -> None:
+        """THE load-bearing property: a 2-row subset of a 15-row suite divides by 15.
+
+        Dividing by the subset reports a per-row LIFT, which makes every rule look promotable —
+        and the gate compares a suite MEAN, over every row including the ones at ceiling.
+        """
+        ceiling = headroom_ceiling(HEADROOM_ROW_SCORES, rule="R1", rows=HEADROOM_RULE_ROWS["R1"])
+        assert ceiling.n_failing == 2
+        assert ceiling.headroom == pytest.approx(0.45)
+        assert ceiling.ceiling == pytest.approx(0.45 / 15)
+        # The subset-denominator reading, spelled out so the difference is a number rather than an
+        # argument: it is 7.5x larger, and it is above the floor rather than barely at it.
+        assert ceiling.ceiling != pytest.approx(0.45 / 2)
+
+    @pytest.mark.parametrize(
+        ("rule", "expected"),
+        [("R1", 0.0300), ("R6", 0.0223), ("R7", 0.0191), ("R8", 0.0095)],
+    )
+    def test_headroom_ceiling_reproduces_the_measured_round(self, rule: str, expected: float) -> None:
+        # The round this whole block exists because of: three of these four rules could not clear
+        # the 0.0255 floor however good a candidate was, and about $40 was spent gating them.
+        ceiling = headroom_ceiling(HEADROOM_ROW_SCORES, rule=rule, rows=HEADROOM_RULE_ROWS[rule])
+        assert round(ceiling.ceiling, 4) == expected
+        assert (ceiling.ceiling >= HEADROOM_FLOOR) is (rule == "R1")
+
+    def test_headroom_ceiling_empty_rows_is_zero(self) -> None:
+        assert headroom_ceiling({}) == RuleCeiling(rule="", headroom=0.0, ceiling=0.0, n_failing=0, n_dropped=0)
+
+    def test_an_empty_subset_is_not_the_whole_suite(self) -> None:
+        # `rows=set()` and `rows=None` are DIFFERENT, and the difference is a real authoring path:
+        # a rule that failed nowhere is ABSENT from `rule_row_map`, so `rule_map.get(rule)` is
+        # None. Reading that as "every row" would report the suite's ceiling under that rule's name
+        # — the exact inverse of the truth, which is that the rule has no headroom at all.
+        assert headroom_ceiling(HEADROOM_ROW_SCORES, rule="R9", rows=set()).ceiling == 0.0
+        assert headroom_ceiling(HEADROOM_ROW_SCORES).ceiling > 0.0
+
+    def test_headroom_ceiling_counts_dropped_unknown_ids(self) -> None:
+        # A stale rule map naming rows this run did not produce must not inflate the ceiling.
+        ceiling = headroom_ceiling(HEADROOM_ROW_SCORES, rule="R1", rows={"sku-labels", "a-row-that-moved"})
+        assert ceiling.n_failing == 1 and ceiling.n_dropped == 1
+        assert ceiling.headroom == pytest.approx(0.25)
+
+    def test_headroom_ceiling_excludes_non_finite_scores(self) -> None:
+        # `_finite_scores`' convention, applied to a bare mapping: a NaN is ABSENT, so it neither
+        # poisons the sum (every arithmetic op on it returns NaN) nor sits in the denominator.
+        scores = {"a": 0.5, "b": float("nan"), "c": 1.0}
+        ceiling = headroom_ceiling(scores)
+        assert math.isfinite(ceiling.ceiling)
+        assert ceiling.n_failing == 2 and ceiling.n_dropped == 1
+        assert ceiling.ceiling == pytest.approx(0.5 / 2)
+
+    def test_headroom_ceiling_clamps_scores_above_max(self) -> None:
+        # A mis-scaled score must not cancel real headroom elsewhere — the row contributes 0.0,
+        # never a negative that quietly subtracts from another row's room.
+        assert headroom_ceiling({"a": 1.5, "b": 0.5}).headroom == pytest.approx(0.5)
+
+    def test_max_score_scales_the_headroom(self) -> None:
+        # A suite whose grader tops out below 1.0 has less room than its scores suggest.
+        assert headroom_ceiling({"a": 0.5}, max_score=0.8).headroom == pytest.approx(0.3)
+
+
+class TestRuleRowMap:
+    def test_rule_row_map_inverts_the_rules_line(self) -> None:
+        rows = {
+            "r1": [_grader_result("r1", 0.5, {"R1": "fail", "R2": "pass"})],
+            "r2": [_grader_result("r2", 1.0, {"R1": "pass", "R2": "pass"})],
+            "r3": [_grader_result("r3", 0.0, {"R2": "fail", "R3": "na"})],
+        }
+        assert rule_row_map(rows, 0) == {"R1": {"r1"}, "R2": {"r3"}}
+
+    def test_rule_row_map_any_replicate_failure_marks_the_row(self) -> None:
+        # Matches the grader's own any-check rule, and for the same reason: both point at counting
+        # the MOST rows as failing, which is what makes the ceiling an upper bound.
+        rows = {
+            "r1": [
+                _grader_result("r1", 1.0, {"R1": "pass"}),
+                _grader_result("r1", 0.5, {"R1": "fail"}),
+                _grader_result("r1", 1.0, {"R1": "pass"}),
+            ]
+        }
+        assert rule_row_map(rows, 0) == {"R1": {"r1"}}
+
+    def test_rule_row_map_returns_empty_without_a_rules_line(self) -> None:
+        # A pre-contract grader. The caller's remedy is the suite-level ceiling, and Step 7 says so
+        # rather than printing an empty table that reads as "no rule has any headroom".
+        rows = {"r1": [_grader_result("r1", 0.5, None, line="")]}
+        assert rule_row_map(rows, 0) == {}
+
+    def test_rule_row_map_reads_the_line_out_of_a_run_command_details_block(self) -> None:
+        # The `RULES` line is the last line of the GRADER's stdout, never of the criterion's
+        # details — `run_command` appends a `Stderr:` section after it. A reader taking the details'
+        # last line finds nothing on every real run directory.
+        details = _grader_result("r1", 0.5, {"R1": "fail"}).success_criteria_results[0].details or ""
+        assert not details.splitlines()[-1].startswith("RULES ")
+        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 0) == {"R1": {"r1"}}
+
+    def test_an_empty_attribution_is_not_a_missing_one(self, caplog) -> None:
+        # `RULES {}` is a CURRENT grader that attributed nothing; a missing line is an old one.
+        # Only the second is warned about, because only the second has a remedy.
+        with caplog.at_level(logging.WARNING):
+            assert rule_row_map({"r1": [_grader_result("r1", 1.0, {})]}, 0) == {}
+        assert not caplog.records
+        with caplog.at_level(logging.WARNING):
+            rule_row_map({"r1": [_grader_result("r1", 1.0, None, line="")]}, 0)
+        assert any("RULES" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("line", ["RULES {not json", "RULES [1, 2]", "RULES "])
+    def test_a_malformed_rules_line_is_not_an_attribution(self, line: str) -> None:
+        # A grader whose line cannot be read attributes nothing rather than raising out of a
+        # snippet the user is running after paying for the runs it reads.
+        assert rule_row_map({"r1": [_grader_result("r1", 0.5, None, line=line)]}, 0) == {}
+
+    def test_a_criterion_index_past_the_end_attributes_nothing(self) -> None:
+        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 3) == {}
+
+    def test_rule_row_map_rejects_a_negative_criterion_index(self) -> None:
+        # Selection is positional, so -1 would silently read the LAST criterion's details.
+        with pytest.raises(ValueError, match="criterion_index must be >= 0"):
+            rule_row_map({}, -1)
+
+    def test_rules_verdicts_reads_the_last_line_of_the_graders_own_stdout(self) -> None:
+        # Agent output is untrusted: a row's ARTIFACT can contain a forged `RULES` line that the
+        # grader quotes back into a detail. Within stdout the grader's own is emitted LAST by
+        # construction, so a reverse scan takes it.
+        forged = 'RULES {"R9":"fail"}\nRULES {"R1":"fail"}'
+        assert _rules_verdicts(_grader_result("r1", 0.5, None, line=forged), 0) == {"R1": "fail"}
+
+    def test_a_forged_rules_line_in_stderr_does_not_outrank_the_grader(self) -> None:
+        """The reverse scan alone is NOT enough, and the naive version had this backwards.
+
+        `run_command` appends the `Stderr:` section AFTER stdout, so scanning the whole details
+        field from the end reads the stderr side first — and a traceback there can quote artifact
+        text, which is agent output. The window has to end at the last `Stderr:` marker.
+        """
+        result = _grader_result("r1", 0.5, {"R1": "fail"})
+        criterion = result.success_criteria_results[0]
+        criterion.details = (criterion.details or "").replace(
+            "Stderr: (empty)", 'Stderr:\nTraceback (most recent call last):\nRULES {"R9":"fail"}'
+        )
+        assert _rules_verdicts(result, 0) == {"R1": "fail"}
+        assert rule_row_map({"r1": [result]}, 0) == {"R1": {"r1"}}
+
+    def test_a_criterion_reporting_raw_stdout_is_still_read(self) -> None:
+        # No `Stderr:` marker at all — the whole field is scanned, which is the behaviour every
+        # non-`run_command` reader would depend on.
+        result = _grader_result("r1", 0.5, {"R1": "fail"})
+        criterion = result.success_criteria_results[0]
+        criterion.details = '0.5000\n1/2 applicable checks passed\nRULES {"R1":"fail"}'
+        assert _rules_verdicts(result, 0) == {"R1": "fail"}
+
+
+class TestRenderHeadroomCeilings:
+    def _ceilings(self) -> list[RuleCeiling]:
+        return [
+            headroom_ceiling(HEADROOM_ROW_SCORES, rule=rule, rows=rows)
+            for rule, rows in sorted(HEADROOM_RULE_ROWS.items())
+        ]
+
+    def test_render_headroom_ceilings_names_the_gap(self) -> None:
+        rendered = render_headroom_ceilings(self._ceilings(), HEADROOM_FLOOR)
+        # Three of the four are below the floor, and the block must say the remedy is rows.
+        assert rendered.count("GAP") == 3, rendered
+        assert "the remedy is ROWS, not candidates" in rendered
+        assert f"{CEILING_MARGIN:g} x floor x n_rows" in rendered
+
+    def test_render_headroom_ceilings_omits_verdict_without_a_floor(self) -> None:
+        # A ceiling with no floor still ranks the rules; a fabricated floor says nothing true.
+        rendered = render_headroom_ceilings(self._ceilings(), None)
+        assert "GAP" not in rendered and "x floor" not in rendered
+        assert "No noise floor was measured" in rendered
+        assert "0.0300" in rendered, "the ceilings themselves must still print"
+
+    def test_render_headroom_ceilings_names_dropped_rows(self) -> None:
+        stale = headroom_ceiling(HEADROOM_ROW_SCORES, rule="R1", rows={"sku-labels", "a-row-that-moved"})
+        assert "R1 (1)" in render_headroom_ceilings([stale], HEADROOM_FLOOR)
+
+    def test_the_suite_level_entry_is_not_rendered_as_a_rule(self) -> None:
+        rendered = render_headroom_ceilings([headroom_ceiling(HEADROOM_ROW_SCORES)], HEADROOM_FLOOR)
+        assert "whole suite" in rendered and "``" not in rendered
+
+    def test_render_headroom_ceilings_with_nothing_to_size(self) -> None:
+        assert render_headroom_ceilings([], HEADROOM_FLOOR) == "_No rules to size._"
+
+    def test_the_block_says_it_is_advisory(self) -> None:
+        # The one sentence that keeps an AUTHORED attribution from reading as a gate.
+        assert "never blocks a promotion" in render_headroom_ceilings(self._ceilings(), HEADROOM_FLOOR)
 
 
 # ---------------------------------------------------------------------------

@@ -711,3 +711,101 @@ def _row_score(result: EvaluationResult, criterion_index: int | None) -> float |
     if criterion_index >= len(result.success_criteria_results):
         return None
     return result.success_criteria_results[criterion_index].score
+
+
+# The grader's machine-readable attribution line, and the ONE declaration of its prefix. The
+# contract is `plugins/coder-eval/reference/templates/outcome-grader/verify.py`'s: the LAST line of
+# the grader's stdout is `RULES ` followed by compact JSON of rule id -> "pass" | "fail" | "na".
+RULES_LINE_PREFIX = "RULES "
+
+
+def _rules_verdicts(result: EvaluationResult, criterion_index: int) -> dict[str, str] | None:
+    """One replicate's rule attribution, or ``None`` when it carried none.
+
+    Scans the criterion's ``details`` from the END for :data:`RULES_LINE_PREFIX`, **within the
+    stdout section only**. ``run_command`` wraps the grader's stdout in a details block and appends
+    a ``Stderr:`` section after it, so the grader's own last line is never the details' last line —
+    and a naive reverse scan reads the STDERR side first. That matters beyond tidiness: a
+    traceback there can quote artifact text, which is untrusted agent output, so a forged
+    ``RULES {...}`` line would outrank the grader's real one. The window therefore ends at the last
+    line beginning ``Stderr:``; with no such line (a criterion that reports raw stdout) the whole
+    field is scanned, which is the old behaviour.
+
+    ``None`` — no line, unparseable JSON, or a payload that is not an object — is deliberately not
+    distinguished from ``{}`` at this level. ``{}`` means a CURRENT grader that attributed nothing;
+    ``None`` means no attribution is available for this replicate at all, which is what
+    :func:`rule_row_map` counts.
+
+    **What it cannot see**, stated rather than left to be discovered: ``run_command`` truncates each
+    stream at 4000 characters, so a grader verbose enough to overflow that budget loses this line
+    and its row reads as unattributed.
+    """
+    if criterion_index >= len(result.success_criteria_results):
+        return None
+    details = result.success_criteria_results[criterion_index].details
+    if not details:
+        return None
+    lines = details.splitlines()
+    # The LAST `Stderr:` marker, not the first: the grader's own stdout may legitimately contain
+    # the word, and the wrapper's section is always the final one.
+    stderr_marker = next((i for i, line in enumerate(reversed(lines)) if line.startswith("Stderr:")), None)
+    if stderr_marker is not None:
+        lines = lines[: len(lines) - stderr_marker - 1]
+    for line in reversed(lines):
+        if not line.startswith(RULES_LINE_PREFIX):
+            continue
+        try:
+            parsed = json.loads(line[len(RULES_LINE_PREFIX) :])
+        except ValueError:
+            logger.warning("A grader emitted an unparseable %s line: %r", RULES_LINE_PREFIX.strip(), line)
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def rule_row_map(rows: dict[str, list[EvaluationResult]], criterion_index: int) -> dict[str, set[str]]:
+    """Rule id -> the row ids where that rule FAILED, read off the grader's ``RULES`` lines.
+
+    The missing link between an outcome suite's grader and the headroom ceiling: without it,
+    ``headroom_ceiling``'s row subsets would have to be typed by hand from the detail lines.
+    ``criterion_index`` is the POSITION of the grader's ``run_command`` criterion in the suite's
+    ``success_criteria`` — the same positional convention every other reader here uses, and the
+    reason a negative index is rejected rather than silently wrapping.
+
+    **Any-replicate failure marks the row**, matching the grader's own any-check rule for one row.
+    Both point the same way on purpose: each counts the MOST rows as failing, so the ceiling
+    computed from them is an UPPER bound, and "this rule cannot clear the floor" is a claim that
+    survives the most generous attribution available.
+
+    A rule that failed nowhere is simply ABSENT from the mapping — the map is failures, not a
+    census — so a caller must pass ``rows=set()`` for it rather than letting ``rows=None`` fall
+    through to the suite-level ceiling.
+
+    An empty return means attribution is unavailable (a pre-contract grader, or a criterion index
+    pointing at something else). The count of unattributed rows is WARNED rather than returned: the
+    caller's remedy is the same either way — fall back to the suite-level ceiling and say so.
+
+    Takes already-loaded rows, so CE053 does not apply: whoever loaded them reconciled them.
+    """
+    _require_valid_criterion_index(criterion_index)
+    failed: dict[str, set[str]] = {}
+    unattributed: list[str] = []
+    for row_id, results in sorted(rows.items()):
+        verdicts = [v for r in results if (v := _rules_verdicts(r, criterion_index)) is not None]
+        if not verdicts:
+            unattributed.append(row_id)
+            continue
+        for verdict in verdicts:
+            for rule, outcome in verdict.items():
+                if outcome == "fail":
+                    failed.setdefault(rule, set()).add(row_id)
+    if unattributed:
+        logger.warning(
+            "%d of %d row(s) carry no %s line at criterion_index=%d and are attributed to no rule: %s",
+            len(unattributed),
+            len(rows),
+            RULES_LINE_PREFIX.strip(),
+            criterion_index,
+            ", ".join(unattributed),
+        )
+    return failed

@@ -6857,7 +6857,10 @@ class TestCE039ComputedClaims:
         }
         assert found == {
             "optimize-method.md": ["Spend | Runs", "arms `A` | flat | halved | premium"],
-            "SKILL.md": ["survivors gated `S` | Holm threshold | discordant rows needed at 8 paired rows | at 20"],
+            "SKILL.md": [
+                "survivors gated `S` | Holm threshold | discordant rows needed at 8 paired rows | at 20",
+                "rule | rows failing | headroom | ceiling | against the 0.0255 floor",
+            ],
         }, f"the arithmetic-table predicate now finds {found}"
 
     def test_every_claim_surface_exists(self):

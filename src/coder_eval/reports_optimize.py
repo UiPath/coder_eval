@@ -10,8 +10,9 @@ estimator, and **no runtime import of** ``optimize_gate``. A renderer that reach
 directory or recomputes a statistic is a gate with a table on it, and the module boundary would
 then document a separation that does not exist.
 
-The two NamedTuples it renders (:class:`~coder_eval.optimize_search.SearchComparison`,
-:class:`~coder_eval.optimize_fronts.CostQualityPoint`) stay with the code that PRODUCES them and are
+The NamedTuples it renders (:class:`~coder_eval.optimize_search.SearchComparison`,
+:class:`~coder_eval.optimize_fronts.CostQualityPoint` and
+:class:`~coder_eval.optimize_fronts.RuleCeiling`) stay with the code that PRODUCES them and are
 imported here under ``if TYPE_CHECKING`` only — exactly the shape
 ``reports_stats.PairedComparison`` → ``reports_experiment`` already has.
 
@@ -39,9 +40,9 @@ if TYPE_CHECKING:
     # would make the presentation layer depend on the decision layer and turn the split
     # cosmetic — which is what `test_the_presentation_module_makes_no_decisions` pins.
     #
-    # TWO modules now, not one: the decision layer was split by track, and these two are produced
-    # at its top rank — the fronts and the search loop.
-    from coder_eval.optimize_fronts import CostQualityPoint
+    # TWO modules now, not one: the decision layer was split by track, and these three are
+    # produced at its top rank — the fronts and the search loop.
+    from coder_eval.optimize_fronts import CostQualityPoint, RuleCeiling
     from coder_eval.optimize_search import SearchComparison
 
 
@@ -396,25 +397,236 @@ def _matrix_footnotes(arms: list[ArmRowScores], row_ids: list[str]) -> list[str]
     return lines
 
 
-def render_row_matrix(arms: list[ArmRowScores], pareto: list[str], *, instance_best: list[str] | None = None) -> str:
+# What a single-replicate matrix is and is not, in one place. Rendered by `render_row_matrix` and
+# asserted against the skill's prose by a sensor that IMPORTS it, so the claim cannot exist in two
+# files at two vintages — the shape `COST_FRONT_ADVISORY` already has.
+SINGLE_REPLICATE_CAVEAT = (
+    "ONE replicate per row: this matrix RANKS, it does not MEASURE. Every cell is a single draw, "
+    "so a difference here is a hypothesis for the gate rather than an effect. Measured on one "
+    "round: a single-replicate matrix reported +0.0392 against a 0.0255 floor and put the "
+    "incumbent off the Pareto front; the replicated gate over the same rows returned 0.000, "
+    "p = 0.9977."
+)
+
+
+def render_row_matrix(
+    arms: list[ArmRowScores],
+    pareto: list[str],
+    *,
+    instance_best: list[str] | None = None,
+    n_replicates: int | None = None,
+) -> str:
     """The row x candidate table, with the Pareto set marked and the holes made visible.
 
     ``instance_best`` is keyword-only and optional so the existing two-positional-argument form
     keeps working byte-for-byte. When given, the block names both fronts AND the arms they disagree
     about — a reader shown two lists learns nothing; the diff is the finding.
+
+    ``n_replicates`` is added the same way and for the same reason: omitted, the output is
+    byte-identical to what every existing call site already prints. Given, the block says how many
+    draws each cell averages — and at **one** it prints
+    :data:`SINGLE_REPLICATE_CAVEAT`, because a Stage A matrix is a ranking device and reads exactly
+    like a measurement.
     """
     if not arms:
         return "_No arms to compare._"
 
     row_ids = sorted({rid for arm in arms for rid in arm.row_scores})
+    replicate_note: list[str] = []
+    if n_replicates is not None:
+        replicate_note = [f"Each cell is the mean of {n_replicates} replicate(s)."]
+        if n_replicates <= 1:
+            replicate_note.append(SINGLE_REPLICATE_CAVEAT)
+        replicate_note.append("")
     return "\n".join(
         [
+            *replicate_note,
             *_matrix_table(arms, row_ids, pareto),
             "",
             *_front_summary(pareto, instance_best),
             *_matrix_footnotes(arms, row_ids),
         ]
     )
+
+
+def _spread(values: list[float]) -> str:
+    """One arm's replicate values on one row, and their spread.
+
+    A SINGLE replicate's spread is undefined, not zero, and renders as ``—``. Printing 0.0 would
+    fire the zero-variance flag on every row of a single-replicate run, where it means nothing —
+    the flag's whole value is that it identifies a REPRODUCIBLE difference.
+    """
+    listed = ", ".join(f"{v:.3f}" for v in values) or "—"
+    return f"{listed} (spread {max(values) - min(values):.3f})" if len(values) > 1 else listed
+
+
+def render_row_replicates(incumbent: dict[str, list[float]], candidate: dict[str, list[float]]) -> str:
+    """Per-row replicate values for two arms, with the zero-variance and dead rows named.
+
+    Takes **already-extracted** replicate values rather than results: pulling a score out of an
+    ``EvaluationResult`` needs the loader's private row primitive, which this module may not import
+    at runtime, and the criterion to read it from is a choice every other execution-track function
+    already leaves with the caller. So the caller extracts and this stays pure formatting.
+
+    Two things a suite mean cannot say, and the reason this block exists:
+
+    * **A row with zero variance on BOTH arms is the most informative row in the run.** It is a
+      reproducible behavioural change, which is exactly the raw material a merge candidate is built
+      from. Measured: one row went ``[0.76, 0.76, 0.76]`` -> ``[1.00, 1.00, 1.00]`` (+0.238) while
+      another went ``[0.86, 0.86, 0.86]`` -> ``[0.59, 0.59, 0.59]`` (-0.272). They cancelled to a
+      suite delta of +0.0001 — "the difference is noise" is the opposite of what happened, and no
+      verdict block could express it.
+    * **A row whose mean delta is exactly 0.0 is DEAD for this comparison** and is counted. A suite
+      of dead rows is a suite that cannot resolve anything, however many rows it has.
+
+    A row present on one arm only is a HOLE: shown, excluded from the delta, never counted as 0.0 —
+    the convention ``ArmRowScores`` and :func:`render_row_matrix` already use. Unequal replicate
+    counts between the arms are REPORTED rather than silently paired, because a row weighted 3-v-2
+    has reweighted the comparison on its own.
+    """
+    row_ids = sorted(set(incumbent) | set(candidate))
+    if not row_ids:
+        return "_No rows to compare._"
+
+    lines = ["| row | incumbent | candidate | mean delta |", "|---|---|---|---|"]
+    dead: list[str] = []
+    reproducible: list[str] = []
+    unequal: list[str] = []
+    for row_id in row_ids:
+        left, right = incumbent.get(row_id, []), candidate.get(row_id, [])
+        if not left or not right:
+            lines.append(f"| {row_id} | {_spread(left)} | {_spread(right)} | — (hole) |")
+            continue
+        delta = sum(right) / len(right) - sum(left) / len(left)
+        lines.append(f"| {row_id} | {_spread(left)} | {_spread(right)} | {delta:+.3f} |")
+        if delta == 0.0:
+            dead.append(row_id)
+        if len(left) > 1 and len(right) > 1 and max(left) == min(left) and max(right) == min(right) and delta != 0.0:
+            reproducible.append(row_id)
+        if len(left) != len(right):
+            unequal.append(f"{row_id} ({len(left)} v {len(right)})")
+
+    lines.append("")
+    if reproducible:
+        lines.append(
+            f"Zero variance on BOTH arms, and a non-zero delta: {', '.join(reproducible)}. These are "
+            + "REPRODUCIBLE behavioural changes rather than noise — the most informative rows in the "
+            + "run, and what a merge candidate should be built from. Read them individually; two of "
+            + "them with opposite signs cancel to a suite delta of nearly zero."
+        )
+    if dead:
+        lines.append(
+            f"{len(dead)} row(s) dead for this comparison (mean delta exactly 0.0): {', '.join(dead)}. "
+            + "They contribute nothing to the paired difference — a suite that is mostly dead rows "
+            + "cannot resolve anything, however many rows it has."
+        )
+    if unequal:
+        lines.append(
+            f"Rows whose arms carry different replicate counts: {', '.join(unequal)}. A row's weight "
+            + "in an arm's mean is its observation count, so this shifts the comparison on its own — "
+            + "usually an interrupted invocation. Re-run it rather than reading the delta as an effect."
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# The headroom ceiling — what the suite can resolve, before a candidate is written
+# ---------------------------------------------------------------------------
+
+
+# The margin a rule's ceiling should carry over the noise floor before a candidate for it is worth
+# writing. A candidate cannot be expected to capture ALL of a rule's headroom, so a ceiling merely
+# at the floor demands a perfect candidate to register at all. Three is a convention, not an
+# estimate, and the render says so rather than dressing it as one.
+CEILING_MARGIN = 3.0
+
+
+def _ceiling_verdict(entry: RuleCeiling, floor: float) -> str:
+    """One rule's read on its own ceiling, given the suite's measured noise floor.
+
+    Takes the whole record rather than the ceiling alone, because the two states that must NOT
+    read as a gap are visible only in the counts. A gap says "stop working on this rule", which is
+    the most expensive advice here, and it must never be produced by an absence of data:
+
+    * **Every selected row missing from the vector** is a wiring fault — a stale rule map, a
+      crashed arm — not a rule without headroom, and the whole family goes out of its way to keep
+      those apart (``_wrong_path_reason``, ``_no_floor``).
+    * **A floor of exactly 0.0 is a real answer**, not a missing one: a deterministic grader whose
+      replicates agree measures no noise. But ``ceiling < 0.0`` is then false for a rule with NO
+      headroom at all, so the one rule nothing can improve would collect the most encouraging
+      verdict. A zero ceiling is a gap whatever the floor.
+    """
+    if entry.n_failing == 0 and entry.n_dropped:
+        return "NO DATA — every row attributed to this rule is missing from the vector; a wiring fault, not a gap"
+    if entry.ceiling <= 0.0:
+        return "GAP — no headroom at all: every row attributed to this rule is already at the maximum"
+    if entry.ceiling < floor:
+        return "GAP — no candidate for this rule can promote; the remedy is ROWS, not candidates"
+    if entry.ceiling < CEILING_MARGIN * floor:
+        return f"thin — a candidate would have to capture nearly all of it (under {CEILING_MARGIN:g}x the floor)"
+    return "room for a candidate"
+
+
+def render_headroom_ceilings(ceilings: list[RuleCeiling], floor: float | None) -> str:
+    """What each rule could move the suite mean by at MOST, against the floor that must be cleared.
+
+    Read before Step 8 proposes anything: a rule whose ceiling is below the floor is a **suite
+    gap, not a hypothesis**, and no wording of a candidate can fix it. Measured on a real round,
+    three of four rules were unpromotable by arithmetic and roughly $40 was spent gating candidates
+    for them — off inputs (a baseline, a noise floor) already paid for.
+
+    ``floor is None`` — no noise floor could be measured — renders the ceilings **without**
+    verdicts rather than inventing a threshold. A ceiling with no floor still says which rule has
+    the most room; a fabricated floor says nothing true at all.
+
+    Advisory, always. See :func:`~coder_eval.optimize_fronts.headroom_ceiling` for why a table
+    built on an AUTHORED attribution must never be able to block a promotion.
+    """
+    if not ceilings:
+        return "_No rules to size._"
+
+    header = "| rule | rows failing | headroom | ceiling |" + (" x floor | verdict |" if floor is not None else "")
+    lines = [header, "|" + "---|" * (6 if floor is not None else 4)]
+    for entry in ceilings:
+        # The suite-level entry carries no rule; naming it is what keeps it from reading as a rule
+        # called "" whose ceiling happens to be every row's headroom.
+        name = f"`{entry.rule}`" if entry.rule else "**whole suite**"
+        row = f"| {name} | {entry.n_failing} | {entry.headroom:.3f} | {entry.ceiling:.4f} |"
+        if floor is not None:
+            # `—` rather than `inf` at a zero floor: a deterministic grader legitimately measures
+            # no noise, and "infinitely above the floor" is not a reading anyone can act on.
+            ratio = f"{entry.ceiling / floor:.2f}x" if floor > 0.0 else "—"
+            row += f" {ratio} | {_ceiling_verdict(entry, floor)} |"
+        lines.append(row)
+
+    lines.append("")
+    if floor is None:
+        lines.append(
+            "No noise floor was measured, so no verdict is rendered. A ceiling still ranks the "
+            + "rules by how much room they have; whether that room clears the noise is the one "
+            + "thing this block cannot say."
+        )
+    else:
+        lines.append(
+            f"Floor {floor:.4f}. A ceiling BELOW it is a suite gap: no candidate for that rule can "
+            + "promote, however good, because the suite mean cannot move that far. The remedy is "
+            + f"rows that fail the rule — about `{CEILING_MARGIN:g} x floor x n_rows` of headroom "
+            + "for a comfortable margin. Every row that PASSES a rule makes that rule harder to "
+            + "promote, which is why one row per rule is the worst possible suite shape."
+        )
+
+    dropped = [f"{c.rule or 'whole suite'} ({c.n_dropped})" for c in ceilings if c.n_dropped]
+    if dropped:
+        lines.append(
+            f"Rule rows that could not be scored and were left out of the headroom: {', '.join(dropped)}. "
+            + "A stale rule map naming rows this run did not produce would otherwise inflate a ceiling "
+            + "silently — these are excluded, never counted at zero."
+        )
+    lines.append(
+        "Advisory. Rule attribution is authored, so a mistyped rule id moves rows between rules — "
+        + "this block tells you what to stop paying for, and never blocks a promotion."
+    )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

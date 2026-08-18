@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -181,6 +181,85 @@ def instance_best_front(arms: list[ArmRowScores]) -> list[str]:
             if math.isfinite(value) and (row_id not in best or value > best[row_id]):
                 best[row_id] = value
     return [arm.variant_id for arm in scored if any(v == best.get(r) for r, v in arm.row_scores.items())]
+
+
+class RuleCeiling(NamedTuple):
+    """The largest suite-mean gain any candidate for one rule could possibly produce.
+
+    A NamedTuple rather than a float, for the same reason :class:`CostQualityPoint` is one: the
+    render needs the headroom, the rows it was summed over and the ids it had to drop, and a bare
+    float has no channel for any of them. Computed and rendered, never persisted.
+    """
+
+    rule: str  # "" for the suite-level ceiling, which is every row rather than a rule's subset
+    headroom: float  # sum of (max_score - score) over the selected rows, each clamped at zero
+    ceiling: float  # headroom / the FULL row count — see `headroom_ceiling` for why
+    n_failing: int  # rows actually summed over
+    n_dropped: int  # selected ids that were absent from `row_scores`, or non-finite
+
+
+def headroom_ceiling(
+    row_scores: dict[str, float],
+    *,
+    rule: str = "",
+    rows: Collection[str] | None = None,
+    max_score: float = 1.0,
+) -> RuleCeiling:
+    """The arithmetic bound on what a candidate targeting ``rule`` could move the suite mean by.
+
+    ::
+
+        max_effect(R) = SUM over rows failing R of (max_score - score)  /  n_rows
+
+    A candidate can only gain where the incumbent lost, so the rows failing ``R`` bound the whole
+    effect — and the suite mean divides that by every row, including the ones already at ceiling.
+    Measured on a real 15-row suite against a noise floor of 0.0255: R1 0.0300 (1.18x the floor),
+    R6 0.0223 (0.87x), R7 0.0191 (0.75x), R8 0.0095 (0.37x). **Three of the four candidates written
+    for that round were unpromotable by arithmetic**, and about $40 was spent gating them — on
+    inputs (a baseline and a noise floor) that had already been paid for.
+
+    **The denominator is the FULL row count, never the selected subset.** That is the whole point:
+    a per-row lift divided by the rows that failed makes every rule look promotable, and the suite
+    mean the gate actually compares is an average over all of them. Every row *passing* ``R``
+    therefore makes ``R`` harder to promote, which is what the depth-over-breadth rule in
+    ``/coder-eval:task`` is about.
+
+    ONE function for both questions — the suite-level "can any candidate promote here?"
+    (``rows=None``, every row) and the rule-level "can a candidate for R?" — because they are the
+    same arithmetic over different subsets. Note that ``rows=None`` and ``rows=set()`` are
+    DIFFERENT and the difference matters: a rule that failed nowhere is absent from
+    :func:`~coder_eval.optimize_load.rule_row_map`, and passing its missing entry through as
+    ``None`` would silently report the whole suite's ceiling under that rule's name.
+
+    **It is advisory and never gates.** A "below the floor" verdict is arithmetically sound — the
+    attribution behind it is an upper bound (see ``rule_row_map``) — but the attribution itself is
+    AUTHORED, and a mistyped rule id moves rows between rules. A wrong annotation must not be able
+    to block a real promotion.
+
+    **The denominator is the rows this ARM produced, not the suite's declared row count**, because
+    a hole is all ``row_scores`` can carry — an arm that lost 5 of 15 rows therefore reports
+    ceilings computed over 10, which is the same intersection semantics the paired gate uses and
+    is 1.5x larger than the suite-wide reading. Check the row matrix's holes before acting on a
+    ceiling from a partly-crashed arm; ``n_dropped`` counts only ids in the SELECTED subset, so a
+    hole outside it is invisible here.
+
+    Per-row headroom is clamped at zero, so a mis-scaled score above ``max_score`` cannot cancel
+    real headroom elsewhere. Non-finite scores are treated as ABSENT — :func:`_finite_scores`'
+    convention, applied to a bare mapping — so a NaN cell neither poisons the sum nor inflates the
+    denominator; it is counted in ``n_dropped``, which the render prints.
+    """
+    finite = {row_id: value for row_id, value in row_scores.items() if math.isfinite(value)}
+    # `is None`, never truthiness: an empty `rows` is a real, empty selection.
+    selected = set(row_scores) if rows is None else set(rows)
+    usable = sorted(selected & finite.keys())
+    headroom = sum((max(0.0, max_score - finite[row_id]) for row_id in usable), 0.0)
+    return RuleCeiling(
+        rule=rule,
+        headroom=headroom,
+        ceiling=headroom / len(finite) if finite else 0.0,
+        n_failing=len(usable),
+        n_dropped=len(selected) - len(usable),
+    )
 
 
 class CostQualityPoint(NamedTuple):
