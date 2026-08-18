@@ -41,6 +41,7 @@ from coder_eval.optimize_gate import (
     _note_check_failed,
     _note_holm_family,
     _note_ordinary_negative,
+    _note_resolution_degraded,
     cost_latency_guardrails,
 )
 from coder_eval.optimize_load import (
@@ -1106,6 +1107,10 @@ def holm_promote_execution(
     multiplicity that was actually incurred, and the conservative direction.
     """
     family, rejected_at = _holm_family(verdicts, alpha)
+    # The coarsest member bounds the family's resolution, so it is the count the resolution note
+    # reports — read off the verdicts rather than from GATE_RESAMPLES, since a caller may pass a
+    # custom one. Only family MEMBERS: a verdict with no p was not tested at any resolution.
+    family_resamples = min((verdicts[i].n_resamples for i, _p in family), default=GATE_RESAMPLES)
 
     decided: list[ExecutionGateVerdict] = []
     for i, verdict in enumerate(verdicts):
@@ -1171,5 +1176,10 @@ def holm_promote_execution(
                 if not check.passed
             ]
         notes.append(_note_holm_family(len(family), alpha))
+        # Not a negative-result claim, so it sits OUTSIDE the refusal guard beside the family note:
+        # it is a statement about the draw count, which stays true whatever the refusal says. The
+        # family's SMALLEST draw count is what bounds its resolution.
+        if (degraded := _note_resolution_degraded(len(family), family_resamples, alpha)) is not None:
+            notes.append(degraded)
         decided.append(copy_with(verdict, promoted=promoted, holm_rejected=rejected, holm_alpha=alpha, notes=notes))
     return decided

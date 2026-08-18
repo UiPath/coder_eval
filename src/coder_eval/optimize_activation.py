@@ -41,6 +41,7 @@ from coder_eval.optimize_gate import (
     _note_check_failed,
     _note_holm_family,
     _note_ordinary_negative,
+    _note_resolution_degraded,
     cost_latency_guardrails,
 )
 from coder_eval.optimize_load import (
@@ -982,6 +983,7 @@ def _activation_notes(
     siblings_hold: bool,
     threshold: float,
     family_size: int,
+    family_resamples: int,
     alpha: float,
 ) -> list[str]:
     """Every note :func:`holm_promote` adds to a MEASURED verdict, in rendered order.
@@ -1050,6 +1052,10 @@ def _activation_notes(
             + "few positive rows the smallest achievable p is bounded well above the estimator's."
         )
     notes.append(_note_holm_family(family_size, alpha))
+    # The second rung outside the refusal guard, for the same reason as the resolution-floor note
+    # above it: a statement about the draw count rather than about this candidate.
+    if (degraded := _note_resolution_degraded(family_size, family_resamples, alpha)) is not None:
+        notes.append(degraded)
     return notes
 
 
@@ -1097,6 +1103,9 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     ``alpha/m``) is unchanged by its presence.
     """
     family, rejected_at = _holm_family(verdicts, alpha)
+    # The coarsest MEMBER bounds the family's resolution — the same rule the execution twin applies,
+    # and read off the verdicts because a caller may pass a custom count.
+    family_resamples = min((verdicts[i].n_resamples for i, _p in family), default=GATE_RESAMPLES)
 
     decided: list[ActivationGateVerdict] = []
     for i, verdict in enumerate(verdicts):
@@ -1141,6 +1150,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
             siblings_hold=siblings_hold,
             threshold=threshold,
             family_size=len(family),
+            family_resamples=family_resamples,
             alpha=alpha,
         )
         # The refusal lives on `gate_refusal` and NOT in `notes`: notes is the "everything the

@@ -313,6 +313,40 @@ def _note_holm_family(family_size: int, alpha: float) -> str:
     return f"Holm applied across a family of {family_size} at alpha={alpha}."
 
 
+def _note_resolution_degraded(family_size: int, n_resamples: int, alpha: float) -> str | None:
+    """What resolution the gate ACTUALLY achieved on a family larger than it is sized for.
+
+    :data:`GATE_RESAMPLES` is derived from :data:`GATE_P_PRECISION` at the strictest Holm threshold
+    for :data:`GATE_MAX_FAMILY` survivors — ``m >= 2 / (k^2 * alpha/S)``. Above that S the threshold
+    tightens while the draw count does not, so the Monte-Carlo error of the p stops being the
+    declared fraction of the threshold it is compared against, and nothing said so: the block still
+    printed the family size and the declared precision was documented on a constant nobody reads at
+    that moment.
+
+    **``str | None``, unlike :func:`_note_holm_family` beside it, which is unconditional.** Returning
+    ``None`` below the threshold puts the condition in ONE place. The alternative — a ``str`` return
+    plus an ``if`` duplicated at the two call sites — is exactly the shape that lets the two tracks
+    drift, which is the whole reason these notes are shared.
+
+    ``n_resamples`` is the family's SMALLEST, not the constant: a caller may pass a custom count, and
+    the coarsest member is what bounds the family's resolution. It is not a refusal — the gate still
+    decides, this says how precisely.
+    """
+    if family_size <= GATE_MAX_FAMILY or family_size <= 0 or n_resamples < 1:
+        return None
+    threshold = alpha / family_size
+    achieved = math.sqrt(2.0 / (n_resamples * threshold))
+    needed = math.ceil(2.0 / (GATE_P_PRECISION**2 * threshold))
+    return (
+        f"resolution: this family of {family_size} is larger than the {GATE_MAX_FAMILY} the gate is "
+        + f"sized for, so its strictest Holm threshold is alpha/{family_size} = {threshold:.5f} and "
+        + f"the bootstrap resolves it to about {achieved:.4f} of itself at {n_resamples} draws, "
+        + f"against the {GATE_P_PRECISION:.2f} this gate declares. Re-run at n_resamples="
+        + f"{needed} to restore the declared precision, or gate fewer candidates per round. The "
+        + "decision above stands; what is degraded is how finely it was measured."
+    )
+
+
 class _HolmFamily(NamedTuple):
     """Who was in the family, and whom Holm rejected — by ORIGINAL index in both cases.
 

@@ -91,6 +91,7 @@ from coder_eval.optimize_gate import (
     _holm_family,
     _note_holm_family,
     _note_ordinary_negative,
+    _note_resolution_degraded,
     cost_latency_guardrails,
 )
 from coder_eval.optimize_load import (
@@ -2139,6 +2140,152 @@ class TestGateResampleCount:
             source = _module_source(module)
             literals = [ln for ln in source.splitlines() if alpha_literal.search(ln) and "DEFAULT_ALPHA = " not in ln]
             assert not literals, f"{module}.py still spells 0.05 outside DEFAULT_ALPHA: {literals}"
+
+
+class TestResolutionDegradedNote:
+    """What resolution the gate ACTUALLY achieved, said at the one place the family size is known.
+
+    `GATE_RESAMPLES` is derived from `GATE_P_PRECISION` at the strictest Holm threshold for
+    `GATE_MAX_FAMILY` survivors. Above that S the threshold tightens while the draw count does not,
+    so the Monte-Carlo error of the p stops being the declared fraction of the threshold it is
+    compared against — and the block printed the family size while the declared precision sat on a
+    constant nobody reads at that moment.
+
+    Every figure below is RECOMPUTED from the shipped constants rather than typed in: a hardcoded
+    table is a claim nobody checks the day one of them moves.
+    """
+
+    @staticmethod
+    def _expected(family_size: int, n_resamples: int = GATE_RESAMPLES, alpha: float = DEFAULT_ALPHA) -> tuple:
+        threshold = alpha / family_size
+        return (
+            threshold,
+            math.sqrt(2.0 / (n_resamples * threshold)),
+            math.ceil(2.0 / (GATE_P_PRECISION**2 * threshold)),
+        )
+
+    @pytest.mark.parametrize("family_size", [1, 3, GATE_MAX_FAMILY])
+    def test_nothing_is_said_at_or_below_the_family_the_gate_is_sized_for(self, family_size: int) -> None:
+        # The declared precision holds there, and a note saying so on every verdict is noise.
+        assert _note_resolution_degraded(family_size, GATE_RESAMPLES, DEFAULT_ALPHA) is None
+
+    @pytest.mark.parametrize("family_size", [GATE_MAX_FAMILY + 1, 8, 10])
+    def test_the_note_reports_the_threshold_the_precision_and_the_count_that_restores_it(
+        self, family_size: int
+    ) -> None:
+        note = _note_resolution_degraded(family_size, GATE_RESAMPLES, DEFAULT_ALPHA)
+        assert note is not None
+        threshold, achieved, needed = self._expected(family_size)
+        assert f"alpha/{family_size} = {threshold:.5f}" in note
+        assert f"{achieved:.4f}" in note
+        assert f"n_resamples={needed}" in note
+        assert f"{GATE_P_PRECISION:.2f} this gate declares" in note
+
+    def test_it_is_not_a_refusal_and_says_so(self) -> None:
+        note = _note_resolution_degraded(8, GATE_RESAMPLES, DEFAULT_ALPHA)
+        assert note is not None and "The decision above stands" in note
+
+    def test_a_coarser_draw_count_reports_a_worse_precision(self) -> None:
+        # Read off the verdict rather than from the constant: a caller may pass a custom count, and
+        # the note has to describe the measurement that actually happened.
+        coarse = _note_resolution_degraded(8, 2_000, DEFAULT_ALPHA)
+        fine = _note_resolution_degraded(8, GATE_RESAMPLES, DEFAULT_ALPHA)
+        assert coarse is not None and fine is not None and coarse != fine
+        assert f"{self._expected(8, 2_000)[1]:.4f}" in coarse
+
+    @pytest.mark.parametrize(("family_size", "n_resamples"), [(0, GATE_RESAMPLES), (8, 0)])
+    def test_the_degenerate_inputs_are_guarded_rather_than_dividing(self, family_size: int, n_resamples: int) -> None:
+        # Unreachable from either wrapper (no members means no notes loop), but the division is
+        # guarded rather than left to raise out of a user's inline snippet.
+        assert _note_resolution_degraded(family_size, n_resamples, DEFAULT_ALPHA) is None
+
+
+class TestBothTracksEmitTheResolutionNote:
+    """One function, two call sites, and the same sentence — the reason these notes are shared.
+
+    `_note_holm_family` and `_note_ordinary_negative` are shared for exactly this: byte-identical
+    copies 600 lines apart drift, and a ledger read back weeks later then has the two tracks
+    describing one decision differently.
+    """
+
+    _FAMILY = GATE_MAX_FAMILY + 3
+
+    def _activation_family(self, tmp_path: Path) -> list[ActivationGateVerdict]:
+        incumbent, candidate = _tiny_suite(6, 6)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        return [_gate(run_dirs) for _ in range(self._FAMILY)]
+
+    def _execution_family(self, tmp_path: Path) -> list[ExecutionGateVerdict]:
+        return [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(self._FAMILY)]
+
+    @staticmethod
+    def _note(verdict) -> str:
+        return next(n for n in verdict.notes if n.startswith("resolution:"))
+
+    def test_the_two_tracks_emit_the_identical_sentence(self, tmp_path: Path) -> None:
+        activation = holm_promote(self._activation_family(tmp_path / "a"))[0]
+        execution = holm_promote_execution(self._execution_family(tmp_path / "e"))[0]
+        # Same family size, same draw count -> the same string, character for character.
+        assert self._note(activation) == self._note(execution)
+        assert f"family of {self._FAMILY}" in self._note(activation)
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_a_family_at_the_sized_limit_emits_nothing_on_either_track(self, tmp_path: Path, track: str) -> None:
+        if track == "activation":
+            incumbent, candidate = _tiny_suite(6, 6)
+            run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+            decided = holm_promote([_gate(run_dirs) for _ in range(GATE_MAX_FAMILY)])
+        else:
+            verdicts = [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(GATE_MAX_FAMILY)]
+            decided = holm_promote_execution(verdicts)
+        assert not any(note.startswith("resolution:") for v in decided for note in v.notes)
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_the_family_names_its_smallest_draw_count(self, tmp_path: Path, track: str) -> None:
+        """A mixed family is bounded by its coarsest member, not by its first or its finest.
+
+        Each member's own `n_resamples` is on its verdict, so a naive implementation reads whichever
+        verdict it happens to be decorating and reports a different resolution per member — for one
+        family, decided at one threshold.
+        """
+        # BELOW the fixtures' own default (`_FAST_RESAMPLES`), which is what makes this member the
+        # coarsest — a "coarse" count above it would be the family minimum for the wrong reason and
+        # the test would pass against a `max`.
+        coarse = _FAST_RESAMPLES // 2
+        if track == "activation":
+            incumbent, candidate = _tiny_suite(6, 6)
+            run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+            verdicts = [_gate(run_dirs, n_resamples=coarse), *[_gate(run_dirs) for _ in range(self._FAMILY - 1)]]
+            decided = holm_promote(verdicts)
+        else:
+            first = _exec_gate(_exec_run_dir(tmp_path / "g0", **_WINNER), n_resamples=coarse)
+            rest = [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(1, self._FAMILY)]
+            decided = holm_promote_execution([first, *rest])
+        expected = TestResolutionDegradedNote._expected(self._FAMILY, coarse)
+        # EVERY member reports the family's resolution, including the ones drawn more finely.
+        for verdict in decided:
+            assert f"{expected[1]:.4f}" in self._note(verdict)
+            assert f"at {coarse} draws" in self._note(verdict)
+
+    def test_it_survives_a_refusal_because_it_is_not_a_claim_about_the_candidate(self, tmp_path: Path) -> None:
+        # Beside the family note and the resolution-floor note, outside the negative-result guard: a
+        # statement about the draw count stays true whatever the refusal says.
+        incumbent, candidate = _tiny_suite(3, 3)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        verdicts = [_gate(run_dirs, n_resamples=TestGateRefusal._REFUSAL_RESAMPLES) for _ in range(self._FAMILY)]
+        decided = holm_promote(verdicts)[0]
+        assert decided.gate_refusal is not None, "fixture drifted — this is the discreteness refusal"
+        assert self._note(decided).startswith("resolution:")
+
+    def test_the_decision_itself_is_untouched(self, tmp_path: Path) -> None:
+        # A note, never a refusal: `gate_refusal`, `promoted` and `separated` are what a caller acts
+        # on, and none of them may move because the family grew past the sized limit.
+        verdicts = self._execution_family(tmp_path)
+        decided = holm_promote_execution(verdicts)
+        for verdict in decided:
+            assert verdict.gate_refusal is None
+            assert verdict.separated is True
+            assert verdict.promoted == verdict.holm_rejected
 
 
 class TestDiscretenessFloor:
@@ -5280,7 +5427,7 @@ class TestDeadWeight:
         assert verdict.gate_refusal is not None, "fixture drifted — this is the zero-variance refusal"
         assert verdict.dead_weight == pytest.approx(0.5)
 
-    def test_a_tiny_but_real_paired_difference_is_ALIVE_not_dead(self) -> None:
+    def test_a_tiny_but_real_paired_difference_is_alive_not_dead(self) -> None:
         """The comparison is `== 0.0` on the raw subtraction, with NO tolerance — pinned.
 
         Every other case here uses differences of 0.2-0.6 or exact zeros, so swapping the test for
@@ -6389,6 +6536,18 @@ class TestRenderingIsBehaviourPreserving:
     def test_the_execution_block_is_unchanged(self, tmp_path: Path) -> None:
         verdict = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
         _assert_matches_render_pin(render_execution_markdown(verdict), "execution_gate")
+
+    def test_the_family_of_eight_block_is_unchanged(self, tmp_path: Path) -> None:
+        """The resolution note, pinned whole — and a NEW fixture, which is why it owes no ledger row.
+
+        Every other pinned render carries a family of 1 or 2, at or below `GATE_MAX_FAMILY`, so the
+        note appears in none of them and this phase modified nothing. A new fixture has no "before",
+        so there is no step for `docs/REPORT_SCHEMA.md`'s `## Estimator changes` table to attribute.
+        If this ever starts MODIFYING one of its siblings, the change reached further than intended.
+        """
+        verdicts = [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(GATE_MAX_FAMILY + 3)]
+        decided = holm_promote_execution(verdicts)[0]
+        _assert_matches_render_pin(render_execution_markdown(decided), "execution_gate_family8")
 
     def test_the_cross_split_refusal_block_is_unchanged(self, tmp_path: Path) -> None:
         """The fifth headline, pinned whole like its siblings rather than sampled by substring.
