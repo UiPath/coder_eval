@@ -4,6 +4,12 @@
     "See core-1.json for the full contract and regression-1.json for what a guard row is for."
   ],
   "path": "REPLACE/output/summary.md",
+  "rules": {
+    "mentions#core": "R5",
+    "mentions#detail": "R6",
+    "mentions#structure": "R8",
+    "mentions#regression": "R4"
+  },
   "checks": {
     "mentions#core": {
       "all_of": ["REPLACE: the second already-working behaviour, stated as the artifact shows it"]

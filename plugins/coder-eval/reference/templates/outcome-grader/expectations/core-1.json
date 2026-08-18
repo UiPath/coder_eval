@@ -29,9 +29,22 @@
     "never the artifact being the wrong shape. See verify.py's docstring: an N/A that keys on the",
     "artifact lets an arm shrink its own denominator by ignoring a requirement.",
     "",
-    "Prove the whole set discriminates before spending on a stage: `/coder-eval:task` step 6.5."
+    "Prove the whole set discriminates before spending on a stage: `/coder-eval:task` step 6.5.",
+    "",
+    "`rules` maps a check to the rule id it enforces, from the Step 2.5 rule inventory. It is",
+    "OPTIONAL, and a SIBLING of `checks` rather than a key inside one: a check's params are",
+    "forwarded verbatim to the check function, where an unknown key is a silent extra argument.",
+    "A bare check name attributes every labelled instance of it. `/coder-eval:optimize-skill`",
+    "Step 7 reads the grader's RULES line to say whether a rule has enough headroom to host a",
+    "promotable candidate at all — a rule nothing here attributes is a rule it cannot size."
   ],
   "path": "REPLACE/output/report.md",
+  "rules": {
+    "mentions#core": "R1",
+    "mentions#detail": "R2",
+    "mentions#structure": "R3",
+    "mentions#regression": "R4"
+  },
   "checks": {
     "mentions#core": {
       "all_of": ["REPLACE: the thing the body's main instruction should have produced"]

@@ -15,10 +15,35 @@ THE OUTPUT PROTOCOL
     the exit code BEFORE it parses the score line, so a grader that computed 0.75 and then exited
     non-zero reports 0.0 — the work is done and thrown away.
 
+    The LAST line is `RULES ` followed by compact JSON: rule id -> `"pass"`, `"fail"` or `"na"`.
+    It is emitted on EVERY exit path, including the ones that run no check at all — a consumer
+    must be able to tell "this row attributed nothing" (`RULES {}`) from "this grader predates the
+    contract" (no line). Emitted inside `_report`, so no future exit path can forget it, and last
+    rather than first because line 1 belongs to the score and a consumer scans from the end.
+
     Nothing else may write to stdout, or it lands on line 1 and the row scores 0.0 with a parse
     error. A check's `print()` cannot do this — the dispatch loop captures stdout while checks run
     and folds anything they printed into the detail lines — but a module-level `print` at import
     time is outside that guard.
+
+RULE ATTRIBUTION
+    OPTIONAL. A top-level `rules` map in the expectations file — a SIBLING of `checks`, never a key
+    inside one, because a check's params are forwarded verbatim to the check function where an
+    unknown key would arrive as a silent extra argument:
+
+        "rules": {"mentions#core": "R1", "json_field": "R7"}
+
+    Keys are check keys as written under `checks`; a bare check NAME matches every labelled
+    instance of it, so `{"mentions": "R1"}` attributes `mentions#core` and `mentions#detail` alike.
+    An exact key wins over the bare name.
+
+    A rule with several checks on one row is `fail` if ANY of its checks failed, and `na` only if
+    ALL of them were N/A. The direction is what makes the verdict safe rather than merely
+    convenient: any-fail counts the MOST rows as failing a rule, so a headroom estimate built on it
+    is an UPPER BOUND — a rule that still cannot clear the noise floor under the most generous
+    attribution is definitively unpromotable, which is the only claim `/coder-eval:optimize-skill`
+    Step 7's ceiling table makes. A check whose name is not in CHECKS produced no verdict at all
+    and contributes to no rule.
 
 THE SCORE
     `passed / applicable`, where `applicable` counts only the checks that returned a verdict.
@@ -206,23 +231,78 @@ CHECKS = {
 }
 
 
-def _report(score: float, *details: str) -> int:
-    """Print the protocol — score on line 1, details after — and return the process exit code."""
+def _report(score: float, *details: str, rules: dict[str, str] | None = None) -> int:
+    """Print the protocol — score on line 1, details, then `RULES` — and return the exit code.
+
+    The `RULES` line is emitted HERE rather than at the call sites, so that every early exit —
+    wrong argv, a missing or malformed expectations file, a missing or unreadable artifact, the
+    top-level `except` — carries it too. `RULES {}` from a grader that ran nothing is a fact a
+    consumer can act on; a MISSING line means an older grader, and the two must not look alike.
+    """
     print(f"{score:.4f}")
     for line in details:
         print(line)
+    # Sorted keys and compact separators: the line is machine-read, and a stable spelling is what
+    # lets a test assert the exact string rather than re-parsing to compare.
+    print("RULES " + json.dumps(rules or {}, sort_keys=True, separators=(",", ":")))
     return 0
 
 
-def _run_checks(doc: Artifact, checks: dict[str, Any]) -> tuple[int, int, list[str]]:
-    """Dispatch every declared check, returning (passed, applicable, details).
+def _aggregate_rules(declared: Any, verdicts: dict[str, bool | None]) -> tuple[dict[str, str], list[str]]:
+    """Fold each rule's check verdicts into one, returning (rule id -> verdict, complaints).
+
+    ANY-FAIL, ALL-NA. See the module docstring for why the direction is load-bearing: it makes the
+    result an upper bound on the rows failing a rule, and an upper bound is what a "this rule
+    cannot clear the floor" verdict has to rest on.
+
+    A malformed `rules` block is reported as a detail line and otherwise ignored — never a raise.
+    Attribution is an optional annotation, and a typo in it must not cost the row its score.
+    """
+    if not declared:
+        return {}, []
+    if not isinstance(declared, dict):
+        return {}, [f"SKIP `rules` must be an object of check -> rule id, got {type(declared).__name__}"]
+
+    complaints: list[str] = []
+    grouped: dict[str, list[bool | None]] = {}
+    for key, verdict in verdicts.items():
+        name = key.split(LABEL_SEPARATOR, 1)[0]
+        # Exact key first, then the bare name, so one entry can attribute every labelled instance.
+        rule = declared.get(key, declared.get(name))
+        if rule is None:
+            continue
+        if not isinstance(rule, str) or not rule:
+            complaints.append(f"SKIP `rules[{key!r}]` must be a non-empty string, got {rule!r}")
+            continue
+        grouped.setdefault(rule, []).append(verdict)
+
+    unused = sorted(set(declared) - {k for k in verdicts} - {k.split(LABEL_SEPARATOR, 1)[0] for k in verdicts})
+    if unused:
+        # Named rather than dropped: an entry matching no check is a renamed or mistyped check key,
+        # and the rule it names then reads as untouched by this row.
+        complaints.append(f"SKIP `rules` entries matching no declared check: {unused}")
+
+    resolved = {
+        rule: "fail" if any(v is False for v in seen) else "na" if all(v is None for v in seen) else "pass"
+        for rule, seen in grouped.items()
+    }
+    return resolved, complaints
+
+
+def _run_checks(doc: Artifact, checks: dict[str, Any]) -> tuple[int, int, list[str], dict[str, bool | None]]:
+    """Dispatch every declared check, returning (passed, applicable, details, verdicts).
 
     Checks run with stdout REDIRECTED: a `print()` inside one would otherwise land on line 1, where
     coder-eval expects the score, and the row would report a parse error instead of a result.
+
+    `verdicts` maps each check key that produced one to `True` / `False` / `None` (N/A), for
+    :func:`_aggregate_rules`. A SKIPPED check — a name with no entry in CHECKS — is absent from it,
+    because it produced no verdict about anything.
     """
     passed = 0
     applicable = 0
     details: list[str] = []
+    verdicts: dict[str, bool | None] = {}
     for key, params in checks.items():
         name = key.split(LABEL_SEPARATOR, 1)[0]
         fn = CHECKS.get(name)
@@ -246,13 +326,14 @@ def _run_checks(doc: Artifact, checks: dict[str, Any]) -> tuple[int, int, list[s
         detail = " ".join(str(detail).splitlines())
         for line in chatter.getvalue().splitlines():
             details.append(f"     (stdout from {key}: {line})")
+        verdicts[key] = verdict
         if verdict is None:
             details.append(f"N/A  {key}: {detail}")
             continue
         applicable += 1
         passed += int(verdict)
         details.append(("PASS " if verdict else "FAIL ") + f"{key}: {detail}")
-    return passed, applicable, details
+    return passed, applicable, details, verdicts
 
 
 def main(argv: list[str]) -> int:
@@ -290,13 +371,18 @@ def main(argv: list[str]) -> int:
     except OSError as exc:
         return _report(0.0, f"artifact {artifact_path} could not be read: {exc}")
 
-    passed, applicable, details = _run_checks(Artifact(text), checks)
+    passed, applicable, details, verdicts = _run_checks(Artifact(text), checks)
+    # `spec.get("rules")` is passed through unvalidated on purpose: `_aggregate_rules` owns the
+    # validation, so a malformed block costs a detail line rather than the row's score. Attribution
+    # is an annotation, and an annotation must never be able to zero a measurement.
+    rules, complaints = _aggregate_rules(spec.get("rules"), verdicts)
+    details += complaints
     if not applicable:
         # 0/0 is not a perfect row and not a failed one — it is a row that measured nothing, which
         # `/coder-eval:task`'s discrimination gate catches by grading a known-GOOD artifact and
         # seeing 0.0 here.
-        return _report(0.0, f"0/0 applicable — no check applied to {artifact_path}", *details)
-    return _report(passed / applicable, f"{passed}/{applicable} applicable checks passed", *details)
+        return _report(0.0, f"0/0 applicable — no check applied to {artifact_path}", *details, rules=rules)
+    return _report(passed / applicable, f"{passed}/{applicable} applicable checks passed", *details, rules=rules)
 
 
 if __name__ == "__main__":

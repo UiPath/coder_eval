@@ -8,6 +8,12 @@
     "name different rules — a suite whose rows all grade R1 measures one sentence."
   ],
   "path": "REPLACE/output/summary.md",
+  "rules": {
+    "mentions#core": "R5",
+    "mentions#detail": "R6",
+    "mentions#structure": "R7",
+    "mentions#regression": "R4"
+  },
   "checks": {
     "mentions#core": {
       "all_of": ["REPLACE: what this scenario's instruction should have produced"]

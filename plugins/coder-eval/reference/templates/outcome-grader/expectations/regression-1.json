@@ -8,6 +8,12 @@
     "one check is a guard that can only say `broken` or `fine`."
   ],
   "path": "REPLACE/output/report.md",
+  "rules": {
+    "mentions#core": "R1",
+    "mentions#detail": "R2",
+    "mentions#structure": "R8",
+    "mentions#regression": "R4"
+  },
   "checks": {
     "mentions#core": {
       "all_of": ["REPLACE: the behaviour that works today and must keep working"]

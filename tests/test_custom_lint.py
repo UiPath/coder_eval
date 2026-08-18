@@ -2190,6 +2190,10 @@ class TestPluginArtifacts:
         assert 0.0 <= score <= 1.0
         assert score == 1.0, output
         assert len(output.splitlines()) > 1, "the score line carries no detail — a 0.0 would be unreadable"
+        # The other end of the same protocol, asserted here rather than in a third first-line test:
+        # rule attribution is the LAST line, so adding it cannot have moved the score off line 1.
+        assert not output.splitlines()[0].startswith("RULES "), output
+        assert output.splitlines()[-1].startswith("RULES "), output
 
     def test_outcome_grader_na_drops_from_denominator(self, tmp_path: Path):
         # THE load-bearing rule. A check that does not apply must leave the numerator AND the
@@ -2278,8 +2282,9 @@ class TestPluginArtifacts:
         score, output, code = self._grade(tmp_path, spec, "nothing here\n")
         assert code == 0 and score == 0.0
         lines = output.splitlines()
-        # score + summary + exactly one detail line
-        assert len(lines) == 3, f"one check produced {len(lines) - 2} detail lines: {lines}"
+        # score + summary + exactly one detail line + the trailing RULES line
+        assert len(lines) == 4, f"one check produced {len(lines) - 3} detail lines: {lines}"
+        assert lines[-1].startswith("RULES "), lines
         assert not any(line.startswith("PASS") for line in lines), lines
 
     def test_outcome_grader_labels_let_one_check_be_declared_twice(self, tmp_path: Path):
@@ -2312,6 +2317,9 @@ class TestPluginArtifacts:
         assert result.error is None, result.error
         assert result.score == 0.5
         assert "mentions#b" in (result.details or ""), "the detail lines did not survive into the criterion result"
+        # `rule_row_map` reads the RULES line back out of exactly this field, so the round trip
+        # through the real criterion is what proves the attribution is reachable at all.
+        assert "RULES " in (result.details or ""), "the RULES line did not survive into the criterion result"
 
     # The four shipped expectations files, one per row of `outcome-rows.jsonl`. Read once here
     # rather than in each assertion below, and asserted non-empty so a moved directory reports a
@@ -2480,6 +2488,167 @@ class TestPluginArtifacts:
         assert code == 0
         assert score == 0.5, output
         assert "raised" in output, output
+
+    # --- rule attribution: the RULES line `optimize_load.rule_row_map` reads -------------------
+
+    @staticmethod
+    def _rules_line(output: str) -> dict[str, str]:
+        """The grader's rule attribution, parsed from the LAST `RULES ` line of its stdout.
+
+        Scanned from the END for the prefix rather than taken as `splitlines()[-1]` blindly: that
+        is exactly what a consumer does, because `run_command` wraps the grader's stdout in a
+        details block that appends a `Stderr:` section after it.
+        """
+        import json
+
+        line = next(ln for ln in reversed(output.splitlines()) if ln.startswith("RULES "))
+        return json.loads(line[len("RULES ") :])
+
+    def test_outcome_grader_emits_rules_line(self, tmp_path: Path):
+        # Present, valid JSON, and NOT on line 1 — where `score_from_stdout` reads the score.
+        spec = {
+            "path": "out/report.md",
+            "rules": {"mentions#core": "R1", "mentions#other": "R2"},
+            "checks": {"mentions#core": {"all_of": ["alpha"]}, "mentions#other": {"all_of": ["absent"]}},
+        }
+        score, output, code = self._grade(tmp_path, spec, "alpha only\n")
+        assert code == 0 and score == 0.5, output
+        assert self._rules_line(output) == {"R1": "pass", "R2": "fail"}, output
+
+    def test_outcome_grader_rules_line_absent_attribution_is_empty_object(self, tmp_path: Path):
+        # A grader with nothing to attribute emits `RULES {}` — it must never OMIT the line. A
+        # consumer has to tell "this row attributed nothing" from "this grader predates the
+        # contract", and a missing line is the only signal for the second.
+        spec = {"path": "out/report.md", "checks": {"mentions": {"all_of": ["alpha"]}}}
+        _score, output, code = self._grade(tmp_path, spec, "alpha\n")
+        assert code == 0
+        assert self._rules_line(output) == {}, output
+
+    def test_outcome_grader_rule_fails_if_any_check_fails(self, tmp_path: Path):
+        # ANY-FAIL, ALL-NA — and the direction is load-bearing rather than a convention. Any-fail
+        # counts the MOST rows as failing a rule, so the headroom estimate built on it is an UPPER
+        # bound: a rule that cannot clear the noise floor even under the most generous attribution
+        # is definitively unpromotable, which is the only claim the ceiling table makes. A
+        # proportional or all-fail rule would make that claim unsound in the dangerous direction.
+        spec = {
+            "path": "out/report.md",
+            "rules": {"mentions#a": "R1", "mentions#b": "R1", "mentions#c": "R2", "json_field": "R3"},
+            "checks": {
+                "mentions#a": {"all_of": ["alpha"]},
+                "mentions#b": {"all_of": ["absent"]},
+                "mentions#c": {"all_of": ["alpha"]},
+                "json_field": {},
+            },
+        }
+        _score, output, code = self._grade(tmp_path, spec, "alpha\n")
+        assert code == 0
+        assert self._rules_line(output) == {"R1": "fail", "R2": "pass", "R3": "na"}, output
+
+    def test_outcome_grader_a_bare_check_name_attributes_every_label(self, tmp_path: Path):
+        # One entry for a check declared three times, which is the shape an author writes by
+        # default. Without the bare-name fallback the rule would silently attribute NO rows, and a
+        # rule with no failing rows reads as "no headroom" — advice to stop, from a typo.
+        spec = {
+            "path": "out/report.md",
+            "rules": {"mentions": "R1"},
+            "checks": {
+                "mentions#a": {"all_of": ["alpha"]},
+                "mentions#b": {"all_of": ["alpha"]},
+                "mentions#c": {"all_of": ["absent"]},
+            },
+        }
+        _score, output, code = self._grade(tmp_path, spec, "alpha\n")
+        assert code == 0
+        assert self._rules_line(output) == {"R1": "fail"}, output
+
+    def test_outcome_grader_reports_a_rules_entry_matching_no_check(self, tmp_path: Path):
+        # A renamed or mistyped check key leaves its rule looking untouched by this row. Named in
+        # the details rather than dropped, and it must not cost the row its score — attribution is
+        # an annotation, never a measurement.
+        spec = {
+            "path": "out/report.md",
+            "rules": {"mentions#core": "R1", "menshuns#core": "R2"},
+            "checks": {"mentions#core": {"all_of": ["alpha"]}},
+        }
+        score, output, code = self._grade(tmp_path, spec, "alpha\n")
+        assert code == 0 and score == 1.0, output
+        assert "matching no declared check" in output, output
+        assert self._rules_line(output) == {"R1": "pass"}, output
+
+    def test_outcome_grader_a_malformed_rules_block_costs_no_score(self, tmp_path: Path):
+        # `"rules": [...]` — an annotation typo. It reports and moves on: a row that measured
+        # correctly must not be zeroed because its bookkeeping was wrong.
+        spec = {"path": "out/report.md", "rules": ["R1"], "checks": {"mentions": {"all_of": ["alpha"]}}}
+        score, output, code = self._grade(tmp_path, spec, "alpha\n")
+        assert code == 0 and score == 1.0, output
+        assert "`rules` must be an object" in output, output
+        assert self._rules_line(output) == {}, output
+
+    @pytest.mark.parametrize(
+        ("argv", "spec_text", "artifact", "why"),
+        [
+            ([], None, None, "wrong argv"),
+            (["r1"], None, None, "no expectations file"),
+            (["r1"], "{not json", None, "invalid JSON"),
+            (["r1"], "[1, 2]", None, "spec is not an object"),
+            (["r1"], '{"path": "out/report.md", "checks": [1]}', None, "checks is not an object"),
+            (["r1"], '{"path": "out/report.md", "checks": {}}', None, "artifact missing"),
+            (["r1"], '{"path": "out", "checks": {}}', "dir", "artifact is a directory"),
+        ],
+        ids=["argv", "no-spec", "bad-json", "spec-not-object", "checks-not-object", "no-artifact", "artifact-is-dir"],
+    )
+    def test_outcome_grader_emits_rules_on_every_early_exit(
+        self, tmp_path: Path, argv: list[str], spec_text: str | None, artifact: str | None, why: str
+    ):
+        # EVERY exit path, including the ones that run no check at all. `_report` owns the line for
+        # exactly this reason: a consumer that cannot distinguish a crashed grader from an old one
+        # has no way to tell "attribution is unavailable" from "this rule failed nowhere".
+        import shutil
+        import subprocess
+        import sys
+
+        grader_dir = tmp_path / "grader"
+        grader_dir.mkdir()
+        shutil.copy(self.GRADER, grader_dir / "verify.py")
+        (grader_dir / "expectations").mkdir()
+        if spec_text is not None:
+            (grader_dir / "expectations" / "r1.json").write_text(spec_text, encoding="utf-8")
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+        if artifact == "dir":
+            (sandbox / "out").mkdir()
+
+        completed = subprocess.run(
+            [sys.executable, str(grader_dir / "verify.py"), *argv],
+            cwd=sandbox,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert completed.returncode == 0, (why, completed.stderr)
+        assert float(completed.stdout.splitlines()[0]) == 0.0, (why, completed.stdout)
+        assert self._rules_line(completed.stdout) == {}, (why, completed.stdout)
+
+    def test_outcome_grader_prints_the_protocol_from_exactly_one_place(self):
+        # The structural half of "emitted on every exit path", which the parametrized test above
+        # can only sample. The top-level `except` is unreachable from a fixture, so what actually
+        # guarantees it is that `_report` is the ONE writer of both the score line and the RULES
+        # line — a second `print` of either is a new exit path that can drift from the contract.
+        source = self.GRADER.read_text(encoding="utf-8")
+        assert source.count('print(f"{score:.4f}")') == 1, "the score line is printed from more than one place"
+        assert source.count('print("RULES "') == 1, "the RULES line is printed from more than one place"
+        assert source.count("def _report(") == 1
+
+    def test_outcome_grader_rules_line_is_last_and_exactly_formatted(self, tmp_path: Path):
+        # The exact bytes, because the line is machine-read: sorted keys and compact separators are
+        # what let a consumer (and this test) assert a string rather than re-parse to compare.
+        spec = {
+            "path": "out/report.md",
+            "rules": {"mentions#z": "R9", "mentions#a": "R1"},
+            "checks": {"mentions#z": {"all_of": ["alpha"]}, "mentions#a": {"all_of": ["alpha"]}},
+        }
+        _score, output, _code = self._grade(tmp_path, spec, "alpha\n")
+        assert output.splitlines()[-1] == 'RULES {"R1":"pass","R9":"pass"}', output
 
     def test_outcome_grader_discriminates_a_good_artifact_from_a_bad_one(self, tmp_path: Path):
         # The instrument's whole purpose, asserted as a SEPARATION rather than as two scores: a
