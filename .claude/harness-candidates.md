@@ -1056,3 +1056,26 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       deciding whether that gap is real is the actual work. `covers` already gives the rule its
       table set, so the registry half is free. — caught in the 2026-08-17 outcome-suite
       measurement-quality plan, Phase 3 review.
+
+- [ ] **Nothing runs a shipped SKILL.md snippet, so a track-specific one can crash on the other
+      track.** `_snippet_binding_failures` binds keyword arguments against the real signatures and
+      the import sensor asserts every name exists — but neither executes anything, so Step 11's
+      ledger snippet shipped calling `subprocess.run` on a grader the ACTIVATION track has no such
+      thing as, in a file whose own prose calls the snippet a runnable continuation. Fixed by hand
+      (the fingerprint half is commented out per track, as the floor already was). A real guard
+      would execute each fence against a fixture run directory per track, which needs a fixture
+      builder per snippet and a way to neutralise the paid calls — well past the promote threshold.
+      The cheap subset, "a fence that names one track must not call anything unconditionally", is
+      a heuristic that would fire on every correct block too. — caught in the 2026-08-17
+      outcome-suite measurement-quality plan, Phase 5 review.
+
+- [ ] **A CLI mode that bypasses a protocol can still fall through that protocol's error handler.**
+      `verify.py --fingerprint` prints only a hash, but an exception inside it reached the
+      always-exit-0 guard that exists to protect a computed SCORE — printing `0.0000\ngrader
+      failed: …`, which `subprocess.run(check=True)` cannot catch and a caller records AS the
+      fingerprint, so every later round reports a changed instrument from a permissions error.
+      Fixed and regression-tested (`test_a_fingerprint_that_cannot_be_computed_exits_non_zero`).
+      The general rule — every declared output mode has its own failure protocol, asserted — needs
+      a machine-readable declaration of the modes, which this scaffold does not have and should not
+      grow for one rule. — caught in the 2026-08-17 outcome-suite measurement-quality plan, Phase 5
+      review.

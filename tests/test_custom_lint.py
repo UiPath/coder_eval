@@ -2631,6 +2631,175 @@ class TestPluginArtifacts:
         assert float(completed.stdout.splitlines()[0]) == 0.0, (why, completed.stdout)
         assert self._rules_line(completed.stdout) == {}, (why, completed.stdout)
 
+    def test_every_line_of_the_shipped_grader_is_reachable(self, tmp_path: Path):
+        """No dead code in the one file users COPY — measured, not reviewed.
+
+        **Why this exists rather than a review note.** The scaffold is 460-odd lines of executable
+        Python that ships to users, and it sits outside coverage entirely: `pyproject.toml` sets
+        ``source = ["src/coder_eval"]``, and every other test here drives it through `subprocess`,
+        where nothing is measured. So a branch that can never fire is invisible — and one shipped:
+        a `__pycache__` filter guarding a path the file list never yielded, whose own test passed
+        with the filter deleted. Reproduced before writing this: an added
+        ``if "this-can-never-match" in path.parts: continue`` passed all 1331 tests in this file
+        and `test_optimize_gate.py`.
+
+        It drives the scaffold IN-PROCESS rather than through `subprocess`, which is what makes the
+        measurement possible at all, and covers every exit path the module docstring declares. That
+        overlaps deliberately with the behaviour tests above: those assert what the grader SAYS,
+        this asserts that every line of it can still be reached. Neither implies the other — a
+        behaviour test passes over dead code, and this passes over wrong answers.
+
+        **Boundary.** Line reachability, not branch reachability: a condition that is always true
+        still executes its line. And the `if __name__` block is excluded, since an imported module
+        never runs it — the `sys.exit` wrappers there are covered by the subprocess tests instead.
+        """
+        import contextlib
+        import importlib.util
+        import io
+        import json
+        import os
+        import shutil
+
+        import coverage
+
+        grader = tmp_path / "outcome-grader"
+        shutil.copytree(self.GRADER.parent, grader, ignore=shutil.ignore_patterns("__pycache__"))
+        specs = grader / "expectations"
+        # Every shape the dispatch loop and the spec reader can meet, so a line that only a
+        # malformed input reaches still counts as live.
+        (specs / "ok.json").write_text(
+            json.dumps(
+                {
+                    "path": "out/report.md",
+                    "rules": {"mentions#a": "R1", "mentions#gone": "R2", "bad": 7},
+                    "checks": {
+                        "mentions#a": {"all_of": ["alpha"]},
+                        "mentions#b": {"all_of": ["absent"]},
+                        "mentions#na": {"all_of": []},
+                        "mentions#raises": {"all_of": "a string, not a list"},
+                        "mentions#type": {"all_of": 5},
+                        "json_field": {"field": "status", "equals": "ok"},
+                        "json_field#absent": {"field": "nope"},
+                        "json_field#none": {},
+                        "json_field#bad": {"field": 7},
+                        "unknown_check": {},
+                        "mentions#params": "not an object",
+                        "bad": {"all_of": ["x"]},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (specs / "structured.json").write_text(
+            json.dumps(
+                {
+                    "path": "out/data.json",
+                    "checks": {
+                        "json_field": {"field": "status", "equals": "ok"},
+                        "json_field#missing": {"field": "nowhere-in-the-document"},
+                        "json_field#present": {"field": "results"},
+                        "chatty": {},
+                        "weird": {},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (specs / "badrules.json").write_text(
+            json.dumps({"path": "out/report.md", "rules": ["R1"], "checks": {"mentions": {"all_of": ["alpha"]}}}),
+            encoding="utf-8",
+        )
+        (specs / "badruleid.json").write_text(
+            json.dumps({"path": "out/report.md", "rules": {"mentions": 7}, "checks": {"mentions": {"all_of": ["a"]}}}),
+            encoding="utf-8",
+        )
+        (specs / "unreadable.json").write_text(json.dumps({"path": "out/locked.md", "checks": {}}), encoding="utf-8")
+        (specs / "notjson.json").write_text("{ not json", encoding="utf-8")
+        (specs / "notobject.json").write_text("[1, 2]", encoding="utf-8")
+        (specs / "badchecks.json").write_text(json.dumps({"path": "out/report.md", "checks": []}), encoding="utf-8")
+        (specs / "nochecks.json").write_text(json.dumps({"path": "out/report.md"}), encoding="utf-8")
+        (specs / "isdir.json").write_text(json.dumps({"path": "out", "checks": {}}), encoding="utf-8")
+
+        sandbox = tmp_path / "sandbox"
+        (sandbox / "out").mkdir(parents=True)
+        (sandbox / "out" / "report.md").write_text("alpha and a chatty line", encoding="utf-8")
+        # A LIST at the shallowest level, so the breadth-first walk descends through one.
+        (sandbox / "out" / "data.json").write_text(
+            json.dumps({"results": [{"status": "ok"}, {"status": "ok"}]}), encoding="utf-8"
+        )
+        (sandbox / "out" / "locked.md").write_text("unreadable", encoding="utf-8")
+
+        target = str(grader / "verify.py")
+        # `config_file=False` and `source=`, not `include=`: this repo's `[tool.coverage.run]` sets
+        # `source = ["src/coder_eval"]`, which SILENTLY overrides an include and measures nothing
+        # here — the same fail-open shape as the dead filter this test exists to catch.
+        measured = coverage.Coverage(data_file=str(tmp_path / ".coverage"), source=[str(grader)], config_file=False)
+        measured.start()
+        try:
+            spec = importlib.util.spec_from_file_location("shipped_grader_under_test", target)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            # The dispatch loop's defensive paths are about checks an AUTHOR adds — the file says
+            # "REPLACE / EXTEND: the checks your rows actually need" — so exercising them means
+            # registering some. With only the two shipped checks they are unreachable, which is a
+            # fact about the sample vocabulary, not about the dispatch.
+            module.CHECKS["chatty"] = lambda _doc, _params: (print("a check that talks"), (True, "ok"))[1]
+            module.CHECKS["weird"] = lambda _doc, _params: (1, "not a bool")
+
+            previous = Path.cwd()
+            os.chdir(sandbox)
+            try:
+                for argv in (
+                    ["verify.py"],  # wrong argv
+                    ["verify.py", "--fingerprint"],
+                    ["verify.py", "ok"],
+                    ["verify.py", "structured"],
+                    ["verify.py", "missing-row"],
+                    ["verify.py", "notjson"],
+                    ["verify.py", "notobject"],
+                    ["verify.py", "badchecks"],
+                    ["verify.py", "nochecks"],
+                    ["verify.py", "isdir"],
+                    ["verify.py", "badrules"],
+                    ["verify.py", "badruleid"],
+                ):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        module.main(argv)
+                # A scalar artifact: `Artifact.data` stays None where the JSON is not a container.
+                (sandbox / "out" / "data.json").write_text("7", encoding="utf-8")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    module.main(["verify.py", "structured"])
+
+                # An artifact that exists and cannot be READ — the one `OSError` path.
+                locked = sandbox / "out" / "locked.md"
+                locked.chmod(0o000)
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        module.main(["verify.py", "unreadable"])
+                finally:
+                    locked.chmod(0o644)
+            finally:
+                os.chdir(previous)
+        finally:
+            measured.stop()
+
+        analysis = measured._analyze(target)
+        # The `if __name__` block never runs in an imported module; the subprocess tests above are
+        # what cover it, and every one of them asserts the exit code it produces.
+        source_lines = (grader / "verify.py").read_text(encoding="utf-8").splitlines()
+        guard_at = next(i for i, line in enumerate(source_lines, 1) if line.startswith("if __name__"))
+        dead = sorted(line for line in analysis.missing if line < guard_at)
+        assert not dead, (
+            "the shipped grader has lines no input can reach: "
+            + ", ".join(f"{line}: {source_lines[line - 1].strip()!r}" for line in dead)
+            + ". Dead code in the file users COPY is invisible to every other test here — it runs "
+            'through subprocess, and the scaffold is outside `source = ["src/coder_eval"]`. A '
+            "`__pycache__` filter guarding a path the file list never yielded shipped exactly this "
+            "way, with a test that passed once the filter was deleted."
+        )
+
     def test_outcome_grader_prints_the_protocol_from_exactly_one_place(self):
         # The structural half of "emitted on every exit path", which the parametrized test above
         # can only sample. The top-level `except` is unreachable from a fixture, so what actually
