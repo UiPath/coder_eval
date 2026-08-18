@@ -404,6 +404,35 @@ class ExecutionGateVerdict(BaseModel):
             "it could not be computed; 0.0 is a real answer meaning the replicates agreed exactly."
         ),
     )
+    dead_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The share of total criterion weight held by criteria whose PAIRED DIFFERENCE is "
+            "identically zero on every row they scored. `weighted_score` is a weighted mean over "
+            "every criterion, so such a criterion contributes its whole weight to that mean's "
+            "denominator and nothing to its difference: the shipped outcome template's engagement "
+            "criterion and its `file_check` both saturate by design and hold 1.05 of that suite's "
+            "2.05 total weight, so an effect confined to the grader arrives here multiplied by "
+            "1/2.05. Reported so a reader can convert `mean_diff` "
+            "back into the grader's own unit. `None` means it could not be computed — most often a "
+            "run predating `CriterionResult.weight`, where the blend is simply not recorded — and "
+            "is deliberately never 0.0, which would claim no dilution; the reason is always in "
+            "`notes`. **It is a READING and can never gate.** That is a permanent architectural "
+            "decision, not a deferral, and it was measured rather than argued: a constant criterion "
+            "scales the paired difference vector without changing its shape, so it scales the mean "
+            "AND the standard deviation by the same factor — the paired t is identical to 1e-12 "
+            "between the grader-only and blended scales while the mean difference scales by 1/2.05. "
+            "The bootstrap interval scales with the data, the MDE is measured on the same blended "
+            "scale, and the cost/latency guardrails never touch the blend, so EVERY conjunct of "
+            "`promoted` is invariant to this number. Wiring it into `integrity_checks` would "
+            "therefore force `promoted = False` on comparisons that are statistically sound — "
+            "strictly worse than the presentational problem it would be fixing. The one case where "
+            "dead weight genuinely invalidates a comparison is every criterion being constant, i.e. "
+            "1.0, and that is already the zero-variance `gate_refusal` today."
+        ),
+    )
     integrity_checks: list[GuardrailCheck] = Field(
         default_factory=list,
         description=(

@@ -65,6 +65,7 @@ from coder_eval.optimize_activation import (
     noise_floor_mde,
 )
 from coder_eval.optimize_execution import (
+    _dead_weight,
     _execution_diagnostics,
     execution_gate,
     holm_promote_execution,
@@ -5055,6 +5056,290 @@ def _uniform_shift(n_rows: int, *, shift: float = 0.5) -> dict[str, dict[str, li
     }
 
 
+# The shipped outcome template's weights, READ from the template rather than retyped. The exact
+# dead-weight share is 0.5121951219…, and hardcoding a rounded constant is what turns a measurement
+# into a claim nobody checks — `0.512` belongs in the RENDER assertion, where it is what a reader
+# sees, and nowhere else.
+def _template_weights() -> list[float]:
+    from coder_eval.orchestration.task_loader import load_task
+
+    template = Path(__file__).parent.parent / "plugins" / "coder-eval" / "reference" / "templates" / "outcome.yaml"
+    task, _ = load_task(template)
+    weights = [criterion.weight for criterion in task.success_criteria]
+    assert len(weights) == 3, f"the outcome template no longer ships three criteria: {weights}"
+    return weights
+
+
+def _weighted_result(row_id: str, scores: list[float], weights: list[float | None]) -> EvaluationResult:
+    """One replicate carrying one criterion result per (score, weight) pair.
+
+    ``weighted_score`` is computed from them rather than passed in, so the fixture cannot claim a
+    blend its criterion results do not support — which is the whole thing the dead-weight reading is
+    about.
+    """
+    assert len(scores) == len(weights)
+    known = [w for w in weights if w is not None]
+    total = sum(known)
+    blended = (
+        sum(score * (weight or 0.0) for score, weight in zip(scores, weights, strict=True)) / total if total else 0.0
+    )
+    return EvaluationResult(
+        task_id=f"{SUITE}/{row_id}",
+        task_description="row",
+        agent_type="claude-code",
+        started_at=datetime(2026, 8, 17, 12, 0, 0),
+        final_status=FinalStatus.SUCCESS,
+        iteration_count=1,
+        weighted_score=blended,
+        success_criteria_results=[
+            CriterionResult(
+                criterion_type="run_command",
+                description=f"criterion {i} for row {row_id}",
+                score=score,
+                weight=weight,
+            )
+            for i, (score, weight) in enumerate(zip(scores, weights, strict=True))
+        ],
+    )
+
+
+def _weighted_run_dir(
+    tmp_path: Path,
+    *,
+    incumbent: dict[str, list[list[float]]],
+    candidate: dict[str, list[list[float]]],
+    weights: list[float | None],
+    candidate_weights: list[float | None] | None = None,
+) -> Path:
+    """A Stage B gate dir whose rows carry PER-CRITERION scores and weights.
+
+    ``incumbent``/``candidate`` map a row id to one list of per-criterion scores per replicate, so
+    the replicate reduction the dead-weight computation shares with `paired_comparison` is exercised
+    rather than assumed. ``candidate_weights`` overrides the candidate arm's list, which is how a
+    tree whose two arms carry DIFFERENT criteria lists is built.
+    """
+    run_dir = tmp_path / "round1-gate"
+    per_replicate: dict[str, dict[str, list[float]]] = {}
+    arms = (("incumbent", incumbent, weights), ("candidate", candidate, candidate_weights or weights))
+    for variant, per_row, arm_weights in arms:
+        per_replicate[variant] = {}
+        for row_id, replicates in per_row.items():
+            blended: list[float] = []
+            for replicate, scores in enumerate(replicates):
+                result = _weighted_result(row_id, scores, arm_weights)
+                _write_row(run_dir, variant, row_id, result, replicate)
+                blended.append(result.weighted_score)
+            per_replicate[variant][f"{SUITE}/{row_id}"] = blended
+    _experiment_json(run_dir, ["incumbent", "candidate"], per_replicate)
+    return run_dir
+
+
+class TestDeadWeight:
+    """The share of criterion weight that cannot move `weighted_score` — a READING, never a veto.
+
+    `weighted_score` is the execution gate's primary statistic and a weighted mean over every
+    criterion, so a criterion identical on both arms on every row contributes its whole weight to
+    that mean's denominator and nothing to its difference. The shipped outcome template's engagement
+    and `file_check` criteria both saturate by design, so an effect confined to the grader arrives at
+    the gate attenuated — and nothing said so.
+    """
+
+    @staticmethod
+    def _two_constant_one_varying(weights: list[float | None]) -> dict[str, dict[str, list[list[float]]]]:
+        """Criteria 0 and 1 saturate on both arms; criterion 2 moves. The shipped configuration."""
+        rows = [f"r{i}" for i in range(4)]
+        return {
+            "incumbent": {rid: [[1.0, 1.0, 0.2], [1.0, 1.0, 0.3]] for rid in rows},
+            "candidate": {rid: [[1.0, 1.0, 0.8], [1.0, 1.0, 0.9]] for rid in rows},
+        }
+
+    def test_the_shipped_template_configuration_reports_its_own_attenuation(self, tmp_path: Path) -> None:
+        weights = _template_weights()
+        arms = self._two_constant_one_varying(weights)
+        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
+
+        dead = weights[0] + weights[1]
+        assert verdict.dead_weight == pytest.approx(dead / sum(weights))
+
+    def test_nothing_is_dead_when_every_criterion_varies(self, tmp_path: Path) -> None:
+        weights = _template_weights()
+        run_dir = _weighted_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [[0.1, 0.2, 0.3]] for i in range(4)},
+            candidate={f"r{i}": [[0.4, 0.5, 0.6]] for i in range(4)},
+            weights=weights,  # type: ignore[arg-type]
+        )
+        assert _exec_gate(run_dir).dead_weight == 0.0
+
+    def test_an_unrecorded_weight_is_unknown_and_never_zero(self, tmp_path: Path) -> None:
+        """`None`, not 0.0 — "no dilution" and "we cannot tell" are the two states this separates.
+
+        Any run predating `CriterionResult.weight` looks like this, which is every run on disk today.
+        """
+        run_dir = _weighted_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [[1.0, 0.2]] for i in range(4)},
+            candidate={f"r{i}": [[1.0, 0.8]] for i in range(4)},
+            weights=[None, None],
+        )
+        verdict = _exec_gate(run_dir)
+        assert verdict.dead_weight is None
+        assert any("dead weight is UNKNOWN" in note for note in verdict.notes)
+        # The rendered line names NO cause — there are four and only the note knows which.
+        assert "- Dead weight: UNKNOWN — see notes for why it could not be computed" in render_execution_markdown(
+            verdict
+        )
+
+    def test_arms_carrying_different_criteria_lists_refuse_rather_than_guess(self, tmp_path: Path) -> None:
+        # One run_dir, one experiment, one suite — so this is a contaminated tree, and the
+        # reconciliation refusal owns that diagnosis. The share is not guessed from the shorter list.
+        run_dir = _weighted_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [[1.0, 0.2, 0.5]] for i in range(4)},
+            candidate={f"r{i}": [[1.0, 0.8]] for i in range(4)},
+            weights=[1.0, 1.0, 2.0],
+            candidate_weights=[1.0, 1.0],
+        )
+        verdict = _exec_gate(run_dir)
+        assert verdict.dead_weight is None
+        assert any("criteria lists" in note and "disagree" in note for note in verdict.notes)
+
+    def test_a_criterion_no_row_scored_on_both_arms_leaves_both_halves(self) -> None:
+        """Neither dead nor alive: with no paired evidence it leaves numerator AND denominator.
+
+        Counting it as varying dilutes the share downward; counting it as dead inflates it — and an
+        empty vector satisfies `all(... == 0.0)` vacuously, so without the guard it reads as dead.
+
+        Reached through a RAGGED tree, which is what makes it a real state rather than a defensive
+        one: row `a` carries no criterion results on the incumbent and row `c` none on the candidate,
+        so the arms' first SCORING results are `b` and `a` respectively — both three criteria long,
+        so the length check passes — while criterion 2 is scored by the candidate on no row that the
+        incumbent also scored it on.
+        """
+        weights: list[float | None] = [1.0, 1.0, 2.0]
+        incumbent = {
+            "a": [_weighted_result("a", [], [])],
+            "b": [_weighted_result("b", [1.0, 0.2, 0.5], weights)],
+            "c": [_weighted_result("c", [1.0, 0.3, 0.5], weights)],
+        }
+        candidate = {
+            "a": [_weighted_result("a", [1.0, 0.8, 0.5], weights)],
+            "b": [_weighted_result("b", [1.0, 0.9], weights[:2])],
+            "c": [_weighted_result("c", [], [])],
+        }
+        share, notes = _dead_weight(incumbent_rows=incumbent, candidate_rows=candidate, row_ids=["a", "b", "c"])
+        # Only row `b` pairs, and only on criteria 0 and 1: criterion 0 is constant there and holds
+        # 1 of the 2 weight the two usable criteria carry between them.
+        assert share == pytest.approx(0.5)
+        assert any("scored no row on both arms" in note for note in notes)
+
+    def test_a_zero_total_weight_is_none_rather_than_a_zero_division(self, tmp_path: Path) -> None:
+        run_dir = _weighted_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [[1.0, 0.2]] for i in range(4)},
+            candidate={f"r{i}": [[1.0, 0.8]] for i in range(4)},
+            weights=[0.0, 0.0],
+        )
+        verdict = _exec_gate(run_dir)
+        assert verdict.dead_weight is None
+        assert any("zero total weight" in note for note in verdict.notes)
+
+    def test_fewer_than_two_paired_rows_is_none_with_a_reason(self, tmp_path: Path) -> None:
+        run_dir = _weighted_run_dir(
+            tmp_path,
+            incumbent={"r0": [[1.0, 0.2]]},
+            candidate={"r0": [[1.0, 0.8]]},
+            weights=[1.0, 1.0],
+        )
+        verdict = _exec_gate(run_dir)
+        assert verdict.dead_weight is None
+        assert any("fewer than two rows paired" in note for note in verdict.notes)
+
+    def test_the_note_names_the_dead_criteria_by_index_and_description(self, tmp_path: Path) -> None:
+        weights = _template_weights()
+        arms = self._two_constant_one_varying(weights)
+        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
+
+        note = next(n for n in verdict.notes if "of the compared weight is dead" in n)
+        assert "[0] 'criterion 0 for row r0'" in note and "[1] 'criterion 1 for row r0'" in note
+        assert "[2]" not in note, "the varying criterion must not be named as dead"
+        # The attenuation multiplier, so a reader can convert `mean_diff` back into the grader's unit.
+        assert f"multiplied by {1.0 - (verdict.dead_weight or 0.0):.3f}" in note
+
+    def test_the_reading_is_reported_on_a_refused_verdict_too(self, tmp_path: Path) -> None:
+        # Every return path carries it: the computation happens beside the noise floor, before
+        # `_verdict` exists, so a refusal does not silently drop the reading.
+        weights = [1.0, 1.0]
+        run_dir = _weighted_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [[1.0, 0.5]] for i in range(4)},
+            candidate={f"r{i}": [[1.0, 0.7]] for i in range(4)},
+            weights=weights,  # type: ignore[arg-type]
+        )
+        verdict = _exec_gate(run_dir)
+        assert verdict.gate_refusal is not None, "fixture drifted — this is the zero-variance refusal"
+        assert verdict.dead_weight == pytest.approx(0.5)
+
+    def test_a_tiny_but_real_paired_difference_is_ALIVE_not_dead(self) -> None:
+        """The comparison is `== 0.0` on the raw subtraction, with NO tolerance — pinned.
+
+        Every other case here uses differences of 0.2-0.6 or exact zeros, so swapping the test for
+        `abs(diff) < 1e-3` leaves them all green. A criterion that is genuinely constant produces
+        exact zeros; a tolerance would silently reclassify a small real effect as dead, which is the
+        one direction this reading must never fail in — it would report the effect as unmeasurable
+        attenuation rather than as an effect.
+        """
+        weights: list[float | None] = [1.0, 1.0]
+        rows = [f"r{i}" for i in range(4)]
+        incumbent = {rid: [_weighted_result(rid, [0.5, 0.2], weights)] for rid in rows}
+        # Criterion 0 differs by 1e-9 — nine orders below anything `weighted_score` renders, and
+        # still not zero.
+        candidate = {rid: [_weighted_result(rid, [0.5 + 1e-9, 0.8], weights)] for rid in rows}
+        share, _notes = _dead_weight(incumbent_rows=incumbent, candidate_rows=candidate, row_ids=rows)
+        assert share == 0.0, "a non-zero paired difference is alive, however small"
+
+    def test_an_arm_with_no_criterion_results_at_all_is_none_with_a_reason(self) -> None:
+        # Every replicate of every paired row errored on one arm, so there is no criteria list to
+        # weigh. Distinct from a disagreement: nothing was read, rather than two things read wrong.
+        weights: list[float | None] = [1.0, 1.0]
+        rows = ["r0", "r1"]
+        incumbent = {rid: [_weighted_result(rid, [1.0, 0.2], weights)] for rid in rows}
+        candidate = {rid: [_weighted_result(rid, [], [])] for rid in rows}
+        share, notes = _dead_weight(incumbent_rows=incumbent, candidate_rows=candidate, row_ids=rows)
+        assert share is None
+        assert any("no criterion results" in note for note in notes)
+
+    def test_the_rendered_block_prints_the_reading(self, tmp_path: Path) -> None:
+        """`0.512` appears HERE and nowhere else — it is the RENDERED value a reader sees.
+
+        The share itself is 0.5121951219…, so the computation tests above assert
+        `pytest.approx(1.05 / 2.05)` with the weights read from the shipped template. A rounded
+        constant standing in for the arithmetic is a claim nobody is checking.
+        """
+        weights = _template_weights()
+        arms = self._two_constant_one_varying(weights)
+        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
+
+        block = render_execution_markdown(verdict)
+        assert "- Dead weight: 51.2% of the compared weight (see notes)" in block
+        assert "UNKNOWN" not in block
+
+    def test_the_replicate_reduction_matches_the_primary_statistic(self, tmp_path: Path) -> None:
+        """Replicates collapse by MEAN before pairing, so a criterion that differs only WITHIN a
+        row's replicates is not dead — the same reduction `paired_comparison` applies.
+        """
+        weights = [1.0, 1.0]
+        run_dir = _weighted_run_dir(
+            tmp_path,
+            incumbent={f"r{i}": [[0.0, 0.2], [1.0, 0.3]] for i in range(4)},
+            # Criterion 0's per-replicate values differ but its per-row MEAN is identical (0.5), so
+            # it is dead. A per-replicate comparison would call it varying.
+            candidate={f"r{i}": [[1.0, 0.8], [0.0, 0.9]] for i in range(4)},
+            weights=weights,  # type: ignore[arg-type]
+        )
+        assert _exec_gate(run_dir).dead_weight == pytest.approx(0.5)
+
+
 class TestExecutionGateRefusesAReusedRunDir:
     """The execution track reads the SAME append-only tree, and here contamination flips `promoted`.
 
@@ -6205,6 +6490,7 @@ def _full_execution_verdict() -> ExecutionGateVerdict:
         holm_rejected=True,  # rejected at its rank, yet not promoted — the refusal is what vetoed
         promoted=False,  # as above: a refusal forces this False
         mde=0.2,
+        dead_weight=0.5,
         integrity_checks=[_full_guardrail_check()],
         guardrails=[_full_guardrail_check()],
         notes=["a note"],

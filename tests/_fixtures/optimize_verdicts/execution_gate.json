@@ -16,6 +16,7 @@
   "holm_rejected": null,
   "promoted": null,
   "mde": 2.7755575615628914e-17,
+  "dead_weight": null,
   "integrity_checks": [
     {
       "name": "engagement recall.yes [criterion 0]",
@@ -69,6 +70,7 @@
     }
   ],
   "notes": [
+    "dead weight is UNKNOWN: this run predates `CriterionResult.weight`, so the blend behind `weighted_score` is not recorded in the artifact. Re-run to record it — the share is deliberately not reported as 0.0, which would claim no dilution.",
     "this suite's minimum detectable effect came back 0.000, so the difference above was NOT checked against a noise floor. A null split measures zero only when every row's replicates agreed exactly — a deterministic suite, or one whose rows all failed the same way — so read it as 'the floor could not be priced', never as 'this suite can resolve anything'. Raise --repeats, and check the rows actually ran, before treating a small difference here as an effect."
   ]
 }

@@ -713,6 +713,28 @@ def _row_score(result: EvaluationResult, criterion_index: int | None) -> float |
     return result.success_criteria_results[criterion_index].score
 
 
+def _criterion_weights(results: Sequence[EvaluationResult]) -> list[float | None]:
+    """The suite's per-criterion weights, POSITIONALLY, off the first result that scored anything.
+
+    ``None`` in a slot means the weight was NOT RECORDED — a run predating
+    :attr:`~coder_eval.models.CriterionResult.weight` — which is deliberately not the same as a
+    recorded ``0.0``. A caller that folds the two together reports "no dead weight" for a run whose
+    blend it cannot see.
+
+    The FIRST scoring result, not a merge across rows: the criteria list is a property of the suite,
+    so every row of one arm carries the same one, and a row whose result list is shorter is a row
+    that errored rather than a suite that changed. A caller comparing two arms still has to decide
+    what to do when their lengths disagree; this function answers one arm's question only.
+
+    Private, matching :func:`_row_score` beside it: it is an internal primitive of this family, and
+    CE053's path scope reasons about the family's PUBLIC run-tree readers.
+    """
+    for result in results:
+        if result.success_criteria_results:
+            return [criterion.weight for criterion in result.success_criteria_results]
+    return []
+
+
 # The grader's machine-readable attribution line, and the ONE declaration of its prefix. The
 # contract is `plugins/coder-eval/reference/templates/outcome-grader/verify.py`'s: the LAST line of
 # the grader's stdout is `RULES ` followed by compact JSON of rule id -> "pass" | "fail" | "na".

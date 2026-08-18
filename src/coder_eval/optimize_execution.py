@@ -44,6 +44,7 @@ from coder_eval.optimize_gate import (
     cost_latency_guardrails,
 )
 from coder_eval.optimize_load import (
+    _criterion_weights,
     _label_pairs,
     _observed_result_types,
     _pool,
@@ -230,6 +231,130 @@ def _completion_rates(
             totals[arm][1] += attempted
     logger.debug("completion: incumbent %s, candidate %s", totals["incumbent"], totals["candidate"])
     return (totals["incumbent"][0], totals["incumbent"][1]), (totals["candidate"][0], totals["candidate"][1])
+
+
+def _dead_weight(
+    *,
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    row_ids: Sequence[str],
+) -> tuple[float | None, list[str]]:
+    """The share of total criterion weight held by criteria whose paired difference is always zero.
+
+    ``weighted_score`` — this gate's primary statistic — is a weighted mean over every criterion,
+    so a criterion that scores identically on both arms on every row contributes its whole weight to
+    the DENOMINATOR of that mean and nothing to the difference. The shipped outcome template is the
+    worked case: its engagement criterion and its ``file_check`` both saturate by design and hold
+    1.05 of that suite's 2.05 total weight between them, so an effect confined to the grader arrives
+    at this block multiplied by ``1 / 2.05``. Reported so a reader can convert the number back into
+    the grader's own unit. (The engagement weight is deliberately not quoted as a literal: the sensor
+    keeping ``DEFAULT_ALPHA`` the single spelling of its own value matches that number everywhere in
+    this family.)
+
+    **A READING, never a veto**, and the measurement behind that is in the field's own description:
+    a constant criterion scales the paired difference vector without changing its shape, so it
+    scales the mean and the standard deviation by the same factor and the paired *t* is identical to
+    1e-12. Every conjunct of ``promoted`` is invariant to it. The one degenerate case that does
+    invalidate a comparison — every criterion constant — is already the zero-variance refusal.
+
+    ``None`` — never ``0.0`` — whenever the share cannot be computed, with a note naming why. "No
+    dead weight" and "we cannot tell" are the two states this exists to separate.
+
+    **Replicates collapse by MEAN, per row, per arm, before pairing**, which is the same reduction
+    :func:`~coder_eval.reports_stats.paired_comparison` applies to ``weighted_score`` and
+    :func:`~coder_eval.optimize_fronts.arm_row_scores` applies to its vectors — so the three
+    surfaces agree about what a row scored. A mean over identical floats is still that float
+    exactly, so the ``== 0.0`` test below survives the reduction: the comparison is on the raw
+    subtraction and deliberately carries no tolerance, since a criterion that is genuinely constant
+    produces exact zeros while a tolerance would classify a small real effect as dead.
+    """
+    if len(row_ids) < 2:
+        return None, [
+            "dead weight was not computed: fewer than two rows paired, so no per-criterion paired "
+            + "difference vector exists to call constant."
+        ]
+
+    incumbent_results = [result for rid in row_ids for result in incumbent_rows.get(rid, [])]
+    candidate_results = [result for rid in row_ids for result in candidate_rows.get(rid, [])]
+    weights = _criterion_weights(incumbent_results)
+    candidate_weights = _criterion_weights(candidate_results)
+    if not weights or not candidate_weights:
+        return None, [
+            "dead weight was not computed: at least one arm produced no criterion results over the "
+            + "paired rows, so there is no criteria list to weigh."
+        ]
+    if len(weights) != len(candidate_weights):
+        # The suite is shared by construction on this track — one run_dir, one experiment — so this
+        # is a contaminated tree. The reconciliation refusal above owns that diagnosis; adding a
+        # second one here would report the same fault twice under two different names.
+        return None, [
+            f"dead weight was not computed: the arms carry {len(weights)} and "
+            + f"{len(candidate_weights)} criterion result(s) per row, so their criteria lists "
+            + "disagree. Both arms ran one suite, so this is a contaminated tree — re-run both into "
+            + "a fresh --run-dir."
+        ]
+    if any(weight is None for weight in (*weights, *candidate_weights)):
+        return None, [
+            "dead weight is UNKNOWN: this run predates `CriterionResult.weight`, so the blend "
+            + "behind `weighted_score` is not recorded in the artifact. Re-run to record it — the "
+            + "share is deliberately not reported as 0.0, which would claim no dilution."
+        ]
+
+    # Every weight is a float from here; the reference result is the one `_criterion_weights` read
+    # them off, so index i of both lists describes one criterion.
+    known = [weight for weight in weights if weight is not None]
+    reference = next((result for result in incumbent_results if result.success_criteria_results), None)
+    descriptions = [c.description for c in reference.success_criteria_results] if reference is not None else []
+
+    dead: list[int] = []
+    unusable: list[int] = []
+    usable_rows: dict[int, int] = {}
+    for index in range(len(known)):
+        diffs: list[float] = []
+        for rid in row_ids:
+            incumbent = [s for r in incumbent_rows.get(rid, []) if (s := _row_score(r, index)) is not None]
+            candidate = [s for r in candidate_rows.get(rid, []) if (s := _row_score(r, index)) is not None]
+            # A row an errored criterion produced no score for is excluded from THIS criterion's
+            # vector, exactly as the primary statistic excludes it — never folded in as a zero.
+            if incumbent and candidate:
+                diffs.append(mean(candidate) - mean(incumbent))
+        usable_rows[index] = len(diffs)
+        if not diffs:
+            # Neither dead nor alive: it left no evidence either way, so it is excluded from BOTH
+            # the numerator and the denominator rather than counted as varying.
+            unusable.append(index)
+        elif all(diff == 0.0 for diff in diffs):
+            dead.append(index)
+
+    total = sum(known[i] for i in range(len(known)) if i not in unusable)
+    if total == 0.0:
+        return None, [
+            "dead weight was not computed: the compared criteria carry zero total weight, so the "
+            + "share has no denominator."
+        ]
+
+    share = sum(known[i] for i in dead) / total
+    notes: list[str] = []
+    if dead:
+        named = " and ".join(
+            f"[{i}] {descriptions[i]!r} (w={known[i]:.2f}, {usable_rows[i]} row(s))"
+            if i < len(descriptions)
+            else f"[{i}] (w={known[i]:.2f}, {usable_rows[i]} row(s))"
+            for i in dead
+        )
+        notes.append(
+            f"{share:.1%} of the compared weight is dead: {named} have identically zero paired "
+            + "differences on every row they scored, so they contribute to `weighted_score`'s "
+            + "denominator and nothing to its difference. An effect confined to the remaining "
+            + f"criteria reaches this block multiplied by {1.0 - share:.3f}. This is a READING and "
+            + "gates nothing — the paired t is invariant to a constant criterion."
+        )
+    if unusable:
+        notes.append(
+            f"criterion index(es) {unusable} scored no row on both arms, so they are excluded from "
+            + "the dead-weight share entirely rather than counted as varying."
+        )
+    return share, notes
 
 
 def _integrity_checks(
@@ -484,6 +609,14 @@ def execution_gate(
     # real answer (every replicate agreed), and truthiness would erase it.
     mde = measured.mde if measured is not None else None
 
+    # Computed HERE, beside the floor and before `_verdict` exists, for the same two reasons: every
+    # return path reports it, and its explanatory sentence has to be in `notes` before the model is
+    # constructed, since pydantic COPIES the list and a later append is silently discarded.
+    dead_weight, dead_weight_notes = _dead_weight(
+        incumbent_rows=incumbent_rows, candidate_rows=candidate_rows, row_ids=row_ids
+    )
+    notes.extend(dead_weight_notes)
+
     # The rows the CHECKS are computed over. Starts as the on-disk intersection and is narrowed to
     # the rows `paired_comparison` actually paired once that is known: `cost_latency_guardrails`'
     # own docstring states the contract — a guardrail must never be computed over a different
@@ -525,6 +658,7 @@ def execution_gate(
             # refusal was set carries it without every call site repeating the keyword.
             gate_refusal=gate_refusal,
             mde=mde,
+            dead_weight=dead_weight,
             integrity_checks=_integrity_checks(
                 incumbent_rows=incumbent_rows,
                 candidate_rows=candidate_rows,

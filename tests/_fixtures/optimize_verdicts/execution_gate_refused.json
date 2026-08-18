@@ -16,6 +16,7 @@
   "holm_rejected": null,
   "promoted": null,
   "mde": 0.0,
+  "dead_weight": null,
   "integrity_checks": [
     {
       "name": "engagement recall.yes [criterion 0]",
@@ -68,5 +69,7 @@
       "note": "the incumbent measured zero, so a relative change is undefined"
     }
   ],
-  "notes": []
+  "notes": [
+    "dead weight is UNKNOWN: this run predates `CriterionResult.weight`, so the blend behind `weighted_score` is not recorded in the artifact. Re-run to record it — the share is deliberately not reported as 0.0, which would claim no dilution."
+  ]
 }

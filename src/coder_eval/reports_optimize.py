@@ -276,6 +276,21 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
         f"- Holm alpha: {_fmt(verdict.holm_alpha, '.3f')}",
         f"- Interval excludes zero: {verdict.ci_low is not None and verdict.ci_low > 0.0}",
         f"- Minimum detectable effect (weighted_score): {_fmt(verdict.mde)}",
+        # A READING, and the line says so: it converts the blended difference above back into the
+        # grader's own unit and gates nothing. UNKNOWN rather than 0.000 when it could not be
+        # computed — "no dilution" and "we cannot tell" are the two states it exists to separate.
+        # The UNKNOWN text names NO cause: there are four (unrecorded weights, fewer than two rows
+        # paired, arms whose criteria lists disagree, zero total weight) and only the note knows
+        # which. An earlier draft hardcoded "run predates the field", which is a confident wrong
+        # sentence on three of the four.
+        (
+            "- Dead weight: "
+            + (
+                "UNKNOWN — see notes for why it could not be computed"
+                if verdict.dead_weight is None
+                else f"{verdict.dead_weight:.1%} of the compared weight (see notes)"
+            )
+        ),
     ]
     lines += _render_checks("Integrity checks", verdict.integrity_checks)
     lines += _render_checks("Guardrails", verdict.guardrails)
