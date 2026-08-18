@@ -111,3 +111,70 @@ class TestCheckerLogSplit:
         assert len(failed_infos) == 1
         assert len(exception_records) == 1
         assert "boom" in failed_infos[0].getMessage()
+
+
+class TestMirroredWeightIsStamped:
+    """`CriterionResult.weight` is stamped at the seam, on every one of its three paths.
+
+    The field exists so a run artifact carries the blend its `weighted_score` was computed from —
+    the execution gate's primary statistic is a weighted mean over every criterion, and without
+    this it is not reconstructible from the file it is read beside. All three paths are covered
+    because two of them build a result for a criterion no checker ever ran, so they cannot route
+    through `_finalize_result` and are the halves a single happy-path test cannot see.
+    """
+
+    def test_the_success_path_stamps_the_declared_weight(self, sandbox):
+        (sandbox.sandbox_dir / "hello.txt").write_text("hi")  # type: ignore[operator]
+        checker = SuccessChecker(sandbox)
+        criterion = FileExistsCriterion(description="hello exists", path="hello.txt", weight=0.05)
+
+        result = checker.check_all([criterion])[0]
+
+        assert result.weight == 0.05
+
+    def test_a_zero_weight_is_recorded_as_zero_not_as_unrecorded(self, sandbox):
+        # An informational criterion. `0.0` and `None` are the two states the field exists to tell
+        # apart, so no consumer may read this through truthiness.
+        (sandbox.sandbox_dir / "hello.txt").write_text("hi")  # type: ignore[operator]
+        checker = SuccessChecker(sandbox)
+        criterion = FileExistsCriterion(description="informational", path="hello.txt", weight=0.0)
+
+        result = checker.check_all([criterion])[0]
+
+        assert result.weight == 0.0
+
+    def test_the_unregistered_type_path_stamps_the_weight(self, sandbox, monkeypatch):
+        checker = SuccessChecker(sandbox)
+        criterion = FileExistsCriterion(description="x", path="x.txt", weight=0.25)
+
+        def _missing(_type: str):
+            raise KeyError(_type)
+
+        monkeypatch.setattr(checker, "_get_checker_instance", _missing)
+        result = checker.check_all([criterion])[0]
+
+        assert result.error is not None and result.weight == 0.25
+
+    async def test_the_async_success_path_stamps_it_too(self, sandbox):
+        # Production runs `check_all_async`. `_finalize_result` is shared by both paths, so this is
+        # cheap — but the class claims all three paths and a sync-only suite covers half of each.
+        (sandbox.sandbox_dir / "hello.txt").write_text("hi")  # type: ignore[operator]
+        checker = SuccessChecker(sandbox)
+        criterion = FileExistsCriterion(description="hello exists", path="hello.txt", weight=0.05)
+
+        results = await checker.check_all_async([criterion])
+
+        assert results[0].weight == 0.05
+
+    def test_the_checker_exception_path_stamps_the_weight(self, sandbox, monkeypatch):
+        checker = SuccessChecker(sandbox)
+        criterion = FileExistsCriterion(description="x", path="x.txt", weight=0.25)
+
+        class _BoomChecker:
+            def check(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(checker, "_get_checker_instance", lambda _t: _BoomChecker())
+        result = checker.check_all([criterion])[0]
+
+        assert result.score == 0.0 and result.weight == 0.25

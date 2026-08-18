@@ -172,8 +172,16 @@ files without `result_kind` are inferred from `criterion_type`. Base fields
 `evaluation_status` (`evaluated` by default; `not_evaluated` means the check did
 not run and is distinct from an evaluated 0.0),
 `pass_threshold` (default 0.9), `gating` (default `true`; `false` = informational /
-weight-0, excluded from the score and the pass/fail gate). The base allows extra
-fields so subclass keys round-trip.
+weight-0, excluded from the score and the pass/fail gate), and `weight` (the criterion's
+weight in this row's `weighted_score`). The base allows extra fields so subclass keys
+round-trip.
+
+`weight` is `null` for **NOT RECORDED** — a result persisted before the field — which is
+deliberately not the same as a recorded `0.0`. It is what makes `weighted_score`
+reconstructible from the artifact, so a consumer computing that mean itself must treat
+`null` as unknown rather than as `1.0`. It is also the authoritative half of the pair it
+forms with `gating` (`gating == weight > 0` on the criterion side); both are stamped from
+one criterion at one seam, so they cannot disagree on a file this tool wrote.
 
 - **`classification`** adds `observed_label`, `expected_label` (sentinels like
   `(none)` / `(other)` allowed). Emitted by `classification_match`, `skill_triggered`.
@@ -278,6 +286,7 @@ merges may cite the branch commit, marked as such; the seed row below is one.
 | 2026-08-16 | `ExecutionGateVerdict` records whether Holm rejected its null, so the rendered `BLOCKED BY A GUARDRAIL` headline can require it. No estimator, resample count or arithmetic changed. | `optimize_verdicts/execution_gate.json`, `optimize_verdicts/execution_gate_refused.json` | **No statistic moved** — regeneration added the key `holm_rejected` and changed no other value (verified field-by-field against the prior pins). Both pins are pre-Holm `execution_gate` output, so it lands as `null`. The files were also re-serialized with `ensure_ascii=False` to match their two siblings, which changes bytes and no values. | branch commit, pre-squash (PR #109) |
 | 2026-08-17 | The activation track's `BLOCKED BY A GUARDRAIL` rung reads BOTH veto lists (sibling checks and cost/latency guardrails), matching the execution twin, which already unioned `integrity_checks`. A RENDER change only: no estimator, resample count, arithmetic or `promoted` value moved. | `optimize_renders/activation_gate.md` | **No statistic moved** — one line changed, the headline, from `NOT PROMOTED` to `BLOCKED BY A GUARDRAIL — … sibling recall.yes [criterion 1] failed.` on a verdict whose `promoted` was already `False`. The old headline was the defect: a candidate that separated, cleared Holm and was vetoed by a sibling regression read identically to one that simply lost. Found independently by two reviewers in the final cross-phase pass. | branch commit, pre-squash (PR #109) |
 | 2026-08-17 | `ActivationGateVerdict` gets the same pair its twin has — a stored `holm_rejected` and a computed `separated` — and `holm_promote` folds the cost/latency guardrails into `promoted`, so both tracks now mean one thing by that field. A DECISION change, not a measurement one: no estimator, resample count or arithmetic moved. | `optimize_verdicts/activation_gate.json`, `optimize_verdicts/activation_gate_early_return.json` | **No statistic moved** — regeneration added the key `holm_rejected` and changed no other value (verified field-by-field against the prior pins). Both pins are pre-Holm `activation_gate` output, so it lands as `null`. Note what a reader of an OLD block must not carry forward: on identical data, a candidate that separated, cleared Holm and carried a failing cost guardrail used to render `promoted: true` and now renders `false`. The number it was decided on is unchanged; the decision is not. | branch commit, pre-squash (PR #109) |
+| 2026-08-17 | `ExecutionGateVerdict` records `dead_weight` — the share of total criterion weight held by criteria whose paired difference is identically zero on every row — and the rendered block prints it. A READING, not a decision: no estimator, resample count, arithmetic or `promoted` value moved, and the field can never gate (the paired *t* is invariant to a constant criterion, measured identical to 1e-12 between the grader-only and blended scales). | `optimize_verdicts/execution_gate.json`, `optimize_verdicts/execution_gate_refused.json`, `optimize_renders/execution_gate.md` | **No statistic moved** — regeneration added the key `dead_weight` (`null` on both pins, whose fixture rows carry no `CriterionResult.weight`) plus one note saying so, and changed no other value (verified field-by-field against the prior pins). The render gains one line, `Dead weight: UNKNOWN — see notes …`. What a reader of an OLD block must not carry forward: nothing — the attenuation those blocks were already subject to is now named rather than silent. | branch commit, pre-squash (PR #109) |
 
 **A PR that changes a watched constant, or modifies a pinned rendered-number fixture, must add a
 row here** — a CI job (`estimator-protocol` in `.github/workflows/pr-checks.yml`) fails otherwise.

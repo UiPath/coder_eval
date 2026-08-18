@@ -8669,6 +8669,164 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
 
 
 @pytest.mark.lint
+class TestCE058MirroredResultFieldsAreStamped:
+    """CE058 — a mirrored `CriterionResult` field must be assigned at the checker's one seam.
+
+    `CriterionResult` mirrors three fields from the criterion that produced it: `pass_threshold`,
+    `gating` and `weight`. All three are stamped in `evaluation/checker.py`. A fourth added to the
+    model and not stamped there is SILENT — every result carries the field's default, nothing
+    raises, no type checker complains, and every consumer believes the value is real. `weight` is
+    what makes it a recurring class rather than a one-off, and the execution gate's dead-weight
+    reading treats an unrecorded weight as "not recorded" on a run that recorded everything else.
+
+    **Class-wired, not a `BaseRule`, and that is structural rather than stylistic.**
+    `BaseRule.__init__` takes one `filepath` and visits that one file; this predicate spans TWO — a
+    field description in `models/results.py` and an assignment in `evaluation/checker.py`. So it
+    follows CE057 exactly: detection body in `tests/lint/mirrored_result_fields.py`, nothing under
+    `tests/lint/rules/`, `runner.py` untouched.
+
+    **All three functions are required, not any one of them.** A union over the three is satisfied
+    by a stamp in `_finalize_result` alone — which is exactly the defect: the two error paths build a
+    result for a criterion no checker ran, so the field defaults there with nothing raised.
+
+    **Boundary:** it matches the description TEXT, so a mirrored field that does not say
+    `mirrors ` is invisible (hence the non-vacuity assert below); it checks an assignment EXISTS,
+    never that the assigned value is right; and it is scoped to `CriterionResult` itself. That last
+    one is a decision about the future rather than a live suppression — no subclass field says
+    `mirrors ` today, so an unscoped rule would currently detect nothing extra. What makes the
+    scoping right anyway is that a subclass field is produced by the criterion that computed it and
+    no seam could stamp one.
+    """
+
+    CHECKER: ClassVar[Path] = Path(__file__).parent.parent / "src" / "coder_eval" / "evaluation" / "checker.py"
+
+    def test_every_mirrored_field_is_stamped_in_the_real_tree(self):
+        from tests.lint.mirrored_result_fields import gaps
+
+        found, fields = gaps(self.CHECKER)
+        # NON-VACUITY, the CE044/CE045 lesson: a renamed description convention would empty
+        # `found` for the wrong reason and report a clean tree.
+        assert set(fields) >= {"pass_threshold", "gating", "weight"}, (
+            f"GAP: the mirrored-field detector sees {fields} — it must see all three of "
+            "pass_threshold, gating and weight, or it is reporting a clean tree because it can no "
+            "longer find its subject."
+        )
+        assert not found, (
+            "a CriterionResult field says it mirrors its criterion but evaluation/checker.py does "
+            "not assign it on every path, so those results carry the default and nothing raises:\n"
+            + "\n".join(f"  {gap.field} — missing from {', '.join(gap.missing_from)}" for gap in found)
+        )
+
+    def test_ce058_fires_when_the_seam_stops_stamping_a_field(self, tmp_path: Path):
+        # The synthetic violation: a checker source that stamps the older two and forgets `weight`.
+        from tests.lint.mirrored_result_fields import gaps
+
+        source = tmp_path / "checker.py"
+        source.write_text(
+            "class SuccessChecker:\n"
+            "    def _finalize_result(self, criterion, result):\n"
+            "        result.pass_threshold = criterion.pass_threshold\n"
+            "        result.gating = criterion.is_gating\n"
+            "        return result\n"
+            "\n"
+            "    def _missing_checker_result(self, criterion):\n"
+            "        return CriterionResult(pass_threshold=criterion.pass_threshold, gating=True)\n"
+            "\n"
+            "    def _error_result(self, criterion, exc):\n"
+            "        return CriterionResult(pass_threshold=criterion.pass_threshold, gating=True)\n",
+            encoding="utf-8",
+        )
+        found, _fields = gaps(source)
+        assert [gap.field for gap in found] == ["weight"]
+        assert found[0].missing_from == ("_finalize_result", "_missing_checker_result", "_error_result")
+
+    def test_ce058_fires_when_only_the_success_path_stamps_a_field(self, tmp_path: Path):
+        """The any-of hole, and the reason the three functions are required EACH.
+
+        A field stamped in `_finalize_result` alone defaults silently on both error paths — which
+        build a result for a criterion no checker ran and therefore cannot route through the seam.
+        A rule that unioned the three would report this tree as clean.
+        """
+        from tests.lint.mirrored_result_fields import gaps
+
+        source = tmp_path / "checker.py"
+        source.write_text(
+            "class SuccessChecker:\n"
+            "    def _finalize_result(self, criterion, result):\n"
+            "        result.pass_threshold = criterion.pass_threshold\n"
+            "        result.gating = criterion.is_gating\n"
+            "        result.weight = criterion.weight\n"
+            "        return result\n"
+            "\n"
+            "    def _missing_checker_result(self, criterion):\n"
+            "        return CriterionResult(pass_threshold=criterion.pass_threshold, gating=True)\n"
+            "\n"
+            "    def _error_result(self, criterion, exc):\n"
+            "        return CriterionResult(pass_threshold=criterion.pass_threshold, gating=True)\n",
+            encoding="utf-8",
+        )
+        found, _fields = gaps(source)
+        assert [gap.field for gap in found] == ["weight"]
+        assert found[0].missing_from == ("_missing_checker_result", "_error_result")
+
+    def test_a_stamping_function_missing_from_the_file_reports_every_field(self, tmp_path: Path):
+        # A renamed or deleted error path must not pass over silently: with no matching function
+        # there is nothing to union with, so every mirrored field is missing from it.
+        from tests.lint.mirrored_result_fields import gaps
+
+        source = tmp_path / "checker.py"
+        source.write_text("def unrelated():\n    return None\n", encoding="utf-8")
+        found, fields = gaps(source)
+        assert {gap.field for gap in found} == set(fields)
+
+    def test_a_stamp_outside_the_named_functions_does_not_count(self, tmp_path: Path):
+        # The seam is the point. A weight assigned in some other helper leaves the two error paths
+        # unstamped, which is the half of the defect a whole-file scan would miss.
+        from tests.lint.mirrored_result_fields import gaps
+
+        source = tmp_path / "checker.py"
+        source.write_text(
+            "def somewhere_else(criterion, result):\n    result.weight = criterion.weight\n",
+            encoding="utf-8",
+        )
+        found, _fields = gaps(source)
+        assert "weight" in [gap.field for gap in found]
+
+    def test_ce058_reads_the_base_model_only(self):
+        """The scoping, asserted on a subclass field that DOES claim to mirror something.
+
+        Written this way because the obvious version cannot fail: no shipped subclass field says
+        `mirrors `, so comparing `mirrored_fields()` against the real subclasses' own fields
+        compares two sets that are disjoint by construction — the vacuous pass the module docstring
+        cites CE044/CE045 for. A subclass declaring the marker is the only input that distinguishes
+        "reads the base model" from "walks every subclass", and it must not be detected: no seam
+        could stamp a field the criterion itself produces.
+        """
+        from pydantic import Field
+
+        from coder_eval.models import ClassificationCriterionResult, CriterionResult
+        from tests.lint.mirrored_result_fields import MIRROR_MARKER, mirrored_fields
+
+        class _SubclassClaimingToMirror(CriterionResult):
+            observed_thing: str = Field(default="", description=f"{MIRROR_MARKER}BaseSuccessCriterion.nothing")
+
+        assert MIRROR_MARKER in (_SubclassClaimingToMirror.model_fields["observed_thing"].description or "")
+        assert "observed_thing" not in mirrored_fields()
+        # And the real subclasses' own fields are absent for the ordinary reason too.
+        subclass_only = set(ClassificationCriterionResult.model_fields) - set(CriterionResult.model_fields)
+        assert subclass_only, "GAP: the subclass declares no field of its own"
+        assert not (set(mirrored_fields()) & subclass_only)
+
+    def test_nothing_was_added_under_the_baserule_directory(self):
+        # CE057's filing decision, asserted the same way: `tests/lint/rules/` holds `BaseRule`
+        # modules and `runner.py`'s id-uniqueness assert covers `ALL_RULES` alone.
+        from tests.lint.runner import ALL_RULES
+
+        assert not (Path(__file__).parent / "lint" / "rules" / "ce058_mirrored_result_fields.py").exists()
+        assert not any(getattr(rule, "rule_id", None) == "CE058" for rule in ALL_RULES)
+
+
+@pytest.mark.lint
 class TestCE052TemplateTasksLoad:
     """CE052 — every task YAML under `templates/` must load through the real `load_task`.
 

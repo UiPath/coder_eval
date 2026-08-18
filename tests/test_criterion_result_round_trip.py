@@ -247,3 +247,47 @@ def test_post_failure_evaluation_status_round_trip() -> None:
         "evaluated",
         "not_evaluated",
     ]
+
+
+def test_a_result_persisted_before_weight_existed_reads_as_unrecorded() -> None:
+    """An old `task.json` parses with `weight is None` — NOT RECORDED, never a fabricated 1.0.
+
+    Written as raw JSON without the key, which is exactly what every `task.json` on disk from
+    before the field looks like. `gating` chose a default that lies benignly for those records;
+    `weight` must not, because a recorded 1.0 and "we do not know the blend" are the two states it
+    exists to tell apart.
+    """
+    payload = (
+        '{"task_id":"t","task_description":"d","agent_type":"claude-code",'
+        '"started_at":"2026-05-12T00:00:00","final_status":"SUCCESS","iteration_count":1,'
+        '"success_criteria_results":[{"criterion_type":"file_exists","description":"x","score":1.0}]}'
+    )
+    reloaded = EvaluationResult.model_validate_json(payload)
+    assert reloaded.success_criteria_results[0].weight is None
+
+
+def test_a_zero_weight_round_trips_as_zero() -> None:
+    er = _make_eval([CriterionResult(criterion_type="file_exists", description="x", score=1.0, weight=0.0)])
+    reloaded = EvaluationResult.model_validate_json(er.model_dump_json())
+    assert reloaded.success_criteria_results[0].weight == 0.0
+
+
+def test_weight_survives_a_subclass_round_trip() -> None:
+    # The mirrored fields live on the base, so the subclasses inherit them — asserted rather than
+    # assumed, since `success_criteria_results` is a discriminated union and the concrete type is
+    # what carries the field through.
+    er = _make_eval(
+        [
+            ClassificationCriterionResult(
+                criterion_type="skill_triggered",
+                description="x",
+                score=1.0,
+                weight=0.05,
+                observed_label="yes",
+                expected_label="yes",
+            )
+        ]
+    )
+    reloaded = EvaluationResult.model_validate_json(er.model_dump_json())
+    cr = reloaded.success_criteria_results[0]
+    assert isinstance(cr, ClassificationCriterionResult) and cr.weight == 0.05

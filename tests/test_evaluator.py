@@ -60,9 +60,11 @@ def test_success_checker_populates_pass_threshold_on_results():
             description = "fake"
             pass_threshold = 0.42
             is_gating = True
+            weight = 0.05
 
         result = checker._check_single(_Fake())  # type: ignore[arg-type]
         assert result.pass_threshold == 0.42
+        assert result.weight == 0.05
         assert result.score == 0.0
 
     finally:
@@ -208,6 +210,7 @@ def test_success_checker_unsupported_type():
     bad_criterion.description = "Test criterion with unsupported type"
     bad_criterion.pass_threshold = 0.9
     bad_criterion.is_gating = True  # a bare Mock() yields a Mock here, not a bool
+    bad_criterion.weight = 1.0  # same reason: a Mock is not a valid float for CriterionResult.weight
 
     # Should return failed result instead of raising
     result = checker.check(bad_criterion)

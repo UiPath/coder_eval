@@ -260,12 +260,20 @@ class SuccessChecker:
         return self._checker_instances[criterion_type]
 
     def _finalize_result(self, criterion: SuccessCriterion, result: CriterionResult) -> CriterionResult:
-        """Stamp pass_threshold/gating onto a checker's result and log it. Shared
+        """Stamp pass_threshold/gating/weight onto a checker's result and log it. Shared
         by the sync/async success paths in ``_check_single`` / ``_check_single_async``
-        so the two only differ in how they invoke the checker."""
+        so the two only differ in how they invoke the checker.
+
+        The seam for every result a CHECKER produced. It is not the only site: the two error paths
+        below build a result for a criterion no checker ran, so they cannot route through here and
+        stamp the same fields as keyword arguments instead. CE058 requires a mirrored field to be
+        assigned at **all three** — a field stamped here alone defaults silently on those two, and
+        every consumer then believes the value is real.
+        """
         criterion_type = criterion.type
         result.pass_threshold = criterion.pass_threshold
         result.gating = criterion.is_gating
+        result.weight = criterion.weight
 
         logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")
         if result.score < criterion.pass_threshold:
@@ -295,6 +303,7 @@ class SuccessChecker:
             error=f"Unsupported criterion type: '{criterion_type}'",
             pass_threshold=criterion.pass_threshold,
             gating=criterion.is_gating,
+            weight=criterion.weight,
         )
 
     def _error_result(self, criterion: SuccessCriterion, exc: Exception) -> CriterionResult:
@@ -311,6 +320,7 @@ class SuccessChecker:
             error=str(exc),
             pass_threshold=criterion.pass_threshold,
             gating=criterion.is_gating,
+            weight=criterion.weight,
         )
         logger.info(
             "Criterion '%s' %s (score=0.00, threshold=%.2f): %s",

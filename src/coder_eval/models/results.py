@@ -109,6 +109,30 @@ class CriterionResult(BaseModel):
             "any result built without a source criterion — read back as gating."
         ),
     )
+    weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        # BOTH bounds, matching `BaseSuccessCriterion.weight` exactly. `ge` alone rejects `nan`
+        # incidentally (`nan >= 0` is False) and lets `inf` THROUGH — and an `inf` weight then
+        # serializes back as `null`, collapsing the recorded-versus-not-recorded distinction this
+        # field exists to make. A mirror weaker than its source is not a mirror.
+        allow_inf_nan=False,
+        description=(
+            "The criterion's weight in this row's ``weighted_score`` (mirrors "
+            "BaseSuccessCriterion.weight). ``None`` means NOT RECORDED — a result persisted before "
+            "this field existed — which is deliberately not the same as a recorded 0.0. It does "
+            "NOT follow ``gating``'s benignly-lying default for exactly that reason: a recorded "
+            '1.0 and "we do not know the weight" are the two states this field exists to tell '
+            "apart, on the ``RunSummary.row_selection`` precedent. The execution gate's primary "
+            "statistic is a weighted mean over every criterion, so without this field that "
+            "statistic is not reconstructible from the artifact it is read beside. It is the "
+            "AUTHORITATIVE half of the pair it now forms with `gating`, which is `weight > 0` on "
+            "the criterion side: both are stamped from one criterion at one seam, so they cannot "
+            "diverge on an artifact this code wrote, and a reader holding both should trust this "
+            "one. `gating` stays because it is persisted in every existing task.json and read by "
+            "display surfaces, and it is the only answer available when this field is None."
+        ),
+    )
 
 
 class ClassificationCriterionResult(CriterionResult):
