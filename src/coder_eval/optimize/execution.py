@@ -1371,13 +1371,13 @@ def holm_promote_execution(
         # blocked winner from an ordinary loss — folding the veto in here without that split is
         # what would silently retire the BLOCKED headline.
         #
-        # SYMMETRIC with `holm_promote` now: every check list on either track vetoes. The
-        # activation track folds in its `sibling_checks` and the same cost/latency `guardrails`;
-        # what it does not have is `integrity_checks`, which are engagement/completion-rate reads
-        # and a concept of this track alone.
-        blocked = any(not check.passed for check in (*verdict.integrity_checks, *verdict.guardrails))
+        # SYMMETRIC with `holm_promote` now: every check list on either track vetoes, and each
+        # track's `failed_vetoes` is the ONE declaration of which lists those are. The activation
+        # track folds in its `sibling_checks` and the same cost/latency `guardrails`; what it does
+        # not have is `integrity_checks`, which are engagement/completion-rate reads and a concept
+        # of this track alone.
         rejected = i in rejected_at
-        promoted = rejected and verdict.separated and not refused and not blocked
+        promoted = rejected and verdict.separated and not refused and not verdict.failed_vetoes
 
         # Every negative-result rung is guarded, this ladder and the `p_value is None` one above:
         # a refused verdict whose difference happens to favour the incumbent would otherwise print
@@ -1406,11 +1406,7 @@ def holm_promote_execution(
         # and citing a headline the block does not carry. The failed check is still visible in the
         # rendered Integrity checks / Guardrails lists on every path — only the CLAIM is withheld.
         if not refused and rejected and verdict.separated:
-            notes += [
-                note_check_failed(check.name)
-                for check in (*verdict.integrity_checks, *verdict.guardrails)
-                if not check.passed
-            ]
+            notes += [note_check_failed(name) for name in verdict.failed_vetoes]
         notes.append(note_holm_family(len(family), alpha))
         # Not a negative-result claim, so it sits OUTSIDE the refusal guard beside the family note:
         # it is a statement about the draw count, which stays true whatever the refusal says. The

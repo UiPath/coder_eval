@@ -127,13 +127,9 @@ def render_markdown(verdict: ActivationGateVerdict) -> str:
     confident ``UNDECIDED`` with the reason nowhere on the page. The execution renderer solved
     exactly this and its comment records why.
     """
-    # BOTH veto lists, exactly as the execution twin unions `integrity_checks` with `guardrails`.
-    # Reading `guardrails` alone was the last place the two tracks disagreed about what `promoted`
-    # means: a candidate that separated, cleared Holm and was vetoed by a failing SIBLING check has
-    # `promoted=False` and used to render NOT PROMOTED — indistinguishable from one that simply
-    # lost, which is the single confusion this rung exists to prevent. "It won and was vetoed" and
-    # "it lost" call for opposite next actions.
-    failed_guardrails = [check.name for check in (*verdict.sibling_checks, *verdict.guardrails) if not check.passed]
+    # BOTH veto lists, from the model's own `failed_vetoes` — see its docstring for why reading
+    # `guardrails` alone is a wrong answer rather than a narrower one.
+    failed_guardrails = verdict.failed_vetoes
     if verdict.promoted is None:
         headline = "UNDECIDED — holm_promote has not been applied, so this verdict decides nothing"
     elif verdict.gate_refusal is not None and verdict.p_value is None:
@@ -252,7 +248,7 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
     not there: the message used to live in ``notes``, which every path prints, and moving it to a
     headline-only channel is what would have lost it.
     """
-    failed = [check.name for check in (*verdict.integrity_checks, *verdict.guardrails) if not check.passed]
+    failed = verdict.failed_vetoes
     if verdict.promoted is None:
         headline = "UNDECIDED — holm_promote_execution has not been applied, so this verdict decides nothing"
     elif verdict.gate_refusal is not None:

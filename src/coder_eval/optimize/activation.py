@@ -1317,12 +1317,17 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         threshold = _holm_threshold([p for _i, p in family], verdict.p_value, alpha)
         refusal = _refusal_message(verdict, threshold=threshold, family_size=len(family), alpha=alpha)
 
+        # A failed check VETOES the promotion; it is not merely reported. The veto lives in the
+        # DECISION so a caller reading `promoted` cannot ship a candidate the rendered block says is
+        # BLOCKED — the same rule `holm_promote_execution` applies, whose only remaining asymmetry
+        # is that it also has `integrity_checks` to fold in. `failed_vetoes` is the ONE declaration
+        # of which lists those are, on both tracks.
+        #
+        # `siblings_hold` survives the collapse because it is NOT only a `promoted` conjunct: the
+        # note ladder needs to tell a sibling regression apart from a guardrail failure, and it gets
+        # that from this binding alone. Delete it as redundant with `failed_vetoes` and both causes
+        # print the generic guardrail note instead.
         siblings_hold = all(check.passed for check in verdict.sibling_checks)
-        # A failed cost/latency guardrail VETOES the promotion; it is not merely reported. The
-        # veto lives in the DECISION so a caller reading `promoted` cannot ship a candidate the
-        # rendered block says is BLOCKED — the same rule `holm_promote_execution` applies, whose
-        # only remaining asymmetry is that it also has `integrity_checks` to fold in.
-        blocked = any(not check.passed for check in verdict.guardrails)
         rejected = i in rejected_at
         # `verdict.separated` is the two statistical conjuncts as ONE named property. The note
         # ladder needs them apart, to say WHICH failed — it splits them itself, where the sentences
@@ -1333,7 +1338,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
         # 30 on the 6-row fixture at 20,000 draws). Without this conjunction an unpromotable suite
         # promotes on a coin-flip AND carries a refusal — two contradictory claims in one block,
         # and the defect this whole field exists to fix, reborn.
-        promoted = rejected and verdict.separated and siblings_hold and not blocked and refusal is None
+        promoted = rejected and verdict.separated and not verdict.failed_vetoes and refusal is None
         notes += _activation_notes(
             verdict,
             p_value=verdict.p_value,

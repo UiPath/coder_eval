@@ -7,6 +7,7 @@ is a typed value the skill prints, instead of arithmetic an agent performs by ha
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -70,6 +71,22 @@ class GuardrailCheck(BaseModel):
     )
     passed: bool = Field(description="False only on a measured breach; an unmeasurable check passes with a note.")
     note: str | None = Field(default=None, description="Why the check could not be evaluated, or what qualifies it.")
+
+
+def _failed_names(*check_lists: Sequence[GuardrailCheck]) -> list[str]:
+    """The names of every check that FAILED, across the lists given, in the order given.
+
+    One function rather than a comprehension in each verdict's ``failed_vetoes`` property, because
+    two copies would put the polarity — ``not check.passed`` — in two places. That is the same shape
+    CE037 and CE040 police for duplicated arithmetic: two spellings agree today and diverge the
+    moment either is touched, silently, because both remain plausible. The properties reduce to a
+    field selection over this.
+
+    ``GuardrailCheck.passed`` is a non-optional ``bool`` and an unevaluable check reports ``True``
+    with a note, so there is no third state to handle: an unmeasurable check is simply absent from
+    the result, which is what lets a caller treat a non-empty list as "measured breach".
+    """
+    return [check.name for checks in check_lists for check in checks if not check.passed]
 
 
 class ActivationGateVerdict(BaseModel):
@@ -261,6 +278,27 @@ class ActivationGateVerdict(BaseModel):
         reason ``SearchComparison.accepted`` is a property over ``beats`` / ``blocker``.
         """
         return self.mean_diff is not None and self.mean_diff > 0.0 and self.ci_low is not None and self.ci_low > 0.0
+
+    @property
+    def failed_vetoes(self) -> list[str]:
+        """Every check that vetoed this candidate — sibling checks first, then cost/latency.
+
+        BOTH veto lists, and that is the whole point. A candidate on this list **won its comparison
+        and was vetoed**, which is a different outcome from losing and calls for the opposite next
+        action: a loss says try a different idea, a veto says this idea works and costs too much or
+        broke a sibling. Reading ``guardrails`` alone is not a narrower version of that question, it
+        is a wrong answer to it — a failing sibling check rendered as the ordinary ``NOT PROMOTED``
+        headline until that was found, so the reader could not tell the two apart at all.
+
+        The ONE declaration of the set, so ``promoted`` and the rendered ``BLOCKED BY A GUARDRAIL``
+        rung cannot disagree about what vetoes. Order is preserved because the renderer joins it into
+        a sentence; a name appearing in both lists appears twice, as it did before this existed.
+
+        A property rather than a ``computed_field``, for :attr:`separated`'s reason and one more: a
+        computed field would enter ``model_dump()``, and every pinned ``optimize_verdicts/*.json``
+        would gain a key for a value that measures nothing new.
+        """
+        return _failed_names(self.sibling_checks, self.guardrails)
 
 
 class ExecutionGateVerdict(BaseModel):
@@ -516,6 +554,21 @@ class ExecutionGateVerdict(BaseModel):
         reason ``SearchComparison.accepted`` is a property over ``beats`` / ``blocker``.
         """
         return self.mean_diff is not None and self.mean_diff > 0.0 and self.ci_low is not None and self.ci_low > 0.0
+
+    @property
+    def failed_vetoes(self) -> list[str]:
+        """Every check that vetoed this candidate — integrity checks first, then cost/latency.
+
+        The twin of :attr:`ActivationGateVerdict.failed_vetoes` over this track's own list, and it
+        answers the same question: a candidate here **won its paired comparison and was vetoed**,
+        which is not the same outcome as losing and calls for a different next action. Both bodies
+        route through :func:`_failed_names`, so the ``not check.passed`` polarity is declared once.
+
+        The ONE declaration of the set, so ``promoted`` and the rendered ``BLOCKED BY A GUARDRAIL``
+        rung cannot disagree about what vetoes. A property, never a ``computed_field``: it must stay
+        out of ``model_dump()`` or every pinned fixture gains a key measuring nothing new.
+        """
+        return _failed_names(self.integrity_checks, self.guardrails)
 
 
 class ConfirmVerdict(BaseModel):

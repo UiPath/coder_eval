@@ -7391,6 +7391,157 @@ def _full_activation_verdict() -> ActivationGateVerdict:
     )
 
 
+class TestFailedVetoes:
+    """The ONE declaration of what vetoes a promotion, on both tracks.
+
+    "It won and was vetoed" and "it lost" call for opposite next actions, and the set that separates
+    them used to be spelled five times. A candidate whose sibling check failed rendered as the
+    ordinary `NOT PROMOTED` headline because one of those five read `guardrails` alone.
+    """
+
+    @staticmethod
+    def _check(name: str, *, passed: bool) -> GuardrailCheck:
+        return GuardrailCheck(
+            name=name, incumbent=1.0, candidate=1.0, relative_change=0.0, tolerance=0.25, passed=passed
+        )
+
+    @classmethod
+    def _built(
+        cls, track: str, *, own: list[GuardrailCheck], guardrails: list[GuardrailCheck]
+    ) -> ActivationGateVerdict | ExecutionGateVerdict:
+        """A verdict of either track carrying the two check lists given.
+
+        Two literal branches rather than `copy_with(v, **{field_name: ...})`: a computed key defeats
+        the whole reason that helper takes keywords, which is that a reader and a rename can see the
+        field names in the source (CE048).
+        """
+        if track == "activation":
+            return copy_with(_full_activation_verdict(), sibling_checks=own, guardrails=guardrails)
+        return copy_with(_full_execution_verdict(), integrity_checks=own, guardrails=guardrails)
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_it_unions_both_lists_in_order(self, track: str) -> None:
+        own_failed = [self._check("own", passed=False)]
+        own_passed = [self._check("own", passed=True)]
+        cost_failed = [self._check("cost (USD/row)", passed=False)]
+        cost_passed = [self._check("cost (USD/row)", passed=True)]
+
+        # Track-own list FIRST, then guardrails — the renderer joins this into a sentence.
+        both = self._built(track, own=own_failed, guardrails=cost_failed)
+        assert both.failed_vetoes == ["own", "cost (USD/row)"]
+
+        own_only = self._built(track, own=own_failed, guardrails=cost_passed)
+        assert own_only.failed_vetoes == ["own"]
+
+        guardrail_only = self._built(track, own=own_passed, guardrails=cost_failed)
+        assert guardrail_only.failed_vetoes == ["cost (USD/row)"]
+
+        clean = self._built(track, own=own_passed, guardrails=cost_passed)
+        assert clean.failed_vetoes == []
+        # `not []` is True, which is the polarity every `promoted` conjunct depends on.
+        assert not clean.failed_vetoes
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_an_unevaluable_check_is_absent_rather_than_a_third_state(self, track: str) -> None:
+        # `passed` is a non-optional bool and an unevaluable check reports True with a note, so
+        # there is nothing for `failed_vetoes` to handle — it simply does not appear.
+        unevaluable = GuardrailCheck(
+            name="cost (USD/row)",
+            incumbent=None,
+            candidate=None,
+            relative_change=None,
+            tolerance=0.25,
+            passed=True,
+            note="not evaluated",
+        )
+        assert self._built(track, own=[], guardrails=[unevaluable]).failed_vetoes == []
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_it_is_not_persisted(self, track: str) -> None:
+        """The fixture-stability guard: a `computed_field` would add a key to every pinned JSON."""
+        build = _full_activation_verdict if track == "activation" else _full_execution_verdict
+        assert "failed_vetoes" not in build().model_dump()
+        assert "failed_vetoes" not in build().model_dump_json()
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_a_duplicate_name_across_the_two_lists_appears_twice(self, track: str) -> None:
+        # Preserved behaviour, not a fix: the collapse is a refactor.
+        duplicated = self._built(
+            track, own=[self._check("same", passed=False)], guardrails=[self._check("same", passed=False)]
+        )
+        assert duplicated.failed_vetoes == ["same", "same"]
+
+    def test_the_polarity_survived_the_collapse_on_the_activation_track(self) -> None:
+        """The activation site's old spelling was the POSITIVE `siblings_hold = all(...)`.
+
+        The new one is the negative `not verdict.failed_vetoes`, and inverting a polarity during a
+        collapse is the classic bug. Driven through `holm_promote` rather than asserted on the
+        expression, so it is the DECISION being pinned.
+        """
+        verdict = copy_with(
+            _full_activation_verdict(),
+            gate_refusal=None,
+            promoted=None,
+            sibling_checks=[self._check("sibling recall.yes [criterion 1]", passed=False)],
+            guardrails=[self._check("cost (USD/row)", passed=True)],
+        )
+        decided = holm_promote([verdict])[0]
+        assert decided.promoted is False, "a failing sibling check must veto"
+        # And it WON its comparison, which is the distinction the veto exists to preserve.
+        assert decided.holm_rejected is True
+        assert decided.separated is True
+
+        clean = copy_with(verdict, sibling_checks=[self._check("sibling recall.yes [criterion 1]", passed=True)])
+        assert holm_promote([clean])[0].promoted is True, "nothing vetoed — the polarity is inverted"
+
+    def test_the_polarity_survived_the_collapse_on_the_execution_track(self) -> None:
+        verdict = copy_with(
+            _full_execution_verdict(),
+            gate_refusal=None,
+            promoted=None,
+            integrity_checks=[self._check("engagement", passed=False)],
+            guardrails=[self._check("cost (USD/row)", passed=True)],
+        )
+        decided = holm_promote_execution([verdict])[0]
+        assert decided.promoted is False
+        assert decided.holm_rejected is True
+        assert decided.separated is True
+
+        clean = copy_with(verdict, integrity_checks=[self._check("engagement", passed=True)])
+        assert holm_promote_execution([clean])[0].promoted is True
+
+    def test_a_sibling_regression_still_gets_its_own_note(self) -> None:
+        """`siblings_hold` must survive as a binding: the note ladder tells the two causes apart.
+
+        Deleting it — which "replace the union sites" invites — makes a sibling regression print the
+        generic guardrail note, and a reader then cannot tell "moved the failure" from "costs too
+        much".
+        """
+        sibling_failed = copy_with(
+            _full_activation_verdict(),
+            gate_refusal=None,
+            promoted=None,
+            sibling_checks=[self._check("sibling recall.yes [criterion 1]", passed=False)],
+            guardrails=[self._check("cost (USD/row)", passed=True)],
+        )
+        notes = holm_promote([sibling_failed])[0].notes
+        assert any("moved the failure rather than fixing it" in note for note in notes)
+        # And the guardrail-naming note is NOT emitted for a sibling: that rung is guardrails-only,
+        # because the sentence above is already the single declaration for a sibling failure.
+        assert not any("sibling recall.yes [criterion 1]" in note for note in notes)
+
+        guardrail_failed = copy_with(
+            _full_activation_verdict(),
+            gate_refusal=None,
+            promoted=None,
+            sibling_checks=[self._check("sibling recall.yes [criterion 1]", passed=True)],
+            guardrails=[self._check("cost (USD/row)", passed=False)],
+        )
+        guardrail_notes = holm_promote([guardrail_failed])[0].notes
+        assert any("cost (USD/row)" in note for note in guardrail_notes)
+        assert not any("moved the failure" in note for note in guardrail_notes)
+
+
 def _full_confirm_verdict(execution: bool = True) -> ConfirmVerdict:
     """Every optional field set, so the round-trip check below proves something on each one."""
     return ConfirmVerdict(
