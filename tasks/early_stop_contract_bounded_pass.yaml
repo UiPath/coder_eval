@@ -1,0 +1,47 @@
+task_id: "early_stop_contract_bounded_pass"
+description: >
+  Live counterfactual probe for the live_verdict contract (the harm CE036
+  exists to prevent; GitHub issue #61 item 2), in the FALSE-SUCCESS direction.
+  The armed criterion is a BOUNDED range (min 1, max 2 matches) and the agent
+  is instructed to run the matching command four times. A bounded pass is only
+  final at end-of-run, so the pass polarity is live-undecidable by design
+  (live_decidable_polarities() claims only fail); correct behavior, verified
+  live: undecided through the compliant window, then a verdict-preserving
+  FAIL-stop the moment the third match overruns max_count -> FAILURE. A
+  two-sided mutant (model claims the pass polarity for bounded instances +
+  checker latches pass at min_count) pass-stops at the FIRST match, freezing a
+  trajectory that still looks compliant -> false SUCCESS (evidence freezing --
+  the opposite failure mode of the require_success probe's evidence
+  truncation). Caught by CE036 as NON-MONOTONIC (pass -> fail across prefixes)
+  plus the "bounded range: a pass is not final until end-of-run" fixture; the
+  exact live trajectory is pinned as the "bounded window then overrun" case in
+  tests/lint/live_verdict_contract.py. This is a NON-CI example task
+  (deliberately untagged for smoke-pass/smoke-fail; with correct code it FAILS
+  by design): run it manually with `coder-eval run` to observe the mechanism.
+tags: [early-stop, counterfactual]
+
+initial_prompt: >
+  Run the exact command `echo ping` four separate times, as four individual
+  Bash commands (do not combine them into one line or a loop). After the
+  fourth one, create a file named done.txt containing the word done.
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+
+run_limits:
+  max_turns: 12
+
+success_criteria:
+  - type: "command_executed"
+    description: "echo ping ran at least once but AT MOST twice (bounded range)"
+    tool_name: "Bash"
+    command_pattern: "echo ping"
+    min_count: 1
+    max_count: 2
+    # No require_success (CE034-exempt): with max_count set this instance is
+    # fail-only -- the pass trigger below is inert by design, which is exactly
+    # what the two-sided mutant this probe documents would subvert.
+    stop_early:
+      on_pass: stop

@@ -192,6 +192,21 @@ CASES: dict[str, tuple[ContractCase, ...]] = {
             reaches="undecided",
         ),
         ContractCase(
+            label="positive row: foreign skill path read FIRST via shell, expected read later still passes",
+            # Pinned from the live counterfactual probe
+            # tasks/early_stop_contract_any_engagement.yaml: a first-engagement
+            # regression (fail on any foreign engagement while the target is
+            # unengaged) is non-monotonic exactly on this walk — it fail-stopped
+            # the live run at tool call 1 and flipped SUCCESS to FAILURE.
+            criterion=_skill_crit(skill_name="beta", expected_skill="beta"),
+            commands=(
+                _bash("ls skills/alpha/", sequence_number=0),
+                _bash("ls skills/beta/", sequence_number=1),
+                _bash("echo done", sequence_number=2),
+            ),
+            reaches="pass",
+        ),
+        ContractCase(
             label="distractor row: a wrong skill engaging is a decidable miss",
             criterion=_skill_crit(skill_name="uipath-rpa", expected_skill="uipath-agents"),
             commands=(
@@ -241,6 +256,21 @@ CASES: dict[str, tuple[ContractCase, ...]] = {
                 _bash("echo done", sequence_number=1),
             ),
             reaches="undecided",
+        ),
+        ContractCase(
+            label="bounded window then overrun: undecided through [min, max], fail past max",
+            # Pinned from the live counterfactual probe
+            # tasks/early_stop_contract_bounded_pass.yaml: a two-sided mutant
+            # that latches a premature pass at min_count is non-monotonic
+            # exactly on this walk (pass at count 1, fail at count 3) — live it
+            # froze a still-compliant count and flipped FAILURE to SUCCESS.
+            criterion=_cmd_crit(pattern="echo ping", min_count=1, max_count=2),
+            commands=(
+                _bash("echo ping", sequence_number=0),
+                _bash("echo ping", sequence_number=1),
+                _bash("echo ping", sequence_number=2),
+            ),
+            reaches="fail",
         ),
         ContractCase(
             label="no bounds at all (min 0 / max None): neither polarity is decidable",

@@ -1,0 +1,45 @@
+task_id: "early_stop_contract_require_success"
+description: >
+  Live counterfactual probe for the live_verdict contract (the harm CE036
+  exists to prevent; GitHub issue #61 item 2). The agent is instructed to run
+  `python app.py` BEFORE app.py exists (a crash), then create it and run it
+  again. Correct live_verdict (require_success filters the crashed match in
+  BOTH live_verdict and _check_impl, via the shared matcher): the crash stays
+  undecided, the pass-stop fires only on the later successful run -> SUCCESS.
+  A contract-violating checker that counts the crashed match latches a false
+  live PASS at tool call 1, fires on_pass: stop, and truncates the run before
+  app.py is ever created -- the frozen trajectory then scores 0 and the verdict
+  silently flips to FAILURE (evidence truncation). That mutant passes every
+  pre-CE036 test and is caught only by the CE036 replay fixtures
+  ("require_success: a crashed match never counts toward the live pass",
+  tests/lint/live_verdict_contract.py). This is a NON-CI example task
+  (deliberately untagged for smoke-pass/smoke-fail): run it manually with
+  `coder-eval run` to observe the mechanism.
+tags: [early-stop, counterfactual]
+
+initial_prompt: >
+  Step 1: run exactly this command first, before creating any file:
+  python app.py
+  It will fail because app.py does not exist yet - that is expected; do not
+  investigate the failure. Step 2: create app.py containing a single line that
+  prints 'Hello, Claude!'. Step 3: run python app.py again to verify it works.
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+
+run_limits:
+  max_turns: 12
+
+success_criteria:
+  - type: "command_executed"
+    description: "python app.py ran SUCCESSFULLY at least once"
+    tool_name: "Bash"
+    command_pattern: "python app\\.py"
+    min_count: 1
+    # The probe's whole point (and CE034's mandate on an armed, pass-capable
+    # criterion): without this, the instructed crash at step 1 live-PASSES.
+    require_success: true
+    stop_early:
+      on_pass: stop

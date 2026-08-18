@@ -1,0 +1,44 @@
+task_id: "early_stop_contract_any_engagement"
+description: >
+  Live counterfactual probe for the live_verdict contract (the harm CE036
+  exists to prevent; GitHub issue #61 item 2), on skill_triggered's
+  any-engagement policy. The agent touches a DISTRACTOR skill path first, then
+  the expected one (the Codex-style file-read engagement signal -- the command
+  string contains `skills/<name>/`, no Skill tool needed). Correct behavior,
+  verified live: the foreign touch stays undecided (exploration is not
+  commitment) and the pass-stop fires at tool call 2 when the expected skill
+  engages -> SUCCESS. A two-sided mutant regressing to the old
+  first-engagement policy (model claims both polarities on a positive
+  instance + checker fails on any foreign engagement while the target is not
+  yet engaged) fail-stops at tool call 1, truncating the run before the
+  expected engagement -> the frozen trajectory scores 0 and the verdict flips
+  to FAILURE (evidence truncation -- recall corruption on every positive row
+  whose agent explores before committing). Caught by CE036 as NON-MONOTONIC
+  on the "positive row: a distractor engages FIRST" fixture; the exact live
+  trajectory is pinned as the foreign-path-read-first case in
+  tests/lint/live_verdict_contract.py. This is a NON-CI example task
+  (deliberately untagged for smoke-pass/smoke-fail): run it manually with
+  `coder-eval run` to observe the mechanism.
+tags: [early-stop, counterfactual]
+
+initial_prompt: >
+  Run exactly these two commands in this order, as two separate Bash commands
+  (they may fail because the folders do not exist - that is fine, ignore the
+  errors and do not investigate): first `ls skills/alpha/`, then
+  `ls skills/beta/`. After both, create a file named done.txt containing done.
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+
+run_limits:
+  max_turns: 12
+
+success_criteria:
+  - type: "skill_triggered"
+    description: "the beta skill was engaged (positive row)"
+    skill_name: "beta"
+    expected_skill: "beta"
+    stop_early:
+      on_pass: stop
