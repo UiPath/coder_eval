@@ -39,6 +39,10 @@ success_criteria:
     tool_name: "Bash"
     command_pattern: "python app\\.py"
     min_count: 1
+    # Mandatory on an ARMED, pass-capable criterion (CE034): a crashed
+    # `python app.py` must not resolve the positive, since resolving it is what
+    # releases the deferred fail-stop this fixture is built to demonstrate.
+    require_success: true
     weight: 0.2
     stop_early:
       on_pass: stop
@@ -48,6 +52,8 @@ success_criteria:
     command_pattern: "curl"
     min_count: 0
     max_count: 0
+    # Deliberately NOT require_success: a curl that failed is still a curl that
+    # was called, which is precisely what this negative assertion forbids.
     weight: 0.8
     stop_early: {}
   - type: "file_exists"

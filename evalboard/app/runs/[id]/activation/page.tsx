@@ -6,6 +6,8 @@ import {
     type ActivationCaseRow,
     type ActivationSkillScore,
 } from "@/lib/runs";
+import { sourceById } from "@/lib/sources";
+import { scalarParam, withSource } from "@/app/_lib/source-param";
 
 export const dynamic = "force-dynamic";
 
@@ -67,15 +69,20 @@ function StatCard({
 
 export default async function ActivationPage({
     params,
+    searchParams,
 }: {
     params: Promise<{ id: string }>;
+    searchParams: Promise<{ src?: string | string[] }>;
 }) {
     const { id } = await params;
+    // Which container this run lives in. Unknown/absent coerces to the skills
+    // nightly, so every URL that predates the Scribe tab keeps resolving as-is.
+    const source = sourceById(scalarParam((await searchParams).src));
     const [activation, cases] = await Promise.all([
         // Both read the nested activation sub-run (run_id/activation/run.json):
         // the rollup and the per-case list. Kept entirely out of the skills run.
-        readActivationScore(id),
-        readActivationTasks(id),
+        readActivationScore(id, source),
+        readActivationTasks(id, source),
     ]);
     if (!activation) notFound();
 
@@ -102,7 +109,7 @@ export default async function ActivationPage({
         <div className="space-y-6">
             <div className="space-y-1">
                 <Link
-                    href={`/runs/${id}`}
+                    href={withSource(`/runs/${id}`, source.id)}
                     className="text-xs text-studio-blue hover:underline"
                 >
                     ← back to run
@@ -230,7 +237,10 @@ export default async function ActivationPage({
                                     >
                                         <td className="px-4 py-2 max-w-xl">
                                             <Link
-                                                href={`/runs/${id}/${t.taskId}`}
+                                                href={withSource(
+                                                    `/runs/${id}/${t.taskId}`,
+                                                    source.id,
+                                                )}
                                                 className={`hover:underline ${
                                                     mistake
                                                         ? "text-red-800"

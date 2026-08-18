@@ -28,7 +28,8 @@ read). Times are ISO-8601.
 | `<variant>/variant.json` / `.md` | `VariantAggregate` | Per variant |
 
 `<NN>` is the zero-padded replicate index. Judge transcripts spill to sibling files
-(e.g. `judge-0.yaml`) referenced by a `transcript_path`.
+(`judge-N.yaml`, or `post-failure-judge-N.yaml` for diagnostic records) referenced
+by a `transcript_path`.
 
 ---
 
@@ -126,6 +127,7 @@ The authoritative per-replicate record.
 | `max_turns_exhausted` | `bool` | Ran out of turns. |
 | `iteration_count` | `int` | Number of turns. |
 | `success_criteria_results` | `list[CriterionResult]` | Per-criterion results — see [below](#criterionresult). |
+| `post_failure_criteria_results` | `list[CriterionResult]` | Diagnostic artifact evidence collected after a terminal agent failure. It does not affect `final_status`, `weighted_score`, gating, or suite aggregation. |
 
 **Transcript:** `iterations: list[TurnRecord]` (accepts legacy alias `turns`) — see
 [TurnRecord](#turnrecord).
@@ -137,6 +139,20 @@ The authoritative per-replicate record.
 `ClaudeAgentOptions` dump), `sandbox_path`, `task_config`
 (`{resolved, source_yaml, source_file, lineage}` — `lineage` maps each field to
 `{value, source, source_detail}` so you can trace which config layer set it).
+`environment_info.system_prompt_semantics` (`"append"` / `"replace"` /
+`"unknown"`) records the system-prompt regime the agent ran with. Every agent
+emits it — the base `Agent` supplies `"unknown"` for an agent that has not
+declared its regime (including out-of-tree plugin agents), so an absent key
+means one thing only: a run predating the marker. Those runs used
+replace-on-set / empty-on-unset semantics on Claude Code and are not
+score-comparable, so consumers should segment on it (absent ⇒ pre-append
+regime; `"unknown"` ⇒ current run, undeclared agent). Codex runs before the
+marker dropped `system_prompt` entirely and Antigravity always appended, so for
+those two the boundary is a reporting change, not a behavioral one.
+`sdk_options.system_prompt` is a `SystemPromptPreset` dict
+(`{type: "preset", preset: "claude_code", exclude_dynamic_sections: true, append?: str}`)
+on append-mode Claude Code runs and a plain string only in replace mode — it is
+no longer `str | null`, so consumers must not string-handle it unconditionally.
 
 **Telemetry/totals:** `total_token_usage` ([TokenUsage](#tokenusage)),
 `command_stats` (`CommandStatistics`), `total_assistant_turns`, `expected_commands` /
@@ -152,6 +168,8 @@ files without `result_kind` are inferred from `criterion_type`. Base fields
 (`result_kind="basic"`):
 
 `criterion_type`, `description`, `score` (0.0–1.0), `details`, `error`,
+`evaluation_status` (`evaluated` by default; `not_evaluated` means the check did
+not run and is distinct from an evaluated 0.0),
 `pass_threshold` (default 0.9), `gating` (default `true`; `false` = informational /
 weight-0, excluded from the score and the pass/fail gate). The base allows extra
 fields so subclass keys round-trip.
@@ -159,9 +177,21 @@ fields so subclass keys round-trip.
 - **`classification`** adds `observed_label`, `expected_label` (sentinels like
   `(none)` / `(other)` allowed). Emitted by `classification_match`, `skill_triggered`.
 - **`judge`** adds `findings`, `token_usage` (kept distinct from the agent total), and
-  `transcript_path` (a sibling `judge-N.yaml`). The full `transcript` is **stripped
+  `transcript_path` (a sibling `judge-N.yaml`, or `post-failure-judge-N.yaml` for
+  diagnostic records). The full `transcript` is **stripped
   from `task.json`** — read it from the referenced file. Emitted by `llm_judge`,
   `agent_judge`.
+
+### Post-failure criterion evidence
+
+When an agent crashes or its turn times out, coder-eval runs only deterministic,
+read-only artifact criteria while the sandbox is still live: `file_exists`,
+`file_contains`, `file_matches_regex`, `file_check`, `json_check`,
+`reference_comparison`, and `classification_match`. Judges, trajectory checks,
+`run_command`, and `uipath_eval` are recorded with
+`evaluation_status="not_evaluated"`; they are not invoked on this recovery path.
+The diagnostic list is additive evidence. An `ERROR` run remains `ERROR`, and its
+canonical score remains 0.0.
 
 ### TurnRecord
 

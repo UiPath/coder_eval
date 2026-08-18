@@ -603,7 +603,10 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
             return {"env": {"PATH": os.environ.get("PATH", "")}}
 
         def get_environment_info(self):
-            return {}
+            # Non-empty on purpose: pins the orchestrator merge seam
+            # (environment_info.update(agent.get_environment_info())) that
+            # carries agent markers like system_prompt_semantics into run.json.
+            return {"system_prompt_semantics": "append"}
 
     async def create_dummy_agent(_self):
         return DummyAgent()
@@ -634,6 +637,10 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
     monkeypatch.setattr(Orchestrator, "_create_agent", create_dummy_agent)
 
     await orchestrator._setup()
+
+    # An agent-supplied environment_info key survives the merge into the
+    # run record (the cross-repo contract seam external consumers read).
+    assert orchestrator.result.environment_info["system_prompt_semantics"] == "append"
 
     assert isinstance(orchestrator.sandbox, Sandbox)
     assert orchestrator.sandbox.sandbox_dir is not None

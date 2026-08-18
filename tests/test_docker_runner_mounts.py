@@ -938,7 +938,7 @@ class TestOutputMountWidenedBeforeLaunch:
     `TestContainerAccessWidening` proves the helper computes the right modes;
     this proves `run()` applies it to the run dir before `docker run` starts.
     The shipped regression was precisely a correct primitive that no live path
-    invoked (cf. lint rule CE033), and no unit test of the helper alone could
+    invoked (cf. lint rule CE036), and no unit test of the helper alone could
     have caught it.
     """
 

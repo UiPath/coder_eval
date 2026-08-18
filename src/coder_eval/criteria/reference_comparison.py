@@ -99,10 +99,10 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
         try:
             agent_code = sandbox.get_file_content(criterion.agent_file)
         except FileNotFoundError:
-            # CE035 exemption: genuinely the AGENT's failure, unlike reference_file
+            # CE038 exemption: genuinely the AGENT's failure, unlike reference_file
             # above: the task asked for this file and the agent did not produce
             # it, which is exactly what a gating 0.0 means.
-            return CriterionResult(  # noqa: CE035
+            return CriterionResult(  # noqa: CE038
                 criterion_type="reference_comparison",
                 description=criterion.description,
                 score=0.0,

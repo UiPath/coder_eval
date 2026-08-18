@@ -23,7 +23,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +47,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -71,32 +72,74 @@ from coder_eval.utils import expand_env_vars
 
 logger = logging.getLogger(__name__)
 
-# Serializes the transient ``os.environ['PATH']`` prepend around the localharness
-# subprocess spawn (see ``AntigravityAgent._harness_spawn_guard``). The Antigravity
-# SDK's ``subprocess.Popen`` inherits the parent process's ``os.environ`` and exposes
-# NO env seam, so making mock CLIs shadow real ones forces a global mutation; this
-# lock keeps concurrent host-mode starts (``run_batch`` fans them out on one event
-# loop) from leaking one task's mock dirs onto another's harness. Lazily created and
-# rebound per running loop so pytest's per-test loops don't reuse a stale-loop lock.
-_HARNESS_SPAWN_LOCK: asyncio.Lock | None = None
-_HARNESS_SPAWN_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
-
-
-def _harness_spawn_lock() -> asyncio.Lock:
-    """Return the process-wide harness-spawn lock, bound to the running loop."""
-    global _HARNESS_SPAWN_LOCK, _HARNESS_SPAWN_LOCK_LOOP
-    loop = asyncio.get_running_loop()
-    if _HARNESS_SPAWN_LOCK is None or _HARNESS_SPAWN_LOCK_LOOP is not loop:
-        _HARNESS_SPAWN_LOCK = asyncio.Lock()
-        _HARNESS_SPAWN_LOCK_LOOP = loop
-    return _HARNESS_SPAWN_LOCK
-
-
 # Recommended Gemini coding model when a task pins no ``agent.model`` and neither
 # ``--model`` nor ``ANTIGRAVITY_MODEL`` is set. Gemini 3.5 Flash is Antigravity 2.0's
 # default coding model (2026-05) — it outperforms the older Gemini 3.1 Pro on coding /
 # agentic benchmarks while running faster; ``medium`` thinking is its daily-driver default.
 _DEFAULT_MODEL = "gemini-3.5-flash"
+
+# How often to re-check for progress once an orphaned (backgrounded) tool call is
+# detected. receive_steps() returns instantly empty ONLY when the connection is
+# already idle with nothing queued -- which is exactly the state right after a
+# background job leaves the model idle, so the common re-check is cheap. (It CAN
+# still await indefinitely if called while genuinely non-idle work is in flight;
+# see the poll loop's own comment in communicate() for that case.)
+# Conversation.wait_for_wakeup() is an unimplemented stub on the Local harness
+# connection this agent uses (always returns False, regardless of pending state,
+# confirmed against the installed SDK's source) — so this file drives its own
+# sleep-and-retry poll instead. Not user-configurable: a tuning constant, not a
+# feature.
+_BACKGROUND_POLL_INTERVAL_SECONDS = 5.0
+
+# Bound on retrying a receive_steps() call that hits the SDK's re-entrancy guard
+# (see _drain()'s docstring) -- each retry yields one event-loop turn via
+# asyncio.sleep(0) for the prior drain's already-scheduled generator cleanup to
+# land. Confirmed live against the real SDK's generator-delegation shape that
+# this clears within 2 turns; this constant carries a 2.5x margin, not a
+# separately-tuned budget.
+_RECEIVE_STEPS_REENTRY_RETRIES = 5
+
+# Fraction of the turn's configured `timeout` the poll loop is allowed to spend
+# waiting on a backgrounded tool call, before giving up and finalizing through
+# its OWN graceful path (force-close the orphan as unresolved, grade normally)
+# instead of running into the ThreadedWatchdog's harder cutoff at `timeout`
+# itself. Deliberately a FRACTION of `timeout`, not `timeout` itself: a check
+# against the identical value the watchdog uses races it non-deterministically
+# for who fires first (the bug an earlier review round removed); a check
+# against a smaller fraction is a strictly earlier, non-racing internal
+# deadline whose whole purpose is to reliably win that race. 0.8 leaves the
+# watchdog a fifth of the turn's budget as margin for this loop's own exit
+# bookkeeping (the warning log, finalize()'s force-close/grade pass) to
+# complete before the harder cancellation would land anyway.
+#
+# This bound is what actually matters: without it, a tool call spuriously left
+# ACTIVE with no real background job behind it (observed live -- see the final
+# validation run) used to finalize immediately pre-fix and grade whatever the
+# agent had already produced. Bounding this loop only by a fixed cycle count
+# disconnected from `timeout` (as an earlier revision did: 120 * 5s = 600s,
+# double the framework's own default `turn_timeout: 300` in
+# experiments/default.yaml) makes the graceful path unreachable in practice --
+# the watchdog always wins first, and the SAME spurious-orphan turn now burns
+# the full turn timeout before crashing as TurnTimeoutError with zero criteria
+# evaluated, a strict regression for that input class.
+_POLL_DEADLINE_TIMEOUT_FRACTION = 0.8
+
+# Cap on poll *cycles* per turn -- the SOLE bound when a task sets no
+# run_limits.turn_timeout/task_timeout at all (timeout=None), since
+# _POLL_DEADLINE_TIMEOUT_FRACTION has nothing to multiply in that case. Also a
+# backstop against a very large configured timeout turning this loop into an
+# effectively unbounded wait: 120 * 5s = 10 minutes, ~2x the worst real
+# backgrounded-job duration observed in confirmed-broken tasks (60-300s).
+#
+# Deliberately NOT "break after N consecutive empty polls" instead: the real
+# SDK's receive_steps() returns identically empty whether a backgrounded job is
+# still genuinely running OR will never resolve at all (confirmed live against
+# the installed SDK) -- there is no signal that tells these two cases apart
+# except waiting. A consecutive-empty-count small enough to matter would also
+# abort real slow jobs (the confirmed cases needed up to ~60 consecutive 5s-
+# empty polls before succeeding); one large enough to be safe barely improves
+# over this flat cap. A flat, data-grounded cap is the honest option.
+_MAX_BACKGROUND_POLLS = 120
 
 # Antigravity builtin tool name -> canonical Claude-ish tool name, so cross-agent
 # success criteria (command_executed / commands_efficiency / skill_triggered) and
@@ -143,6 +186,7 @@ _ANTIGRAVITY_ARG_RENAME: dict[str, dict[str, str]] = {
 # optional extra; only ``start()`` touches it). Named constants — not bare string
 # literals — so an antigravity StepStatus.ERROR comparison is not mistaken for a
 # coder_eval FinalStatus member-name denylist (lint rule CE018).
+_STATUS_ACTIVE = "ACTIVE"
 _STATUS_DONE = "DONE"
 _STATUS_ERROR = "ERROR"
 _TYPE_THINKING = "THINKING"
@@ -189,6 +233,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
 
+    # Antigravity has always appended (TemplatedSystemInstructions wraps
+    # system_instructions around its own harness prompt), so its runs are
+    # comparable across the marker boundary.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+
     def __init__(
         self,
         config: AntigravityAgentConfig,
@@ -213,7 +262,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         self._sdk_agent: Any = None
         self._exit_stack: AsyncExitStack | None = None
         # Absolute dirs to prepend to PATH so sandbox mock CLIs shadow real ones
-        # for the harness's run_command tool — applied at spawn (see start()).
+        # for the harness's run_command tool — handed to the SDK's per-agent env
+        # seam at start() (see _harness_env).
         self._env_path_prepend: list[str] = []
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
@@ -288,6 +338,24 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """
         return [str(self.working_directory), *skills_paths]
 
+    def _harness_env(self) -> dict[str, str] | None:
+        """Per-agent environment for the localharness subprocess (``LocalAgentConfig.env``).
+
+        Returns the mock-CLI PATH prepend as a one-key overlay, or ``None`` when no
+        mock dirs are configured (so the SDK spawns with a plain inherited env). The
+        SDK merges this over ``os.environ`` at spawn (``{**os.environ, **env}``), so
+        naming only ``PATH`` leaves every other inherited variable untouched. The
+        same overlay is handed to the harness as its ``run_command`` environment, so
+        mock CLIs shadow the real ones inside the agent's shell too.
+        """
+        if not self._env_path_prepend:
+            return None
+        # Match the parent process's own casing (Windows exports ``Path``) so the
+        # merge overrides the inherited entry instead of adding a sibling key.
+        path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
+        merged = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key) or ""])
+        return {path_key: merged}
+
     async def start(
         self,
         working_directory: str,
@@ -306,10 +374,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             env_path_prepend: Absolute directories to prepend to PATH (typically the
                 resolved ``SandboxConfig.mock_path_dirs``) so mock CLIs shadow the real
                 ones for the harness's ``run_command`` tool — same mock-shadowing
-                contract as the Claude/Codex backends. The Antigravity SDK spawns the
-                localharness via ``subprocess.Popen`` with no env seam, so the prepend
-                is applied by transiently mutating ``os.environ['PATH']`` across the
-                spawn (see ``_harness_spawn_guard``).
+                contract as the Claude/Codex backends. Delivered through the SDK's
+                per-agent ``env`` seam (see ``_harness_env``), so concurrent tasks get
+                genuinely separate environments rather than a time-sliced global one.
             plugin_tools_dir: A skills/plugin source root. Resolved (together with
                 ``config.plugins``) into the harness's native ``skills_paths`` so the
                 agent can discover and engage UiPath skills — see ``_resolve_skills_paths``.
@@ -347,12 +414,23 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 workspaces=self._resolve_workspaces(skills_paths),
                 # Autonomous execution: approve every tool call (incl. run_command),
                 # which the default LocalAgentConfig policy would otherwise deny.
+                # ``permission_mode`` is deliberately NOT mapped onto these policies —
+                # it does not confine this agent, exactly as on Codex. coder_eval's
+                # isolation boundary is the driver (a docker container or an ephemeral
+                # per-task tempdir), so an in-agent approval policy is redundant, and
+                # the modes below bypassPermissions differ only in what they'd ask a
+                # human about — there is no human on a headless eval path. Declared as
+                # such in the parity table so it is visible rather than silent.
                 policies=[policy.allow_all()],
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: hand the harness the search-path roots that parent
                 # the UiPath skill dirs. Unlike Codex (which symlinks into
                 # .agents/skills/), Antigravity takes skill search paths natively.
                 skills_paths=skills_paths,
+                # Mock-CLI PATH shadowing, per agent. The SDK merges this over the
+                # inherited os.environ when it spawns the localharness, so two
+                # concurrent tasks never see each other's mock dirs.
+                env=self._harness_env(),
             )
             # Attach the configured thinking level (reasoning effort) onto every
             # resolved model's Gemini endpoint. The SDK validates the model list in
@@ -365,46 +443,77 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
             # Enter the SDK Agent context (boots the localharness subprocess +
             # opens the conversation). Held open across communicate() calls and
-            # closed in stop(). The spawn guard prepends the mock dirs onto
-            # os.environ['PATH'] across the whole context-entry (subprocess spawn
-            # + session open — the child keeps the env it was spawned with), then
-            # restores it.
+            # closed in stop().
             self._exit_stack = AsyncExitStack()
-            async with self._harness_spawn_guard():
-                self._sdk_agent = await self._exit_stack.enter_async_context(SdkAgent(cfg))
+            self._sdk_agent = await self._exit_stack.enter_async_context(SdkAgent(cfg))
             self._log.debug("Antigravity local harness started (model=%s)", self._effective_model())
         except Exception as e:
             await self._teardown()
             raise RuntimeError(f"Failed to start Antigravity agent: {e}") from e
 
-    @contextlib.asynccontextmanager
-    async def _harness_spawn_guard(self) -> AsyncIterator[None]:
-        """Prepend ``_env_path_prepend`` onto ``os.environ['PATH']`` across a harness spawn.
+    async def _drain(
+        self,
+        conversation: Any,
+        state: "_AntigravityTurnState",
+        should_stop: Callable[[], bool] | None,
+    ) -> None:
+        """Consume one ``receive_steps()`` cycle onto ``state``, honoring a
+        cooperative stop mid-stream. Shared by the initial drain and each poll
+        cycle's re-drain in ``communicate`` so this shape lives in one place.
 
-        The localharness ``subprocess.Popen`` inherits ``os.environ`` at spawn time and
-        the SDK exposes no env seam, so mock CLIs can only shadow the real ones by
-        mutating the process PATH across the harness context-entry (subprocess spawn +
-        session open). The mutation is serialized (process-wide lock) and restored in
-        ``finally`` — the spawned child keeps the env it started with, so the restore
-        never affects the live harness. The lock is taken even when no prepend dirs
-        were configured: a no-prepend spawn must still wait out any in-flight mutated-
-        PATH window, or its harness would inherit another task's mock dirs.
+        ``receive_steps()`` is actually TWO nested async generators: the public
+        ``Conversation.receive_steps()`` we call here delegates internally
+        (``async for step in self._connection.receive_steps(): yield step``) to
+        the connection layer, which guards re-entrancy with an ``_is_receiving``
+        flag cleared only in its OWN ``finally``. ``aclosing`` on the outer
+        generator closes IT deterministically, but a ``GeneratorExit`` thrown
+        into a delegating generator does not synchronously propagate into the
+        inner one it was mid-iterating -- confirmed live: the inner ``finally``
+        only ran after the outer's frame was unwound AND the event loop had
+        processed the abandoned inner generator's async-gen finalizer, i.e. on a
+        LATER event-loop turn, not within the ``aclosing`` block itself. So a
+        cooperative-stop ``break`` here can still leave the connection
+        "receiving" for a short, bounded window afterward, and the NEXT
+        ``receive_steps()`` call (the next poll cycle, or the next turn in a
+        multi-turn dialog) can raise ``RuntimeError`` during that window. The
+        retry below -- yielding via ``asyncio.sleep(0)`` and trying again --
+        gives that already-scheduled finalizer a turn to run, mirroring the
+        SDK's OWN handling of this exact ``RuntimeError`` in
+        ``Conversation.send()`` (falls back to ``wait_for_idle()``); retrying
+        the drain itself is preferred here over that fallback since
+        ``wait_for_idle()`` discards any steps already queued, which would
+        silently drop real content instead of just retrying past a transient
+        window.
         """
-        async with _harness_spawn_lock():
-            if not self._env_path_prepend:
-                yield
-                return
-            path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
-            original = os.environ.get(path_key)
-            os.environ[path_key] = os.pathsep.join([*self._env_path_prepend, original or ""])
-            self._log.debug("PATH prepend for harness spawn: %s", os.pathsep.join(self._env_path_prepend))
+        for attempt in range(_RECEIVE_STEPS_REENTRY_RETRIES):
             try:
-                yield
-            finally:
-                if original is None:
-                    os.environ.pop(path_key, None)
-                else:
-                    os.environ[path_key] = original
+                async with contextlib.aclosing(conversation.receive_steps()) as steps:
+                    async for step in steps:
+                        state.process_step(step)
+                        if should_stop is not None and should_stop():
+                            state.stopped_early_hit = True
+                            self._log.debug("Cooperative stop requested; ending step loop at this boundary")
+                            break
+                        # The turn cap shares this boundary: the step that reached the
+                        # cap is kept whole, the next is never pulled. Checked after
+                        # the cooperative stop so an armed early-stop still reports as
+                        # STOPPED_EARLY when both would fire on the same step.
+                        if state.max_turns_reached():
+                            state.max_turns_hit = True
+                            self._log.debug(
+                                "max_turns (%s visible turns) reached; ending step loop",
+                                state.max_turns,
+                            )
+                            break
+                return
+            except RuntimeError:
+                if attempt == _RECEIVE_STEPS_REENTRY_RETRIES - 1:
+                    raise
+                self._log.debug(
+                    "receive_steps() re-entrancy guard still set from a prior drain; retrying (attempt %d)",
+                    attempt + 1,
+                )
+                await asyncio.sleep(0)
 
     async def communicate(
         self,
@@ -421,6 +530,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         processed step. When it returns True the step loop breaks, the
         conversation is cancelled (best-effort) and the turn finalizes cleanly as
         ``STOPPED_EARLY`` (``crashed=False``).
+
+        ``max_turns`` caps VISIBLE turns — tool calls, the unit
+        ``reports_stats.visible_turn_count`` counts — enforced in-stream on the same
+        step-loop boundary as the cooperative stop. Claude Code's native SDK cap
+        counts assistant messages instead; one ``communicate()`` here is a single SDK
+        turn, so a native counter would cap at 1 and mean nothing. See
+        docs/agents/HARNESS_PARITY.md.
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
         ``receive_steps()`` until the turn goes idle, mapping the Gemini step
@@ -454,6 +570,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             iteration=self._iteration,
             model=model,
             turn_start_time=turn_start_time,
+            max_turns=max_turns,
         )
 
         try:
@@ -470,21 +587,88 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             ):
                 emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=model))
                 conversation = self._sdk_agent.conversation
+                poll_count = 0
+                # Bound the poll loop's OWN exit by a fraction of `timeout` so its
+                # graceful path (force-close the orphan, grade normally) reliably
+                # wins the race against the ThreadedWatchdog's harder cutoff at
+                # `timeout` itself, instead of the watchdog always firing first —
+                # see _POLL_DEADLINE_TIMEOUT_FRACTION's comment for why a FRACTION
+                # of `timeout` doesn't race it the way an identical value would.
+                # `timeout=None` has nothing to derive a fraction from, so the
+                # cycle-based _MAX_BACKGROUND_POLLS is the sole bound in that case.
+                poll_deadline = turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
                 try:
                     await conversation.send(user_input)
                     # The cooperative should_stop poll runs AFTER process_step (the
                     # emission that lets the watcher latch on the deciding tool
                     # call) and BEFORE the next step is pulled — the deciding step
                     # is kept, the next is not. No-op when should_stop is None.
-                    async for step in conversation.receive_steps():
-                        state.process_step(step)
+                    await self._drain(conversation, state, should_stop)
+
+                    # The model may have kicked off a run_command as a background
+                    # task and gone idle without waiting for it — receive_steps()
+                    # then exhausts with that tool call still open (never reached
+                    # DONE/ERROR). Conversation.wait_for_wakeup() is an unimplemented
+                    # stub on this SDK's Local harness (always returns False,
+                    # regardless of pending state — confirmed against the installed
+                    # source and live-tested), so poll for progress ourselves
+                    # instead, gated on that orphaned-tool signal so a normal turn
+                    # (which always closes its tool calls before the stream
+                    # exhausts) takes this branch zero times and finalizes exactly
+                    # as fast as today.
+                    while (
+                        not state.stopped_early_hit
+                        and not state.max_turns_hit
+                        and not state.timeout_hit
+                        and state.has_orphaned_tool_call()
+                        and (
+                            poll_count < _MAX_BACKGROUND_POLLS
+                            if poll_deadline is None
+                            else time.monotonic() < poll_deadline
+                        )
+                    ):
+                        poll_count += 1
+                        self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
+                        await asyncio.sleep(_BACKGROUND_POLL_INTERVAL_SECONDS)
+                        if state.timeout_hit or (poll_deadline is not None and time.monotonic() >= poll_deadline):
+                            # The watchdog decided to fire during the sleep above, or
+                            # this loop's own (earlier) deadline just passed: skip the
+                            # re-drain (which could itself await indefinitely on
+                            # genuinely non-idle work) rather than waiting for the
+                            # loop's own head check to catch it next cycle.
+                            break
                         if should_stop is not None and should_stop():
                             state.stopped_early_hit = True
-                            self._log.debug("Cooperative stop requested; ending step loop at this boundary")
                             break
-                    if state.stopped_early_hit:
+                        # A re-drain honors the turn cap the same way the initial one
+                        # does (the check lives in _drain), so a poll cycle can also
+                        # be the cycle that reaches it; the loop head above then
+                        # stops polling instead of waiting out the background work.
+                        await self._drain(conversation, state, should_stop)
+
+                    if (
+                        state.has_orphaned_tool_call()
+                        and not state.stopped_early_hit
+                        and not state.max_turns_hit
+                        and not state.timeout_hit
+                    ):
+                        # Exited via this loop's own bound (poll_deadline or the
+                        # cycle cap), not an external stop/timeout -- the tool call
+                        # is force-closed as unresolved in finalize() below and the
+                        # turn is still graded normally on everything else.
+                        bound = (
+                            f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
+                            if poll_deadline is not None
+                            else f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
+                        )
+                        msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
+                        self._log.warning(msg, bound, poll_count)
+
+                    if state.stopped_early_hit or state.max_turns_hit:
                         # Best-effort server-side cancel, mirrors kill(); a raising
-                        # cancel() lands in the guarded handler below.
+                        # cancel() lands in the guarded handler below. Single check
+                        # point covers a stop from either the initial drain or any
+                        # poll cycle, so cancel() fires exactly once either way.
                         with contextlib.suppress(Exception):
                             await conversation.cancel()
                 except asyncio.CancelledError:
@@ -494,13 +678,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 except Exception as e:
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
-                    if state.stopped_early_hit:
+                    if state.ended_cleanly:
                         # The turn already stopped cleanly (e.g. the generator's
                         # aclose() raised on the break); escalating to a crash
                         # would trigger the orchestrator's retry with the watcher's
                         # decision still latched → immediate stop-at-turn-0 on the
-                        # retry (wasted spend). Fall through to the clean tail.
-                        self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+                        # retry (wasted spend). A cap-break is the same shape: the
+                        # retry would burn the budget again and re-hit the cap.
+                        self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
                     else:
                         self._finalize_and_raise_crash(
                             state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
@@ -517,10 +702,11 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 self._finalize_external_cancel(state.finalize)
             raise
         except Exception as e:
-            if state.stopped_early_hit and not state.timeout_hit:
-                # Same retry-poisoning guard as the inner handler: a cooperative
-                # stop already happened, so finalize cleanly instead of crashing.
-                self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+            if state.ended_cleanly and not state.timeout_hit:
+                # Same retry-poisoning guard as the inner handler: the turn already
+                # ended cleanly (cooperative stop or turn cap), so finalize instead
+                # of crashing.
+                self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
             else:
                 self._finalize_and_raise_crash(
                     state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
@@ -528,8 +714,16 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
-        # Precedence matches Claude: timeout (raised above) > stopped_early > completed.
-        status = AgentEndStatus.STOPPED_EARLY if state.stopped_early_hit else AgentEndStatus.COMPLETED
+        # Precedence matches Claude: timeout (raised above) > stopped_early >
+        # max_turns_exhausted > completed. stopped_early outranks the cap because an
+        # armed criterion deciding the outcome is the more specific reason to have
+        # cut the run, and the step loop checks it first.
+        if state.stopped_early_hit:
+            status = AgentEndStatus.STOPPED_EARLY
+        elif state.max_turns_hit:
+            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+        else:
+            status = AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
@@ -559,6 +753,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Gemini model + thinking level for auditability."""
         return {
+            **super().get_environment_info(),
             "antigravity_model": self._effective_model(),
             "antigravity_thinking_level": self.config.thinking_level,
         }
@@ -608,6 +803,7 @@ class _AntigravityTurnState:
         iteration: int,
         model: str,
         turn_start_time: float,
+        max_turns: int | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -619,8 +815,10 @@ class _AntigravityTurnState:
         self.model = model
         self.turn_start_time = turn_start_time
 
+        self.max_turns = max_turns
         self.timeout_hit = False
         self.stopped_early_hit = False
+        self.max_turns_hit = False
         self.finalized = False
 
         self.total_usage = TokenUsage()
@@ -638,8 +836,32 @@ class _AntigravityTurnState:
         # inputs). Used at DONE to distinguish inputs from harness-appended
         # result fields, whatever they're named for that tool.
         self._tool_input_keys: dict[str, set[str]] = {}
+        # Most recently seen StepStatus per tool id, for has_orphaned_tool_call
+        # below — deliberately separate from _closed_tools, which only tracks
+        # the DONE/ERROR terminal states relevant to result reporting.
+        self._tool_last_status: dict[str, Any] = {}
         # Content blocks accumulated since the last per-generation flush.
         self._blocks: list[ContentBlock] = []
+
+    @property
+    def ended_cleanly(self) -> bool:
+        """True once the loop broke on purpose (cooperative stop or the turn cap).
+
+        Both are non-crash terminations, so a stray exception raised while unwinding
+        the step generator afterwards must not be escalated into a retry.
+        """
+        return self.stopped_early_hit or self.max_turns_hit
+
+    def max_turns_reached(self) -> bool:
+        """True once this turn has produced ``max_turns`` visible turns.
+
+        Delegates the count to the collector (``EventCollector.visible_turn_count``)
+        — the single agent-agnostic capture path, so one ``max_turns`` value means
+        the same thing here and on Codex. It counts RESOLVED tool calls (the end
+        event), which also means the call that reaches the cap keeps its result
+        instead of being force-closed as unresolved.
+        """
+        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
 
     def process_step(self, step: Any) -> None:
         """Route one streamed ``Step`` to events + transcript reconstruction."""
@@ -654,8 +876,8 @@ class _AntigravityTurnState:
             self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=step.content_delta))
 
         # Tool calls: ToolStart on first sight, ToolEnd when the owning step is DONE.
-        for call in step.tool_calls:
-            self._handle_tool_call(call, step, done, sstatus)
+        for call_index, call in enumerate(step.tool_calls):
+            self._handle_tool_call(call, step, done, sstatus, call_index)
 
         # Capture content blocks on the terminal transition of a step.
         if done:
@@ -671,9 +893,26 @@ class _AntigravityTurnState:
             self.total_usage = self.total_usage + gen
             self._flush_generation(gen, getattr(step.usage_metadata, "thoughts_token_count", 0) or 0)
 
-    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any) -> None:
+    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
         raw_name = _enum_value(call.name)
-        cid = call.id or f"{raw_name}_{self._next_seq}"
+        # call.id is usually present ("a tool call carries a stable id" per this
+        # class's docstring), but the SDK types it as optional. The fallback must
+        # be BOTH stable across a step's own ACTIVE -> DONE re-emissions (same
+        # step_index) -- so an id-less call's DONE step closes the SAME cid its
+        # ACTIVE step opened, rather than minting a fresh id from a counter that
+        # already advanced, which would strand the ACTIVE entry as a permanent,
+        # never-closing "orphan" and stall the poll loop for its full budget --
+        # AND unique across trajectories: the SDK keys its own step tracking on
+        # (trajectory_id, step_index), since a sub-agent trajectory can reuse the
+        # same low step_index values as the main one. Mirrors the SDK's own
+        # `trajectory_id:step_index` id scheme (falling back to bare step_index
+        # when trajectory_id is empty, e.g. no sub-agent involved) rather than
+        # inventing a separate one; call_index further disambiguates multiple
+        # id-less tool calls within the same step, which the SDK's scheme does not.
+        trajectory_id = getattr(step, "trajectory_id", "") or ""
+        step_key = f"{trajectory_id}:{step.step_index}" if trajectory_id else str(step.step_index)
+        cid = call.id or f"{raw_name}_{step_key}_{call_index}"
+        self._tool_last_status[cid] = sstatus
         if cid not in self._seen_tools:
             self._seen_tools.add(cid)
             seq = self._next_seq
@@ -786,6 +1025,25 @@ class _AntigravityTurnState:
             return self._agent._sdk_agent.conversation.last_response  # type: ignore[union-attr]
         return ""
 
+    def has_orphaned_tool_call(self) -> bool:
+        """True if any NOT-YET-CLOSED tool call's most recently seen status is
+        ACTIVE — the structural signature of a backgrounded task the model went
+        idle on without waiting for. See ``communicate``'s poll loop.
+
+        Deliberately an ALLOWLIST on ACTIVE, not a denylist on "not yet closed
+        via _closed_tools" alone: the SDK's StepStatus also has WAITING_FOR_USER
+        (the harness is blocked on a question that will never be answered in
+        this headless eval), CANCELED, and UNKNOWN — none of which _closed_tools
+        ever marks done (that set only tracks DONE/ERROR, the states relevant to
+        result reporting), but none of which the poll loop should ever wait out
+        either, since they will never become DONE on their own. Checking the
+        allowlisted ACTIVE status is what tells these apart from a genuine
+        in-flight background job. The `not in _closed_tools` guard is layered on
+        top (not a substitute) purely as a monotonicity backstop, in case a
+        closed id's last-seen entry were ever left at ACTIVE by a re-emission.
+        """
+        return any(cid not in self._closed_tools and s == _STATUS_ACTIVE for cid, s in self._tool_last_status.items())
+
     def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
         """Close orphaned tools, flush leftover blocks, emit TurnEnd + AgentEnd.
 
@@ -841,6 +1099,7 @@ class _AntigravityTurnState:
                 num_turns=self._assistant_turns,
                 crashed=crashed,
                 crash_reason=crash_reason,
+                max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
             )
         )

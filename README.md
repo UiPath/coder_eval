@@ -2,6 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![GitHub Marketplace](https://img.shields.io/badge/marketplace-coder__eval-2ea44f.svg)](https://github.com/marketplace/actions/coder_eval)
+[![Claude Code plugin](https://img.shields.io/badge/claude__code__plugin-coder--eval-d97757.svg)](docs/PLUGIN.md)
 [![Website](https://img.shields.io/badge/website-coder--eval.com-1f6feb.svg)](https://coder-eval.com)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
@@ -95,6 +96,22 @@ live in this repo — clone it or point the CLI at your own task files.) See
 [Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md) for
 the full setup.
 
+## Use inside Claude Code
+
+This repo is also a **Claude Code plugin marketplace**, so the whole loop —
+scaffold a suite, author a task, check whether a skill triggers, read the
+results — runs inside the agent:
+
+```
+/plugin marketplace add UiPath/coder_eval
+/plugin install coder-eval@coder-eval
+```
+
+That adds six slash commands: `/coder-eval:init`, `/coder-eval:check-skill`,
+`/coder-eval:task`, `/coder-eval:lint-tasks`, `/coder-eval:analyze` and
+`/coder-eval:ci`. They drive the `coder-eval` CLI, so install it too
+(`uv tool install coder-eval`). See [Claude Code Plugin](docs/PLUGIN.md).
+
 ## Use as a GitHub Action
 
 A composite action — on the Marketplace as
@@ -110,7 +127,7 @@ task/gate failure:
 
 - uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
-    tasks: tests/tasks/**/*.yaml
+    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
     model: claude-sonnet-5
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
@@ -147,7 +164,7 @@ it can't leak into later steps). Set whatever the run needs, Anthropic or not:
 ```yaml
 - uses: UiPath/coder_eval@v0
   with:
-    tasks: tests/tasks/**/*.yaml
+    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
     minimum-task-score: "0.8"   # fail the build if any task scores below 0.8
     env: |
       API_BACKEND=bedrock
@@ -192,11 +209,13 @@ alone.
 | [Claude Code](docs/agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
 | [Codex](docs/agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
+| [Run-Limit Parity](docs/agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
 | [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor |
+| [Claude Code Plugin](docs/PLUGIN.md) | Install the Claude Code plugin — author, run, and analyze suites from inside the agent |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
 | [How It Compares](docs/comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |
@@ -253,9 +272,9 @@ Tasks can omit the `agent` section entirely — defaults resolve from the experi
 layer (`experiments/default.yaml`). For the full schema and every criterion type,
 see the [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md).
 
-> **Tip:** In Claude Code, use `/coder-eval-task-create` to scaffold a task from a
-> natural-language description, and `/coder-eval-run-analysis runs/latest` to get
-> improvement suggestions from a completed run.
+> **Tip:** With the [Claude Code plugin](docs/PLUGIN.md) installed, use
+> `/coder-eval:task` to scaffold a task from a natural-language description, and
+> `/coder-eval:analyze runs/latest` to get improvement suggestions from a completed run.
 
 ## Development
 

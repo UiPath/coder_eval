@@ -3,9 +3,9 @@
 The full judge transcript (tool calls, raw verdict, rendered prompt and
 system prompt) can run 10-100 KB. Inlining it into every ``task.json``
 inflates the row record for consumers (suite rollups, report renderers)
-that don't need it. Spilling each transcript to a sibling
-``judge-<idx>.yaml`` next to ``task.json`` keeps the row record lean and
-lets reviewers grep transcripts independently.
+that don't need it. Spilling each transcript to a sibling YAML file next to
+``task.json`` keeps the row record lean and lets reviewers grep transcripts
+independently.
 
 YAML (over JSON) for the sibling: the transcript carries multi-line text
 (``judge_prompt``, ``judge_system_prompt``, ``raw_verdict``) which YAML's
@@ -55,6 +55,12 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+TASK_JSON_TRANSCRIPT_EXCLUDE = {
+    "success_criteria_results": {"__all__": {"transcript"}},
+    "post_failure_criteria_results": {"__all__": {"transcript"}},
+}
 
 
 # Windows reserved device basenames. The Win32 API maps these to character
@@ -121,50 +127,48 @@ def _ordered_transcript_dict(transcript_dump: dict[str, Any]) -> dict[str, Any]:
 def spill_judge_transcripts(result: EvaluationResult, output_dir: Path) -> int:
     """Write each judge result's inline transcript to a sibling YAML file.
 
-    For each ``JudgeCriterionResult`` in ``result.success_criteria_results``
-    that carries a non-None ``transcript``, writes ``judge-<idx>.yaml`` in
-    ``output_dir`` (creating the directory if needed) and sets
+    For each ``JudgeCriterionResult`` in the canonical or post-failure result
+    list that carries a non-None ``transcript``, writes a distinct sibling YAML
+    file in ``output_dir`` (creating the directory if needed) and sets
     ``transcript_path`` on the result to the sibling filename.
 
     The inline ``transcript`` is **left in place** so in-memory consumers
     (HTML rendering at the end of the orchestrator run) still see it.
-    Callers writing ``task.json`` should pass
-    ``exclude={"success_criteria_results": {"__all__": {"transcript"}}}``
-    to ``model_dump_json`` so the on-disk record carries only the path.
+    Callers writing ``task.json`` should exclude ``transcript`` from both result
+    lists so the on-disk record carries only the path.
 
     Returns the count of transcripts spilled (informational; no-op when 0).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     spilled = 0
-    # ORDER IS LOAD-BEARING. ``judge-{idx}.yaml`` is keyed off the criterion's
-    # position in ``success_criteria_results``; ``load_judge_transcripts`` reads
-    # ``transcript_path`` (which we set below) to find each sibling, so the
-    # filename naming scheme itself can change freely. What MUST stay stable is
-    # the index→file mapping for the lifetime of any task.json that references
-    # these siblings: writers that reorder ``success_criteria_results`` between
-    # spill and read would break the binding. Today's only writer is the
-    # orchestrator and the order is preserved through model_dump_json/
-    # model_validate_json, so this is safe — keep it that way.
-    for idx, cr in enumerate(result.success_criteria_results):
-        if not isinstance(cr, JudgeCriterionResult):
-            continue
-        if cr.transcript is None:
-            continue
-        sibling_name = f"judge-{idx}.yaml"
-        sibling_path = output_dir / sibling_name
-        ordered = _ordered_transcript_dict(cr.transcript.model_dump())
-        sibling_path.write_text(
-            yaml.dump(
-                ordered,
-                Dumper=_BlockLiteralDumper,
-                sort_keys=False,
-                allow_unicode=True,
-                width=100,
-            ),
-            encoding="utf-8",
-        )
-        cr.transcript_path = sibling_name
-        spilled += 1
+    # ORDER IS LOAD-BEARING. Each filename is keyed off the criterion's
+    # position in its result list; ``load_judge_transcripts`` reads the stored
+    # path, so each list must retain its order through persistence.
+    result_groups = (
+        ("judge", result.success_criteria_results),
+        ("post-failure-judge", result.post_failure_criteria_results),
+    )
+    for prefix, criteria_results in result_groups:
+        for idx, cr in enumerate(criteria_results):
+            if not isinstance(cr, JudgeCriterionResult):
+                continue
+            if cr.transcript is None:
+                continue
+            sibling_name = f"{prefix}-{idx}.yaml"
+            sibling_path = output_dir / sibling_name
+            ordered = _ordered_transcript_dict(cr.transcript.model_dump())
+            sibling_path.write_text(
+                yaml.dump(
+                    ordered,
+                    Dumper=_BlockLiteralDumper,
+                    sort_keys=False,
+                    allow_unicode=True,
+                    width=100,
+                ),
+                encoding="utf-8",
+            )
+            cr.transcript_path = sibling_name
+            spilled += 1
     if spilled:
         logger.debug("spilled %d judge transcript(s) to %s", spilled, output_dir)
     return spilled
@@ -173,11 +177,11 @@ def spill_judge_transcripts(result: EvaluationResult, output_dir: Path) -> int:
 def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
     """Read sibling judge transcript files and attach them to each result.
 
-    For each criterion result in ``result.success_criteria_results`` that has
-    a ``transcript_path`` set (and no inline ``transcript`` — already-loaded
+    For each criterion result in either result list that has a
+    ``transcript_path`` set (and no inline ``transcript`` — already-loaded
     results are left alone), reads the sibling file relative to ``task_dir``
-    and attaches the parsed dict on ``transcript`` so HTML / markdown
-    renderers see the same shape they get during the original run.
+    and attaches the parsed dict on ``transcript`` so HTML / markdown renderers
+    see the same shape they get during the original run.
 
     Missing sibling files are skipped silently and logged at debug level —
     runs predating this feature have no sibling files and render fine via
@@ -187,7 +191,8 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
     Returns the count of transcripts loaded.
     """
     loaded = 0
-    for cr in result.success_criteria_results:
+    criterion_results = result.success_criteria_results + result.post_failure_criteria_results
+    for cr in criterion_results:
         path = getattr(cr, "transcript_path", None)
         if not path:
             continue
@@ -198,8 +203,8 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
             continue
         # SECURITY: transcript_path comes from task.json, which may travel across
         # trust boundaries (CI artifacts, shared eval bundles). spill_judge_transcripts
-        # only ever writes the literal ``f"judge-{idx}.yaml"`` — a basename, no
-        # separators, no ``..``. Allowlist the basename shape directly so a tampered
+        # only ever writes generated basename-only paths, with no separators or
+        # ``..``. Allowlist that shape directly so a tampered
         # ``transcript_path: '/etc/passwd'`` or ``../../secrets`` is refused at the
         # door rather than relying on ``is_relative_to`` to catch it after a join.
         # Check BOTH PurePosixPath (forward-slash separator) AND PureWindowsPath
@@ -208,7 +213,7 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         # regular char) but resolves to a nested file on Windows. Rejecting under
         # either interpretation enforces the basename-only policy regardless of
         # which platform the task.json travels to next.
-        if PurePosixPath(path).name != path or PureWindowsPath(path).name != path:
+        if path in {".", ".."} or PurePosixPath(path).name != path or PureWindowsPath(path).name != path:
             logger.warning("Refusing to load judge transcript with non-basename path: %s", path)
             continue
         # Reject Windows reserved device basenames. On Windows, ``CON.yaml`` /
@@ -275,8 +280,8 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         # which (depending on model_config of the loaded subclass) might
         # validate or reject. The HTML renderer accepts both typed
         # JudgeTranscript and dict-shape so either shape works downstream.
-        # NOTE: With the ``CriterionResultUnion`` discriminator on
-        # ``EvaluationResult.success_criteria_results``, ``cr`` is now a
+        # NOTE: With the ``CriterionResultUnion`` discriminator on both
+        # ``EvaluationResult`` criterion-result lists, ``cr`` is now a
         # properly-typed ``JudgeCriterionResult`` after reload (not a base
         # ``CriterionResult`` with the field in ``__pydantic_extra__``), so
         # the assignment lands on the declared field directly.

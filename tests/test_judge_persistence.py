@@ -1,6 +1,6 @@
 """Tests for the spill/load helpers in ``coder_eval.evaluation.judge_persistence``.
 
-The orchestrator spills judge transcripts to ``judge-<idx>.json`` next to
+The orchestrator spills judge transcripts to sibling YAML files next to
 ``task.json`` so the row record stays lean. Re-render paths reload them.
 These tests verify the round-trip and back-compat with old runs that
 inlined the transcript.
@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from coder_eval.evaluation.judge_persistence import (
+    TASK_JSON_TRANSCRIPT_EXCLUDE,
     load_judge_transcripts,
     spill_judge_transcripts,
 )
@@ -131,6 +132,31 @@ def test_spill_preserves_index_for_multiple_judges(tmp_path: Path) -> None:
     assert judge2.transcript_path == "judge-1.yaml"
     assert (tmp_path / "judge-0.yaml").is_file()
     assert (tmp_path / "judge-1.yaml").is_file()
+
+
+def test_post_failure_judge_uses_distinct_sibling_and_round_trips(tmp_path: Path) -> None:
+    canonical = _make_judge_result(score=0.6, transcript=_make_transcript())
+    diagnostic = _make_judge_result(score=0.9, transcript=_make_transcript())
+    result = _make_evaluation_result(criteria=[canonical])
+    result.final_status = FinalStatus.ERROR
+    result.post_failure_criteria_results = [diagnostic]
+
+    assert spill_judge_transcripts(result, tmp_path) == 2
+    assert canonical.transcript_path == "judge-0.yaml"
+    assert diagnostic.transcript_path == "post-failure-judge-0.yaml"
+
+    raw = result.model_dump_json(exclude=TASK_JSON_TRANSCRIPT_EXCLUDE)
+    assert "raw_verdict" not in raw
+
+    reloaded = EvaluationResult.model_validate_json(raw)
+    assert load_judge_transcripts(reloaded, tmp_path) == 2
+    for recovered in (
+        reloaded.success_criteria_results[0],
+        reloaded.post_failure_criteria_results[0],
+    ):
+        assert isinstance(recovered, JudgeCriterionResult)
+        assert recovered.transcript is not None
+        assert recovered.transcript.raw_verdict == '{"score":0.75,"rationale":"ok"}'
 
 
 def test_spill_skips_non_judge_results(tmp_path: Path) -> None:
@@ -306,8 +332,8 @@ def test_load_rejects_dotdot_traversal(tmp_path: Path) -> None:
 
 def test_load_rejects_subdir_path(tmp_path: Path) -> None:
     """A path with a separator (even within task_dir) is rejected — the spill helper
-    only ever writes ``judge-<idx>.yaml`` as a basename, so anything with a slash is
-    by definition not from us."""
+    only ever writes basenames, so anything with a slash is by definition not
+    from us."""
     judge = _make_judge_result(transcript=None)
     judge.transcript_path = "subdir/judge-0.yaml"
     result = _make_evaluation_result(criteria=[judge])
@@ -315,6 +341,16 @@ def test_load_rejects_subdir_path(tmp_path: Path) -> None:
     n = load_judge_transcripts(result, tmp_path)
 
     assert n == 0
+
+
+@pytest.mark.parametrize("name", [".", ".."])
+def test_load_rejects_dot_path_components(tmp_path: Path, name: str) -> None:
+    judge = _make_judge_result(transcript=None)
+    judge.transcript_path = name
+    result = _make_evaluation_result(criteria=[judge])
+
+    assert load_judge_transcripts(result, tmp_path) == 0
+    assert judge.transcript is None
 
 
 @pytest.mark.parametrize(

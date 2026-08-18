@@ -173,7 +173,7 @@ step:
 
       - uses: UiPath/coder_eval@v0       # …then run the gate (pin @vX.Y.Z in production)
         with:
-          tasks: tests/tasks/**/*.yaml
+          tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
           model: claude-sonnet-5
           env: |
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}

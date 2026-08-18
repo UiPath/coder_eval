@@ -11,6 +11,7 @@ import pytest
 
 from coder_eval.errors import BudgetExceededError
 from coder_eval.models import (
+    DEFAULT_SIMULATOR_MODEL,
     AgentKind,
     ClaudeCodeAgentConfig,
     CriterionResult,
@@ -251,6 +252,30 @@ class TestSingleShotEnforcement:
         # Criteria still ran before budget check (single-shot order).
         assert len(result.success_criteria_results) == 1
 
+    async def test_complete_canonical_results_skip_post_failure_regrade(self, tmp_path):
+        task = _make_task(run_limits=RunLimits(max_input_tokens=10))
+        run_dir = tmp_path / "run" / "complete_budget_result"
+        run_dir.mkdir(parents=True)
+        orch = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
+        orch._setup = AsyncMock()  # type: ignore[method-assign]
+        orch._cleanup = AsyncMock()  # type: ignore[method-assign]
+        orch._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
+        err = BudgetExceededError("input_tokens", actual=100, limit=10, task_id=task.task_id, iteration=1)
+
+        async def loop() -> bool:
+            assert orch.result is not None
+            orch.result.success_criteria_results = [
+                CriterionResult(criterion_type="file_exists", description="x", score=1.0)
+            ]
+            raise err
+
+        orch._evaluation_loop = loop  # type: ignore[method-assign]
+        result = await orch.run()
+
+        assert result.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED
+        assert len(result.success_criteria_results) == 1
+        assert result.post_failure_criteria_results == []
+
     @pytest.mark.parametrize(
         "budget_name,expected_status,expected_component",
         [
@@ -280,6 +305,8 @@ class TestSingleShotEnforcement:
         assert "budget exceeded" in (result.error_message or "")
         # Captured error_log_tail key allowlist must include both new statuses.
         assert result.error_details == {}
+        assert len(result.post_failure_criteria_results) == 1
+        assert result.post_failure_criteria_results[0].evaluation_status == "not_evaluated"
         # Inspect the actual create_error_context call to confirm the component label.
         assert mock_ctx.call_args.kwargs["component"] == expected_component
 
@@ -369,6 +396,9 @@ class TestSimulationBudgetAbort:
         # The UserSimulator must NOT be reached after the budget trip — we
         # configure it but it should not produce another user message.
         mock_simulator = MagicMock()
+        # UserSimulator.model is a real str property (the pinned simulator model);
+        # an auto-specced MagicMock here fails SimulationTelemetry validation.
+        mock_simulator.model = DEFAULT_SIMULATOR_MODEL
         mock_simulator.start = AsyncMock()
         mock_simulator.stop = AsyncMock()
         mock_simulator.next_user_message = AsyncMock()
@@ -529,6 +559,9 @@ class TestExpectedTurnsSimulation:
         # Simulator emits the stop token on the second prompt so the dialog
         # terminates cleanly after the warning has fired.
         mock_simulator = MagicMock()
+        # UserSimulator.model is a real str property (the pinned simulator model);
+        # an auto-specced MagicMock here fails SimulationTelemetry validation.
+        mock_simulator.model = DEFAULT_SIMULATOR_MODEL
         mock_simulator.start = AsyncMock()
         mock_simulator.stop = AsyncMock()
         mock_simulator.next_user_message = AsyncMock(
@@ -580,6 +613,9 @@ class TestExpectedTurnsSimulation:
         orch.success_checker = mock_checker
 
         mock_simulator = MagicMock()
+        # UserSimulator.model is a real str property (the pinned simulator model);
+        # an auto-specced MagicMock here fails SimulationTelemetry validation.
+        mock_simulator.model = DEFAULT_SIMULATOR_MODEL
         mock_simulator.start = AsyncMock()
         mock_simulator.stop = AsyncMock()
         mock_simulator.next_user_message = AsyncMock(

@@ -1,4 +1,4 @@
-"""CE035: a criterion checker must not book an IO/config error as score 0.0.
+"""CE038: a criterion checker must not book an IO/config error as score 0.0.
 
 ``CriterionResult(score=0.0)`` means *the agent did the work and it was wrong*.
 It is gating (``all_criteria_passed`` is a strict AND) and it flows into every
@@ -20,7 +20,7 @@ Fires only on a ``return CriterionResult(...)`` with a literal ``score=0.0``
 lexically inside an ``except`` handler for ``OSError`` / ``FileNotFoundError`` /
 ``PermissionError`` / ``IsADirectoryError``, in ``coder_eval/criteria/``. A
 failure attributable to the AGENT's own output (its file is missing, its JSON is
-malformed) is legitimately 0.0 — mark those ``# noqa: CE035`` with a one-line
+malformed) is legitimately 0.0 — mark those ``# noqa: CE038`` with a one-line
 reason.
 """
 
@@ -56,7 +56,7 @@ def _is_zero_score_result(node: ast.stmt) -> ast.Call | None:
 
 
 class ConfigErrorEscalates(BaseRule):
-    id = "CE035"
+    id = "CE038"
 
     _CRITERIA_PATH = re.compile(r"[/\\]coder_eval[/\\]criteria[/\\]")
 
@@ -76,6 +76,6 @@ class ConfigErrorEscalates(BaseRule):
                         "an IO failure on a path the TASK AUTHOR named is returned as a gating score=0.0, "
                         + "so an eval-config error is booked as an agent failure (and on a dataset-fanned "
                         + "suite, zeroes every row). Raise CheckerMisuseError so it routes to "
-                        + "FinalStatus.ERROR; use # noqa: CE035 when the failure really is the agent's",
+                        + "FinalStatus.ERROR; use # noqa: CE038 when the failure really is the agent's",
                     )
         self.generic_visit(node)

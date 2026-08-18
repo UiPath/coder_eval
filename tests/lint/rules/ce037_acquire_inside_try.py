@@ -1,4 +1,4 @@
-"""CE034: in an async context manager, the acquire must sit INSIDE the try.
+"""CE037: in an async context manager, the acquire must sit INSIDE the try.
 
 An ``@contextlib.asynccontextmanager`` whose shape is::
 
@@ -30,7 +30,7 @@ name to an empty value before it::
 Fires only when all four conditions hold, so it stays specific: the function is
 an async context manager, a name is bound by an ``await`` in the statement
 immediately preceding a ``try``, that ``try`` has a ``finally``, and the
-``finally`` references the bound name. ``# noqa: CE034`` if the acquire genuinely
+``finally`` references the bound name. ``# noqa: CE037`` if the acquire genuinely
 cannot fail partway.
 """
 
@@ -68,7 +68,7 @@ def _names_in(body: list[ast.stmt]) -> set[str]:
 
 
 class AcquireInsideTry(BaseRule):
-    id = "CE034"
+    id = "CE037"
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         if _is_async_cm(node):

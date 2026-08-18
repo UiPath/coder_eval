@@ -198,3 +198,52 @@ def test_mixed_result_types_in_one_list() -> None:
     reloaded = EvaluationResult.model_validate_json(er.model_dump_json())
     types = [type(r).__name__ for r in reloaded.success_criteria_results]
     assert types == ["JudgeCriterionResult", "ClassificationCriterionResult", "CriterionResult"]
+
+
+def test_legacy_result_defaults_to_evaluated_and_no_post_failure_evidence() -> None:
+    """Old task.json payloads keep their meaning when the new fields are absent."""
+    legacy_payload = {
+        "task_id": "t",
+        "task_description": "d",
+        "agent_type": "claude-code",
+        "started_at": "2026-05-12T00:00:00",
+        "final_status": "ERROR",
+        "iteration_count": 1,
+        "success_criteria_results": [
+            {"criterion_type": "file_exists", "description": "f", "score": 0.0},
+        ],
+    }
+
+    result = EvaluationResult.model_validate(legacy_payload)
+
+    assert result.success_criteria_results[0].evaluation_status == "evaluated"
+    assert result.post_failure_criteria_results == []
+
+
+def test_post_failure_evaluation_status_round_trip() -> None:
+    result = _make_eval([])
+    result.final_status = FinalStatus.ERROR
+    result.weighted_score = 0.0
+    result.post_failure_criteria_results = [
+        CriterionResult(
+            criterion_type="file_exists",
+            description="artifact exists",
+            score=1.0,
+            evaluation_status="evaluated",
+        ),
+        CriterionResult(
+            criterion_type="command_executed",
+            description="agent ran validator",
+            score=0.0,
+            details="Not evaluated after terminal agent failure: no turn record survived.",
+            evaluation_status="not_evaluated",
+        ),
+    ]
+
+    reloaded = EvaluationResult.model_validate_json(result.model_dump_json())
+
+    assert reloaded.weighted_score == 0.0
+    assert [r.evaluation_status for r in reloaded.post_failure_criteria_results] == [
+        "evaluated",
+        "not_evaluated",
+    ]

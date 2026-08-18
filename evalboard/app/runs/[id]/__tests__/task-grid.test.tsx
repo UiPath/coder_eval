@@ -54,7 +54,7 @@ function turnsCellFor(taskId: string): HTMLElement {
 describe("TaskGrid — mature rows", () => {
     test("opens a popover linking to the run where it last executed", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="r2"
                 tasks={[
                     row("rantask", 3, 5),
@@ -98,7 +98,7 @@ describe("TaskGrid — mature rows", () => {
 
     test("falls back to a non-clickable id when no source run is known", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="r2"
                 tasks={[row("skippedtask", 0, 5, { matureSkipped: true })]}
                 matureSourceRuns={{}}
@@ -120,7 +120,7 @@ describe("TaskGrid — mature rows", () => {
 describe("TaskGrid — Turns column", () => {
     test("colorizes the digits per ratio bucket (no background)", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("over", 10, 5), // ratio 2.0 → red (> 1.5)
@@ -159,14 +159,14 @@ describe("TaskGrid — Turns column", () => {
     });
 
     test("renders em dash when actualCommands is null", () => {
-        render(<TaskGrid runId="r1" tasks={[row("legacy", null, null)]} />);
+        render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("legacy", null, null)]} />);
         const cell = turnsCellFor("legacy");
         expect(cell).toHaveTextContent("—");
         expect(cell.className).toContain("text-gray-900");
     });
 
     test("token columns are collapsed by default, revealed by the toggle", () => {
-        render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
+        render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("x", 1, 1)]} />);
         // Read the sort toggle (first button) per header — token columns also
         // carry an ⓘ help button, so the bare th textContent isn't the label.
         const labels = () =>
@@ -205,7 +205,7 @@ describe("TaskGrid — Turns column", () => {
 
 describe("TaskGrid — column help popover", () => {
     test("ⓘ toggles a static help card; Escape closes it", () => {
-        render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
+        render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("x", 1, 1)]} />);
         revealTokens(); // ⓘ help buttons live on the token columns
         const trigger = screen.getByRole("button", {
             name: /What is Cache R/i,
@@ -224,7 +224,7 @@ describe("TaskGrid — column help popover", () => {
     });
 
     test("opening one column's help closes another's", () => {
-        render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
+        render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("x", 1, 1)]} />);
         revealTokens(); // ⓘ help buttons live on the token columns
         fireEvent.click(screen.getByRole("button", { name: /What is Out/i }));
         expect(screen.getByRole("tooltip")).toHaveTextContent("Output tokens");
@@ -241,7 +241,7 @@ describe("TaskGrid — column help popover", () => {
 describe("TaskGrid — dataset-expanded task links", () => {
     test("link href uses the full slash-separated task ID", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="2026-06-03_16-16-26"
                 tasks={[row("sentiment-classification/r3", 1, null)]}
             />,
@@ -267,7 +267,7 @@ describe("TaskGrid — Tokens↔USD toggle", () => {
     });
 
     test("shows token counts once revealed, no 'estimated' badge", () => {
-        render(<TaskGrid runId="r1" tasks={[priced]} />);
+        render(<TaskGrid sourceId="skills" runId="r1" tasks={[priced]} />);
         revealTokens();
         // Scope value lookups to the table — the mobile card duplicates them.
         const table = screen.getByRole("table");
@@ -276,7 +276,7 @@ describe("TaskGrid — Tokens↔USD toggle", () => {
     });
 
     test("USD mode prices each bucket and shows an 'estimated' badge", () => {
-        render(<TaskGrid runId="r1" tasks={[priced]} />);
+        render(<TaskGrid sourceId="skills" runId="r1" tasks={[priced]} />);
         revealTokens();
         fireEvent.click(screen.getByRole("button", { name: "USD" }));
         const table = screen.getByRole("table");
@@ -296,7 +296,7 @@ describe("TaskGrid — Tokens↔USD toggle", () => {
             cacheCreationTokens: 1000,
             cacheReadTokens: 80_000,
         });
-        render(<TaskGrid runId="r1" tasks={[unpriced]} />);
+        render(<TaskGrid sourceId="skills" runId="r1" tasks={[unpriced]} />);
         revealTokens();
         fireEvent.click(screen.getByRole("button", { name: "USD" }));
         // Estimated mode is active, but an unpriced model can't value the
@@ -309,7 +309,7 @@ describe("TaskGrid — Tokens↔USD toggle", () => {
 describe("TaskGrid — replicates", () => {
     test("collapses replicates to one row with a k/N ✓ badge linking to the task page", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("reptask", 1, 5, { replicateIndex: 0 }),
@@ -339,7 +339,7 @@ describe("TaskGrid — replicates", () => {
 
     test("k/N ✓ badge counts only the passing replicates and is amber for a partial pass", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("mixed", 1, 5, { replicateIndex: 0, status: "SUCCESS" }),
@@ -357,7 +357,7 @@ describe("TaskGrid — replicates", () => {
 
     test("k/N ✓ badge is red when no replicate passed", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("none", 1, 5, { replicateIndex: 0, status: "FAILURE" }),
@@ -373,7 +373,7 @@ describe("TaskGrid — replicates", () => {
 
     test("collapsed row picks a PASSING replicate: Passed pill and link to that run", () => {
         render(
-            <TaskGrid
+            <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
                     // Lowest index failed; replicate 1 passed → 1 is the rep.

@@ -26,6 +26,7 @@ import {
     TOKEN_COLUMN_HELP,
 } from "@/app/_components/col-help";
 import { type Unit, UnitToggle } from "@/app/_components/unit-toggle";
+import { withSource } from "@/app/_lib/source-param";
 import { TableScroll } from "@/app/_components/scroll-table";
 import { StatusPill } from "@/lib/pills";
 import { displayedTurns } from "@/lib/turns";
@@ -104,39 +105,62 @@ export function FlowDebugSection({ flowDebug }: { flowDebug: FlowDebugResult }) 
     );
 }
 
-export function CriteriaSection({ criteria }: { criteria: CriterionResult[] }) {
+export function CriteriaSection({
+    criteria,
+    title = "Success criteria",
+    diagnostic = false,
+}: {
+    criteria: CriterionResult[];
+    title?: string;
+    diagnostic?: boolean;
+}) {
     return (
         <section className="space-y-2">
             <h2 className="text-sm font-semibold text-gray-900">
-                Success criteria ({criteria.length})
-                {criteria.some((c) => !c.gating) && (
+                {title} ({criteria.length})
+                {!diagnostic && criteria.some((c) => !c.gating) && (
                     <span className="ml-2 font-normal text-gray-500">
                         {criteria.filter((c) => !c.gating).length}{" "}
                         informational
                     </span>
                 )}
             </h2>
+            {diagnostic && (
+                <p className="text-xs text-gray-500">
+                    Diagnostic evidence collected after the agent failed. It
+                    does not affect status, score, or pass/fail gating.
+                </p>
+            )}
             <div className="space-y-2">
                 {criteria.map((c, i) => {
                     // Compare against the criterion's own threshold, not === 1:
                     // fractional criteria pass below 1.0 (default threshold 0.9).
                     const passed = (c.score ?? 0) >= c.passThreshold;
+                    const evaluated = c.evaluationStatus === "evaluated";
                     return (
                         <Expandable
                             key={i}
                             header={
                                 <div className="flex items-center gap-3">
-                                    <ResultPill
-                                        passed={passed}
-                                        gating={c.gating}
-                                    />
+                                    {evaluated ? (
+                                        <ResultPill
+                                            passed={passed}
+                                            gating={c.gating}
+                                        />
+                                    ) : (
+                                        <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                                            NOT EVALUATED
+                                        </span>
+                                    )}
                                     <span className="text-sm text-gray-900">
                                         {c.description ??
                                             c.criterionType ??
                                             `criterion ${i + 1}`}
                                     </span>
                                     <span className="ml-auto text-xs text-gray-500 tabular-nums">
-                                        score {c.score ?? "—"}
+                                        {evaluated
+                                            ? `score ${c.score ?? "—"}`
+                                            : "no score"}
                                     </span>
                                 </div>
                             }
@@ -1449,9 +1473,11 @@ const ARTIFACT_CAP = 50;
 function ArtifactList({
     runId,
     items,
+    sourceId,
 }: {
     runId: string;
     items: ArtifactRef[];
+    sourceId: string;
 }) {
     return (
         <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg bg-white">
@@ -1462,9 +1488,12 @@ function ArtifactList({
                 >
                     <KindChip kind={a.kind} />
                     <a
-                        href={`/api/file?run=${encodeURIComponent(
-                            runId,
-                        )}&path=${encodeURIComponent(a.relPath)}`}
+                        href={withSource(
+                            `/api/file?run=${encodeURIComponent(
+                                runId,
+                            )}&path=${encodeURIComponent(a.relPath)}`,
+                            sourceId,
+                        )}
                         className="text-studio-blue hover:underline truncate"
                         download
                     >
@@ -1482,9 +1511,13 @@ function ArtifactList({
 export function ArtifactsSection({
     runId,
     artifacts,
+    sourceId,
 }: {
     runId: string;
     artifacts: ArtifactRef[];
+    // Artifact relPaths resolve under the source's cache dir, so /api/file needs
+    // the same source the task detail was read with.
+    sourceId: string;
 }) {
     const head = artifacts.slice(0, ARTIFACT_CAP);
     const rest = artifacts.slice(ARTIFACT_CAP);
@@ -1496,7 +1529,11 @@ export function ArtifactsSection({
             {artifacts.length === 0 ? (
                 <div className="text-sm text-gray-500">none</div>
             ) : (
-                <ArtifactList runId={runId} items={head} />
+                <ArtifactList
+                    runId={runId}
+                    items={head}
+                    sourceId={sourceId}
+                />
             )}
             {rest.length > 0 && (
                 <Expandable
@@ -1506,7 +1543,11 @@ export function ArtifactsSection({
                         </span>
                     }
                 >
-                    <ArtifactList runId={runId} items={rest} />
+                    <ArtifactList
+                        runId={runId}
+                        items={rest}
+                        sourceId={sourceId}
+                    />
                 </Expandable>
             )}
         </section>

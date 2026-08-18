@@ -44,7 +44,7 @@ describe("RunView — Pass-rate / Failed tiles for repeated runs", () => {
         // task A: 1/2 replicates pass → task passes. task B: 0/2 → task fails.
         // Per-task: 1/2 passed, 1 failed. Per-replicate: 1/4 passed, 3 failed.
         render(
-            <RunView
+            <RunView sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("A", { replicateIndex: 0, status: "SUCCESS" }),
@@ -68,7 +68,7 @@ describe("RunView — Pass-rate / Failed tiles for repeated runs", () => {
 
     test("single-shot run keeps the plain per-replicate rate (no 'tasks' suffix)", () => {
         render(
-            <RunView
+            <RunView sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("A", { status: "SUCCESS" }),

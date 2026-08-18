@@ -33,7 +33,7 @@ initial_prompt: >
 
 agent:
   type: "claude-code"
-  model: "claude-sonnet-4-6"
+  model: "claude-sonnet-5"
   permission_mode: "acceptEdits"
   setting_sources: []   # isolate the sandbox from your own CLAUDE.md/settings
 

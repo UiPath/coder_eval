@@ -46,6 +46,7 @@ def _make_agent_config() -> ClaudeCodeAgentConfig:
             permission_mode="bypassPermissions",
             allowed_tools=["Read"],
             system_prompt="x",
+            system_prompt_mode="replace",  # identity-prompt contract
             setting_sources=[],  # security contract
         ),
     )
@@ -430,6 +431,27 @@ def test_runner_asserts_setting_sources_empty(sandbox: Sandbox, bad_sources: lis
         setting_sources=bad_sources,  # type: ignore[arg-type]
     )
     with pytest.raises(ValueError, match="setting_sources"):
+        SubAgentRunner(
+            sandbox=sandbox,
+            agent_config=bad_config,
+            ignore_patterns=[],
+            route=DirectRoute(),
+        )
+
+
+def test_runner_asserts_replace_mode_for_identity_prompt(sandbox: Sandbox) -> None:
+    """Identity-prompt contract: a sub-agent's system_prompt is its entire identity,
+    so append mode (which would prefix the claude_code coding-agent preset) is
+    rejected at construction rather than silently changing the sub-agent's persona."""
+    bad_config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE,
+        model="claude-opus-4-6",
+        permission_mode="bypassPermissions",
+        allowed_tools=["Read"],
+        system_prompt="x",  # mode defaults to 'append'
+        setting_sources=[],
+    )
+    with pytest.raises(ValueError, match="system_prompt_mode"):
         SubAgentRunner(
             sandbox=sandbox,
             agent_config=bad_config,

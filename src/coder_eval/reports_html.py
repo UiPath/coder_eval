@@ -416,7 +416,7 @@ def _render_criteria_details(cr: CriterionResult) -> str:
     )
 
 
-def _render_judge_section(criteria: list[CriterionResult]) -> str:
+def _render_judge_section(criteria: list[CriterionResult], heading: str = "Judge Verdicts") -> str:
     """Render the dedicated 'Judge Verdicts' section containing per-judge cards.
 
     Each judge result that carries verdict evidence (findings, transcript) gets
@@ -443,7 +443,7 @@ def _render_judge_section(criteria: list[CriterionResult]) -> str:
     if not cards:
         return ""
 
-    return f'<h2>Judge Verdicts ({len(cards)})</h2><div class="judge-section">' + "".join(cards) + "</div>"
+    return f'<h2>{_esc(heading)} ({len(cards)})</h2><div class="judge-section">' + "".join(cards) + "</div>"
 
 
 def _extract_rationale(details: str | None) -> str:
@@ -566,8 +566,16 @@ def _render_judge_transcript(transcript: Any) -> str:
     )
 
 
-def _render_criteria(results: list[CriterionResult], early_stop: EarlyStopInfo | None = None) -> str:
+def _render_criteria(
+    results: list[CriterionResult],
+    early_stop: EarlyStopInfo | None = None,
+    *,
+    heading: str = "Success Criteria",
+    diagnostic: bool = False,
+) -> str:
     if not results:
+        if diagnostic:
+            return ""
         return """
 <div class="card">
   <h2 style="margin-top:0;border:none;padding:0">Success Criteria</h2>
@@ -579,31 +587,52 @@ def _render_criteria(results: list[CriterionResult], early_stop: EarlyStopInfo |
     rows: list[str] = []
     for cr in results:
         advisory = ""
-        if not cr.gating:
+        evaluated = cr.evaluation_status == "evaluated"
+        if not evaluated:
+            advisory = '<div class="dim" style="margin-top:4px">no verdict — the check did not run</div>'
+        elif not cr.gating and not diagnostic:
             # weight: 0 — measured but excluded from the gate. Saying so here keeps
             # the row from reading as a failure that the header/status contradicts.
             advisory = '<div class="dim" style="margin-top:4px">informational — not gated (weight: 0)</div>'
-        elif early_stop is not None and f"{cr.criterion_type}: {cr.description}" not in armed:
+        elif not diagnostic and early_stop is not None and f"{cr.criterion_type}: {cr.description}" not in armed:
             advisory = '<div class="dim" style="margin-top:4px">advisory — not gated (run stopped early)</div>'
+        score = _score_pill(cr.score) if evaluated else '<span class="badge neutral">NOT EVALUATED</span>'
         rows.append(
             f"""
 <tr class="criterion-row">
   <td>{_esc(cr.criterion_type)}</td>
   <td>{_esc(cr.description)}{advisory}</td>
-  <td style="text-align:center">{_score_pill(cr.score)}</td>
+  <td style="text-align:center">{score}</td>
   <td>{_render_criteria_details(cr)}</td>
 </tr>
 """
         )
-    # Count over gating criteria only, so this header agrees with final_status
-    # and the CLI exit code (both of which ignore weight: 0 criteria).
-    gating_results = [r for r in results if r.gating]
-    passed = sum(1 for r in gating_results if r.score >= r.pass_threshold)
-    total = len(gating_results)
-    informational = len(results) - total
-    info_note = f' <span class="dim">+ {informational} informational</span>' if informational else ""
+    evaluated_results = [r for r in results if r.evaluation_status == "evaluated"]
+    not_evaluated = len(results) - len(evaluated_results)
+    if diagnostic:
+        passed = sum(1 for r in evaluated_results if r.score >= r.pass_threshold)
+        summary = f"{passed}/{len(evaluated_results)} evaluated checks passed"
+        if not_evaluated:
+            summary += f" · {not_evaluated} not evaluated"
+        note = (
+            '<div class="card"><p class="muted">Diagnostic evidence collected after the agent failed. '
+            "It does not change the terminal status, canonical score, or pass/fail gate.</p></div>"
+        )
+    else:
+        # Count over evaluated gating criteria only, so this header agrees with
+        # final_status and the CLI exit code.
+        gating_results = [r for r in evaluated_results if r.gating]
+        passed = sum(1 for r in gating_results if r.score >= r.pass_threshold)
+        summary = f"{passed}/{len(gating_results)} passed"
+        informational = len(evaluated_results) - len(gating_results)
+        if informational:
+            summary += f" + {informational} informational"
+        if not_evaluated:
+            summary += f" + {not_evaluated} not evaluated"
+        note = ""
     return f"""
-<h2>Success Criteria <span class="muted" style="font-weight:400">({passed}/{total} passed{info_note})</span></h2>
+<h2>{_esc(heading)} <span class="muted" style="font-weight:400">({_esc(summary)})</span></h2>
+{note}
 <div class="card" style="padding:0">
 <table>
   <thead>
@@ -962,7 +991,9 @@ def _render_agent_settings(result: EvaluationResult) -> str:
     else:
         return ""
 
-    rows = collect_agent_settings_rows(settings, is_sdk)
+    rows = collect_agent_settings_rows(
+        settings, is_sdk, system_prompt_semantics=(result.environment_info or {}).get("system_prompt_semantics")
+    )
     body = "".join(f"<tr><td class='mono dim'>{_esc(label)}</td><td>{_esc(value)}</td></tr>" for label, value in rows)
     return f"""
 <h2>Agent Settings</h2>
@@ -1493,6 +1524,15 @@ class HTMLReportGenerator:
             + _render_simulation(result)
             + _render_criteria(result.success_criteria_results or [], result.early_stop)
             + _render_judge_section(result.success_criteria_results or [])
+            + _render_criteria(
+                result.post_failure_criteria_results or [],
+                heading="Post-failure Artifact Evidence",
+                diagnostic=True,
+            )
+            + _render_judge_section(
+                result.post_failure_criteria_results or [],
+                heading="Post-failure Judge Evidence",
+            )
             + _render_error_details(result)
             + f"<h2>Conversation Trace ({trace_count})</h2>"
             + turns_html

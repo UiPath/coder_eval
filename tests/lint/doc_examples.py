@@ -203,9 +203,16 @@ def find_invalid_doc_examples(doc_paths: list[Path]) -> dict[str, list[str]]:
 
 
 def default_doc_paths(repo_root: Path) -> list[Path]:
-    """The Markdown surfaces CE029 scans: README plus every page under docs/."""
+    """The Markdown surfaces CE029 scans: README, every page under docs/, and the plugin.
+
+    The plugin's skills are included because teaching task-YAML schema is precisely
+    what they do — a mistyped field name or criterion ``type:`` there ships to every
+    installer. Excluding them left the one surface whose whole job is the schema as
+    the one surface whose examples were never validated against the models.
+    """
     paths = [repo_root / "README.md"]
-    docs = repo_root / "docs"
-    if docs.is_dir():
-        paths.extend(sorted(docs.rglob("*.md")))
+    for subdir in ("docs", "plugins"):
+        tree = repo_root / subdir
+        if tree.is_dir():
+            paths.extend(sorted(p for p in tree.rglob("*.md") if p.is_file()))
     return paths
