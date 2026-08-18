@@ -770,8 +770,10 @@ suite_id = "<the suite's task_id>"
 grader_index = 2  # the grader's POSITION in the suite's success_criteria, not its name
 
 arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=suite_id)
+if not arms[0].row_scores:
+    raise SystemExit("the incumbent scored NO rows — a wrong suite_id or run dir, not a result")
 rows = load_arm_rows(run_dirs, "incumbent", suite_id)
-rule_map = rule_row_map(rows, grader_index)
+attribution = rule_row_map(rows, grader_index)
 
 # `None` at the first round is expected — one replicate cannot split against itself. Re-print this
 # block once the control arm has given the suite a second replicate.
@@ -780,18 +782,33 @@ floor = measure_execution_noise_floor(
     model=resolve_model(rows) or UNRESOLVED_MODEL,
     measurements=load_measurements(Path(".optimize-skill/<skill>/measurements.json")),
 )
-ceilings = [headroom_ceiling(arms[0].row_scores, rule=rule, rows=rule_map[rule]) for rule in sorted(rule_map)]
-# No attribution: fall back to the SUITE-level ceiling rather than printing an empty table, which
-# reads as "no rule has any headroom" when it means "nobody asked".
+# EVERY rule the graders mentioned, not only the ones that failed: a rule this suite always passes
+# has a real ceiling of 0.0 — "no candidate for it can show anything here" — and leaving it out of
+# the table is the difference between an answer and a missing row.
+ceilings = [
+    headroom_ceiling(arms[0].row_scores, rule=rule, rows=attribution.failed[rule])
+    for rule in sorted(attribution.failed)
+]
+# No attribution at all: fall back to the SUITE-level ceiling rather than printing an empty table,
+# which reads as "no rule has any headroom" when it means "nobody asked".
 ceilings = ceilings or [headroom_ceiling(arms[0].row_scores)]
-print(render_headroom_ceilings(ceilings, None if floor is None else floor.mde))
+print(
+    render_headroom_ceilings(
+        ceilings, None if floor is None else floor.mde, unattributed=len(attribution.unattributed)
+    )
+)
 ```
 
-**If `rule_map` comes back empty, attribution is unavailable** — an older grader, or a
-`grader_index` pointing at a different criterion. Say so, and fall back to the suite-level ceiling
-— the snippet's last two lines already do it, and the block then reports one row for the whole
-suite. Rule attribution comes from the grader's `RULES` line; `/coder-eval:task` writes it from the
-Step 2.5 rule inventory.
+**If `attribution.failed` comes back empty, attribution is unavailable** — an older grader, or a
+`grader_index` pointing at a different criterion. The snippet falls back to the suite-level ceiling
+itself and the block then reports one row for the whole suite. Rule attribution comes from the
+grader's `RULES` line; `/coder-eval:task` writes it from the Step 2.5 rule inventory.
+
+**`attribution.unattributed` is not a detail.** A row whose grader output carried no `RULES` line
+is in no rule's failing set, so its headroom is counted nowhere and **every ceiling in the table is
+an under-estimate**. Pass the count in, as above, and the block says so — otherwise a `GAP` verdict,
+which tells you to stop working on a rule, can be produced by a stdout the criterion truncated at
+4000 characters rather than by a rule with no room.
 
 **It advises and never blocks.** The attribution is authored, so a mistyped rule id moves rows
 between rules — and a wrong annotation must not be able to veto a real promotion. What the block is
@@ -1513,8 +1530,8 @@ Two readings the mean cannot give you:
 
 - **A row with zero variance on BOTH arms and a non-zero delta is a reproducible behavioural
   change** — the most informative row in the run, and precisely what a merge candidate should be
-  built from. Measured: one row went `[0.76, 0.76, 0.76]` → `[1.00, 1.00, 1.00]` (+0.238) while
-  another went `[0.86, 0.86, 0.86]` → `[0.59, 0.59, 0.59]` (−0.272). They cancelled to a suite
+  built from. Measured: one row went `[0.76, 0.76, 0.76]` → `[1.00, 1.00, 1.00]` (+0.240) while
+  another went `[0.86, 0.86, 0.86]` → `[0.59, 0.59, 0.59]` (−0.270). They cancelled to a suite
   delta of **+0.0001**, and "the difference is noise" is the opposite of what happened.
 - **A row whose mean delta is exactly 0.0 is dead for this comparison.** The block counts them. A
   suite that is mostly dead rows resolves nothing however many rows it has, and that is a suite

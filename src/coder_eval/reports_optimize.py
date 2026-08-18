@@ -472,8 +472,8 @@ def render_row_replicates(incumbent: dict[str, list[float]], candidate: dict[str
 
     * **A row with zero variance on BOTH arms is the most informative row in the run.** It is a
       reproducible behavioural change, which is exactly the raw material a merge candidate is built
-      from. Measured: one row went ``[0.76, 0.76, 0.76]`` -> ``[1.00, 1.00, 1.00]`` (+0.238) while
-      another went ``[0.86, 0.86, 0.86]`` -> ``[0.59, 0.59, 0.59]`` (-0.272). They cancelled to a
+      from. Measured: one row went ``[0.76, 0.76, 0.76]`` -> ``[1.00, 1.00, 1.00]`` (+0.240) while
+      another went ``[0.86, 0.86, 0.86]`` -> ``[0.59, 0.59, 0.59]`` (-0.270). They cancelled to a
       suite delta of +0.0001 — "the difference is noise" is the opposite of what happened, and no
       verdict block could express it.
     * **A row whose mean delta is exactly 0.0 is DEAD for this comparison** and is counted. A suite
@@ -559,7 +559,10 @@ def _ceiling_verdict(entry: RuleCeiling, floor: float) -> str:
     if entry.n_failing == 0 and entry.n_dropped:
         return "NO DATA — every row attributed to this rule is missing from the vector; a wiring fault, not a gap"
     if entry.ceiling <= 0.0:
-        return "GAP — no headroom at all: every row attributed to this rule is already at the maximum"
+        # Covers both shapes: no row was attributed to the rule at all (it always passed, so
+        # `rule_row_map` gives it an empty set), and every row that was is already at the maximum.
+        # Neither leaves a candidate anywhere to gain, which is the only thing the verdict claims.
+        return "GAP — no headroom: this suite has no row where a candidate for this rule could gain"
     if entry.ceiling < floor:
         return "GAP — no candidate for this rule can promote; the remedy is ROWS, not candidates"
     if entry.ceiling < CEILING_MARGIN * floor:
@@ -567,7 +570,7 @@ def _ceiling_verdict(entry: RuleCeiling, floor: float) -> str:
     return "room for a candidate"
 
 
-def render_headroom_ceilings(ceilings: list[RuleCeiling], floor: float | None) -> str:
+def render_headroom_ceilings(ceilings: list[RuleCeiling], floor: float | None, *, unattributed: int = 0) -> str:
     """What each rule could move the suite mean by at MOST, against the floor that must be cleared.
 
     Read before Step 8 proposes anything: a rule whose ceiling is below the floor is a **suite
@@ -578,6 +581,13 @@ def render_headroom_ceilings(ceilings: list[RuleCeiling], floor: float | None) -
     ``floor is None`` — no noise floor could be measured — renders the ceilings **without**
     verdicts rather than inventing a threshold. A ceiling with no floor still says which rule has
     the most room; a fabricated floor says nothing true at all.
+
+    ``unattributed`` is the count of rows that carried no ``RULES`` line
+    (:attr:`~coder_eval.optimize_load.RuleAttribution.unattributed`), and it is keyword-only and
+    defaulted so existing calls are unchanged. When non-zero the block says every ceiling below is
+    an **under**-estimate — a row nothing attributed is in no rule's failing set, so its headroom
+    is counted in no rule. Without that line a ``GAP`` verdict, which tells a reader to stop
+    working on a rule, can be produced by a stdout the criterion truncated at 4000 characters.
 
     Advisory, always. See :func:`~coder_eval.optimize_fronts.headroom_ceiling` for why a table
     built on an AUTHORED attribution must never be able to block a promotion.
@@ -613,6 +623,14 @@ def render_headroom_ceilings(ceilings: list[RuleCeiling], floor: float | None) -
             + f"rows that fail the rule — about `{CEILING_MARGIN:g} x floor x n_rows` of headroom "
             + "for a comfortable margin. Every row that PASSES a rule makes that rule harder to "
             + "promote, which is why one row per rule is the worst possible suite shape."
+        )
+
+    if unattributed:
+        lines.append(
+            f"**{unattributed} row(s) carried no rule attribution and are counted in NO rule's "
+            + "headroom, so every ceiling above is an UNDER-estimate.** A GAP verdict here may be "
+            + "a truncated grader log rather than a rule without room — `run_command` caps each "
+            + "stream at 4000 characters. Fix the attribution before acting on a gap."
         )
 
     dropped = [f"{c.rule or 'whole suite'} ({c.n_dropped})" for c in ceilings if c.n_dropped]

@@ -727,9 +727,17 @@ def _rules_verdicts(result: EvaluationResult, criterion_index: int) -> dict[str,
     a ``Stderr:`` section after it, so the grader's own last line is never the details' last line —
     and a naive reverse scan reads the STDERR side first. That matters beyond tidiness: a
     traceback there can quote artifact text, which is untrusted agent output, so a forged
-    ``RULES {...}`` line would outrank the grader's real one. The window therefore ends at the last
-    line beginning ``Stderr:``; with no such line (a criterion that reports raw stdout) the whole
-    field is scanned, which is the old behaviour.
+    ``RULES {...}`` line would outrank the grader's real one.
+
+    The window is ``[first "Stdout:" ... first "Stderr:" after it)``, and **both must be the
+    FIRST** — an earlier draft ended it at the LAST ``Stderr:``, which the same untrusted text
+    defeats simply by containing a second such line, moving the boundary back past the grader's
+    real one. Everything before the wrapper's ``Stdout:`` is written by the criterion (``Score:``,
+    ``Command:``, ``Exit code:``), so the first marker is always its own.
+
+    With no ``Stdout:`` marker — a criterion reporting raw stdout — the whole field is scanned. A
+    grader printing its own ``Stderr:`` line truncates the window early and its row reads as
+    unattributed, which fails CLOSED: a missing attribution is warned about, a forged one is not.
 
     ``None`` — no line, unparseable JSON, or a payload that is not an object — is deliberately not
     distinguished from ``{}`` at this level. ``{}`` means a CURRENT grader that attributed nothing;
@@ -746,11 +754,11 @@ def _rules_verdicts(result: EvaluationResult, criterion_index: int) -> dict[str,
     if not details:
         return None
     lines = details.splitlines()
-    # The LAST `Stderr:` marker, not the first: the grader's own stdout may legitimately contain
-    # the word, and the wrapper's section is always the final one.
-    stderr_marker = next((i for i, line in enumerate(reversed(lines)) if line.startswith("Stderr:")), None)
-    if stderr_marker is not None:
-        lines = lines[: len(lines) - stderr_marker - 1]
+    stdout_at = next((i for i, line in enumerate(lines) if line.startswith("Stdout:")), None)
+    if stdout_at is not None:
+        after = lines[stdout_at + 1 :]
+        stderr_at = next((i for i, line in enumerate(after) if line.startswith("Stderr:")), len(after))
+        lines = after[:stderr_at]
     for line in reversed(lines):
         if not line.startswith(RULES_LINE_PREFIX):
             continue
@@ -763,7 +771,21 @@ def _rules_verdicts(result: EvaluationResult, criterion_index: int) -> dict[str,
     return None
 
 
-def rule_row_map(rows: dict[str, list[EvaluationResult]], criterion_index: int) -> dict[str, set[str]]:
+class RuleAttribution(NamedTuple):
+    """What the graders said about rules, and which rows said nothing at all.
+
+    ``unattributed`` is RETURNED rather than only logged, because a consumer cannot recompute it
+    and the ceiling is wrong without it: a row carrying no ``RULES`` line is in no rule's failing
+    set, so every ceiling is an UNDER-estimate — and the ``GAP`` verdict, the one that says "stop
+    working on this rule", can then be produced by a truncated log rather than by a suite with no
+    headroom. ``run_command`` truncates each stream at 4000 characters, so that is a real path.
+    """
+
+    failed: dict[str, set[str]]  # every rule SEEN -> the rows it failed on, possibly empty
+    unattributed: list[str]  # rows whose replicates carried no RULES line at all
+
+
+def rule_row_map(rows: dict[str, list[EvaluationResult]], criterion_index: int) -> RuleAttribution:
     """Rule id -> the row ids where that rule FAILED, read off the grader's ``RULES`` lines.
 
     The missing link between an outcome suite's grader and the headroom ceiling: without it,
@@ -777,13 +799,15 @@ def rule_row_map(rows: dict[str, list[EvaluationResult]], criterion_index: int) 
     computed from them is an UPPER bound, and "this rule cannot clear the floor" is a claim that
     survives the most generous attribution available.
 
-    A rule that failed nowhere is simply ABSENT from the mapping — the map is failures, not a
-    census — so a caller must pass ``rows=set()`` for it rather than letting ``rows=None`` fall
-    through to the suite-level ceiling.
+    **Every rule SEEN is a key**, including one that only ever passed or was N/A, mapping to an
+    empty set. Two things follow, and both were bugs in the version that keyed only failures: the
+    rule everything already passes can be SIZED (its ceiling is 0.0 — "this suite cannot show an
+    improvement to it", a real finding rather than a rule missing from the table), and
+    ``rule_map.failed[rule]`` is never a missing key, which removes the ``rows=None``-versus-
+    ``rows=set()`` trap from every consumer.
 
-    An empty return means attribution is unavailable (a pre-contract grader, or a criterion index
-    pointing at something else). The count of unattributed rows is WARNED rather than returned: the
-    caller's remedy is the same either way — fall back to the suite-level ceiling and say so.
+    An empty ``failed`` means attribution is unavailable (a pre-contract grader, or a criterion
+    index pointing at something else); the caller's remedy is the suite-level ceiling.
 
     Takes already-loaded rows, so CE053 does not apply: whoever loaded them reconciled them.
     """
@@ -797,8 +821,11 @@ def rule_row_map(rows: dict[str, list[EvaluationResult]], criterion_index: int) 
             continue
         for verdict in verdicts:
             for rule, outcome in verdict.items():
+                # `setdefault` on EVERY verdict, not only a failing one: a rule this suite always
+                # passes has a real ceiling (zero), and a caller that never sees the key cannot ask.
+                seen = failed.setdefault(rule, set())
                 if outcome == "fail":
-                    failed.setdefault(rule, set()).add(row_id)
+                    seen.add(row_id)
     if unattributed:
         logger.warning(
             "%d of %d row(s) carry no %s line at criterion_index=%d and are attributed to no rule: %s",
@@ -808,4 +835,4 @@ def rule_row_map(rows: dict[str, list[EvaluationResult]], criterion_index: int) 
             criterion_index,
             ", ".join(unattributed),
         )
-    return failed
+    return RuleAttribution(failed=failed, unattributed=unattributed)

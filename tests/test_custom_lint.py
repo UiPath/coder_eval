@@ -2388,9 +2388,11 @@ class TestPluginArtifacts:
             # 0.0 or 1.0, which is the zero-variance shape the execution gate refuses to rule on.
             # Weaker than the declared-check floor above on purpose — `json_field: {}` is the
             # documented opt-out, so a file may declare four and apply three.
+            # FOUR, matching `task/SKILL.md`'s floor and `core-1.json`'s own `_comment`. At three
+            # the sensor would let the template drift below the rule it teaches while staying green.
             applicable = [k for k, params in spec["checks"].items() if params]
-            assert len(applicable) >= 3, (
-                f"{row_id}.json declares only {len(applicable)} applicable checks, so it teaches a "
+            assert len(applicable) >= 4, (
+                f"{row_id}.json declares only {len(applicable)} APPLICABLE checks, so it teaches a "
                 "near-binary grader — the defect `score_from_stdout` was chosen to avoid"
             )
 
@@ -8298,7 +8300,6 @@ class TestCE046CliFlagsAreDocumented:
 
 
 @pytest.mark.lint
-@pytest.mark.lint
 class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
     """CE057 — an outcome row's prompt must not contain a value its EXPECTATIONS grade it on.
 
@@ -8347,17 +8348,72 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
 
     @staticmethod
     def _suite(root: Path, *, scenario: str, needle: str, extra_row: dict | None = None) -> Path:
-        """One outcome suite on disk: a rows JSONL beside an `outcome-grader/expectations/` dir."""
+        """One outcome suite on disk: suite YAML + rows JSONL + `outcome-grader/expectations/`.
+
+        The suite YAML is not optional scaffolding — its `initial_prompt` IS the thing compared,
+        and building the fixture without it is what let the rule compare row fields instead.
+        """
         import json
 
         (root / "outcome-grader" / "expectations").mkdir(parents=True)
         row = {"id": "core-1", "scenario": scenario, **(extra_row or {})}
         (root / "rows.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        (root / "outcome.yaml").write_text(
+            'task_id: "s"\ninitial_prompt: |\n  Use the skill.\n\n  ${row.scenario}\n', encoding="utf-8"
+        )
         (root / "outcome-grader" / "expectations" / "core-1.json").write_text(
             json.dumps({"path": "out/report.md", "checks": {"mentions#core": {"all_of": [needle]}}}),
             encoding="utf-8",
         )
         return root
+
+    def test_ce057_ignores_a_row_field_the_prompt_never_interpolates(self, tmp_path: Path):
+        """The false positive that would have got this rule `# noqa`'d on first contact.
+
+        `expected_snippet` is a CRITERION parameter — the shipped template feeds it to
+        `file_check.includes` — so a suite whose expectations assert the same string is doing
+        exactly what the template teaches. The string is in the marking scheme twice and in the
+        prompt zero times. Comparing every row field reported that as a leak.
+        """
+        from tests.lint.outcome_prompt_leak import leaks
+
+        self._suite(
+            tmp_path,
+            scenario="Summarise the quarterly figures",
+            needle="Total Revenue by Region",
+            extra_row={"expected_snippet": "Total Revenue by Region"},
+        )
+        found, pairs = leaks(tmp_path)
+        assert pairs == 1 and not found
+
+    def test_ce057_sees_a_leak_in_the_shared_prompt_template(self, tmp_path: Path):
+        # The converse, and only reachable by rendering the real template: a graded value hardcoded
+        # into `initial_prompt` reaches EVERY row and no row field is involved at all.
+        from tests.lint.outcome_prompt_leak import leaks
+
+        root = self._suite(tmp_path, scenario="Summarise the figures", needle="Total Revenue by Region")
+        (root / "outcome.yaml").write_text(
+            'task_id: "s"\ninitial_prompt: |\n  Always show Total Revenue by Region.\n\n  ${row.scenario}\n',
+            encoding="utf-8",
+        )
+        found, _pairs = leaks(root)
+        assert len(found) == 1 and found[0].value == "Total Revenue by Region"
+
+    def test_ce057_skips_a_rows_file_with_no_suite_beside_it(self, tmp_path: Path):
+        # No prompt template means nothing to compare against, and GUESSING one is precisely how
+        # the false positive above happened. Skipped rather than approximated.
+        import json
+
+        from tests.lint.outcome_prompt_leak import leaks
+
+        (tmp_path / "outcome-grader" / "expectations").mkdir(parents=True)
+        (tmp_path / "rows.jsonl").write_text(
+            json.dumps({"id": "core-1", "scenario": "a graded phrase"}) + "\n", "utf-8"
+        )
+        (tmp_path / "outcome-grader" / "expectations" / "core-1.json").write_text(
+            json.dumps({"path": "o", "checks": {"mentions": {"all_of": ["a graded phrase"]}}}), "utf-8"
+        )
+        assert leaks(tmp_path) == ([], 0)
 
     def test_ce057_flags_a_prompt_containing_a_graded_value(self, tmp_path: Path):
         from tests.lint.outcome_prompt_leak import leaks
@@ -8408,6 +8464,7 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
 
         (tmp_path / "outcome-grader" / "expectations").mkdir(parents=True)
         (tmp_path / "rows.jsonl").write_text(json.dumps({"id": "core-1", "scenario": "anything"}) + "\n", "utf-8")
+        (tmp_path / "outcome.yaml").write_text('task_id: "s"\ninitial_prompt: "${row.scenario}"\n', "utf-8")
         (tmp_path / "outcome-grader" / "expectations" / "example-row.json").write_text(
             json.dumps({"path": "out/report.md", "checks": {"mentions": {"all_of": ["a graded phrase"]}}}), "utf-8"
         )

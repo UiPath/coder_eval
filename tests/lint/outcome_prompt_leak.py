@@ -28,8 +28,11 @@ exactly what ``LEAK_LOCATOR_FIELDS`` is for; anything outside it is a leak.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import NamedTuple
+
+import yaml
 
 from coder_eval.leak_detection import LEAK_LOCATOR_FIELDS, LEAK_MIN_CHARS, string_leaves
 
@@ -81,19 +84,56 @@ def _rows(rows_file: Path) -> list[dict]:
     return [json.loads(line) for line in rows_file.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def discover_outcome_suites(root: Path) -> list[tuple[Path, Path]]:
-    """``(rows JSONL, expectations dir)`` for every outcome suite under ``root``.
+# `${row.<field>}` — the substitution `task_loader.expand_dataset` performs into `initial_prompt`.
+_ROW_REF = re.compile(r"\$\{row\.([A-Za-z0-9_]+)\}")
 
-    Discovery is by CONTENT — a rows file beside a directory named :data:`EXPECTATIONS_DIRNAME` —
-    never by filename, so a suite an author called something else is still checked.
+
+def rendered_prompts(suite_yaml: Path, rows: list[dict]) -> dict[str, str]:
+    """Row id -> the prompt that row's agent actually receives.
+
+    **This is the whole correctness of the rule**, and getting it wrong makes CE057 a build-breaker
+    that fires on the shape the shipped template teaches. Only `initial_prompt` reaches the agent,
+    and only the row fields it interpolates reach `initial_prompt`. A row's other fields are
+    CRITERION parameters: `expected_snippet` is fed to `file_check.includes`, so a suite whose
+    expectations assert the same string is doing exactly what the template tells it to — the string
+    is in the marking scheme twice and in the prompt zero times, which is not a leak. Comparing
+    against every row field reported it as one.
+
+    Rendering the real template also closes the converse gap: a graded value hard-coded into the
+    SHARED prompt, where no row field is involved at all, is now visible.
     """
-    found: list[tuple[Path, Path]] = []
+    document = yaml.safe_load(suite_yaml.read_text(encoding="utf-8"))
+    template = document.get("initial_prompt") if isinstance(document, dict) else None
+    if not isinstance(template, str):
+        return {}
+
+    def render(row: dict) -> str:
+        return _ROW_REF.sub(lambda m: str(row.get(m.group(1), m.group(0))), template)
+
+    return {str(row.get("id", "")): render(row) for row in rows}
+
+
+def discover_outcome_suites(root: Path) -> list[tuple[Path, Path, Path]]:
+    """``(suite YAML, rows JSONL, expectations dir)`` for every outcome suite under ``root``.
+
+    Discovery is by CONTENT — a `task_id:`-bearing YAML beside a rows file and a directory named
+    :data:`EXPECTATIONS_DIRNAME` — never by filename, so a suite an author called something else is
+    still checked. A rows file with no suite YAML beside it is skipped: without the prompt template
+    there is nothing to compare against, and guessing one is how the false positive above happened.
+    """
+    found: list[tuple[Path, Path, Path]] = []
     for expectations in sorted(root.rglob(EXPECTATIONS_DIRNAME)):
         if not expectations.is_dir() or not any(expectations.glob("*.json")):
             continue
-        # The rows file sits with the suite YAML, one level above the grader directory.
+        # The suite YAML and its rows file sit one level above the grader directory.
         suite_dir = expectations.parent.parent
-        found += [(rows, expectations) for rows in sorted(suite_dir.glob("*.jsonl"))]
+        suites = [
+            path
+            for path in sorted([*suite_dir.glob("*.yaml"), *suite_dir.glob("*.yml")])
+            if isinstance(document := yaml.safe_load(path.read_text(encoding="utf-8")), dict) and "task_id" in document
+        ]
+        for suite in suites:
+            found += [(suite, rows, expectations) for rows in sorted(suite_dir.glob("*.jsonl"))]
     return found
 
 
@@ -104,25 +144,22 @@ def leaks(root: Path) -> tuple[list[LeakPair], int]:
     pass green over a suite whose expectations match no row at all — which is the shipped state
     this plan had to fix, and precisely the CE044/CE045 vacuous pass this rule cites.
 
-    A row's "prompt" here is its own free-text fields rather than the rendered ``initial_prompt``:
-    the suite's prompt template is one string shared by every row, and what varies per row — the
-    scenario — is the half an author leaks into. Locator fields on the ROW are dropped for the same
-    reason they are on a check: naming the output path is the spec, not the answer.
+    The compared prompt is the RENDERED ``initial_prompt`` (see :func:`rendered_prompts`), never
+    the row's other fields: those are criterion parameters, and treating them as the prompt makes
+    the rule fire on the shape the shipped template teaches.
     """
     found: list[LeakPair] = []
     pairs = 0
-    for rows_file, expectations in discover_outcome_suites(root):
+    for suite_yaml, rows_file, expectations in discover_outcome_suites(root):
         specs = {p.stem: json.loads(p.read_text(encoding="utf-8")) for p in sorted(expectations.glob("*.json"))}
-        for row in _rows(rows_file):
-            row_id = str(row.get("id", ""))
+        prompts = rendered_prompts(suite_yaml, _rows(rows_file))
+        for row_id, prompt in prompts.items():
             spec = specs.get(row_id)
             if spec is None:
                 continue
-            scenario = " ".join(
-                value for key, value in row.items() if isinstance(value, str) and key not in LEAK_LOCATOR_FIELDS
-            ).casefold()
+            haystack = prompt.casefold()
             for check, value in graded_values(spec):
                 pairs += 1
-                if value.casefold() in scenario:
+                if value.casefold() in haystack:
                     found.append(LeakPair(suite=rows_file, row_id=row_id, value=value, check=check))
     return found, pairs

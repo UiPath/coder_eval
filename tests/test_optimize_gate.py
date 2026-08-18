@@ -94,6 +94,7 @@ from coder_eval.optimize_gate import (
 )
 from coder_eval.optimize_load import (
     TASK_JSON_GLOB,
+    RuleAttribution,
     SplitProvenance,
     _balance_pair,
     _label_pairs,
@@ -3814,7 +3815,15 @@ class TestRowMatrixReplicateLabelling:
             Path(__file__).parent.parent / "plugins" / "coder-eval" / "skills" / "optimize-skill" / "SKILL.md"
         ).read_text(encoding="utf-8")
         assert "ranking device" in skill, "the skill no longer says Stage A ranks rather than measures"
-        assert "0.9977" in SINGLE_REPLICATE_CAVEAT
+        # BINDING, not two presence checks: the anchor must be in the constant AND in the prose, so
+        # the skill's own retelling cannot drift to a different pair of numbers than the block
+        # prints. This is the shape the MATERIALITY_FLOOR and COST_FRONT_ADVISORY sensors have.
+        for anchor in ("0.9977", "0.0392", "0.0255"):
+            assert anchor in SINGLE_REPLICATE_CAVEAT, f"the constant no longer carries {anchor!r}"
+            assert anchor in skill, (
+                f"optimize-skill retells the single-replicate evidence without {anchor!r}, so the "
+                "prose and the rendered block can state different numbers for the same round"
+            )
 
 
 class TestRowReplicates:
@@ -4412,7 +4421,7 @@ class TestRuleRowMap:
             "r2": [_grader_result("r2", 1.0, {"R1": "pass", "R2": "pass"})],
             "r3": [_grader_result("r3", 0.0, {"R2": "fail", "R3": "na"})],
         }
-        assert rule_row_map(rows, 0) == {"R1": {"r1"}, "R2": {"r3"}}
+        assert rule_row_map(rows, 0).failed == {"R1": {"r1"}, "R2": {"r3"}, "R3": set()}
 
     def test_rule_row_map_any_replicate_failure_marks_the_row(self) -> None:
         # Matches the grader's own any-check rule, and for the same reason: both point at counting
@@ -4424,13 +4433,52 @@ class TestRuleRowMap:
                 _grader_result("r1", 1.0, {"R1": "pass"}),
             ]
         }
-        assert rule_row_map(rows, 0) == {"R1": {"r1"}}
+        assert rule_row_map(rows, 0).failed == {"R1": {"r1"}}
+
+    def test_a_rule_that_failed_nowhere_is_a_key_with_an_empty_set(self) -> None:
+        """The rule everything already passes must be SIZEABLE, not missing from the table.
+
+        Keying only failures made "can a candidate for R5 promote?" unanswerable for exactly the
+        rule whose answer matters most — no, its ceiling is zero — because the consumer iterates
+        the map and R5 was not in it. It also removes the `rows=None` vs `rows=set()` trap: the
+        key is always present, so a caller cannot reach for `.get()` and get the whole suite.
+        """
+        rows = {"r1": [_grader_result("r1", 1.0, {"R5": "pass", "R6": "na"})]}
+        attribution = rule_row_map(rows, 0)
+        assert attribution.failed == {"R5": set(), "R6": set()}
+        assert headroom_ceiling({"r1": 1.0}, rule="R5", rows=attribution.failed["R5"]).ceiling == 0.0
+
+    def test_rule_row_map_returns_the_unattributed_rows(self) -> None:
+        # RETURNED, not only logged: a consumer cannot recompute it, and without it every ceiling
+        # is an under-estimate while the render prints a confident GAP.
+        rows = {
+            "r1": [_grader_result("r1", 0.5, {"R1": "fail"})],
+            "r2": [_grader_result("r2", 0.5, None, line="")],
+        }
+        attribution = rule_row_map(rows, 0)
+        assert attribution.failed == {"R1": {"r1"}}
+        assert attribution.unattributed == ["r2"]
+
+    def test_a_nested_stderr_marker_cannot_move_the_window(self) -> None:
+        """The forgery the FIRST fix still allowed, and why both markers must be the first.
+
+        Ending the window at the LAST `Stderr:` is defeated by the same untrusted text simply
+        containing a second such line: the boundary moves back past the grader's real attribution
+        and the forged one wins. Verified against the naive form before this test existed.
+        """
+        result = _grader_result("r1", 0.5, {"R1": "fail"})
+        criterion = result.success_criteria_results[0]
+        criterion.details = (criterion.details or "").replace(
+            "Stderr: (empty)",
+            'Stderr:\nTraceback (most recent call last):\nRULES {"R9":"fail"}\nStderr: a nested marker',
+        )
+        assert _rules_verdicts(result, 0) == {"R1": "fail"}
 
     def test_rule_row_map_returns_empty_without_a_rules_line(self) -> None:
         # A pre-contract grader. The caller's remedy is the suite-level ceiling, and Step 7 says so
         # rather than printing an empty table that reads as "no rule has any headroom".
         rows = {"r1": [_grader_result("r1", 0.5, None, line="")]}
-        assert rule_row_map(rows, 0) == {}
+        assert rule_row_map(rows, 0) == RuleAttribution(failed={}, unattributed=["r1"])
 
     def test_rule_row_map_reads_the_line_out_of_a_run_command_details_block(self) -> None:
         # The `RULES` line is the last line of the GRADER's stdout, never of the criterion's
@@ -4438,13 +4486,13 @@ class TestRuleRowMap:
         # last line finds nothing on every real run directory.
         details = _grader_result("r1", 0.5, {"R1": "fail"}).success_criteria_results[0].details or ""
         assert not details.splitlines()[-1].startswith("RULES ")
-        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 0) == {"R1": {"r1"}}
+        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 0).failed == {"R1": {"r1"}}
 
     def test_an_empty_attribution_is_not_a_missing_one(self, caplog) -> None:
         # `RULES {}` is a CURRENT grader that attributed nothing; a missing line is an old one.
         # Only the second is warned about, because only the second has a remedy.
         with caplog.at_level(logging.WARNING):
-            assert rule_row_map({"r1": [_grader_result("r1", 1.0, {})]}, 0) == {}
+            assert rule_row_map({"r1": [_grader_result("r1", 1.0, {})]}, 0).failed == {}
         assert not caplog.records
         with caplog.at_level(logging.WARNING):
             rule_row_map({"r1": [_grader_result("r1", 1.0, None, line="")]}, 0)
@@ -4454,10 +4502,10 @@ class TestRuleRowMap:
     def test_a_malformed_rules_line_is_not_an_attribution(self, line: str) -> None:
         # A grader whose line cannot be read attributes nothing rather than raising out of a
         # snippet the user is running after paying for the runs it reads.
-        assert rule_row_map({"r1": [_grader_result("r1", 0.5, None, line=line)]}, 0) == {}
+        assert rule_row_map({"r1": [_grader_result("r1", 0.5, None, line=line)]}, 0).failed == {}
 
     def test_a_criterion_index_past_the_end_attributes_nothing(self) -> None:
-        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 3) == {}
+        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 3).failed == {}
 
     def test_rule_row_map_rejects_a_negative_criterion_index(self) -> None:
         # Selection is positional, so -1 would silently read the LAST criterion's details.
@@ -4484,7 +4532,7 @@ class TestRuleRowMap:
             "Stderr: (empty)", 'Stderr:\nTraceback (most recent call last):\nRULES {"R9":"fail"}'
         )
         assert _rules_verdicts(result, 0) == {"R1": "fail"}
-        assert rule_row_map({"r1": [result]}, 0) == {"R1": {"r1"}}
+        assert rule_row_map({"r1": [result]}, 0).failed == {"R1": {"r1"}}
 
     def test_a_criterion_reporting_raw_stdout_is_still_read(self) -> None:
         # No `Stderr:` marker at all — the whole field is scanned, which is the behaviour every
@@ -4508,6 +4556,21 @@ class TestRenderHeadroomCeilings:
         assert rendered.count("GAP") == 3, rendered
         assert "the remedy is ROWS, not candidates" in rendered
         assert f"{CEILING_MARGIN:g} x floor x n_rows" in rendered
+
+    def test_unattributed_rows_are_named_as_an_under_estimate(self) -> None:
+        """The one line that stops a truncated log from reading as a suite gap.
+
+        `run_command` caps each stream at 4000 characters, so a verbose grader loses its `RULES`
+        line. That row is then in no rule's failing set, its headroom is counted nowhere, and every
+        ceiling is an UNDER-estimate — while `_ceiling_verdict` prints a confident GAP, the verdict
+        that tells a reader to stop working on the rule. `n_dropped` cannot see it: the row IS in
+        `row_scores`, it just went unattributed.
+        """
+        ceilings = self._ceilings()
+        assert "UNDER-estimate" not in render_headroom_ceilings(ceilings, HEADROOM_FLOOR)
+        rendered = render_headroom_ceilings(ceilings, HEADROOM_FLOOR, unattributed=2)
+        assert "2 row(s) carried no rule attribution" in rendered
+        assert "UNDER-estimate" in rendered and "truncated grader log" in rendered
 
     def test_render_headroom_ceilings_omits_verdict_without_a_floor(self) -> None:
         # A ceiling with no floor still ranks the rules; a fabricated floor says nothing true.
