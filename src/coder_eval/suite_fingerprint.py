@@ -44,6 +44,32 @@ _NOT_SCORING_RELEVANT: dict[str, str] = {
     "description": "authored prose; changes no score",
 }
 
+# Task-level fields beyond the criteria and the prompt that decide what a score MEANS, hashed as one
+# canonical dump each.
+#
+# The list exists because the first version had only the criteria, the prompt and the rows, and its
+# docstring's "what is NOT covered" named only the agent and sandbox blocks — which was FALSE for five
+# fields. The sharpest was `reference`: it is the answer key `reference_comparison`, `llm_judge` and
+# `agent_judge` score against, and this module's own justification for hashing the criteria whole is
+# that the answer key is part of the instrument. `initial_prompt_file` was next — a file-backed suite's
+# prompt section hashed `null`, so the docstring's claim to cover the prompt was vacuous for exactly
+# the suites that keep it in a file.
+_SCORING_TASK_FIELDS = (
+    # The prompt when it lives in a file rather than inline. The file's CONTENTS are not read — this
+    # module takes no filesystem — so a changed file with the same name does not move the digest, and
+    # the docstring says so rather than implying otherwise.
+    "initial_prompt_file",
+    # The answer key. See above.
+    "reference",
+    # Setup and teardown that decide what the agent starts from and what is measured afterwards.
+    "pre_run",
+    "post_run",
+    # `commands_efficiency` scores against this.
+    "expected_commands",
+    # A dialog-mode suite's simulated user IS its instrument.
+    "simulation",
+)
+
 # One tag absorbed before each section's parts.
 #
 # What they are for, stated exactly, because an earlier draft of this comment overclaimed: the
@@ -59,7 +85,7 @@ _NOT_SCORING_RELEVANT: dict[str, str] = {
 # length-prefixed parts (a section with one more part is a different byte stream either way), and a
 # redundant guard whose rationale has to be qualified is worse than no guard: the next reader cannot
 # tell which of the two is doing the work.
-_SECTIONS = ("criteria", "prompt", "rows", "run_limits")
+_SECTIONS = ("criteria", "prompt", "rows", "run_limits", "task_fields")
 
 
 def _canonical(value: object) -> str:
@@ -107,9 +133,10 @@ def suite_fingerprint(task: TaskDefinition, rows: Sequence[TaskDefinition]) -> s
     "because the answer key is part of the instrument"; this is the same rule on the other track.
     Pass ``()`` for a suite with no ``dataset:`` — the template is then the whole instrument.
 
-    What is covered, in this order, each section tagged and counted: every criterion's
-    :func:`scoring_dump` in declaration order; the initial prompt; each row's id, prompt and
-    criteria, sorted by row id; and the whole ``run_limits`` block.
+    What is covered, in this order, each section tagged: every criterion's :func:`scoring_dump` in
+    declaration order; the initial prompt; each row's id, prompt and criteria, sorted by row id; the
+    whole ``run_limits`` block; and the task fields in :data:`_SCORING_TASK_FIELDS` — notably
+    ``reference``, the answer key the judge criteria score against.
 
     What is NOT: the **task-level** agent and sandbox blocks, and therefore the paths in them — an
     absolute ``template_dir`` or a ``$SKILL_SOURCE_PATH`` would otherwise report "the instrument
@@ -118,7 +145,11 @@ def suite_fingerprint(task: TaskDefinition, rows: Sequence[TaskDefinition]) -> s
     ``agent_judge`` criterion embeds its own agent config, so a judge's model, plugin paths and
     settings ARE hashed. That is right on the merits — the judge's model is part of what that
     criterion measures — but it means a suite whose judge names a machine-local path has a
-    machine-local digest, and cross-checkout stability is a property of suites that do not.
+    machine-local digest, and cross-checkout stability is a property of suites that do not. The same
+    boundary applies to a ``reference`` or a ``pre_run`` naming an absolute path: the VALUE is hashed,
+    never the file behind it, so a suite whose answer key is a path is machine-local for the same
+    reason — and a changed FILE at an unchanged path does not move the digest at all. This module
+    reads no filesystem, deliberately, so that is a limit rather than an oversight.
 
     ``run_limits`` is hashed WHOLE rather than through a curated list of caps. An earlier draft named
     four (``max_turns``, ``turn_timeout``, ``task_timeout``, ``max_usd``) and justified excluding the
@@ -148,7 +179,7 @@ def suite_fingerprint(task: TaskDefinition, rows: Sequence[TaskDefinition]) -> s
         digest.update(b"\0")
         digest.update(encoded)
 
-    criteria_tag, prompt_tag, rows_tag, limits_tag = _SECTIONS
+    criteria_tag, prompt_tag, rows_tag, limits_tag, task_fields_tag = _SECTIONS
 
     absorb(criteria_tag)
     for criterion in task.success_criteria:
@@ -163,6 +194,21 @@ def suite_fingerprint(task: TaskDefinition, rows: Sequence[TaskDefinition]) -> s
         absorb(_canonical(row.row_id))
         absorb(_canonical(row.initial_prompt))
         absorb(_canonical([scoring_dump(criterion) for criterion in row.success_criteria]))
+
+    absorb(task_fields_tag)
+    # Dumped through pydantic with `include=`, rather than reaching for each attribute: these fields
+    # are variously a scalar, a model, and a list of models, so `mode="json"` is what makes them
+    # uniformly serializable without this module knowing any of their shapes.
+    #
+    # `include=` rather than dumping the whole task and picking keys, and the difference is not
+    # stylistic: the excluded blocks then never reach the serializer at all, so "the agent and sandbox
+    # blocks do not reach the digest" is structural rather than a matter of which keys this loop
+    # happens to read. It also keeps the digest insensitive to an unvalidated value elsewhere on the
+    # task — a whole-task dump emitted a pydantic serializer warning the moment a test perturbed a
+    # criterion through `copy_with`, which is a coupling this function should not have.
+    dumped = task.model_dump(mode="json", include=set(_SCORING_TASK_FIELDS))
+    for name in _SCORING_TASK_FIELDS:
+        absorb(_canonical(dumped.get(name)))
 
     absorb(limits_tag)
     # `or RunLimits()`: an absent block means the defaults apply, so it must hash as the defaults do

@@ -222,6 +222,48 @@ class TestWhatMovesTheDigest:
         rekeyed[1].success_criteria[0].skill_name = "other-skill"  # type: ignore[union-attr]
         assert _digest(_suite(), ROWS) != _digest(_suite(), rekeyed)
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reference", {"code": "def solve(): return 42"}),
+            ("expected_commands", 4),
+            ("pre_run", [{"command": "echo setup"}]),
+            ("post_run", [{"command": "echo teardown"}]),
+            ("simulation", {"persona": "a terse user", "goal": "get it done", "max_turns": 3}),
+        ],
+    )
+    def test_a_scoring_relevant_task_field_moves_it(self, field: str, value: object) -> None:
+        """The five fields the first version was blind to, and `reference` is the sharpest.
+
+        `reference` is the answer key `reference_comparison` / `llm_judge` / `agent_judge` score
+        against — and this module's own justification for hashing the criteria WHOLE is that the answer
+        key is part of the instrument. Swapping it left the digest byte-identical, so
+        `suite_changed` answered False for a moved instrument. `expected_commands` is what
+        `commands_efficiency` scores against, `pre_run`/`post_run` decide what the agent starts from,
+        and a dialog suite's simulated user IS its instrument.
+        """
+        assert _digest(_suite()) != _digest(_suite(**{field: value}))
+
+    def test_a_changed_initial_prompt_file_moves_it(self) -> None:
+        """The prompt section was VACUOUS for a file-backed suite — it hashed `null`.
+
+        The docstring claimed to cover the initial prompt, which was true only for the inline form.
+        Note the stated limit: the file's CONTENTS are not read (this module takes no filesystem), so
+        a changed file at an unchanged path does not move the digest.
+        """
+
+        def file_backed(name: str) -> TaskDefinition:
+            return TaskDefinition.model_validate(
+                {
+                    "task_id": "s",
+                    "description": "d",
+                    "initial_prompt_file": name,
+                    "success_criteria": [{"type": "file_exists", "description": "a", "path": "o"}],
+                }
+            )
+
+        assert _digest(file_backed("prompt-a.md")) != _digest(file_backed("prompt-b.md"))
+
     def test_swapping_two_criteria_moves_it(self) -> None:
         # `criterion_index` is positional everywhere in the optimize family, so declaration order
         # decides which criterion a gate reads. A changed order is a changed instrument.

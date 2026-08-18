@@ -987,9 +987,9 @@ def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
     """What makes the split real rather than cosmetic.
 
     A renderer that reaches back for a run directory or an estimator is a gate with a table on it,
-    and the module boundary then documents a separation that does not exist. The two NamedTuples it
-    needs are allowed only under `if TYPE_CHECKING`, so the runtime dependency on the decision
-    layer is exactly zero.
+    and the module boundary then documents a separation that does not exist. The NamedTuples it needs
+    — four of them now, across three modules — are allowed only under `if TYPE_CHECKING`, so the
+    runtime dependency on the decision layer is exactly zero.
     """
     runtime = _coder_eval_imports("reports_optimize", inside_type_checking=False)
     assert set(runtime) <= {"coder_eval.models", "coder_eval.reports_stats"}, (
@@ -5308,8 +5308,12 @@ class TestDeadWeight:
     """
 
     @staticmethod
-    def _two_constant_one_varying(weights: list[float | None]) -> dict[str, dict[str, list[list[float]]]]:
-        """Criteria 0 and 1 saturate on both arms; criterion 2 moves. The shipped configuration."""
+    def _two_constant_one_varying() -> dict[str, dict[str, list[list[float]]]]:
+        """Criteria 0 and 1 saturate on both arms; criterion 2 moves.
+
+        The per-criterion SCORES only — the weights are the caller's, since `_weighted_run_dir` stamps
+        them. An earlier signature took a `weights` argument and never read it.
+        """
         rows = [f"r{i}" for i in range(4)]
         return {
             "incumbent": {rid: [[1.0, 1.0, 0.2], [1.0, 1.0, 0.3]] for rid in rows},
@@ -5318,7 +5322,7 @@ class TestDeadWeight:
 
     def test_the_shipped_template_configuration_reports_its_own_attenuation(self, tmp_path: Path) -> None:
         weights = _template_weights()
-        arms = self._two_constant_one_varying(weights)
+        arms = self._two_constant_one_varying()
         verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
 
         dead = weights[0] + weights[1]
@@ -5420,7 +5424,7 @@ class TestDeadWeight:
 
     def test_the_note_names_the_dead_criteria_by_index_and_description(self, tmp_path: Path) -> None:
         weights = _template_weights()
-        arms = self._two_constant_one_varying(weights)
+        arms = self._two_constant_one_varying()
         verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
 
         note = next(n for n in verdict.notes if "of the compared weight is dead" in n)
@@ -5472,15 +5476,65 @@ class TestDeadWeight:
         assert share is None
         assert any("no criterion results" in note for note in notes)
 
+    def test_three_samples_that_diverge_are_named_on_the_block(self, tmp_path: Path) -> None:
+        """The conversion a reader performs stops being exact, and the block has to say so.
+
+        `mean_diff` comes from `experiment.json`, `primary_mean_diff` from the on-disk results over the
+        paired rows, `dead_weight` from the on-disk results over the intersection. Ordinarily those are
+        one sample. Here `experiment.json` scores a fifth row that has no `task.json` at all — the
+        shape a crashed write or a skipped malformed row leaves — so the paired statistic is computed
+        over five rows and both readings over four, and `primary x (1 - dead_weight)` no longer equals
+        `mean_diff`. Each number is still correct over its own sample, which is why this is a NOTE.
+        """
+        weights = _template_weights()
+        arms = self._two_constant_one_varying()
+        run_dir = _weighted_run_dir(tmp_path, **arms, weights=weights)  # type: ignore[arg-type]
+        # Add a row to experiment.json only — nothing on disk for it.
+        experiment = run_dir / "experiment.json"
+        raw = ExperimentResult.model_validate_json(experiment.read_text(encoding="utf-8"))
+        scores = {v: dict(per) for v, per in raw.per_replicate_scores.items()}
+        for variant, value in (("incumbent", [0.2]), ("candidate", [0.9])):
+            scores[variant][f"{SUITE}/ghost"] = value
+        experiment.write_text(copy_with(raw, per_replicate_scores=scores).model_dump_json(), encoding="utf-8")
+
+        verdict = _exec_gate(run_dir, primary_criterion_index=2)
+        assert verdict.rows_paired == 5, "fixture drifted — experiment.json must pair the ghost row"
+        note = next((n for n in verdict.notes if "DIFFERENT numbers of rows" in n), None)
+        assert note is not None, "a block whose three magnitudes came from three samples must say so"
+        # The primary's count is its USABLE rows (4), not the 5 ids experiment.json named — the ghost
+        # row is in `check_row_ids` and contributes no difference, which IS the divergence.
+        assert "5 row(s) from experiment.json" in note
+        assert "the primary reading over 4 row(s)" in note
+        assert "dead weight over 4 row(s)" in note
+        # And the identity a reader would apply is indeed false here — which is the point of the note.
+        assert verdict.mean_diff is not None and verdict.primary_mean_diff is not None
+        assert verdict.mean_diff != pytest.approx(verdict.primary_mean_diff * (1.0 - (verdict.dead_weight or 0.0)))
+
+    def test_the_ordinary_case_carries_no_divergence_note(self, tmp_path: Path) -> None:
+        # The anti-over-fire half: the note must be absent when the three samples do coincide, or it
+        # prints on every healthy block and stops being read.
+        weights = _template_weights()
+        arms = self._two_constant_one_varying()
+        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights), primary_criterion_index=2)  # type: ignore[arg-type]
+        assert not any("DIFFERENT numbers of rows" in note for note in verdict.notes)
+        assert verdict.mean_diff == pytest.approx(verdict.primary_mean_diff * (1.0 - (verdict.dead_weight or 0.0)))  # type: ignore[operator]
+
     def test_the_rendered_block_prints_the_reading(self, tmp_path: Path) -> None:
-        """`0.512` appears HERE and nowhere else — it is the RENDERED value a reader sees.
+        """`0.512` appears in no other ASSERTION — it is the RENDERED value a reader sees.
 
         The share itself is 0.5121951219…, so the computation tests above assert
         `pytest.approx(1.05 / 2.05)` with the weights read from the shipped template. A rounded
         constant standing in for the arithmetic is a claim nobody is checking.
+
+        Note what this fixture is and is not: it makes the template's `file_check` saturate as well as
+        its engagement criterion, which is a property of a RUN in which every arm produced the
+        artifact — not of the template, whose `file_check` is a graded outcome check with its own
+        `mean` threshold. The template's BY-DESIGN dead weight is the engagement criterion alone,
+        about 2.4%. The prose surfaces say so; an earlier draft of them called both criteria
+        "saturating by design", which overstated it by 20x.
         """
         weights = _template_weights()
-        arms = self._two_constant_one_varying(weights)
+        arms = self._two_constant_one_varying()
         verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
 
         block = render_execution_markdown(verdict)
@@ -6136,7 +6190,8 @@ class TestPrimaryCriterionIndex:
         """The whole point: the blended `mean_diff` is the primary effect times (1 - dead_weight).
 
         On the shipped template's weights, an effect confined to the grader arrives at the gate
-        multiplied by 1/2.05 — and `primary_mean_diff` is what converts it back.
+        multiplied by 1/2.05 in a run where the `file_check` saturates too — and `primary_mean_diff`
+        is what converts it back.
         """
         weights = _template_weights()
         run_dir = _weighted_run_dir(tmp_path, **self._dead_weight_arms(), weights=weights)  # type: ignore[arg-type]
@@ -8272,7 +8327,7 @@ class TestSeedStability:
         run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
         stability = gate_seed_stability(**self._kwargs(run_dirs))
         assert stability.promote_agreement == 0 and stability.unanimous is True
-        assert "promoted at none of 3 seeds" in render_seed_stability(stability)
+        assert "would promote at none of 3 seeds" in render_seed_stability(stability)
 
     def test_a_split_decision_renders_as_a_coin_flip_and_returns_no_single_verdict(self) -> None:
         """The whole reason this exists, asserted on the model rather than through a flaky fixture.
@@ -8291,6 +8346,10 @@ class TestSeedStability:
         block = render_seed_stability(split)
         assert "UNSTABLE" in block and "coin flip, not a result" in block
         assert "Do not report the majority's verdict" in block
+        # And the count's FAMILY SIZE is named: each seed decides alone, so "would promote at 2/3" is
+        # not the round's answer when the round gated a shortfall — measured 3/3 for a candidate a
+        # family of three rejects.
+        assert "family of ONE" in block and "would promote" in block
 
     def test_the_block_states_that_it_costs_no_runs(self, tmp_path: Path) -> None:
         # Three bootstraps over rows already loaded. Unsaid, a reader assumes it triples the round.
@@ -8299,11 +8358,27 @@ class TestSeedStability:
         block = render_seed_stability(gate_seed_stability(**self._kwargs(run_dirs)))
         assert "zero** extra agent runs" in block and "CPU only" in block
 
-    def test_the_p_spread_is_none_below_two_measured_values(self) -> None:
-        # A spread over one p is 0.0, which reads as "the seeds agreed" when only one produced a number.
-        one = SeedStability(seeds=(0, 1), promote_agreement=0, p_values=(0.03, None), p_spread=None)
-        assert one.p_spread is None
-        assert render_seed_stability(one).count("—") >= 1
+    def test_the_p_spread_is_none_below_two_measured_values(self, tmp_path: Path) -> None:
+        """Driven through the real computation, because the obvious version cannot fail.
+
+        Constructing a `SeedStability(p_spread=None)` and asserting `p_spread is None` asserts the value
+        just passed in — measured: mutating the production guard from `>= 2` to `>= 1` left the whole
+        class green. A single seed is the reachable input that exercises it: one measured p, and a
+        spread over one value is `0.0`, which reads as "the seeds agreed" when only one of them
+        answered.
+        """
+        incumbent, candidate = _tiny_suite(4, 4)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        one = gate_seed_stability(seeds=(0,), **self._kwargs(run_dirs))
+
+        assert one.seeds == (0,)
+        assert one.p_values[0] is not None, "fixture drifted — the single seed must produce a p"
+        assert one.p_spread is None, "a spread over ONE measured p is not a spread"
+        assert "spread (max - min over the measured ones): —" in render_seed_stability(one)
+        # Two seeds over the same rows DO produce a spread (0.0 here, since the p is stable) — so the
+        # `None` above is about the COUNT of measured values, not about them happening to agree.
+        two = gate_seed_stability(seeds=(0, 1), **self._kwargs(run_dirs))
+        assert two.p_spread is not None
 
     def test_the_gate_itself_is_unchanged_by_the_reading(self, tmp_path: Path) -> None:
         """`activation_gate` gains no parameter and no cost, which is why this is a separate function.

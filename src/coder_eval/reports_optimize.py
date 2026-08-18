@@ -10,11 +10,13 @@ estimator, and **no runtime import of** ``optimize_gate``. A renderer that reach
 directory or recomputes a statistic is a gate with a table on it, and the module boundary would
 then document a separation that does not exist.
 
-The NamedTuples it renders (:class:`~coder_eval.optimize_search.SearchComparison`,
-:class:`~coder_eval.optimize_fronts.CostQualityPoint` and
-:class:`~coder_eval.optimize_fronts.RuleCeiling`) stay with the code that PRODUCES them and are
-imported here under ``if TYPE_CHECKING`` only — exactly the shape
-``reports_stats.PairedComparison`` → ``reports_experiment`` already has.
+The NamedTuples it renders — :class:`~coder_eval.optimize_search.SearchComparison`,
+:class:`~coder_eval.optimize_fronts.CostQualityPoint`, :class:`~coder_eval.optimize_fronts.RuleCeiling`
+and :class:`~coder_eval.optimize_activation.SeedStability` — stay with the code that PRODUCES them and
+are imported here under ``if TYPE_CHECKING`` only, exactly the shape
+``reports_stats.PairedComparison`` → ``reports_experiment`` already has. That every one of them is a
+NamedTuple is the pattern rather than a coincidence: a computed-and-rendered value stays with its
+producer and is deferred, while a MODEL is imported at runtime from ``coder_eval.models``.
 
 The one estimator value it may read is :func:`coder_eval.reports_stats.bootstrap_p_floor`, for
 display in ``render_markdown``'s "p floors" line. CE040 requires it be DERIVED there rather than
@@ -46,8 +48,10 @@ if TYPE_CHECKING:
     # would make the presentation layer depend on the decision layer and turn the split
     # cosmetic — which is what `test_the_presentation_module_makes_no_decisions` pins.
     #
-    # TWO modules now, not one: the decision layer was split by track, and these three are
-    # produced at its top rank — the fronts and the search loop.
+    # THREE modules now: the decision layer was split by track, and these four values are produced
+    # across its ranks — the fronts and the search loop at rank 3, `SeedStability` at rank 2. Which
+    # rank produces one does not matter here; that all four are NamedTuples does, because that is what
+    # makes deferring them right rather than a way to dodge the layering rule.
     from coder_eval.optimize_activation import SeedStability
     from coder_eval.optimize_fronts import CostQualityPoint, RuleCeiling
     from coder_eval.optimize_search import SearchComparison
@@ -378,20 +382,27 @@ def render_seed_stability(stability: SeedStability) -> str:
     answer is precisely what the reading exists to prevent. A split decision is reported as a coin
     flip in those words — "2/3" on its own reads like a result to anyone skimming.
 
-    It also states the cost, because the obvious assumption is wrong: three seeds are three bootstraps
-    over rows already loaded, so this is CPU only and buys no agent runs.
+    It also states the cost, because the obvious assumption is wrong: one bootstrap per seed over rows
+    already loaded, so this is CPU only and buys no agent runs.
+
+    And it names the FAMILY SIZE the count was decided at. Each seed goes through ``holm_promote``
+    alone, so "would promote at 3/3" is a family-of-one statement — a round that gated a shortlist
+    applies a stricter, rank-dependent threshold, and without this line the block reads as that
+    round's decision. Measured: 3/3 here for a candidate a family of three rejects.
     """
     total = len(stability.seeds)
     agreed = stability.promote_agreement
     if stability.unanimous:
         verdict = (
-            f"STABLE — promoted at {agreed}/{total} seeds" if agreed else f"STABLE — promoted at none of {total} seeds"
+            f"STABLE — would promote at {agreed}/{total} seeds"
+            if agreed
+            else f"STABLE — would promote at none of {total} seeds"
         )
     else:
         verdict = (
-            f"UNSTABLE — promoted at {agreed}/{total} seeds. This is a coin flip, not a result: the "
-            "decision is being made by the bootstrap draw rather than by the data. Do not report the "
-            "majority's verdict as the verdict — raise n_resamples, or add rows, and gate again."
+            f"UNSTABLE — would promote at {agreed}/{total} seeds. This is a coin flip, not a result: "
+            "the decision is being made by the bootstrap draw rather than by the data. Do not report "
+            "the majority's verdict as the verdict — raise n_resamples, or add rows, and gate again."
         )
     return "\n".join(
         [
@@ -402,7 +413,10 @@ def render_seed_stability(stability: SeedStability) -> str:
             f"- Seeds: {', '.join(str(seed) for seed in stability.seeds)}",
             f"- p per seed: {', '.join(_fmt(p, '.4f') for p in stability.p_values)}",
             f"- p spread (max - min over the measured ones): {_fmt(stability.p_spread, '.4f')}",
-            "- Cost: three bootstraps over rows already loaded — CPU only, and **zero** extra agent runs.",
+            f"- Cost: {total} bootstrap(s) over rows already loaded — CPU only, and **zero** extra agent runs.",
+            "- Decided at a **family of ONE** per seed, so `would promote` is NOT this round's "
+            + "decision if the round gated a shortlist: Holm's threshold there is rank-dependent and "
+            + "stricter. Compare the p spread above against that threshold instead.",
         ]
     )
 

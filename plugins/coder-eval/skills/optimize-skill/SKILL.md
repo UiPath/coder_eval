@@ -1803,8 +1803,12 @@ statistic had rows is a REFUSAL, because an empty primary vector is indistinguis
 whose rows all errored on that criterion. Check the index against the suite YAML. Read it together
 with **Dead weight** on the same block: `weighted_score` is a weighted mean, so a criterion that
 saturates on both arms contributes its whole weight to the denominator and nothing to the difference,
-and the shipped outcome template does that by design. A dead weight of 51.2% means an effect confined
-to the grader arrives at this block roughly halved.
+and the shipped outcome template does that with its ENGAGEMENT criterion by design — which is why
+that criterion carries a deliberately small weight, about 2.4% of the suite's total. The template's
+`file_check` is a graded outcome check and is NOT meant to saturate; when it does anyway, because
+every arm produced the artifact, the dead weight jumps to roughly half and an effect confined to the
+grader arrives at this block roughly halved. That is a property of the RUN rather than of the
+template, which is why the block measures it per verdict instead of assuming it.
 
 ### Stage C — the confirm gate
 

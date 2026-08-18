@@ -36,6 +36,7 @@ from coder_eval.optimize_gate import (
     FLOOR_RESOLUTION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
+    _family_resamples,
     _floor_from_clusters,
     _holm_family,
     _metric,
@@ -269,12 +270,17 @@ def _dead_weight(
     ``weighted_score`` — this gate's primary statistic — is a weighted mean over every criterion,
     so a criterion that scores identically on both arms on every row contributes its whole weight to
     the DENOMINATOR of that mean and nothing to the difference. The shipped outcome template is the
-    worked case: its engagement criterion and its ``file_check`` both saturate by design and hold
-    1.05 of that suite's 2.05 total weight between them, so an effect confined to the grader arrives
-    at this block multiplied by ``1 / 2.05``. Reported so a reader can convert the number back into
-    the grader's own unit. (The engagement weight is deliberately not quoted as a literal: the sensor
-    keeping ``DEFAULT_ALPHA`` the single spelling of its own value matches that number everywhere in
-    this family.)
+    worked case, and it is worth being precise about how much of it is BY DESIGN. Its engagement
+    criterion saturates by design — that is what its ``recall.yes: 1.0`` threshold demands — and it
+    carries a deliberately small weight for exactly this reason, so the by-design dead weight is that
+    one criterion's share of the suite's 2.05 total: about 2.4%. The template's ``file_check`` is a
+    GRADED outcome check with its own ``mean`` threshold and does NOT saturate by design; when it
+    happens to saturate anyway — every arm produced the artifact — the share reaches 1.05 of 2.05 and
+    an effect confined to the grader then arrives at roughly half its size. That second case is the
+    one worth reporting, and it is a property of the RUN rather than of the template, which is why
+    this is measured per verdict rather than assumed. (The engagement weight is deliberately not
+    quoted as a literal: the sensor keeping ``DEFAULT_ALPHA`` the single spelling of its own value
+    matches that number everywhere in this family.)
 
     **A READING, never a veto**, and the measurement behind that is in the field's own description:
     a constant criterion scales the paired difference vector without changing its shape, so it
@@ -378,6 +384,33 @@ def _dead_weight(
             + "the dead-weight share entirely rather than counted as varying."
         )
     return share, notes
+
+
+def _sample_divergence_note(*, experiment_rows: int, primary_rows: int | None, on_disk_rows: int) -> str | None:
+    """Why the three magnitudes on one block may not convert into each other. ``None`` when they do.
+
+    `mean_diff` is computed from ``experiment.json``, `primary_mean_diff` over the rows the paired
+    statistic used, and `dead_weight` over the on-disk intersection. A reader converting the blended
+    difference back into the grader's unit is relying on those being one sample — true in the ordinary
+    case, and false whenever a row scored in ``experiment.json`` has no readable ``task.json``, or one
+    on disk was never scored.
+
+    Reported rather than refused: each number is individually correct over the rows it was measured
+    on, so this qualifies a conversion rather than invalidating a comparison. Which is exactly what
+    ``notes`` is for.
+    """
+    counts = {experiment_rows, on_disk_rows} | ({primary_rows} if primary_rows is not None else set())
+    if len(counts) == 1:
+        return None
+    primary = "not requested" if primary_rows is None else f"{primary_rows} row(s)"
+    return (
+        "the magnitudes on this block were measured over DIFFERENT numbers of rows: the paired "
+        + f"statistic over {experiment_rows} row(s) from experiment.json, the primary reading over "
+        + f"{primary}, and the dead weight over {on_disk_rows} row(s) read from disk. Each is correct "
+        + "over its own sample, but `mean_diff` does NOT convert exactly into the primary via "
+        + "(1 - dead_weight) here. A row scored in experiment.json whose task.json is missing or "
+        + "unparseable is the usual cause — check the loader warnings above."
+    )
 
 
 def _integrity_checks(
@@ -656,6 +689,11 @@ def execution_gate(
     # Assigned near the end, over the rows the STATISTIC used — see the comment at that point. It is
     # declared here because `_verdict` closes over it and reads it at CALL time.
     primary_mean_diff: float | None = None
+    # The primary's USABLE row count, for the divergence note below — `None` when no primary was
+    # requested. Deliberately not `len(check_row_ids)`: that list comes from experiment.json, so a row
+    # it names but disk does not carry is IN it and contributes no difference, which is exactly the
+    # divergence being reported.
+    primary_usable: int | None = None
 
     # The rows the CHECKS are computed over. Starts as the on-disk intersection and is narrowed to
     # the rows `paired_comparison` actually paired once that is known: `cost_latency_guardrails`'
@@ -826,6 +864,61 @@ def execution_gate(
     # Negating an interval reverses it, so re-order rather than reporting a "low" above its "high".
     bounds = sorted(b for b in (_signed(comparison.ci_low), _signed(comparison.ci_high)) if b is not None)
 
+    # The predeclared primary, as a READING, computed over `check_row_ids` — the rows
+    # `paired_comparison` actually paired.
+    #
+    # It sits here rather than beside the noise floor for the ORDERING reason below, and the sample
+    # question is worth being exact about rather than overclaiming, which an earlier version of this
+    # comment did. THREE magnitudes reach this block from three sources: `mean_diff` from
+    # `experiment.json`, `primary_mean_diff` from the on-disk criterion results over `check_row_ids`,
+    # and `dead_weight` from the on-disk results over `row_ids`. The conversion a reader performs —
+    # `mean_diff ~= primary x (1 - dead_weight)` — is therefore exact only while all three samples
+    # coincide, which is the ordinary case and NOT guaranteed: a row `experiment.json` scored but whose
+    # `task.json` is absent or unparseable is in one sample and not the others. `_sample_divergence`
+    # below says so on the block rather than leaving the reader to trust an identity that has quietly
+    # stopped holding.
+    #
+    # The consequence, stated rather than hidden: a return path ABOVE this one carries no primary. A
+    # verdict with no statistic has no primary either, so there is nothing to report there — unlike
+    # `dead_weight`, which is a property of the suite rather than of the comparison.
+    #
+    # BEFORE `_execution_diagnostics`, and that ordering is load-bearing rather than tidy: that
+    # function takes `refused_already` and uses it to SUPPRESS every note that would contradict a
+    # refusal headline. Setting this refusal after it produced exactly the contradiction those
+    # guards exist to prevent — measured: a `NOT A RESULT — primary_criterion_index=7 selected no
+    # usable row` headline above notes reading "this is an ordinary negative result and not a
+    # measurement problem" and "the paired interval is tighter than this suite's own noise floor".
+    if primary_criterion_index is not None:
+        primary_diffs = _paired_criterion_diffs(
+            incumbent_rows=incumbent_rows,
+            candidate_rows=candidate_rows,
+            row_ids=check_row_ids,
+            criterion_index=primary_criterion_index,
+        )
+        primary_usable = len(primary_diffs)
+        if primary_diffs:
+            primary_mean_diff = mean(primary_diffs)
+        elif check_row_ids:
+            # `_require_valid_criterion_index` bounds only BELOW — deliberately, since rows may
+            # legitimately differ in criteria count and an over-long index should skip a row rather
+            # than raise. That is the wrong answer HERE: an over-long primary index makes `_row_score`
+            # return None on every row, so the vector is EMPTY and indistinguishable from a suite of
+            # rows that all errored on that criterion.
+            _refuse(
+                f"primary_criterion_index={primary_criterion_index} selected no usable row on either "
+                + f"arm across {len(check_row_ids)} paired row(s), so no primary effect could be "
+                + "reported. The index is the criterion's POSITION in the suite's success_criteria "
+                + "list — check it against the suite rather than reading the blended difference as "
+                + "the primary one."
+            )
+
+    if (
+        divergence := _sample_divergence_note(
+            experiment_rows=comparison.task_count, primary_rows=primary_usable, on_disk_rows=len(row_ids)
+        )
+    ) is not None:
+        notes.append(divergence)
+
     refusal, diagnostics = _execution_diagnostics(
         incumbent_rows=incumbent_rows,
         candidate_rows=candidate_rows,
@@ -843,39 +936,6 @@ def execution_gate(
     if refusal is not None:
         _refuse(refusal)
     notes.extend(diagnostics)
-
-    # The predeclared primary, as a READING, computed over `check_row_ids` — the rows
-    # `paired_comparison` actually paired — and NOT over the on-disk intersection. That is the whole
-    # reason it sits here rather than beside the noise floor: the field is sold as a CONVERSION of
-    # `mean_diff` back into the grader's unit (`mean_diff ~= primary x (1 - dead_weight)`), and that
-    # identity holds only while both are computed over one sample. A row present in experiment.json
-    # but missing on disk, or one whose task.json failed to parse, otherwise moves one side silently.
-    #
-    # The consequence, stated rather than hidden: a return path ABOVE this one carries no primary. A
-    # verdict with no statistic has no primary either, so there is nothing to report there — unlike
-    # `dead_weight`, which is a property of the suite rather than of the comparison.
-    if primary_criterion_index is not None:
-        primary_diffs = _paired_criterion_diffs(
-            incumbent_rows=incumbent_rows,
-            candidate_rows=candidate_rows,
-            row_ids=check_row_ids,
-            criterion_index=primary_criterion_index,
-        )
-        if primary_diffs:
-            primary_mean_diff = mean(primary_diffs)
-        elif check_row_ids:
-            # `_require_valid_criterion_index` bounds only BELOW — deliberately, since rows may
-            # legitimately differ in criteria count and an over-long index should skip a row rather
-            # than raise. That is the wrong answer HERE: an over-long primary index makes `_row_score`
-            # return None on every row, so the vector is EMPTY and indistinguishable from a suite of
-            # rows that all errored on that criterion.
-            _refuse(
-                f"primary_criterion_index={primary_criterion_index} selected no usable row on either "
-                + f"arm across {len(check_row_ids)} paired row(s), so no primary effect could be "
-                + "reported. The index is the criterion's POSITION in the suite's success_criteria "
-                + "list — check it against the suite rather than reading the blended difference as "
-                + "the primary one."
-            )
 
     return _verdict(
         rows_paired=comparison.task_count,
@@ -1286,10 +1346,7 @@ def holm_promote_execution(
     multiplicity that was actually incurred, and the conservative direction.
     """
     family, rejected_at = _holm_family(verdicts, alpha)
-    # The coarsest member bounds the family's resolution, so it is the count the resolution note
-    # reports — read off the verdicts rather than from GATE_RESAMPLES, since a caller may pass a
-    # custom one. Only family MEMBERS: a verdict with no p was not tested at any resolution.
-    family_resamples = min((verdicts[i].n_resamples for i, _p in family), default=GATE_RESAMPLES)
+    family_resamples = _family_resamples(verdicts, family)
 
     decided: list[ExecutionGateVerdict] = []
     for i, verdict in enumerate(verdicts):

@@ -654,6 +654,21 @@ def _holm_family(verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict
     return _HolmFamily(members, {i for (i, _p), reject in zip(members, rejections, strict=True) if reject})
 
 
+def _family_resamples(
+    verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict], family: list[tuple[int, float]]
+) -> int:
+    """The COARSEST draw count among the family's members — what bounds the family's resolution.
+
+    Read off the verdicts rather than from :data:`GATE_RESAMPLES`, since a caller may pass a custom
+    count, and over family MEMBERS only: a verdict with no p was not tested at any resolution.
+
+    Shared because the line was byte-identical in both Holm wrappers, which is the duplication
+    :func:`_note_resolution_degraded` was put at this rank to avoid — and :func:`_holm_family` already
+    accepts both verdict types, so there was nothing structural keeping it apart.
+    """
+    return min((verdicts[i].n_resamples for i, _p in family), default=GATE_RESAMPLES)
+
+
 def _note_check_failed(check_name: str) -> str:
     """Which non-primary check vetoed a promotion the statistic had otherwise won.
 

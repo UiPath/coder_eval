@@ -36,6 +36,7 @@ from coder_eval.optimize_gate import (
     _NOTE_OUTSIDE_FAMILY,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
+    _family_resamples,
     _floor_from_clusters,
     _holm_family,
     _metric,
@@ -1078,6 +1079,15 @@ class SeedStability(NamedTuple):
     **It deliberately carries NO single ``promoted`` field.** Collapsing three disagreeing seeds into
     one verdict is the exact thing it exists to prevent: a decision that flips with the seed is a coin
     flip, and reporting the majority's answer as *the* answer hides that.
+
+    **``promote_agreement`` counts promotions at a FAMILY OF ONE, which is not the round's decision
+    when the round gated more than one candidate.** Each seed's verdict goes through ``holm_promote``
+    alone, so the threshold is ``alpha`` rather than the rank-dependent ``alpha/m`` a real family
+    applies — measured on a 10-row suite at p = 0.0299: a family of three rejects nothing while this
+    reads 3/3. A faithful reproduction would need every sibling's p at every seed, which is a
+    different and much more expensive question. So the count answers "does THIS candidate's own
+    statistic survive the seed", the renderer says so in those words, and ``p_spread`` is the part to
+    compare against the real family's threshold.
     """
 
     seeds: tuple[int, ...]
@@ -1110,6 +1120,11 @@ def gate_seed_stability(*, seeds: Sequence[int] = (0, 1, 2), **gate_kwargs) -> S
 
     Disagreeing seeds are the FINDING, not an error. Never pick the majority's verdict and present it
     as the answer; :attr:`SeedStability.unanimous` is there so a caller cannot accidentally read one.
+
+    **It decides at a FAMILY OF ONE**, per seed, which is not the round's decision when the round
+    gated a shortlist — see :class:`SeedStability`. The reading is about whether one candidate's own
+    statistic is seed-stable, and it is legitimate to ask that of a candidate the family correction
+    rejected; what is not legitimate is quoting its promote count as the round's answer.
 
     **The execution track has no useful twin, and the reason is worth stating rather than leaving as
     an omission.** Its primary statistic is an analytic paired *t*, deterministic given the rows, so a
@@ -1187,7 +1202,10 @@ def confirm_gate(
     if (train_refusal := confirm_train_refusal(train_verdict.gate_refusal)) is not None:
         _refuse(train_refusal)
 
-    confirm_dirs = [*incumbent_run_dirs, *candidate_run_dirs]
+    # De-duplicated, preserving order: this track's normal shape — and the shipped snippet — passes
+    # the SAME run dirs for both arms, since one invocation writes both variants. Concatenating them
+    # made the unrecorded-provenance note say "missing from 2 of 6" for three real directories.
+    confirm_dirs = list(dict.fromkeys([*incumbent_run_dirs, *candidate_run_dirs]))
     provenance = read_split_provenance(confirm_dirs)
     split_refusal, split_note = confirm_split_check(provenance, confirm_dirs)
     if split_note is not None:
@@ -1279,9 +1297,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     ``alpha/m``) is unchanged by its presence.
     """
     family, rejected_at = _holm_family(verdicts, alpha)
-    # The coarsest MEMBER bounds the family's resolution — the same rule the execution twin applies,
-    # and read off the verdicts because a caller may pass a custom count.
-    family_resamples = min((verdicts[i].n_resamples for i, _p in family), default=GATE_RESAMPLES)
+    family_resamples = _family_resamples(verdicts, family)
 
     decided: list[ActivationGateVerdict] = []
     for i, verdict in enumerate(verdicts):
