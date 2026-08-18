@@ -934,6 +934,20 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
   ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
 ```
 
+**One operation, several verbs.** Use `verb_any_of` instead of `verb` (mutually exclusive); it matches if any entry does. Each entry is a *complete* verb in the form `verb` takes — not one token of a chain:
+
+```yaml
+- type: "cli_called"
+  description: "Read the project through the CLI"
+  verb_any_of: ["ixp projects list", "ixp projects get"]
+```
+
+Do **not** shorten the verb instead. `verb: "ixp projects"` matches all of its subcommands, so a positive assertion that the agent *read* a project is equally satisfied by `ixp projects delete`. Two entries are rejected when one prefixes the other, since the shorter already accepts everything the longer does.
+
+**The argument tail stays open.** `positional` is a prefix too, so `verb: "ixp projects list"` with `positional: ["proj-1"]` also matches `ixp projects list proj-1 dummy`. To require a specific tail, name every argument in it. `positional: []` is rejected — it would assert nothing.
+
+**Declare value-bearing flags when you use `positional`.** An undeclared flag is treated as a switch, so its value stays among the non-flag arguments and shifts the ones you named. `get proj-1 --folder Finance` matches `positional: ["proj-1"]`, but `get --folder Finance proj-1` does **not** — `Finance` takes the first slot. Add `folder` to `value_flags` (or name it in `flags`) to fix it. Resolving the ambiguity this way is deliberate: guessing that an unknown flag consumes the next token let `--yes proj-1` bind `yes=proj-1` and swallow the project name, which made a `max_count: 0` delete guard pass on the delete it forbade.
+
 `log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
 
 **Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
@@ -1021,7 +1035,7 @@ flags:
 
 **Negative guards.** Set `min_count: 0` and `max_count: 0` to assert a call did **not** happen. A missing log file *fails* rather than counting as zero matches — otherwise a mock writing to the wrong path would make every negative guard pass vacuously.
 
-**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`.
+**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix compared token by token**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`, nor `ixp projects list` by `ixp projects lists`. What a prefix leaves open is the *tail*: `positional` constrains the arguments you name, and anything past them is unconstrained.
 
 ### `commands_efficiency`
 
