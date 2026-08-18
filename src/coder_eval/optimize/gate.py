@@ -18,6 +18,14 @@ CLI package. The skill drives these functions from a short inline ``python`` sni
 **F1 is never recomputed here.** Every metric comes from
 :func:`coder_eval.criteria._classification_aggregate.classification_metrics`, the criterion layer's
 own routine (CE037), so the gate cannot disagree with the numbers the run reported.
+
+**Four of the constants below are WATCHED** by the estimator-change protocol
+(``tests/lint/estimator_ledger.py``), and so is :data:`FLOOR_RESOLUTION`, which moved here from the
+execution track so the shared confirm classifier could apply it rather than the activation side
+declaring a second copy. Touching a watched constant — including moving the file it is declared in —
+obliges a row in ``docs/REPORT_SCHEMA.md``'s ``## Estimator changes`` table, because a rendered
+statistic can step for identical data and nothing in a run artifact tells that apart from a real
+change in the thing being measured.
 """
 
 from __future__ import annotations

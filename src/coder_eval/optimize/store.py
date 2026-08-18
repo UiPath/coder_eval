@@ -17,6 +17,14 @@ live here rather than with the gate for exactly that reason: both are cache-key 
 ``record_noise_floor`` refuses to write, so keeping them in the gate would make this module import
 the gate and close a cycle.
 
+**What the grader fingerprint covers**, since this module stores it without computing it: the
+grader script AND the ``expectations/*.json`` files it LOADS, because the answer key is part of the
+instrument. Not a ``.DS_Store``, a ``__pycache__`` or an ``archive/`` of retired keys — and the
+filter is written that way round because a denylist naming today's stray files is a list nobody can
+finish. Its ``--fingerprint`` flag is also the ONE path in that script which exits NON-ZERO on
+failure: everywhere else it exits 0 to protect a score already computed, and here a score-shaped
+line would be recorded by the caller AS the fingerprint.
+
 Two stated limits of :func:`_atomic_write`, both accepted because this is a local single-agent
 artifact: the read-modify-write around it is not locked, so two concurrent writers lose one set of
 changes; and ``os.replace`` follows a symlink at the destination, replacing the link rather than
