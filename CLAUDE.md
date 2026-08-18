@@ -159,7 +159,7 @@ action.yml                         # Published composite GitHub Action (coder-ev
 | `file_matches_regex` | Binary | Regex match on file |
 | `reference_comparison` | Continuous | AST/token/complexity similarity |
 | `command_executed` | Fractional | Agent tool usage verification |
-| `cli_called` | Binary | Structured match over a JSON Lines invocation log: verb / positional / per-flag predicates, with min_count/max_count bounds |
+| `cli_called` | Binary | Structured match over a JSON Lines invocation log: verb (or `verb_any_of` alternation) / positional / per-flag predicates, with min_count/max_count bounds |
 | `commands_efficiency` | Continuous | Agent tool-call efficiency relative to expected budget |
 | `uipath_eval` | Fractional | UiPath agent evaluation results |
 | `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
