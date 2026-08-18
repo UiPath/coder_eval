@@ -315,22 +315,19 @@ coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_toke
 
 There is nothing to declare. A task's expected wall clock is **derived**, per
 task and per harness, from the durations that task has already achieved: p10 of
-its passing runs once there are ten of them, `min` while history is thinner, and
-no line at all under three. The eval runner computes it from past runs and stamps
-`expected_seconds` onto each row of `run.json`, which is what the dashboard's
-**"Time per Passed Task"** card and the Slack rollup read.
+its passing runs, and no line at all under three of them. The eval runner computes
+it from past runs and stamps `expected_seconds` onto each row of `run.json`, which
+is what the dashboard's **"Time per Passed Task"** card and the Slack rollup read.
 
 A task counts as within expected while it stays inside **1.5×** that line.
 Passing tasks only: a task that crashed in ten seconds did not blow a time
 budget. The seconds burned by failures are still visible, in the headline's
 numerator (total seconds of every task that ran, over the number that passed).
 
-`expected_turns` was the hand-written predecessor of this. `run_limits.expected_turns`
-is deprecated and ignored: still accepted so existing task YAMLs keep resolving, but
-nothing reads it, and it will be removed in a later release. Delete it when you
-touch a task. Turn counts are still reported, they are just not scored — a `Read`
-and a 20-minute deploy both count one turn, which is why the budget never meant
-much.
+`expected_turns` was the hand-written predecessor. `run_limits.expected_turns` is
+deprecated and ignored: still accepted so existing task YAMLs keep resolving, and
+removed in a later release. Delete it when you touch a task. Turn counts are still
+reported, just not scored.
 ### `stop_early` (opt-in early stop)
 
 Early stop ends a single-shot run **early** once the run's **armed** criteria

@@ -1,16 +1,13 @@
 // Wall-clock efficiency: how a task's duration compares to the time it is
 // expected to take.
 //
-// `expected_seconds` is derived per task, per harness by the eval runner from
-// every past run of that harness (p10 of successful durations once there are 10
-// observations, min while history is thinner) and stamped into run.json. The
-// dashboard never derives it: it reads the line the run was actually scored
-// against, so a number rendered here still matches the Slack ping that
-// announced that run months later.
+// `expected_seconds` is derived per task, per harness by the eval runner (p10 of
+// past successful durations) and stamped into run.json. The dashboard reads that
+// stamp rather than deriving its own, so a number here still matches the ping
+// that announced the run.
 //
-// A task with no `expected_seconds` is *unscored*, not "within budget": either
-// it is too young to have history or the run predates stamping. Every helper
-// here returns null for that case rather than a verdict.
+// A task with no `expected_seconds` is *unscored*, not "within budget": too young
+// for history, or a run that predates stamping. Every helper returns null there.
 
 export interface TimeRatioThresholds {
     yellow: number;
@@ -32,11 +29,9 @@ export function getTimeRatioThresholds(): TimeRatioThresholds {
 export type TimeTint = "green" | "yellow" | "red" | null;
 
 // Pure time-efficiency ratio (seconds ÷ expected_seconds), used to tint per-task
-// duration cells. Deliberately blind to pass/fail: the cell answers "did this
-// task take longer than it should?", which is meaningful either way. The
-// aggregate headline is the opposite — see withinExpectedTime below and
-// `overview.ts::withinExpectedTimeRateForTasks`, which score passing tasks only.
-// The two intentionally diverge.
+// duration cells. Blind to pass/fail on purpose: the cell answers "did this take
+// longer than it should?", which holds either way. The aggregates diverge
+// deliberately and score passes only (withinExpectedTime, overview.ts).
 export function timeRatio(
     durationSeconds: number | null,
     expectedSeconds: number | null,

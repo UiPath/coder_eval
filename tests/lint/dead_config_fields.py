@@ -57,9 +57,9 @@ EXEMPT: dict[str, dict[str, str]] = {
     "RunLimits": {
         "expected_turns": (
             "deprecated and intentionally inert: efficiency is scored in wall-clock "
-            "seconds against a line derived from run history, so nothing reads this. "
-            "Kept accepted (RunLimits forbids extras, and thousands of task YAMLs "
-            "still declare it) until the next minor release drops it."
+            "seconds against a line derived from run history. Kept accepted because "
+            "RunLimits forbids extras and ~930 task YAMLs still declare it; dropped "
+            "in a later minor."
         ),
     },
 }
