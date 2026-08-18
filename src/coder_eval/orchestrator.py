@@ -76,6 +76,28 @@ logger = logging.getLogger(__name__)
 _WAIT_FOR_GRACE_SECONDS = 2.0
 
 
+def _close_subprocess_transport(proc: asyncio.subprocess.Process | None) -> None:
+    """Release a finished subprocess's pipe transport deterministically.
+
+    ``asyncio`` gives ``Process`` no public way to do this: the transport is held
+    privately and is only closed when the object is garbage-collected. On
+    Windows' Proactor loop ``_ProactorBasePipeTransport.__del__`` then emits
+    ``ResourceWarning: unclosed transport`` — one per pipe — which a strict test
+    run surfaces as ``PytestUnraisableExceptionWarning`` attributed to whichever
+    test happened to be running when the GC fired, not to the code that leaked.
+    That is exactly the shape of the intermittent Windows CI failures in
+    ``test_pre_run`` / ``test_post_run`` / ``test_preservation_mode``.
+
+    Best-effort and idempotent: a second ``close()`` is a no-op, and any error is
+    swallowed because releasing a pipe must never turn into a task failure.
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is None:
+        return
+    with suppress(Exception):
+        transport.close()
+
+
 async def _pump_stream(
     stream: asyncio.StreamReader | None,
     log_fn: Callable[..., None],
@@ -1641,6 +1663,7 @@ class Orchestrator:
         sim_in: int,
         sim_out: int,
         sim_failures: int,
+        sim_model: str | None = None,
     ) -> SimulationTelemetry:
         """Single construction point for SimulationTelemetry across the dialog loop's exit paths."""
         return SimulationTelemetry(
@@ -1651,6 +1674,9 @@ class Orchestrator:
             simulator_output_tokens=sim_out,
             simulator_failures=sim_failures,
             total_turns=total_turns,
+            # The resolved id, not the configured one, so the record names the model
+            # the backend actually served and simulator cost prices from a fact.
+            simulator_model=sim_model,
         )
 
     async def _run_dialog_criteria_check(
@@ -1768,6 +1794,7 @@ class Orchestrator:
                 sim_in=0,
                 sim_out=0,
                 sim_failures=1,
+                sim_model=sim_model_id,
             )
             return _OpenerOutcome(short_circuit=True, return_value=False)
 
@@ -1783,6 +1810,7 @@ class Orchestrator:
                 sim_in=solicited.sim_in,
                 sim_out=solicited.sim_out,
                 sim_failures=0,
+                sim_model=sim_model_id,
             )
             return _OpenerOutcome(short_circuit=True, return_value=False)
 
@@ -1857,7 +1885,10 @@ class Orchestrator:
         # UserMessage captured for the upcoming agent call; prepended to the
         # next turn_record.messages. None outside simulation paths.
         pending_user_turn: UserMessage | None = None
-        sim_model_id = getattr(sim_config, "model", None)
+        # The RESOLVED simulator model (backend-translated), not the configured id —
+        # it labels each simulator UserMessage and is persisted on the telemetry so
+        # simulator cost prices from the model that actually served the call.
+        sim_model_id = simulator.model
         # Track whether we entered the agent-call loop — used by the finally
         # block to decide whether to persist an orphaned pending_user_turn.
         agent_turn_attempted = False
@@ -2035,6 +2066,7 @@ class Orchestrator:
                 sim_in=simulator_input_tokens,
                 sim_out=simulator_output_tokens,
                 sim_failures=simulator_failures,
+                sim_model=sim_model_id,
             )
             logger.info(
                 "Simulation dialog ended: stop_reason=%s turns=%s criteria_passed=%s",
@@ -2070,6 +2102,7 @@ class Orchestrator:
                     sim_in=simulator_input_tokens,
                     sim_out=simulator_output_tokens,
                     sim_failures=simulator_failures,
+                    sim_model=sim_model_id,
                 )
             # Always tear down the simulator agent (and its scratch dir) even
             # when the dialog bails out via exception.
@@ -2161,6 +2194,9 @@ class Orchestrator:
             start = time.time()
             logger.info("Running %s command: %s", human.lower(), cmd.command)
 
+            # Bound outside the try so the `finally` can tell "never spawned"
+            # (a create_subprocess_shell failure) from "spawned, needs closing".
+            proc: asyncio.subprocess.Process | None = None
             try:
                 proc = await asyncio.create_subprocess_shell(
                     cmd.command,
@@ -2235,6 +2271,13 @@ class Orchestrator:
                 if fail_on_error:
                     raise RuntimeError(f"{human} command failed: {cmd.command!r}") from e
                 logger.warning("%s command '%s' failed: %s", human, cmd.command, e)
+            finally:
+                # Every exit from this iteration -- normal, `continue` from the
+                # timeout branch, or a raised RuntimeError -- must release the
+                # two pipes this command opened. Without it they survive until
+                # GC, which on Windows reports as an unraisable ResourceWarning
+                # against an unrelated test. See _close_subprocess_transport.
+                _close_subprocess_transport(proc)
 
     async def _run_pre_run_commands(self) -> None:
         """Execute pre-run commands inside the sandbox before evaluation.
