@@ -28,27 +28,27 @@ describe("timeRatio", () => {
     });
 });
 
-describe("tintForTimeRatio (defaults: yellow=1.25, red=1.5)", () => {
-    const t = { yellow: 1.25, red: 1.5 };
+describe("tintForTimeRatio (defaults: yellow=1.5, red=2)", () => {
+    const t = { yellow: 1.5, red: 2 };
 
     test("green well under the line", () => {
         expect(tintForTimeRatio(0.5, t)).toBe("green");
     });
 
-    test("green at exactly 1.25 (yellow boundary)", () => {
-        expect(tintForTimeRatio(1.25, t)).toBe("green");
+    test("green at exactly 1.5 (yellow boundary)", () => {
+        expect(tintForTimeRatio(1.5, t)).toBe("green");
     });
 
     test("yellow between the thresholds", () => {
-        expect(tintForTimeRatio(1.4, t)).toBe("yellow");
+        expect(tintForTimeRatio(1.8, t)).toBe("yellow");
     });
 
-    test("yellow at exactly 1.5 (red boundary)", () => {
-        expect(tintForTimeRatio(1.5, t)).toBe("yellow");
+    test("yellow at exactly 2 (red boundary)", () => {
+        expect(tintForTimeRatio(2, t)).toBe("yellow");
     });
 
     test("red past the red threshold", () => {
-        expect(tintForTimeRatio(2.0, t)).toBe("red");
+        expect(tintForTimeRatio(2.5, t)).toBe("red");
     });
 
     test("an unscored task is untinted, not green", () => {
@@ -64,7 +64,7 @@ describe("getTimeRatioThresholds", () => {
     test("returns defaults when env unset", () => {
         vi.stubEnv("EVALBOARD_TIME_YELLOW_RATIO", "");
         vi.stubEnv("EVALBOARD_TIME_RED_RATIO", "");
-        expect(getTimeRatioThresholds()).toEqual({ yellow: 1.25, red: 1.5 });
+        expect(getTimeRatioThresholds()).toEqual({ yellow: 1.5, red: 2 });
     });
 
     test("honours env overrides", () => {
@@ -76,27 +76,27 @@ describe("getTimeRatioThresholds", () => {
     test("falls back to defaults on non-numeric env", () => {
         vi.stubEnv("EVALBOARD_TIME_YELLOW_RATIO", "not-a-number");
         vi.stubEnv("EVALBOARD_TIME_RED_RATIO", "high");
-        expect(getTimeRatioThresholds()).toEqual({ yellow: 1.25, red: 1.5 });
+        expect(getTimeRatioThresholds()).toEqual({ yellow: 1.5, red: 2 });
     });
 
     test("falls back to defaults on zero / negative env", () => {
         vi.stubEnv("EVALBOARD_TIME_YELLOW_RATIO", "0");
         vi.stubEnv("EVALBOARD_TIME_RED_RATIO", "-1");
-        expect(getTimeRatioThresholds()).toEqual({ yellow: 1.25, red: 1.5 });
+        expect(getTimeRatioThresholds()).toEqual({ yellow: 1.5, red: 2 });
     });
 });
 
-describe("withinExpectedTime (default tolerance 0.5 → 1.5× expected)", () => {
+describe("withinExpectedTime (default tolerance 1 → 2× expected)", () => {
     test("default tolerance matches the runner's", () => {
-        expect(TIME_BUDGET_TOLERANCE).toBe(0.5);
+        expect(TIME_BUDGET_TOLERANCE).toBe(1);
     });
 
-    test("within at exactly 1.5× expected", () => {
-        expect(withinExpectedTime(150, 100)).toBe(true);
+    test("within at exactly 2× expected", () => {
+        expect(withinExpectedTime(200, 100)).toBe(true);
     });
 
-    test("over just past 1.5× expected", () => {
-        expect(withinExpectedTime(151, 100)).toBe(false);
+    test("over just past 2× expected", () => {
+        expect(withinExpectedTime(201, 100)).toBe(false);
     });
 
     test("within well under expected", () => {

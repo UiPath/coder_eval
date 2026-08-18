@@ -90,13 +90,23 @@ function filterTagsByQuery(tags: TagCount[], q: string | null): TagCount[] {
 // "where we are now", and averaging across harnesses would blend Codex's line
 // with Claude's. Renders nothing when no run in scope reports a time, which is
 // every run predating expected-time stamping.
+// Latest run's seconds-per-passed-task, against the previous run OF THE SAME
+// HARNESS. Consecutive runs are usually different harnesses, and they are not
+// comparable: codex runs the suite in a third of Claude Code's wall clock, so a
+// naive "vs prev" reports the schedule rather than a change in speed.
 function WallClockHeadline({ runs }: { runs: RunPoint[] }) {
     const timed = runs.filter((r) => r.timePerPassedTask != null);
     const latest = timed.at(-1);
     if (!latest?.timePerPassedTask) return null;
-    const prev = timed.at(-2)?.timePerPassedTask ?? null;
+    const prev =
+        timed
+            .slice(0, -1)
+            .filter((r) => r.harness === latest.harness)
+            .at(-1)?.timePerPassedTask ?? null;
     const deltaPct = prev ? ((latest.timePerPassedTask - prev) / prev) * 100 : null;
-    const scored = runs.filter((r) => r.withinExpectedTimeRate != null).at(-1);
+    const scored = runs
+        .filter((r) => r.withinExpectedTimeRate != null && r.harness === latest.harness)
+        .at(-1);
     return (
         <span className="text-xs text-gray-500 tabular-nums flex items-baseline gap-3">
             <span className="text-gray-900 font-semibold text-sm">
@@ -105,7 +115,7 @@ function WallClockHeadline({ runs }: { runs: RunPoint[] }) {
             {deltaPct != null && Math.abs(deltaPct) >= 0.5 && (
                 <span className={deltaPct > 0 ? "text-rose-700" : "text-emerald-700"}>
                     {deltaPct > 0 ? "▲" : "▼"} {Math.abs(deltaPct).toFixed(0)}% vs
-                    prev
+                    prev {harnessShortLabel(latest.harness)}
                 </span>
             )}
             {scored?.withinExpectedTimeRate != null && (
@@ -325,11 +335,12 @@ export default async function Page({
                         <WallClockHeadline runs={overview.runs} />
                     </div>
                     <p className="text-xs text-gray-500">
-                        % of passing tasks that came in within 1.5× their
+                        % of passing tasks that came in within 2× their
                         expected time, which is derived per task from that
-                        harness's own history (p10 of past passing runs) · a task
-                        with under three passing runs is unscored, and runs with
-                        no scored task are omitted rather than plotted at 0
+                        harness's own history (its fastest run, or p10 once there
+                        are ten) · a task its harness has never passed is
+                        unscored, and runs with no scored task are omitted rather
+                        than plotted at 0
                         {activeTag || q ? " · scoped to the active filter" : ""}
                     </p>
                     <WithinExpectedTimeChart

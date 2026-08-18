@@ -23,12 +23,12 @@ describe("DurationStat", () => {
         );
     });
 
-    test("yellow text at +25%–+50% (ratio 1.4)", () => {
-        renderDuration(140, 100);
-        expect(screen.getByText("2m20s").className).toContain("text-amber-700");
+    test("yellow text between 1.5x and 2x expected (ratio 1.8)", () => {
+        renderDuration(180, 100);
+        expect(screen.getByText("3m00s").className).toContain("text-amber-700");
     });
 
-    test("green text at or under +25% (ratio 1.2)", () => {
+    test("green text at or under 1.5x expected (ratio 1.2)", () => {
         renderDuration(120, 100);
         expect(screen.getByText("2m00s").className).toContain(
             "text-emerald-700",
@@ -42,7 +42,7 @@ describe("DurationStat", () => {
         expect(dd.className).not.toMatch(/text-(rose|amber|emerald)-/);
         expect(dd).toHaveAttribute(
             "title",
-            "no expected time yet (needs 3 passing runs)",
+            "no expected time yet (needs a passing run on this harness)",
         );
     });
 

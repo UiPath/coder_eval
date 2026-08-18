@@ -127,9 +127,9 @@ describe("TaskGrid — Duration column", () => {
             <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
-                    row("over", 3, 50), // ratio 2.0 → red (> 1.5)
-                    row("mid", 3, 71), // ratio 1.41 → yellow (1.25 < r ≤ 1.5)
-                    row("under", 3, 250), // ratio 0.4 → green (≤ 1.25)
+                    row("over", 3, 40), // ratio 2.5 → red (> 2)
+                    row("mid", 3, 56), // ratio 1.79 → yellow (1.5 < r ≤ 2)
+                    row("under", 3, 250), // ratio 0.4 → green (≤ 1.5)
                     row("unscored", 3, null), // no line yet → black-ish default
                 ]}
             />,
@@ -138,7 +138,7 @@ describe("TaskGrid — Duration column", () => {
         const overCell = durationCellFor("over");
         expect(overCell.className).toContain("text-rose-700");
         expect(overCell.className).not.toContain("bg-");
-        expect(overCell).toHaveAttribute("title", "expected time: 0m50s");
+        expect(overCell).toHaveAttribute("title", "expected time: 0m40s");
 
         expect(durationCellFor("mid").className).toContain("text-amber-700");
         expect(durationCellFor("under").className).toContain(
@@ -152,7 +152,7 @@ describe("TaskGrid — Duration column", () => {
         );
         expect(unscoredCell).toHaveAttribute(
             "title",
-            "no expected time yet (needs 3 passing runs)",
+            "no expected time yet (needs a passing run on this harness)",
         );
     });
 });

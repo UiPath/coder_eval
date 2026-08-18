@@ -314,12 +314,13 @@ coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_toke
 ### Efficiency is measured in seconds, not turns
 
 There is nothing to declare. A task's expected wall clock is **derived**, per
-task and per harness, from the durations that task has already achieved: p10 of
-its passing runs, and no line at all under three of them. The eval runner computes
-it from past runs and stamps `expected_seconds` onto each row of `run.json`, which
-is what the dashboard's **"Time per Passed Task"** card and the Slack rollup read.
+task and per harness, from the durations that task has already achieved: the
+fastest run on record while there are fewer than ten, p10 from there up. A single
+passing run is enough to draw a line. The eval runner computes it from past runs
+and stamps `expected_seconds` onto each row of `run.json`, which is what the
+dashboard's **"Time per Passed Task"** card and the Slack rollup read.
 
-A task counts as within expected while it stays inside **1.5×** that line.
+A task counts as within expected while it stays inside **2×** that line.
 Passing tasks only: a task that crashed in ten seconds did not blow a time
 budget. The seconds burned by failures are still visible, in the headline's
 numerator (total seconds of every task that ran, over the number that passed).

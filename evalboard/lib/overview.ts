@@ -29,12 +29,10 @@ export interface RunPoint {
     // into one series per harness and color each by identity.
     harness: string;
     successRate: number | null;
-    // % of scored passing tasks that came in within 1.5× their expected wall
-    // clock. Only tasks that passed AND carry a derived expected_seconds are
-    // eligible; unscored tasks (too little history) are excluded regardless of
-    // outcome, so the rate is stable under tag/q filtering. null when no task in
-    // scope is scored at all (the chart shows a gap rather than a
-    // failure-driven 0%). Same tag/q scoping as successRate.
+    // % of scored passing tasks that came in within 2× their expected wall clock.
+    // Only tasks that passed AND carry a derived expected_seconds are eligible,
+    // so the rate is stable under tag/q filtering. null when no task in scope is
+    // scored (the chart shows a gap rather than a failure-driven 0%).
     withinExpectedTimeRate: number | null;
     // Seconds of every task that ran over the number that passed, for this run's
     // scoped task set. Failures stay in the numerator on purpose. null when
@@ -42,28 +40,23 @@ export interface RunPoint {
     timePerPassedTask: number | null;
 }
 
-// The % of scored passing tasks that came in within 1.5× their expected wall
+// The % of scored passing tasks that came in within 2× their expected wall
 // clock; null when no task in scope is scored.
 //
-// Passing tasks only. This is a deliberate departure from the turn budget this
-// metric replaces, which counted a budgeted failure as over budget: a task that
-// crashed in 10 seconds did not blow a time budget, and folding failures in here
-// would make a pass-to-timeout regression read as an efficiency *gain* once the
-// slow pass stopped counting. Failure is already the pass rate's job, and the
-// seconds burned failing are already in timePerPassedTask's numerator.
+// Passing tasks only, unlike the turn budget this replaces: a task that crashed
+// in 10 seconds did not blow a time budget, and counting it would make a
+// pass-to-timeout regression read as a gain. Failure is the pass rate's job.
 //
-// Unscored tasks (no derived expected_seconds — under three passing runs of
-// history, or a run predating the stamp) are excluded, so the metric name stays
-// literally true and the rate does not shift when filtering changes which
-// co-scoped tasks happen to be scored. Callers pass the already tag/q-scoped
-// task list. Exported for unit testing.
+// Unscored tasks (a harness that has never passed the task, or a run predating
+// the stamp) are excluded, so the rate does not shift when filtering changes
+// which co-scoped tasks happen to be scored. Exported for unit testing.
 export function withinExpectedTimeRateForTasks(
     tasks: RunOverviewTask[],
 ): number | null {
     let eligible = 0;
     let within = 0;
     for (const t of tasks) {
-        if (t.status !== "SUCCESS") continue;
+        if (t.status !== "SUCCESS" || t.matureSkipped) continue;
         const verdict = withinExpectedTime(t.durationSeconds, t.expectedSeconds);
         if (verdict === null) continue; // unscored, or no duration → can't judge
         eligible += 1;
@@ -76,12 +69,18 @@ export function withinExpectedTimeRateForTasks(
 // Seconds of every task that ran, over the number that passed. Mirrors the
 // runner's headline (timing.py::time_per_passed_task) so a filtered front-page
 // view and the Slack ping compute the same thing on the same rows.
+//
+// Mature-skipped rows leave BOTH sides. They are carried-forward passes with no
+// duration, so counting them only in the denominator divides real seconds by a
+// task count that never ran: on a codex nightly that reported 3m12s, including
+// them read 1m17s.
 export function timePerPassedTaskForTasks(
     tasks: RunOverviewTask[],
 ): number | null {
-    const passed = tasks.filter((t) => t.status === "SUCCESS").length;
+    const executed = tasks.filter((t) => !t.matureSkipped);
+    const passed = executed.filter((t) => t.status === "SUCCESS").length;
     if (!passed) return null;
-    const total = tasks.reduce((a, t) => a + (t.durationSeconds ?? 0), 0);
+    const total = executed.reduce((a, t) => a + (t.durationSeconds ?? 0), 0);
     return total > 0 ? total / passed : null;
 }
 

@@ -128,7 +128,7 @@ describe("withinExpectedTimeRateForTasks", () => {
         expect(
             withinExpectedTimeRateForTasks([
                 task({ expectedSeconds: 100, durationSeconds: 120 }), // within
-                task({ expectedSeconds: 100, durationSeconds: 160 }), // over
+                task({ expectedSeconds: 100, durationSeconds: 260 }), // over
             ]),
         ).toBe(50);
     });
@@ -192,6 +192,36 @@ describe("withinExpectedTimeRateForTasks", () => {
 });
 
 describe("timePerPassedTaskForTasks", () => {
+    test("mature-skipped passes leave both sides of the ratio", () => {
+        // Regression: counting carried-forward passes in the denominator only
+        // divided real seconds by tasks that never ran. A codex nightly whose
+        // runner block said 3m12s rendered as 1m17s on the front page.
+        const executed = [
+            task({ durationSeconds: 100 }),
+            task({ durationSeconds: 300 }),
+        ];
+        const carried = [
+            task({ durationSeconds: 0, matureSkipped: true }),
+            task({ durationSeconds: 0, matureSkipped: true }),
+        ];
+        expect(timePerPassedTaskForTasks([...executed, ...carried])).toBe(
+            timePerPassedTaskForTasks(executed),
+        );
+    });
+
+    test("a mature-skipped pass is not counted as within expected", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 260 }), // over
+                task({
+                    expectedSeconds: 100,
+                    durationSeconds: 0,
+                    matureSkipped: true,
+                }),
+            ]),
+        ).toBe(0);
+    });
+
     test("divides all seconds that ran by the number that passed", () => {
         expect(
             timePerPassedTaskForTasks([

@@ -21,8 +21,8 @@ export function getTimeRatioThresholds(): TimeRatioThresholds {
         return Number.isFinite(n) && n > 0 ? n : fallback;
     };
     return {
-        yellow: parse(process.env.EVALBOARD_TIME_YELLOW_RATIO, 1.25),
-        red: parse(process.env.EVALBOARD_TIME_RED_RATIO, 1.5),
+        yellow: parse(process.env.EVALBOARD_TIME_YELLOW_RATIO, 1.5),
+        red: parse(process.env.EVALBOARD_TIME_RED_RATIO, 2),
     };
 }
 
@@ -70,9 +70,10 @@ export function timeCellClasses(tint: TimeTint): string {
 }
 
 // A task counts as within its expected time while it stays inside
-// (1 + tolerance) × expected. Mirrors `timing.TOLERANCE` on the runner side,
-// which records the value it used in each run's `timing` block.
-export const TIME_BUDGET_TOLERANCE = 0.5;
+// (1 + tolerance) × expected, so anything past 2× its line reads slow. Mirrors
+// `timing.TOLERANCE` on the runner side, which records the value it used in each
+// run's `timing` block. Red tints at the same 2×, so the cell and the rollup agree.
+export const TIME_BUDGET_TOLERANCE = 1;
 
 // Whether a task came in at or under (1 + tolerance) × its expected time.
 // Null when the task is not scoreable: no duration, or no positive
@@ -109,5 +110,5 @@ export function fmtTimeRatio(ratio: number | null): string {
 export function expectedTimeTitle(expectedSeconds: number | null): string {
     return expectedSeconds != null
         ? `expected time: ${fmtTaskSeconds(expectedSeconds)}`
-        : "no expected time yet (needs 3 passing runs)";
+        : "no expected time yet (needs a passing run on this harness)";
 }

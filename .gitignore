@@ -69,3 +69,6 @@ refs/
 
 # SkillsBench tasks for testing
 /resources/
+
+# Local evalboard dataset for `next dev` (EVALBOARD_LOCAL_RUNS_DIR)
+evalboard/.local-runs/
