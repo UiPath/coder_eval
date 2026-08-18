@@ -15,13 +15,13 @@ import {
     StatusPill,
 } from "@/lib/pills";
 import { isPassStatus, perTaskPassCounts, statusSortRank } from "@/lib/status";
+import { displayedTurns, fmtTurnsCount } from "@/lib/turns";
 import {
-    displayedTurns,
-    fmtTurnsCount,
-    tintForRatio,
-    turnRatio,
-    turnsCellClasses,
-} from "@/lib/turns";
+    expectedTimeTitle,
+    timeCellClasses,
+    timeRatio,
+    tintForTimeRatio,
+} from "@/lib/timing";
 import { ChipButton } from "./chips";
 import { withSource } from "@/app/_lib/source-param";
 import { TableScroll } from "@/app/_components/scroll-table";
@@ -429,17 +429,22 @@ function Stat({
     label,
     value,
     valueClass = "text-gray-800",
+    title,
 }: {
     label: string;
     value: string;
     valueClass?: string;
+    // Hover text for the value, e.g. what a tinted duration was measured against.
+    title?: string;
 }) {
     return (
         <div className="min-w-0">
             <div className="text-[10px] uppercase tracking-wide text-gray-400">
                 {label}
             </div>
-            <div className={`tabular-nums ${valueClass}`}>{value}</div>
+            <div className={`tabular-nums ${valueClass}`} title={title}>
+                {value}
+            </div>
         </div>
     );
 }
@@ -695,15 +700,12 @@ export function TaskGrid({
                 <tbody>
                     {sorted.map((t) => {
                         const review = reviewsByTask?.get(t.taskId);
-                        // Color off the same visible-events count the cell
-                        // displays — not SDK num_turns (totalTurns), which the
-                        // visible-turns refactor dropped from the display and
-                        // is often null, leaving the cell silently uncolored.
-                        const turnsTint = tintForRatio(
-                            turnRatio(
-                                displayedTurns(t.actualCommands, t.hasFinalReply),
-                                t.expectedTurns,
-                            ),
+                        // Efficiency is measured in seconds, so the tint lives on
+                        // the Duration cell. Turns stay a plain count: a Read and
+                        // a 20-minute deploy both count 1, which is exactly why
+                        // the turn budget was retired.
+                        const timeTint = tintForTimeRatio(
+                            timeRatio(t.durationSeconds, t.expectedSeconds),
                         );
                         return (
                         <tr
@@ -747,20 +749,16 @@ export function TaskGrid({
                                     ? t.weightedScore.toFixed(2)
                                     : "—"}
                             </td>
-                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                            <td
+                                className={`py-3 px-4 text-right tabular-nums font-medium ${timeCellClasses(timeTint)}`}
+                                title={expectedTimeTitle(t.expectedSeconds)}
+                            >
                                 {fmtTableDuration(t.durationSeconds)}
                             </td>
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtCost(t.totalCostUsd)}
                             </td>
-                            <td
-                                className={`py-3 px-4 text-right tabular-nums font-medium ${turnsCellClasses(turnsTint)}`}
-                                title={
-                                    t.expectedTurns != null
-                                        ? `expected_turns target: ${t.expectedTurns}`
-                                        : "no expected_turns target set"
-                                }
-                            >
+                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtTurnsCount(
                                     displayedTurns(
                                         t.actualCommands,
@@ -841,11 +839,8 @@ export function TaskGrid({
             <div className="md:hidden space-y-2">
                 {sorted.map((t) => {
                     const review = reviewsByTask?.get(t.taskId);
-                    const turnsTint = tintForRatio(
-                        turnRatio(
-                            displayedTurns(t.actualCommands, t.hasFinalReply),
-                            t.expectedTurns,
-                        ),
+                    const timeTint = tintForTimeRatio(
+                        timeRatio(t.durationSeconds, t.expectedSeconds),
                     );
                     return (
                         <div
@@ -894,6 +889,8 @@ export function TaskGrid({
                                 <Stat
                                     label="Duration"
                                     value={fmtTableDuration(t.durationSeconds)}
+                                    valueClass={`font-medium ${timeCellClasses(timeTint)}`}
+                                    title={expectedTimeTitle(t.expectedSeconds)}
                                 />
                                 <Stat
                                     label="Cost"
@@ -907,7 +904,6 @@ export function TaskGrid({
                                             t.hasFinalReply,
                                         ),
                                     )}
-                                    valueClass={`font-medium ${turnsCellClasses(turnsTint)}`}
                                 />
                             </dl>
                             {showTokens && (

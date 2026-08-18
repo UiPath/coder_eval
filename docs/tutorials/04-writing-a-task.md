@@ -38,7 +38,7 @@ agent:
   setting_sources: []   # isolate the sandbox from your own CLAUDE.md/settings
 
 run_limits:
-  expected_turns: 5     # soft target — warns when exceeded, never aborts
+  max_turns: 20         # hard cap on agent inner-loop turns
 
 success_criteria:
   - type: "file_exists"
@@ -62,9 +62,9 @@ What each block does:
   settings out of the sandbox. Without it, a large host `CLAUDE.md` is injected
   into every API call, inflating cache-creation tokens and cost. Leave it out
   only when the task needs your MCP servers.
-- **`run_limits.expected_turns`** — an efficiency target, not a cap: exceeding
-  it logs a warning and adds a report badge but never aborts (use
-  `run_limits.max_turns` for a hard cap).
+- **`run_limits.max_turns`** — a hard cap on the agent's inner-loop turns.
+  Nothing to declare for efficiency: expected wall clock is derived per task from
+  run history and stamped into `run.json` after the run.
 - **`success_criteria`** — each criterion scores 0.0–1.0 and supports `weight`
   (default 1.0) and `pass_threshold` (default 0.9). `run_command` here only
   checks the exit code; it can also match stdout (`expected_stdout`) or read a

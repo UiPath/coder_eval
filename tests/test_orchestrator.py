@@ -1530,17 +1530,14 @@ async def test_overrides_apply_max_turns_field_merge(tmp_path):
     from coder_eval.orchestration.overrides import apply_overrides
 
     task, _ = load_task(Path("tasks/hello_date.yaml"))
-    # hello_date.yaml ships a baseline run_limits.expected_turns; max_turns is
-    # the field this test exercises. The override must field-merge on top.
-    baseline_expected_turns = task.run_limits.expected_turns if task.run_limits else None
     assert task.run_limits is None or task.run_limits.max_turns is None
 
-    apply_overrides(task, {"run_limits.max_turns": 42})
+    apply_overrides(task, {"run_limits.task_timeout": 600, "run_limits.max_turns": 42})
 
     assert task.run_limits is not None
     assert task.run_limits.max_turns == 42
-    # Field-merge must preserve other run_limits keys from the task YAML.
-    assert task.run_limits.expected_turns == baseline_expected_turns
+    # Field-merge must preserve the other run_limits keys set alongside it.
+    assert task.run_limits.task_timeout == 600
 
 
 # ==================== Duplicate Task ID Validation Tests ====================

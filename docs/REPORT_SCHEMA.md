@@ -79,7 +79,7 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `judge_cost_usd` / `simulator_cost_usd` slices and the `cost_complete` flag),
 `expected_commands`,
 `actual_commands`, `commands_efficiency`, `agent_config`, `sdk_options`,
-`installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_turns`,
+`installed_tools`, turn accounting (`total_turns`, `visible_turns`,
 `max_turns_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
 `early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,

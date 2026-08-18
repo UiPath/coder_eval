@@ -24,7 +24,6 @@ defaults:
     # Soft target: when cumulative SDK turns across all iterations of a task
     # exceed this, the orchestrator logs a one-shot warning and the report
     # surfaces a badge. Does NOT abort the run (max_turns is the hard cap).
-    # expected_turns: 15
     # Maximum total seconds for the entire task evaluation (all iterations combined).
     task_timeout: 600
     # Maximum seconds per agent turn / communicate call (null = no limit).

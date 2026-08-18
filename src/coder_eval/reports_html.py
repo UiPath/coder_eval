@@ -327,8 +327,6 @@ def _format_params(params: dict[str, Any]) -> str:
 
 
 def _render_header(result: EvaluationResult) -> str:
-    from .reports_stats import expected_turns_overage
-
     started = result.started_at.isoformat(timespec="seconds") if result.started_at else "—"
     duration = _format_duration(result.duration_seconds)
     score_badge = _score_pill(result.weighted_score) if result.weighted_score is not None else ""
@@ -340,11 +338,6 @@ def _render_header(result: EvaluationResult) -> str:
     task_cost = eval_result_total_cost(result)
     if task_cost is not None:
         cost_badge = f'<span class="badge neutral">${task_cost:.4f}</span>'
-    expected_turns_badge = ""
-    overage = expected_turns_overage(result)
-    if overage is not None:
-        actual, expected = overage
-        expected_turns_badge = f'<span class="badge warning">expected_turns exceeded ({actual}/{expected})</span>'
     early_stop_badge = ""
     if result.early_stop is not None:
         title = early_stop_gate_note(result.early_stop.reason.value)
@@ -364,7 +357,6 @@ def _render_header(result: EvaluationResult) -> str:
     <span class="badge neutral">{agent_type} · {model}</span>
     <span class="badge neutral">{_esc(duration)}</span>
     {cost_badge}
-    {expected_turns_badge}
     {early_stop_badge}
     <span class="nav-toggle" onclick="toggleTheme()">Toggle theme</span>
   </div>

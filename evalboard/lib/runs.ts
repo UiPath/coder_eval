@@ -85,7 +85,10 @@ export interface TaskResultSummary {
     totalCostUsd: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
-    expectedTurns: number | null;
+    // Wall clock this task is expected to need, derived per harness from run
+    // history and stamped into run.json by the eval runner. Null = unscored
+    // (too little history, or a run predating the stamp) — never "on target".
+    expectedSeconds: number | null;
     // True when the agent's final iteration emitted a text reply
     // (i.e. ResultMessage.result was non-empty). Lets grid/trends
     // Turns cells inflate by +1 on legacy runs that lack total_turns.
@@ -395,16 +398,17 @@ interface RawTaskResult {
     cache_creation_input_tokens?: number | null;
     cache_read_input_tokens?: number | null;
     actual_commands?: number;
-    // Cumulative SDK turn count + configured target. Absent on runs from
-    // before the dashboard-expected-turns PR; both fields are optional and
+    // Cumulative SDK turn count. Absent on older runs; optional and
     // null-fallback through the cell helpers in lib/turns.ts.
     total_turns?: number;
-    expected_turns?: number | null;
-    // Documented visible-turn count (tool calls + final reply) — the canonical
-    // metric the "within expected turns" chart compares against expected_turns.
-    // Absent on runs predating this field; visibleTurnsFromRaw() then reconstructs
-    // it from actual_commands + has_final_reply (the identical formula) so the
-    // metric still populates for historical runs.
+    // Derived expected wall clock for this task, stamped by the eval runner
+    // (see eval_runner/skills/timing.py). Absent on unscored tasks and on every
+    // run predating the stamp, which read as unscored through lib/timing.ts.
+    expected_seconds?: number | null;
+    // Documented visible-turn count (tool calls + final reply), rendered as a
+    // plain count on task views. Absent on runs predating this field;
+    // visibleTurnsFromRaw() then reconstructs it from actual_commands +
+    // has_final_reply (the identical formula).
     visible_turns?: number | null;
     // True iff the final iteration's ResultMessage.result was non-empty.
     // Absent on legacy runs predating the field — treated as false.
@@ -453,6 +457,23 @@ interface RawRunJson {
     // run.json (run_id/activation/run.json), which the dashboard finalizes with
     // compute_activation_rollup. The top-level skills run.json never carries it.
     activation?: RawActivation;
+    // Run-level wall-clock rollup stamped by the eval runner alongside the
+    // per-task expected_seconds. Absent on runs predating it.
+    timing?: RawTiming;
+}
+
+// The `timing` block from run.json. `tolerance` is recorded by the runner so the
+// dashboard can never disagree with the run it is describing about what counted
+// as "within expected".
+interface RawTiming {
+    harness?: string;
+    pool_runs?: number;
+    time_per_passed_task?: number | null;
+    scored_tasks?: number;
+    unscored_tasks?: number;
+    within_expected_time?: number;
+    within_expected_rate?: number | null;
+    tolerance?: number;
 }
 
 interface RawActivation {
@@ -735,7 +756,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
         totalTurns: t.total_turns ?? null,
-        expectedTurns: t.expected_turns ?? null,
+        expectedSeconds: t.expected_seconds ?? null,
         hasFinalReply: t.has_final_reply ?? false,
         inputTokens: t.input_tokens ?? null,
         outputTokens: t.output_tokens ?? null,
@@ -920,7 +941,7 @@ export interface RunOverviewTask {
     weightedScore: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
-    expectedTurns: number | null;
+    expectedSeconds: number | null;
     visibleTurns: number | null;
     hasFinalReply: boolean;
     // True when the nightly skipped this mature task and carried it forward as a
@@ -950,6 +971,11 @@ export interface RunOverview {
     // from the date-shaped id; ad-hoc ids carry no date, so the ad-hoc listing
     // orders by this instead. Optional so test factories predating it stay valid.
     startedAt?: string | null;
+    // Seconds of every task that ran, over the number that passed — the headline
+    // efficiency number, as stamped by the runner. Failures are in the numerator
+    // on purpose: a run that spends an hour failing is a worse run. Null when the
+    // run predates stamping (the front page then falls back to the task rows).
+    timePerPassedTask?: number | null;
 }
 
 // Visible-turn count for a task row: the persisted `visible_turns` field when
@@ -1042,7 +1068,7 @@ export async function readRunOverview(
                 weightedScore: t.weighted_score ?? null,
                 actualCommands: t.actual_commands ?? null,
                 totalTurns: t.total_turns ?? null,
-                expectedTurns: t.expected_turns ?? null,
+                expectedSeconds: t.expected_seconds ?? null,
                 visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,
                 matureSkipped: t.mature_skipped ?? false,
@@ -1069,6 +1095,7 @@ export async function readRunOverview(
         componentShas: extractComponentShas(data.environment_info),
         ...extractRunConfig(data),
         startedAt: data.start_time ?? null,
+        timePerPassedTask: data.timing?.time_per_passed_task ?? null,
     };
 }
 

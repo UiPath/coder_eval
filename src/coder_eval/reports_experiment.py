@@ -100,16 +100,14 @@ def eval_result_to_task_dict(
             downstream consumers (evalboard) collapse them to one. ``None`` when
             the caller doesn't track replicates (repeats disabled / legacy).
     """
-    from coder_eval.reports_stats import expected_turns_overage, visible_turn_count
     from coder_eval.reports_stats import has_final_reply as _has_final_reply
+    from coder_eval.reports_stats import visible_turn_count
 
     ref_similarity: float | None = None
     for cr in result.success_criteria_results:
         if cr.criterion_type == "reference_comparison":
             ref_similarity = cr.score
             break
-
-    overage = expected_turns_overage(result)
 
     total_turns = sum((t.num_turns or 0) for t in result.iterations)
 
@@ -123,14 +121,6 @@ def eval_result_to_task_dict(
     judge_cost = judge_cost_usd(result)
     simulator_cost = simulator_cost_usd(result)
     row_total_cost = sum_costs(agent_cost, judge_cost, simulator_cost)
-
-    expected_turns_value: int | None = None
-    if result.task_config is not None:
-        rl = (result.task_config.resolved or {}).get("run_limits") or {}
-        if isinstance(rl, dict):
-            raw = rl.get("expected_turns")
-            if isinstance(raw, int) and raw >= 1:
-                expected_turns_value = raw
 
     d: dict[str, Any] = {
         "task_id": result.task_id,
@@ -194,13 +184,12 @@ def eval_result_to_task_dict(
         "sdk_options": result.sdk_options,
         "installed_tools": result.environment_info.get("installed_tools"),
         "max_turns_exhausted": result.max_turns_exhausted,
-        "expected_turns_overage": list(overage) if overage is not None else None,
         "total_turns": total_turns,
-        # Documented "visible turns" (tool calls + final reply) — the canonical
-        # turn count the run-level "within expected turns" metric compares against
-        # expected_turns. Distinct from total_turns (SDK num_turns).
+        # Documented "visible turns" (tool calls + final reply). Kept as the turn
+        # count task views render; efficiency itself is measured in seconds, and
+        # the expected-time line is stamped per row after the run by the eval
+        # runner rather than derived here. Distinct from total_turns (SDK num_turns).
         "visible_turns": visible_turn_count(result),
-        "expected_turns": expected_turns_value,
         "has_final_reply": has_reply,
         # Early-stop surfaces (opt-in per-criterion stop_early: blocks). None/False on the
         # default path so downstream analysis never confuses a truncated run

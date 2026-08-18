@@ -17,7 +17,11 @@ import { ChipButton } from "../chips";
 import { VersionChip } from "@/app/_components/version-list";
 import { isInternal } from "@/lib/edition";
 import { displayedTurns } from "@/lib/turns";
-import { ExpectedTurnsStat, TurnsStat } from "./turns-stat";
+import {
+    DurationStat,
+    ExpectedTimeStat,
+    TurnsStat,
+} from "./task-stats";
 import {
     ArtifactsSection,
     ConversationSection,
@@ -192,16 +196,10 @@ export default async function TaskPage({
                             {task.weightedScore?.toFixed(2) ?? "—"}
                         </dd>
                     </div>
-                    <div>
-                        <dt className="text-xs text-gray-500 uppercase tracking-wide">
-                            Duration
-                        </dt>
-                        <dd className="text-gray-900 font-medium mt-0.5 tabular-nums">
-                            {task.durationSeconds
-                                ? `${task.durationSeconds.toFixed(1)}s`
-                                : "—"}
-                        </dd>
-                    </div>
+                    <DurationStat
+                        durationSeconds={task.durationSeconds}
+                        expectedSeconds={task.expectedSeconds}
+                    />
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Cost
@@ -225,9 +223,8 @@ export default async function TaskPage({
                             task.actualCommands,
                             task.hasFinalReply,
                         )}
-                        expectedTurns={task.expectedTurns}
                     />
-                    <ExpectedTurnsStat expectedTurns={task.expectedTurns} />
+                    <ExpectedTimeStat expectedSeconds={task.expectedSeconds} />
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Tokens

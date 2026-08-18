@@ -61,25 +61,26 @@ describe("parseCriterionResults", () => {
 });
 
 describe("toTaskRow", () => {
-    test("propagates total_turns and expected_turns", () => {
+    test("propagates total_turns and the stamped expected_seconds", () => {
         const row = toTaskRow({
             task_id: "x",
             total_turns: 7,
-            expected_turns: 5,
+            expected_seconds: 104.5,
         });
         expect(row.totalTurns).toBe(7);
-        expect(row.expectedTurns).toBe(5);
+        expect(row.expectedSeconds).toBe(104.5);
     });
 
     test("legacy raw shape (no new fields) yields null", () => {
         const row = toTaskRow({ task_id: "x" });
         expect(row.totalTurns).toBeNull();
-        expect(row.expectedTurns).toBeNull();
+        // A run predating expected-time stamping reads as unscored, not on target.
+        expect(row.expectedSeconds).toBeNull();
     });
 
-    test("expected_turns explicitly null on raw yields null", () => {
-        const row = toTaskRow({ task_id: "x", expected_turns: null });
-        expect(row.expectedTurns).toBeNull();
+    test("expected_seconds explicitly null on raw yields null", () => {
+        const row = toTaskRow({ task_id: "x", expected_seconds: null });
+        expect(row.expectedSeconds).toBeNull();
     });
 });
 

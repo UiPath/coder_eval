@@ -4,6 +4,7 @@ import {
     getOverview,
     getRunListing,
     listRecentHarnesses,
+    type RunPoint,
     type TagCount,
 } from "@/lib/overview";
 import { parseHarnessScope } from "@/lib/harness";
@@ -11,7 +12,8 @@ import { fmtDuration, fmtRunTime, fmtTimestamp } from "@/lib/format";
 import { passClass } from "@/lib/pass-rate";
 import { type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
-import { TurnBudgetChart } from "./_overview/turn-budget-chart";
+import { WithinExpectedTimeChart } from "./_overview/time-budget-chart";
+import { fmtTaskSeconds } from "@/lib/timing";
 import { WindowSummary } from "./_overview/window-summary";
 import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 import { TableScroll } from "./_components/scroll-table";
@@ -80,6 +82,39 @@ function filterTagsByQuery(tags: TagCount[], q: string | null): TagCount[] {
     if (!q) return tags;
     const needle = q.toLowerCase();
     return tags.filter((t) => t.tag.toLowerCase().includes(needle));
+}
+
+// The two headline wall-clock numbers for the newest run in the window, with the
+// per-passed-task figure compared against the run before it. Deliberately the
+// LATEST run rather than a window average: the number is meant to be read as
+// "where we are now", and averaging across harnesses would blend Codex's line
+// with Claude's. Renders nothing when no run in scope reports a time, which is
+// every run predating expected-time stamping.
+function WallClockHeadline({ runs }: { runs: RunPoint[] }) {
+    const timed = runs.filter((r) => r.timePerPassedTask != null);
+    const latest = timed.at(-1);
+    if (!latest?.timePerPassedTask) return null;
+    const prev = timed.at(-2)?.timePerPassedTask ?? null;
+    const deltaPct = prev ? ((latest.timePerPassedTask - prev) / prev) * 100 : null;
+    const scored = runs.filter((r) => r.withinExpectedTimeRate != null).at(-1);
+    return (
+        <span className="text-xs text-gray-500 tabular-nums flex items-baseline gap-3">
+            <span className="text-gray-900 font-semibold text-sm">
+                {fmtTaskSeconds(latest.timePerPassedTask)}
+            </span>
+            {deltaPct != null && Math.abs(deltaPct) >= 0.5 && (
+                <span className={deltaPct > 0 ? "text-rose-700" : "text-emerald-700"}>
+                    {deltaPct > 0 ? "▲" : "▼"} {Math.abs(deltaPct).toFixed(0)}% vs
+                    prev
+                </span>
+            )}
+            {scored?.withinExpectedTimeRate != null && (
+                <span>
+                    {scored.withinExpectedTimeRate.toFixed(0)}% within expected
+                </span>
+            )}
+        </span>
+    );
 }
 
 function buildHref(
@@ -283,17 +318,21 @@ export default async function Page({
                     windowEnd={overview.windowEnd}
                 />
                 <div className="pt-4 mt-2 border-t border-dashed border-gray-200 space-y-1">
-                    <h2 className="text-sm font-semibold text-gray-900">
-                        Within Expected Turns (%)
-                    </h2>
+                    <div className="flex items-baseline gap-6">
+                        <h2 className="text-sm font-semibold text-gray-900">
+                            Time per Passed Task
+                        </h2>
+                        <WallClockHeadline runs={overview.runs} />
+                    </div>
                     <p className="text-xs text-gray-500">
-                        % of budgeted tasks that stayed within 1.5× their
-                        expected turns (a budgeted task that failed counts as
-                        over budget) · runs with no budgeted task are omitted
-                        rather than plotted at 0
+                        % of passing tasks that came in within 1.5× their
+                        expected time, which is derived per task from that
+                        harness's own history (p10 of past passing runs) · a task
+                        with under three passing runs is unscored, and runs with
+                        no scored task are omitted rather than plotted at 0
                         {activeTag || q ? " · scoped to the active filter" : ""}
                     </p>
-                    <TurnBudgetChart
+                    <WithinExpectedTimeChart
                         data={overview.runs}
                         harnesses={overview.harnesses}
                         windowStart={overview.windowStart}

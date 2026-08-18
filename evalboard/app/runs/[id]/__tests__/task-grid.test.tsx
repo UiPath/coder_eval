@@ -6,7 +6,7 @@ import { TaskGrid } from "../task-grid";
 function row(
     taskId: string,
     actualCommands: number | null,
-    expectedTurns: number | null,
+    expectedSeconds: number | null,
     extra: Partial<TaskResultSummary> = {},
 ): TaskResultSummary {
     return {
@@ -14,11 +14,11 @@ function row(
         replicateIndex: null,
         status: "SUCCESS",
         weightedScore: 1.0,
-        durationSeconds: 1.0,
+        durationSeconds: 100,
         totalCostUsd: 0.1,
         actualCommands,
         totalTurns: null,
-        expectedTurns,
+        expectedSeconds,
         hasFinalReply: false,
         inputTokens: null,
         outputTokens: null,
@@ -38,7 +38,7 @@ function revealTokens(): void {
     fireEvent.click(screen.getByRole("button", { name: /show tokens/i }));
 }
 
-function turnsCellFor(taskId: string): HTMLElement {
+function cellFor(taskId: string, index: number): HTMLElement {
     // Scope to the desktop <table>: below md the grid also renders each task as
     // a card (same link/values), so an unscoped query would match twice.
     const table = screen.getByRole("table");
@@ -47,9 +47,12 @@ function turnsCellFor(taskId: string): HTMLElement {
     });
     const tr = link.closest("tr")!;
     const cells = within(tr).getAllByRole("cell");
-    // Layout: Task, Status, Score, Duration, Cost, Turns, Out, Cache+, Cache↺
-    return cells[5]!;
+    return cells[index]!;
 }
+
+// Layout: Task, Status, Score, Duration, Cost, Turns, Out, Cache+, Cache↺
+const durationCellFor = (taskId: string) => cellFor(taskId, 3);
+const turnsCellFor = (taskId: string) => cellFor(taskId, 5);
 
 describe("TaskGrid — mature rows", () => {
     test("opens a popover linking to the run where it last executed", () => {
@@ -117,52 +120,62 @@ describe("TaskGrid — mature rows", () => {
     });
 });
 
-describe("TaskGrid — Turns column", () => {
+describe("TaskGrid — Duration column", () => {
     test("colorizes the digits per ratio bucket (no background)", () => {
+        // row() fixes durationSeconds at 100s, so expectedSeconds sets the ratio.
         render(
             <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
-                    row("over", 10, 5), // ratio 2.0 → red (> 1.5)
-                    row("mid", 7, 5), // ratio 1.4 → yellow (1.25 < r ≤ 1.5)
-                    row("under", 4, 10), // ratio 0.4 → green (≤ 1.25)
-                    row("notarget", 7, null), // black-ish default
+                    row("over", 3, 50), // ratio 2.0 → red (> 1.5)
+                    row("mid", 3, 71), // ratio 1.41 → yellow (1.25 < r ≤ 1.5)
+                    row("under", 3, 250), // ratio 0.4 → green (≤ 1.25)
+                    row("unscored", 3, null), // no line yet → black-ish default
                 ]}
             />,
         );
 
-        const overCell = turnsCellFor("over");
-        expect(overCell).toHaveTextContent("10");
+        const overCell = durationCellFor("over");
         expect(overCell.className).toContain("text-rose-700");
         expect(overCell.className).not.toContain("bg-");
-        expect(overCell).toHaveAttribute(
-            "title",
-            "expected_turns target: 5",
+        expect(overCell).toHaveAttribute("title", "expected time: 0m50s");
+
+        expect(durationCellFor("mid").className).toContain("text-amber-700");
+        expect(durationCellFor("under").className).toContain(
+            "text-emerald-700",
         );
 
-        const midCell = turnsCellFor("mid");
-        expect(midCell.className).toContain("text-amber-700");
-
-        const underCell = turnsCellFor("under");
-        expect(underCell.className).toContain("text-emerald-700");
-
-        const noTargetCell = turnsCellFor("notarget");
-        expect(noTargetCell).toHaveTextContent("7");
-        expect(noTargetCell.className).toContain("text-gray-900");
-        expect(noTargetCell.className).not.toMatch(
+        const unscoredCell = durationCellFor("unscored");
+        expect(unscoredCell.className).toContain("text-gray-900");
+        expect(unscoredCell.className).not.toMatch(
             /text-(rose|amber|emerald)-/,
         );
-        expect(noTargetCell).toHaveAttribute(
+        expect(unscoredCell).toHaveAttribute(
             "title",
-            "no expected_turns target set",
+            "no expected time yet (needs 3 passing runs)",
         );
+    });
+});
+
+describe("TaskGrid — Turns column", () => {
+    test("renders a plain count, never tinted against a budget", () => {
+        // Turns are data, not a scored signal: a Read and a 20-minute deploy
+        // both count 1, which is why the turn budget was retired.
+        render(
+            <TaskGrid sourceId="skills"
+                runId="r1"
+                tasks={[row("over", 10, 50)]}
+            />,
+        );
+        const cell = turnsCellFor("over");
+        expect(cell).toHaveTextContent("10");
+        expect(cell.className).not.toMatch(/text-(rose|amber|emerald)-/);
     });
 
     test("renders em dash when actualCommands is null", () => {
         render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("legacy", null, null)]} />);
         const cell = turnsCellFor("legacy");
         expect(cell).toHaveTextContent("—");
-        expect(cell.className).toContain("text-gray-900");
     });
 
     test("token columns are collapsed by default, revealed by the toggle", () => {

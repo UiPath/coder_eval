@@ -9,7 +9,8 @@ import {
     summarizeListing,
     taskCarriesRepoTag,
     taskMatchesTag,
-    turnBudgetRateForTasks,
+    timePerPassedTaskForTasks,
+    withinExpectedTimeRateForTasks,
     type PerRun,
     type RunListingRow,
 } from "../overview";
@@ -27,7 +28,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         weightedScore: null,
         actualCommands: null,
         totalTurns: null,
-        expectedTurns: null,
+        expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
         ...overrides,
@@ -105,104 +106,122 @@ describe("summarizeListing", () => {
     });
 });
 
-describe("turnBudgetRateForTasks", () => {
-    test("null when no task in scope carries a budget", () => {
-        // No task carries an expected_turns budget, so none is eligible and the
-        // final eligible>0 check returns null (the chart shows a gap).
-        expect(turnBudgetRateForTasks([task({ visibleTurns: 5 })])).toBeNull();
+describe("withinExpectedTimeRateForTasks", () => {
+    test("null when no task in scope is scored", () => {
+        // Nothing carries a derived expected time, so nothing is eligible and the
+        // chart shows a gap rather than a point.
+        expect(
+            withinExpectedTimeRateForTasks([task({ durationSeconds: 120 })]),
+        ).toBeNull();
     });
 
-    test("100% when every budgeted SUCCESS task is within budget", () => {
+    test("100% when every scored pass is within its line", () => {
         expect(
-            turnBudgetRateForTasks([
-                task({ expectedTurns: 10, visibleTurns: 7 }),
-                task({ expectedTurns: 6, visibleTurns: 9 }), // exactly 1.5×
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 70 }),
+                task({ expectedSeconds: 100, durationSeconds: 150 }), // exactly 1.5×
             ]),
         ).toBe(100);
     });
 
-    test("computes the within-budget share", () => {
-        // 1 within, 1 over → 50% of 2 eligible.
+    test("computes the within-expected share", () => {
         expect(
-            turnBudgetRateForTasks([
-                task({ expectedTurns: 10, visibleTurns: 12 }), // within (<=15)
-                task({ expectedTurns: 10, visibleTurns: 16 }), // over (>15)
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }), // within
+                task({ expectedSeconds: 100, durationSeconds: 160 }), // over
             ]),
         ).toBe(50);
     });
 
-    test("excludes tasks without a budget from the denominator", () => {
-        // Only the budgeted task counts; the budget-less one is ignored.
+    test("excludes unscored tasks from the denominator", () => {
         expect(
-            turnBudgetRateForTasks([
-                task({ expectedTurns: 10, visibleTurns: 12 }),
-                task({ visibleTurns: 99 }),
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }),
+                task({ durationSeconds: 9999 }), // unscored → ignored
             ]),
         ).toBe(100);
     });
 
-    test("failed/crashed tasks count as over budget even when cheap", () => {
-        // A crashed task with a low visible count must NOT count as within budget;
-        // it's treated as having exhausted its turn budget (infinite turns).
-        const rate = turnBudgetRateForTasks([
-            task({ expectedTurns: 10, visibleTurns: 20 }), // SUCCESS, over → fail
-            task({ status: "FAILURE", expectedTurns: 10, visibleTurns: 2 }), // over
-            task({ status: "ERROR", expectedTurns: 10, visibleTurns: 1 }), // over
-        ]);
-        // All 3 eligible, none within budget → 0%.
-        expect(rate).toBe(0);
-    });
-
-    test("budget-less failures are excluded from the denominator", () => {
-        // Eligibility is symmetric: a failure with no expected_turns budget is
-        // excluded just like a budget-less success, so it cannot drag the rate
-        // down. Only the budgeted within-budget SUCCESS counts → 100%.
-        const rate = turnBudgetRateForTasks([
-            task({ expectedTurns: 10, visibleTurns: 7 }), // budgeted, within
-            task({ status: "FAILURE" }), // no budget → excluded
-        ]);
-        expect(rate).toBe(100);
-    });
-
-    test("budgeted SUCCESS with no visible-turn count is excluded", () => {
-        // A budgeted SUCCESS task we can't judge (visibleTurns == null) is
-        // dropped from the denominator rather than counted as over budget, so
-        // it neither helps nor hurts the rate.
-        const rate = turnBudgetRateForTasks([
-            task({ expectedTurns: 10, visibleTurns: 7 }), // budgeted, within
-            task({ expectedTurns: 10, visibleTurns: null }), // no turn data → excluded
-        ]);
-        // If the null-turns task were counted as over, this would be 50%.
-        expect(rate).toBe(100);
-    });
-
-    test("null when no task in scope carries a budget, even with failures", () => {
-        // A run that never opted into turn budgeting reports nothing rather than
-        // a failure-driven 0% — the chart shows a gap, not a misleading point.
+    test("failures are excluded, however long or short they ran", () => {
+        // The departure from the retired turn budget, which counted a budgeted
+        // failure as over budget. A 2-second crash did not blow a time budget,
+        // and counting a slow failure here would let a pass→timeout regression
+        // read as an efficiency gain once the slow pass stopped counting.
         expect(
-            turnBudgetRateForTasks([
-                task({ status: "FAILURE" }),
-                task({ status: "ERROR", visibleTurns: 3 }),
-                task({ visibleTurns: 5 }), // budget-less SUCCESS
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }), // within
+                task({
+                    status: "FAILURE",
+                    expectedSeconds: 100,
+                    durationSeconds: 2,
+                }),
+                task({
+                    status: "TIMEOUT",
+                    expectedSeconds: 100,
+                    durationSeconds: 1200,
+                }),
+            ]),
+        ).toBe(100);
+    });
+
+    test("a scored pass with no duration is excluded rather than counted over", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }),
+                task({ expectedSeconds: 100, durationSeconds: null }),
+            ]),
+        ).toBe(100);
+    });
+
+    test("null when a run only has failures, even scored ones", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ status: "FAILURE", expectedSeconds: 100, durationSeconds: 10 }),
+                task({ status: "ERROR", expectedSeconds: 100, durationSeconds: 3 }),
             ]),
         ).toBeNull();
     });
 
-    test("a budgeted failure counts as over budget (0%)", () => {
-        // Once a budget exists in scope, a failed task drags the rate down.
+    test("only reflects the tasks passed in (scoping contract)", () => {
         expect(
-            turnBudgetRateForTasks([
-                task({ status: "FAILURE", expectedTurns: 10, visibleTurns: 2 }),
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 80, durationSeconds: 80 }),
             ]),
-        ).toBe(0);
+        ).toBe(100);
+    });
+});
+
+describe("timePerPassedTaskForTasks", () => {
+    test("divides all seconds that ran by the number that passed", () => {
+        expect(
+            timePerPassedTaskForTasks([
+                task({ durationSeconds: 100 }),
+                task({ durationSeconds: 300 }),
+            ]),
+        ).toBe(200);
     });
 
-    test("only reflects the tasks passed in (scoping contract)", () => {
-        // getOverview hands this function the already tag/q-scoped list, so the
-        // rate is whatever that subset implies — here a single within-budget task.
+    test("seconds burned failing stay in the numerator", () => {
+        // A run that spends its time failing is a worse run, and the headline
+        // says so: 400 seconds over the single pass.
         expect(
-            turnBudgetRateForTasks([task({ expectedTurns: 8, visibleTurns: 8 })]),
-        ).toBe(100);
+            timePerPassedTaskForTasks([
+                task({ durationSeconds: 100 }),
+                task({ status: "FAILURE", durationSeconds: 300 }),
+            ]),
+        ).toBe(400);
+    });
+
+    test("null when nothing passed", () => {
+        expect(
+            timePerPassedTaskForTasks([
+                task({ status: "FAILURE", durationSeconds: 300 }),
+            ]),
+        ).toBeNull();
+    });
+
+    test("null when no duration was recorded", () => {
+        expect(timePerPassedTaskForTasks([task({})])).toBeNull();
     });
 });
 

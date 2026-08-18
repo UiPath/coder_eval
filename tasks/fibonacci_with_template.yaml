@@ -2,9 +2,6 @@ task_id: fibonacci-starter
 description: "Implement fibonacci function with starter code template"
 tags: [golden, basic, pure-python, template]
 
-run_limits:
-  expected_turns: 3
-
 agent:
   type: claude-code
   permission_mode: acceptEdits

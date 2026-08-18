@@ -14,7 +14,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         weightedScore: null,
         actualCommands: null,
         totalTurns: null,
-        expectedTurns: null,
+        expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
         ...overrides,
@@ -102,23 +102,23 @@ describe("attention score", () => {
         expect(topAttention.map((r) => r.skill)).toEqual(["chronic"]);
     });
 
-    test("turn overage contributes for a passing-but-bloated skill", () => {
+    test("time overage contributes for a passing-but-slow skill", () => {
         const runs = Array.from({ length: 2 }, (_, i) =>
             perRun(`2026-01-0${2 - i}`, [
                 task({
                     taskId: "a",
                     skill: "slow",
                     status: "SUCCESS",
-                    totalTurns: 24,
-                    expectedTurns: 12,
+                    durationSeconds: 240,
+                    expectedSeconds: 120,
                 }),
             ]),
         );
         const row = buildWatchlist(runs).topAttention[0];
         expect(row.failRate).toBe(0);
-        expect(row.turnOverage).toBe(1); // ratio 2 -> clamp(2-1,0,1)=1
+        expect(row.timeOverage).toBe(1); // ratio 2 -> clamp(2-1,0,1)=1
         expect(row.score).toBe(20);
-        expect(row.reason).toContain("turn budget");
+        expect(row.reason).toContain("expected time");
     });
 });
 
@@ -192,20 +192,25 @@ describe("turn overage", () => {
                     taskId: "a",
                     skill: "slow",
                     status: "SUCCESS",
-                    totalTurns: 18,
-                    expectedTurns: 12,
+                    durationSeconds: 180,
+                    expectedSeconds: 120,
                 }),
                 task({
                     taskId: "b",
                     skill: "ok",
                     status: "SUCCESS",
-                    totalTurns: 6,
-                    expectedTurns: 12,
+                    durationSeconds: 60,
+                    expectedSeconds: 120,
                 }),
             ]),
         ]);
-        expect(data.turnOverage).toEqual([
-            { skill: "slow", avgTurnRatio: 1.5, avgTurns: 18, avgExpected: 12 },
+        expect(data.timeOverage).toEqual([
+            {
+                skill: "slow",
+                avgTimeRatio: 1.5,
+                avgSeconds: 180,
+                avgExpectedSeconds: 120,
+            },
         ]);
     });
 });
@@ -220,7 +225,7 @@ describe("empty window", () => {
             leaderboard: [],
             streaks: [],
             volatility: [],
-            turnOverage: [],
+            timeOverage: [],
         });
     });
 

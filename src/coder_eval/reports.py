@@ -483,8 +483,8 @@ class ReportGenerator:
 
     @staticmethod
     def _runtime_notes_lines(summary: RunSummary) -> list[str]:
-        """The ``## Run-time Notes`` blockquotes (max_turns exhaustion + expected_turns
-        overage). Returns ``[]`` when there are no notes so the caller adds nothing —
+        """The ``## Run-time Notes`` blockquotes (max_turns exhaustion, early stop).
+        Returns ``[]`` when there are no notes so the caller adds nothing —
         preserving the "only render the section when notes exist" behavior.
         """
         # Surface per-task signals as plain blockquote one-liners. Same surface for
@@ -494,16 +494,6 @@ class ReportGenerator:
             task_id = t.get("task_id", "?")
             if t.get("max_turns_exhausted"):
                 notes.append(f"> **WARNING:** [{task_id}] max_turns exhausted")
-            overage_field = t.get("expected_turns_overage")
-            if (
-                isinstance(overage_field, (list, tuple))
-                and len(overage_field) == 2
-                and all(isinstance(x, int) for x in overage_field)
-            ):
-                actual, expected = overage_field
-                notes.append(
-                    f"> **WARNING:** [{task_id}] expected_turns exceeded: {actual}/{expected} (cumulative SDK turns)"
-                )
             if t.get("stopped_early"):
                 reason = t.get("early_stop_reason") or "unknown"
                 # No "N turn(s) avoided" claim here. It derived from

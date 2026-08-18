@@ -238,7 +238,6 @@ valid and an empty block is legal — every field defaults to "no limit".
 run_limits:
   # Structural caps
   max_turns: 20                       # hard cap on agent inner-loop turns per iteration
-  expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
 
@@ -253,7 +252,6 @@ run_limits:
 | Field | Default | Constraint | Description |
 |-------|---------|------------|-------------|
 | `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
-| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
@@ -313,25 +311,26 @@ coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_toke
 > They must live under `run_limits:`. (A deprecation shim hoisted them
 > automatically until it was removed on 2026-06-01.)
 
-### `expected_turns` (soft efficiency budget)
+### Efficiency is measured in seconds, not turns
 
-`run_limits.expected_turns` is a **soft target**, not a cap: the run is never
-aborted for exceeding it (use `max_turns` for a hard limit). It's the budget the
-dashboard's **"Within Expected Turns"** metric divides by — a task counts as
-"within budget" when it succeeds *and* its turn count stays within **1.5×**
-`expected_turns`. The run-level headline reports the share of **budgeted** tasks
-that did: a budgeted task that failed counts as over budget, while tasks with no
-`expected_turns` budget are excluded entirely (success or fail).
+There is nothing to declare. A task's expected wall clock is **derived**, per
+task and per harness, from the durations that task has already achieved: p10 of
+its passing runs once there are ten of them, `min` while history is thinner, and
+no line at all under three. The eval runner computes it from past runs and stamps
+`expected_seconds` onto each row of `run.json`, which is what the dashboard's
+**"Time per Passed Task"** card and the Slack rollup read.
 
-The count compared against the budget is **visible turns** — one per tool call
-plus one for the agent's final reply — *not* the SDK's `total_turns` (which
-counts assistant messages and can bundle several tool calls into one).
+A task counts as within expected while it stays inside **1.5×** that line.
+Passing tasks only: a task that crashed in ten seconds did not blow a time
+budget. The seconds burned by failures are still visible, in the headline's
+numerator (total seconds of every task that ran, over the number that passed).
 
-Set it to the number of turns a competent agent should need for the task. Pick
-budgets consistently across a suite — the headline % is only comparable when
-tasks are measured against realistic, like-for-like targets. Omit it (the
-default) to exclude a task from the metric entirely.
-
+`expected_turns` was the hand-written predecessor of this. `run_limits.expected_turns`
+is deprecated and ignored: still accepted so existing task YAMLs keep resolving, but
+nothing reads it, and it will be removed in a later release. Delete it when you
+touch a task. Turn counts are still reported, they are just not scored — a `Read`
+and a 20-minute deploy both count one turn, which is why the budget never meant
+much.
 ### `stop_early` (opt-in early stop)
 
 Early stop ends a single-shot run **early** once the run's **armed** criteria

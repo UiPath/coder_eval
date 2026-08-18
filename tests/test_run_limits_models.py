@@ -109,21 +109,22 @@ class TestRunLimitsValidation:
         rebuilt = RunLimits.model_validate(dumped)
         assert rebuilt == rl
 
-    def test_expected_turns_default_none(self):
-        assert RunLimits().expected_turns is None
+    def test_deprecated_expected_turns_still_resolves(self):
+        """The retired turn budget is accepted and ignored, not rejected.
 
-    def test_expected_turns_lower_bound(self):
+        Nothing reads it any more (efficiency is scored in wall-clock seconds
+        against a line derived from run history), but thousands of task YAMLs
+        still declare it and RunLimits forbids extras — so dropping the field
+        outright would fail every one of those tasks at resolution time.
+        """
+        assert RunLimits().expected_turns is None
+        assert RunLimits(expected_turns=1).expected_turns == 1
+        assert RunLimits.model_validate({"expected_turns": "10"}).expected_turns == 10
         with pytest.raises(ValidationError, match="greater than or equal to 1"):
             RunLimits(expected_turns=0)
-        assert RunLimits(expected_turns=1).expected_turns == 1
 
-    def test_expected_turns_yaml_coercion(self):
-        assert RunLimits.model_validate({"expected_turns": "10"}).expected_turns == 10
-
-    def test_expected_turns_greater_than_max_turns_allowed(self):
-        rl = RunLimits(max_turns=5, expected_turns=20)
-        assert rl.max_turns == 5
-        assert rl.expected_turns == 20
+    def test_deprecated_expected_turns_is_marked_deprecated(self):
+        assert RunLimits.model_fields["expected_turns"].deprecated
 
     def test_extra_forbid_still_rejects_unknowns(self):
         with pytest.raises(ValidationError):

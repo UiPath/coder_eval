@@ -22,10 +22,10 @@ function shortLabel(ms: number): string {
 }
 
 // Sibling of DailySuccessChart: same axes/styling and the same per-harness
-// series split, plotting the per-run "within expected turns" rate instead of the
+// series split, plotting the per-run "within expected time" rate instead of the
 // success rate. Driven by the same windowed RunPoint[] so the shared window and
 // harness selectors control both.
-export function TurnBudgetChart({
+export function WithinExpectedTimeChart({
     data,
     harnesses,
     windowStart,
@@ -36,7 +36,11 @@ export function TurnBudgetChart({
     windowStart: number;
     windowEnd: number;
 }) {
-    const { rows, series } = pivotByHarness(data, harnesses, "turnBudgetRate");
+    const { rows, series } = pivotByHarness(
+        data,
+        harnesses,
+        "withinExpectedTimeRate",
+    );
     return (
         <div className="space-y-1">
             <div className="w-full h-56 relative">
@@ -72,8 +76,8 @@ export function TurnBudgetChart({
                             content={
                                 <HarnessTooltip
                                     series={series}
-                                    suffix="within turn budget"
-                                    emptyText="no tasks with a turn budget"
+                                    suffix="within expected time"
+                                    emptyText="no scored tasks"
                                 />
                             }
                             cursor={{
@@ -94,7 +98,7 @@ export function TurnBudgetChart({
                                 // the same reason: rows are interleaved across
                                 // harnesses, so "no value here" usually means
                                 // "another harness's run". A run of this harness
-                                // with no budgeted task is already absent from
+                                // with no scored task is already absent from
                                 // the pivot, so it reads as a bridged gap rather
                                 // than a fabricated 0%.
                                 connectNulls={true}
