@@ -502,7 +502,7 @@ def _check_execution_sign_resolution(text: str, tmp: Path) -> list[str]:
     describe code that has stopped doing it.
 
     This claim's job is to bind the PROSE to the behaviour. ``TestExecutionGateSign``
-    (``tests/test_optimize_gate.py``) is the unit-level guarantee and asserts the same three
+    (``tests/test_optimize_execution.py``) is the unit-level guarantee and asserts the same three
     things deliberately: a weaker check here would not prove the sentence. Neither is redundant
     with the other — delete the unit test and the behaviour is unpinned; delete this and
     ``optimize-method.md`` can be reworded into a lie about it, which is exactly what the file

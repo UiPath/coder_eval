@@ -46,7 +46,7 @@ unit-tested, and a rule routed through it cannot be half-right.
   f-string, or imports it from another module, has no first-party constant of its own and drops
   out of scope entirely. Both are real evasion routes and neither is detected.
 * It scans all of ``tests/`` — not just ``tests/lint/rules/``. The class is not confined to
-  numbered rules: ``tests/test_optimize_gate.py``'s ``_coder_eval_imports`` had exactly the
+  numbered rules: ``tests/test_optimize_layering.py``'s ``_coder_eval_imports`` had exactly the
   same blindness, and it is the helper behind the ``optimize/`` / ``reports_optimize``
   layering pin CLAUDE.md calls out as held "by a test, not by this sentence". Scoping to the
   rules package would have guaranteed nothing ever caught it.

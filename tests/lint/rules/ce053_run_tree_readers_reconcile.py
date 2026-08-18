@@ -43,7 +43,7 @@ the wrong place to put one. Stated rather than glossed, because this rule's fail
   reconcile_arms(...)`` with the ``if stale:`` branch dropped passes — which is the likeliest
   future regression, since copying the call is easy and copying the branch is a second step.
   Nothing an AST walk can see distinguishes the two; the behavioural tests in
-  ``tests/test_optimize_gate.py::TestStageAReadersReconcileTheTree`` are what cover it.
+  ``tests/test_optimize_layering.py::TestStageAReadersReconcileTheTree`` are what cover it.
 - It does not check that the reconciliation is over the SAME run dirs and variant the read uses.
   Both are usually the function's own parameters, but a mismatched pair would pass.
 - Nested functions are folded into their enclosing top-level one: ``execution_gate`` reconciles in

@@ -649,7 +649,7 @@ with the two `action.yml` items above — one considered change to the action's 
       retiring the tree's last `# noqa: CE048`.
 - [ ] A no-op "absence" assertion: `assert "X" not in text.replace("NOT X", "")` is vacuous whenever
       the fixture cannot contain `X` at all, and reads as a strong guard. The named instance —
-      `tests/test_optimize_gate.py`'s `render_search_comparison` blocked-path test — **is FIXED**
+      `tests/test_reports_optimize.py`'s `render_search_comparison` blocked-path test — **is FIXED**
       (Plan D Phase 4: it now asserts `block.splitlines()[0] == "### Search round — CANNOT
       COMPARE"`, and a sibling pins `DO NOT ACCEPT` as PRESENT on the input that produces it), so
       do not go looking for a live example; the general RULE is what remains deferred. The correct form is to read the discriminating
@@ -675,7 +675,7 @@ with the two `action.yml` items above — one considered change to the action's 
       lines apart as byte-identical copies, two of them wrapped differently in source while producing
       the same string. A wording fix applied to one would have left the two tracks describing the
       same decision differently in a ledger read back weeks later. The interim guard is
-      `test_neither_wrapper_respells_a_shared_note` in `tests/test_optimize_gate.py`, which pins
+      `test_neither_wrapper_respells_a_shared_note` in `tests/test_optimize_layering.py`, which pins
       those four strings only. The general rule is **Plan D's proposed CE049** and is deliberately
       not built here: unlike CE042 (a one-allowed-site seam rule copied wholesale from CE040), this
       is a heuristic whole-tree rule needing its own design pass — a length threshold, a

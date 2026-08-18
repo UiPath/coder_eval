@@ -31,6 +31,7 @@ Builders taking a path take it as an explicit argument rather than reaching for 
 """
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -51,8 +52,8 @@ from coder_eval.models import (
 )
 from coder_eval.optimize.activation import activation_gate
 from coder_eval.optimize.execution import execution_gate, measure_execution_noise_floor
-from coder_eval.optimize.gate import MATERIALITY_FLOOR
-from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES
+from coder_eval.optimize.gate import GATE_P_PRECISION, GATE_RESAMPLES, MATERIALITY_FLOOR
+from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, DEFAULT_ALPHA
 
 
 SUITE = "my-skill-activation"
@@ -621,3 +622,71 @@ def set_split(run_dir: Path, split: str | None) -> None:
         json.dumps({"row_selection": {"split": split, "max_rows": None, "sample_per_stratum": None}}),
         encoding="utf-8",
     )
+
+
+# Builders a test in ANOTHER of the per-module files reaches for. They were class members of
+# one test class until the split made that a cross-FILE reference; a shared builder belongs
+# here rather than being duplicated per file.
+REFUSAL_RESAMPLES = 2_000
+
+
+def confirm_activation_arms(tmp_path: Path, *, split: str | None, incumbent_hits: int, candidate_hits: int):
+    """Two arms over 6 rows, each scoring a given number of them, under a recorded split."""
+    inc_labels = {f"r{i}": [("yes", "yes" if i < incumbent_hits else "no")] for i in range(6)}
+    cand_labels = {f"r{i}": [("yes", "yes" if i < candidate_hits else "no")] for i in range(6)}
+    inc = write_arm(tmp_path, "incumbent", inc_labels, invocations=2, prefix="inc-")
+    cand = write_arm(tmp_path, "candidate", cand_labels, invocations=2, prefix="cand-")
+    for d in (*inc, *cand):
+        set_split(d, split)
+    return inc, cand
+
+
+def split_labelled_arms(tmp_path: Path, incumbent_split: str | None, candidate_split: str | None):
+    labels = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(6)}
+    inc = write_arm(tmp_path, "incumbent", labels, invocations=2, prefix="inc-")
+    cand = write_arm(tmp_path, "candidate", labels, invocations=2, prefix="cand-")
+    for d in inc:
+        set_split(d, incumbent_split)
+    for d in cand:
+        set_split(d, candidate_split)
+    return inc, cand
+
+
+def activation_verdict_over_arms(inc, cand):
+    return activation_gate(
+        incumbent_run_dirs=inc,
+        candidate_run_dirs=cand,
+        incumbent_variant="incumbent",
+        candidate_variant="candidate",
+        suite_id=SUITE,
+        criterion_index=0,
+        n_resamples=FAST_RESAMPLES,
+    )
+
+
+def shifted_replicate_arms(shift: float, *, swap: bool = False) -> dict[str, dict[str, list[float]]]:
+    """Two arms differing by ``shift`` per replicate, with the replicate spread varied per row.
+
+    ``swap`` exchanges the arms, which is how a NEGATIVE effect is built. Negating the shift
+    instead would write ``weighted_score`` values below zero — and `EvaluationResult` bounds that
+    field at 0.0, so every row on disk then fails to LOAD while the statistic (which comes from
+    `experiment.json`) still computes: the numbers look right and the integrity checks and
+    guardrails are silently computed over nothing. Measured while building the REVERSED pin.
+    """
+    low = {"r0": [0.10, 0.50], "r1": [0.20, 0.40], "r2": [0.05, 0.55], "r3": [0.25, 0.45]}
+    high = {row: [round(v + shift, 3) for v in values] for row, values in low.items()}
+    return {"incumbent": high, "candidate": low} if swap else {"incumbent": low, "candidate": high}
+
+
+def expected_resolution_note(
+    family_size: int, n_resamples: int = GATE_RESAMPLES, alpha: float = DEFAULT_ALPHA
+) -> tuple:
+    threshold = alpha / family_size
+    return (
+        threshold,
+        math.sqrt(2.0 / (n_resamples * threshold)),
+        math.ceil(2.0 / (GATE_P_PRECISION**2 * threshold)),
+    )
+
+
+SEARCH_HEAD_SCORES: dict[str, float] = {"r1": 1.0, "r2": 0.0, "r3": 1.0, "r4": 0.0}  # mean 0.5

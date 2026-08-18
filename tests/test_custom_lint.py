@@ -2642,7 +2642,7 @@ class TestPluginArtifacts:
         a `__pycache__` filter guarding a path the file list never yielded, whose own test passed
         with the filter deleted. Reproduced before writing this: an added
         ``if "this-can-never-match" in path.parts: continue`` passed all 1331 tests in this file
-        and `test_optimize_gate.py`.
+        and `test_optimize_gate.py` (since split into the eight `test_optimize_*` files).
 
         It drives the scaffold IN-PROCESS rather than through `subprocess`, which is what makes the
         measurement possible at all, and covers every exit path the module docstring declares. That
@@ -8223,7 +8223,7 @@ class TestCE053RunTreeReadersReconcile:
                 return [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
         """
         assert self._check(source, "src/coder_eval/reports.py") == []
-        assert self._check(source, "tests/test_optimize_gate.py") == []
+        assert self._check(source, "tests/test_optimize_load.py") == []
 
     def test_a_noqa_on_the_read_suppresses_it(self, tmp_path: Path) -> None:
         """The escape hatch, through the real runner rather than the rule in isolation.
@@ -9078,8 +9078,8 @@ class TestTheSharedFixtureModuleIsNotInverted:
         probe = tmp_path / "probe.py"
         probe.write_text(
             "from tests.optimize_fixtures import write_row\n"
-            "import tests.test_optimize_gate\n"
-            "from tests import test_optimize_gate as gate_tests\n"
+            "import tests.test_optimize_layering\n"
+            "from tests import test_optimize_layering as layering_tests\n"
             "from .sibling import thing\n",
             encoding="utf-8",
         )
@@ -9089,7 +9089,7 @@ class TestTheSharedFixtureModuleIsNotInverted:
         # `node.module`, and therefore the one most likely to be wrong and never exercised.
         assert any("a relative import" in entry for entry in found)
         # And the `from tests import <module>` shape, whose offending name is in `node.names`.
-        assert any(entry.endswith("tests.test_optimize_gate") for entry in found)
+        assert any(entry.endswith("tests.test_optimize_layering") for entry in found)
 
     def test_it_is_not_collected_as_a_test_module(self) -> None:
         # Named `optimize_fixtures.py`, not `test_optimize_fixtures.py`: pytest would collect it, and
