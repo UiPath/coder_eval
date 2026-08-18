@@ -211,19 +211,25 @@ max-branches = 25
 #
 # Measured at this commit: `isolation/docker_runner.py::_build_argv` 29,
 # `reports_experiment.py::generate_variant_report` 24,
-# `orchestrator.py::_simulation_dialog_loop` 22, `agents/claude_code_agent.py::communicate` 21 —
-# everything else is under 20.
+# `optimize/execution.py::execution_gate` 23, `orchestrator.py::_simulation_dialog_loop` 22,
+# `agents/claude_code_agent.py::communicate` 21 — everything else is under 20.
 #
 # No per-file-ignore exists because the CEILING is 30, and nothing else. The old flat
 # `optimize_gate.py` — the file the plan that introduced this expected to exempt — never needed one,
 # and the split has now landed into the `optimize/` package: that module is six (`optimize/load.py`
-# 860, `optimize/gate.py` 694, `optimize/activation.py` 1361, `optimize/execution.py` 1421,
-# `optimize/fronts.py` 406, `optimize/search.py` 335), down from one file of
-# 3,664 lines (3,291 before that plan's earlier phases added to it). `radon cc` reports NO
-# E-grade anywhere in the family and seven D-grades spread
-# across four modules, the largest concentration being three. mccabe and radon still disagree about
-# these functions — mccabe peaks at 17 on `execution_gate` where radon reports D(30) — which is why
-# the ceiling is a ratchet on new growth rather than a health reading.
+# 867, `optimize/gate.py` 733, `optimize/activation.py` 1366, `optimize/execution.py` 1417,
+# `optimize/fronts.py` 415, `optimize/search.py` 335), down from one file of
+# 3,664 lines (3,291 before that plan's earlier phases added to it).
+#
+# What `radon cc` actually reports there, re-measured rather than carried forward: TWO E-grades,
+# both in `optimize/execution.py` (`execution_gate` E(34), `_execution_diagnostics` E(31)), and FIVE
+# D-grades across four modules, the largest concentration being two (`optimize/activation.py`).
+# An earlier version of this comment claimed no E-grade at all and seven D-grades — it was stale
+# before the package move and the move did not re-measure it.
+#
+# mccabe and radon disagree sharply about these functions — mccabe scores `execution_gate` 23 where
+# radon reports E(34) — which is why this ceiling is a ratchet on NEW growth rather than a health
+# reading, and why the E-grades are tracked rather than exempted.
 #
 # Lowering this toward 20 is tracked in .claude/harness-candidates.md, one function at a time.
 max-complexity = 30

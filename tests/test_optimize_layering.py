@@ -140,10 +140,13 @@ def _family_source() -> str:
 
     Scans that read `optimize/gate.py` alone went VACUOUS the moment the split moved their
     subjects: proven by mutation, an inlined `min(len(a), len(b))` and a respelled shared note both
-    passed. A whole-family read is what keeps them asserting something — and it is derived from
-    `_OPTIMIZE_RANKS`, so a seventh module joins every scan at once.
+    passed. A whole-family read is what keeps them asserting something.
+
+    Derived from `_PACKAGE_MODULES`, not from `_OPTIMIZE_RANKS`: the ranks exclude the ladder-exempt
+    `store`, which left it outside every scan built on this while the sentence above claimed "every
+    module". `store` is exempt from the LADDER, not from "declared once".
     """
-    return "\n".join(module_source(module) for module in _OPTIMIZE_RANKS)
+    return "\n".join(module_source(module) for module in sorted(_PACKAGE_MODULES))
 
 
 def test_the_trim_is_declared_once() -> None:
@@ -330,6 +333,10 @@ _OPTIMIZE_RANKS = {
 # `store` is the sidecar every rank imports and is deliberately outside the ladder — the ONE
 # documented exception, for the same reason `reports_optimize` is the one tail above.
 _LADDER_EXEMPT = frozenset({"optimize.store"})
+# The word "ONE" in `__init__.py` and CLAUDE.md, asserted. A second exemption would slip past the
+# rank check, the store-edge assertion AND `test_the_store_module_imports_only_models` — all three
+# name `store` specifically — so the count is the only thing standing in its way.
+assert len(_LADDER_EXEMPT) == 1, f"a second ladder exemption needs its own reason and its own checks: {_LADDER_EXEMPT}"
 
 
 def _rank_coverage_gap(package_modules: set[str]) -> tuple[list[str], list[str]]:
@@ -379,6 +386,24 @@ def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None
             continue
         found.setdefault(resolved or "", set()).update(alias.name for alias in node.names)
     return found
+
+
+# The COVERAGE check on the ladder above, at MODULE scope so it fails COLLECTION rather than one
+# test: a new module in `coder_eval/optimize/` with no rank stops this file dead instead of quietly
+# skipping whichever layering test forgot it. It also catches the reverse — a rank naming a module
+# that is gone — which is what makes an EMPTY derivation fail loudly rather than pass over nothing.
+#
+# It was silently DROPPED when this file was split out of the monolith: the splitter moved statements
+# that define a NAME, and a bare `assert` defines none. Nothing failed, because an assert is not a
+# test and the node-id parity check that guarded the split cannot see one.
+assert _rank_coverage_gap(_PACKAGE_MODULES) == ([], []), (
+    f"the ranks and coder_eval/optimize/ disagree: {_rank_coverage_gap(_PACKAGE_MODULES)}. Give a "
+    "new module a rank in _OPTIMIZE_RANKS, or add it to _LADDER_EXEMPT with the reason, as "
+    "`store` is"
+)
+# `store` is the one name the coverage check cannot see either way, so it is asserted separately: a
+# derivation that lost only the sidecar would otherwise satisfy the check above untouched.
+assert _LADDER_EXEMPT <= _PACKAGE_MODULES, f"the ladder-exempt sidecar is missing: {sorted(_LADDER_EXEMPT)}"
 
 
 def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:

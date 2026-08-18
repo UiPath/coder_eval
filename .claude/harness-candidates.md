@@ -1126,3 +1126,40 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       one-line alternative and was deliberately NOT taken mid-phase, since the plan had verified and
       recorded both as single-module. — caught in the 2026-08-18 optimize subsystem architecture
       plan, Phase 3 quality review.
+
+- [ ] **The `optimize-skill` snippet binder is structurally blind to an ATTRIBUTE read, which is 13
+      of the skill's live bindings.** `tests/test_custom_lint.py::_snippet_binding_failures` resolves
+      the skill's `import` lines and binds keyword arguments, so a renamed FUNCTION or PARAMETER is
+      caught. It never resolves an attribute read off a returned object, and the skill has thirteen:
+      `floor.mde`, `attribution.failed` / `.unattributed`, `arm.row_scores` / `.variant_id`,
+      `measurements.regression_corpus` / `.round_scores`, `confirm.test_verdict`,
+      `promoted_verdict.candidate_variant`, `r.success_criteria_results[i].score`. Proven both
+      directions: renaming `NoiseFloor.mde` -> `mde_value` in `src/` leaves all 15 binder tests
+      GREEN, and the in-tree tests that do go red point at `src/`, so the repair path never reaches
+      `SKILL.md`. This is the seam that matters most in this subsystem, because it has ZERO in-tree
+      callers by design — the binder is the only thing between a rename and a skill that fails in the
+      user's terminal after they have paid for the runs. Not cheap: doing it properly means resolving
+      each snippet expression's TYPE (the return annotation of the function it came from, then the
+      field on that model) rather than matching a name, which is a small type resolver, not a regex.
+      — caught in the 2026-08-18 optimize subsystem architecture plan, final cross-phase review.
+
+- [ ] **A commented-out snippet in a skill is import-sensed but not signature-sensed.** The activation
+      track's whole Stage C call (`plugins/coder-eval/skills/optimize-skill/SKILL.md:1841-1852`) is a
+      commented block. The binder's raw-text import regex matches `# from coder_eval... import
+      confirm_gate`, so the NAME is checked, but `ast.parse` discards comments, so its seven keyword
+      arguments are never bound — mutating one reports zero failures. It is the one procedure step
+      with no signature sensor. Two possible fixes and neither is a one-liner: uncomment the block
+      (a change to the shipped skill's content, needing its own review of whether the step should be
+      live), or teach the binder to strip a leading `# ` from a fenced block's lines before parsing,
+      which risks parsing genuine prose comments as code. — caught in the same review.
+
+- [ ] **A test-file split can silently drop a module-level statement that defines no NAME.** Measured:
+      splitting `tests/test_optimize_gate.py` into eight files lost exactly two statements — both bare
+      module-scope `assert`s guarding the optimize rank ladder's coverage. Nothing went red, because
+      an assert is not a collected test and the node-id parity check that guarded the split (803 ids,
+      identical modulo the file component) cannot see a statement that collects nothing. A specific
+      sensor now exists (`TestTheLayeringCoverageAssertRunsAtCollection`), but the general rule — "a
+      refactor must preserve every top-level statement, not every top-level NAME" — has no guard. Not
+      cheap as a lint rule: it is a property of a DIFF across a file boundary, not of one file's AST,
+      so it belongs with `estimator_ledger.py`'s diff-based protocol rather than under
+      `tests/lint/rules/`. — caught in the same review.

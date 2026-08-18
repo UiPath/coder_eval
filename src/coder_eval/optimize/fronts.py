@@ -330,12 +330,21 @@ def cost_quality_points(
         # fault — measured, and the reason the suppression is the record rather than a second call.
         rows = load_arm_rows(run_dirs, arm.variant_id, suite_id)  # noqa: CE053
         scored_ids = sorted(arm.row_scores)
-        levels = row_cost_levels([row_costs(rows.get(rid, [])) for rid in scored_ids])
+        clusters = [row_costs(rows.get(rid, [])) for rid in scored_ids]
+        levels = row_cost_levels(clusters)
+        # `row_cost_levels` drops a row whose cost is not finite, which would otherwise put this
+        # coordinate on FEWER rows than the score coordinate while `row_ids` still claimed the full
+        # set — and an arm could then dominate on a cost it under-measured. Shrinking `row_ids`
+        # instead would be worse: those rows SCORED fine, and narrowing coverage forfeits the arm's
+        # own dominance claim over a cost figure. So the honest answer is that this arm's cost per
+        # row is unknown, which is the same `None` an arm recording no cost at all reports, and the
+        # 2-D front already excludes a point with no cost rather than placing it at zero.
+        unusable = len(levels) != len([c for c in clusters if c])
         points.append(
             CostQualityPoint(
                 variant_id=arm.variant_id,
                 score=mean(list(arm.row_scores.values())) if arm.row_scores else None,
-                cost_per_row=median_or_none(levels),
+                cost_per_row=None if unusable else median_or_none(levels),
                 row_ids=frozenset(scored_ids),
             )
         )

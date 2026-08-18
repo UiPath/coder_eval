@@ -617,11 +617,23 @@ def arm_row_scores_for(variant: str, scores: dict[str, float]) -> ArmRowScores:
 
 
 def set_split(run_dir: Path, split: str | None) -> None:
-    """Overwrite a fixture run dir's recorded split (``write_row`` stamps `None` by default)."""
-    (run_dir / "run.json").write_text(
-        json.dumps({"row_selection": {"split": split, "max_rows": None, "sample_per_stratum": None}}),
-        encoding="utf-8",
-    )
+    """Overwrite a fixture run dir's recorded split, preserving everything else in ``run.json``.
+
+    Read-modify-write, and both halves of that matter. It hand-wrote the whole payload — four literal
+    keys and nothing else — which DISCARDED the ``task_results`` ``write_row`` had recorded, so every
+    fixture that changed a split silently became a run dir the tree-reconciliation preflight reads as
+    unrecorded. A split-provenance test then passed while exercising the contamination path rather
+    than a clean current run.
+
+    The payload comes from :class:`RowSelection` rather than from literal keys, for
+    :func:`write_run_provenance`'s reason: hand-writing the WRITER while
+    :func:`read_split_provenance` hand-writes the READER means renaming the field moves both in
+    lockstep, leaving every test green while production goes 100% "unrecorded".
+    """
+    path = run_dir / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"task_results": []}
+    payload[RUN_SELECTION_KEY] = RowSelection(split=split).model_dump(mode="json")
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 # Builders a test in ANOTHER of the per-module files reaches for. They were class members of

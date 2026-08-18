@@ -124,6 +124,11 @@ def classification_metric(pairs: list[tuple[str, str]], name: str) -> float:
     return cm.metric(name) if cm is not None else 0.0
 
 
+def _all_finite(values: list[float]) -> bool:
+    """Whether every measurement in one row's cluster is usable."""
+    return all(math.isfinite(v) for v in values)
+
+
 def _row_durations(results: list[EvaluationResult]) -> list[float]:
     return [result.duration_seconds for result in results]
 
@@ -175,6 +180,22 @@ def cost_latency_guardrails(
         comparable = [balance_pair(inc, cand) for inc, cand in paired]
         # A different rule, applied AFTER the trim: drop rows one arm did not measure at all.
         comparable = [(inc, cand) for inc, cand in comparable if inc and cand]
+        # And a third: a row carrying a NON-FINITE figure on either arm measured nothing usable, so
+        # it goes the same way an unmeasured row does. Dropping it HERE rather than downstream is
+        # what makes the medians, the incumbent mean and the bootstrap interval see the SAME rows.
+        # They did not: `row_cost_levels` filters non-finite values, so a corrupt row vanished from
+        # the reported levels while the raw cluster still reached `cluster_bootstrap_diff_ci` — and
+        # `nan <= materiality * mean` is False, which is a VETO. Measured on two IDENTICAL arms with
+        # one corrupt row: the block rendered `1.000 -> 1.000`, a relative change of 0.000, and
+        # blocked the promotion with nothing on the page saying why.
+        #
+        # Reachable from a CALLER, not from a run directory: pydantic accepts a non-finite
+        # `total_cost_usd` in memory but serialises it as `null`, so a row loaded from `task.json`
+        # arrives with no cost rather than a bad one. This function is public and takes the rows it
+        # is given — the same reason `TestGuardrailsNeverRaiseOnACallerSuppliedRow` exists.
+        usable = [(inc, cand) for inc, cand in comparable if _all_finite(inc) and _all_finite(cand)]
+        discarded = len(comparable) - len(usable)
+        comparable = usable
 
         incumbent_clusters = [inc for inc, _c in comparable]
         candidate_clusters = [cand for _i, cand in comparable]
@@ -196,12 +217,21 @@ def cost_latency_guardrails(
                     relative_change=None,
                     tolerance=materiality,
                     passed=True,
-                    note=f"no {name.split(' ')[0]} recorded on at least one arm — guardrail not evaluated",
+                    # The wording is UNCHANGED for the ordinary unmeasured arm, so every pinned
+                    # render stays byte-identical; the discard is appended only when there was one.
+                    note=(
+                        f"no {name.split(' ')[0]} recorded on at least one arm — guardrail not evaluated"
+                        + (f" ({discarded} row(s) discarded for a non-finite figure)" if discarded else "")
+                    ),
                 )
             )
             continue
 
         notes: list[str] = []
+        if discarded:
+            # NAMED, never silent: a narrowed comparison a reader cannot see is the same defect as a
+            # wrong one, and this is the only place the discard is visible.
+            notes.append(f"{discarded} row(s) discarded for a non-finite {name.split(' ')[0]} figure")
         if measured[0] != measured[1]:
             notes.append(f"measured on {measured[0]} incumbent row(s) vs {measured[1]} candidate row(s)")
 

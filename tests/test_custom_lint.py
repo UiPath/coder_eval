@@ -8288,15 +8288,26 @@ class TestCE053RunTreeReadersReconcile:
         ]
         assert out_of_scope == [], out_of_scope
 
-    def test_the_scope_moved_to_the_package_rather_than_widening_to_both(self) -> None:
-        """The fail-open guard on the re-scope itself.
-
-        A regex that matched the OLD flat filename as well would pass every other test here while
-        proving nothing about the move — and CE053's failure mode is silence, so the negative half
-        has to be asserted explicitly.
-        """
-        assert RunTreeReadersReconcile("src/coder_eval/optimize/fronts.py")._in_scope
-        assert not RunTreeReadersReconcile("src/coder_eval/optimize_fronts.py")._in_scope
+    @pytest.mark.parametrize(
+        ("path", "in_scope"),
+        [
+            ("src/coder_eval/optimize/fronts.py", True),
+            # A nested subpackage, and a module whose name carries a digit. Neither exists today;
+            # both were fail-open holes in the first spelling of this regex (`[a-z_]+` directly
+            # below the package), and a reader that leaves the rule's reach reports ZERO violations,
+            # which is byte-identical to a clean tree.
+            ("src/coder_eval/optimize/sub/deep.py", True),
+            ("src/coder_eval/optimize/load2.py", True),
+            # The OLD flat path: a regex matching both would pass every other test here while
+            # proving nothing about the move.
+            ("src/coder_eval/optimize_fronts.py", False),
+            ("src/coder_eval/reports.py", False),
+            ("tests/test_optimize_load.py", False),
+        ],
+    )
+    def test_the_scope_is_the_package_directory_and_only_that(self, path: str, in_scope: bool) -> None:
+        """Both directions asserted, because CE053's failure mode is silence rather than noise."""
+        assert RunTreeReadersReconcile(path)._in_scope is in_scope
 
     def test_the_violation_anchors_at_the_earliest_read(self) -> None:
         """The anchor is where the `# noqa: CE053` must sit, so it has to be the FIRST read.
@@ -9017,6 +9028,58 @@ class TestCE058MirroredResultFieldsAreStamped:
 
 
 @pytest.mark.lint
+class TestTheLayeringCoverageAssertRunsAtCollection:
+    """`tests/test_optimize_layering.py` must check the rank ladder's COVERAGE at module scope.
+
+    Written because it was silently lost. When the optimize test monolith was split, the splitter
+    moved every top-level statement that defines a NAME — and a bare `assert` defines none, so two
+    module-scope coverage asserts vanished. Nothing went red: an assert is not a test, and the
+    node-id parity check that guarded the split (803 ids, identical modulo the file component) cannot
+    see a statement that collects nothing.
+
+    Module scope is the point, not a stylistic preference. A new module in `coder_eval/optimize/` with
+    no rank must stop that file COLLECTING, rather than failing whichever single test happens to
+    notice — because the failure it guards is "a layering test silently iterates over an incomplete
+    set", and a test that never ran cannot report that.
+
+    The boundary: it asserts the assert EXISTS at module scope and mentions the coverage predicate.
+    It does not check what the predicate returns — the file's own tests do that.
+    """
+
+    LAYERING = Path(__file__).parent / "test_optimize_layering.py"
+
+    def test_a_module_scope_assert_calls_the_coverage_predicate(self) -> None:
+        tree = ast.parse(self.LAYERING.read_text(encoding="utf-8"))
+        called = {
+            node.func.id
+            for stmt in tree.body
+            if isinstance(stmt, ast.Assert)
+            for node in ast.walk(stmt)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "_rank_coverage_gap" in called, (
+            "no module-scope assert calls `_rank_coverage_gap` in tests/test_optimize_layering.py. A "
+            "new module under coder_eval/optimize/ would then join the family unranked and be "
+            "silently skipped by whichever layering test iterates the rank map — which is what "
+            "happened once already, when a file split dropped this assert because it defines no name"
+        )
+
+    def test_the_predicate_the_assert_calls_is_defined_in_that_file(self) -> None:
+        """Anti-vacuity: a renamed predicate must fail loudly rather than leave a string meaning nothing.
+
+        By AST rather than by importing the module: importing it would couple two test files and, worse,
+        run its module-scope asserts inside THIS file's collection, so an unranked module would report
+        the failure here instead of where it belongs.
+        """
+        tree = ast.parse(self.LAYERING.read_text(encoding="utf-8"))
+        defined = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+        assert "_rank_coverage_gap" in defined, (
+            "`_rank_coverage_gap` is not defined in tests/test_optimize_layering.py — the assertion "
+            "above is matching a name that no longer exists"
+        )
+
+
+@pytest.mark.lint
 class TestTheSharedFixtureModuleIsNotInverted:
     """`tests/optimize_fixtures.py` may not import from the test tree.
 
@@ -9162,7 +9225,19 @@ class TestCE059NoSiblingPrivateImports:
         assert self._check("from coder_eval.optimize.load import _PairedRows", outside) == []
 
     def test_it_reports_no_violations_on_the_real_tree(self) -> None:
-        """The acceptance test for the 29 renames being COMPLETE, not merely started."""
+        """The acceptance test for the 29 renames being COMPLETE, not merely started.
+
+        Guarded by the non-vacuity assert first, on CE053's precedent: `_PACKAGE_PATH` is a hardcoded
+        string, so renaming or moving the package leaves this test green while the rule inspects ZERO
+        files — indistinguishable from a clean tree, which is this family's standing failure mode.
+        """
+        in_scope = [
+            p for p in (SRC / "coder_eval" / "optimize").glob("*.py") if NoSiblingPrivateImports(str(p))._in_package
+        ]
+        assert len(in_scope) >= 7, (
+            f"CE059 is in scope for only {sorted(p.name for p in in_scope)} — its `_PACKAGE_PATH` no "
+            "longer matches the package, so it would be checking nothing"
+        )
         assert check_paths([SRC], [NoSiblingPrivateImports]) == []
 
     def test_the_rule_is_wired_into_all_rules(self) -> None:

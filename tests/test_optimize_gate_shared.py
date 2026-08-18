@@ -5,6 +5,7 @@ cost/latency guardrails, and Stage C's shared classifier. A claim about ONE trac
 track's file; a claim that the two AGREE belongs in `test_optimize_layering.py`.
 """
 
+import math
 import random
 from pathlib import Path
 
@@ -65,13 +66,59 @@ class TestCostLatencyGuardrails:
         assert check.note is not None and "not evaluated" in check.note
 
     def test_one_corrupt_row_does_not_poison_the_rest_of_the_arm(self) -> None:
-        # The row is dropped, not the arm: eleven clean rows still produce a real comparison.
+        """The row is dropped, not the arm: eleven clean rows still produce a real comparison.
+
+        `check.passed is False` here is the DOUBLING being vetoed, and the interval is what says so
+        — asserted explicitly, because a `nan` interval also produces `passed is False` (`nan <= x`
+        is False) and the two are indistinguishable from the flag alone. That is not hypothetical:
+        it is the defect the sibling test below was written for.
+        """
         incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
         candidate = cost_rows({f"r{i}": [2.0] for i in range(11)} | {"r11": [float("inf")]})
 
         check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.candidate == 2.0
+        assert check.ci_low is not None and math.isfinite(check.ci_low), "the interval must be real"
+        assert check.ci_low > 0.0, "the doubling is what vetoes — not an unusable interval"
         assert check.passed is False
+
+    def test_a_corrupt_row_cannot_veto_two_otherwise_identical_arms(self) -> None:
+        """The cross-phase defect: filtered levels, unfiltered clusters.
+
+        `row_cost_levels` drops a non-finite row from the reported medians and from the incumbent
+        MEAN, but the clusters handed to `cluster_bootstrap_diff_ci` are the raw ones — so one
+        corrupt figure put a `nan` in `ci_low`, and `nan <= materiality * mean` is False, which is a
+        VETO. The rendered block showed `incumbent 1.000 -> candidate 1.000`, a relative change of
+        0.0, and no note: a promotion blocked with the page saying nothing changed.
+
+        The medians, the mean and the interval must all see the SAME rows, which is what makes the
+        "not evaluated" note true rather than merely printed.
+
+        Reachable from a CALLER rather than from a run directory — pydantic serialises a non-finite
+        `total_cost_usd` as `null`, so a row read from `task.json` arrives with no cost rather than a
+        bad one. This function is public and takes the rows it is handed, which is the same reason
+        `TestGuardrailsNeverRaiseOnACallerSuppliedRow` below exists.
+        """
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [1.0] for i in range(11)} | {"r11": [float("nan")]})
+
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        assert check.incumbent == check.candidate == 1.0
+        assert check.ci_low is not None and math.isfinite(check.ci_low)
+        assert check.passed is True, "identical arms must not be vetoed by one unusable row"
+        # And the drop is VISIBLE: a silently narrowed comparison is the thing not to ship.
+        assert check.note is not None and "non-finite" in check.note
+
+    def test_an_arm_whose_every_row_is_corrupt_reads_as_unmeasured(self) -> None:
+        # The boundary: nothing usable left, so it takes the not-evaluated path rather than
+        # comparing an empty sample.
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [float("nan")] for i in range(12)})
+
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        assert check.candidate is None
+        assert check.passed is True
+        assert check.note is not None and "not evaluated" in check.note
 
     def test_fails_on_a_large_consistent_increase(self) -> None:
         incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})

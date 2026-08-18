@@ -4,6 +4,7 @@ All three fronts treat a hole as ABSENT rather than zero, require row coverage b
 dominate another, and guard non-finite values; a parametrized test asserts they agree.
 """
 
+import json
 import math
 from pathlib import Path
 
@@ -327,6 +328,37 @@ class TestCostQualityFront:
         return cost_quality_points(
             run_dirs=[tmp_path / "run-0"], variant_ids=list(arms), suite_id=SUITE, criterion_index=None
         )
+
+    def test_a_non_finite_cost_cannot_reach_this_front_from_disk(self, tmp_path: Path) -> None:
+        """Why the coordinate invariant holds, pinned on the mechanism rather than assumed.
+
+        `row_cost_levels` drops a row whose cost is not finite, which would put the cost coordinate
+        on FEWER rows than the score coordinate while `row_ids` still claimed the full set — an arm
+        dominating on a cost it under-measured. It cannot happen HERE, and the reason is worth a test
+        rather than a comment: pydantic accepts a non-finite `total_cost_usd` in memory but
+        serialises it as `null`, and this front reads every row from `task.json`. So the row arrives
+        with no cost at all, which is a state the front has always handled.
+
+        The guard in `cost_quality_points` is therefore defence-in-depth for a caller-supplied row,
+        not a live path — and if this test ever fails because the serialiser starts round-tripping
+        `Infinity`, the guard is what stops the invariant breaking silently.
+        """
+        points = self._points(
+            tmp_path,
+            {
+                "incumbent": {f"r{i}": (0.90, 1.00) for i in range(6)},
+                "cand-corrupt": {**{f"r{i}": (0.90, 0.10) for i in range(5)}, "r5": (0.90, float("inf"))},
+            },
+        )
+        corrupt = next(p for p in points if p.variant_id == "cand-corrupt")
+        assert corrupt.score == 0.90, "the SCORE coordinate is unaffected — those rows scored fine"
+        assert len(corrupt.row_ids) == 6, "coverage is about rows SCORED, and all six were"
+        # The row recorded NO cost, so it is absent from the cost median exactly as an unmeasured row
+        # is — and the five clean rows still state this arm's cost.
+        assert corrupt.cost_per_row == 0.10
+        row = next((tmp_path / "run-0" / "cand-corrupt" / SUITE / "r5").rglob("task.json"))
+        recorded = json.loads(row.read_text(encoding="utf-8"))["total_token_usage"]["total_cost_usd"]
+        assert recorded is None, "a non-finite cost reaching disk would break the coordinate invariant"
 
     def test_keeps_a_cheaper_slightly_worse_arm(self, tmp_path: Path) -> None:
         # The headline case: 2% worse and 40% cheaper is a trade worth showing the user.

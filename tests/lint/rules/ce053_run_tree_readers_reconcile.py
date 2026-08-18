@@ -65,7 +65,11 @@ from tests.lint.rules.base import BaseRule
 # byte-identical to a clean tree — the CE051 direction. The directory costs nothing to be wrong
 # about, since a module here with no tree reader is simply never matched (`optimize/store.py` is one
 # today), and it does not depend on a future module being named to a convention.
-_OPTIMIZE_MODULES = re.compile(r"/coder_eval/optimize/[a-z_]+\.py$")
+# Recursive, and the character class is deliberately wide. `[a-z_]+` directly below the package
+# would have been two fail-open holes at once: a reader in `optimize/<subpackage>/x.py` and a module
+# whose name carries a digit both report ZERO violations, byte-identical to a clean tree. Neither is
+# hypothetical enough to gamble on for a rule whose failure mode is silence.
+_OPTIMIZE_MODULES = re.compile(r"/coder_eval/optimize/(?:[\w]+/)*[\w]+\.py$")
 
 _TREE_READERS = frozenset({"load_suite_rows", "load_arm_rows"})
 # The primitive and the whole-arm sweep that wraps it. See the module docstring for why both.
