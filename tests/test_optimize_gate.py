@@ -1496,8 +1496,12 @@ class TestMdeAndGuardrailsInTheVerdict:
         assert "x incumbent" in text
 
 
-def _headline(text: str) -> str:
+def _headline_line(text: str) -> str:
     """The rendered block's headline, unwrapped from its bold markers.
+
+    Named for what it does — it EXTRACTS a line from rendered markdown. Not to be confused with
+    ``reports_optimize._headline``, which BUILDS the string this reads back; assertions here read
+    ``_headline_line(render_markdown(...))``, and one name for both jobs made that line lie.
 
     Reading the headline LINE rather than asserting a substring is absent from the whole block:
     "PROMOTED" is a substring of "NOT PROMOTED", so a `not in` over the block is either wrong or a
@@ -1603,7 +1607,7 @@ class TestPromotionIsNotOverstated:
         text = render_markdown(decided)
         # On the HEADLINE, not merely somewhere in the block — the notes quote the headline's own
         # words, so a whole-page substring test would pass on the wrong rung.
-        assert _headline(text).startswith("BLOCKED BY A GUARDRAIL —")
+        assert _headline_line(text).startswith("BLOCKED BY A GUARDRAIL —")
         assert "cost (USD/row)" in text
         assert "Do not promote on this block" in text
         # And the block names WHICH check vetoed, so the reader is not left to diff the lists.
@@ -1615,7 +1619,7 @@ class TestPromotionIsNotOverstated:
         # is the commonest shape on a suite whose turns recorded no cost.
         decided = holm_promote([self._verdict(guardrails=[])])[0]
         assert decided.promoted is True
-        assert _headline(render_markdown(decided)) == "PROMOTED"
+        assert _headline_line(render_markdown(decided)) == "PROMOTED"
 
     def test_a_separated_blocked_candidate_holm_never_rejected_reads_not_promoted(self) -> None:
         """The BLOCKED rung must not OVER-fire — the trap on the other side of `promoted`.
@@ -1641,7 +1645,7 @@ class TestPromotionIsNotOverstated:
         for verdict in decided:
             assert verdict.separated is True, "the statistic did separate"
             assert verdict.holm_rejected is False, "but the family correction rejected nothing"
-            assert _headline(render_markdown(verdict)) == "NOT PROMOTED"
+            assert _headline_line(render_markdown(verdict)) == "NOT PROMOTED"
 
     def test_a_passing_guardrail_still_reads_promoted(self) -> None:
         passing = GuardrailCheck(
@@ -1655,7 +1659,7 @@ class TestPromotionIsNotOverstated:
             passed=True,
         )
         text = render_markdown(holm_promote([self._verdict(guardrails=[passing])])[0])
-        assert _headline(text) == "PROMOTED"
+        assert _headline_line(text) == "PROMOTED"
 
 
 class TestBothTracksMeanTheSameThingByPromoted:
@@ -1712,8 +1716,8 @@ class TestBothTracksMeanTheSameThingByPromoted:
         decided = gate([build(**{vetoing: [failing]})])[0]
         assert decided.separated is True and decided.holm_rejected is True, "it WON the comparison"
         assert decided.promoted is False, "and the check vetoed it"
-        assert _headline(render(decided)).startswith("BLOCKED BY A GUARDRAIL")
-        assert "the check that vetoed" in _headline(render(decided))
+        assert _headline_line(render(decided)).startswith("BLOCKED BY A GUARDRAIL")
+        assert "the check that vetoed" in _headline_line(render(decided))
 
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
     def test_the_blocked_block_names_the_failing_check(self, gate, build) -> None:
@@ -2939,7 +2943,7 @@ class TestARefusalSuppressesNegativeResultProse:
         assert decided.gate_refusal is not None, "the fixture must refuse for this to mean anything"
         assert decided.promoted is False
         assert _negative_result_notes(decided.notes) == [], decided.notes
-        assert _headline(render_markdown(decided)).startswith("CANNOT SEPARATE AT THIS SIZE")
+        assert _headline_line(render_markdown(decided)).startswith("CANNOT SEPARATE AT THIS SIZE")
 
     @pytest.mark.parametrize("mean_diff", [0.5, -0.3])
     @pytest.mark.parametrize(("ci_low", "ci_high"), [(0.2, 0.75), (-0.5, -0.1), (-0.05, 0.6)])
@@ -2956,7 +2960,7 @@ class TestARefusalSuppressesNegativeResultProse:
         decided = holm_promote_execution([refused])[0]
         assert decided.promoted is False
         assert _negative_result_notes(decided.notes) == [], decided.notes
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
 
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
     @pytest.mark.parametrize(
@@ -5037,7 +5041,9 @@ class TestExecutionGateLoading:
         assert (verdict.mean_diff, verdict.ci_low, verdict.p_value) == (None, None, None)
         assert verdict.gate_refusal is not None
         assert "experiment.json" in verdict.gate_refusal and "-e" in verdict.gate_refusal
-        assert _headline(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith("NOT A RESULT")
+        assert _headline_line(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith(
+            "NOT A RESULT"
+        )
 
     def test_a_malformed_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
         run_dir = _exec_run_dir(tmp_path, **_WINNER)
@@ -5126,7 +5132,7 @@ class TestExecutionGateLoading:
         assert (verdict.p_value, verdict.effect_size) == (None, None)
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is not True
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_fewer_than_two_paired_rows_is_refused_with_the_count_still_carried(self, tmp_path: Path) -> None:
         # No interval can be computed at all, so there is nothing for a reader to weigh — rendering
@@ -5317,7 +5323,7 @@ class TestExecutionGateMde:
         assert verdict.gate_refusal is None, "below the floor AND consistent with zero is not a refusal"
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is False
-        assert _headline(render_execution_markdown(decided)) == "NOT PROMOTED"
+        assert _headline_line(render_execution_markdown(decided)) == "NOT PROMOTED"
 
     def test_an_interval_tighter_than_the_floor_is_a_caveat_not_a_refusal(self, tmp_path: Path) -> None:
         """A large, consistent win reports an absurd p — the PRECISION is wrong, not the decision.
@@ -5742,7 +5748,7 @@ class TestExecutionGateRefusesAReusedRunDir:
         run_dir = _exec_run_dir(tmp_path, **_WINNER)
         _write_row(run_dir, "incumbent", "r1", _scored_result("r1", 0.0), 7, record=False)
         decided = holm_promote_execution([_exec_gate(run_dir)])[0]
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
 
     def test_refused_already_is_reachable_as_true(self, tmp_path: Path) -> None:
         """The test whose absence let `_execution_diagnostics`'s docstring call two guards dead.
@@ -5773,7 +5779,7 @@ class TestExecutionGateRefusesAReusedRunDir:
             decided = holm_promote_execution([_exec_gate(run_dir)])[0]
 
         assert seen == [True], "the reconciliation cause must reach the ladder already refused"
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
         assert not any(fragment in note for note in decided.notes for fragment in _MDE_ADVISORY_FRAGMENTS), (
             decided.notes
         )
@@ -5854,8 +5860,8 @@ _FAILING_GUARDRAIL = GuardrailCheck(
 )
 
 
-class TestEveryExecutionHeadlineRungIsReachable:
-    """All five rungs, one verdict each, asserted on the headline LINE.
+class TestEveryHeadlineRungIsReachableOnBothTracks:
+    """All five rungs on BOTH tracks, one verdict each, asserted on the headline LINE.
 
     Folding the guardrail veto into `promoted` retires the BLOCKED rung the moment the renderer
     reads `promoted` for it — silently, because the block still renders and still says something
@@ -5863,7 +5869,34 @@ class TestEveryExecutionHeadlineRungIsReachable:
     confuse: "it lost" and "it won and was vetoed" call for opposite next actions. The rungs are
     parametrized from one table so a future reorder cannot make one unreachable without failing
     here, and `test_blocked_and_not_promoted_differ_only_by_separated` pins the collapse itself.
+
+    Widened from the execution track alone to a generated cross-product once both ladders became one
+    `_headline` chain: the tracks differ by three strings, so a rung reachable on one and not the
+    other is now a defect in the arguments rather than in a hand-written chain, and only a
+    cross-product can see it. The execution-specific tests below still exercise this track's own
+    verdict, because what they pin (family size, `separated` vs `promoted`) is not track-shaped.
     """
+
+    def _activation_verdict(self, **overrides) -> ActivationGateVerdict:
+        base: dict[str, object] = {
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "cand",
+            "suite_id": SUITE,
+            "criterion_index": 0,
+            "confidence": 0.95,
+            "n_resamples": _FAST_RESAMPLES,
+            "rows_paired": 8,
+            "rows_excluded": 0,
+            "incumbent_f1": 0.4,
+            "candidate_f1": 0.8,
+            "mean_diff": 0.2,
+            "ci_low": 0.1,
+            "ci_high": 0.3,
+            "p_value": 0.001,
+        }
+        # CE041 scans `src/` only; a test building a verdict from a base dict is the documented
+        # legitimate splat.
+        return ActivationGateVerdict(**{**base, **overrides})
 
     def _verdict(self, **overrides) -> ExecutionGateVerdict:
         base: dict[str, object] = {
@@ -5884,28 +5917,155 @@ class TestEveryExecutionHeadlineRungIsReachable:
         # legitimate splat.
         return ExecutionGateVerdict(**{**base, **overrides})
 
-    # One row per rung, top of the ladder down. `apply_holm=False` is the UNDECIDED rung: the
-    # renderer must not be handed a decided verdict for it, since `promoted is None` IS the rung.
-    _RUNGS: ClassVar[list[tuple[str, dict, str]]] = [
-        ("undecided", {}, "UNDECIDED"),
-        ("not-a-result", {"gate_refusal": "there is no experiment file", "p_value": None}, "NOT A RESULT"),
-        ("blocked", {"guardrails": [_FAILING_GUARDRAIL]}, "BLOCKED BY A GUARDRAIL"),
-        # `failed` alone cannot tell this rung from the one above it — the primary reason here is
-        # that the candidate LOST, and `separated` is the only thing that distinguishes them.
+    # One row per rung, top of the ladder down: (id, overrides, expected per track). The overrides
+    # are the fields both verdicts share, which is what makes one table serve both tracks.
+    #
+    # `refusal-with-a-p` is the ONE rung whose text differs, and the difference is the whole reason
+    # `refusal_label` is an argument: on activation a refusal that DID compute a p is a statement
+    # about the suite's RESOLUTION, and demoting it to `NOT A RESULT` would tell the user the run was
+    # mis-wired. The execution track has no discreteness refusal, so it passes `NOT A RESULT` and its
+    # ladder reads as four rungs.
+    # `via_holm` says whether the wrapper produces this rung's state or the fixture declares it.
+    # Exactly ONE rung declares it, and the reason is precise rather than blanket: `holm_promote`
+    # recomputes `gate_refusal` only in its `p_value is not None` branch, so a fixture refusal
+    # survives the wrapper when there is no p (the `not-a-result` rung) and cannot survive it when
+    # there is (`refusal-with-a-p`). The subject here is the RENDERER's ladder, so that rung is fed
+    # the post-Holm field state a real gate emits; that the state is reachable is pinned separately,
+    # by the wrapper-driven tests below and by the activation gate's own discreteness-refusal suite.
+    _RUNGS: ClassVar[list[tuple[str, dict, dict[str, str], bool]]] = [
+        ("undecided", {}, {"activation": "UNDECIDED", "execution": "UNDECIDED"}, False),
+        (
+            "not-a-result",
+            {"gate_refusal": "there is no experiment file", "p_value": None},
+            {"activation": "NOT A RESULT", "execution": "NOT A RESULT"},
+            True,
+        ),
+        (
+            "refusal-with-a-p",
+            {"gate_refusal": "the suite cannot separate at this size", "promoted": False, "holm_rejected": True},
+            {"activation": "CANNOT SEPARATE AT THIS SIZE", "execution": "NOT A RESULT"},
+            False,
+        ),
+        (
+            "blocked",
+            {"guardrails": [_FAILING_GUARDRAIL]},
+            {"activation": "BLOCKED BY A GUARDRAIL", "execution": "BLOCKED BY A GUARDRAIL"},
+            True,
+        ),
+        # `failed_vetoes` alone cannot tell this rung from the one above it — the primary reason here
+        # is that the candidate LOST, and `separated` is the only thing that distinguishes them.
         (
             "lost-and-blocked",
             {"mean_diff": -0.2, "ci_low": -0.3, "ci_high": -0.1, "guardrails": [_FAILING_GUARDRAIL]},
-            "NOT PROMOTED",
+            {"activation": "NOT PROMOTED", "execution": "NOT PROMOTED"},
+            True,
         ),
-        ("promoted", {}, "PROMOTED"),
+        ("promoted", {}, {"activation": "PROMOTED", "execution": "PROMOTED"}, True),
     ]
 
-    @pytest.mark.parametrize(("rung", "overrides", "expected"), _RUNGS, ids=[r[0] for r in _RUNGS])
-    def test_the_rung_is_reachable(self, rung: str, overrides: dict, expected: str) -> None:
-        verdict = self._verdict(**overrides)
-        # The UNDECIDED rung is the un-decided verdict itself; every other rung is post-Holm.
-        decided = verdict if rung == "undecided" else holm_promote_execution([verdict])[0]
-        assert _headline(render_execution_markdown(decided)).startswith(expected)
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    @pytest.mark.parametrize(("rung", "overrides", "expected", "via_holm"), _RUNGS, ids=[r[0] for r in _RUNGS])
+    def test_the_rung_is_reachable(
+        self, track: str, rung: str, overrides: dict, expected: dict[str, str], via_holm: bool
+    ) -> None:
+        if track == "activation":
+            verdict = self._activation_verdict(**overrides)
+            rendered = render_markdown(holm_promote([verdict])[0] if via_holm else verdict)
+        else:
+            execution_verdict = self._verdict(**overrides)
+            rendered = render_execution_markdown(
+                holm_promote_execution([execution_verdict])[0] if via_holm else execution_verdict
+            )
+        assert _headline_line(rendered).startswith(expected[track]), rung
+
+    @staticmethod
+    def _headline_assignments_inside_a_branch(function: ast.FunctionDef) -> list[int]:
+        """Lines where ``function`` assigns a headline-shaped name INSIDE an `if`."""
+        return [
+            node.lineno
+            for branch in ast.walk(function)
+            if isinstance(branch, ast.If)
+            for node in ast.walk(branch)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id.endswith("headline") for target in node.targets)
+        ]
+
+    @pytest.mark.parametrize("renderer", ["render_markdown", "render_execution_markdown"])
+    def test_the_stage_b_headline_is_built_in_exactly_one_place(self, renderer: str) -> None:
+        """The cheap sensor for the drift that already happened twice.
+
+        Two hand-written ladders were kept in step by hand and diverged anyway: the activation
+        `BLOCKED` rung once read `guardrails` alone while its twin unioned both lists, and before
+        that it keyed on `promoted`, which the veto had made unsatisfiable. Neither drift deleted a
+        token, so no presence sensor could see either — but both looked exactly like an `if/elif`
+        chain assigning a headline at a call site, and THAT is detectable.
+
+        An assignment from the shared helper is fine and is what both renderers do; a headline built
+        inside a BRANCH is the rung being rebuilt locally. A test rather than a CE rule: two call
+        sites in one file, and a rule would need a scope nothing else in the tree shares. On the AST
+        rather than on text, because the chains were heavily commented and a substring scan over
+        them is the fragile shape CE039 discourages.
+
+        **The boundary, so a green run is not mistaken for a proof.** It matches an `ast.Assign` to a
+        `Name` whose id ends in `headline`, inside an `ast.If`, in the two functions the parametrize
+        names. Invisible to it: a rung that `return`s instead of assigning, a top-level ternary
+        (which also keeps `"_headline" in calls` true), a differently-named local, and a THIRD Stage B
+        renderer nobody added it to. The shape that actually drifted twice is exactly the shape it
+        catches, which is the whole claim — not that no bespoke rung is expressible.
+        """
+        tree = ast.parse(_module_source("reports_optimize"))
+        function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == renderer)
+        branched = self._headline_assignments_inside_a_branch(function)
+        assert branched == [], (
+            f"{renderer} builds a headline inside a branch at line(s) {branched} — the Stage B ladder "
+            "is `_headline` alone, and a second chain is how the two tracks' BLOCKED rungs drifted "
+            "apart once already"
+        )
+        calls = {
+            node.func.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "_headline" in calls, (
+            f"{renderer} no longer calls the shared ladder — no chain AND no headline would satisfy "
+            "the assertion above while printing nothing"
+        )
+
+    def test_the_branch_scan_can_see_a_real_ladder(self) -> None:
+        """Anti-vacuity, and the standing positive control is in the tree rather than fabricated.
+
+        `render_confirm_markdown` keeps its OWN short ladder on purpose — its REVERSED rung is
+        Stage-C-specific and there is exactly one confirm renderer, so folding it in would be the
+        generality YAGNI forbids. That makes it the subject that proves this scan is looking at what
+        it claims: a renamed local or a changed AST shape would otherwise make the two assertions
+        above silently green.
+        """
+        tree = ast.parse(_module_source("reports_optimize"))
+        confirm = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "render_confirm_markdown"
+        )
+        assert self._headline_assignments_inside_a_branch(confirm), (
+            "no headline is built inside a branch in `render_confirm_markdown` — either its ladder "
+            "moved, or this scan no longer detects one and the Stage B assertions prove nothing"
+        )
+
+    def test_an_execution_refusal_with_a_p_value_still_says_not_a_result(self) -> None:
+        """The collapsed-rung guard, and the one place the shared chain could change a byte.
+
+        The execution ladder read as four rungs because it had no `CANNOT SEPARATE AT THIS SIZE`
+        text — not because it skipped a rung. A refusal carrying a p must still reach rung 3 and
+        print `NOT A RESULT`, exactly as it did when the chain was hand-written per track.
+        """
+        decided = holm_promote_execution(
+            [self._verdict(gate_refusal="zero variance in the paired differences", p_value=0.001)]
+        )[0]
+        assert decided.p_value is not None, "the premise: this refusal DID compute a p"
+        assert (
+            _headline_line(render_execution_markdown(decided))
+            == "NOT A RESULT — zero variance in the paired differences"
+        )
 
     def test_an_underpowered_candidate_is_not_blocked_however_its_guardrails_read(self) -> None:
         """The trap on the far side of the fold: `separated` alone must not reach the BLOCKED rung.
@@ -5923,7 +6083,7 @@ class TestEveryExecutionHeadlineRungIsReachable:
         )
         assert (blocked_arm.separated, clean_arm.separated) == (True, True)
         assert (blocked_arm.holm_rejected, clean_arm.holm_rejected) == (False, False)
-        headlines = [_headline(render_execution_markdown(v)) for v in (blocked_arm, clean_arm)]
+        headlines = [_headline_line(render_execution_markdown(v)) for v in (blocked_arm, clean_arm)]
         assert headlines == ["NOT PROMOTED", "NOT PROMOTED"], "identical statistics must read identically"
 
     def test_blocked_and_not_promoted_differ_only_by_separated(self) -> None:
@@ -5943,7 +6103,7 @@ class TestEveryExecutionHeadlineRungIsReachable:
             [self._verdict(gate_refusal="zero variance in the paired differences", guardrails=[_FAILING_GUARDRAIL])]
         )[0]
         assert decided.separated is True and decided.promoted is False
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
 
     def test_a_blocked_candidate_stays_in_the_holm_family(self) -> None:
         # The veto must not change `m` for its siblings: a blocked candidate was still TESTED, and
@@ -6430,7 +6590,7 @@ class TestRenderConfirmMarkdown:
     def test_the_rung_is_reachable(self, rung: str, overrides: dict, expected: str) -> None:
         outcome = "undecided" if rung == "refusal" else rung
         block = render_confirm_markdown(self._verdict(outcome, **overrides))
-        assert _headline(block).startswith(expected)
+        assert _headline_line(block).startswith(expected)
 
     def test_a_refusal_is_printed_once_not_twice(self, tmp_path: Path) -> None:
         # `holm_promote`'s rule for `gate_refusal`, applied here: notes is the distrust-the-numbers
@@ -6462,13 +6622,13 @@ class TestRenderConfirmMarkdown:
         block = render_confirm_markdown(
             self._verdict("reversed", confirm_refusal="the confirm run recorded --split 'train'")
         )
-        assert _headline(block).startswith("NOT A COMPARISON")
-        assert "REVERSED" not in _headline(block)
+        assert _headline_line(block).startswith("NOT A COMPARISON")
+        assert "REVERSED" not in _headline_line(block)
 
     def test_reversed_says_do_not_promote_in_the_headline(self) -> None:
         # A reversal is a headline, not a footnote: a reader who skims past it promotes on a number
         # that does not hold on held-out rows.
-        assert "Do not promote" in _headline(render_confirm_markdown(self._verdict("reversed")))
+        assert "Do not promote" in _headline_line(render_confirm_markdown(self._verdict("reversed")))
 
     def test_the_block_carries_both_effects_the_delta_and_the_margin(self) -> None:
         block = render_confirm_markdown(self._verdict("reproduced"))
@@ -6591,7 +6751,7 @@ class TestHolmPromoteExecution:
         assert any("cost (USD/row) FAILED" in note for note in decided.notes)
         # On the HEADLINE: the note above quotes the headline's own words, so a whole-page
         # substring test passes whichever rung the block actually took.
-        assert _headline(render_execution_markdown(decided)).startswith("BLOCKED BY A GUARDRAIL")
+        assert _headline_line(render_execution_markdown(decided)).startswith("BLOCKED BY A GUARDRAIL")
 
 
 class TestRenderExecutionMarkdown:
@@ -6621,7 +6781,7 @@ class TestRenderExecutionMarkdown:
         assert decided.separated is True
         text = render_execution_markdown(decided)
         # The headline, not the page — the failed-check note quotes this phrase too.
-        assert _headline(text).startswith("BLOCKED BY A GUARDRAIL")
+        assert _headline_line(text).startswith("BLOCKED BY A GUARDRAIL")
         assert "engagement" in text
 
     def test_renders_a_missing_effect_size_as_a_dash(self, tmp_path: Path) -> None:
@@ -6633,10 +6793,10 @@ class TestRenderExecutionMarkdown:
         # so building both fixtures under one `tmp_path` leaves the refused arm's rows on disk for
         # the control — measured, it moved the control's `mde` from 2.8e-17 to 0.030.
         decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path / "refused", **_uniform_shift(4)))])[0]
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
         # And the assertion is not a no-op: a clean fixture WITH spread headlines PROMOTED, so the
         # headline above is discriminating rather than whatever this renderer happens to print.
-        assert _headline(render_execution_markdown(self._decided(tmp_path / "winner"))) == "PROMOTED"
+        assert _headline_line(render_execution_markdown(self._decided(tmp_path / "winner"))) == "PROMOTED"
 
     def test_a_refusal_outranks_a_failing_guardrail(self, tmp_path: Path) -> None:
         # Reading a guardrail presupposes a statistic that separated, so the refusal is above it —
@@ -6648,13 +6808,13 @@ class TestRenderExecutionMarkdown:
             name="cost (USD/row)", incumbent=1.0, candidate=3.0, relative_change=2.0, tolerance=0.25, passed=False
         )
         decided = holm_promote_execution([verdict.model_copy(update={"guardrails": [failing]})])[0]
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_undecided_still_outranks_the_refusal(self, tmp_path: Path) -> None:
         # A verdict Holm never saw has no decision to refuse, so `promoted is None` wins the ladder.
         verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
         assert verdict.gate_refusal is not None
-        assert _headline(render_execution_markdown(verdict)).startswith("UNDECIDED")
+        assert _headline_line(render_execution_markdown(verdict)).startswith("UNDECIDED")
 
     def test_the_refusal_text_survives_the_undecided_headline(self, tmp_path: Path) -> None:
         """The message must reach the reader on EVERY render path, not only when it wins.
@@ -6669,7 +6829,7 @@ class TestRenderExecutionMarkdown:
         verdict = _exec_gate(run_dir)
         assert verdict.promoted is None and verdict.gate_refusal is not None
         block = render_execution_markdown(verdict)
-        assert _headline(block).startswith("UNDECIDED"), "the ladder is unchanged — this is about the TEXT"
+        assert _headline_line(block).startswith("UNDECIDED"), "the ladder is unchanged — this is about the TEXT"
         assert verdict.gate_refusal in block
         # And it appears exactly once: when the headline DOES carry it, the extra line must not.
         decided = holm_promote_execution([verdict])[0]
@@ -7807,7 +7967,7 @@ class TestExecutionGateCannotBeQuietlyMisread:
         assert "loaded ZERO rows" not in verdict.gate_refusal
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is not True
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_both_arms_empty_produce_exactly_one_refusal_naming_both(self, tmp_path: Path) -> None:
         # Every id correct and the experiment file valid — only the row tree is gone. That is the
@@ -7821,7 +7981,9 @@ class TestExecutionGateCannotBeQuietlyMisread:
         assert "the incumbent arm ('incumbent')" in verdict.gate_refusal
         assert "the candidate arm ('candidate')" in verdict.gate_refusal
         assert not any("loaded ZERO rows" in note for note in verdict.notes), "one message, not one per arm"
-        assert _headline(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith("NOT A RESULT")
+        assert _headline_line(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith(
+            "NOT A RESULT"
+        )
 
     def test_one_empty_arm_is_refused_where_the_variant_check_does_not_fire(self, tmp_path: Path) -> None:
         # A VALID incumbent id whose rows are simply not on disk (right id, wrong run dir). The
@@ -7836,7 +7998,7 @@ class TestExecutionGateCannotBeQuietlyMisread:
         assert "the candidate arm" not in verdict.gate_refusal, "only the empty arm may be named"
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is False
-        assert _headline(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_a_wiring_refusal_outranks_a_zero_variance_one(self, tmp_path: Path) -> None:
         # Both causes at once. If the rows never loaded, whether their differences vary is moot —
@@ -8355,7 +8517,7 @@ class TestRenderSearchComparison:
         # fixture, whose headline is CANNOT COMPARE: the strip removed nothing, so the absence
         # assertion could not fail while reading as a strong guard.
         #
-        # Not `_headline`: that helper returns the first line starting with `**`, and
+        # Not `_headline_line`: that helper returns the first line starting with `**`, and
         # `render_search_comparison` leads with an `###` heading on all three of its paths, so
         # calling it here raises StopIteration. Same discipline, differently-shaped block.
         assert block.splitlines()[0] == "### Search round — CANNOT COMPARE"
