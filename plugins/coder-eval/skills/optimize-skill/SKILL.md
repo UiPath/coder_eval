@@ -1135,6 +1135,14 @@ snapshots:
 A fourth appears only if you halve Stage A: `round<N>-triage-survivors.yaml`, the arms that
 survived the first pass.
 
+**Predeclare the primary criterion here, in writing, before any of these run.** On the execution
+track that is a POSITION in the suite's `success_criteria` — usually the grader's `run_command` slot
+— and Step 10 passes it to the gate as `primary_criterion_index` so the block reports the effect in
+that criterion's own unit beside the blended `weighted_score`. Writing it down before the numbers
+exist is what makes it a predeclaration rather than a rationalization, and it is the one part of the
+Step 11 ledger that has to be recorded early. If you genuinely have no single primary, record that —
+it is a real answer, and it is not the same as picking one afterwards.
+
 From round 2 there is one more, and it is the only file here holding **one variant**:
 `round<N>-explore.yaml`, the search loop's single candidate (Step 10). One variant is right there
 and wrong at Stage B, for a reason worth keeping straight: the search loop compares against a
@@ -1754,6 +1762,84 @@ task run, so a body edit that sends the agent down a longer path moves real mone
 space `activation_gate`'s `criterion_index` uses, counted from the top of the suite YAML. It is
 **not** a position in `suite.json`'s `criterion_aggregates`, which is a filtered list. Pass `None`
 to skip the check on a suite with no engagement criterion.
+
+`primary_criterion_index` is a **different** index in the same space, and it is a READING rather than
+a check: pass the primary you predeclared at Step 9 and the block additionally reports the paired
+difference on that criterion ALONE, so you can read the effect in the grader's own unit beside the
+blended one. The VALUE never moves `promoted` — the gate still decides on `weighted_score`. One
+exception, so passing it is never a surprise: an index that selects no usable row while the blended
+statistic had rows is a REFUSAL, because an empty primary vector is indistinguishable from a suite
+whose rows all errored on that criterion. Check the index against the suite YAML. Read it together
+with **Dead weight** on the same block: `weighted_score` is a weighted mean, so a criterion that
+saturates on both arms contributes its whole weight to the denominator and nothing to the difference,
+and the shipped outcome template does that by design. A dead weight of 51.2% means an effect confined
+to the grader arrives at this block roughly halved.
+
+### Stage C — the confirm gate
+
+**Stage C has a computed verdict; do not eyeball two intervals.** Run the confirm experiment
+(`round<N>-confirm.yaml`, exactly two variants, `--split test --repeats 3`), then hand the Stage B
+verdict and the confirm run to the confirm gate for the matching track. It classifies the train→test
+delta as **REPRODUCED**, **SHRANK**, **REVERSED** or **UNDECIDED**, and it refuses outright if the
+confirm run did not record `--split test`.
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize_execution import confirm_gate_execution
+from coder_eval.reports_optimize import render_confirm_markdown, render_execution_markdown
+
+# EXECUTION TRACK. `promoted_verdict` is the ONE Stage B winner, post-`holm_promote_execution`.
+confirm = confirm_gate_execution(
+    train_verdict=promoted_verdict,
+    confirm_run_dir=Path("<runs>/round1-confirm"),
+    incumbent_variant="incumbent",
+    candidate_variant=promoted_verdict.candidate_variant,
+    suite_id="<the suite's task_id>",
+    # The primary you predeclared, if any — a reading on both blocks, never a decision.
+    primary_criterion_index=None,
+)
+print(render_confirm_markdown(confirm))
+print(render_execution_markdown(confirm.test_verdict))
+
+# ACTIVATION TRACK — the twin, taking that track's run-dir lists instead:
+#
+# from coder_eval.optimize_activation import confirm_gate
+# from coder_eval.reports_optimize import render_markdown
+#
+# confirm = confirm_gate(
+#     train_verdict=promoted_verdict,
+#     incumbent_run_dirs=confirm_dirs, candidate_run_dirs=confirm_dirs,
+#     incumbent_variant="incumbent", candidate_variant=promoted_verdict.candidate_variant,
+#     suite_id="<the suite's task_id>", criterion_index=0,
+# )
+# print(render_confirm_markdown(confirm))
+# print(render_markdown(confirm.test_verdict))
+```
+
+**ONE candidate, and the guard is not a formality.** Confirming a shortlist spends the held-out split
+on SELECTION, which is exactly what the "never re-rolled" rule exists to prevent — passing a list
+raises rather than iterating.
+
+**A family of ONE is correct here.** Only the Stage B winner is confirmed, so there is no
+multiplicity to correct; the gate applies Holm at `m = 1` purely so the carried block reads as a
+decision rather than as `UNDECIDED`.
+
+**What each outcome means for the next action:**
+
+- **REPRODUCED** — the effect holds on rows the candidate was never fitted to. Promote (Step 12), and
+  record both figures in the ledger.
+- **SHRANK** — real but smaller than Stage B claimed; part of the train figure was fit. Promote if the
+  remaining effect is still worth the cost, and **report the test figure, not the train one**.
+- **REVERSED** — the effect points the other way on held-out rows. Do not promote. This is the
+  finding, and it is the one Stage C exists to catch.
+- **UNDECIDED** — this is not a comparison. Read the refusal: most often the confirm split's floor
+  could not be priced (raise `--repeats` on the confirm run), or the confirm ran on the wrong split.
+
+**`--split test` is checked, and a `train` confirm is REFUSED.** That is the failure this skill warns
+about earlier: Stage C re-running the train rows reproduces by construction, at full price, with no
+error anywhere. An UNRECORDED split — a run predating the provenance field — is a note instead, so
+confirm it by hand before promoting on that block.
 
 ## Step 11 — Ledger
 

@@ -31,6 +31,7 @@ from coder_eval.models import (
     ActivationGateVerdict,
     ArmRowScores,
     ClassificationCriterionResult,
+    ConfirmVerdict,
     CriterionResult,
     EvaluationResult,
     ExecutionGateVerdict,
@@ -58,6 +59,7 @@ from coder_eval.optimize_activation import (
     _refusal_message,
     _sibling_checks,
     activation_gate,
+    confirm_gate,
     derive_sibling_indices,
     holm_promote,
     measure_noise_floor,
@@ -67,6 +69,7 @@ from coder_eval.optimize_activation import (
 from coder_eval.optimize_execution import (
     _dead_weight,
     _execution_diagnostics,
+    confirm_gate_execution,
     execution_gate,
     holm_promote_execution,
     measure_execution_noise_floor,
@@ -84,6 +87,7 @@ from coder_eval.optimize_fronts import (
 )
 from coder_eval.optimize_gate import (
     _NOTE_OUTSIDE_FAMILY,
+    FLOOR_RESOLUTION,
     GATE_MAX_FAMILY,
     GATE_P_PRECISION,
     GATE_RESAMPLES,
@@ -92,6 +96,9 @@ from coder_eval.optimize_gate import (
     _note_holm_family,
     _note_ordinary_negative,
     _note_resolution_degraded,
+    build_confirm_verdict,
+    classify_confirm,
+    confirm_split_check,
     cost_latency_guardrails,
 )
 from coder_eval.optimize_load import (
@@ -126,6 +133,7 @@ from coder_eval.reports_optimize import (
     SINGLE_REPLICATE_CAVEAT,
     _front_summary,
     _render_checks,
+    render_confirm_markdown,
     render_cost_quality,
     render_execution_markdown,
     render_headroom_ceilings,
@@ -5776,6 +5784,506 @@ class TestEveryExecutionHeadlineRungIsReachable:
         assert "separated" not in build().model_dump()
 
 
+def _confirm_dir(tmp_path: Path, *, split: str | None, **arms) -> Path:
+    """A gate run dir whose `run.json` records a given `--split`.
+
+    The split is rewritten AFTER the rows go down, not before: `_exec_run_dir` refuses to build into
+    an existing directory (two calls under one tmp_path merge silently), and `_write_row` creates
+    `run.json` on the first row. So `row_selection` is patched in place, leaving `task_results` — which
+    the tree reconciliation reads — exactly as the row writer left it.
+    """
+    run_dir = _exec_run_dir(tmp_path, **(arms or _WINNER))
+    path = run_dir / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[_RUN_SELECTION_KEY] = RowSelection(split=split).model_dump(mode="json")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return run_dir
+
+
+def _train_verdict(tmp_path: Path, **kwargs) -> ExecutionGateVerdict:
+    return holm_promote_execution([_exec_gate(_confirm_dir(tmp_path, split="train"), **kwargs)])[0]
+
+
+def _confirm(tmp_path: Path, train: ExecutionGateVerdict, *, split: str | None = "test", **overrides) -> ConfirmVerdict:
+    return confirm_gate_execution(
+        train_verdict=train,
+        confirm_run_dir=_confirm_dir(tmp_path, split=split),
+        incumbent_variant="incumbent",
+        candidate_variant="candidate",
+        suite_id=EXEC_SUITE,
+        n_resamples=_FAST_RESAMPLES,
+        **overrides,
+    )
+
+
+class TestClassifyConfirm:
+    """The four answers, as a pure function of three floats — one rule, shared by both tracks.
+
+    It lives in `optimize_gate` because both rank-2 track modules need it and neither may import the
+    other, so per-track would mean two copies of promotion-relevant arithmetic. `TestTheClassifierIsShared`
+    below asserts that placement, so a future copy in either module fails the build.
+    """
+
+    def test_the_signs_opposing_is_reversed(self) -> None:
+        outcome, note = classify_confirm(0.08, -0.06, 0.02)
+        assert outcome == "reversed"
+        assert "+0.080" in note and "-0.060" in note
+
+    def test_the_same_sign_within_the_margin_is_reproduced(self) -> None:
+        outcome, _note = classify_confirm(0.08, 0.075, 0.02)
+        assert outcome == "reproduced"
+
+    def test_a_shortfall_beyond_the_margin_is_shrank(self) -> None:
+        outcome, note = classify_confirm(0.08, 0.02, 0.01)
+        assert outcome == "shrank" and "-0.060" in note
+
+    def test_a_test_effect_of_exactly_zero_is_shrank_not_reproduced(self) -> None:
+        # "Same sign" is undefined at zero, and calling no effect a reproduced one is the reading a
+        # promotion would be built on.
+        assert classify_confirm(0.08, 0.0, 0.02)[0] == "shrank"
+
+    @pytest.mark.parametrize("mde", [None, 0.0, 2.7755575615628914e-17])
+    def test_an_undefined_margin_is_undecided_never_shrank(self, mde: float | None) -> None:
+        """`None`, `0.0` and floating-point RESIDUE all leave the comparison with no operand.
+
+        Both pinned execution fixtures render `Minimum detectable effect: 0.000`, which
+        `execution_gate` itself documents as "the floor was not checked" — so this is the common case,
+        and with a margin of zero EVERY non-identical test effect would classify SHRANK.
+
+        The third value is not hypothetical: it is what this repo's own winning fixture's null split
+        returns, and an `== 0.0` test goes silently inert on it. `FLOOR_RESOLUTION` is the threshold
+        the execution track already had to widen to for exactly that reason — it moved to rank 1 so
+        this classifier could share it rather than the activation side declaring a second copy.
+        """
+        outcome, note = classify_confirm(0.08, 0.075, mde)
+        assert outcome == "undecided"
+        assert "could not be MEASURED" in note and "--repeats" in note
+
+    @pytest.mark.parametrize(
+        ("train", "test"), [(None, 0.05), (0.05, None), (None, None)], ids=["no-train", "no-test", "neither"]
+    )
+    def test_a_missing_effect_is_undecided(self, train: float | None, test: float | None) -> None:
+        outcome, note = classify_confirm(train, test, 0.02)
+        assert outcome == "undecided" and "not an effect of zero" in note
+
+    @pytest.mark.parametrize(
+        ("train", "test"),
+        [(-0.08, -0.10), (-0.08, -0.02), (0.0, 0.06), (0.0, 0.0)],
+        ids=["lost-harder", "lost-less", "appeared-from-nothing", "both-zero"],
+    )
+    def test_a_train_effect_that_is_not_a_win_is_undecided(self, train: float, test: float) -> None:
+        """Stage C confirms a WIN, and the arithmetic was actively misleading without this guard.
+
+        Measured on the version before it: `(-0.08, -0.10)` read REPRODUCED — a candidate that lost on
+        train and lost harder on test — `(-0.08, -0.02)` read SHRANK, a LOSS reading like a diminished
+        win, and `(0.0, +0.06)` read REPRODUCED when nothing was reproduced: an effect APPEARED where
+        Stage B measured none. All four are the wrong headline on a block a promotion is read from.
+        """
+        outcome, note = classify_confirm(train, test, 0.02)
+        assert outcome == "undecided"
+        assert "not a win" in note and "Stage B WINNER" in note
+
+    def test_a_zero_test_effect_gets_its_own_note_rather_than_the_shrank_arithmetic(self) -> None:
+        # The SHRANK sentence quotes a shortfall against the margin. On the zero branch that sentence
+        # was FALSE whenever the margin exceeded the train effect — it announced that a shortfall of
+        # 0.020 exceeded a resolution of 0.050. The outcome is right; the reason had to be too.
+        outcome, note = classify_confirm(0.02, 0.0, 0.05)
+        assert outcome == "shrank"
+        assert "measured exactly 0.000" in note
+        assert "exceeds" not in note, "the zero branch must not quote a shortfall against the margin"
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_value_is_undecided_rather_than_the_most_permissive_rung(self, bad: float) -> None:
+        # A NaN compares False against every threshold, so without the guard it fell through to
+        # REPRODUCED — the one rung a promotion is made on (rubric item 15).
+        assert classify_confirm(bad, 0.05, 0.02)[0] == "undecided"
+        assert classify_confirm(0.08, bad, 0.02)[0] == "undecided"
+        assert classify_confirm(0.08, 0.05, bad)[0] == "undecided"
+
+    def test_every_outcome_carries_a_non_empty_note(self) -> None:
+        # A bare outcome word in a ledger read back weeks later cannot be reconstructed from.
+        cases = [(0.08, -0.06, 0.02), (0.08, 0.075, 0.02), (0.08, 0.02, 0.01), (0.08, 0.075, None)]
+        assert all(classify_confirm(*case)[1].strip() for case in cases)
+
+
+class TestTheClassifierIsShared:
+    """One declaration, at rank 1, and a copy in either track module must fail the build."""
+
+    def test_it_lives_in_optimize_gate(self) -> None:
+        import coder_eval.optimize_gate as gate
+
+        assert classify_confirm.__module__ == gate.__name__
+        assert build_confirm_verdict.__module__ == gate.__name__
+
+    @pytest.mark.parametrize("module", ["optimize_activation", "optimize_execution"])
+    def test_neither_track_module_defines_its_own(self, module: str) -> None:
+        # A SOURCE scan, not an attribute check: both modules IMPORT these names, so `hasattr` passes
+        # either way and only the source says whether a second implementation was written.
+        source = _module_source(module)
+        for name in ("classify_confirm", "build_confirm_verdict"):
+            assert f"def {name}(" not in source, (
+                f"{module}.py defines its own {name} — the two track modules may not import each "
+                "other, so a per-track copy is two copies of promotion-relevant arithmetic"
+            )
+
+    def test_both_tracks_call_the_shared_builder(self) -> None:
+        for module in ("optimize_activation", "optimize_execution"):
+            assert "build_confirm_verdict(" in _module_source(module)
+
+
+class TestConfirmGateExecution:
+    """Stage C had no computed verdict — it was prose telling the reader to eyeball two intervals."""
+
+    def test_a_deterministic_confirm_is_undecided_and_still_reports_its_numbers(self, tmp_path: Path) -> None:
+        train = _train_verdict(tmp_path / "train")
+        confirm = _confirm(tmp_path / "test", train)
+        # `_WINNER`'s replicates agree within each row, so its null split returns RESIDUE rather than
+        # a floor — which is why the outcome is UNDECIDED. Asserted directly rather than worked
+        # around: it is what a real confirm over a deterministic suite produces, and `== 0.0` would
+        # not have seen it.
+        assert confirm.test_mde is not None and confirm.test_mde < FLOOR_RESOLUTION
+        assert confirm.outcome == "undecided"
+        assert confirm.train_effect is not None and confirm.test_effect is not None
+        assert confirm.delta == pytest.approx(confirm.test_effect - confirm.train_effect)
+
+    def test_the_train_effect_is_read_off_the_train_verdict(self, tmp_path: Path) -> None:
+        # Never recomputed: the two numbers this block compares must not be able to disagree with the
+        # blocks they were each reported in.
+        train = _train_verdict(tmp_path / "train")
+        assert _confirm(tmp_path / "test", train).train_effect == train.mean_diff
+
+    def test_a_confirm_run_recorded_under_split_train_is_refused(self, tmp_path: Path) -> None:
+        """The failure the skill already warns about in prose, at full price with no error anywhere."""
+        train = _train_verdict(tmp_path / "train")
+        confirm = _confirm(tmp_path / "test", train, split="train")
+        assert confirm.confirm_refusal is not None
+        assert "--split 'train'" in confirm.confirm_refusal
+        assert "reproduces by construction" in confirm.confirm_refusal
+        assert confirm.outcome == "undecided"
+
+    def test_a_full_suite_confirm_is_refused_too(self, tmp_path: Path) -> None:
+        # A recorded `null` split means no `--split` was passed, so the confirm scored the rows the
+        # candidate was proposed against as well.
+        train = _train_verdict(tmp_path / "train")
+        confirm = _confirm(tmp_path / "test", train, split=None)
+        assert confirm.confirm_refusal is not None and "held-out split" in confirm.confirm_refusal
+
+    def test_an_unrecorded_split_is_a_note_not_a_refusal(self, tmp_path: Path) -> None:
+        """A run predating the provenance field is an expected input, not a wiring fault."""
+        train = _train_verdict(tmp_path / "train")
+        run_dir = _exec_run_dir(tmp_path / "test", **_WINNER)
+        (run_dir / "run.json").unlink()
+        confirm = confirm_gate_execution(
+            train_verdict=train,
+            confirm_run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert confirm.confirm_refusal is None
+        assert any("provenance is missing" in note for note in confirm.notes)
+
+    def test_a_refused_train_verdict_is_undecided_and_names_the_train_cause(self, tmp_path: Path) -> None:
+        refused = holm_promote_execution(
+            [_exec_gate(_confirm_dir(tmp_path / "train", split="train", **_uniform_shift(4)))]
+        )[0]
+        assert refused.gate_refusal is not None, "fixture drifted — the train verdict must refuse"
+        confirm = _confirm(tmp_path / "test", refused)
+        assert confirm.outcome == "undecided"
+        assert confirm.confirm_refusal is not None and "TRAIN verdict is not a result" in confirm.confirm_refusal
+
+    def test_naming_more_than_one_candidate_raises(self, tmp_path: Path) -> None:
+        # Confirming a shortlist spends the held-out split on SELECTION.
+        train = _train_verdict(tmp_path / "train")
+        with pytest.raises(TypeError, match="ONE variant id"):
+            confirm_gate_execution(
+                train_verdict=train,
+                confirm_run_dir=_confirm_dir(tmp_path / "test", split="test"),
+                incumbent_variant="incumbent",
+                candidate_variant=["candidate", "cand-b"],  # type: ignore[arg-type]
+                suite_id=EXEC_SUITE,
+            )
+
+    def test_a_train_verdict_that_did_not_promote_is_noted(self, tmp_path: Path) -> None:
+        """Stage C confirms the Stage B WINNER, and confirming anything else is worth saying.
+
+        A note rather than a refusal: a reader may legitimately want to confirm a candidate that
+        separated and was then vetoed by a guardrail. What it prevents is the resulting UNDECIDED —
+        `classify_confirm` will not classify a train effect that is not a win — reading as a tooling
+        failure rather than as the wrong verdict having been passed.
+        """
+        # A candidate that SEPARATED and was then vetoed — the legitimate reason to reach here. These
+        # rows' labels derive from their scores, so the incumbent's low rows read `no` and the
+        # engagement integrity check fails, which is exactly that shape.
+        train = holm_promote_execution(
+            [_exec_gate(_confirm_dir(tmp_path / "train", split="train", **TestConfirmGateOutcomesEndToEnd._arms(0.30)))]
+        )[0]
+        assert (train.separated, train.promoted) == (True, False), "fixture drifted — need a vetoed winner"
+        confirm = _confirm(tmp_path / "test", train)
+        assert confirm.confirm_refusal is None
+        assert any("not True — Stage C confirms the Stage B WINNER" in note for note in confirm.notes)
+
+    def test_it_measures_no_floor_of_its_own(self, tmp_path: Path) -> None:
+        # `execution_gate` already measures the replicate floor unconditionally, so `test_mde` is
+        # simply `test_verdict.mde`. A second estimator would double every confirm's bootstrap cost.
+        train = _train_verdict(tmp_path / "train")
+        confirm = _confirm(tmp_path / "test", train)
+        assert confirm.test_mde == confirm.test_verdict.mde
+        source = _module_source("optimize_execution")
+        body = source[source.index("def confirm_gate_execution(") : source.index("def holm_promote_execution(")]
+        assert "measure_execution_noise_floor" not in body
+
+    def test_the_carried_block_is_decided_rather_than_undecided(self, tmp_path: Path) -> None:
+        # Holm at m=1: there is no multiplicity at Stage C, and applying it is what stops the carried
+        # block rendering as UNDECIDED — which would read as "the gate never ran".
+        train = _train_verdict(tmp_path / "train")
+        assert _confirm(tmp_path / "test", train).test_verdict.promoted is not None
+
+
+class TestConfirmGateOutcomesEndToEnd:
+    """All four outcomes reachable through the real gate, with a measurable confirm floor.
+
+    The `_WINNER` fixture's replicates agree within each row, so its null split reduces to a floor of
+    exactly 0.000 and every confirm over it is UNDECIDED — correctly. These fixtures give the confirm
+    run a MEASURABLE floor by varying the replicate spread per row, which is what a real
+    `--repeats 3` confirm produces.
+    """
+
+    @staticmethod
+    def _arms(shift: float, *, swap: bool = False) -> dict[str, dict[str, list[float]]]:
+        """Two arms differing by ``shift`` per replicate, with the replicate spread varied per row.
+
+        ``swap`` exchanges the arms, which is how a NEGATIVE effect is built. Negating the shift
+        instead would write ``weighted_score`` values below zero — and `EvaluationResult` bounds that
+        field at 0.0, so every row on disk then fails to LOAD while the statistic (which comes from
+        `experiment.json`) still computes: the numbers look right and the integrity checks and
+        guardrails are silently computed over nothing. Measured while building the REVERSED pin.
+        """
+        low = {"r0": [0.10, 0.50], "r1": [0.20, 0.40], "r2": [0.05, 0.55], "r3": [0.25, 0.45]}
+        high = {row: [round(v + shift, 3) for v in values] for row, values in low.items()}
+        return {"incumbent": high, "candidate": low} if swap else {"incumbent": low, "candidate": high}
+
+    def _confirm_with(
+        self, tmp_path: Path, *, train_shift: float, test_shift: float, swap_test: bool = False
+    ) -> ConfirmVerdict:
+        train = holm_promote_execution(
+            [_exec_gate(_confirm_dir(tmp_path / "train", split="train", **self._arms(train_shift)))]
+        )[0]
+        return confirm_gate_execution(
+            train_verdict=train,
+            confirm_run_dir=_confirm_dir(tmp_path / "test", split="test", **self._arms(test_shift, swap=swap_test)),
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            n_resamples=_FAST_RESAMPLES,
+        )
+
+    def test_a_sign_flip_is_reversed(self, tmp_path: Path) -> None:
+        confirm = self._confirm_with(tmp_path, train_shift=0.30, test_shift=0.30, swap_test=True)
+        assert confirm.outcome == "reversed"
+        assert confirm.test_effect is not None and confirm.test_effect < 0.0
+
+    def test_the_same_effect_reproduces(self, tmp_path: Path) -> None:
+        confirm = self._confirm_with(tmp_path, train_shift=0.30, test_shift=0.30)
+        assert confirm.outcome == "reproduced"
+
+    def test_a_much_smaller_effect_shrank(self, tmp_path: Path) -> None:
+        """A test effect ABOVE the confirm floor but far below the train one.
+
+        The shifts are constrained from both sides, which is worth stating because the obvious
+        fixture does not work: a test effect below the confirm split's own MDE makes the confirm GATE
+        refuse (see the test below), so SHRANK needs a test effect above that floor whose shortfall
+        from the train effect still exceeds it. Measured floor for these rows: 0.125.
+        """
+        confirm = self._confirm_with(tmp_path, train_shift=0.45, test_shift=0.20)
+        assert confirm.confirm_refusal is None, "fixture drifted — the confirm gate must not refuse here"
+        assert confirm.outcome == "shrank"
+
+    def test_a_confirm_effect_below_the_confirm_floor_is_undecided(self, tmp_path: Path) -> None:
+        # The confirm gate's own below-MDE refusal propagates: an effect the confirm split cannot
+        # resolve is not a reproduction, and it is not a shrinkage either — it is not a measurement.
+        confirm = self._confirm_with(tmp_path, train_shift=0.45, test_shift=0.02)
+        assert confirm.confirm_refusal is not None and "confirm gate is not a result" in confirm.confirm_refusal
+        assert confirm.outcome == "undecided"
+
+    def test_the_confirm_floor_is_measurable_on_these_fixtures(self, tmp_path: Path) -> None:
+        # The precondition every test above depends on — asserted, so a drifted fixture reports
+        # itself rather than silently collapsing all three into UNDECIDED.
+        confirm = self._confirm_with(tmp_path, train_shift=0.30, test_shift=0.30)
+        assert confirm.test_mde is not None and confirm.test_mde > 0.0
+
+
+class TestPrimaryCriterionIndex:
+    """The PREDECLARED primary, as a reading. It never moves `promoted`."""
+
+    @staticmethod
+    def _dead_weight_arms() -> dict[str, dict[str, list[list[float]]]]:
+        rows = [f"r{i}" for i in range(4)]
+        return {
+            "incumbent": {rid: [[1.0, 1.0, 0.2], [1.0, 1.0, 0.3]] for rid in rows},
+            "candidate": {rid: [[1.0, 1.0, 0.8], [1.0, 1.0, 0.9]] for rid in rows},
+        }
+
+    def test_the_primary_effect_differs_from_the_blended_one_under_dead_weight(self, tmp_path: Path) -> None:
+        """The whole point: the blended `mean_diff` is the primary effect times (1 - dead_weight).
+
+        On the shipped template's weights, an effect confined to the grader arrives at the gate
+        multiplied by 1/2.05 — and `primary_mean_diff` is what converts it back.
+        """
+        weights = _template_weights()
+        run_dir = _weighted_run_dir(tmp_path, **self._dead_weight_arms(), weights=weights)  # type: ignore[arg-type]
+        verdict = _exec_gate(run_dir, primary_criterion_index=2)
+
+        assert verdict.primary_mean_diff is not None and verdict.mean_diff is not None
+        assert verdict.primary_mean_diff != pytest.approx(verdict.mean_diff)
+        # The blended difference IS the primary one attenuated by the dead weight.
+        assert verdict.mean_diff == pytest.approx(verdict.primary_mean_diff * (1.0 - (verdict.dead_weight or 0.0)))
+
+    def test_setting_it_changes_no_decision(self, tmp_path: Path) -> None:
+        weights = _template_weights()
+        arms = self._dead_weight_arms()
+        plain = holm_promote_execution([_exec_gate(_weighted_run_dir(tmp_path / "a", **arms, weights=weights))])[0]  # type: ignore[arg-type]
+        primary = holm_promote_execution(
+            [_exec_gate(_weighted_run_dir(tmp_path / "b", **arms, weights=weights), primary_criterion_index=2)]  # type: ignore[arg-type]
+        )[0]
+        assert (plain.promoted, plain.holm_rejected, plain.separated) == (
+            primary.promoted,
+            primary.holm_rejected,
+            primary.separated,
+        )
+        assert plain.mean_diff == pytest.approx(primary.mean_diff)
+
+    def test_an_over_range_index_is_refused_rather_than_reported_as_empty(self, tmp_path: Path) -> None:
+        """`_require_valid_criterion_index` bounds only BELOW, deliberately — and that is wrong here.
+
+        An over-long index makes `_row_score` return None on every row, so the vector is EMPTY and
+        indistinguishable from a suite whose rows all errored on that criterion. Refused explicitly.
+        """
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER), primary_criterion_index=7)
+        assert verdict.primary_mean_diff is None
+        assert verdict.gate_refusal is not None and "selected no usable row" in verdict.gate_refusal
+        assert holm_promote_execution([verdict])[0].promoted is False
+
+    def test_a_negative_index_raises_at_the_boundary(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="criterion_index must be >= 0"):
+            _exec_gate(_exec_run_dir(tmp_path, **_WINNER), primary_criterion_index=-1)
+
+    def test_it_defaults_to_absent(self, tmp_path: Path) -> None:
+        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER))
+        assert verdict.primary_criterion_index is None and verdict.primary_mean_diff is None
+
+    def test_the_rendered_block_prints_it_only_when_predeclared(self, tmp_path: Path) -> None:
+        """It has to be on the BLOCK, not only on the model — the skill tells the user to read it.
+
+        And only when predeclared: a permanent `primary: —` line sends the reader looking for a number
+        nobody asked for, and it would churn every pinned render for a field no fixture sets.
+        """
+        weights = _template_weights()
+        arms = self._dead_weight_arms()
+        plain = _exec_gate(_weighted_run_dir(tmp_path / "a", **arms, weights=weights))  # type: ignore[arg-type]
+        primary = _exec_gate(
+            _weighted_run_dir(tmp_path / "b", **arms, weights=weights),  # type: ignore[arg-type]
+            primary_criterion_index=2,
+        )
+        assert "Predeclared primary" not in render_execution_markdown(plain)
+        block = render_execution_markdown(primary)
+        assert primary.primary_mean_diff is not None
+        assert f"- Predeclared primary (criterion 2): {primary.primary_mean_diff:.3f}" in block
+        assert "gates nothing" in block
+
+
+class TestRenderConfirmMarkdown:
+    """The Stage C block. Only the REVERSED rung is new; the rest takes its shape from the gate ladder."""
+
+    @staticmethod
+    def _verdict(outcome: str, **overrides) -> ConfirmVerdict:
+        base: dict[str, object] = {
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "cand",
+            "suite_id": EXEC_SUITE,
+            "train_effect": 0.08,
+            "test_effect": 0.075,
+            "test_mde": 0.02,
+            "delta": -0.005,
+            "outcome": outcome,
+            "test_verdict": _full_execution_verdict(),
+        }
+        return ConfirmVerdict(**{**base, **overrides})
+
+    _RUNGS: ClassVar[list[tuple[str, dict, str]]] = [
+        ("refusal", {"confirm_refusal": "the confirm run recorded --split 'train'"}, "NOT A COMPARISON"),
+        ("reversed", {}, "REVERSED"),
+        ("shrank", {}, "SHRANK"),
+        ("reproduced", {}, "REPRODUCED"),
+        ("undecided", {}, "UNDECIDED"),
+    ]
+
+    @pytest.mark.parametrize(("rung", "overrides", "expected"), _RUNGS, ids=[r[0] for r in _RUNGS])
+    def test_the_rung_is_reachable(self, rung: str, overrides: dict, expected: str) -> None:
+        outcome = "undecided" if rung == "refusal" else rung
+        block = render_confirm_markdown(self._verdict(outcome, **overrides))
+        assert _headline(block).startswith(expected)
+
+    def test_a_refusal_is_printed_once_not_twice(self, tmp_path: Path) -> None:
+        # `holm_promote`'s rule for `gate_refusal`, applied here: notes is the distrust-the-numbers
+        # channel and a refusal is a headline, so a refused block must not carry both.
+        reason = "the confirm run recorded --split 'train'"
+        block = render_confirm_markdown(self._verdict("undecided", confirm_refusal=reason, notes=[]))
+        assert block.count(reason) == 1
+
+    def test_a_refused_verdict_carries_no_classification_note(self, tmp_path: Path) -> None:
+        from coder_eval.optimize_gate import build_confirm_verdict
+
+        verdict = build_confirm_verdict(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=EXEC_SUITE,
+            train_effect=0.08,
+            test_effect=0.075,
+            test_mde=0.02,
+            test_verdict=_full_execution_verdict(),
+            confirm_refusal="the confirm run recorded --split 'train'",
+            notes=["a qualification worth keeping"],
+        )
+        assert verdict.outcome == "undecided"
+        assert verdict.notes == ["a qualification worth keeping"], "the refusal must not become a note"
+
+    def test_a_refusal_outranks_every_outcome(self, tmp_path: Path) -> None:
+        # Including REVERSED: a refused block is not a comparison, so no classification beneath it
+        # means anything — the same precedence both gate ladders apply.
+        block = render_confirm_markdown(
+            self._verdict("reversed", confirm_refusal="the confirm run recorded --split 'train'")
+        )
+        assert _headline(block).startswith("NOT A COMPARISON")
+        assert "REVERSED" not in _headline(block)
+
+    def test_reversed_says_do_not_promote_in_the_headline(self) -> None:
+        # A reversal is a headline, not a footnote: a reader who skims past it promotes on a number
+        # that does not hold on held-out rows.
+        assert "Do not promote" in _headline(render_confirm_markdown(self._verdict("reversed")))
+
+    def test_the_block_carries_both_effects_the_delta_and_the_margin(self) -> None:
+        block = render_confirm_markdown(self._verdict("reproduced"))
+        assert "Train effect (candidate - incumbent): 0.080" in block
+        assert "Test effect on the held-out split: 0.075" in block
+        assert "Delta: -0.005" in block and "MDE: 0.020" in block
+
+    def test_it_names_the_family_of_one(self) -> None:
+        # Or a reader looks for a Holm correction over hypotheses that were never tested.
+        assert "family of ONE" in render_confirm_markdown(self._verdict("reproduced"))
+
+    def test_it_does_not_re_render_the_carried_gate_block(self) -> None:
+        # A third copy of either gate ladder is the drift this renderer's docstring is about.
+        block = render_confirm_markdown(self._verdict("reproduced"))
+        assert "Execution gate —" not in block
+        assert "render_execution_markdown" in block, "it must say which renderer to print beside it"
+
+    def test_every_note_is_printed(self) -> None:
+        verdict = self._verdict("reproduced", notes=["something worth distrusting"])
+        assert "something worth distrusting" in render_confirm_markdown(verdict)
+
+
 class TestHolmPromoteExecution:
     def _verdict(self, p: float, **overrides) -> ExecutionGateVerdict:
         base = {
@@ -6550,6 +7058,40 @@ class TestRenderingIsBehaviourPreserving:
         decided = holm_promote_execution(verdicts)[0]
         _assert_matches_render_pin(render_execution_markdown(decided), "execution_gate_family8")
 
+    def test_the_confirm_block_is_unchanged(self, tmp_path: Path) -> None:
+        """Stage C's block, pinned whole. A NEW fixture, so it owes no ledger row.
+
+        Pinned on the REVERSED rung specifically: it is the only rung this renderer adds, and it is
+        the one whose precedence matters most — a reversal that renders as a footnote is a promotion
+        made on a number that does not hold.
+        """
+        # `engagement_criterion_index=None` on the TRAIN gate: these rows' labels derive from their
+        # scores, so the incumbent's low rows read `no` and the engagement check fails — which blocks
+        # the train verdict and would add a "not the Stage B winner" note to a pin whose whole subject
+        # is the REVERSED rung. `TestConfirmGateExecution` covers that note on its own.
+        train = holm_promote_execution(
+            [
+                _exec_gate(
+                    _confirm_dir(tmp_path / "train", split="train", **TestConfirmGateOutcomesEndToEnd._arms(0.30)),
+                    engagement_criterion_index=None,
+                )
+            ]
+        )[0]
+        assert train.promoted is True, "fixture drifted — the pin's train verdict must be a WINNER"
+        confirm = confirm_gate_execution(
+            train_verdict=train,
+            confirm_run_dir=_confirm_dir(
+                tmp_path / "test", split="test", **TestConfirmGateOutcomesEndToEnd._arms(0.30, swap=True)
+            ),
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            engagement_criterion_index=None,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert confirm.outcome == "reversed", "fixture drifted — this pin exists for the REVERSED rung"
+        _assert_matches_render_pin(render_confirm_markdown(confirm), "confirm_gate_reversed")
+
     def test_the_cross_split_refusal_block_is_unchanged(self, tmp_path: Path) -> None:
         """The fifth headline, pinned whole like its siblings rather than sampled by substring.
 
@@ -6631,6 +7173,23 @@ def _full_activation_verdict() -> ActivationGateVerdict:
     )
 
 
+def _full_confirm_verdict(execution: bool = True) -> ConfirmVerdict:
+    """Every optional field set, so the round-trip check below proves something on each one."""
+    return ConfirmVerdict(
+        incumbent_variant="incumbent",
+        candidate_variant="cand",
+        suite_id=SUITE,
+        train_effect=0.08,
+        test_effect=0.075,
+        test_mde=0.02,
+        delta=-0.005,
+        outcome="reproduced",
+        test_verdict=_full_execution_verdict() if execution else _full_activation_verdict(),
+        confirm_refusal="refused",
+        notes=["a note"],
+    )
+
+
 def _full_execution_verdict() -> ExecutionGateVerdict:
     return ExecutionGateVerdict(
         incumbent_variant="incumbent",
@@ -6651,6 +7210,8 @@ def _full_execution_verdict() -> ExecutionGateVerdict:
         promoted=False,  # as above: a refusal forces this False
         mde=0.2,
         dead_weight=0.5,
+        primary_criterion_index=1,
+        primary_mean_diff=0.9,
         integrity_checks=[_full_guardrail_check()],
         guardrails=[_full_guardrail_check()],
         notes=["a note"],
@@ -6670,9 +7231,10 @@ class TestTypedConstruction:
         [
             (_full_activation_verdict, "mean_dif"),
             (_full_execution_verdict, "mean_dif"),
+            (_full_confirm_verdict, "test_efect"),
             (_full_guardrail_check, "relative_chnge"),
         ],
-        ids=["activation", "execution", "guardrail"],
+        ids=["activation", "execution", "confirm", "guardrail"],
     )
     def test_an_unknown_field_raises(self, build, typo: str) -> None:
         instance = build()
@@ -6682,8 +7244,8 @@ class TestTypedConstruction:
 
     @pytest.mark.parametrize(
         "build",
-        [_full_activation_verdict, _full_execution_verdict, _full_guardrail_check],
-        ids=["activation", "execution", "guardrail"],
+        [_full_activation_verdict, _full_execution_verdict, _full_confirm_verdict, _full_guardrail_check],
+        ids=["activation", "execution", "confirm", "guardrail"],
     )
     def test_a_fully_populated_instance_round_trips(self, build) -> None:
         instance = build()
@@ -6706,6 +7268,39 @@ class TestTypedConstruction:
             if not field.is_required() and dumped[name] == field.get_default(call_default_factory=True)
         ]
         assert not still_default, f"fixture leaves {still_default} at the default — it proves nothing there"
+
+
+class TestConfirmVerdictCarriesEitherTrack:
+    """`test_verdict` is a BARE `ActivationGateVerdict | ExecutionGateVerdict`, so pin what makes it work.
+
+    Rubric item 12 wants a discriminated union, and there is no field to discriminate ON: neither
+    verdict carries a track tag, and adding one would change two models that are already persisted in
+    pinned fixtures. What makes the bare union safe instead is that both declare `extra="forbid"` and
+    have DISJOINT required-plus-unique fields (`criterion_index` on one, `effect_size`/`dead_weight` on
+    the other), so pydantic's smart mode cannot resolve either to the wrong member. That is an
+    argument, and an argument about a persisted field needs a witness — a future field added to one
+    model could make the two overlap, and the failure would be a Stage C block reporting the wrong
+    track's verdict after a round-trip, silently.
+    """
+
+    @pytest.mark.parametrize("execution", [True, False], ids=["execution", "activation"])
+    def test_the_concrete_member_survives_a_round_trip(self, execution: bool) -> None:
+        verdict = _full_confirm_verdict(execution=execution)
+        expected = ExecutionGateVerdict if execution else ActivationGateVerdict
+        assert isinstance(verdict.test_verdict, expected)
+        reloaded = ConfirmVerdict.model_validate_json(verdict.model_dump_json())
+        assert isinstance(reloaded.test_verdict, expected)
+        assert reloaded == verdict
+
+    def test_the_two_members_have_no_common_shape(self) -> None:
+        # The property the bare union rests on, asserted rather than assumed.
+        activation = set(ActivationGateVerdict.model_fields)
+        execution = set(ExecutionGateVerdict.model_fields)
+        assert activation - execution and execution - activation, (
+            "the two verdicts' field sets no longer differ in BOTH directions, so pydantic's smart "
+            "mode could resolve `ConfirmVerdict.test_verdict` to the wrong member — give the union a "
+            "discriminator, or a Stage C block will report the wrong track's numbers after a reload"
+        )
 
 
 class TestDeriveSiblingIndices:
@@ -7522,6 +8117,279 @@ class TestReadSplitProvenance:
             _set_split(run_dir, "train")
         provenance = read_split_provenance([a, b])
         assert provenance.mismatched is False and provenance.value == "train"
+
+
+class TestConfirmGateActivation:
+    """The activation twin. Same four outcomes on `f1.yes`, one shared classifier, no cross-track import."""
+
+    @staticmethod
+    def _arms(tmp_path: Path, *, split: str | None, incumbent_hits: int, candidate_hits: int):
+        """Two arms over 6 rows, each scoring a given number of them, under a recorded split."""
+        inc_labels = {f"r{i}": [("yes", "yes" if i < incumbent_hits else "no")] for i in range(6)}
+        cand_labels = {f"r{i}": [("yes", "yes" if i < candidate_hits else "no")] for i in range(6)}
+        inc = _write_arm(tmp_path, "incumbent", inc_labels, invocations=2, prefix="inc-")
+        cand = _write_arm(tmp_path, "candidate", cand_labels, invocations=2, prefix="cand-")
+        for d in (*inc, *cand):
+            _set_split(d, split)
+        return inc, cand
+
+    def _confirm(self, tmp_path: Path, *, split: str | None = "test", train: ActivationGateVerdict | None = None):
+        inc, cand = self._arms(tmp_path / "confirm", split=split, incumbent_hits=2, candidate_hits=5)
+        if train is None:
+            t_inc, t_cand = self._arms(tmp_path / "train", split="train", incumbent_hits=2, candidate_hits=5)
+            train = holm_promote([TestCrossSplitRefusal._gate(t_inc, t_cand)])[0]
+        return confirm_gate(
+            train_verdict=train,
+            incumbent_run_dirs=inc,
+            candidate_run_dirs=cand,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+
+    def test_it_produces_a_confirm_verdict_on_f1(self, tmp_path: Path) -> None:
+        confirm = self._confirm(tmp_path)
+        assert isinstance(confirm, ConfirmVerdict)
+        assert confirm.outcome in {"reproduced", "shrank", "reversed", "undecided"}
+        # The effect is the F1 difference this track gates on, read off each verdict rather than
+        # recomputed — the same rule the execution twin follows.
+        assert confirm.train_effect is not None
+        assert confirm.test_effect == confirm.test_verdict.mean_diff
+
+    def test_a_confirm_run_recorded_under_split_train_is_refused(self, tmp_path: Path) -> None:
+        confirm = self._confirm(tmp_path, split="train")
+        assert confirm.confirm_refusal is not None
+        assert "--split 'train'" in confirm.confirm_refusal and confirm.outcome == "undecided"
+
+    def test_a_cross_split_confirm_pair_is_refused_naming_both_splits(self, tmp_path: Path) -> None:
+        """This track pools several dirs per arm, so its confirm can be internally inconsistent.
+
+        `activation_gate` refuses it underneath too, but a Stage C block reporting UNDECIDED with no
+        reason would send the reader to the gate's notes to find out why.
+        """
+        inc, cand = self._arms(tmp_path / "c", split="test", incumbent_hits=2, candidate_hits=5)
+        for d in cand:
+            _set_split(d, "train")
+        t_inc, t_cand = self._arms(tmp_path / "t", split="train", incumbent_hits=2, candidate_hits=5)
+        train = holm_promote([TestCrossSplitRefusal._gate(t_inc, t_cand)])[0]
+        confirm = confirm_gate(
+            train_verdict=train,
+            incumbent_run_dirs=inc,
+            candidate_run_dirs=cand,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert confirm.confirm_refusal is not None
+        assert "'train'" in confirm.confirm_refusal and "'test'" in confirm.confirm_refusal
+
+    def test_naming_more_than_one_candidate_raises(self, tmp_path: Path) -> None:
+        inc, cand = self._arms(tmp_path, split="test", incumbent_hits=2, candidate_hits=5)
+        with pytest.raises(TypeError, match="ONE variant id"):
+            confirm_gate(
+                train_verdict=_full_activation_verdict(),
+                incumbent_run_dirs=inc,
+                candidate_run_dirs=cand,
+                incumbent_variant="incumbent",
+                candidate_variant=["candidate", "cand-b"],  # type: ignore[arg-type]
+                suite_id=SUITE,
+                criterion_index=0,
+            )
+
+    def test_a_refused_train_verdict_is_undecided(self, tmp_path: Path) -> None:
+        refused = _full_activation_verdict()  # carries `gate_refusal="refused"`
+        assert refused.gate_refusal is not None
+        confirm = self._confirm(tmp_path, train=refused)
+        assert confirm.outcome == "undecided"
+        assert confirm.confirm_refusal is not None and "TRAIN verdict is not a result" in confirm.confirm_refusal
+
+    def test_the_carried_block_is_decided(self, tmp_path: Path) -> None:
+        assert self._confirm(tmp_path).test_verdict.promoted is not None
+
+    def test_it_measures_no_floor_of_its_own(self, tmp_path: Path) -> None:
+        source = _module_source("optimize_activation")
+        body = source[source.index("def confirm_gate(") : source.index("def holm_promote(")]
+        assert "measure_noise_floor" not in body
+        # ONE verdict's two fields, not one field from each of two independently gated runs.
+        confirm = self._confirm(tmp_path)
+        assert confirm.test_mde == confirm.test_verdict.mde
+
+
+class TestConfirmSplitCheckIsShared:
+    """One split rule for both tracks, and it must not be an `if/elif` over the collapsed value.
+
+    `SplitProvenance.value` collapses to `UNRECORDED_SPLIT` when ANY pooled dir is unreadable, so an
+    `if unrecorded: note / elif value != "test": refuse` chain drops the refusal entirely for three
+    dirs recording `train` beside one unreadable `run.json` — and the confirm then classifies over
+    TRAIN rows carrying only a "provenance is missing from 1 of 4" note. That is precisely the failure
+    the refusal exists for. The execution twin takes ONE run dir and cannot reach the state, which is
+    exactly why the rule may not live on each track separately: the safe one would keep working while
+    the other drifted.
+    """
+
+    @staticmethod
+    def _provenance(*recorded: str | None, unrecorded: int = 0) -> SplitProvenance:
+        return SplitProvenance(recorded=frozenset(recorded), unrecorded=unrecorded)
+
+    def test_a_test_split_is_neither_refused_nor_noted(self) -> None:
+        assert confirm_split_check(self._provenance("test"), [Path("d")]) == (None, None)
+
+    def test_a_train_split_is_refused_with_the_re_run_remedy(self) -> None:
+        refusal, note = confirm_split_check(self._provenance("train"), [Path("d")])
+        assert refusal is not None and note is None
+        assert "--split 'train'" in refusal and "reproduces by construction" in refusal
+
+    def test_a_full_suite_selection_is_refused_too(self) -> None:
+        # A recorded `None` means no `--split` was passed, so the confirm scored the train rows as well.
+        refusal, _note = confirm_split_check(self._provenance(None), [Path("d")])
+        assert refusal is not None and "held-out split" in refusal
+
+    def test_an_unrecorded_split_alone_is_a_note(self) -> None:
+        refusal, note = confirm_split_check(self._provenance(unrecorded=1), [Path("d")])
+        assert refusal is None
+        assert note is not None and "provenance is missing" in note
+
+    def test_a_recorded_train_beside_an_unrecorded_dir_still_refuses(self) -> None:
+        """THE regression this shared helper exists for — verified against the collapsed value.
+
+        Three dirs recording `train` and one unreadable: `value` is `UNRECORDED_SPLIT`, so a chain
+        keyed on it emits only the note. Both must appear.
+        """
+        provenance = self._provenance("train", unrecorded=1)
+        assert provenance.value == UNRECORDED_SPLIT, "precondition: the value collapses"
+        refusal, note = confirm_split_check(provenance, [Path("a"), Path("b")])
+        assert refusal is not None and "--split 'train'" in refusal
+        assert note is not None and "provenance is missing" in note
+
+    def test_a_mixed_recording_names_every_off_split_value(self) -> None:
+        refusal, _note = confirm_split_check(self._provenance("train", "holdout"), [Path("d")])
+        assert refusal is not None and "'holdout'" in refusal and "'train'" in refusal
+
+    @pytest.mark.parametrize("module", ["optimize_activation", "optimize_execution"])
+    def test_neither_track_reimplements_the_rule(self, module: str) -> None:
+        # The drift this closes was already present: the execution side had gained the
+        # "not the Stage B winner" note that the activation side lacked, while the activation
+        # docstring claimed both worked "for the reasons the execution twin's docstring gives".
+        source = _module_source(module)
+        assert "confirm_split_check(" in source
+        assert "reproduces by construction" not in source, f"{module}.py carries its own copy of the remedy"
+
+    def test_the_activation_gate_refuses_a_train_beside_an_unrecorded_dir_end_to_end(self, tmp_path: Path) -> None:
+        # Through the real gate, not only the helper: this track pools dirs per arm, so the state is
+        # reachable there and nowhere else.
+        inc, cand = TestConfirmGateActivation._arms(tmp_path / "c", split="train", incumbent_hits=2, candidate_hits=5)
+        (inc[0] / "run.json").unlink()
+        t_inc, t_cand = TestConfirmGateActivation._arms(
+            tmp_path / "t", split="train", incumbent_hits=2, candidate_hits=5
+        )
+        train = holm_promote([TestCrossSplitRefusal._gate(t_inc, t_cand)])[0]
+        confirm = confirm_gate(
+            train_verdict=train,
+            incumbent_run_dirs=inc,
+            candidate_run_dirs=cand,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+        assert confirm.confirm_refusal is not None and "--split 'train'" in confirm.confirm_refusal
+        assert confirm.outcome == "undecided"
+
+
+class TestConfirmGateActivationOutcomes:
+    """All three DECIDED outcomes reached through `optimize_activation.confirm_gate` itself.
+
+    Asserting `outcome in {the four values}` proves nothing — the field is a `Literal` of exactly
+    those — and the refusal tests next door only ever reach `undecided`. So REPRODUCED, SHRANK and
+    REVERSED are pinned on this track too, not only on the execution one and in the pure classifier.
+
+    **The arms have to be FLAKY across invocations**, and that is the whole difficulty: this track's
+    floor is a null split over INVOCATIONS, so two identical invocations give an `mde` of exactly
+    0.000 and every confirm over them is UNDECIDED — correctly, and it is what the simpler fixtures
+    next door produce. One row flipping between the two invocations is what prices the floor.
+    """
+
+    @staticmethod
+    def _flaky(hits: int) -> list[dict[str, tuple[str, str]]]:
+        """Two invocations over 6 positive rows; `hits` of them score, and `r0` flips between them."""
+        first = {f"r{i}": ("yes", "yes" if i < hits else "no") for i in range(6)}
+        second = {row: (("yes", "no") if row == "r0" else pair) for row, pair in first.items()}
+        return [first, second]
+
+    @classmethod
+    def _arm(cls, base: Path, variant: str, hits: int, prefix: str) -> list[Path]:
+        dirs: list[Path] = []
+        for index, labels in enumerate(cls._flaky(hits)):
+            run_dir = base / f"{prefix}run-{index}"
+            for row, pair in labels.items():
+                _write_row(run_dir, variant, row, _eval_result(row, [pair]))
+            dirs.append(run_dir)
+        return dirs
+
+    @classmethod
+    def _pair(cls, base: Path, *, incumbent_hits: int, candidate_hits: int, split: str) -> tuple:
+        inc = cls._arm(base, "incumbent", incumbent_hits, "inc-")
+        cand = cls._arm(base, "candidate", candidate_hits, "cand-")
+        for run_dir in (*inc, *cand):
+            _set_split(run_dir, split)
+        return inc, cand
+
+    @classmethod
+    def _gate(cls, base: Path, *, incumbent_hits: int, candidate_hits: int, split: str):
+        inc, cand = cls._pair(base, incumbent_hits=incumbent_hits, candidate_hits=candidate_hits, split=split)
+        return holm_promote([TestCrossSplitRefusal._gate(inc, cand)])[0], inc, cand
+
+    @classmethod
+    def _confirm(cls, tmp_path: Path, *, train: tuple[int, int], test: tuple[int, int]) -> ConfirmVerdict:
+        train_verdict, _i, _c = cls._gate(
+            tmp_path / "train", incumbent_hits=train[0], candidate_hits=train[1], split="train"
+        )
+        _v, inc, cand = cls._gate(tmp_path / "test", incumbent_hits=test[0], candidate_hits=test[1], split="test")
+        return confirm_gate(
+            train_verdict=train_verdict,
+            incumbent_run_dirs=inc,
+            candidate_run_dirs=cand,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+            n_resamples=_FAST_RESAMPLES,
+        )
+
+    def test_the_same_effect_reproduces(self, tmp_path: Path) -> None:
+        confirm = self._confirm(tmp_path, train=(2, 6), test=(2, 6))
+        assert confirm.confirm_refusal is None
+        assert confirm.outcome == "reproduced"
+
+    def test_a_much_smaller_effect_shrank(self, tmp_path: Path) -> None:
+        # Train +0.803 against test +0.368 with a confirm floor of 0.257: the shortfall exceeds it.
+        confirm = self._confirm(tmp_path, train=(1, 6), test=(3, 6))
+        assert confirm.confirm_refusal is None
+        assert confirm.outcome == "shrank"
+
+    def test_a_sign_flip_is_reversed(self, tmp_path: Path) -> None:
+        confirm = self._confirm(tmp_path, train=(2, 6), test=(6, 2))
+        assert confirm.confirm_refusal is None
+        assert confirm.outcome == "reversed"
+        assert confirm.test_effect is not None and confirm.test_effect < 0.0
+
+    def test_the_confirm_floor_is_priced_on_these_fixtures(self, tmp_path: Path) -> None:
+        # The precondition all three depend on: with identical invocations the floor is 0.000 and
+        # every outcome above collapses to UNDECIDED. Asserted so a drifted fixture says so.
+        confirm = self._confirm(tmp_path, train=(2, 6), test=(2, 6))
+        assert confirm.test_mde is not None and confirm.test_mde > FLOOR_RESOLUTION
+
+    def test_the_effect_is_f1_not_weighted_score(self, tmp_path: Path) -> None:
+        # This track gates on `f1.yes`, so the delta it classifies is an F1 difference — read off the
+        # verdicts rather than recomputed, exactly as the execution twin reads `weighted_score`.
+        confirm = self._confirm(tmp_path, train=(2, 6), test=(2, 6))
+        assert confirm.test_effect == confirm.test_verdict.mean_diff
+        assert confirm.test_verdict.incumbent_f1 is not None and confirm.test_verdict.candidate_f1 is not None
 
 
 class TestCrossSplitRefusal:

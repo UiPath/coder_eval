@@ -64,6 +64,13 @@ agent:
   # hypothesis is "reach for a different tool" would otherwise be scored on the
   # prohibition rather than on the instruction.
   #
+  # The worked example, now that a candidate may edit `scripts/` and reference files as well as
+  # the body (see the optimize-skill plugin's reference/proposal-prompt.md): a candidate whose
+  # hypothesis is "run a bundled script instead of following six prose steps" needs `Bash`.
+  # Nothing is missing here — `Bash` is already in the list below — but the union rule bites
+  # harder once scripts are a reachable candidate shape, because the tool a candidate needs may
+  # appear in no arm that exists yet.
+  #
   # Omitting this field allows ALL tools, which is why the risk here is a list drawn too
   # narrow, never one drawn too wide.
   #

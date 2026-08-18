@@ -7,6 +7,8 @@ is a typed value the skill prints, instead of arithmetic an agent performs by ha
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
@@ -404,6 +406,39 @@ class ExecutionGateVerdict(BaseModel):
             "it could not be computed; 0.0 is a real answer meaning the replicates agreed exactly."
         ),
     )
+    primary_criterion_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "The PREDECLARED primary criterion, by position in the suite's success_criteria — the "
+            "one the round said before the numbers existed that it was optimizing. When set, "
+            "`primary_mean_diff` beside it reports the paired difference on that criterion alone, "
+            "so the effect is readable in the grader's own unit next to the blended one. `None` "
+            "means none was predeclared. **The VALUE it reports never affects `promoted`** — the "
+            "gate's primary statistic stays per-row `weighted_score`, because changing which number "
+            "Holm decides on is a different change with different power characteristics, and this "
+            "field exists to make the blended magnitude interpretable (see `dead_weight`) rather "
+            "than to move the decision. One exception, stated because a reader trusts this field to "
+            "be safe to pass: an index that selects NO usable row while the blended statistic had "
+            "rows is a `gate_refusal`, which DOES force `promoted=False`. That is a wiring fault "
+            "rather than a reading — an empty primary vector is indistinguishable from a suite whose "
+            "rows all errored on that criterion, and `_require_valid_criterion_index` bounds only "
+            "below. "
+            "Distinct from `engagement_criterion_index`, which is an integrity CHECK's subject "
+            "rather than a reported reading, and from ActivationGateVerdict.criterion_index, which "
+            "is that gate's metric SOURCE."
+        ),
+    )
+    primary_mean_diff: float | None = Field(
+        default=None,
+        description=(
+            "The paired mean difference on `primary_criterion_index` alone, ALWAYS "
+            "candidate - incumbent like `mean_diff` beside it. `None` when no primary was "
+            "predeclared, or when that criterion produced no usable paired row. A READING: it is "
+            "what lets a reader convert the blended `mean_diff` back into the unit the grader "
+            "actually scores in, and it gates nothing."
+        ),
+    )
     dead_weight: float | None = Field(
         default=None,
         ge=0.0,
@@ -476,6 +511,101 @@ class ExecutionGateVerdict(BaseModel):
         reason ``SearchComparison.accepted`` is a property over ``beats`` / ``blocker``.
         """
         return self.mean_diff is not None and self.mean_diff > 0.0 and self.ci_low is not None and self.ci_low > 0.0
+
+
+class ConfirmVerdict(BaseModel):
+    """Stage C's computed verdict: did the Stage B effect REPRODUCE on the held-out split?
+
+    A DECISION RECORD, so a `BaseModel` with ``extra="forbid"`` beside
+    :class:`ActivationGateVerdict` and :class:`ExecutionGateVerdict`, and for their reason: a
+    mistyped field on a model whose job is to say what a promotion rests on must raise rather than
+    land at a default (CE041's rationale). That is the opposite filing decision from a computed
+    READING like ``SeedStability`` or ``RuleCeiling``, which are NamedTuples beside the functions
+    that produce them because they are rendered and never persisted.
+
+    **Stage C is a family of ONE, and that is correct rather than an oversight.** Only the Stage B
+    winner is confirmed, so there is no multiplicity to correct — a reader who expects Holm here is
+    looking for a correction over hypotheses that were never tested.
+
+    **The train effect is READ, never recomputed.** It comes off the Stage B verdict, so the two
+    numbers this block compares cannot disagree with the blocks they were reported in.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    incumbent_variant: str = Field(description="Variant id of the incumbent arm on the confirm run.")
+    candidate_variant: str = Field(description="Variant id of the ONE candidate being confirmed.")
+    suite_id: str = Field(description="Suite id (the pre-fan-out task_id) both arms ran.")
+    train_effect: float | None = Field(
+        default=None,
+        description=(
+            "candidate - incumbent on the TRAIN split, read off the Stage B verdict rather than "
+            "recomputed. `None` when that verdict measured none."
+        ),
+    )
+    test_effect: float | None = Field(
+        default=None,
+        description=(
+            "The same quantity on the confirm run. `None` means no comparison was made there — not "
+            "an effect of zero, which is a measurement."
+        ),
+    )
+    test_mde: float | None = Field(
+        default=None,
+        description=(
+            "The confirm split's OWN minimum detectable effect, read off the confirm gate's verdict — "
+            "so nothing here re-measures it. `execution_gate` measures that floor on every path; "
+            "`activation_gate` does NOT, because its row-selection preflight returns before the "
+            "measurement, which is one more way this arrives `None`. `None` "
+            "or 0.0 leaves the SHRANK/REPRODUCED margin UNDEFINED, and the outcome is then "
+            "`undecided` rather than silently SHRANK: a floor of 0.000 means the floor could not be "
+            "priced, never that this suite can resolve anything."
+        ),
+    )
+    delta: float | None = Field(
+        default=None,
+        description="test_effect - train_effect. `None` when either side is None.",
+    )
+    outcome: Literal["reproduced", "shrank", "reversed", "undecided"] = Field(
+        description=(
+            "The train->test classification, from `optimize_gate.classify_confirm`. `reversed`: the "
+            "test effect's sign opposes the train effect's. `shrank`: same sign, but below the train "
+            "effect by more than the confirm split's MDE — and a test effect of exactly 0.0 is "
+            "SHRANK, not reproduced, because 'same sign' is undefined there. `reproduced`: same "
+            "sign, within that margin. `undecided` has FIVE causes: the confirm gate refused; either "
+            "effect is absent; the TRAIN effect is not a win (Stage C confirms an improvement, and "
+            "there is none to hold — passing a verdict that lost, or one that measured exactly zero, "
+            "used to produce actively misleading REPRODUCED and SHRANK readings); the margin is "
+            "undefined, which means `None` or anything below `optimize_gate.FLOOR_RESOLUTION` rather "
+            "than only exactly 0.0 (a null split returns residue like 2.8e-17 on a deterministic "
+            "suite, and an `== 0.0` test goes inert on exactly those); or a non-finite value reached "
+            "the comparison."
+        )
+    )
+    test_verdict: ActivationGateVerdict | ExecutionGateVerdict = Field(
+        description=(
+            "The FULL confirm-gate block, carried rather than summarized: every check, guardrail and "
+            "note the confirm run produced is what a reader needs to decide whether to trust the "
+            "classification above it."
+        )
+    )
+    confirm_refusal: str | None = Field(
+        default=None,
+        description=(
+            "Why this is NOT a comparison, or None when it is one — mirroring `gate_refusal` on both "
+            "gate verdicts, including that it forces `outcome = undecided`. Set when the confirm run "
+            "recorded any `--split` other than `test` — most damagingly `train`, which is Stage C "
+            "silently re-running the rows the candidate was fitted to, at full price with no error "
+            "anywhere — when the confirm gate itself refused, or when the train verdict refused. "
+            "Naming more than one candidate does NOT land here: that raises `TypeError` at the call, "
+            "because a shortlist is a caller error rather than a property of the measurement. And a "
+            "train verdict that merely did not PROMOTE is a NOTE rather than a refusal — confirming a "
+            "separated-but-vetoed candidate is a legitimate thing to want."
+        ),
+    )
+    notes: list[str] = Field(
+        default_factory=list, description="Everything the reader needs to distrust or qualify the numbers above."
+    )
 
 
 class NoiseFloor(BaseModel):

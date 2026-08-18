@@ -21,6 +21,7 @@ from pathlib import Path
 
 from coder_eval.models import (
     TARGET_LABEL,
+    ConfirmVerdict,
     EvaluationResult,
     ExecutionGateVerdict,
     ExperimentResult,
@@ -32,6 +33,7 @@ from coder_eval.models import (
 from coder_eval.optimize_gate import (
     _NOTE_CI_CONTAINS_ZERO,
     _NOTE_OUTSIDE_FAMILY,
+    FLOOR_RESOLUTION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
     _floor_from_clusters,
@@ -42,6 +44,11 @@ from coder_eval.optimize_gate import (
     _note_holm_family,
     _note_ordinary_negative,
     _note_resolution_degraded,
+    build_confirm_verdict,
+    confirm_one_candidate,
+    confirm_split_check,
+    confirm_train_note,
+    confirm_train_refusal,
     cost_latency_guardrails,
 )
 from coder_eval.optimize_load import (
@@ -71,15 +78,6 @@ from coder_eval.reports_stats import (
 
 
 logger = logging.getLogger(__name__)
-
-# Below this, a measured noise floor is floating-point residue rather than a measurement, and the
-# gate treats it as no floor at all. Not a tolerance anyone chose: `weighted_score` is bounded
-# [0, 1] and reported to three decimals, so a floor of 1e-9 is nine orders below anything the
-# metric can express. It exists because a null split over a CONSTANT per-row difference returns
-# something like 2.8e-17 rather than exactly 0.0 — measured on this repo's own winning fixture —
-# which is not zero, so an `mde == 0.0` test misses it while `abs(diff) < mde` can never fire. Both
-# floor-based checks then went silently inert on exactly the degenerate suites they exist for.
-FLOOR_RESOLUTION = 1e-9
 
 
 def resolve_model(rows: dict[str, list[EvaluationResult]]) -> str | None:
@@ -234,6 +232,32 @@ def _completion_rates(
     return (totals["incumbent"][0], totals["incumbent"][1]), (totals["candidate"][0], totals["candidate"][1])
 
 
+def _paired_criterion_diffs(
+    *,
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    row_ids: Sequence[str],
+    criterion_index: int,
+) -> list[float]:
+    """One criterion's per-row paired differences, candidate - incumbent, replicates meaned first.
+
+    The ONE spelling of that reduction on this track: :func:`_dead_weight` classifies these vectors
+    and :func:`execution_gate` averages one of them for ``primary_mean_diff``, and a second
+    implementation would let the reported primary effect disagree with the dead-weight reading
+    computed from the same rows.
+
+    A row where either arm produced no score for this criterion is EXCLUDED, exactly as the primary
+    statistic excludes it — never folded in as a zero.
+    """
+    diffs: list[float] = []
+    for row_id in row_ids:
+        incumbent = [s for r in incumbent_rows.get(row_id, []) if (s := _row_score(r, criterion_index)) is not None]
+        candidate = [s for r in candidate_rows.get(row_id, []) if (s := _row_score(r, criterion_index)) is not None]
+        if incumbent and candidate:
+            diffs.append(mean(candidate) - mean(incumbent))
+    return diffs
+
+
 def _dead_weight(
     *,
     incumbent_rows: dict[str, list[EvaluationResult]],
@@ -311,14 +335,12 @@ def _dead_weight(
     unusable: list[int] = []
     usable_rows: dict[int, int] = {}
     for index in range(len(known)):
-        diffs: list[float] = []
-        for rid in row_ids:
-            incumbent = [s for r in incumbent_rows.get(rid, []) if (s := _row_score(r, index)) is not None]
-            candidate = [s for r in candidate_rows.get(rid, []) if (s := _row_score(r, index)) is not None]
-            # A row an errored criterion produced no score for is excluded from THIS criterion's
-            # vector, exactly as the primary statistic excludes it — never folded in as a zero.
-            if incumbent and candidate:
-                diffs.append(mean(candidate) - mean(incumbent))
+        diffs = _paired_criterion_diffs(
+            incumbent_rows=incumbent_rows,
+            candidate_rows=candidate_rows,
+            row_ids=row_ids,
+            criterion_index=index,
+        )
         usable_rows[index] = len(diffs)
         if not diffs:
             # Neither dead nor alive: it left no evidence either way, so it is excluded from BOTH
@@ -471,6 +493,7 @@ def execution_gate(
     candidate_variant: str,
     suite_id: str,
     engagement_criterion_index: int | None = 0,
+    primary_criterion_index: int | None = None,
     materiality: float = MATERIALITY_FLOOR,
     confidence: float = 0.95,
     seed: int = 0,
@@ -519,9 +542,21 @@ def execution_gate(
       difference below the floor, but its interval CONTAINS zero, and that is an ordinary negative
       result which stays one.
 
+    **Two criterion indices, and they do different jobs.** ``engagement_criterion_index`` is an
+    integrity CHECK's subject — which criterion says the skill engaged, a reading that can VETO a
+    promotion. ``primary_criterion_index`` is the PREDECLARED primary, and the VALUE it reports is a
+    reading: it adds ``primary_mean_diff`` so the effect is legible in the grader's own unit beside the
+    blended one, and that number never touches ``promoted``. Setting the parameter can still refuse —
+    an index selecting no usable row is a wiring fault, and a refusal forces ``promoted=False`` —
+    stated here because a reader would otherwise take "a reading" to mean "safe to pass".
+    (A third exists on the other track —
+    ``ActivationGateVerdict.criterion_index``, that gate's metric SOURCE — which is why each of
+    these says which kind it is.)
+
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
     _require_valid_criterion_index(engagement_criterion_index)
+    _require_valid_criterion_index(primary_criterion_index)
     notes: list[str] = []
     # The run's row-selection provenance, as a NOTE and never a refusal — deliberately unlike
     # `activation_gate`, and the asymmetry is a consequence of the data sources rather than drift:
@@ -618,6 +653,10 @@ def execution_gate(
     )
     notes.extend(dead_weight_notes)
 
+    # Assigned near the end, over the rows the STATISTIC used — see the comment at that point. It is
+    # declared here because `_verdict` closes over it and reads it at CALL time.
+    primary_mean_diff: float | None = None
+
     # The rows the CHECKS are computed over. Starts as the on-disk intersection and is narrowed to
     # the rows `paired_comparison` actually paired once that is known: `cost_latency_guardrails`'
     # own docstring states the contract — a guardrail must never be computed over a different
@@ -660,6 +699,8 @@ def execution_gate(
             gate_refusal=gate_refusal,
             mde=mde,
             dead_weight=dead_weight,
+            primary_criterion_index=primary_criterion_index,
+            primary_mean_diff=primary_mean_diff,
             integrity_checks=_integrity_checks(
                 incumbent_rows=incumbent_rows,
                 candidate_rows=candidate_rows,
@@ -802,6 +843,39 @@ def execution_gate(
     if refusal is not None:
         _refuse(refusal)
     notes.extend(diagnostics)
+
+    # The predeclared primary, as a READING, computed over `check_row_ids` — the rows
+    # `paired_comparison` actually paired — and NOT over the on-disk intersection. That is the whole
+    # reason it sits here rather than beside the noise floor: the field is sold as a CONVERSION of
+    # `mean_diff` back into the grader's unit (`mean_diff ~= primary x (1 - dead_weight)`), and that
+    # identity holds only while both are computed over one sample. A row present in experiment.json
+    # but missing on disk, or one whose task.json failed to parse, otherwise moves one side silently.
+    #
+    # The consequence, stated rather than hidden: a return path ABOVE this one carries no primary. A
+    # verdict with no statistic has no primary either, so there is nothing to report there — unlike
+    # `dead_weight`, which is a property of the suite rather than of the comparison.
+    if primary_criterion_index is not None:
+        primary_diffs = _paired_criterion_diffs(
+            incumbent_rows=incumbent_rows,
+            candidate_rows=candidate_rows,
+            row_ids=check_row_ids,
+            criterion_index=primary_criterion_index,
+        )
+        if primary_diffs:
+            primary_mean_diff = mean(primary_diffs)
+        elif check_row_ids:
+            # `_require_valid_criterion_index` bounds only BELOW — deliberately, since rows may
+            # legitimately differ in criteria count and an over-long index should skip a row rather
+            # than raise. That is the wrong answer HERE: an over-long primary index makes `_row_score`
+            # return None on every row, so the vector is EMPTY and indistinguishable from a suite of
+            # rows that all errored on that criterion.
+            _refuse(
+                f"primary_criterion_index={primary_criterion_index} selected no usable row on either "
+                + f"arm across {len(check_row_ids)} paired row(s), so no primary effect could be "
+                + "reported. The index is the criterion's POSITION in the suite's success_criteria "
+                + "list — check it against the suite rather than reading the blended difference as "
+                + "the primary one."
+            )
 
     return _verdict(
         rows_paired=comparison.task_count,
@@ -1056,6 +1130,111 @@ def _execution_diagnostics(
         )
 
     return refusal, notes
+
+
+def confirm_gate_execution(
+    *,
+    train_verdict: ExecutionGateVerdict,
+    confirm_run_dir: Path,
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    engagement_criterion_index: int | None = 0,
+    primary_criterion_index: int | None = None,
+    materiality: float = MATERIALITY_FLOOR,
+    confidence: float = 0.95,
+    seed: int = 0,
+    n_resamples: int = GATE_RESAMPLES,
+) -> ConfirmVerdict:
+    """Stage C on the execution track: did the Stage B effect REPRODUCE on the held-out split?
+
+    Runs this track's own gate on the confirm run directory and classifies the train -> test delta
+    through :func:`~coder_eval.optimize_gate.classify_confirm`, the shared four-way rule. Stage C used
+    to be prose — "report that block verbatim alongside the test numbers" — which left the reader to
+    eyeball two intervals and decide whether one reproduced the other.
+
+    **Exactly ONE candidate.** Confirming two would spend the held-out split on SELECTION, which is
+    the failure the "never re-rolled" integrity rule exists to prevent, so a sequence raises rather
+    than being iterated. State it in the signature and it is still worth the guard: a caller with a
+    shortlist in hand will try.
+
+    **A family of ONE, and that is correct rather than an oversight.** Only the Stage B winner is
+    confirmed, so there is no multiplicity to correct — Holm is applied at ``m = 1`` purely so the
+    carried block is a DECIDED one rather than rendering as ``UNDECIDED``.
+
+    **The confirm run must have recorded ``--split test``.** Read through
+    :func:`~coder_eval.optimize_load.read_split_provenance`, the existing reader — a second reader of
+    ``run.json``'s ``row_selection.split`` is the duplication this repo removes on sight. The two
+    non-``test`` cases differ and are treated differently: an UNRECORDED split is a NOTE (a run
+    predating the field), while a recorded ``train`` is a REFUSAL — that is Stage C silently
+    re-running the train rows, at full price, with no error anywhere.
+
+    **``test_mde`` costs nothing here.** :func:`execution_gate` already measures the replicate noise
+    floor unconditionally on whatever run dir it is handed, so the confirm split's own resolution is
+    simply ``test_verdict.mde``. A second measurement would be a duplicate estimator — the
+    CE037/CE040 defect class — and would double every confirm's bootstrap cost.
+
+    **The margin is the confirm split's own MDE on the metric this track gates**, which is what makes
+    it per-track without a second rule: the activation twin passes ITS gate's floor on ``f1.yes`` to
+    the same classifier. Picking a different multiple on one track would be a second declaration of
+    "how much shrinkage is real".
+
+    Never raises on a wiring fault — like both gates, every such state becomes a refusal.
+    """
+    confirm_one_candidate(candidate_variant)
+
+    notes: list[str] = []
+    confirm_refusal: str | None = None
+
+    def _refuse(reason: str) -> None:
+        """The FIRST cause that makes this not a comparison, mirroring ``execution_gate._refuse``."""
+        nonlocal confirm_refusal
+        if confirm_refusal is None:
+            confirm_refusal = reason
+
+    if (train_note := confirm_train_note(train_verdict.promoted)) is not None:
+        notes.append(train_note)
+    if (train_refusal := confirm_train_refusal(train_verdict.gate_refusal)) is not None:
+        _refuse(train_refusal)
+
+    split_refusal, split_note = confirm_split_check(read_split_provenance([confirm_run_dir]), [confirm_run_dir])
+    if split_note is not None:
+        notes.append(split_note)
+    if split_refusal is not None:
+        _refuse(split_refusal)
+
+    test_verdict = holm_promote_execution(
+        [
+            execution_gate(
+                run_dir=confirm_run_dir,
+                incumbent_variant=incumbent_variant,
+                candidate_variant=candidate_variant,
+                suite_id=suite_id,
+                engagement_criterion_index=engagement_criterion_index,
+                primary_criterion_index=primary_criterion_index,
+                materiality=materiality,
+                confidence=confidence,
+                seed=seed,
+                n_resamples=n_resamples,
+            )
+        ]
+    )[0]
+    if test_verdict.gate_refusal is not None:
+        _refuse(f"the confirm gate is not a result: {test_verdict.gate_refusal}")
+
+    return build_confirm_verdict(
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        # READ off the Stage B verdict, never recomputed, so the two numbers this block compares
+        # cannot disagree with the blocks they were each reported in.
+        train_effect=train_verdict.mean_diff,
+        test_effect=test_verdict.mean_diff,
+        test_mde=test_verdict.mde,
+        test_verdict=test_verdict,
+        confirm_refusal=confirm_refusal,
+        notes=notes,
+    )
 
 
 def holm_promote_execution(

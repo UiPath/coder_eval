@@ -16,6 +16,8 @@
   "holm_rejected": null,
   "promoted": null,
   "mde": 0.0,
+  "primary_criterion_index": null,
+  "primary_mean_diff": null,
   "dead_weight": null,
   "integrity_checks": [
     {

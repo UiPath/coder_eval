@@ -30,7 +30,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from coder_eval.models import ActivationGateVerdict, ArmRowScores, ExecutionGateVerdict, GuardrailCheck
+from coder_eval.models import (
+    ActivationGateVerdict,
+    ArmRowScores,
+    ConfirmVerdict,
+    ExecutionGateVerdict,
+    GuardrailCheck,
+)
 from coder_eval.reports_stats import bootstrap_p_floor
 
 
@@ -292,11 +298,74 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
             )
         ),
     ]
+    # APPENDED conditionally rather than carried as a `—` on every block: this reading exists only
+    # when a primary was predeclared, and a permanent "primary: —" line invites the reader to look
+    # for a number nobody asked for. The skill's Step 10 tells the user to read it beside Dead weight,
+    # so it has to be on the block rather than only on the model.
+    if verdict.primary_criterion_index is not None:
+        lines.append(
+            f"- Predeclared primary (criterion {verdict.primary_criterion_index}): "
+            + f"{_fmt(verdict.primary_mean_diff)} — the same paired difference on that criterion "
+            + "ALONE, in the unit it scores in. A reading: it gates nothing."
+        )
     lines += _render_checks("Integrity checks", verdict.integrity_checks)
     lines += _render_checks("Guardrails", verdict.guardrails)
     if verdict.notes:
         lines.append("- **Notes:**")
         lines += [f"  - {note}" for note in verdict.notes]
+    return "\n".join(lines)
+
+
+def render_confirm_markdown(verdict: ConfirmVerdict) -> str:
+    """The Stage C block the skill prints verbatim, on either track.
+
+    **Its headlines share NOTHING with the gate renderers, and that is worth stating plainly** because
+    an earlier draft of this docstring claimed they did: the four here are its own, only REVERSED
+    resembles anything on the gate ladders, and there is no PRECEDENCE to implement at all —
+    ``outcome`` is a mutually-exclusive ``Literal``, so this is one lookup plus one override. What IS
+    carried over from :func:`render_execution_markdown` is the two RULES that ladder exists to
+    enforce, and they are the whole reason this function is not a dict:
+
+    - **A refusal takes the headline and outranks every outcome.** ``confirm_refusal`` means the block
+      is not a comparison, so no classification beneath it means anything. It is printed ONCE, in the
+      headline and not also as a note — the rule ``holm_promote`` states for ``gate_refusal``, which
+      :func:`build_confirm_verdict` implements by leaving the note off a refused block.
+    - **REVERSED is a headline, not a footnote.** It says the effect the round was built on pointed
+      the other way on held-out rows, and a reader who skims past it promotes on a number that does
+      not hold. It reads "Do not promote" for that reason.
+
+    The full confirm-gate block is NOT re-rendered here: this block reports the comparison and names
+    which renderer to print beside it, because the two verdict types have their own ladders and a
+    third copy of either is the drift a hand-written ladder produces.
+    """
+    headline = {
+        "reversed": "REVERSED — the effect points the other way on held-out rows. Do not promote.",
+        "shrank": "SHRANK — the effect is real but smaller than the train block claimed.",
+        "reproduced": "REPRODUCED — the effect holds on the held-out split.",
+        "undecided": "UNDECIDED — this is not a train-to-test comparison.",
+    }[verdict.outcome]
+    if verdict.confirm_refusal is not None:
+        headline = f"NOT A COMPARISON — {verdict.confirm_refusal}"
+
+    lines = [
+        f"### Stage C confirm — `{verdict.candidate_variant}` vs `{verdict.incumbent_variant}`",
+        "",
+        f"**{headline}**",
+        "",
+        f"- Suite `{verdict.suite_id}`, family of ONE (only the Stage B winner is confirmed)",
+        f"- Train effect (candidate - incumbent): {_fmt(verdict.train_effect)}",
+        f"- Test effect on the held-out split: {_fmt(verdict.test_effect)}",
+        f"- Delta: {_fmt(verdict.delta)} · confirm split's own MDE: {_fmt(verdict.test_mde)}",
+        f"- Outcome: **{verdict.outcome.upper()}**",
+    ]
+    if verdict.notes:
+        lines.append("- **Notes:**")
+        lines += [f"  - {note}" for note in verdict.notes]
+    lines += [
+        "",
+        "The confirm gate's own block is carried on `test_verdict` — print it with "
+        + "`render_markdown` (activation) or `render_execution_markdown` (execution) beside this one.",
+    ]
     return "\n".join(lines)
 
 

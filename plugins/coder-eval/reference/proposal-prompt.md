@@ -17,6 +17,25 @@ in order. A score says a row failed. The
 trajectory says *which instruction the agent followed instead*, and that difference is the whole
 content of a good hypothesis.
 
+**The rows that already PASS, with their trajectories — labelled as what must not regress.** A
+proposer shown only failures optimizes for them alone, and a body edit that fixes three rows while
+breaking two that used to pass is a net loss the aggregate can hide. Hand over a sample of the
+passing rows the same way the failing ones are handed over — prompt, outcome, trajectory — under
+the heading *these already work; do not break them*.
+
+Two caveats, both honest rather than hedging. **This is a sample, not the whole passing set**:
+context is finite and an outcome suite's trajectories are long, so choose the passing rows nearest
+the failures — same category, same instruction — because those are the ones an edit aimed at the
+failures is most likely to disturb. And **the external evidence is genuinely mixed**: whether
+failures-plus-successes beats failures-only flips across settings, so this is not a free win. What
+it reliably buys is a proposer that can see what it is trading against.
+
+**A pointer to the regression corpus, BEFORE it writes.** `regression_check` reads
+`.optimize-skill/<skill>/measurements.json`'s corpus — the rows earlier promotions were built on —
+and the skill runs it against the candidate at Step 10, after the round is paid for. Show the
+proposer that list first: a candidate that re-loses one of those rows is a regression however good
+its aggregate looks, and the cheapest place to avoid it is before the edit rather than after the run.
+
 **Every previous attempt, with its train score.** Candidate text, the hypothesis it embodied, and
 what it measured. Then the instruction that makes the history worth carrying:
 
@@ -118,6 +137,31 @@ that describes a row's graded content in different words leaks just as much and 
 And because the check is a *diff*, a leak that once rode into a promotion is part of the baseline
 from then on and is never reported again — so the round that introduces a span is the only round
 that can catch it mechanically. Read the candidate, not just the checker's output.
+
+**Scripts and reference files are legitimate edit targets, not just prose.** A skill is a
+DIRECTORY — `SKILL.md` plus whatever `scripts/` and reference files it ships — and a candidate may
+add or change any of them. The hypothesis worth trying first is usually
+**prose → determinism**: where the body says "do X in six steps", a candidate that says "run
+`scripts/x.py`" removes six chances for the agent to deviate, and the steps become a thing you can
+test directly instead of a thing you hope was followed.
+
+Such a candidate tends to be *cheaper* in turns as well as more reliable, so it competes on the
+cost-quality front rather than fighting the cost guardrail — which is the opposite of what a longer,
+more emphatic body does.
+
+Three constraints on it, all of them consequences rather than rules:
+
+- **The suite's `allowed_tools` must already permit what the script needs.** A bundled script needs
+  `Bash`. Size that list to the UNION of what every arm's body names, on the SUITE — the outcome
+  template's `allowed_tools` comment carries why — or the candidate is scored on a prohibition
+  instead of on its instruction.
+- **The leak check reads the whole directory.** `candidate_leaks` is handed
+  `optimize_search.skill_text(<arm>/skills/<skill>)`, so a graded string pasted into `scripts/` is
+  flagged exactly as one in the body is. It was not, before scripts were on the table.
+- **Activation is untouched by this.** Adding a script changes no frontmatter, and the skill listing
+  the model chooses from carries name and description only — so a scripts-only candidate cannot move
+  the activation track's number in either direction. Say so when reporting one, or a reader will
+  look for an effect that cannot be there.
 
 ## Track-specific constraints
 

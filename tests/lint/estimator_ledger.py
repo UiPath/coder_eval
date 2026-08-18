@@ -72,7 +72,7 @@ WATCHED_CONSTANTS: tuple[tuple[str, str], ...] = (
     # FLOOR_RESOLUTION decides whether an MDE counts as measurable at all (and therefore whether
     # the execution gate REFUSES), and NEAR_FLOOR_MULTIPLE gates the "p is at or near this
     # bootstrap's resolution floor" note.
-    ("src/coder_eval/optimize_execution.py", "FLOOR_RESOLUTION"),
+    ("src/coder_eval/optimize_gate.py", "FLOOR_RESOLUTION"),
     ("src/coder_eval/optimize_activation.py", "NEAR_FLOOR_MULTIPLE"),
 )
 

@@ -25,11 +25,13 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import NamedTuple
 
 from coder_eval.criteria._classification_aggregate import classification_metrics
 from coder_eval.models import (
     ActivationGateVerdict,
+    ConfirmVerdict,
     EvaluationResult,
     ExecutionGateVerdict,
     GuardrailCheck,
@@ -37,7 +39,7 @@ from coder_eval.models import (
     OptimizeMeasurements,
     copy_with,
 )
-from coder_eval.optimize_load import _balance_pair, _median, _row_cost_levels, _row_costs
+from coder_eval.optimize_load import SplitProvenance, _balance_pair, _median, _row_cost_levels, _row_costs
 from coder_eval.optimize_store import UNRESOLVED_MODEL, lookup_noise_floor
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
@@ -82,6 +84,24 @@ GATE_MAX_FAMILY = 5
 # Separate from reports_stats.BOOTSTRAP_RESAMPLES because a GATE decides on the p while a REPORT
 # renders it: everything here that feeds a promotion decision uses this count.
 GATE_RESAMPLES = math.ceil(2.0 / (GATE_P_PRECISION**2 * (DEFAULT_ALPHA / GATE_MAX_FAMILY)))
+
+
+# Below this, a measured noise floor is floating-point residue rather than a measurement, and
+# EVERY consumer treats it as no floor at all.
+#
+# At rank 1 rather than on the execution track, where it used to live: `classify_confirm` needs it
+# too, and the two rank-2 track modules may not import each other — so keeping it there would
+# have meant a second declaration of the same number on the activation side, which is the
+# CE037/CE040 defect class. It is not a property of `weighted_score` in any case: both tracks'
+# metrics are bounded [0, 1] and reported to three decimals, so a floor nine orders below that is
+# residue on either one.
+#
+# Not a tolerance anyone chose. It exists because a null split over a CONSTANT per-row difference
+# returns something like 2.8e-17 rather than exactly 0.0 — measured on this repo's own winning
+# fixture — which is not zero, so an `mde == 0.0` test misses it while `abs(diff) < mde` can never
+# fire. Every floor-based check then goes silently inert on exactly the degenerate suites it exists
+# for, which is why `classify_confirm` compares against this rather than against zero.
+FLOOR_RESOLUTION = 1e-9
 
 
 def _metric(pairs: list[tuple[str, str]], name: str) -> float:
@@ -344,6 +364,257 @@ def _note_resolution_degraded(family_size: int, n_resamples: int, alpha: float) 
         + f"against the {GATE_P_PRECISION:.2f} this gate declares. Re-run at n_resamples="
         + f"{needed} to restore the declared precision, or gate fewer candidates per round. The "
         + "decision above stands; what is degraded is how finely it was measured."
+    )
+
+
+# What Stage C is asking, and the ONE declaration of the four answers on both tracks.
+#
+# It lives HERE rather than on either track's module because both need it and the layering forbids
+# the two rank-2 modules from importing each other — so per-track would mean two copies of
+# promotion-relevant arithmetic, which is the CE037/CE040 defect class exactly.
+_CONFIRM_REVERSED = "reversed"
+_CONFIRM_SHRANK = "shrank"
+_CONFIRM_REPRODUCED = "reproduced"
+_CONFIRM_UNDECIDED = "undecided"
+
+
+def classify_confirm(train_effect: float | None, test_effect: float | None, test_mde: float | None) -> tuple[str, str]:
+    """``(outcome, note)`` for a train -> test comparison. See :class:`ConfirmVerdict.outcome`.
+
+    **Stage C confirms a WIN**, and the classifier says so rather than accepting any pair of signs.
+    A train effect that is zero or negative is not something a confirm can reproduce, and the
+    arithmetic silently produced actively misleading answers for those inputs — measured on the
+    shipped version: ``train=-0.08, test=-0.10`` read REPRODUCED (a candidate that lost on train and
+    lost harder), ``train=-0.08, test=-0.02`` read SHRANK (a LOSS reading like a diminished win), and
+    ``train=0.0, test=+0.06`` read REPRODUCED when nothing was reproduced — an effect APPEARED where
+    Stage B measured none. All four are UNDECIDED now, and with ``train_effect > 0`` guaranteed the
+    remaining sign test is the plain ``test_effect < 0`` rather than a product.
+
+    The four answers and their precedence:
+
+    - **UNDECIDED** — either effect is absent, the train effect is not a win, or the margin is
+      undefined. The margin is
+      ``test_mde``, and it is undefined for ``None`` and for anything below
+      :data:`FLOOR_RESOLUTION` — not just for exactly ``0.0``, which is the too-narrow test the
+      execution track already had to widen once: a null split over a constant per-row difference
+      returns something like 2.8e-17 rather than 0.0, so an ``== 0.0`` check goes silently inert on
+      exactly the degenerate suites it exists for (measured on this repo's own winning fixture).
+      ``execution_gate`` documents such a floor as "the floor was not checked", never "this suite can
+      resolve anything", and with a margin of zero every non-identical test effect would classify
+      SHRANK. Both pinned fixtures render ``Minimum detectable effect: 0.000``, so this is the common
+      case rather than a corner.
+    - **REVERSED** — the signs oppose. It outranks the two below because a reversal is a headline:
+      the effect the round was built on pointed the other way on held-out rows.
+    - **SHRANK** — same sign, and the test effect is below the train effect by MORE than the margin.
+      A test effect of exactly ``0.0`` lands here too: "same sign" is undefined at zero, and calling
+      it reproduced would report no effect as a reproduced one.
+    - **REPRODUCED** — same sign, within the margin.
+
+    A pure function of three floats, so it decides nothing about a run and can be read on its own.
+    The note is always non-empty: a bare outcome word in a ledger read back weeks later is not
+    enough to reconstruct which comparison produced it.
+    """
+    if train_effect is None or test_effect is None:
+        missing = "train" if train_effect is None else "test"
+        return _CONFIRM_UNDECIDED, (
+            f"undecided: the {missing} effect is absent, so there is no delta to classify. That is "
+            "not an effect of zero — no comparison was made."
+        )
+    if test_mde is None or test_mde < FLOOR_RESOLUTION:
+        return _CONFIRM_UNDECIDED, (
+            "undecided: the confirm split's minimum detectable effect is "
+            + ("unavailable" if test_mde is None else f"{test_mde:.3g}")
+            + ", so the SHRANK/REPRODUCED margin has no operand. An unpriced floor means the floor "
+            + "could not be MEASURED — a null split reduces to zero, or to floating-point residue "
+            + "below FLOOR_RESOLUTION, when every row's replicates agreed exactly — and is never a "
+            + "green light. Raise --repeats on the confirm run and re-read."
+        )
+    if train_effect <= 0.0:
+        return _CONFIRM_UNDECIDED, (
+            f"undecided: the train effect was {train_effect:+.3f}, which is not a win — Stage C "
+            "confirms that a measured improvement holds on held-out rows, and there is no "
+            "improvement here to hold. Only the Stage B WINNER is confirmed; check which verdict was "
+            "passed as the train one."
+        )
+    if not (math.isfinite(train_effect) and math.isfinite(test_effect) and math.isfinite(test_mde)):
+        # Practically unreachable through the models' [0,1] bounds, but a NaN compares False against
+        # every threshold below and would fall through to REPRODUCED — the most permissive rung.
+        return _CONFIRM_UNDECIDED, (
+            "undecided: one of the effects or the margin is not a finite number, so no comparison "
+            "can be made. That is a wiring fault rather than a measurement — check the verdicts."
+        )
+    delta = test_effect - train_effect
+    if test_effect == 0.0:
+        # Its OWN note. Folding it into the SHRANK sentence below made a false arithmetic claim:
+        # a small train win against a zero test effect announced that its shortfall "exceeds the
+        # confirm split's own resolution", quoting a margin LARGER than the shortfall. The OUTCOME is
+        # right — "same sign" is undefined
+        # at zero, and reporting no effect as a reproduced one is the reading a promotion would be
+        # built on — but the reason had to be the real one.
+        return _CONFIRM_SHRANK, (
+            f"SHRANK: the train effect was {train_effect:+.3f} and the confirm run measured exactly "
+            "0.000 — no difference at all on the held-out rows. Classified as a shrinkage rather than "
+            "a reproduction because 'the same sign' is undefined at zero."
+        )
+    if test_effect < 0.0:
+        return _CONFIRM_REVERSED, (
+            f"REVERSED: the train effect was {train_effect:+.3f} and the confirm run measured "
+            f"{test_effect:+.3f} — opposite signs. The effect the round was built on does not hold "
+            "on held-out rows; do not promote on it."
+        )
+    # No `abs()`: the guards above leave `train_effect > 0` and `test_effect > 0`, so both calls
+    # would be dead and would imply a generality those guards removed.
+    if test_effect < train_effect - test_mde:
+        return _CONFIRM_SHRANK, (
+            f"SHRANK: the train effect was {train_effect:+.3f}, the confirm run measured "
+            f"{test_effect:+.3f} (delta {delta:+.3f}), and the shortfall exceeds the confirm split's "
+            f"own resolution of {test_mde:.3f}. The train number was optimistic — some of it was fit "
+            "to the rows it was measured on."
+        )
+    return _CONFIRM_REPRODUCED, (
+        f"REPRODUCED: the train effect was {train_effect:+.3f} and the confirm run measured "
+        f"{test_effect:+.3f} (delta {delta:+.3f}), within the confirm split's own resolution of "
+        f"{test_mde:.3f}."
+    )
+
+
+def confirm_one_candidate(candidate_variant: object) -> None:
+    """Raise unless exactly ONE candidate was named. Shared by both confirm gates.
+
+    ``TypeError`` rather than ``ValueError``: a list where a variant id belongs is a type mismatch,
+    and the plan that specified ``ValueError`` did not distinguish them. Recorded as a deviation.
+
+    Confirming a shortlist would spend the held-out split on SELECTION, which is the failure the
+    "never re-rolled" integrity rule exists to prevent — so a sequence raises rather than being
+    iterated.
+    """
+    if not isinstance(candidate_variant, str):
+        raise TypeError(
+            f"candidate_variant must be ONE variant id, got {type(candidate_variant).__name__}. "
+            + "Confirming a shortlist would spend the held-out split on selection, which is the "
+            + "failure the never-re-rolled rule exists to prevent — gate one winner."
+        )
+
+
+def confirm_split_check(provenance: SplitProvenance, run_dirs: Sequence[Path]) -> tuple[str | None, str | None]:
+    """``(refusal, note)`` for a confirm run's recorded ``--split``. The ONE rule, both tracks.
+
+    Stage C confirms on the held-out split and nothing else, so anything other than ``test`` is a
+    refusal — with ONE exception: a run predating the ``run.json`` provenance field is a NOTE, since
+    that is an expected input rather than a wiring fault.
+
+    **A refusal and a note are returned INDEPENDENTLY, and that is the whole reason this is shared.**
+    The activation track pools several run directories per arm, and :attr:`SplitProvenance.value`
+    collapses to ``UNRECORDED_SPLIT`` when *any* one of them is unreadable — so an ``if unrecorded /
+    elif value != "test"`` chain drops the refusal entirely for three dirs recording ``train`` beside
+    one unreadable ``run.json``, and the confirm then classifies over train rows with only a
+    "provenance is missing from 1 of 4" note. Reading ``recorded`` directly is what closes that: a
+    recorded non-``test`` split refuses whether or not a sibling dir also failed to answer.
+
+    The execution twin takes ONE run dir and could not reach that state, which is exactly why the two
+    tracks must not each own a copy of this: the safe one would keep working while the other drifted.
+    """
+    # `recorded` may carry `None` (no `--split` was passed), which is itself an off-split value here.
+    off_split = sorted((split for split in provenance.recorded if split != "test"), key=lambda split: split or "")
+    note = None
+    if provenance.unrecorded:
+        note = (
+            f"row-selection provenance is missing from {provenance.unrecorded} of the "
+            + f"{len(run_dirs)} confirm run directory/ies (they predate the run.json `row_selection` "
+            + "field, or could not be read), so whether this run scored the HELD-OUT rows is not "
+            + "recorded there. Confirm it by hand before promoting on this block."
+        )
+    if not off_split:
+        return None, note
+    named = ", ".join(repr(split) for split in off_split)
+    remedy = (
+        "That is Stage C re-running the TRAIN rows the candidate was fitted to — at full price, "
+        + "and it reproduces by construction. Re-run the confirm with --split test."
+        if "train" in off_split
+        else "Stage C confirms on the held-out split and nothing else; a full-suite or "
+        + "differently-named selection includes the rows the candidate was proposed against."
+    )
+    where = ", ".join(str(d) for d in run_dirs)
+    return f"the confirm run recorded --split {named}, not 'test', under {where}. {remedy}", note
+
+
+def confirm_train_note(promoted: bool | None) -> str | None:
+    """Why a train verdict that did not PROMOTE is worth naming. Shared, so it cannot drift.
+
+    A NOTE, not a refusal: a reader may legitimately want to confirm a candidate that separated and
+    was then vetoed by a guardrail. But Stage C is DEFINED as confirming the Stage B winner, and
+    :func:`classify_confirm` will not classify a train effect that is not a win — so saying which
+    verdict was passed is what stops the resulting UNDECIDED reading as a tooling failure.
+    """
+    if promoted is True:
+        return None
+    return (
+        f"the train verdict's `promoted` is {promoted!r}, not True — Stage C confirms the Stage B "
+        + "WINNER. Confirming anything else spends the held-out split on a candidate no correction "
+        + "promoted."
+    )
+
+
+def confirm_train_refusal(gate_refusal: str | None) -> str | None:
+    """The refusal a train verdict that is not a result propagates into Stage C. Shared."""
+    if gate_refusal is None:
+        return None
+    return "the TRAIN verdict is not a result, so there is nothing to reproduce: " + gate_refusal
+
+
+def build_confirm_verdict(
+    *,
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    train_effect: float | None,
+    test_effect: float | None,
+    test_mde: float | None,
+    test_verdict: ActivationGateVerdict | ExecutionGateVerdict,
+    confirm_refusal: str | None,
+    notes: list[str],
+) -> ConfirmVerdict:
+    """Assemble the Stage C record — the ONE construction site, shared by both tracks.
+
+    Here rather than per track for the same reason :func:`classify_confirm` is: the two rank-2
+    modules may not import each other, so per-track would mean two copies of a promotion-relevant
+    record's assembly, and a field added to :class:`ConfirmVerdict` would become two coordinated
+    edits that can drift.
+
+    **A refusal forces UNDECIDED and takes the note.** The classification is a statement about two
+    measurements; if one of them is not a measurement there is nothing to state, and printing a
+    confident outcome beneath a refusal is two contradictory claims in one block — the same rule
+    both gates already apply to their negative-result notes.
+
+    Literal keywords, never a splat: this is a model whose whole job is to say what a promotion
+    rests on, so a mistyped key must raise rather than land at a default (CE041).
+    """
+    if confirm_refusal is not None:
+        # The refusal lives on `confirm_refusal` and NOT in `notes` — the same rule `holm_promote`
+        # states for `gate_refusal`: notes is the "everything you need to distrust the numbers"
+        # channel, a refusal is a headline, and duplicating it printed the same sentence twice in one
+        # rendered block.
+        outcome, note = _CONFIRM_UNDECIDED, None
+    else:
+        outcome, note = classify_confirm(train_effect, test_effect, test_mde)
+    delta = None if train_effect is None or test_effect is None else test_effect - train_effect
+    return ConfirmVerdict(
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        train_effect=train_effect,
+        test_effect=test_effect,
+        test_mde=test_mde,
+        delta=delta,
+        # `outcome` is a `Literal`, so the model validates the four spellings for us — which is why
+        # `classify_confirm` may return a plain `str`.
+        outcome=outcome,  # type: ignore[arg-type]
+        test_verdict=test_verdict,
+        confirm_refusal=confirm_refusal,
+        # Pydantic COPIES this list, so the note has to be in it before construction — the same
+        # ordering rule both gates' `notes` follow.
+        # `None` on a refused block, where the reason is the headline rather than a note.
+        notes=[*notes, note] if note is not None else list(notes),
     )
 
 

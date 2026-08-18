@@ -23,6 +23,7 @@ from coder_eval.models import (
     TARGET_LABEL,
     ActivationGateVerdict,
     ClassificationCriterionResult,
+    ConfirmVerdict,
     EvaluationResult,
     GuardrailCheck,
     NoiseFloor,
@@ -42,6 +43,11 @@ from coder_eval.optimize_gate import (
     _note_holm_family,
     _note_ordinary_negative,
     _note_resolution_degraded,
+    build_confirm_verdict,
+    confirm_one_candidate,
+    confirm_split_check,
+    confirm_train_note,
+    confirm_train_refusal,
     cost_latency_guardrails,
 )
 from coder_eval.optimize_load import (
@@ -1057,6 +1063,102 @@ def _activation_notes(
     if (degraded := _note_resolution_degraded(family_size, family_resamples, alpha)) is not None:
         notes.append(degraded)
     return notes
+
+
+def confirm_gate(
+    *,
+    train_verdict: ActivationGateVerdict,
+    incumbent_run_dirs: Sequence[Path],
+    candidate_run_dirs: Sequence[Path],
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    criterion_index: int,
+    sibling_indices: Sequence[int] | None = None,
+    materiality: float = MATERIALITY_FLOOR,
+    confidence: float = 0.95,
+    seed: int = 0,
+    n_resamples: int = GATE_RESAMPLES,
+) -> ConfirmVerdict:
+    """Stage C on the activation track: did the Stage B ``f1.yes`` effect REPRODUCE on the test split?
+
+    The twin of :func:`~coder_eval.optimize_execution.confirm_gate_execution`, and it shares the
+    classification and the record's assembly with it — :func:`~coder_eval.optimize_gate.classify_confirm`
+    and :func:`~coder_eval.optimize_gate.build_confirm_verdict` both live at rank 1 precisely because
+    the two rank-2 track modules may not import each other, so writing the rule here and mirroring it
+    there would be two copies of promotion-relevant arithmetic.
+
+    What differs is only what each track measures: the effect here is ``candidate_f1 - incumbent_f1``
+    and the margin is THIS gate's own floor on ``f1.yes``. The margin rule is the same sentence on
+    both tracks — the confirm split's own resolution on the metric that track gates — so it is
+    per-track by construction rather than by a second constant.
+
+    **Exactly ONE candidate**, a family of ONE, and a REFUSAL unless the confirm runs recorded
+    ``--split test``: all three for the reasons the execution twin's docstring gives. This track pools
+    several run directories per arm, so the provenance check reads BOTH arms' dirs and a cross-split
+    pair is caught by ``activation_gate``'s own preflight underneath.
+    """
+    confirm_one_candidate(candidate_variant)
+
+    notes: list[str] = []
+    confirm_refusal: str | None = None
+
+    def _refuse(reason: str) -> None:
+        nonlocal confirm_refusal
+        if confirm_refusal is None:
+            confirm_refusal = reason
+
+    if (train_note := confirm_train_note(train_verdict.promoted)) is not None:
+        notes.append(train_note)
+    if (train_refusal := confirm_train_refusal(train_verdict.gate_refusal)) is not None:
+        _refuse(train_refusal)
+
+    confirm_dirs = [*incumbent_run_dirs, *candidate_run_dirs]
+    provenance = read_split_provenance(confirm_dirs)
+    split_refusal, split_note = confirm_split_check(provenance, confirm_dirs)
+    if split_note is not None:
+        notes.append(split_note)
+    if split_refusal is not None:
+        _refuse(split_refusal)
+    elif provenance.mismatched:
+        # This track pools several dirs per arm, so its confirm can be internally inconsistent in a
+        # way the execution twin cannot. `activation_gate` refuses it underneath too, but a Stage C
+        # block reporting UNDECIDED with no reason would send the reader to the gate's notes to find
+        # out why. Below the split check: a mismatch that INCLUDES a non-test split is the more
+        # specific fault, and `confirm_split_check` names every off-split value it saw.
+        _refuse(_split_mismatch_reason("the confirm run's", provenance, confirm_dirs))
+
+    test_verdict = holm_promote(
+        [
+            activation_gate(
+                incumbent_run_dirs=incumbent_run_dirs,
+                candidate_run_dirs=candidate_run_dirs,
+                incumbent_variant=incumbent_variant,
+                candidate_variant=candidate_variant,
+                suite_id=suite_id,
+                criterion_index=criterion_index,
+                sibling_indices=sibling_indices,
+                materiality=materiality,
+                confidence=confidence,
+                seed=seed,
+                n_resamples=n_resamples,
+            )
+        ]
+    )[0]
+    if test_verdict.gate_refusal is not None:
+        _refuse(f"the confirm gate is not a result: {test_verdict.gate_refusal}")
+
+    return build_confirm_verdict(
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        train_effect=train_verdict.mean_diff,
+        test_effect=test_verdict.mean_diff,
+        test_mde=test_verdict.mde,
+        test_verdict=test_verdict,
+        confirm_refusal=confirm_refusal,
+        notes=notes,
+    )
 
 
 def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_ALPHA) -> list[ActivationGateVerdict]:

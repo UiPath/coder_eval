@@ -660,6 +660,28 @@ pairs per-row `weighted_score` — row-level correctness, an accuracy-flavoured 
 **not** F1. F1 remains the promotion metric; the paired block corroborates the direction on
 the paired rows, it does not re-test the promotion metric.
 
-Require the F1 direction to reproduce on the test split. Do **not** require replicate separation
-there — a test split is usually smaller and the separation usually weaker — and say that,
-rather than implying a stronger result than was obtained.
+#### The acceptance criterion, per track
+
+**Stage C has a computed verdict now, and the criterion is a different quantity on each track.**
+The paragraph above is the ACTIVATION track's, and stating only that one instructed an execution
+reader to check a number their track never produces — the paired block IS their result there, not a
+corroboration of one.
+
+- **Activation track.** The metric is `f1.yes`. Require its DIRECTION to reproduce on the test
+  split. Do **not** require replicate separation there — a test split is usually smaller and the
+  separation usually weaker — and say that, rather than implying a stronger result than was
+  obtained.
+- **Execution track.** The metric is per-row `weighted_score`, and it is the same quantity Stage B
+  decided on, so the criterion is stronger and simpler: require the paired mean difference to keep
+  its SIGN and to stay within the confirm split's own minimum detectable effect of the train
+  figure. That MDE is the margin because it is what the confirm split can actually resolve; a
+  shortfall larger than it is a real shrinkage rather than noise.
+
+Both are computed by `confirm_gate` (activation) / `confirm_gate_execution` (execution), which
+classify the train→test delta as **REPRODUCED**, **SHRANK**, **REVERSED** or **UNDECIDED** through
+one shared rule. Print the returned block; do not re-derive the comparison by eye. A REVERSED
+outcome is a headline: the effect the round was built on points the other way on held-out rows.
+
+UNDECIDED is a common and honest answer, not a failure of the tooling — most often the confirm
+split's floor could not be priced, which needs a higher `--repeats` on the confirm run rather than
+a different reading of the same numbers.

@@ -4217,6 +4217,42 @@ class TestPluginArtifacts:
             "bootstrap-derived and carry no figure, or the prose drifts the moment the constant moves."
         )
 
+    def test_optimize_method_states_a_stage_c_criterion_for_each_track(self):
+        """Stage C's acceptance criterion is a DIFFERENT quantity per track, and it said only one.
+
+        The shipped § Stage C text was activation-only — "F1 remains the promotion metric … require
+        the F1 direction to reproduce" — which instructs an execution reader to check a number their
+        track never produces. On that track the paired `weighted_score` block IS the result, not a
+        corroboration of one.
+
+        Asserted by TOKEN rather than by sentence because the prose is pitched at a reader and will be
+        reworded; what may not vanish is that both metrics are named as the criterion, and that the
+        computed outcomes exist. `f1` alone would be vacuous — the section already mentions F1 nine
+        times — so the anchor is the per-track heading plus each track's metric plus the four
+        outcomes, which are the model's own `Literal` values and are derived from it here rather than
+        retyped.
+        """
+        import typing
+
+        from coder_eval.models import ConfirmVerdict
+
+        method = _normalized(PLUGIN_ROOT / "reference" / "optimize-method.md")
+        stage_c = method[method.index("### Stage C") :]
+        assert "acceptance criterion, per track" in stage_c, (
+            "reference/optimize-method.md § Stage C no longer states its criterion PER TRACK. "
+            "Activation promotes on f1.yes and execution on per-row weighted_score, so one "
+            "criterion tells one of the two readers to check a quantity their track never produces."
+        )
+        for metric in ("f1.yes", "weighted_score"):
+            assert metric in stage_c, f"§ Stage C does not name {metric} as an acceptance criterion"
+        outcomes = typing.get_args(ConfirmVerdict.model_fields["outcome"].annotation)
+        assert len(outcomes) == 4, f"ConfirmVerdict.outcome no longer has four values: {outcomes}"
+        for outcome in outcomes:
+            assert outcome.upper() in stage_c, (
+                f"§ Stage C does not name the {outcome!r} outcome, so a reader cannot tell what the "
+                "computed verdict can say"
+            )
+
     def test_optimize_surfaces_call_the_cost_front_advisory(self):
         # Derived from the constant exactly as the MATERIALITY_FLOOR sensor is, so the claim cannot
         # exist in three files at three vintages. Asserted PER SURFACE rather than against the
@@ -8000,6 +8036,12 @@ class TestEstimatorLedger:
         page = (Path(__file__).parent.parent / LEDGER_DOC).read_text(encoding="utf-8")
         section = page.split("## Estimator changes", 1)[1].split("\n## ", 1)[0]
         undocumented = sorted({name for _module, name in WATCHED_CONSTANTS if f"`{name}`" not in section})
+        # This matches the NAME only, and that is a stated limitation rather than an oversight:
+        # `FLOOR_RESOLUTION` moved module and this section went on attributing it to the old one with
+        # every assertion green. A module check was written and then removed for being unfailable —
+        # the section legitimately names an old module inside a ledger row describing the move, and
+        # every watched module is named somewhere in the section anyway, so neither a subset rule nor
+        # a proximity rule distinguishes the two. Deferred in `.claude/harness-candidates.md`.
         assert not undocumented, (
             f"{undocumented} are watched by the estimator-protocol job but absent from "
             f"{LEDGER_DOC}'s boundary paragraph, which claims to name the watch set."
