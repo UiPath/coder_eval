@@ -8299,6 +8299,150 @@ class TestCE046CliFlagsAreDocumented:
 
 @pytest.mark.lint
 @pytest.mark.lint
+class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
+    """CE057 — an outcome row's prompt must not contain a value its EXPECTATIONS grade it on.
+
+    CE036's blind spot, one indirection over. An outcome suite's marking scheme does not live on
+    any criterion: the criterion is a `run_command` naming a script, and every string the row is
+    actually graded on sits in `outcome-grader/expectations/<row id>.json`. So the suite whose
+    scores an optimization round spends real money on is exactly the one CE036 cannot see into.
+
+    A leak here is worse than an ordinary one, for the reason the whole plan exists: a prompt that
+    supplies its own answer scores well whether or not the behaviour under test happened, and in an
+    A/B an arm that DELETED that behaviour still passes. It biases every arm equally, so no
+    comparison downstream can reveal it.
+
+    **Class-wired, not a `BaseRule`.** Its subject is a JSONL plus a directory of JSON, not one
+    `.py` AST, so it follows CE043 / CE045 / CE052 rather than `tests/lint/rules/` — and nothing is
+    added to `runner.py`, whose id-uniqueness assert covers `ALL_RULES` alone. The detection body
+    lives in `tests/lint/outcome_prompt_leak.py`, a shared reader beside `skip_guards.py` and
+    `task_yaml_discovery.py`, so the fixtures below and the repo scan exercise the SAME code.
+
+    **Boundary**, stated so a green run is not mistaken for a proof: **verbatim only**, exactly as
+    CE036. A prompt describing the graded behaviour in other words still needs a reviewer. And the
+    spec carve-out is the whole difficulty — an outcome prompt legitimately states output paths,
+    sheet names and column names, because "follow the user's spec literally" is itself graded.
+    `LEAK_LOCATOR_FIELDS` is what draws that line, shared with CE036 rather than redrawn here.
+    """
+
+    REPO_ROOT: ClassVar[Path] = Path(__file__).parent.parent
+
+    def test_no_shipped_outcome_suite_leaks_its_marking_scheme(self):
+        from tests.lint.outcome_prompt_leak import leaks
+
+        found, pairs = leaks(self.REPO_ROOT / "plugins")
+        # NON-VACUITY on the PAIR count, never the suite count. Before this plan the only suite in
+        # the tree had one expectations file matching zero rows, so a suite-level assert would have
+        # passed while comparing nothing — the CE044/CE045 failure this rule cites by name.
+        assert pairs, (
+            "GAP: no prompt/expectation PAIR was compared. Either no outcome suite was discovered, "
+            "or every expectations file matches no row — this rule is inert either way."
+        )
+        assert not found, (
+            "an outcome row's prompt hands the agent a string its expectations grade it on, so the "
+            "row scores well whether or not the behaviour happened — and an A/B arm that DELETED "
+            "that behaviour would still pass:\n"
+            + "\n".join(f"  {leak.row_id}: {leak.value!r} (check {leak.check}) in {leak.suite}" for leak in found)
+        )
+
+    @staticmethod
+    def _suite(root: Path, *, scenario: str, needle: str, extra_row: dict | None = None) -> Path:
+        """One outcome suite on disk: a rows JSONL beside an `outcome-grader/expectations/` dir."""
+        import json
+
+        (root / "outcome-grader" / "expectations").mkdir(parents=True)
+        row = {"id": "core-1", "scenario": scenario, **(extra_row or {})}
+        (root / "rows.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        (root / "outcome-grader" / "expectations" / "core-1.json").write_text(
+            json.dumps({"path": "out/report.md", "checks": {"mentions#core": {"all_of": [needle]}}}),
+            encoding="utf-8",
+        )
+        return root
+
+    def test_ce057_flags_a_prompt_containing_a_graded_value(self, tmp_path: Path):
+        from tests.lint.outcome_prompt_leak import leaks
+
+        self._suite(
+            tmp_path, scenario="Write a report that sets minimum-task-score to 0.8", needle="minimum-task-score"
+        )
+        found, pairs = leaks(tmp_path)
+        assert pairs == 1
+        assert len(found) == 1 and found[0].value == "minimum-task-score"
+
+    def test_ce057_allows_a_prompt_stating_a_locator(self, tmp_path: Path):
+        # THE carve-out. An outcome prompt names the output path by design — that removes filename
+        # nondeterminism from the measurement without revealing what the artifact must contain, and
+        # the outcome template tells every author to do it.
+        from tests.lint.outcome_prompt_leak import leaks
+
+        self._suite(
+            tmp_path,
+            scenario="Write the summary to reports/quarterly-summary.md",
+            needle="a genuinely graded phrase",
+            extra_row={"expected_path": "reports/quarterly-summary.md"},
+        )
+        found, pairs = leaks(tmp_path)
+        assert pairs == 1 and not found
+
+    def test_ce057_respects_leak_min_chars(self, tmp_path: Path):
+        # Short values collide by chance. The threshold is `leak_detection`'s, not a second one.
+        from coder_eval.leak_detection import LEAK_MIN_CHARS
+        from tests.lint.outcome_prompt_leak import leaks
+
+        short = "x" * (LEAK_MIN_CHARS - 1)
+        self._suite(tmp_path, scenario=f"Mention {short} somewhere", needle=short)
+        found, pairs = leaks(tmp_path)
+        assert pairs == 0 and not found
+
+    def test_ce057_reports_gap_when_no_suites_discovered(self, tmp_path: Path):
+        from tests.lint.outcome_prompt_leak import leaks
+
+        assert leaks(tmp_path) == ([], 0)
+
+    def test_an_expectations_file_matching_no_row_compares_nothing(self, tmp_path: Path):
+        # The state the shipped template was in, and why the assert counts PAIRS: the suite is
+        # discovered and the file parses, so a suite-level non-empty assert would read as green.
+        import json
+
+        from tests.lint.outcome_prompt_leak import leaks
+
+        (tmp_path / "outcome-grader" / "expectations").mkdir(parents=True)
+        (tmp_path / "rows.jsonl").write_text(json.dumps({"id": "core-1", "scenario": "anything"}) + "\n", "utf-8")
+        (tmp_path / "outcome-grader" / "expectations" / "example-row.json").write_text(
+            json.dumps({"path": "out/report.md", "checks": {"mentions": {"all_of": ["a graded phrase"]}}}), "utf-8"
+        )
+        assert leaks(tmp_path) == ([], 0)
+
+    def test_the_rules_map_and_the_path_are_not_graded_values(self, tmp_path: Path):
+        # `rules` maps checks to rule ids and `path` is a locator; neither asserts CONTENT, so
+        # neither may fire. A rule id echoed in a scenario is bookkeeping, not an answer.
+        from tests.lint.outcome_prompt_leak import graded_values
+
+        spec = {
+            "path": "reports/quarterly-summary.md",
+            "rules": {"mentions#core": "R1-formulas-in-column"},
+            "checks": {"mentions#core": {"all_of": ["a genuinely graded phrase"], "path": "some/other/path.md"}},
+        }
+        assert graded_values(spec) == [("mentions#core", "a genuinely graded phrase")]
+
+    def test_nothing_was_added_under_the_baserule_directory(self):
+        # The rule's own filing decision, asserted rather than described: `tests/lint/rules/` holds
+        # `BaseRule` modules and `runner.py`'s id-uniqueness assert covers `ALL_RULES` alone, so a
+        # class-wired id living there would be neither loaded nor checked for collisions.
+        from tests.lint.runner import ALL_RULES
+
+        assert not (Path(__file__).parent / "lint" / "rules" / "ce057_outcome_prompt_leak.py").exists()
+        assert not any(getattr(rule, "rule_id", None) == "CE057" for rule in ALL_RULES)
+
+    def test_ce056_is_still_reserved_and_unimplemented(self):
+        # CE057 was chosen because CE056 is RESERVED with a promotion trigger that has not fired.
+        # Renumbering onto it would silently retire that reservation.
+        from tests.lint.runner import ALL_RULES
+
+        assert not any(getattr(rule, "rule_id", None) == "CE056" for rule in ALL_RULES)
+
+
+@pytest.mark.lint
 class TestCE052TemplateTasksLoad:
     """CE052 — every task YAML under `templates/` must load through the real `load_task`.
 
