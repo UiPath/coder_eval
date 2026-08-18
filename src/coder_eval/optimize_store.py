@@ -189,6 +189,24 @@ def record_round_scores(path: Path, scores: RoundScores) -> OptimizeMeasurements
     return updated
 
 
+def grader_changed(previous: RoundScores | None, current: RoundScores) -> bool | None:
+    """Did the measuring instrument move between these two rounds? ``None`` means UNKNOWN.
+
+    Three-valued on purpose. ``True``/``False`` require BOTH fingerprints to be present; if either
+    is missing the answer is ``None``, never ``False`` — an older ``measurements.json`` predating
+    the field, or a suite with no script grader, must not be able to masquerade as an instrument
+    that provably did not change. The whole value of the field is that it distinguishes "the same
+    grader produced both numbers" from "nobody recorded which grader produced them", and folding
+    the second into the first would delete exactly that.
+
+    Reported, never enforced. A changed instrument means the two rounds' scores are not comparable
+    — evidence for a reader deciding whether last round's baseline still stands, not a veto.
+    """
+    if previous is None or previous.grader_fingerprint is None or current.grader_fingerprint is None:
+        return None
+    return previous.grader_fingerprint != current.grader_fingerprint
+
+
 # Placeholder for "the caller resolved no single model" — a mixed-model or unlabelled suite. It can
 # never collide with a real model id. A floor carrying it is neither read from nor written to the
 # cache: borrowing another model's floor is worse than recomputing, and storing one under this key

@@ -602,6 +602,20 @@ class RoundScores(BaseModel):
             "merging, because it deliberately retains an arm that wins exactly one row."
         ),
     )
+    grader_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "A hash of the outcome grader AND its expectations at the time this round ran, from "
+            "`verify.py --fingerprint`. Scores are only comparable across rounds that share it: a "
+            "mid-round grader fix moved a suite mean 0.8679 -> 0.9158 on IDENTICAL artifacts, and "
+            "nothing in any run directory recorded that the instrument had moved. `None` means NOT "
+            "RECORDED — a round written before this field, or one whose suite has no script grader "
+            "— which is deliberately not the same as a recorded fingerprint that happens to differ, "
+            "and is why `grader_changed` answers None rather than True for it. Reported, never "
+            "enforced: a changed instrument makes two rounds incomparable, which is a fact about "
+            "the measurement, not a veto on a promotion."
+        ),
+    )
     lineage_head: str | None = Field(
         default=None,
         description=(

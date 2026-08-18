@@ -26,6 +26,25 @@ THE OUTPUT PROTOCOL
     and folds anything they printed into the detail lines — but a module-level `print` at import
     time is outside that guard.
 
+THE FINGERPRINT
+    `python3 verify.py --fingerprint` prints a stable hash of THIS SCRIPT plus the
+    `expectations/*.json` files it loads, and nothing else — no score line, no `RULES` line. It is
+    handled before the row-id contract, or `--fingerprint` would be read as a row id.
+
+    The answer key is part of the instrument, so the expectations are hashed with the script:
+    editing one row's expected values changes the number the suite is measured with. Hashed by
+    file CONTENT in sorted-path order — never mtimes, never absolute paths — so it is identical
+    wherever the files are byte-identical. A file the grader never READS never moves it.
+
+    **This mode alone exits NON-ZERO on failure**, with the reason on stderr. Everything else here
+    exits 0 to protect a computed score; there is no score here, and a score-shaped line would be
+    recorded by a caller as the fingerprint itself.
+
+    `/coder-eval:optimize-skill` records it per round. Evidence for why: a mid-round grader fix
+    moved a suite mean 0.8679 -> 0.9158 **on identical artifacts**, and nothing in any run
+    directory recorded that the instrument had moved. A differing fingerprint is REPORTED, never
+    enforced — it says the two rounds are not comparable, which is a fact, not a veto.
+
 RULE ATTRIBUTION
     OPTIONAL. A top-level `rules` map in the expectations file — a SIBLING of `checks`, never a key
     inside one, because a check's params are forwarded verbatim to the check function where an
@@ -112,6 +131,7 @@ BEYOND TEXT AND JSON
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -336,9 +356,46 @@ def _run_checks(doc: Artifact, checks: dict[str, Any]) -> tuple[int, int, list[s
     return passed, applicable, details, verdicts
 
 
+def fingerprint() -> str:
+    """A stable hash of this script and the expectations files it LOADS.
+
+    Exactly `verify.py` plus every top-level `expectations/*.json` — the set `main()` below actually
+    reads, never the whole directory tree. That is the rule that makes the number mean "the
+    instrument moved": a `.DS_Store`, a `__pycache__` beside the scaffold, an `archive/` of retired
+    keys — none of them is read when a row is scored, so none of them may move the fingerprint. A
+    filter listing today's stray files instead would be a list nobody can finish. **If you change
+    where this script loads expectations from, change this set too**, or the hash stops describing
+    the instrument.
+
+    CONTENT in sorted-path order, with each path recorded RELATIVE to this file: an absolute path
+    would change the hash on a colleague's machine and in CI, and an mtime would change it on every
+    checkout. Both would report "the instrument moved" when nothing had. The byte LENGTH is hashed
+    with each part, so a NUL inside a file's content cannot forge the delimiter and make a renamed
+    file collide with an edited one.
+
+    It hashes BYTES, so a checkout that rewrites line endings changes the number — the claim is
+    "identical wherever the files are byte-identical", not "identical on every platform".
+    """
+    here = Path(__file__).resolve()
+    files = [here, *sorted((here.parent / "expectations").glob("*.json"))]
+    digest = hashlib.sha256()
+    for path in files:
+        for part in (path.relative_to(here.parent).as_posix().encode("utf-8"), path.read_bytes()):
+            digest.update(str(len(part)).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(part)
+    return digest.hexdigest()
+
+
 def main(argv: list[str]) -> int:
+    # BEFORE the row-id contract: `len(argv) != 2` would otherwise take `--fingerprint` as a usage
+    # error, and `argv[1]` would take it as a row id. It bypasses the score protocol entirely —
+    # no line-1 float, no RULES line, just the hash, because nothing is being scored.
+    if len(argv) == 2 and argv[1] == "--fingerprint":
+        print(fingerprint())
+        return 0
     if len(argv) != 2:
-        return _report(0.0, f"usage: {Path(__file__).name} <row_id>")
+        return _report(0.0, f"usage: {Path(__file__).name} <row_id> | --fingerprint")
     row_id = argv[1]
 
     # Relative to the SCRIPT, never the cwd: the cwd is the sandbox, which is exactly where the
@@ -389,7 +446,16 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv))
     except Exception as exc:
-        # The last guard on the protocol. Any unanticipated failure still reports a score and a
-        # reason and still exits 0 — a traceback on stderr with a non-zero exit would be read as
-        # 0.0 with the reason nowhere in the report.
+        # `--fingerprint` has the OPPOSITE failure protocol, and the difference is load-bearing.
+        # Nothing is being scored, so there is no score to preserve — and printing the score
+        # protocol here would hand a caller doing `.stdout.strip()` the string "0.0000\ngrader
+        # failed: ..." to record AS the fingerprint, which then differs from every real one and
+        # reports "the instrument changed" forever. Exit non-zero so `subprocess.run(check=True)`
+        # raises instead.
+        if "--fingerprint" in sys.argv[1:]:
+            print(f"fingerprint failed: {exc!r}", file=sys.stderr)
+            sys.exit(1)
+        # The last guard on the SCORING protocol. Any unanticipated failure still reports a score
+        # and a reason and still exits 0 — a traceback on stderr with a non-zero exit would be read
+        # as 0.0 with the reason nowhere in the report.
         sys.exit(_report(0.0, f"grader failed: {exc!r}"))

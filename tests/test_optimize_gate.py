@@ -14,6 +14,8 @@ import math
 import random
 import re
 import shutil
+import subprocess
+import sys
 import textwrap
 from datetime import datetime
 from pathlib import Path
@@ -113,7 +115,7 @@ from coder_eval.optimize_search import (
     regression_check,
     search_compare,
 )
-from coder_eval.optimize_store import UNRECORDED_SPLIT, record_noise_floor
+from coder_eval.optimize_store import UNRECORDED_SPLIT, grader_changed, record_noise_floor
 from coder_eval.reports_optimize import (
     CEILING_MARGIN,
     COST_FRONT_ADVISORY,
@@ -4092,6 +4094,191 @@ class TestOneRowCostDefinition:
     def test_an_empty_cluster_is_absent_not_zero(self) -> None:
         # `mean([])` is 0.0, so an unfiltered empty cluster would read as "this row cost nothing".
         assert _row_cost_levels([[1.0], [], [3.0]]) == [1.0, 3.0]
+
+
+class TestGraderFingerprint:
+    """The instrument, recorded per round — because a grader fix moves every score at once.
+
+    Measured: a mid-round fix moved a suite mean 0.8679 -> 0.9158 on IDENTICAL artifacts, and
+    nothing in any run directory recorded that the instrument had moved.
+    """
+
+    GRADER = (
+        Path(__file__).parent.parent
+        / "plugins"
+        / "coder-eval"
+        / "reference"
+        / "templates"
+        / "outcome-grader"
+        / "verify.py"
+    )
+
+    def _copy(self, tmp_path: Path) -> Path:
+        target = tmp_path / "outcome-grader"
+        shutil.copytree(self.GRADER.parent, target, ignore=shutil.ignore_patterns("__pycache__"))
+        return target / "verify.py"
+
+    @staticmethod
+    def _fingerprint(script: Path) -> str:
+        completed = subprocess.run(
+            [sys.executable, str(script), "--fingerprint"], capture_output=True, text=True, timeout=60
+        )
+        assert completed.returncode == 0, completed.stderr
+        lines = completed.stdout.split()
+        assert len(lines) == 1, f"--fingerprint printed more than the hash: {completed.stdout!r}"
+        return lines[0]
+
+    def test_grader_fingerprint_is_stable_across_invocations(self, tmp_path: Path) -> None:
+        script = self._copy(tmp_path)
+        assert self._fingerprint(script) == self._fingerprint(script)
+
+    def test_grader_fingerprint_bypasses_the_score_protocol(self, tmp_path: Path) -> None:
+        # No line-1 float and no RULES line: nothing is being scored, and a float here would be
+        # read as a score by anything that pipes the two modes through one reader.
+        script = self._copy(tmp_path)
+        printed = self._fingerprint(script)
+        assert "RULES" not in printed
+        try:
+            float(printed)
+        except ValueError:
+            pass
+        else:  # pragma: no cover - a hash that parses as a float is a contract violation
+            raise AssertionError("--fingerprint printed something a score reader would accept")
+
+    def test_grader_fingerprint_changes_when_an_expectation_changes(self, tmp_path: Path) -> None:
+        # The answer key is PART of the instrument. Editing one row's expected values changes what
+        # the suite measures just as surely as editing a check does.
+        script = self._copy(tmp_path)
+        before = self._fingerprint(script)
+        spec = script.parent / "expectations" / "core-1.json"
+        spec.write_text(spec.read_text(encoding="utf-8").replace("REPLACE/output/report.md", "out/x.md"), "utf-8")
+        assert self._fingerprint(script) != before
+
+    def test_grader_fingerprint_changes_when_the_script_changes(self, tmp_path: Path) -> None:
+        script = self._copy(tmp_path)
+        before = self._fingerprint(script)
+        script.write_text(script.read_text(encoding="utf-8") + "\n# a new check would go here\n", "utf-8")
+        assert self._fingerprint(script) != before
+
+    @pytest.mark.parametrize(
+        "stray",
+        ["__pycache__/verify.cpython-313.pyc", "expectations/.DS_Store", "expectations/archive/retired.json"],
+        ids=["pycache", "editor-junk", "retired-keys"],
+    )
+    def test_a_file_the_grader_never_reads_does_not_move_the_fingerprint(self, tmp_path: Path, stray: str) -> None:
+        """The instrument is the script plus the keys it LOADS — not everything in the directory.
+
+        A first version filtered `__pycache__` by name, which was DEAD CODE: the cache sits beside
+        the script and the hash only ever walked `expectations/`, so the guard could not fire and
+        its test passed with the guard deleted. Hashing what the grader actually reads makes all
+        three of these true by construction, and none of them is a special case.
+        """
+        script = self._copy(tmp_path)
+        before = self._fingerprint(script)
+        target = script.parent / stray
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\x00 not part of the instrument \x01")
+        assert self._fingerprint(script) == before
+
+    def test_a_new_row_key_does_move_the_fingerprint(self) -> None:
+        # The other half, so the test above cannot be satisfied by a fingerprint that ignores
+        # everything: an expectations file the grader WOULD load is part of the instrument.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            script = self._copy(Path(raw))
+            before = self._fingerprint(script)
+            (script.parent / "expectations" / "core-9.json").write_text('{"path": "x", "checks": {}}', "utf-8")
+            assert self._fingerprint(script) != before
+
+    def test_a_nul_in_an_expectation_cannot_forge_the_delimiter(self, tmp_path: Path) -> None:
+        # Two DIFFERENT instruments must not hash alike. Without a length prefix, one file whose
+        # content embeds `\0<path>\0` produces the same byte stream as two files with that path
+        # and content — a rename-versus-edit collision on the one number the field rests on.
+        one, two = self._copy(tmp_path / "one"), self._copy(tmp_path / "two")
+        for grader in (one, two):
+            for existing in (grader.parent / "expectations").glob("*.json"):
+                existing.unlink()
+        (one.parent / "expectations" / "a.json").write_bytes(b"X\0expectations/b.json\0Y")
+        (two.parent / "expectations" / "a.json").write_bytes(b"X")
+        (two.parent / "expectations" / "b.json").write_bytes(b"Y")
+        assert self._fingerprint(one) != self._fingerprint(two)
+
+    def test_a_fingerprint_that_cannot_be_computed_exits_non_zero(self, tmp_path: Path) -> None:
+        """`--fingerprint` has the OPPOSITE failure protocol from every other path, deliberately.
+
+        The grader exits 0 on every failure to protect a score it already computed. There is no
+        score here — so falling through that guard printed `0.0000\ngrader failed: ...`, which
+        `check=True` cannot catch and a caller doing `.stdout.strip()` records AS THE FINGERPRINT.
+        Every later round then reports a changed instrument, forever, from a permissions error.
+        """
+        script = self._copy(tmp_path)
+        target = next((script.parent / "expectations").glob("*.json"))
+        target.chmod(0o000)
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(script), "--fingerprint"], capture_output=True, text=True, timeout=60
+            )
+        finally:
+            target.chmod(0o644)
+        assert completed.returncode != 0, completed.stdout
+        assert completed.stdout.strip() == "", "a score-shaped line here is recorded as the fingerprint"
+        assert "fingerprint failed" in completed.stderr
+
+    def test_the_scoring_path_still_exits_zero_on_failure(self, tmp_path: Path) -> None:
+        # The other side of the same coin: the non-zero exit must NOT have leaked into scoring,
+        # where coder-eval checks the exit code before parsing the score and discards it.
+        script = self._copy(tmp_path)
+        completed = subprocess.run(
+            [sys.executable, str(script), "no-such-row"], capture_output=True, text=True, timeout=60
+        )
+        assert completed.returncode == 0
+        assert float(completed.stdout.splitlines()[0]) == 0.0
+
+    def test_the_fingerprint_does_not_depend_on_where_the_grader_lives(self, tmp_path: Path) -> None:
+        # Relative paths and content only — never an absolute path or an mtime, or the number
+        # would differ on a colleague's machine and in CI while nothing had changed.
+        first = self._copy(tmp_path / "a")
+        second = self._copy(tmp_path / "b")
+        assert self._fingerprint(first) == self._fingerprint(second)
+
+    def test_round_scores_parses_without_a_fingerprint(self) -> None:
+        # An existing measurements.json predating the field. `extra="forbid"` governs UNKNOWN keys;
+        # a MISSING key is handled by the field default — different mechanisms, both needed here.
+        scores = RoundScores.model_validate({"round": 1, "arm_row_scores": [], "pareto_front": []})
+        assert scores.grader_fingerprint is None
+
+    def test_store_round_trips_the_fingerprint(self, tmp_path: Path) -> None:
+        # `record_round_scores` model_dump_json's the whole record, so the field needs no writer
+        # change — asserted rather than assumed.
+        from coder_eval.optimize_store import load_measurements, record_round_scores
+
+        sidecar = tmp_path / "my-skill" / "measurements.json"
+        record_round_scores(sidecar, RoundScores(round=1, grader_fingerprint="abc123"))
+        assert load_measurements(sidecar).round_scores[0].grader_fingerprint == "abc123"
+
+    @pytest.mark.parametrize(
+        ("previous", "current", "expected"),
+        [
+            ("abc", "abc", False),
+            ("abc", "def", True),
+            (None, "abc", None),
+            ("abc", None, None),
+            (None, None, None),
+        ],
+        ids=["same", "changed", "previous-missing", "current-missing", "both-missing"],
+    )
+    def test_grader_changed_is_three_valued(
+        self, previous: str | None, current: str | None, expected: bool | None
+    ) -> None:
+        # `None` means UNKNOWN and must never collapse to False: a round that recorded no
+        # fingerprint would otherwise masquerade as an instrument that provably did not move.
+        before = RoundScores(round=1, grader_fingerprint=previous)
+        after = RoundScores(round=2, grader_fingerprint=current)
+        assert grader_changed(before, after) is expected
+
+    def test_grader_changed_without_a_previous_round_is_unknown(self) -> None:
+        assert grader_changed(None, RoundScores(round=1, grader_fingerprint="abc")) is None
 
 
 # ---------------------------------------------------------------------------

@@ -1804,9 +1804,12 @@ fresh interpreter and it fails with `NameError` on the first of them, after the 
 been paid for. **Which floor you record depends on the track**, so take the matching half:
 
 ```python
+import subprocess
+import sys
 from pathlib import Path
 
 from coder_eval.models import RegressionRow, RoundScores
+from coder_eval.orchestration.task_loader import load_task
 from coder_eval.optimize_load import load_arm_rows
 from coder_eval.optimize_activation import measure_noise_floor
 from coder_eval.optimize_execution import (
@@ -1820,6 +1823,7 @@ from coder_eval.optimize_fronts import (
 from coder_eval.optimize_store import (
     UNRESOLVED_MODEL,
     append_regression_rows,
+    grader_changed,
     load_measurements,
     record_noise_floor,
     record_round_scores,
@@ -1849,8 +1853,33 @@ floor = measure_noise_floor(
 if floor is not None:
     record_noise_floor(sidecar, floor)
 
-record_round_scores(sidecar, RoundScores(
-    round=1, arm_row_scores=arms,
+# The PREVIOUS round, read from the snapshot loaded above and BEFORE this round is written.
+# Both halves matter: `record_round_scores` REPLACES the entry for a round number, so reading
+# after the write compares this round against itself and prints "same grader" forever; and
+# excluding `round` handles a re-run, where the stored entry is an earlier version of this same
+# round rather than the one before it.
+previous = max((r for r in measurements.round_scores if r.round < 1), key=lambda r: r.round, default=None)
+
+# The INSTRUMENT this round's scores were produced with. EXECUTION TRACK ONLY — the activation
+# track has no script grader, and `None` there is correct rather than missing. Take the matching
+# half, as with the floor above.
+fingerprint = None  # ACTIVATION TRACK.
+
+# EXECUTION TRACK — resolve the grader from the SUITE rather than typing a path: it is the
+# `run_command` criterion's own command, and `$TASK_DIR` in it is the suite file's directory.
+# `--fingerprint` hashes the script AND the expectations it loads, because the answer key is part
+# of the instrument, and it exits NON-ZERO on failure so `check=True` cannot record a broken hash.
+#
+# suite_file = Path("<path to the suite yaml>")
+# task, _ = load_task(suite_file)
+# command = next(c.command for c in task.success_criteria if c.type == "run_command")
+# grader = Path(command.split()[1].replace("$TASK_DIR", str(suite_file.parent)))
+# fingerprint = subprocess.run(
+#     [sys.executable, str(grader), "--fingerprint"], capture_output=True, text=True, check=True
+# ).stdout.strip()
+
+this_round = RoundScores(
+    round=1, arm_row_scores=arms, grader_fingerprint=fingerprint,
     pareto_front=pareto_front(arms), instance_best_front=instance_best_front(arms),
     # The arm the next round's SEARCH LOOP is accepted or reverted against. On a multi-arm round
     # like this one that is the arm with the highest MEAN of row_scores — not the top f1.yes arm,
@@ -1858,11 +1887,29 @@ record_round_scores(sidecar, RoundScores(
     # candidate if it beat the head and the head otherwise, and None if there is no lineage yet.
     # Not a promotion — see Step 8's two pointers.
     lineage_head="cand-a-widen-vocabulary",
-))
+)
+record_round_scores(sidecar, this_round)
+
+# Say it OUT LOUD when the instrument moved. `None` is UNKNOWN, never "unchanged".
+moved = grader_changed(previous, this_round)
+print(
+    "the grader CHANGED since the last round — these scores are not comparable to it"
+    if moved
+    else "same grader as the last round" if moved is False
+    else "no fingerprint on one of the two rounds — comparability unknown"
+)
 
 # On promotion only:
 append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round=1, reason="...")])
 ```
+
+**The grader fingerprint is what makes two rounds' scores comparable at all.** Measured: a
+mid-round grader fix moved a suite mean **0.8679 → 0.9158 on identical artifacts**, and nothing in
+any run directory recorded that the instrument had moved — so the improvement was indistinguishable
+from a body that got better. Record it every round, and when it differs, **say the instrument
+changed** rather than reporting a delta across two instruments. It is reported and never enforced:
+`grader_changed` returns `None` for "unknown" whenever either round lacks a fingerprint, so an
+older sidecar can never masquerade as an instrument that provably did not move.
 
 **Use `measure_noise_floor` / `measure_execution_noise_floor`, not `noise_floor_mde`, when you
 intend to record.** They return the whole keyed record — including `n_rows`, the count of rows
