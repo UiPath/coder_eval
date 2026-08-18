@@ -1079,3 +1079,31 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       a machine-readable declaration of the modes, which this scaffold does not have and should not
       grow for one rule. — caught in the 2026-08-17 outcome-suite measurement-quality plan, Phase 5
       review.
+
+- [ ] **A python fence in a shipped SKILL.md must be executable as written, not merely
+      import-resolvable.** Step 11's ledger snippet shipped with `suite = suite_fingerprint(suite_task, …)`
+      whose only assignment of `suite_task` was inside a COMMENT — a `NameError` in the user's
+      terminal after the round is already paid for. The existing snippet sensor asserts every
+      imported NAME resolves, which is satisfied here, and the prose-token sensors assert strings
+      are present; neither can see an undefined local. The cheap version — `ast.parse` each fence
+      and check every load is bound by an earlier store, an import, or a builtin — is defeated by
+      the placeholders these snippets legitimately carry (`<runs>`, `<the suite yaml>`,
+      `gate_dirs` carried from an earlier step), so it needs a per-fence declaration of what the
+      step inherits before it can tell a placeholder from a bug. That declaration does not exist
+      and should not be grown for one rule. Note this is the SECOND time a fence defect shipped
+      past every sensor (see the entry above about executing fences per track), so the pair is
+      the argument for building it properly rather than cheaply. — caught in the 2026-08-17
+      optimize measurement-unit / confirm-gate plan, Phase 3 review.
+
+- [ ] **A moved WATCHED constant leaves `docs/REPORT_SCHEMA.md`'s boundary paragraph attributing it
+      to the old module, with every assertion green.** `FLOOR_RESOLUTION` moved from
+      `optimize_execution` to `optimize_gate`; `WATCHED_CONSTANTS` was updated and both anti-rename
+      parity tests passed, because `test_the_documented_watch_list_matches_the_code` matches the
+      constant NAME only. A module check was written and then REMOVED for being unfailable: the
+      section legitimately names an old module inside a ledger row describing the move, and every
+      watched module is named somewhere in the section anyway, so neither a subset rule nor a
+      proximity rule distinguishes a correct mention from a stale one. Doing it properly means
+      parsing the boundary paragraph's `<module>'s <A> / <B>` structure — a one-paragraph grammar,
+      which is more machinery than the defect (a stale attribution in prose) justifies today. The
+      limitation is stated in the test itself so the next reader is not misled. — caught in the
+      2026-08-17 optimize measurement-unit / confirm-gate plan, Phase 6 review.

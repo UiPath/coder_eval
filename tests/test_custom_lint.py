@@ -8788,6 +8788,52 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
 
 
 @pytest.mark.lint
+class TestPersistedCriterionResultFieldsAreDocumented:
+    """Every `CriterionResult` base field must be named in `docs/REPORT_SCHEMA.md` § CriterionResult.
+
+    CE030's doc-parity family one model over, and NOT a numbered rule: it is one derived assertion
+    over one section rather than the configurable model→guide machinery CE030 owns, and adding a
+    number would imply a generality it does not have.
+
+    It exists because the gap was real and silent. `CriterionResult` is a PERSISTED consumer contract —
+    `task.json` is read by the evalboard and by anything else pointed at a run tree — and CE030's set
+    is `TaskDefinition` / `RunLimits` / `Dataset` / `SimulationConfig`, so adding `weight` to the model
+    and forgetting the schema doc broke nothing and failed nothing. A reviewer caught it; this is what
+    catches the next one.
+
+    Scoped to the BASE model on purpose. The subclasses' own fields are documented in their own
+    bullets in that section, and sweeping them in would make the assertion pass or fail on which
+    bullet a name happens to appear in rather than on whether it is documented.
+    """
+
+    SCHEMA: ClassVar[Path] = Path(__file__).parent.parent / "docs" / "REPORT_SCHEMA.md"
+    HEADING: ClassVar[str] = "### CriterionResult"
+
+    def _section(self) -> str:
+        text = self.SCHEMA.read_text(encoding="utf-8")
+        start = text.index(self.HEADING)
+        # To the next same-or-higher heading, so a later section cannot satisfy this one.
+        rest = text[start + len(self.HEADING) :]
+        end = min((rest.index(m) for m in ("\n### ", "\n## ") if m in rest), default=len(rest))
+        return rest[:end]
+
+    def test_every_base_field_is_named(self):
+        from coder_eval.models import CriterionResult
+
+        section = self._section()
+        assert section.strip(), f"GAP: {self.HEADING} in docs/REPORT_SCHEMA.md is empty"
+        fields = set(CriterionResult.model_fields)
+        assert fields, "GAP: CriterionResult declares no fields"
+        undocumented = sorted(name for name in fields if f"`{name}`" not in section)
+        assert not undocumented, (
+            f"docs/REPORT_SCHEMA.md's {self.HEADING} section does not name {undocumented}. "
+            "task.json is a persisted consumer contract, and CE030's doc-parity family covers "
+            "TaskDefinition / RunLimits / Dataset / SimulationConfig only — so a new field here is "
+            "documented nowhere and nothing fails."
+        )
+
+
+@pytest.mark.lint
 class TestCE058MirroredResultFieldsAreStamped:
     """CE058 — a mirrored `CriterionResult` field must be assigned at the checker's one seam.
 
