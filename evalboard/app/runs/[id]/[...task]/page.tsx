@@ -306,6 +306,13 @@ export default async function TaskPage({
 
             {flowDebug && <FlowDebugSection flowDebug={flowDebug} />}
             <CriteriaSection criteria={task.criteria} />
+            {task.postFailureCriteria.length > 0 && (
+                <CriteriaSection
+                    criteria={task.postFailureCriteria}
+                    title="Post-failure artifact evidence"
+                    diagnostic
+                />
+            )}
             {conversation.length > 0 && (
                 <ConversationSection turns={conversation} />
             )}

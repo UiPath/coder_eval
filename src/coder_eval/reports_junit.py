@@ -189,6 +189,49 @@ def _load_task_json(run_dir: Path, row: dict[str, Any], variant: str) -> dict[st
         return None
 
 
+def _criterion_lines(criteria: list[Any], *, diagnostic: bool = False) -> list[str]:
+    """Render criterion rows without treating unavailable evidence as a failed check."""
+    lines: list[str] = []
+    for crit in criteria:
+        if not isinstance(crit, dict):
+            continue
+        ctype = str(crit.get("criterion_type", "unknown"))
+        description = str(crit.get("description", ""))
+        evaluation_status = crit.get("evaluation_status", "evaluated")
+        detail = crit.get("details") or crit.get("error")
+        if evaluation_status == "not_evaluated":
+            lines.append(f"[NOT EVALUATED] {ctype}: {description}")
+            if detail:
+                lines.append(str(detail))
+            continue
+
+        score = crit.get("score")
+        threshold = crit.get("pass_threshold")
+        score_str = f"{score:.2f}" if isinstance(score, int | float) else str(score)
+        passed = isinstance(score, int | float) and isinstance(threshold, int | float) and score >= threshold
+        if diagnostic:
+            label = "DIAGNOSTIC PASS" if passed else "DIAGNOSTIC FAIL"
+            lines.append(f"[{label}] {ctype}: score {score_str} — {description}")
+            if detail:
+                lines.append(str(detail))
+            continue
+
+        # Only an explicit JSON ``false`` marks an informational criterion; a
+        # missing key or a schema-skewed value fails safe to gating.
+        informational = crit.get("gating", True) is False
+        if informational:
+            lines.append(f"[INFO] {ctype}: score {score_str} — {description}")
+            continue
+        if passed:
+            lines.append(f"[PASS] {ctype}: {description}")
+            continue
+        threshold_str = f"{threshold:.2f}" if isinstance(threshold, int | float) else str(threshold)
+        lines.append(f"[FAIL] {ctype}: score {score_str} < threshold {threshold_str} — {description}")
+        if detail:
+            lines.append(str(detail))
+    return lines
+
+
 def _criteria_body(row: dict[str, Any], run_dir: Path, variant: str) -> str:
     """Build the failure/error body for a non-succeeded row.
 
@@ -199,42 +242,24 @@ def _criteria_body(row: dict[str, Any], run_dir: Path, variant: str) -> str:
     status = _status_of(row)
     data = _load_task_json(run_dir, row, variant)
     criteria = data.get("success_criteria_results") if isinstance(data, dict) else None
+    post_failure = data.get("post_failure_criteria_results") if isinstance(data, dict) else None
 
     lines: list[str] = []
     if isinstance(criteria, list) and criteria:
-        for crit in criteria:
-            if not isinstance(crit, dict):
-                continue
-            ctype = str(crit.get("criterion_type", "unknown"))
-            description = str(crit.get("description", ""))
-            score = crit.get("score")
-            threshold = crit.get("pass_threshold")
-            # Only an explicit JSON ``false`` marks an informational criterion; a
-            # missing key or a schema-skewed value (null / non-bool) fails safe
-            # to gating — matching CriterionResult.gating's default and this
-            # module's isinstance-guarded, degrade-don't-crash reads of untyped
-            # rows. Informational criteria are excluded from the score/gate, so
-            # they are labelled [INFO] regardless of pass/fail and never rendered
-            # as the failure cause (mirrors reports.py `_compute_suite_rollup`'s
-            # `if not cr.gating: continue`).
-            informational = crit.get("gating", True) is False
-            score_str = f"{score:.2f}" if isinstance(score, int | float) else str(score)
-            if informational:
-                lines.append(f"[INFO] {ctype}: score {score_str} — {description}")
-                continue
-            passed = isinstance(score, int | float) and isinstance(threshold, int | float) and score >= threshold
-            if passed:
-                lines.append(f"[PASS] {ctype}: {description}")
-                continue
-            thr_str = f"{threshold:.2f}" if isinstance(threshold, int | float) else str(threshold)
-            lines.append(f"[FAIL] {ctype}: score {score_str} < threshold {thr_str} — {description}")
-            detail = crit.get("details") or crit.get("error")
-            if detail:
-                lines.append(str(detail))
+        lines.extend(_criterion_lines(criteria))
     else:
         weighted = row.get("weighted_score")
         weighted_str = f"{weighted:.2f}" if isinstance(weighted, int | float) else str(weighted)
         lines.append(f"status={status} weighted_score={weighted_str}")
+
+    if isinstance(post_failure, list) and post_failure:
+        lines.extend(
+            [
+                "",
+                "Post-failure artifact evidence (diagnostic only; does not affect status or weighted score):",
+                *_criterion_lines(post_failure, diagnostic=True),
+            ]
+        )
 
     return _xml_safe(truncate("\n".join(lines), _BODY_LIMIT))
 

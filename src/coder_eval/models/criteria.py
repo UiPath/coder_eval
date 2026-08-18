@@ -130,6 +130,9 @@ class BaseSuccessCriterion(BaseModel, ABC):
     requires_agent: ClassVar[bool] = False
     """True if this criterion requires agent turn records to evaluate correctly."""
 
+    supports_post_failure_evaluation: ClassVar[bool] = False
+    """True for deterministic, read-only artifact checks safe to run after agent failure."""
+
     @property
     def is_stop_armed(self) -> bool:
         """True when this criterion participates in the run's early-stop armed set.
@@ -321,6 +324,7 @@ class FileExistsCriterion(BaseSuccessCriterion):
     Pure data model - checking logic in SuccessChecker._check_file_exists()
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_exists"] = "file_exists"
     path: str = Field(
         description="Path to the file that must exist; a glob pattern passes when it matches at least one file"
@@ -333,6 +337,7 @@ class FileContainsCriterion(BaseSuccessCriterion):
     Pure data model - checking logic in SuccessChecker._check_file_contains()
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_contains"] = "file_contains"
     path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     includes: list[str] = Field(description="List of strings that must be present in the file")
@@ -406,6 +411,7 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     Pure data model - checking logic in SuccessChecker._check_file_matches_regex()
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_matches_regex"] = "file_matches_regex"
     path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     pattern: str = Field(description="Regex pattern that must match somewhere in the file")
@@ -842,6 +848,7 @@ class JsonCheckCriterion(BaseSuccessCriterion):
     Only active categories (schema, assertions) contribute to the average.
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["json_check"] = "json_check"
     path: str = Field(
         description="Path to the JSON file (relative to sandbox root); may be a glob matching exactly one file"
@@ -879,6 +886,7 @@ class FileCheckCriterion(BaseSuccessCriterion):
             description: "main.py exists with correct imports and structure"
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_check"] = "file_check"
     path: str = Field(
         description="Path to the file to check (relative to sandbox root); may be a glob matching exactly one file"
@@ -910,6 +918,7 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     """
 
     requires_agent: ClassVar[bool] = True
+    supports_post_failure_evaluation: ClassVar[bool] = True
 
     type: Literal["reference_comparison"] = "reference_comparison"
 
@@ -1107,6 +1116,7 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
             description: "Sentiment label matches ground truth"
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["classification_match"] = "classification_match"
     path: str = Field(
         description=(

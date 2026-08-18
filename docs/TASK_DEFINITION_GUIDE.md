@@ -239,7 +239,7 @@ run_limits:
   # Structural caps
   max_turns: 20                       # hard cap on agent inner-loop turns per iteration
   expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
-  task_timeout: 600                   # wall-clock cap across all iterations, seconds
+  task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
 
   # Budget caps
@@ -254,8 +254,8 @@ run_limits:
 |-------|---------|------------|-------------|
 | `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
 | `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
-| `task_timeout` | *unset* | `>= 30` | Max seconds for the whole evaluation loop (all iterations). |
-| `turn_timeout` | *unset* | `>= 10` | Max seconds for a single agent `communicate()` call. |
+| `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
+| `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
 | `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
 | `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
@@ -264,6 +264,11 @@ run_limits:
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
 | `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution on an armed task) | Minimum weighted score over the armed subset required for an **early-stopped** run to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
+
+If resolved `task_timeout` is larger than `turn_timeout`, `plan` and runtime emit
+a non-blocking warning: a larger `task_timeout` cannot extend the agent's single
+iteration; the agent budget is `turn_timeout`. The values are not rejected or
+changed because `task_timeout` still governs grading and other run-envelope work.
 
 The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
 a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
