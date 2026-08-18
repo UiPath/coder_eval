@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.10.2 (2026-08-18)
+
+### Continuous Integration
+
+- Exclude attestation sidecars from the PyPI artifact-identity assert
+  ([#124](https://github.com/UiPath/coder_eval/pull/124),
+  [`7d8a771`](https://github.com/UiPath/coder_eval/commit/7d8a771f51fc8694a90f55477d410a55235a4d8a))
+
+
 ## v0.10.1 (2026-08-18)
 
 ### Continuous Integration
