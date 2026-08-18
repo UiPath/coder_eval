@@ -1826,7 +1826,7 @@ import sys
 from pathlib import Path
 
 from coder_eval.models import RegressionRow, RoundScores
-from coder_eval.orchestration.task_loader import load_task
+from coder_eval.orchestration.task_loader import expand_dataset, load_task
 from coder_eval.optimize_load import load_arm_rows
 from coder_eval.optimize_activation import measure_noise_floor
 from coder_eval.optimize_execution import (
@@ -1844,7 +1844,9 @@ from coder_eval.optimize_store import (
     load_measurements,
     record_noise_floor,
     record_round_scores,
+    suite_changed,
 )
+from coder_eval.suite_fingerprint import suite_fingerprint
 
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
 measurements = load_measurements(sidecar)
@@ -1895,8 +1897,27 @@ fingerprint = None  # ACTIVATION TRACK.
 #     [sys.executable, str(grader), "--fingerprint"], capture_output=True, text=True, check=True
 # ).stdout.strip()
 
+# The SUITE the scores were produced by, on BOTH tracks — no subprocess, and no track branch: the
+# criteria, the prompt, the rows and the run limits are an instrument wherever they are, and on the
+# activation track they are the WHOLE instrument (there is no script grader to fingerprint).
+#
+# REPLACE the path. TWO arguments, and they are different things: the UNEXPANDED suite task — what
+# `load_task` returns, BEFORE `expand_dataset` — and the EXPANDED row-tasks the round actually
+# scored. The rows are the half that matters most here: `activation.yaml` keeps every prompt and
+# every LABEL in its rows file, so a digest over row ids alone is blind to a rewritten prompt and a
+# flipped label.
+#
+# The scored ids are the UNION over arms, never `arms[0]`: a hole is absent rather than zero, so an
+# arm that crashed a row has a shorter vector and reading one arm makes the digest a function of
+# which arm happens to be first.
+suite_file = Path("<path to the suite yaml>")
+suite_task, _ = load_task(suite_file)
+scored_ids = sorted(set().union(*(arm.row_scores for arm in arms)))
+row_tasks = [r for r in expand_dataset(suite_task, suite_file.parent) if r.row_id in scored_ids]
+suite = suite_fingerprint(suite_task, row_tasks)
+
 this_round = RoundScores(
-    round=1, arm_row_scores=arms, grader_fingerprint=fingerprint,
+    round=1, arm_row_scores=arms, grader_fingerprint=fingerprint, suite_fingerprint=suite,
     pareto_front=pareto_front(arms), instance_best_front=instance_best_front(arms),
     # The arm the next round's SEARCH LOOP is accepted or reverted against. On a multi-arm round
     # like this one that is the arm with the highest MEAN of row_scores — not the top f1.yes arm,
@@ -1907,18 +1928,51 @@ this_round = RoundScores(
 )
 record_round_scores(sidecar, this_round)
 
-# Say it OUT LOUD when the instrument moved. `None` is UNKNOWN, never "unchanged".
+# Say it OUT LOUD when either instrument moved. `None` is UNKNOWN, never "unchanged".
+#
+# The GRADER half is EXECUTION-TRACK ONLY, and the branch below is not decoration: `fingerprint` is
+# `None` on every activation round by design, so `grader_changed` returns `None` there every time and
+# the un-branched version printed "comparability unknown" forever — on a track where comparability is
+# not unknown, there is simply no script grader to move.
 moved = grader_changed(previous, this_round)
+TRACK = "activation"  # or "execution"
 print(
-    "the grader CHANGED since the last round — these scores are not comparable to it"
+    "this track has no script grader; instrument comparability is carried by the suite fingerprint"
+    if TRACK == "activation"
+    else "the grader CHANGED since the last round — these scores are not comparable to it"
     if moved
     else "same grader as the last round" if moved is False
-    else "no fingerprint on one of the two rounds — comparability unknown"
+    else "no grader fingerprint on one of the two rounds — comparability unknown"
+)
+
+# The SUITE half is track-independent, so this one has no branch.
+suite_moved = suite_changed(previous, this_round)
+print(
+    "the SUITE CHANGED since the last round (a criterion parameter, a weight, the prompt, the row "
+    "set or a run cap) — these scores are not comparable to it"
+    if suite_moved
+    else "same suite as the last round" if suite_moved is False
+    else "no suite fingerprint on one of the two rounds — comparability unknown"
 )
 
 # On promotion only:
 append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round=1, reason="...")])
 ```
+
+**Two fingerprints, and they answer different questions.** The grader one covers the outcome
+track's *script and its answer key*; the suite one covers everything around it — every criterion's
+own parameters, the prompt, the row set and the four run caps. A weight change re-blends
+`weighted_score`, which is exactly what the execution gate's paired *t* compares, and the grader
+fingerprint cannot see it by a byte. And the suite fingerprint is the activation track's **only**
+instrument provenance: that track has no script grader, so its criteria plus its prompt plus its row
+set ARE the instrument. Record both every round; each is reported and never enforced.
+
+The suite digest excludes the **task-level** agent and sandbox blocks, so a colleague's checkout at a
+different absolute path produces the same number. One boundary follows from hashing criteria whole:
+an `agent_judge` criterion carries its own agent config, so a judge's model and plugin paths are
+hashed — correctly, since the judge's model is part of what that criterion measures, but it makes
+such a suite's digest machine-local. It is the digest and never the pre-image — this file is
+committed, so nothing here should ever grow into a field-level diff of values.
 
 **The grader fingerprint is what makes two rounds' scores comparable at all.** Measured: a
 mid-round grader fix moved a suite mean **0.8679 → 0.9158 on identical artifacts**, and nothing in

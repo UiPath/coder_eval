@@ -645,6 +645,34 @@ class RoundScores(BaseModel):
             "the measurement, not a veto on a promotion."
         ),
     )
+    suite_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "A hash of the SUITE this round scored — every criterion's concrete parameters, the "
+            "prompt template, the expanded ROWS themselves and the run limits — from "
+            "`coder_eval.suite_fingerprint.suite_fingerprint`. The same three-valued discipline as "
+            "`grader_fingerprint` beside it: `None` means NOT RECORDED, which `suite_changed` "
+            "answers None rather than False for, so a round written before this field cannot "
+            "masquerade as a suite that provably did not move. Reported, never enforced. "
+            "TRACK-INDEPENDENT, unlike its sibling — and on the activation track it is the ONLY "
+            "instrument provenance there is, because that track has no script grader at all. The "
+            "ROWS are why: `activation.yaml` is `initial_prompt: ${row.prompt}` with "
+            '`expected_skill: "${row.expected_skill}"`, so every prompt AND every label lives in '
+            "the rows file — a digest over row IDS alone would be blind to a rewritten prompt and a "
+            "flipped label, which is the commonest suite edit there is. The grader half hashes "
+            "`expectations/*.json` because the answer key is part of the instrument; this is that "
+            "same rule on the other track. It also sees a criterion `weight` change, which "
+            "re-blends `weighted_score` — the number the execution gate's paired t compares — and "
+            "which the grader fingerprint cannot see by a byte. What it deliberately does NOT "
+            "cover: the TASK-LEVEL agent and sandbox blocks, and therefore the paths in them, so "
+            "two checkouts at different absolute paths agree. Note the boundary that follows from "
+            "hashing criteria whole: an `agent_judge` criterion embeds its own agent config, so a "
+            "judge's model and plugin paths ARE hashed — right on the merits, since the judge's "
+            "model is part of what that criterion measures, but it means such a suite's digest is "
+            "machine-local. It is the DIGEST only and never the pre-image: this file is committed, "
+            "so a field-level diff of VALUES would make it a leak surface."
+        ),
+    )
     lineage_head: str | None = Field(
         default=None,
         description=(

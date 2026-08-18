@@ -189,22 +189,52 @@ def record_round_scores(path: Path, scores: RoundScores) -> OptimizeMeasurements
     return updated
 
 
-def grader_changed(previous: RoundScores | None, current: RoundScores) -> bool | None:
-    """Did the measuring instrument move between these two rounds? ``None`` means UNKNOWN.
+def _fingerprint_changed(previous: str | None, current: str | None) -> bool | None:
+    """The three-valued comparison both fingerprint predicates share. ``None`` means UNKNOWN.
 
-    Three-valued on purpose. ``True``/``False`` require BOTH fingerprints to be present; if either
-    is missing the answer is ``None``, never ``False`` — an older ``measurements.json`` predating
-    the field, or a suite with no script grader, must not be able to masquerade as an instrument
-    that provably did not change. The whole value of the field is that it distinguishes "the same
-    grader produced both numbers" from "nobody recorded which grader produced them", and folding
-    the second into the first would delete exactly that.
+    ``True``/``False`` require BOTH fingerprints to be present; if either is missing the answer is
+    ``None``, never ``False`` — an older ``measurements.json`` predating the field, or a suite with no
+    script grader, must not be able to masquerade as an instrument that provably did not change. The
+    whole value of these fields is that they distinguish "the same instrument produced both numbers"
+    from "nobody recorded which instrument produced them", and folding the second into the first
+    would delete exactly that.
+
+    One body rather than two identical five-line functions: the two predicates differ only in which
+    field they read, and a wording or polarity fix applied to one copy is how the pair drifts.
+    """
+    if previous is None or current is None:
+        return None
+    return previous != current
+
+
+def grader_changed(previous: RoundScores | None, current: RoundScores) -> bool | None:
+    """Did the outcome GRADER move between these two rounds? ``None`` means UNKNOWN.
 
     Reported, never enforced. A changed instrument means the two rounds' scores are not comparable
     — evidence for a reader deciding whether last round's baseline still stands, not a veto.
+
+    **Execution-track only in practice**: the activation track has no script grader, so this answers
+    ``None`` on every activation round — which is correct but is NOT the sentence to print there,
+    because comparability is not unknown, there is simply no script to move. That track's instrument
+    provenance is :func:`suite_changed`.
     """
-    if previous is None or previous.grader_fingerprint is None or current.grader_fingerprint is None:
+    if previous is None:
         return None
-    return previous.grader_fingerprint != current.grader_fingerprint
+    return _fingerprint_changed(previous.grader_fingerprint, current.grader_fingerprint)
+
+
+def suite_changed(previous: RoundScores | None, current: RoundScores) -> bool | None:
+    """Did the SUITE around the grader move between these two rounds? ``None`` means UNKNOWN.
+
+    The exact twin of :func:`grader_changed`, one field over, and three-valued for the same reason.
+    Track-INDEPENDENT, unlike its sibling: the criteria, the prompt, the row set and the run caps are
+    an instrument on both tracks, and on the activation track they are the WHOLE instrument. See
+    :func:`coder_eval.suite_fingerprint.suite_fingerprint` for what the digest covers and what it
+    deliberately does not.
+    """
+    if previous is None:
+        return None
+    return _fingerprint_changed(previous.suite_fingerprint, current.suite_fingerprint)
 
 
 # Placeholder for "the caller resolved no single model" — a mixed-model or unlabelled suite. It can
