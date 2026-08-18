@@ -9,14 +9,19 @@ is a hypothesis to gate and nothing here promotes. It lives in code rather than 
 prose because each of its guards is silent when omitted, and the previous home for them was a
 markdown block an agent copies and adapts.
 
-:func:`candidate_leaks` is the anti-memorization preflight: static, text-only, needing no runs, so
-the skill reads it at proposal time before Stage A is paid for.
+:func:`candidate_leaks` is the anti-memorization preflight: static, needing no runs, so the skill
+reads it at proposal time before Stage A is paid for. It stays PURE — two strings and a row list —
+while :func:`skill_text` beside it does the IO, reading a whole skill DIRECTORY. That split is the
+point: a candidate that bundles train-row content into ``scripts/`` or a reference file is invisible
+to a one-file scan and comes back clean, so the scan has to read a tree; and widening it inside the
+checker would have made a pure function reach the filesystem.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from pathlib import Path
 from typing import NamedTuple
 
 from coder_eval.leak_detection import graded_strings
@@ -69,6 +74,43 @@ def regression_check(
     return findings
 
 
+def skill_text(skill_dir: Path) -> str:
+    """Every text file under a skill directory, concatenated in sorted relative-path order.
+
+    What :func:`candidate_leaks` should be handed. Scanning ``SKILL.md`` alone leaves a candidate
+    that bundles train-row content into ``scripts/`` or a reference file completely invisible, and
+    the result comes back **clean** — byte-identical to a genuinely clean candidate.
+
+    Each file's content is preceded by its relative POSIX path, for two reasons: a span's location
+    stays recoverable from the returned text, and two files cannot be concatenated into a phantom
+    match across the boundary between them. ``as_posix()`` so a Windows checkout produces the same
+    string.
+
+    **Skips what it cannot read and what it must not reach, and nothing else.** A file that does not
+    decode as UTF-8 — an image in a reference directory — is skipped, because a binary cannot carry a
+    verbatim graded string in the form :func:`~coder_eval.leak_detection.graded_strings` produces, and
+    so is one that raises ``OSError`` (a permission, or a file that vanished mid-walk): a preflight
+    must not abort a round over an unreadable stray file. Symlinks are not followed in either form —
+    a linked FILE is skipped by the explicit check below, and a linked DIRECTORY is never descended
+    into because ``rglob`` does not recurse through one. Either would otherwise scan arbitrary files
+    on the machine.
+
+    The cost is O(text) once per arm, before Stage A is paid for, so a skill with a large reference
+    corpus is slower to preflight and costs no runs.
+    """
+    parts: list[str] = []
+    for path in sorted(skill_dir.rglob("*")):
+        # `is_symlink` FIRST: `is_file` follows the link, so a symlink to a real file passes it.
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        parts.append(f"{path.relative_to(skill_dir).as_posix()}\n{content}")
+    return "\n".join(parts)
+
+
 def candidate_leaks(
     candidate_text: str,
     baseline_text: str,
@@ -92,7 +134,7 @@ def candidate_leaks(
     that against the incumbent would re-report every span the head added, every round. Pass the
     arm the candidate was actually edited from.
 
-    **Four boundaries, stated so an empty result is not mistaken for a proof:**
+    **Five boundaries, stated so an empty result is not mistaken for a proof:**
 
     - It catches the VERBATIM form, as CE036 states of its own. A candidate that describes a train
       row's content in other words is a semantic leak and needs a reader. (Matching is
@@ -113,6 +155,13 @@ def candidate_leaks(
       what is otherwise a pure function. That matters more than it looks: ``proposal-prompt.md``
       tells the proposer to *study* the reference, and calls copying it "especially tempting"
       because the content is known-correct. This checker cannot see that copy. A reader has to.
+    - **The caller decides what text is scanned, and this function cannot tell how much of the
+      candidate it saw.** Handed one file's contents it checks one file, and a candidate that bundles
+      train-row content into ``scripts/`` or a reference file comes back CLEAN — byte-identical to a
+      genuinely clean one, which is the worst shape a preflight can have. :func:`skill_text` above is
+      what a caller should pass, and it is a separate function precisely so this one stays pure:
+      widening the scan is an IO decision, and pushing it in here would make the checker read the
+      filesystem.
 
     ``rows`` are the EXPANDED row-tasks of the TRAIN split only — passing the whole suite would
     flag content drawn from rows the candidate is entitled to be fitted to. (The five-string

@@ -938,7 +938,7 @@ rather than after a stage:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_search import candidate_leaks
+from coder_eval.optimize_search import candidate_leaks, skill_text
 from coder_eval.orchestration.task_loader import expand_dataset, load_task
 
 suite = Path("<the suite yaml>")
@@ -948,8 +948,13 @@ train = expand_dataset(task, suite.parent, split="train")
 root = Path(".optimize-skill/<skill>")
 
 
+# The WHOLE skill directory, not just SKILL.md. A candidate is free to edit `scripts/` and reference
+# files (see reference/proposal-prompt.md), and a graded string bundled into one of those is
+# invisible to a one-file read — which returns **clean**, byte-identical to a genuinely clean
+# candidate. `skill_text` concatenates every text file under the directory, each preceded by its
+# relative path, so a finding stays locatable and two files cannot merge into a phantom match.
 def body(arm: Path) -> str:
-    return (arm / "skills" / "<skill>" / "SKILL.md").read_text(encoding="utf-8")
+    return skill_text(arm / "skills" / "<skill>")
 
 
 # The BASELINE is whatever these candidates were edited FROM. On a multi-arm round that is this

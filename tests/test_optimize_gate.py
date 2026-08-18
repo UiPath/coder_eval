@@ -117,6 +117,7 @@ from coder_eval.optimize_search import (
     lineage_head_scores,
     regression_check,
     search_compare,
+    skill_text,
 )
 from coder_eval.optimize_store import UNRECORDED_SPLIT, grader_changed, record_noise_floor
 from coder_eval.reports_optimize import (
@@ -7025,6 +7026,102 @@ def _leak_row(row_id: str, criteria: list) -> TaskDefinition:
 # The real shape: a criterion asserting a substantive string on a file the row expects.
 _GRADED = "minimum-task-score"
 _ROWS = [_leak_row("r1", [FileCheckCriterion(description="d", path="out.yml", includes=[_GRADED])])]
+
+
+class TestSkillText:
+    """The preflight reads a TREE, because a one-file read returns clean on a real leak.
+
+    A candidate may edit `scripts/` and reference files, so a graded string bundled into one of those
+    was invisible to `(arm / "SKILL.md").read_text()` — and the result came back **clean**,
+    byte-identical to a genuinely clean candidate, which is the worst shape a preflight can have.
+    """
+
+    @staticmethod
+    def _skill(root: Path, *, body: str = "# My skill\n", script: str | None = None) -> Path:
+        skill = root / "skills" / "my-skill"
+        (skill / "scripts").mkdir(parents=True)
+        (skill / "SKILL.md").write_text(body, encoding="utf-8")
+        if script is not None:
+            (skill / "scripts" / "helper.py").write_text(script, encoding="utf-8")
+        return skill
+
+    def test_a_graded_string_bundled_in_scripts_is_flagged(self, tmp_path: Path) -> None:
+        """And the same tree read one-file-only is NOT — both halves, so the test states the defect."""
+        candidate = self._skill(tmp_path / "cand", script=f"THRESHOLD = {_GRADED!r}\n")
+        baseline = self._skill(tmp_path / "base")
+
+        assert candidate_leaks(skill_text(candidate), skill_text(baseline), _ROWS)
+        one_file = (candidate / "SKILL.md").read_text(encoding="utf-8")
+        assert candidate_leaks(one_file, skill_text(baseline), _ROWS) == [], (
+            "the one-file read must come back clean here — that IS the defect this replaces"
+        )
+
+    def test_a_string_already_in_the_baselines_reference_file_is_not_flagged(self, tmp_path: Path) -> None:
+        # Widening the scan cannot re-introduce the wolf-crying the DIFF was built to prevent: a span
+        # the baseline already carries stays invisible however many files are read.
+        script = f"THRESHOLD = {_GRADED!r}\n"
+        candidate = self._skill(tmp_path / "cand", script=script)
+        baseline = self._skill(tmp_path / "base", script=script)
+        assert candidate_leaks(skill_text(candidate), skill_text(baseline), _ROWS) == []
+
+    def test_a_binary_file_is_skipped_rather_than_raising(self, tmp_path: Path) -> None:
+        skill = self._skill(tmp_path / "cand")
+        (skill / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00\x01")
+        text = skill_text(skill)
+        assert "My skill" in text and "PNG" not in text
+
+    def test_a_symlink_out_of_the_skill_directory_is_not_followed(self, tmp_path: Path) -> None:
+        """Both forms: a linked FILE and a linked DIRECTORY. Either would scan arbitrary files.
+
+        The two are stopped by different mechanisms — the explicit `is_symlink` check and `rglob` not
+        recursing through a symlinked directory — so a test covering one proves nothing about the
+        other.
+        """
+        outside = tmp_path / "outside.txt"
+        outside.write_text("a secret from outside the skill", encoding="utf-8")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "also-secret.txt").write_text("another secret entirely", encoding="utf-8")
+
+        skill = self._skill(tmp_path / "cand")
+        (skill / "linked.txt").symlink_to(outside)
+        (skill / "linkdir").symlink_to(elsewhere, target_is_directory=True)
+
+        text = skill_text(skill)
+        assert "outside the skill" not in text and "another secret" not in text
+
+    def test_an_unreadable_file_does_not_abort_the_scan(self, tmp_path: Path) -> None:
+        # A preflight must not fail a round over one stray unreadable file.
+        import os
+
+        skill = self._skill(tmp_path / "cand")
+        locked = skill / "locked.md"
+        locked.write_text("unreachable", encoding="utf-8")
+        os.chmod(locked, 0o000)
+        try:
+            assert "My skill" in skill_text(skill)
+        finally:
+            os.chmod(locked, 0o644)
+
+    def test_each_file_is_preceded_by_its_relative_path(self, tmp_path: Path) -> None:
+        # So a finding stays locatable, and so two files cannot concatenate into a phantom match
+        # across the boundary between them.
+        skill = self._skill(tmp_path / "cand", script="print(1)\n")
+        text = skill_text(skill)
+        assert "SKILL.md" in text and "scripts/helper.py" in text
+
+    def test_the_order_is_deterministic(self, tmp_path: Path) -> None:
+        skill = self._skill(tmp_path / "cand", script="print(1)\n")
+        (skill / "reference.md").write_text("some reference prose\n", encoding="utf-8")
+        assert skill_text(skill) == skill_text(skill)
+        # Sorted by relative path, so a filesystem's directory order cannot move it.
+        text = skill_text(skill)
+        assert text.index("SKILL.md") < text.index("reference.md") < text.index("scripts/helper.py")
+
+    def test_an_empty_or_missing_directory_is_an_empty_string(self, tmp_path: Path) -> None:
+        (tmp_path / "empty").mkdir()
+        assert skill_text(tmp_path / "empty") == ""
+        assert skill_text(tmp_path / "nope") == ""
 
 
 class TestCandidateLeaks:
