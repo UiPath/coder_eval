@@ -1,3 +1,3 @@
 """coder_eval - A framework for evaluating AI coding agents."""
 
-__version__ = "0.9.6"
+__version__ = "0.10.0"
