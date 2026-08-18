@@ -225,8 +225,9 @@ class JudgeCriterionResult(CriterionResult):
     transcript_path: str | None = Field(
         default=None,
         description=(
-            "Filename of the sibling JSON file holding this result's full transcript "
-            "(e.g. ``judge-0.yaml``), relative to the directory containing ``task.json``. "
+            "Filename of the sibling YAML file holding this result's full transcript "
+            "(``judge-N.yaml`` for canonical results or ``post-failure-judge-N.yaml`` "
+            "for diagnostic results), relative to the directory containing ``task.json``. "
             "Set by ``spill_judge_transcripts`` after the run; reloaded by "
             "``load_judge_transcripts`` for re-rendering. None when no transcript was captured."
         ),
@@ -976,7 +977,11 @@ def judge_cost_usd(result: EvaluationResult) -> float | None:
     ``None`` when no criterion reported cost.
     """
     criterion_results = result.success_criteria_results + result.post_failure_criteria_results
-    usages = [u for cr in criterion_results if (u := getattr(cr, "token_usage", None)) is not None]
+    usages = [
+        cr.token_usage
+        for cr in criterion_results
+        if isinstance(cr, JudgeCriterionResult) and cr.token_usage is not None
+    ]
     return sum_costs(*(u.total_cost_usd for u in usages))
 
 

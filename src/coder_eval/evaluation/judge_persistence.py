@@ -57,6 +57,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+TASK_JSON_TRANSCRIPT_EXCLUDE = {
+    "success_criteria_results": {"__all__": {"transcript"}},
+    "post_failure_criteria_results": {"__all__": {"transcript"}},
+}
+
+
 # Windows reserved device basenames. The Win32 API maps these to character
 # devices regardless of the directory they sit in — opening ``CON`` or ``NUL.yaml``
 # inside ``task_dir`` resolves to the console or the null device, not a file.
@@ -207,7 +213,7 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         # regular char) but resolves to a nested file on Windows. Rejecting under
         # either interpretation enforces the basename-only policy regardless of
         # which platform the task.json travels to next.
-        if PurePosixPath(path).name != path or PureWindowsPath(path).name != path:
+        if path in {".", ".."} or PurePosixPath(path).name != path or PureWindowsPath(path).name != path:
             logger.warning("Refusing to load judge transcript with non-basename path: %s", path)
             continue
         # Reject Windows reserved device basenames. On Windows, ``CON.yaml`` /

@@ -118,12 +118,39 @@ export interface CriterionResult {
     score: number | null;
     details: string | null;
     error: string | null;
+    evaluationStatus: "evaluated" | "not_evaluated";
     // Mirrors the Python CriterionResult fields. `gating: false` (weight: 0) means
     // the criterion is informational — measured, but excluded from the score and
     // the pass/fail gate, so it must not render as PASS/FAIL. Both default the way
     // pre-existing task.json files behave: gating, threshold 0.9.
     passThreshold: number;
     gating: boolean;
+}
+
+interface RawCriterionResult {
+    criterion_type?: string;
+    description?: string;
+    score?: number;
+    details?: string;
+    error?: string | null;
+    evaluation_status?: "evaluated" | "not_evaluated";
+    pass_threshold?: number;
+    gating?: boolean;
+}
+
+export function parseCriterionResults(
+    criteria: RawCriterionResult[] | undefined,
+): CriterionResult[] {
+    return (criteria ?? []).map((criterion) => ({
+        criterionType: criterion.criterion_type ?? null,
+        description: criterion.description ?? null,
+        score: criterion.score ?? null,
+        details: criterion.details ?? null,
+        error: criterion.error ?? null,
+        evaluationStatus: criterion.evaluation_status ?? "evaluated",
+        passThreshold: criterion.pass_threshold ?? 0.9,
+        gating: criterion.gating ?? true,
+    }));
 }
 
 export interface ElementExecution {
@@ -267,6 +294,7 @@ export interface TaskDetail extends TaskResultSummary {
     errorMessage: string | null;
     taskDescription: string | null;
     criteria: CriterionResult[];
+    postFailureCriteria: CriterionResult[];
     artifacts: ArtifactRef[];
     flowDebug: FlowDebugResult | null;
     toolCalls: ToolCall[];
@@ -2003,30 +2031,16 @@ export async function readTaskDetail(
                 initial_prompt?: string;
             };
         };
-        success_criteria_results?: Array<{
-            criterion_type?: string;
-            description?: string;
-            score?: number;
-            details?: string;
-            error?: string | null;
-            pass_threshold?: number;
-            gating?: boolean;
-        }>;
+        success_criteria_results?: RawCriterionResult[];
+        post_failure_criteria_results?: RawCriterionResult[];
         iterations?: TurnEntry[];
         environment_info?: RawRunJson["environment_info"];
     }>(path.join(contentDir, "task.json"));
 
-    const criteria: CriterionResult[] = (
-        task?.success_criteria_results ?? []
-    ).map((c) => ({
-        criterionType: c.criterion_type ?? null,
-        description: c.description ?? null,
-        score: c.score ?? null,
-        details: c.details ?? null,
-        error: c.error ?? null,
-        passThreshold: c.pass_threshold ?? 0.9,
-        gating: c.gating ?? true,
-    }));
+    const criteria = parseCriterionResults(task?.success_criteria_results);
+    const postFailureCriteria = parseCriterionResults(
+        task?.post_failure_criteria_results,
+    );
 
     const artifactRoot = path.join(contentDir, "artifacts");
     // relPath is stored relative to the run root so the /api/file route can
@@ -2093,6 +2107,7 @@ export async function readTaskDetail(
         errorMessage: task?.error_message ?? null,
         taskDescription,
         criteria,
+        postFailureCriteria,
         artifacts,
         flowDebug,
         toolCalls,

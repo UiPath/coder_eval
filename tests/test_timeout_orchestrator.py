@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coder_eval.errors import JudgeInfrastructureError
+from coder_eval.errors import AgentCrashError, CheckerMisuseError, JudgeInfrastructureError
 from coder_eval.errors.timeout import TaskTimeoutError, TurnTimeoutError
+from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import (
     AgentKind,
     ClaudeCodeAgentConfig,
@@ -16,12 +17,15 @@ from coder_eval.models import (
     CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
+    LLMJudgeCriterion,
+    RunCommandCriterion,
     SandboxConfig,
     TaskDefinition,
     TokenUsage,
     TurnRecord,
 )
 from coder_eval.orchestrator import Orchestrator
+from coder_eval.sandbox import Sandbox
 
 
 def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None = None):
@@ -335,44 +339,60 @@ async def test_turn_timeout_not_rewrapped_as_task_timeout(tmp_path) -> None:
         await orchestrator._evaluation_loop()
 
 
+@pytest.mark.parametrize(
+    "terminal_error",
+    [
+        pytest.param(
+            TurnTimeoutError(1200, task_id="timeout_test", iteration=1),
+            id="turn-timeout",
+        ),
+        pytest.param(AgentCrashError("agent subprocess crashed"), id="agent-crash"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_turn_timeout_records_post_failure_evidence_without_rescoring(tmp_path) -> None:
-    """A terminal turn timeout preserves artifact truth without changing the ERROR score."""
+async def test_terminal_agent_error_records_safe_artifact_evidence_without_rescoring(
+    tmp_path, terminal_error: Exception
+) -> None:
+    """Agent failures preserve artifact truth before the live sandbox is removed."""
     task = _make_task(turn_timeout=1200, task_timeout=1500)
     task.success_criteria = [
-        FileExistsCriterion(type="file_exists", path="artifact.txt", description="artifact exists"),
         CommandExecutedCriterion(
             type="command_executed",
             tool_name="Bash",
             description="agent ran validator",
+        ),
+        FileExistsCriterion(type="file_exists", path="artifact.txt", description="artifact exists"),
+        RunCommandCriterion(
+            type="run_command",
+            command="touch should-not-run",
+            description="sandbox command",
+        ),
+        LLMJudgeCriterion(
+            type="llm_judge",
+            prompt="Grade the artifact.",
+            description="paid judge",
         ),
     ]
     run_dir = tmp_path / "run" / "post_failure_evidence"
     run_dir.mkdir(parents=True)
     orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
     orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
-    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
     orchestrator._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
-    orchestrator._evaluation_loop = AsyncMock(  # type: ignore[method-assign]
-        side_effect=TurnTimeoutError(1200, task_id=task.task_id, iteration=1)
-    )
+    orchestrator._evaluation_loop = AsyncMock(side_effect=terminal_error)  # type: ignore[method-assign]
 
-    mock_sandbox = MagicMock()
-    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
-    mock_sandbox.sandbox_dir.mkdir()
-    orchestrator.sandbox = mock_sandbox
+    sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id=task.task_id)
+    sandbox_dir = sandbox.setup()
+    (sandbox_dir / "artifact.txt").write_text("finished", encoding="utf-8")
+    orchestrator.sandbox = sandbox
 
-    mock_checker = MagicMock()
-    mock_checker.check_all_async = AsyncMock(
-        return_value=[
-            CriterionResult(
-                criterion_type="file_exists",
-                description="artifact exists",
-                score=1.0,
-            )
-        ]
-    )
-    orchestrator.success_checker = mock_checker
+    checker = SuccessChecker(sandbox)
+    checker.check_all_async = AsyncMock(wraps=checker.check_all_async)  # type: ignore[method-assign]
+    orchestrator.success_checker = checker
+
+    async def cleanup() -> None:
+        sandbox.cleanup()
+
+    orchestrator._cleanup = cleanup  # type: ignore[method-assign]
 
     mock_agent = MagicMock()
     mock_agent.kill_sync = MagicMock()
@@ -383,30 +403,45 @@ async def test_turn_timeout_records_post_failure_evidence_without_rescoring(tmp_
         result = await orchestrator.run()
 
     assert result.final_status == "ERROR"
+    assert result.error_message == str(terminal_error)
     assert result.weighted_score == 0.0
     assert result.success_criteria_results == []
-    assert len(result.post_failure_criteria_results) == 2
-    artifact, agent_dependent = result.post_failure_criteria_results
+    assert len(result.post_failure_criteria_results) == 4
+    agent_dependent, artifact, command, judge = result.post_failure_criteria_results
     assert artifact.score == 1.0
     assert artifact.evaluation_status == "evaluated"
-    assert agent_dependent.score == 0.0
-    assert agent_dependent.evaluation_status == "not_evaluated"
-    assert "no turn record survived" in (agent_dependent.details or "")
+    for unavailable in (agent_dependent, command, judge):
+        assert unavailable.score == 0.0
+        assert unavailable.evaluation_status == "not_evaluated"
+        assert "not a deterministic, read-only artifact check" in (unavailable.details or "")
 
-    checked_criteria = mock_checker.check_all_async.await_args.args[0]
+    checked_criteria = checker.check_all_async.await_args.args[0]
     assert [criterion.type for criterion in checked_criteria] == ["file_exists"]
+    assert not sandbox_dir.exists(), "cleanup must run after diagnostic grading"
 
     persisted = EvaluationResult.model_validate_json((run_dir / "task.json").read_text())
     assert persisted.final_status == "ERROR"
     assert persisted.weighted_score == 0.0
     assert [r.evaluation_status for r in persisted.post_failure_criteria_results] == [
+        "not_evaluated",
         "evaluated",
+        "not_evaluated",
         "not_evaluated",
     ]
 
 
+@pytest.mark.parametrize(
+    "recovery_error",
+    [
+        pytest.param(JudgeInfrastructureError("judge unavailable"), id="judge-infrastructure"),
+        pytest.param(CheckerMisuseError("checker contract violated"), id="checker-misuse"),
+        pytest.param(None, id="result-count-mismatch"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_post_failure_judge_infrastructure_error_still_escalates(tmp_path) -> None:
+async def test_post_failure_checker_error_preserves_terminal_agent_error(
+    tmp_path, recovery_error: Exception | None
+) -> None:
     task = _make_task(turn_timeout=1200, task_timeout=1500)
     task.success_criteria = [
         FileExistsCriterion(type="file_exists", path="artifact.txt", description="artifact exists")
@@ -415,12 +450,18 @@ async def test_post_failure_judge_infrastructure_error_still_escalates(tmp_path)
     orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
     orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
     orchestrator._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
-    orchestrator._evaluation_loop = AsyncMock(  # type: ignore[method-assign]
-        side_effect=TurnTimeoutError(1200, task_id=task.task_id, iteration=1)
-    )
+    terminal_error = TurnTimeoutError(1200, task_id=task.task_id, iteration=1)
+    orchestrator._evaluation_loop = AsyncMock(side_effect=terminal_error)  # type: ignore[method-assign]
     orchestrator.sandbox = MagicMock()
     orchestrator.success_checker = MagicMock()
-    orchestrator.success_checker.check_all_async = AsyncMock(side_effect=JudgeInfrastructureError("judge unavailable"))
+    if recovery_error is None:
+        orchestrator.success_checker.check_all_async = AsyncMock(return_value=[])
+        expected_type = "ValueError"
+        expected_message = "Post-failure checker returned 0 results for 1 runnable criteria"
+    else:
+        orchestrator.success_checker.check_all_async = AsyncMock(side_effect=recovery_error)
+        expected_type = type(recovery_error).__name__
+        expected_message = str(recovery_error)
     orchestrator.agent = MagicMock()
     orchestrator.agent.get_sdk_options.return_value = None
 
@@ -428,8 +469,47 @@ async def test_post_failure_judge_infrastructure_error_still_escalates(tmp_path)
         result = await orchestrator.run()
 
     assert result.final_status == "ERROR"
-    assert result.error_message == "judge unavailable"
+    assert result.error_message == str(terminal_error)
     assert result.weighted_score == 0.0
+    assert len(result.post_failure_criteria_results) == 1
+    unavailable = result.post_failure_criteria_results[0]
+    assert unavailable.evaluation_status == "not_evaluated"
+    assert expected_type in (unavailable.details or "")
+    assert expected_message in (unavailable.details or "")
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_during_post_failure_grading_preserves_agent_error(tmp_path) -> None:
+    task = _make_task(turn_timeout=1200, task_timeout=0.1)
+    run_dir = tmp_path / "run" / "diagnostic_timeout"
+    run_dir.mkdir(parents=True)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
+    terminal_error = TurnTimeoutError(1200, task_id=task.task_id, iteration=1)
+    orchestrator._evaluation_loop = AsyncMock(side_effect=terminal_error)  # type: ignore[method-assign]
+    orchestrator.sandbox = MagicMock()
+    orchestrator.success_checker = MagicMock()
+
+    async def slow_check(*_args, **_kwargs):
+        await asyncio.sleep(10)
+
+    orchestrator.success_checker.check_all_async = slow_check
+    orchestrator.agent = MagicMock()
+    orchestrator.agent.kill_sync = MagicMock()
+    orchestrator.agent.get_sdk_options.return_value = None
+
+    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+        result = await orchestrator.run()
+
+    assert result.final_status == "ERROR"
+    assert result.error_message == str(terminal_error)
+    assert result.weighted_score == 0.0
+    assert len(result.post_failure_criteria_results) == 1
+    unavailable = result.post_failure_criteria_results[0]
+    assert unavailable.evaluation_status == "not_evaluated"
+    assert "task_timeout budget expired during post-failure grading" in (unavailable.details or "")
 
 
 def test_runtime_timeout_warning_is_emitted_once(tmp_path, caplog) -> None:

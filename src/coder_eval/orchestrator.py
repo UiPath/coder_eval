@@ -22,8 +22,6 @@ from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors import (
     AgentCrashError,
     BudgetExceededError,
-    CheckerMisuseError,
-    JudgeInfrastructureError,
     TaskTimeoutError,
     TurnTimeoutError,
 )
@@ -675,11 +673,6 @@ class Orchestrator:
                     elapsed_seconds=time.time() - start_time,
                 ) from None
             raise
-        except TaskTimeoutError:
-            self._record_post_failure_not_evaluated(
-                "the task_timeout budget was exhausted before post-failure grading could run"
-            )
-            raise
         except (AgentCrashError, TurnTimeoutError, BudgetExceededError) as terminal_error:
             if (
                 isinstance(terminal_error, BudgetExceededError)
@@ -694,24 +687,29 @@ class Orchestrator:
                     self._record_post_failure_not_evaluated(
                         "the task_timeout budget expired during post-failure grading"
                     )
-                    raise TaskTimeoutError(
-                        task_timeout or 0,
-                        task_id=self.task.task_id,
-                        elapsed_seconds=time.time() - start_time,
-                    ) from None
-                raise
-            except (JudgeInfrastructureError, CheckerMisuseError):
-                raise
+                    logger.warning(
+                        "[%s] Task timeout stopped post-failure grading; preserving %s",
+                        self.task.task_id,
+                        type(terminal_error).__name__,
+                    )
+                else:
+                    raise
             except Exception as recovery_error:
-                self._record_post_failure_not_evaluated(
-                    f"post-failure grading could not complete ({type(recovery_error).__name__})"
-                )
+                self._record_post_failure_not_evaluated(self._post_failure_exception_reason(recovery_error))
                 logger.warning(
                     "[%s] Post-failure criteria evaluation failed; preserving the original terminal error",
                     self.task.task_id,
                     exc_info=True,
                 )
             raise
+
+    @staticmethod
+    def _post_failure_exception_reason(error: Exception) -> str:
+        message = " ".join(str(error).split())
+        if len(message) > 200:
+            message = message[:199] + "…"
+        suffix = f": {message}" if message else ""
+        return f"post-failure grading could not complete ({type(error).__name__}{suffix})"
 
     @staticmethod
     def _not_evaluated_result(criterion: SuccessCriterion, reason: str) -> CriterionResult:
@@ -736,9 +734,9 @@ class Orchestrator:
     async def _evaluate_post_failure_criteria(self) -> None:
         """Evaluate diagnostic criteria before the live sandbox is torn down.
 
-        Results stay outside the canonical scored list. Agent-dependent checks
-        require at least one preserved turn; artifact-only checks can still run
-        when the agent failed before producing trajectory evidence.
+        Results stay outside the canonical scored list. Only criteria that
+        declare themselves deterministic and read-only run on this path. This
+        excludes judges and checks that execute sandbox commands.
         """
         if self.result is None:
             return
@@ -749,7 +747,7 @@ class Orchestrator:
         runnable: list[SuccessCriterion] = []
         unavailable_positions: set[int] = set()
         for position, criterion in enumerate(self.task.success_criteria):
-            if criterion.requires_agent and not self.result.iterations:
+            if not criterion.supports_post_failure_evaluation:
                 unavailable_positions.add(position)
             else:
                 runnable.append(criterion)
@@ -780,7 +778,7 @@ class Orchestrator:
                 recovered.append(
                     self._not_evaluated_result(
                         criterion,
-                        "no turn record survived for this agent-dependent criterion",
+                        "the criterion is not a deterministic, read-only artifact check",
                     )
                 )
             else:
@@ -936,7 +934,7 @@ class Orchestrator:
         # we dump task.json, so transcript_path is set on each judge result.
         # The inline `transcript` field stays in memory — HTML rendering below
         # uses it directly. We strip it from the JSON dump via `exclude=...`.
-        from .evaluation.judge_persistence import spill_judge_transcripts
+        from .evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE, spill_judge_transcripts
 
         spill_judge_transcripts(self.result, self.report_path.parent)
 
@@ -954,10 +952,7 @@ class Orchestrator:
                 # next to task.json, referenced by transcript_path. Excluding
                 # `transcript` here avoids ~20-100 KB of bloat per judge result
                 # in the row record without losing any data.
-                exclude={
-                    "success_criteria_results": {"__all__": {"transcript"}},
-                    "post_failure_criteria_results": {"__all__": {"transcript"}},
-                },
+                exclude=TASK_JSON_TRANSCRIPT_EXCLUDE,
             ),
             encoding="utf-8",
         )
