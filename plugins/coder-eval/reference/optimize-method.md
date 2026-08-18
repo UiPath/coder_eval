@@ -165,6 +165,15 @@ near the floor: exactly right, and precisely the separation the emptied-body des
 Record the control's numbers once and reuse them. It is a property of the suite and the skill, not
 of the round, so re-running it every round is pure spend.
 
+**One reading to keep straight once candidates may bundle SCRIPTS.** A candidate whose hypothesis is
+"run `scripts/x.py` instead of following six prose steps" has a SHORT body, which superficially
+resembles the control. It is not one: the control has no instructions at all, so nothing tells the
+agent the script exists, while the candidate's short body is what points at it. The comparison the
+control licenses is therefore unchanged — it still asks whether *instructions* do measurable work, and
+a bundled script is an instruction with a different delivery mechanism. What does change is that
+"short body" stops being a proxy for "no instruction", so read the directory rather than the line
+count when deciding which arm is which.
+
 ### Stage A — triage (cheap)
 
 All candidates plus the incumbent — that is `round<N>-triage.yaml` — in **one** invocation,

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     #
     # TWO modules now, not one: the decision layer was split by track, and these three are
     # produced at its top rank — the fronts and the search loop.
+    from coder_eval.optimize_activation import SeedStability
     from coder_eval.optimize_fronts import CostQualityPoint, RuleCeiling
     from coder_eval.optimize_search import SearchComparison
 
@@ -367,6 +368,43 @@ def render_confirm_markdown(verdict: ConfirmVerdict) -> str:
         + "`render_markdown` (activation) or `render_execution_markdown` (execution) beside this one.",
     ]
     return "\n".join(lines)
+
+
+def render_seed_stability(stability: SeedStability) -> str:
+    """Whether the gate's decision survived a change of bootstrap seed.
+
+    **Never renders a single verdict**, however the seeds voted: the block says how many agreed and
+    leaves the reader to draw the conclusion, because collapsing three disagreeing seeds into one
+    answer is precisely what the reading exists to prevent. A split decision is reported as a coin
+    flip in those words — "2/3" on its own reads like a result to anyone skimming.
+
+    It also states the cost, because the obvious assumption is wrong: three seeds are three bootstraps
+    over rows already loaded, so this is CPU only and buys no agent runs.
+    """
+    total = len(stability.seeds)
+    agreed = stability.promote_agreement
+    if stability.unanimous:
+        verdict = (
+            f"STABLE — promoted at {agreed}/{total} seeds" if agreed else f"STABLE — promoted at none of {total} seeds"
+        )
+    else:
+        verdict = (
+            f"UNSTABLE — promoted at {agreed}/{total} seeds. This is a coin flip, not a result: the "
+            "decision is being made by the bootstrap draw rather than by the data. Do not report the "
+            "majority's verdict as the verdict — raise n_resamples, or add rows, and gate again."
+        )
+    return "\n".join(
+        [
+            "### Seed stability",
+            "",
+            f"**{verdict}**",
+            "",
+            f"- Seeds: {', '.join(str(seed) for seed in stability.seeds)}",
+            f"- p per seed: {', '.join(_fmt(p, '.4f') for p in stability.p_values)}",
+            f"- p spread (max - min over the measured ones): {_fmt(stability.p_spread, '.4f')}",
+            "- Cost: three bootstraps over rows already loaded — CPU only, and **zero** extra agent runs.",
+        ]
+    )
 
 
 def render_search_comparison(comparison: SearchComparison) -> str:

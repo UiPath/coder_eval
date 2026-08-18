@@ -53,6 +53,7 @@ from coder_eval.models import (
     copy_with,
 )
 from coder_eval.optimize_activation import (
+    SeedStability,
     _activation_preflight,
     _discreteness_floor,
     _holm_threshold,
@@ -61,6 +62,7 @@ from coder_eval.optimize_activation import (
     activation_gate,
     confirm_gate,
     derive_sibling_indices,
+    gate_seed_stability,
     holm_promote,
     measure_noise_floor,
     min_discordant_rows,
@@ -141,6 +143,7 @@ from coder_eval.reports_optimize import (
     render_row_matrix,
     render_row_replicates,
     render_search_comparison,
+    render_seed_stability,
 )
 from coder_eval.reports_stats import (
     BOOTSTRAP_RESAMPLES,
@@ -996,9 +999,13 @@ def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
     assert runtime.get("coder_eval.reports_stats", set()) == {"bootstrap_p_floor"}
 
     deferred = _coder_eval_imports("reports_optimize", inside_type_checking=True)
-    # TWO modules since the split, and the pair is asserted whole rather than per-module: what
-    # matters is that these are the ONLY names it defers, wherever they now live.
+    # THREE modules now, and the set is asserted whole rather than per-module: what matters is that
+    # these are the ONLY names it defers, wherever they now live. Every one is a NamedTuple —
+    # computed and rendered, never persisted — which is exactly the category that stays with its
+    # producer and is deferred here. A MODEL would be imported at runtime from `coder_eval.models`
+    # instead, so a new name appearing in this dict is a signal to check which category it is.
     assert deferred == {
+        "coder_eval.optimize_activation": {"SeedStability"},
         "coder_eval.optimize_fronts": {"CostQualityPoint", "RuleCeiling"},
         "coder_eval.optimize_search": {"SearchComparison"},
     }, deferred
@@ -7058,6 +7065,17 @@ class TestRenderingIsBehaviourPreserving:
         decided = holm_promote_execution(verdicts)[0]
         _assert_matches_render_pin(render_execution_markdown(decided), "execution_gate_family8")
 
+    def test_the_seed_stability_block_is_unchanged(self, tmp_path: Path) -> None:
+        """A NEW fixture, so it owes no ledger row, and pinned on the UNSTABLE rung.
+
+        That is the rung whose wording is load-bearing: a split decision reported as "2/3" reads like
+        a result to anyone skimming, and the block exists to stop that. Built from a constructed
+        `SeedStability` rather than a run, because a fixture that happens to straddle the Holm
+        threshold at three particular seeds is exactly what drifts.
+        """
+        split = SeedStability(seeds=(0, 1, 2), promote_agreement=2, p_values=(0.02, 0.03, 0.06), p_spread=0.04)
+        _assert_matches_render_pin(render_seed_stability(split), "seed_stability_unstable")
+
     def test_the_confirm_block_is_unchanged(self, tmp_path: Path) -> None:
         """Stage C's block, pinned whole. A NEW fixture, so it owes no ledger row.
 
@@ -8217,6 +8235,111 @@ class TestConfirmGateActivation:
         # ONE verdict's two fields, not one field from each of two independently gated runs.
         confirm = self._confirm(tmp_path)
         assert confirm.test_mde == confirm.test_verdict.mde
+
+
+class TestSeedStability:
+    """Does the gate's decision survive a change of bootstrap seed? A READING, never a verdict."""
+
+    @staticmethod
+    def _kwargs(run_dirs) -> dict:
+        return {
+            "incumbent_run_dirs": run_dirs,
+            "candidate_run_dirs": run_dirs,
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "candidate",
+            "suite_id": SUITE,
+            "criterion_index": 0,
+            "n_resamples": _FAST_RESAMPLES,
+        }
+
+    def test_agreeing_seeds_read_unanimous(self, tmp_path: Path) -> None:
+        # A wide, unambiguous win: no seed can move it.
+        incumbent = {f"r{i}": [("yes", "no")] for i in range(8)}
+        candidate = {f"r{i}": [("yes", "yes")] for i in range(8)}
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        stability = gate_seed_stability(**self._kwargs(run_dirs))
+
+        assert stability.seeds == (0, 1, 2)
+        assert stability.promote_agreement == 3 and stability.unanimous is True
+        assert "STABLE" in render_seed_stability(stability)
+        assert "coin flip" not in render_seed_stability(stability)
+
+    def test_seeds_that_all_decline_are_also_unanimous(self, tmp_path: Path) -> None:
+        # Unanimity is about AGREEMENT, not about promotion — 0/3 is as stable an answer as 3/3. The
+        # candidate LOSES here, which no seed can turn into a promotion.
+        incumbent = {f"r{i}": [("yes", "yes")] for i in range(8)}
+        candidate = {f"r{i}": [("yes", "no" if i < 4 else "yes")] for i in range(8)}
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        stability = gate_seed_stability(**self._kwargs(run_dirs))
+        assert stability.promote_agreement == 0 and stability.unanimous is True
+        assert "promoted at none of 3 seeds" in render_seed_stability(stability)
+
+    def test_a_split_decision_renders_as_a_coin_flip_and_returns_no_single_verdict(self) -> None:
+        """The whole reason this exists, asserted on the model rather than through a flaky fixture.
+
+        Constructing the disagreement directly is deliberate: a fixture that happens to straddle the
+        Holm threshold at these three seeds is exactly the kind of thing that drifts, and the
+        behaviour under test is what the READING says when seeds disagree — not the arithmetic that
+        produced the disagreement.
+        """
+        split = SeedStability(seeds=(0, 1, 2), promote_agreement=1, p_values=(0.02, 0.06, 0.07), p_spread=0.05)
+        assert split.unanimous is False
+        assert not hasattr(split, "promoted"), (
+            "SeedStability must carry NO single `promoted` field — collapsing disagreeing seeds into "
+            "one verdict is the thing it exists to prevent"
+        )
+        block = render_seed_stability(split)
+        assert "UNSTABLE" in block and "coin flip, not a result" in block
+        assert "Do not report the majority's verdict" in block
+
+    def test_the_block_states_that_it_costs_no_runs(self, tmp_path: Path) -> None:
+        # Three bootstraps over rows already loaded. Unsaid, a reader assumes it triples the round.
+        incumbent, candidate = _tiny_suite(4, 4)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        block = render_seed_stability(gate_seed_stability(**self._kwargs(run_dirs)))
+        assert "zero** extra agent runs" in block and "CPU only" in block
+
+    def test_the_p_spread_is_none_below_two_measured_values(self) -> None:
+        # A spread over one p is 0.0, which reads as "the seeds agreed" when only one produced a number.
+        one = SeedStability(seeds=(0, 1), promote_agreement=0, p_values=(0.03, None), p_spread=None)
+        assert one.p_spread is None
+        assert render_seed_stability(one).count("—") >= 1
+
+    def test_the_gate_itself_is_unchanged_by_the_reading(self, tmp_path: Path) -> None:
+        """`activation_gate` gains no parameter and no cost, which is why this is a separate function.
+
+        A `seeds=` argument on the gate would have changed the rendered output of every existing call
+        site and every pinned fixture. Asserted on the SIGNATURE, so adding one fails here.
+        """
+        import inspect
+
+        assert "seeds" not in inspect.signature(activation_gate).parameters
+        # And the reading's first seed reproduces the gate's own default exactly.
+        incumbent, candidate = _tiny_suite(4, 4)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        alone = holm_promote([_gate(run_dirs)])[0]
+        stability = gate_seed_stability(**self._kwargs(run_dirs))
+        assert stability.p_values[0] == alone.p_value
+
+    def test_passing_seed_instead_of_seeds_raises(self, tmp_path: Path) -> None:
+        # The seed is the axis being varied, so a caller pinning it has misread the function.
+        incumbent, candidate = _tiny_suite(4, 4)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        with pytest.raises(TypeError, match="pass `seeds=`"):
+            gate_seed_stability(seed=7, **self._kwargs(run_dirs))
+
+    def test_an_empty_seed_list_raises(self, tmp_path: Path) -> None:
+        incumbent, candidate = _tiny_suite(4, 4)
+        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        with pytest.raises(ValueError, match="at least one seed"):
+            gate_seed_stability(seeds=(), **self._kwargs(run_dirs))
+
+    def test_it_is_not_exported_from_the_models_package(self) -> None:
+        # Computed and rendered, never persisted — `RuleCeiling`'s category, not the verdicts'.
+        import coder_eval.models as models
+
+        assert not hasattr(models, "SeedStability")
+        assert SeedStability.__module__ == "coder_eval.optimize_activation"
 
 
 class TestConfirmSplitCheckIsShared:

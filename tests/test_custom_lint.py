@@ -4253,6 +4253,83 @@ class TestPluginArtifacts:
                 "computed verdict can say"
             )
 
+    def test_the_proposal_prompt_names_scripts_as_edit_targets(self):
+        """The gap that produced this: three surfaces, zero mentions, and nobody noticed.
+
+        A skill is a DIRECTORY, and the highest-leverage candidate class — replacing six prose steps
+        with a bundled script — was nowhere described as legal. Without a sensor this paragraph is one
+        careless edit from vanishing, and its absence is silent: nothing fails, the proposer simply
+        stops being told, and the class of candidate stops being written.
+
+        Asserted by TOKEN rather than by sentence, because prose pitched at a proposer will be
+        reworded. `scripts/` alone would be too weak — the file mentions `scripts/` in the leak
+        paragraph — so the anchor is the edit-target CLAIM plus the hypothesis it names.
+        """
+        prompt = _normalized(PLUGIN_ROOT / "reference" / "proposal-prompt.md")
+        assert "legitimate edit targets" in prompt, (
+            "reference/proposal-prompt.md no longer names scripts and reference files as edit "
+            "targets. A skill is a directory, and a candidate that moves instruction into a script "
+            "is the highest-leverage shape there is — a proposer not told so will not write one."
+        )
+        for token in ("scripts/", "reference files", "determinism"):
+            assert token in prompt, f"the scripts-as-edit-targets paragraph no longer names {token!r}"
+        # The three constraints that follow from it, each of which is silent when dropped.
+        assert "allowed_tools" in prompt, "the paragraph must say a bundled script needs Bash in allowed_tools"
+        assert "skill_text" in prompt, "it must say the leak check reads the whole directory"
+        assert "Activation is untouched" in prompt, (
+            "it must say a scripts-only candidate cannot move the activation number — a reader will "
+            "otherwise look for an effect that cannot be there"
+        )
+
+    def test_the_proposal_prompt_supplies_the_passing_rows(self):
+        # A proposer shown only failures optimizes for them alone, and an edit that fixes three rows
+        # while breaking two is a net loss the aggregate hides. The caveats are part of the claim:
+        # the evidence is genuinely mixed, so a sensor that let the honest hedge be deleted would be
+        # pinning an overclaim.
+        prompt = _normalized(PLUGIN_ROOT / "reference" / "proposal-prompt.md")
+        assert "must not regress" in prompt, (
+            "reference/proposal-prompt.md no longer supplies the PASSING rows. Only the failing rows "
+            "were ever handed over, so nothing told the proposer what it was trading against."
+        )
+        assert "sample, not the whole passing set" in prompt, "the sampling caveat must stay"
+        assert "genuinely mixed" in prompt, (
+            "the honest caveat must stay: whether failures-plus-successes beats failures-only flips "
+            "across settings, and a sensor pinning the claim without it pins an overclaim"
+        )
+        assert "regression_check" in prompt, (
+            "the proposer must be pointed at the regression corpus BEFORE it writes — the skill only "
+            "reads it at Step 10, after the round is paid for"
+        )
+
+    def test_the_stop_rule_counts_candidates_not_only_rounds(self):
+        """The patience is a budget in HYPOTHESES, and rounds are a poor proxy for them.
+
+        Two rounds of four candidates have tested eight; two rounds of one have tested two and say
+        almost nothing. A reader deciding whether a skill is at its ceiling needs the count that
+        actually failed.
+        """
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        stop_rule = skill[skill.index("## Step 13") :]
+        assert "candidates gated across" in stop_rule, (
+            "optimize-skill's Step 13 no longer prints a cumulative CANDIDATE count beside the round "
+            "count, so 'two rounds promoted nothing' cannot be told from two rounds of one candidate"
+        )
+        # `_normalized` collapses the file's hard wrapping, so the phrase is matched unwrapped.
+        assert "budget in candidates" in stop_rule, (
+            "Step 13 must say the patience is a budget in candidates rather than in rounds"
+        )
+
+    def test_the_execution_track_diffs_a_tree(self):
+        # A `SKILL.md`-only diff hides a scripts-only candidate entirely — which is now a legal and
+        # encouraged shape, so the presentation step has to render it.
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        step_12 = skill[skill.index("## Step 12") : skill.index("## Step 13")]
+        assert "skill DIRECTORY" in step_12, (
+            "optimize-skill's Step 12 no longer diffs the whole skill directory on the execution "
+            "track, so a candidate whose whole hypothesis is a bundled script renders as no change"
+        )
+        assert "diff -ru" in step_12, "Step 12 should name the diff shape, not only ask for one"
+
     def test_optimize_surfaces_call_the_cost_front_advisory(self):
         # Derived from the constant exactly as the MATERIALITY_FLOOR sensor is, so the claim cannot
         # exist in three files at three vintages. Asserted PER SURFACE rather than against the

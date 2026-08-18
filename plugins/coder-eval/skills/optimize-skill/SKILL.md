@@ -1594,6 +1594,37 @@ p-value for a family decision to correct. A cross-split refusal also has no p, b
 come back that way — it keeps `promoted=None` until `holm_promote` forces it to `False`, so the
 refusal reaches you whether or not you remembered the correction.)
 
+**Check whether the decision survives the seed, and it costs nothing.** The bootstrap is seeded, so
+a p near the Holm threshold can land on either side of it depending on the draw — and one verdict
+cannot say whether that happened. `gate_seed_stability` gates at three seeds and reports the
+agreement:
+
+```python
+from coder_eval.optimize_activation import gate_seed_stability
+from coder_eval.reports_optimize import render_seed_stability
+
+# The SAME keywords `activation_gate` takes, minus `seed` — the seeds are the axis being varied, so
+# passing one raises. Three bootstraps over rows already loaded: CPU only, and ZERO extra runs.
+print(
+    render_seed_stability(
+        gate_seed_stability(
+            incumbent_run_dirs=gate_dirs, candidate_run_dirs=gate_dirs,
+            incumbent_variant="incumbent", candidate_variant="cand-a-widen-vocabulary",
+            suite_id="<the suite's task_id>", criterion_index=0,
+        )
+    )
+)
+```
+
+**Seeds that disagree are the FINDING, not an error.** Never take the majority's verdict and report
+it as the verdict — that is the one thing the reading exists to prevent, which is why it returns no
+single `promoted` field to read. A 2/3 split means the decision is being made by the draw count
+rather than by the data: raise `n_resamples`, or add rows, and gate again.
+
+**The execution track has no useful twin.** Its primary statistic is an analytic paired *t*,
+deterministic given the rows, so a seed moves only the MDE and the cost/latency guardrails — the
+function would report a spread of zero on the number that decides.
+
 **There is a FIFTH headline on this track too, and it is a different fault with a different
 remedy: `NOT A RESULT`.** Nothing about the candidate is being reported — the arms did not score
 a comparable set of rows, so their difference is not an effect. **Read the refusal text, because
@@ -2105,6 +2136,13 @@ On the execution track, keep the diff **minimal and reviewable**. A body edit ch
 the skill instructs on every future invocation, including cases no row covered, so the user
 is approving reach beyond the measurement. Say which rows justified each hunk.
 
+**And on that track diff the whole skill DIRECTORY, not just `SKILL.md`.** A candidate may add or
+change `scripts/` and reference files — `reference/proposal-prompt.md` names them as edit targets, and
+the prose→determinism hypothesis usually IS a new script — so a `SKILL.md`-only diff silently hides
+the change the round was actually about. `diff -ru <incumbent>/skills/<skill> <promoted>/skills/<skill>`
+is the shape; a candidate that touched no body line at all is legal and must still render. Each hunk
+still names the rows that justified it, whichever file it lands in.
+
 **On a multi-round session the diff is cumulative** — the original against the final *promoted*
 text, with each hunk naming the round and the rows that justified it. It diffs the **incumbent**,
 never the lineage head: a search accept has cleared no gate, so text that only ever won an unpaired
@@ -2119,6 +2157,13 @@ noise, here are the numbers" — is worth more than a promotion that will not re
 Stop after two consecutive **gated** rounds that promote nothing — rounds that actually reached
 Stage B. Continuing past that is fitting to the train set, and the test will eventually stop
 catching it.
+
+**Print the cumulative CANDIDATE count when you stop, beside the round count** — "stopping after 2
+gated rounds that promoted nothing; 9 candidates gated across 3 rounds". The patience is a budget in
+candidates rather than in rounds, and the two diverge badly: two rounds of four candidates each have
+tested eight hypotheses, while two rounds of one have tested two and say almost nothing. A reader
+deciding whether the skill is at its ceiling needs the number of hypotheses that failed, not the
+number of times you stopped to count them.
 
 **A search round is not a gated round and does not count here.** It promotes nothing by
 construction, so counting it would end every session after two of the cheapest rounds available.

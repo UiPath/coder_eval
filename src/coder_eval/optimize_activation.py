@@ -18,6 +18,7 @@ import math
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from coder_eval.models import (
     TARGET_LABEL,
@@ -1063,6 +1064,79 @@ def _activation_notes(
     if (degraded := _note_resolution_degraded(family_size, family_resamples, alpha)) is not None:
         notes.append(degraded)
     return notes
+
+
+class SeedStability(NamedTuple):
+    """Whether a gate's decision survives a change of bootstrap seed. A READING, never a verdict.
+
+    A `NamedTuple` beside the function that produces it rather than a model in ``models/optimize.py``,
+    following :class:`~coder_eval.optimize_fronts.RuleCeiling` — whose docstring states the rule this
+    family goes by outright, "computed and rendered, never persisted". The verdict models are the
+    other category: decision records with ``extra="forbid"``, dumped to pinned fixtures. This is
+    neither, so it is not exported from ``coder_eval.models`` either.
+
+    **It deliberately carries NO single ``promoted`` field.** Collapsing three disagreeing seeds into
+    one verdict is the exact thing it exists to prevent: a decision that flips with the seed is a coin
+    flip, and reporting the majority's answer as *the* answer hides that.
+    """
+
+    seeds: tuple[int, ...]
+    promote_agreement: int
+    p_values: tuple[float | None, ...]
+    p_spread: float | None
+
+    @property
+    def unanimous(self) -> bool:
+        """True when every seed agreed — either all promoted or none did.
+
+        A property rather than a field, for :attr:`SearchComparison.accepted`'s reason: nothing new is
+        stored, so no construction site can set it inconsistently with the counts it derives from.
+        """
+        return self.promote_agreement in (0, len(self.seeds))
+
+
+def gate_seed_stability(*, seeds: Sequence[int] = (0, 1, 2), **gate_kwargs) -> SeedStability:
+    """Run :func:`activation_gate` once per seed and report whether the decision held.
+
+    The bootstrap is seeded, so a p near the Holm threshold can land on either side of it depending on
+    the draw — and nothing in a single verdict says whether that happened. This asks.
+
+    **A separate function rather than a ``seeds=`` parameter on the gate**, and that is what keeps it
+    cheap to have: adding the parameter would change the cost and the rendered output of every
+    existing call site and every pinned fixture. The gate is untouched, so nothing moves.
+
+    **It costs no agent runs at all** — three bootstraps over rows already on disk, CPU only. Say so
+    wherever it is offered, or a reader assumes it triples the round.
+
+    Disagreeing seeds are the FINDING, not an error. Never pick the majority's verdict and present it
+    as the answer; :attr:`SeedStability.unanimous` is there so a caller cannot accidentally read one.
+
+    **The execution track has no useful twin, and the reason is worth stating rather than leaving as
+    an omission.** Its primary statistic is an analytic paired *t*, deterministic given the rows, so a
+    seed moves only the MDE and the cost/latency guardrails — the function would report a spread of
+    zero on the number that decides, which is a true answer to a question nobody asked.
+
+    ``gate_kwargs`` are forwarded verbatim; passing ``seed`` there raises, since the seeds are the
+    axis being varied.
+    """
+    if "seed" in gate_kwargs:
+        raise TypeError("gate_seed_stability varies the seed itself — pass `seeds=`, not `seed=`.")
+    if not seeds:
+        raise ValueError("gate_seed_stability needs at least one seed to vary.")
+    # Each seed's verdict goes through `holm_promote` on its own, because `promoted` is a FAMILY
+    # decision and a family of one is what a single-candidate stability check is asking about. Pooling
+    # the three into one family would correct across three runs of the same hypothesis.
+    decided = [holm_promote([activation_gate(seed=seed, **gate_kwargs)])[0] for seed in seeds]
+    p_values = tuple(verdict.p_value for verdict in decided)
+    measured = [p for p in p_values if p is not None]
+    return SeedStability(
+        seeds=tuple(seeds),
+        promote_agreement=sum(1 for verdict in decided if verdict.promoted),
+        p_values=p_values,
+        # `None` below two measured values: a spread over one p is 0.0, which reads as "the seeds
+        # agreed" when what happened is that only one of them produced a number.
+        p_spread=max(measured) - min(measured) if len(measured) >= 2 else None,
+    )
 
 
 def confirm_gate(
