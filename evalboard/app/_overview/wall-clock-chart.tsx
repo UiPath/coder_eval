@@ -10,6 +10,7 @@ import {
     YAxis,
 } from "recharts";
 import type { RunPoint } from "@/lib/overview";
+import { fmtTaskSeconds } from "@/lib/timing";
 import { pivotByHarness } from "./harness-series";
 import { HarnessLegend, HarnessTooltip } from "./harness-legend";
 
@@ -22,10 +23,12 @@ function shortLabel(ms: number): string {
 }
 
 // Sibling of DailySuccessChart: same axes/styling and the same per-harness
-// series split, plotting the per-run "within expected time" rate instead of the
-// success rate. Driven by the same windowed RunPoint[] so the shared window and
-// harness selectors control both.
-export function WithinExpectedTimeChart({
+// series split, plotting seconds per passed task instead of the success rate.
+// Driven by the same windowed RunPoint[] so the shared window and harness
+// selectors control both. Per-harness lines matter more here than on any other
+// chart: codex runs the suite in roughly a third of claude-code's wall clock,
+// so one blended line would plot the schedule rather than the speed.
+export function TimePerPassedTaskChart({
     data,
     harnesses,
     windowStart,
@@ -39,7 +42,17 @@ export function WithinExpectedTimeChart({
     const { rows, series } = pivotByHarness(
         data,
         harnesses,
-        "withinExpectedTimeRate",
+        "timePerPassedTask",
+    );
+    // The within-expected rate belongs to one run, so it reads as a hover detail
+    // on that run's point rather than as a headline over a multi-run chart.
+    const withinByPoint = new Map(
+        data
+            .filter((p) => p.withinExpectedTimeRate != null)
+            .map((p) => [
+                `${p.harness}|${p.timestamp}`,
+                p.withinExpectedTimeRate as number,
+            ]),
     );
     return (
         <div className="space-y-1">
@@ -65,19 +78,31 @@ export function WithinExpectedTimeChart({
                             scale="time"
                         />
                         <YAxis
-                            domain={[0, 100]}
-                            ticks={[0, 25, 50, 75, 100]}
+                            // Zero-based: these are seconds, so the distance from
+                            // the axis is the magnitude a reader is entitled to
+                            // compare across harnesses.
+                            domain={[0, "auto"]}
+                            tickFormatter={(v: number) => fmtTaskSeconds(v)}
                             tick={{ fontSize: 11, fill: "#6b7280" }}
                             tickLine={false}
                             axisLine={false}
-                            width={36}
+                            width={48}
                         />
                         <Tooltip
                             content={
                                 <HarnessTooltip
                                     series={series}
-                                    suffix="within expected time"
-                                    emptyText="no scored tasks"
+                                    suffix="per passed task"
+                                    emptyText="no passing tasks"
+                                    format={fmtTaskSeconds}
+                                    secondary={(harness, ms) => {
+                                        const r = withinByPoint.get(
+                                            `${harness}|${ms}`,
+                                        );
+                                        return r == null
+                                            ? null
+                                            : `${r.toFixed(0)}% within 2× expected`;
+                                    }}
                                 />
                             }
                             cursor={{
@@ -94,13 +119,12 @@ export function WithinExpectedTimeChart({
                                 strokeWidth={2}
                                 dot={{ r: 3, fill: s.color }}
                                 activeDot={{ r: 4 }}
-                                // Unlike the success chart this must bridge, for
-                                // the same reason: rows are interleaved across
-                                // harnesses, so "no value here" usually means
-                                // "another harness's run". A run of this harness
-                                // with no scored task is already absent from
-                                // the pivot, so it reads as a bridged gap rather
-                                // than a fabricated 0%.
+                                // Rows are interleaved across harnesses, so "no
+                                // value here" usually means "another harness's
+                                // run". A run of this harness where nothing
+                                // passed is already absent from the pivot, so it
+                                // reads as a bridged gap rather than a
+                                // fabricated 0s.
                                 connectNulls={true}
                                 isAnimationActive={false}
                             />

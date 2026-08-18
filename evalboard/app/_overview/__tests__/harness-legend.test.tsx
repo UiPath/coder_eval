@@ -37,6 +37,44 @@ describe("HarnessLegend", () => {
 describe("HarnessTooltip", () => {
     const s = series("claude-code", "codex");
 
+    test("formats the value with the chart's own formatter", () => {
+        render(
+            <HarnessTooltip
+                active
+                label={1_700_000_000_000}
+                series={s}
+                suffix="per passed task"
+                emptyText="no passing tasks"
+                format={(v) => `${Math.round(v)}s`}
+                payload={[{ dataKey: s[1].dataKey, value: 192.3 }]}
+            />,
+        );
+        expect(screen.getByText("192s per passed task")).toBeInTheDocument();
+    });
+
+    test("adds the secondary line for the hovered point only", () => {
+        // The within-expected rate belongs to one run, so it rides the hover on
+        // that run's point instead of being summarized over the whole chart.
+        render(
+            <HarnessTooltip
+                active
+                label={1_700_000_000_000}
+                series={s}
+                suffix="per passed task"
+                emptyText="no passing tasks"
+                secondary={(harness) =>
+                    harness === "codex" ? "78% within 2× expected" : null
+                }
+                payload={[
+                    { dataKey: s[0].dataKey, value: 300 },
+                    { dataKey: s[1].dataKey, value: 192 },
+                ]}
+            />,
+        );
+        expect(screen.getByText("78% within 2× expected")).toBeInTheDocument();
+        expect(screen.queryAllByText(/within/)).toHaveLength(1);
+    });
+
     test("shows only the harnesses that actually ran at the hovered x", () => {
         // Recharts hands over every series, including the ones with no value
         // here. Listing those would invent runs that never happened.
