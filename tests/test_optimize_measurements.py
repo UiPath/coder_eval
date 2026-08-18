@@ -37,7 +37,7 @@ from coder_eval.optimize.store import (
     record_noise_floor,
     record_round_scores,
 )
-from tests.test_optimize_gate import SUITE, _eval_result, _module_source, _write_row
+from tests.optimize_fixtures import SUITE, eval_result, module_source, write_row
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -319,7 +319,7 @@ class TestNoiseFloorReuse:
             run_dir = tmp_path / f"run-{i}"
             for row in range(rows):
                 observed = "yes" if (row + i) % 3 else "no"
-                _write_row(run_dir, "incumbent", f"r{row}", _eval_result(f"r{row}", [("yes", observed)]))
+                write_row(run_dir, "incumbent", f"r{row}", eval_result(f"r{row}", [("yes", observed)]))
             dirs.append(run_dir)
         return dirs
 
@@ -623,7 +623,7 @@ class TestTargetLabelMoved:
         from coder_eval.models import TARGET_LABEL
 
         imported = importlib.import_module(f"coder_eval.{module}")
-        source = _module_source(module)
+        source = module_source(module)
         if not hasattr(imported, "TARGET_LABEL"):
             # A module that does not read the label at all is fine; it just must not declare one.
             assert "TARGET_LABEL = " not in source, f"{module} declares TARGET_LABEL without using it"

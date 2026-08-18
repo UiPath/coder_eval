@@ -447,7 +447,7 @@ def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
     dir" — past every token sensor, because the tokens were all still there. The only way to check
     it is to build the fixture and call the code.
     """
-    from tests.test_optimize_gate import SUITE, _eval_result, _write_row
+    from tests.optimize_fixtures import SUITE, eval_result, write_row
 
     failures: list[str] = []
     if "could be computed from a" not in " ".join(text.split()):
@@ -474,8 +474,8 @@ def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
     for replicate in range(3):
         for row in range(4):
             observed = "yes" if (row + replicate) % 3 else "no"
-            _write_row(one, "incumbent", f"r{row}", _eval_result(f"r{row}", [("yes", observed)]), replicate)
-            _write_row(one, "candidate", f"r{row}", _eval_result(f"r{row}", [("yes", "yes")]), replicate)
+            write_row(one, "incumbent", f"r{row}", eval_result(f"r{row}", [("yes", observed)]), replicate)
+            write_row(one, "candidate", f"r{row}", eval_result(f"r{row}", [("yes", "yes")]), replicate)
     single = _gate([one])
     if single.ci_low is None:
         failures.append("the interval was NOT computable from one run directory, but the method file says it is")
@@ -487,8 +487,8 @@ def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
     for i, run_dir in enumerate(two):
         for row in range(4):
             observed = "yes" if (row + i) % 3 else "no"
-            _write_row(run_dir, "incumbent", f"r{row}", _eval_result(f"r{row}", [("yes", observed)]))
-            _write_row(run_dir, "candidate", f"r{row}", _eval_result(f"r{row}", [("yes", "yes")]))
+            write_row(run_dir, "incumbent", f"r{row}", eval_result(f"r{row}", [("yes", observed)]))
+            write_row(run_dir, "candidate", f"r{row}", eval_result(f"r{row}", [("yes", "yes")]))
     if _gate(two).mde is None:
         failures.append("no MDE from TWO run directories — the method file prices the second invocation for exactly it")
     return failures
@@ -508,7 +508,7 @@ def _check_execution_sign_resolution(text: str, tmp: Path) -> list[str]:
     ``optimize-method.md`` can be reworded into a lie about it, which is exactly what the file
     warns costs you a promotion of the arm that LOST.
     """
-    from tests.test_optimize_gate import _WINNER, _exec_gate, _exec_run_dir
+    from tests.optimize_fixtures import WINNER, exec_gate, exec_run_dir
 
     failures: list[str] = []
     normalized = " ".join(text.split())
@@ -523,10 +523,10 @@ def _check_execution_sign_resolution(text: str, tmp: Path) -> list[str]:
                 "promise, and a reversed reading promotes the arm that lost"
             )
 
-    # Distinct sub-directories: `_exec_run_dir` asserts its target does not exist, precisely
+    # Distinct sub-directories: `exec_run_dir` asserts its target does not exist, precisely
     # because two builds under one parent silently MERGE into one fixture.
-    first = _exec_gate(_exec_run_dir(tmp / "declared-incumbent-first", **_WINNER, declare_incumbent_first=True))
-    second = _exec_gate(_exec_run_dir(tmp / "declared-candidate-first", **_WINNER, declare_incumbent_first=False))
+    first = exec_gate(exec_run_dir(tmp / "declared-incumbent-first", **WINNER, declare_incumbent_first=True))
+    second = exec_gate(exec_run_dir(tmp / "declared-candidate-first", **WINNER, declare_incumbent_first=False))
 
     for order, verdict in (("incumbent first", first), ("candidate first", second)):
         if verdict.mean_diff is None or verdict.mean_diff <= 0.0:
@@ -583,7 +583,7 @@ def _check_headroom_ceilings(text: str, _tmp: Path) -> list[str]:
       makes every rule look promotable.
     """
     from coder_eval.optimize.fronts import headroom_ceiling
-    from tests.test_optimize_gate import HEADROOM_ROW_SCORES, HEADROOM_RULE_ROWS
+    from tests.optimize_fixtures import HEADROOM_ROW_SCORES, HEADROOM_RULE_ROWS
 
     table = next((t for t in parse_markdown_tables(text) if table_signature(t) == _HEADROOM_SIGNATURE), None)
     if table is None:

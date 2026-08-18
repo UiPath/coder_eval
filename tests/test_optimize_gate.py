@@ -42,16 +42,12 @@ from coder_eval.models import (
     FileExistsCriterion,
     FinalStatus,
     GuardrailCheck,
-    NoiseFloor,
     OptimizeMeasurements,
     RegressionRow,
     ResolvedTask,
     RoundScores,
-    RowSelection,
-    RunSummary,
     SkillTriggeredCriterion,
     TaskDefinition,
-    TokenUsage,
     copy_with,
 )
 from coder_eval.optimize import execution as optimize_execution
@@ -156,182 +152,59 @@ from coder_eval.reports_stats import (
     median_or_none,
 )
 from tests.lint.import_resolution import resolved_module
-
-
-SUITE = "my-skill-activation"
-
-
-def _eval_result(row_id: str, labels: list[tuple[str, str]], *, extra_basic: bool = False) -> EvaluationResult:
-    """One replicate's result carrying one classification result per (expected, observed) pair.
-
-    Descriptions interpolate the row id, exactly as both bundled templates do — which is what
-    makes a description-keyed implementation impossible and the positional one necessary.
-    """
-    results: list[CriterionResult] = [
-        ClassificationCriterionResult(
-            criterion_type="skill_triggered",
-            description=f"criterion {i} for row {row_id}",
-            score=1.0 if expected == observed else 0.0,
-            expected_label=expected,
-            observed_label=observed,
-        )
-        for i, (expected, observed) in enumerate(labels)
-    ]
-    if extra_basic:
-        results.append(CriterionResult(criterion_type="file_check", description=f"file for row {row_id}", score=1.0))
-    return EvaluationResult(
-        task_id=f"{SUITE}/{row_id}",
-        task_description="row",
-        agent_type="claude-code",
-        started_at=datetime(2026, 8, 13, 12, 0, 0),
-        final_status=FinalStatus.SUCCESS,
-        iteration_count=1,
-        success_criteria_results=results,  # type: ignore[arg-type]
-    )
-
-
-# The run.json key the gate reads, taken from the model that declares it rather than typed again.
-_RUN_SELECTION_KEY = next(name for name in RunSummary.model_fields if name == "row_selection")
-
-
-def _write_run_provenance(run_dir: Path, split: str | None = None) -> None:
-    """Stamp a minimal ``run.json`` carrying the run's row selection.
-
-    Every arm builder goes through ``_write_row``, which calls this, so fixtures model a run
-    directory written by a CURRENT coder-eval rather than a pre-provenance one. Without it every
-    fixture takes the "unrecorded" path: the gate would note it on every block (churning six
-    pinned renders) and — the part that actually bites — ``record_noise_floor`` would refuse to
-    cache any floor, since a floor measured over runs whose row sets are unknown is a floor for
-    no particular row set. The unrecorded and mismatched paths get their own explicit tests
-    instead of contaminating every other one.
-
-    Only the keys the gate reads are written; ``RunSummary`` has many more, and a fixture that
-    tracked all of them would be a second implementation of the writer.
-    """
-    run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / "run.json"
-    if path.exists():
-        return
-    # Built from the REAL models rather than hand-typed keys. `read_split_provenance` hand-writes
-    # its READER, and this hand-wrote its WRITER — so renaming `RunSummary.row_selection` or
-    # `RowSelection.split` would have moved both in lockstep, leaving every test green while
-    # production went 100% "unrecorded". Deriving the payload here is what breaks that symmetry.
-    payload = {_RUN_SELECTION_KEY: RowSelection(split=split).model_dump(mode="json"), "task_results": []}
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _record_task_result(run_dir: Path, variant: str, task_id: str, replicate: int) -> None:
-    """Append one executed row to ``run.json``'s ``task_results``, as a real run does.
-
-    The tree-reconciliation preflight asks whether run.json describes the rows on disk, so a
-    fixture that writes rows without recording them models a CONTAMINATED run dir. Every builder
-    goes through ``_write_row``, which calls this, so the ordinary fixture is a clean one and the
-    contaminated case is built deliberately (``_write_row(..., record=False)``).
-
-    Only the three keys the reconciliation reads, on the same "do not re-implement the writer"
-    grounds as ``_write_run_provenance`` above. ``replicate_index`` is load-bearing: the
-    reconciliation keys on ``(row, replicate)``, so a fixture omitting it would send every entry
-    down the permissive whole-row path and leave the replicate half of the check untested.
-    """
-    path = run_dir / "run.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload.setdefault("task_results", []).append(
-        {"task_id": task_id, "variant_id": variant, "replicate_index": replicate}
-    )
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _write_row(
-    run_dir: Path,
-    variant: str,
-    row_id: str,
-    result: EvaluationResult,
-    replicate: int = 0,
-    *,
-    record: bool = True,
-) -> Path:
-    """Write one replicate's ``task.json``, recording it in ``run.json`` unless told not to.
-
-    ``record=False`` writes the row to disk WITHOUT recording it — a row left behind by an earlier
-    invocation of a re-used ``--run-dir``, which is exactly what the tree-reconciliation preflight
-    refuses on.
-    """
-    task_dir = run_dir / variant / SUITE / row_id / f"{replicate:02d}"
-    task_dir.mkdir(parents=True, exist_ok=True)
-    path = task_dir / "task.json"
-    path.write_text(result.model_dump_json(), encoding="utf-8")
-    _write_run_provenance(run_dir)
-    if record:
-        _record_task_result(run_dir, variant, f"{SUITE}/{row_id}", replicate)
-    return path
-
-
-def _write_arm(
-    tmp_path: Path,
-    variant: str,
-    per_row_labels: dict[str, list[tuple[str, str]]],
-    *,
-    invocations: int = 3,
-    prefix: str = "",
-) -> list[Path]:
-    """One arm across ``invocations`` separate run directories — Stage B's three invocations."""
-    run_dirs: list[Path] = []
-    for i in range(invocations):
-        run_dir = tmp_path / f"{prefix}run-{i}"
-        for row_id, labels in per_row_labels.items():
-            _write_row(run_dir, variant, row_id, _eval_result(row_id, labels))
-        run_dirs.append(run_dir)
-    return run_dirs
-
-
-def _shared_dirs(
-    tmp_path: Path,
-    incumbent: dict[str, list[tuple[str, str]]],
-    candidate: dict[str, list[tuple[str, str]]],
-    *,
-    invocations: int = 3,
-) -> list[Path]:
-    """Both arms written into the SAME run directories, as a real experiment produces them."""
-    run_dirs: list[Path] = []
-    for i in range(invocations):
-        run_dir = tmp_path / f"run-{i}"
-        for row_id, labels in incumbent.items():
-            _write_row(run_dir, "incumbent", row_id, _eval_result(row_id, labels))
-        for row_id, labels in candidate.items():
-            _write_row(run_dir, "candidate", row_id, _eval_result(row_id, labels))
-        run_dirs.append(run_dir)
-    return run_dirs
-
-
-# The gate's real default is GATE_RESAMPLES (20,000), which is what a promotion decision needs and
-# what ~80 tests in this file do NOT: at four bootstraps per call it would take the file from ~3s to
-# ~35s. So the helper passes a small count, resample-sensitive tests pass their own, and
-# `test_gate_defaults_to_the_gate_resample_count` is the one test that exercises the signature.
-_FAST_RESAMPLES = 400
-
-
-def _gate(run_dirs: list[Path], **kwargs) -> ActivationGateVerdict:
-    return activation_gate(
-        incumbent_run_dirs=run_dirs,
-        candidate_run_dirs=run_dirs,
-        incumbent_variant="incumbent",
-        candidate_variant="candidate",
-        suite_id=SUITE,
-        **{"criterion_index": 0, "n_resamples": _FAST_RESAMPLES, **kwargs},
-    )
+from tests.optimize_fixtures import (
+    EXEC_SUITE,
+    FAST_RESAMPLES,
+    HEADROOM_FLOOR,
+    HEADROOM_ROW_SCORES,
+    HEADROOM_RULE_ROWS,
+    RUN_SELECTION_KEY,
+    SUITE,
+    WINNER,
+    activation_verdict,
+    arm_row_scores_for,
+    confirm_dir,
+    cost_check,
+    cost_quality_arm,
+    cost_rows,
+    costed_result,
+    eval_result,
+    exec_gate,
+    exec_run_dir,
+    execution_floor,
+    experiment_json,
+    failing_cost_check,
+    full_activation_verdict,
+    full_execution_verdict,
+    full_guardrail_check,
+    headline_line,
+    module_path,
+    module_source,
+    parity_activation,
+    parity_execution,
+    pinned_suite,
+    scored_result,
+    set_split,
+    shared_dirs,
+    tiny_suite,
+    uniform_shift,
+    weighted_arm,
+    write_arm,
+    write_row,
+)
 
 
 class TestLoadSuiteRows:
     def test_reads_all_replicate_dirs(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]}, invocations=3)
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]}, invocations=3)
         assert [len(load_suite_rows(d, "incumbent", SUITE)["r1"]) for d in run_dirs] == [1, 1, 1]
         # Pooled across the three invocations, the row carries three replicates.
         assert len(load_arm_rows(run_dirs, "incumbent", SUITE)["r1"]) == 3
 
     def test_skips_malformed_task_json(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         run_dir = tmp_path / "run-0"
-        _write_row(run_dir, "incumbent", "good", _eval_result("good", [("yes", "yes")]))
-        bad = _write_row(run_dir, "incumbent", "bad", _eval_result("bad", [("yes", "yes")]))
+        write_row(run_dir, "incumbent", "good", eval_result("good", [("yes", "yes")]))
+        bad = write_row(run_dir, "incumbent", "bad", eval_result("bad", [("yes", "yes")]))
         bad.write_text('{"task_id": "truncated"', encoding="utf-8")
 
         with caplog.at_level(logging.WARNING):
@@ -341,7 +214,7 @@ class TestLoadSuiteRows:
 
     def test_missing_variant_dir_returns_empty(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run-0"
-        _write_row(run_dir, "incumbent", "r1", _eval_result("r1", [("yes", "yes")]))
+        write_row(run_dir, "incumbent", "r1", eval_result("r1", [("yes", "yes")]))
         assert load_suite_rows(run_dir, "typo-variant", SUITE) == {}
         assert load_suite_rows(run_dir, "incumbent", "typo-suite") == {}
 
@@ -355,7 +228,7 @@ class TestLoadSuiteRows:
         run_dir = tmp_path / "run-0"
         task_dir = run_dir / "incumbent" / SUITE / "r1" / "000"
         task_dir.mkdir(parents=True)
-        (task_dir / "task.json").write_text(_eval_result("r1", [("yes", "yes")]).model_dump_json(), encoding="utf-8")
+        (task_dir / "task.json").write_text(eval_result("r1", [("yes", "yes")]).model_dump_json(), encoding="utf-8")
         assert list(load_suite_rows(run_dir, "incumbent", SUITE)) == ["r1"]
 
 
@@ -369,7 +242,7 @@ class TestEveryWrongPathMessageDerivesFromTheGlob:
     """
 
     def test_the_activation_zero_row_note_derives(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         verdict = activation_gate(
             incumbent_run_dirs=run_dirs,
             candidate_run_dirs=run_dirs,
@@ -377,21 +250,21 @@ class TestEveryWrongPathMessageDerivesFromTheGlob:
             candidate_variant="typo",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         note = next(n for n in verdict.notes if "loaded ZERO rows" in n)
         assert TASK_JSON_GLOB in note
 
     def test_the_execution_zero_row_refusal_derives(self, tmp_path: Path) -> None:
         # Spelled with the literal `<variant>` because this one message names BOTH arms.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         shutil.rmtree(run_dir / "incumbent")
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.gate_refusal is not None
         assert f"<run>/<variant>/{EXEC_SUITE}/{TASK_JSON_GLOB}" in verdict.gate_refusal
 
     def test_the_activation_floor_reason_derives(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         with caplog.at_level(logging.WARNING):
             assert (
                 measure_noise_floor(run_dirs=run_dirs, variant_id="typo", suite_id=SUITE, criterion_index=0, model="m")
@@ -400,7 +273,7 @@ class TestEveryWrongPathMessageDerivesFromTheGlob:
         assert TASK_JSON_GLOB in caplog.text
 
     def test_the_execution_floor_reason_derives(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         with caplog.at_level(logging.WARNING):
             assert (
                 measure_execution_noise_floor(run_dirs=run_dirs, variant_id="typo", suite_id=SUITE, model="m") is None
@@ -449,7 +322,7 @@ def _family_source() -> str:
     passed. A whole-family read is what keeps them asserting something — and it is derived from
     `_OPTIMIZE_RANKS`, so a seventh module joins every scan at once.
     """
-    return "\n".join(_module_source(module) for module in _OPTIMIZE_RANKS)
+    return "\n".join(module_source(module) for module in _OPTIMIZE_RANKS)
 
 
 def test_the_trim_is_declared_once() -> None:
@@ -498,8 +371,8 @@ class TestBothTracksEmitTheSameHolmNotes:
         # Through the real wrappers, not the constants: a call site that kept its own copy would
         # still produce an equal string today, so the source scan below is what makes this tight.
         incumbent = {f"r{i}": [("yes", "no" if i else "yes")] for i in range(6)}
-        activation = holm_promote([_gate(_shared_dirs(tmp_path, incumbent, incumbent))])[0]
-        execution = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+        activation = holm_promote([activation_verdict(shared_dirs(tmp_path, incumbent, incumbent))])[0]
+        execution = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **WINNER))])[0]
         for verdict in (activation, execution):
             assert note_holm_family(1, DEFAULT_ALPHA) in verdict.notes
 
@@ -520,16 +393,16 @@ class TestLabelPairs:
     def test_selects_by_position(self, tmp_path: Path) -> None:
         # Two stacked skill_triggered criteria whose descriptions BOTH interpolate the row id,
         # mirroring the shipped templates. A description-keyed implementation fails this.
-        results = [_eval_result("r1", [("yes", "yes"), ("no", "yes")])]
+        results = [eval_result("r1", [("yes", "yes"), ("no", "yes")])]
         assert label_pairs(results, 0) == [("yes", "yes")]
         assert label_pairs(results, 1) == [("no", "yes")]
 
     def test_skips_rows_with_too_few_results(self) -> None:
-        results = [_eval_result("r1", [("yes", "yes")])]
+        results = [eval_result("r1", [("yes", "yes")])]
         assert label_pairs(results, 5) == []
 
     def test_skips_non_classification_results(self) -> None:
-        results = [_eval_result("r1", [("yes", "yes")], extra_basic=True)]
+        results = [eval_result("r1", [("yes", "yes")], extra_basic=True)]
         assert label_pairs(results, 1) == []
 
 
@@ -542,18 +415,18 @@ class TestActivationGate:
 
     def test_promotes_a_clearly_better_candidate(self, tmp_path: Path) -> None:
         incumbent, candidate = self._clear_win()
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
         assert verdict.rows_paired == 12
         assert verdict.ci_low is not None and verdict.ci_low > 0.0
         assert holm_promote([verdict])[0].promoted is True
 
     def test_leaves_promoted_none_before_holm(self, tmp_path: Path) -> None:
         incumbent, candidate = self._clear_win()
-        assert _gate(_shared_dirs(tmp_path, incumbent, candidate)).promoted is None
+        assert activation_verdict(shared_dirs(tmp_path, incumbent, candidate)).promoted is None
 
     def test_refuses_a_tied_candidate(self, tmp_path: Path) -> None:
         rows = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(12)}
-        verdict = _gate(_shared_dirs(tmp_path, rows, dict(rows)))
+        verdict = activation_verdict(shared_dirs(tmp_path, rows, dict(rows)))
         assert verdict.mean_diff == 0.0
         assert verdict.ci_low is not None and verdict.ci_high is not None
         assert verdict.ci_low <= 0.0 <= verdict.ci_high
@@ -564,7 +437,7 @@ class TestActivationGate:
         # few clusters for the interval to exclude zero.
         incumbent = {f"r{i}": [("yes", "no")] for i in range(4)}
         candidate = {"r0": [("yes", "yes")], "r1": [("yes", "no")], "r2": [("yes", "no")], "r3": [("yes", "no")]}
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
         assert verdict.range_non_overlap is True
         assert verdict.ci_low is not None and verdict.ci_low <= 0.0
         assert holm_promote([verdict])[0].promoted is False
@@ -573,7 +446,7 @@ class TestActivationGate:
         incumbent = {f"r{i}": [("yes", "yes")] for i in range(5)}
         candidate = {f"r{i}": [("yes", "yes")] for i in range(4)}  # r4 missing on the candidate
         candidate["extra"] = [("yes", "yes")]
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
         assert verdict.rows_paired == 4
         assert verdict.rows_excluded == 2
         assert any("only one arm" in note for note in verdict.notes)
@@ -589,7 +462,7 @@ class TestActivationGate:
         """
         incumbent = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(12)}
         candidate = {f"r{i}": ([("yes", "yes")] if i % 2 else []) for i in range(12)}
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
 
         assert verdict.rows_paired == 6
         assert verdict.rows_excluded == 6
@@ -599,7 +472,7 @@ class TestActivationGate:
         assert any("scored on only one arm" in note for note in verdict.notes)
 
     def test_with_fewer_than_two_paired_rows_returns_none_stats(self, tmp_path: Path) -> None:
-        verdict = _gate(_shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
+        verdict = activation_verdict(shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
         assert verdict.rows_paired == 1
         assert (verdict.mean_diff, verdict.ci_low, verdict.ci_high, verdict.p_value) == (None, None, None, None)
         assert verdict.promoted is False
@@ -607,7 +480,7 @@ class TestActivationGate:
 
     def test_a_wrong_path_yields_zero_rows_and_never_raises(self, tmp_path: Path) -> None:
         incumbent, candidate = self._clear_win()
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         verdict = activation_gate(
             incumbent_run_dirs=run_dirs,
             candidate_run_dirs=run_dirs,
@@ -627,7 +500,7 @@ class TestActivationGate:
 
     def test_a_wrong_variant_id_names_the_arm_that_found_nothing(self, tmp_path: Path) -> None:
         incumbent, candidate = self._clear_win()
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         verdict = activation_gate(
             incumbent_run_dirs=run_dirs,
             candidate_run_dirs=run_dirs,
@@ -642,7 +515,7 @@ class TestActivationGate:
 
     def test_bad_criterion_index_is_noted_not_raised(self, tmp_path: Path) -> None:
         incumbent, candidate = self._clear_win()
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate), criterion_index=7)
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate), criterion_index=7)
         # Every row exists but none is scored at that position, so nothing is comparable.
         assert (verdict.rows_paired, verdict.rows_excluded) == (0, 12)
         note = " ".join(verdict.notes)
@@ -658,19 +531,19 @@ class TestActivationGate:
         # number for a criterion nobody asked about.
         incumbent, candidate = self._clear_win()
         with pytest.raises(ValueError, match="criterion_index must be >= 0, got -1"):
-            _gate(_shared_dirs(tmp_path, incumbent, candidate), criterion_index=-1)
+            activation_verdict(shared_dirs(tmp_path, incumbent, candidate), criterion_index=-1)
 
     def test_criterion_index_zero_is_legal(self, tmp_path: Path) -> None:
         # The boundary the guard must NOT reject.
         incumbent, candidate = self._clear_win()
-        assert _gate(_shared_dirs(tmp_path, incumbent, candidate), criterion_index=0).rows_paired > 0
+        assert activation_verdict(shared_dirs(tmp_path, incumbent, candidate), criterion_index=0).rows_paired > 0
 
     def test_sibling_recall_drop_blocks_promotion(self, tmp_path: Path) -> None:
         # Criterion 0 is the target (candidate wins outright); criterion 1 is a sibling the
         # candidate annexes on half the rows — a false negative there, so recall.yes drops.
         incumbent = {f"r{i}": [("yes", "yes" if i < 3 else "no"), ("yes", "yes")] for i in range(12)}
         candidate = {f"r{i}": [("yes", "yes"), ("yes", "yes" if i % 2 else "no")] for i in range(12)}
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[1])
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[1])
         assert verdict.ci_low is not None and verdict.ci_low > 0.0
         assert [c.passed for c in verdict.sibling_checks] == [False]
 
@@ -681,14 +554,14 @@ class TestActivationGate:
     def test_sibling_with_no_true_instances_is_not_a_regression(self, tmp_path: Path) -> None:
         incumbent = {f"r{i}": [("yes", "yes" if i < 3 else "no"), ("no", "no")] for i in range(12)}
         candidate = {f"r{i}": [("yes", "yes"), ("no", "no")] for i in range(12)}
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[1])
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[1])
         assert [c.passed for c in verdict.sibling_checks] == [True]
         assert verdict.sibling_checks[0].note is not None
         assert holm_promote([verdict])[0].promoted is True
 
     def test_a_sibling_index_that_selects_nothing_is_noted_not_scored(self, tmp_path: Path) -> None:
         incumbent, candidate = self._clear_win()
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[4])
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[4])
         check = verdict.sibling_checks[0]
         assert check.passed is True
         assert check.incumbent is None and check.candidate is None
@@ -697,7 +570,7 @@ class TestActivationGate:
     def test_a_sibling_present_on_one_arm_only_is_not_blamed_on_the_candidate(self, tmp_path: Path) -> None:
         incumbent = {f"r{i}": [("yes", "yes" if i < 3 else "no"), ("yes", "yes")] for i in range(12)}
         candidate = {f"r{i}": [("yes", "yes")] for i in range(12)}  # no sibling criterion at all
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[1])
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate), sibling_indices=[1])
         check = verdict.sibling_checks[0]
         assert check.passed is True
         assert check.note is not None and "one arm only" in check.note
@@ -706,15 +579,15 @@ class TestActivationGate:
         # A 90% interval labelled 95% is the failure this pins: the renderer reads the width off
         # the verdict rather than assuming one.
         incumbent, candidate = self._clear_win()
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate), confidence=0.90)
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate), confidence=0.90)
         assert verdict.confidence == 0.90
-        assert verdict.n_resamples == _FAST_RESAMPLES
+        assert verdict.n_resamples == FAST_RESAMPLES
         assert "90% CI" in render_markdown(verdict)
 
     def test_is_deterministic_for_a_seed(self, tmp_path: Path) -> None:
         incumbent, candidate = self._clear_win()
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        assert _gate(run_dirs, seed=3) == _gate(run_dirs, seed=3)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        assert activation_verdict(run_dirs, seed=3) == activation_verdict(run_dirs, seed=3)
 
 
 class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
@@ -758,7 +631,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
         Built by doing to a real verdict exactly what a mistyped `model_copy(update=)` would.
         """
         lone = {"r0": [("yes", "yes")]}
-        verdict = _gate(_shared_dirs(tmp_path, lone, lone))
+        verdict = activation_verdict(shared_dirs(tmp_path, lone, lone))
         typo = verdict.model_copy(update={"promotd": True})  # CE048 scans src/ only; this IS the defect
 
         assert set(typo.model_dump()) == set(type(typo).model_fields), (
@@ -771,7 +644,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
     def test_a_promoted_activation_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
         incumbent = {f"r{i}": [("yes", "no")] for i in range(12)}
         candidate = {f"r{i}": [("yes", "yes")] for i in range(12)}
-        decided = holm_promote([_gate(_shared_dirs(tmp_path, incumbent, candidate))])[0]
+        decided = holm_promote([activation_verdict(shared_dirs(tmp_path, incumbent, candidate))])[0]
 
         self._assert_no_attribute_outside_the_model(decided)
         assert decided.promoted is True
@@ -782,7 +655,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
     def test_an_unfamilied_activation_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
         # The `p_value is None` branch, which writes three fields rather than four.
         lone = {"r0": [("yes", "yes")]}
-        decided = holm_promote([_gate(_shared_dirs(tmp_path, lone, lone))])[0]
+        decided = holm_promote([activation_verdict(shared_dirs(tmp_path, lone, lone))])[0]
 
         self._assert_no_attribute_outside_the_model(decided)
         assert decided.p_value is None
@@ -790,7 +663,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
         assert decided.holm_alpha == DEFAULT_ALPHA
 
     def test_a_promoted_execution_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
-        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+        decided = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **WINNER))])[0]
 
         self._assert_no_attribute_outside_the_model(decided)
         assert decided.promoted is True
@@ -799,7 +672,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
 
     def test_a_refused_execution_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
         one_row = {"incumbent": {"r1": [0.2, 0.3]}, "candidate": {"r1": [0.7, 0.8]}}
-        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **one_row))])[0]
+        decided = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **one_row))])[0]
 
         self._assert_no_attribute_outside_the_model(decided)
         assert decided.gate_refusal is not None
@@ -916,7 +789,7 @@ class TestRenderMarkdown:
 
 # The package's own contents, DERIVED — a new module joins every layering test at once, without
 # anyone remembering to extend a tuple. Names are dotted and package-relative to `coder_eval`
-# (`_module_path`'s docstring says why). `iter_modules` does not yield `__init__` but it DOES yield
+# (`module_path`'s docstring says why). `iter_modules` does not yield `__init__` but it DOES yield
 # a private module, so the leading-underscore filter is load-bearing rather than defensive: a future
 # `_helpers.py` is a file-local detail, not a family member with a rank.
 _PACKAGE_MODULES = {
@@ -975,21 +848,6 @@ assert _rank_coverage_gap(_PACKAGE_MODULES) == ([], []), (
 assert _LADDER_EXEMPT <= _PACKAGE_MODULES, f"the ladder-exempt sidecar is missing: {sorted(_LADDER_EXEMPT)}"
 
 
-def _module_path(module: str) -> Path:
-    """The file behind a family module name.
-
-    Names are DOTTED and package-relative to `coder_eval` — `"optimize.load"`, never `"load"` and
-    never the pre-package `"optimize_load"` — which is what keeps the rank test's
-    `imported.removeprefix("coder_eval.")` comparable with `_OPTIMIZE_RANKS`'s keys. The one flat
-    sibling, `"reports_optimize"`, splits into a single component and resolves at the top level.
-    """
-    return Path(__file__).parent.parent.joinpath("src", "coder_eval", *module.split(".")).with_suffix(".py")
-
-
-def _module_source(module: str) -> str:
-    return _module_path(module).read_text(encoding="utf-8")
-
-
 def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None) -> dict[str, set[str]]:
     """`coder_eval` imports in a module, keyed by module path.
 
@@ -1007,8 +865,8 @@ def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None
     tests would pass over a broken boundary — the same fail-open shape, on what CLAUDE.md calls
     out as pinned "by a test, not by this sentence".
     """
-    path = str(_module_path(module).resolve())
-    tree = ast.parse(_module_source(module))
+    path = str(module_path(module).resolve())
+    tree = ast.parse(module_source(module))
     guarded: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
@@ -1055,7 +913,7 @@ def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
     }, deferred
 
     # No filesystem call anywhere in the module.
-    tree = ast.parse(_module_source("reports_optimize"))
+    tree = ast.parse(module_source("reports_optimize"))
     called: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -1172,7 +1030,7 @@ def test_the_derived_package_module_set_is_the_family_and_every_file_exists() ->
     assert set(_OPTIMIZE_RANKS) | set(_LADDER_EXEMPT) == _PACKAGE_MODULES, sorted(_PACKAGE_MODULES)
     assert len(_PACKAGE_MODULES) == 7, sorted(_PACKAGE_MODULES)
     for name in _PACKAGE_MODULES:
-        assert _module_path(name).is_file(), name
+        assert module_path(name).is_file(), name
 
 
 def test_the_import_graph_respects_the_rank_order() -> None:
@@ -1225,40 +1083,16 @@ def test_module_imports_no_cli_machinery() -> None:
     # All THREE modules: the claim is about the whole surface the skill's snippets import, and the
     # gate's presentation and sidecar halves are exactly as reachable from a snippet as it is.
     for module in _OPTIMIZE_MODULES:
-        source = _module_source(module)
+        source = module_source(module)
         for banned in ("import typer", "import rich", "from typer", "from rich", "coder_eval.cli"):
             assert banned not in source, f"{module} imports {banned!r} — it is a library, not a CLI surface"
 
 
-def _costed_result(
-    row_id: str, labels: list[tuple[str, str]], *, cost: float | None, duration: float
-) -> EvaluationResult:
-    """A row result carrying cost and duration, for the guardrail tests."""
-    result = _eval_result(row_id, labels)
-    return result.model_copy(
-        update={
-            "duration_seconds": duration,
-            "total_token_usage": TokenUsage(total_cost_usd=cost) if cost is not None else None,
-        }
-    )
-
-
-def _cost_rows(per_row: dict[str, list[float]], *, duration: float = 10.0) -> dict[str, list[EvaluationResult]]:
-    return {
-        rid: [_costed_result(rid, [("yes", "yes")], cost=c, duration=duration) for c in costs]
-        for rid, costs in per_row.items()
-    }
-
-
 def _duration_rows(per_row: dict[str, list[float]]) -> dict[str, list[EvaluationResult]]:
     return {
-        rid: [_costed_result(rid, [("yes", "yes")], cost=1.0, duration=d) for d in durations]
+        rid: [costed_result(rid, [("yes", "yes")], cost=1.0, duration=d) for d in durations]
         for rid, durations in per_row.items()
     }
-
-
-def _cost_check(checks: list[GuardrailCheck]) -> GuardrailCheck:
-    return next(c for c in checks if c.name.startswith("cost"))
 
 
 class TestNoiseFloorMde:
@@ -1270,40 +1104,40 @@ class TestNoiseFloorMde:
             run_dir = tmp_path / f"run-{i}"
             for row in range(10):
                 observed = "yes" if (row + i) % 3 else "no"
-                _write_row(run_dir, "incumbent", f"r{row}", _eval_result(f"r{row}", [("yes", observed)]))
+                write_row(run_dir, "incumbent", f"r{row}", eval_result(f"r{row}", [("yes", observed)]))
             run_dirs.append(run_dir)
 
         mde = noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0)
         assert mde is not None and mde > 0.0
 
     def test_none_with_a_single_invocation(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {f"r{i}": [("yes", "yes")] for i in range(6)}, invocations=1)
+        run_dirs = write_arm(tmp_path, "incumbent", {f"r{i}": [("yes", "yes")] for i in range(6)}, invocations=1)
         assert noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0) is None
 
     def test_none_with_fewer_than_two_rows(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=3)
+        run_dirs = write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=3)
         assert noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0) is None
 
     def test_an_odd_invocation_count_splits_two_one(self, tmp_path: Path) -> None:
         # 3 invocations must still produce a floor (a 2/1 split), not None.
-        run_dirs = _write_arm(tmp_path, "incumbent", {f"r{i}": [("yes", "yes")] for i in range(6)}, invocations=3)
+        run_dirs = write_arm(tmp_path, "incumbent", {f"r{i}": [("yes", "yes")] for i in range(6)}, invocations=3)
         assert noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0) == 0.0
 
 
 class TestResolveModel:
     def test_returns_the_single_model_used(self, tmp_path: Path) -> None:
-        rows = {"r0": [_eval_result("r0", [("yes", "yes")]).model_copy(update={"model_used": "claude-haiku-4-5"})]}
+        rows = {"r0": [eval_result("r0", [("yes", "yes")]).model_copy(update={"model_used": "claude-haiku-4-5"})]}
         assert resolve_model(rows) == "claude-haiku-4-5"
 
     def test_returns_none_when_rows_disagree(self, tmp_path: Path) -> None:
         rows = {
-            "r0": [_eval_result("r0", [("yes", "yes")]).model_copy(update={"model_used": "claude-haiku-4-5"})],
-            "r1": [_eval_result("r1", [("yes", "yes")]).model_copy(update={"model_used": "claude-sonnet-5"})],
+            "r0": [eval_result("r0", [("yes", "yes")]).model_copy(update={"model_used": "claude-haiku-4-5"})],
+            "r1": [eval_result("r1", [("yes", "yes")]).model_copy(update={"model_used": "claude-sonnet-5"})],
         }
         assert resolve_model(rows) is None
 
     def test_returns_none_when_unset(self) -> None:
-        assert resolve_model({"r0": [_eval_result("r0", [("yes", "yes")])]}) is None
+        assert resolve_model({"r0": [eval_result("r0", [("yes", "yes")])]}) is None
 
 
 class TestCostLatencyGuardrails:
@@ -1317,10 +1151,10 @@ class TestCostLatencyGuardrails:
         `reports_stats.median_or_none`. Asserted here because the claim is about the CALLERS; the
         helper's own tests cannot see whether their messages survive it.
         """
-        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
-        candidate = _cost_rows({f"r{i}": [float("nan")] for i in range(12)})
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [float("nan")] for i in range(12)})
 
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.candidate is None, "a corrupt arm must read as unmeasured, never as a nan level"
         assert check.relative_change is None
         assert check.passed is True, "an unevaluable guardrail may not veto — it has measured nothing"
@@ -1328,17 +1162,17 @@ class TestCostLatencyGuardrails:
 
     def test_one_corrupt_row_does_not_poison_the_rest_of_the_arm(self) -> None:
         # The row is dropped, not the arm: eleven clean rows still produce a real comparison.
-        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
-        candidate = _cost_rows({f"r{i}": [2.0] for i in range(11)} | {"r11": [float("inf")]})
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [2.0] for i in range(11)} | {"r11": [float("inf")]})
 
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.candidate == 2.0
         assert check.passed is False
 
     def test_fails_on_a_large_consistent_increase(self) -> None:
-        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
-        candidate = _cost_rows({f"r{i}": [2.0] for i in range(12)})
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [2.0] for i in range(12)})
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.passed is False
         assert check.ci_low is not None and check.ci_low > MATERIALITY_FLOOR * 1.0
 
@@ -1357,23 +1191,23 @@ class TestCostLatencyGuardrails:
         this test while proving nothing about the redesign.
         """
         rng = random.Random(13)
-        incumbent = _cost_rows({f"r{i}": [max(0.05, rng.gauss(1.0, 0.25))] for i in range(12)})
-        candidate = _cost_rows({f"r{i}": [max(0.05, rng.gauss(1.0, 0.25))] for i in range(12)})
+        incumbent = cost_rows({f"r{i}": [max(0.05, rng.gauss(1.0, 0.25))] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [max(0.05, rng.gauss(1.0, 0.25))] for i in range(12)})
 
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.relative_change is not None and check.relative_change > 0.15  # a fixed rule fires
         assert check.passed is True
         assert check.ci_low is not None and check.ci_low < 0.0  # the interval contains zero
 
-        floorless = _cost_check(
+        floorless = cost_check(
             cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate, materiality=0.0)
         )
         assert floorless.passed is True, "the interval must absorb this, not the materiality floor"
 
     def test_reports_the_interval_not_just_the_verdict(self) -> None:
-        incumbent = _cost_rows({f"r{i}": [1.0, 1.1] for i in range(8)})
-        candidate = _cost_rows({f"r{i}": [1.2, 1.3] for i in range(8)})
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        incumbent = cost_rows({f"r{i}": [1.0, 1.1] for i in range(8)})
+        candidate = cost_rows({f"r{i}": [1.2, 1.3] for i in range(8)})
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.ci_low is not None and check.ci_high is not None
         assert check.ci_low <= check.ci_high
 
@@ -1382,38 +1216,38 @@ class TestCostLatencyGuardrails:
         # fails. Driven off MATERIALITY_FLOOR, never a hardcoded number.
         small = MATERIALITY_FLOOR / 2.0
         large = MATERIALITY_FLOOR * 2.0
-        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
-        assert _cost_check(
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        assert cost_check(
             cost_latency_guardrails(
-                incumbent_rows=incumbent, candidate_rows=_cost_rows({f"r{i}": [1.0 + small] for i in range(12)})
+                incumbent_rows=incumbent, candidate_rows=cost_rows({f"r{i}": [1.0 + small] for i in range(12)})
             )
         ).passed
-        assert not _cost_check(
+        assert not cost_check(
             cost_latency_guardrails(
-                incumbent_rows=incumbent, candidate_rows=_cost_rows({f"r{i}": [1.0 + large] for i in range(12)})
+                incumbent_rows=incumbent, candidate_rows=cost_rows({f"r{i}": [1.0 + large] for i in range(12)})
             )
         ).passed
 
     def test_with_no_recorded_cost_passes_with_a_note(self) -> None:
-        incumbent = _cost_rows({f"r{i}": [None] for i in range(6)})  # type: ignore[arg-type]
-        candidate = _cost_rows({f"r{i}": [None] for i in range(6)})  # type: ignore[arg-type]
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        incumbent = cost_rows({f"r{i}": [None] for i in range(6)})  # type: ignore[arg-type]
+        candidate = cost_rows({f"r{i}": [None] for i in range(6)})  # type: ignore[arg-type]
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.passed is True
         assert check.incumbent is None
         assert check.note is not None and "not evaluated" in check.note
 
     def test_a_zero_incumbent_does_not_divide(self) -> None:
-        incumbent = _cost_rows({f"r{i}": [0.0] for i in range(12)})
-        candidate = _cost_rows({f"r{i}": [0.5] for i in range(12)})
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        incumbent = cost_rows({f"r{i}": [0.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [0.5] for i in range(12)})
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.relative_change is None
         assert check.passed is True
         assert check.note is not None and "the incumbent measured zero" in check.note
 
     def test_notes_an_asymmetric_measurement_count(self) -> None:
-        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
-        candidate = _cost_rows({f"r{i}": ([1.0] if i else [None]) for i in range(12)})  # type: ignore[arg-type]
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": ([1.0] if i else [None]) for i in range(12)})  # type: ignore[arg-type]
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.note is not None and "incumbent row(s) vs" in check.note
 
     def test_latency_is_guarded_too(self) -> None:
@@ -1437,11 +1271,11 @@ class TestMdeAndGuardrailsInTheVerdict:
             for row in range(10):
                 incumbent_observed = "yes" if (row + i) % 3 else "no"
                 candidate_observed = "yes" if (row + i + 1) % 3 else "no"
-                _write_row(run_dir, "incumbent", f"r{row}", _eval_result(f"r{row}", [("yes", incumbent_observed)]))
-                _write_row(run_dir, "candidate", f"r{row}", _eval_result(f"r{row}", [("yes", candidate_observed)]))
+                write_row(run_dir, "incumbent", f"r{row}", eval_result(f"r{row}", [("yes", incumbent_observed)]))
+                write_row(run_dir, "candidate", f"r{row}", eval_result(f"r{row}", [("yes", candidate_observed)]))
             run_dirs.append(run_dir)
 
-        verdict = _gate(run_dirs)
+        verdict = activation_verdict(run_dirs)
         assert verdict.mde is not None and verdict.mde > 0.0
         assert verdict.mean_diff is not None and abs(verdict.mean_diff) < verdict.mde
         assert any("minimum detectable effect" in note for note in verdict.notes)
@@ -1449,30 +1283,30 @@ class TestMdeAndGuardrailsInTheVerdict:
     def test_gate_notes_when_the_mde_cannot_be_computed(self, tmp_path: Path) -> None:
         incumbent = {f"r{i}": [("yes", "yes" if i < 3 else "no")] for i in range(12)}
         candidate = {f"r{i}": [("yes", "yes")] for i in range(12)}
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate, invocations=1))
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate, invocations=1))
         assert verdict.mde is None
         assert any("could not be computed" in note for note in verdict.notes)
 
     def test_gate_fills_guardrails_from_the_scored_rows(self, tmp_path: Path) -> None:
         incumbent, candidate = ({f"r{i}": [("yes", "yes")] for i in range(12)} for _ in range(2))
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        verdict = _gate(run_dirs)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        verdict = activation_verdict(run_dirs)
         assert [c.name for c in verdict.guardrails] == ["cost (USD/row)", "latency (seconds/row)"]
         # These fixtures record no cost, so the cost guardrail must pass WITH A NOTE, never bare.
         assert all(c.passed for c in verdict.guardrails)
-        assert _cost_check(verdict.guardrails).note is not None
+        assert cost_check(verdict.guardrails).note is not None
 
     def test_render_markdown_prints_the_mde_and_every_guardrail_note(self, tmp_path: Path) -> None:
         incumbent, candidate = ({f"r{i}": [("yes", "yes")] for i in range(12)} for _ in range(2))
-        text = render_markdown(holm_promote([_gate(_shared_dirs(tmp_path, incumbent, candidate))])[0])
+        text = render_markdown(holm_promote([activation_verdict(shared_dirs(tmp_path, incumbent, candidate))])[0])
         assert "Minimum detectable effect: 0.000" in text
         assert "cost (USD/row)" in text
         assert "not evaluated" in text
         assert "latency (seconds/row)" in text
 
     def test_render_markdown_shows_the_guardrail_interval(self) -> None:
-        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
-        candidate = _cost_rows({f"r{i}": [2.0] for i in range(12)})
+        incumbent = cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = cost_rows({f"r{i}": [2.0] for i in range(12)})
         verdict = ActivationGateVerdict(
             incumbent_variant="incumbent",
             candidate_variant="cand",
@@ -1496,84 +1330,11 @@ class TestMdeAndGuardrailsInTheVerdict:
         assert "x incumbent" in text
 
 
-def _headline_line(text: str) -> str:
-    """The rendered block's headline, unwrapped from its bold markers.
-
-    Named for what it does — it EXTRACTS a line from rendered markdown. Not to be confused with
-    ``reports_optimize._headline``, which BUILDS the string this reads back; assertions here read
-    ``_headline_line(render_markdown(...))``, and one name for both jobs made that line lie.
-
-    Reading the headline LINE rather than asserting a substring is absent from the whole block:
-    "PROMOTED" is a substring of "NOT PROMOTED", so a `not in` over the block is either wrong or a
-    no-op depending on the fixture, and both failure modes already exist in this file.
-
-    It got sharper once the failed-check note began quoting the headline's own words ("the rendered
-    headline reports it as BLOCKED BY A GUARDRAIL"): `"BLOCKED" not in block` now matches that
-    SENTENCE and passes on a block whose headline is something else entirely. Assert on the
-    discriminating line, never on a substring of the whole page.
-    """
-    return next(line for line in text.splitlines() if line.startswith("**")).strip("*")
-
-
-def _failing_cost_check() -> GuardrailCheck:
-    """A measured, material cost breach — the check both tracks must now veto on."""
-    return GuardrailCheck(
-        name="cost (USD/row)",
-        incumbent=1.0,
-        candidate=2.0,
-        relative_change=1.0,
-        tolerance=MATERIALITY_FLOOR,
-        ci_low=0.6,
-        ci_high=1.4,
-        passed=False,
-    )
-
-
-def _parity_activation(**overrides) -> ActivationGateVerdict:
-    """A separating activation verdict, ready for `holm_promote`."""
-    base = {
-        "incumbent_variant": "incumbent",
-        "candidate_variant": "cand",
-        "suite_id": SUITE,
-        "criterion_index": 0,
-        "confidence": 0.95,
-        "n_resamples": BOOTSTRAP_RESAMPLES,
-        "rows_paired": 12,
-        "rows_excluded": 0,
-        "incumbent_f1": 0.4,
-        "candidate_f1": 0.9,
-        "mean_diff": 0.5,
-        "ci_low": 0.2,
-        "ci_high": 0.75,
-        "p_value": 0.001,
-    }
-    return ActivationGateVerdict(**{**base, **overrides})
-
-
-def _parity_execution(**overrides) -> ExecutionGateVerdict:
-    """The execution twin of `_parity_activation`, on the same numbers."""
-    base = {
-        "incumbent_variant": "incumbent",
-        "candidate_variant": "cand",
-        "suite_id": EXEC_SUITE,
-        "confidence": 0.95,
-        "n_resamples": BOOTSTRAP_RESAMPLES,
-        "rows_paired": 12,
-        "rows_excluded": 0,
-        "mean_diff": 0.5,
-        "ci_low": 0.2,
-        "ci_high": 0.75,
-        "effect_size": 1.1,
-        "p_value": 0.001,
-    }
-    return ExecutionGateVerdict(**{**base, **overrides})
-
-
 # The two tracks' (gate, verdict factory) pairs, so a parity claim is asserted over both rather
 # than written twice and allowed to drift — which is the defect this whole phase closes.
 _TRACKS = [
-    pytest.param(holm_promote, _parity_activation, id="activation"),
-    pytest.param(holm_promote_execution, _parity_execution, id="execution"),
+    pytest.param(holm_promote, parity_activation, id="activation"),
+    pytest.param(holm_promote_execution, parity_execution, id="execution"),
 ]
 
 
@@ -1582,7 +1343,7 @@ class TestPromotionIsNotOverstated:
 
     # The same separating verdict the cross-track parity class builds. It was a byte-identical
     # second copy of that base dict, which is the duplication `_TRACKS` exists to remove.
-    _verdict = staticmethod(_parity_activation)
+    _verdict = staticmethod(parity_activation)
 
     def test_an_interval_containing_zero_never_promotes(self) -> None:
         # Holm can reject at a corrected alpha while the reported interval still contains zero.
@@ -1593,7 +1354,7 @@ class TestPromotionIsNotOverstated:
         assert any("still contains zero" in note for note in decided.notes)
 
     def test_a_failed_guardrail_never_renders_as_promoted(self) -> None:
-        decided = holm_promote([self._verdict(guardrails=[_failing_cost_check()])])[0]
+        decided = holm_promote([self._verdict(guardrails=[failing_cost_check()])])[0]
         # INVERTED, deliberately, and kept rather than deleted because it is the REACHABILITY
         # PROOF for the BLOCKED rung: it is the one test that builds a verdict which separates,
         # clears Holm, and carries a failing guardrail. `promoted` used to read True here — the
@@ -1607,7 +1368,7 @@ class TestPromotionIsNotOverstated:
         text = render_markdown(decided)
         # On the HEADLINE, not merely somewhere in the block — the notes quote the headline's own
         # words, so a whole-page substring test would pass on the wrong rung.
-        assert _headline_line(text).startswith("BLOCKED BY A GUARDRAIL —")
+        assert headline_line(text).startswith("BLOCKED BY A GUARDRAIL —")
         assert "cost (USD/row)" in text
         assert "Do not promote on this block" in text
         # And the block names WHICH check vetoed, so the reader is not left to diff the lists.
@@ -1619,7 +1380,7 @@ class TestPromotionIsNotOverstated:
         # is the commonest shape on a suite whose turns recorded no cost.
         decided = holm_promote([self._verdict(guardrails=[])])[0]
         assert decided.promoted is True
-        assert _headline_line(render_markdown(decided)) == "PROMOTED"
+        assert headline_line(render_markdown(decided)) == "PROMOTED"
 
     def test_a_separated_blocked_candidate_holm_never_rejected_reads_not_promoted(self) -> None:
         """The BLOCKED rung must not OVER-fire — the trap on the other side of `promoted`.
@@ -1645,7 +1406,7 @@ class TestPromotionIsNotOverstated:
         for verdict in decided:
             assert verdict.separated is True, "the statistic did separate"
             assert verdict.holm_rejected is False, "but the family correction rejected nothing"
-            assert _headline_line(render_markdown(verdict)) == "NOT PROMOTED"
+            assert headline_line(render_markdown(verdict)) == "NOT PROMOTED"
 
     def test_a_passing_guardrail_still_reads_promoted(self) -> None:
         passing = GuardrailCheck(
@@ -1659,7 +1420,7 @@ class TestPromotionIsNotOverstated:
             passed=True,
         )
         text = render_markdown(holm_promote([self._verdict(guardrails=[passing])])[0])
-        assert _headline_line(text) == "PROMOTED"
+        assert headline_line(text) == "PROMOTED"
 
 
 class TestBothTracksMeanTheSameThingByPromoted:
@@ -1674,7 +1435,7 @@ class TestBothTracksMeanTheSameThingByPromoted:
 
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
     def test_a_failing_guardrail_forces_promoted_false(self, gate, build) -> None:
-        decided = gate([build(guardrails=[_failing_cost_check()])])[0]
+        decided = gate([build(guardrails=[failing_cost_check()])])[0]
         assert decided.holm_rejected is True, "Holm did reject it"
         assert decided.separated is True, "and the statistic did separate"
         assert decided.promoted is False, "so the guardrail is what vetoed — on BOTH tracks"
@@ -1684,10 +1445,10 @@ class TestBothTracksMeanTheSameThingByPromoted:
         [
             # The list that is NOT the cost/latency guardrails on each track — the one whose
             # failure vetoes without being a "guardrail" by name.
-            pytest.param(holm_promote, _parity_activation, render_markdown, "sibling_checks", id="activation"),
+            pytest.param(holm_promote, parity_activation, render_markdown, "sibling_checks", id="activation"),
             pytest.param(
                 holm_promote_execution,
-                _parity_execution,
+                parity_execution,
                 render_execution_markdown,
                 "integrity_checks",
                 id="execution",
@@ -1716,12 +1477,12 @@ class TestBothTracksMeanTheSameThingByPromoted:
         decided = gate([build(**{vetoing: [failing]})])[0]
         assert decided.separated is True and decided.holm_rejected is True, "it WON the comparison"
         assert decided.promoted is False, "and the check vetoed it"
-        assert _headline_line(render(decided)).startswith("BLOCKED BY A GUARDRAIL")
-        assert "the check that vetoed" in _headline_line(render(decided))
+        assert headline_line(render(decided)).startswith("BLOCKED BY A GUARDRAIL")
+        assert "the check that vetoed" in headline_line(render(decided))
 
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
     def test_the_blocked_block_names_the_failing_check(self, gate, build) -> None:
-        decided = gate([build(guardrails=[_failing_cost_check()])])[0]
+        decided = gate([build(guardrails=[failing_cost_check()])])[0]
         assert any("cost (USD/row) FAILED" in note for note in decided.notes)
 
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
@@ -1734,7 +1495,7 @@ class TestBothTracksMeanTheSameThingByPromoted:
         reader to fix cost when the real problem is power. The failing check is still visible in
         the rendered Guardrails list on this path — only the CLAIM is withheld.
         """
-        decided = gate([build(p_value=0.9, guardrails=[_failing_cost_check()])])[0]
+        decided = gate([build(p_value=0.9, guardrails=[failing_cost_check()])])[0]
         assert decided.holm_rejected is False
         assert decided.promoted is False
         assert not any("FAILED" in note for note in decided.notes), decided.notes
@@ -1749,16 +1510,16 @@ class TestBothTracksMeanTheSameThingByPromoted:
             # whatever the verdict arrived with, so setting the field directly is unreachable
             # there — a suite whose floor exceeds its Holm threshold is the reachable state.
             # `execution_gate` sets the field itself and `holm_promote_execution` only reads it.
-            pytest.param(holm_promote, _parity_activation, {"p_floor": 0.9, "n_discordant": 1}, id="activation"),
+            pytest.param(holm_promote, parity_activation, {"p_floor": 0.9, "n_discordant": 1}, id="activation"),
             pytest.param(
-                holm_promote_execution, _parity_execution, {"gate_refusal": "no comparison was made"}, id="execution"
+                holm_promote_execution, parity_execution, {"gate_refusal": "no comparison was made"}, id="execution"
             ),
         ],
     )
     def test_the_failed_check_note_stays_off_a_refused_verdict(self, gate, build, refusing) -> None:
         # Under a refusal the headline is not a decision at all, so a note asserting the block
         # "reports it as BLOCKED BY A GUARDRAIL" contradicts the line above it.
-        decided = gate([build(guardrails=[_failing_cost_check()], **refusing)])[0]
+        decided = gate([build(guardrails=[failing_cost_check()], **refusing)])[0]
         assert decided.gate_refusal is not None, "the fixture must actually refuse"
         assert decided.promoted is False
         assert not any("FAILED" in note for note in decided.notes), decided.notes
@@ -1782,7 +1543,7 @@ class TestBothTracksMeanTheSameThingByPromoted:
 
     # Deliberately NOT parametrized over `_TRACKS`: `separated` is a property of the VERDICT and
     # no gate is involved, so pairing it with a gate would run every case twice for nothing.
-    @pytest.mark.parametrize("build", [_parity_activation, _parity_execution], ids=["activation", "execution"])
+    @pytest.mark.parametrize("build", [parity_activation, parity_execution], ids=["activation", "execution"])
     @pytest.mark.parametrize(
         ("mean_diff", "ci_low", "expected"),
         [
@@ -1798,11 +1559,6 @@ class TestBothTracksMeanTheSameThingByPromoted:
         assert build(mean_diff=mean_diff, ci_low=ci_low).separated is expected
 
 
-def _scored_result(row_id: str, score: float) -> EvaluationResult:
-    """A row result carrying a weighted_score plus one criterion scoring the same."""
-    return _eval_result(row_id, [("yes", "yes" if score >= 0.5 else "no")]).model_copy(update={"weighted_score": score})
-
-
 def _write_scored_arm(tmp_path: Path, variant: str, per_row: dict[str, list[float]]) -> list[Path]:
     """One arm whose row scores differ per run dir, so the replicate reduction is exercised."""
     invocations = max(len(v) for v in per_row.values())
@@ -1811,7 +1567,7 @@ def _write_scored_arm(tmp_path: Path, variant: str, per_row: dict[str, list[floa
         run_dir = tmp_path / f"run-{i}"
         for row_id, scores in per_row.items():
             if i < len(scores):
-                _write_row(run_dir, variant, row_id, _scored_result(row_id, scores[i]))
+                write_row(run_dir, variant, row_id, scored_result(row_id, scores[i]))
         run_dirs.append(run_dir)
     return run_dirs
 
@@ -1859,7 +1615,7 @@ class TestCriterionIndexIsBoundedBelow:
     """
 
     def test_activation_gate_rejects_a_negative_index(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
             activation_gate(
                 incumbent_run_dirs=run_dirs,
@@ -1868,31 +1624,31 @@ class TestCriterionIndexIsBoundedBelow:
                 candidate_variant="candidate",
                 suite_id=SUITE,
                 criterion_index=-1,
-                n_resamples=_FAST_RESAMPLES,
+                n_resamples=FAST_RESAMPLES,
             )
 
     def test_execution_gate_rejects_a_negative_index(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -2"):
-            _exec_gate(run_dir, engagement_criterion_index=-2)
+            exec_gate(run_dir, engagement_criterion_index=-2)
 
     def test_arm_row_scores_rejects_a_negative_index(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
             arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=-1)
 
     def test_cost_quality_points_rejects_a_negative_index(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
             cost_quality_points(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=-1)
 
     def test_noise_floor_mde_rejects_a_negative_index(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
             noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=-1)
 
     def test_measure_noise_floor_rejects_a_negative_index(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
             measure_noise_floor(
                 run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=-1, model="m"
@@ -1900,14 +1656,14 @@ class TestCriterionIndexIsBoundedBelow:
 
     def test_none_stays_legal_on_the_index_optional_entry_points(self, tmp_path: Path) -> None:
         # `None` is the documented "use the row's weighted_score" sentinel, not a missing value.
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         assert arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE) != []
         assert cost_quality_points(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE) is not None
 
     def test_an_over_long_index_still_degrades_rather_than_raising(self, tmp_path: Path) -> None:
         # The anti-over-fix pin: only the LOWER bound became an error. Rows legitimately differ in
         # criteria count, so an index past the end must keep skipping the row.
-        run_dirs = _write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "incumbent", {"r1": [("yes", "yes")]})
         scores = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=9)
         assert scores[0].row_scores == {}
 
@@ -1922,8 +1678,8 @@ class TestCriterionIndexIsBoundedBelow:
         computed over a silently different, silently smaller set of rows.
         """
         run_dir = tmp_path / "run-0"
-        _write_row(run_dir, "incumbent", "r1", _eval_result("r1", [("yes", "no")], extra_basic=True))
-        _write_row(run_dir, "incumbent", "r2", _eval_result("r2", [("yes", "yes")]))
+        write_row(run_dir, "incumbent", "r1", eval_result("r1", [("yes", "no")], extra_basic=True))
+        write_row(run_dir, "incumbent", "r2", eval_result("r2", [("yes", "yes")]))
 
         rows = load_suite_rows(run_dir, "incumbent", SUITE)
         # What `-1` would have selected: `file_check` on r1 (dropped by label_pairs, so the row
@@ -1965,7 +1721,7 @@ class TestArmRowScores:
         run_dir = tmp_path / "run-0"
         for variant, score in (("incumbent", 0.4), ("cand-a", 0.9)):
             for row in ("r1", "r2"):
-                _write_row(run_dir, variant, row, _scored_result(row, score))
+                write_row(run_dir, variant, row, scored_result(row, score))
 
         arms = arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent", "cand-a"], suite_id=SUITE)
         assert [a.variant_id for a in arms] == ["incumbent", "cand-a"]
@@ -1981,14 +1737,14 @@ class TestArmRowScores:
 
     def test_reads_a_criterion_score_when_given_an_index(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run-0"
-        _write_row(run_dir, "incumbent", "r1", _eval_result("r1", [("yes", "no"), ("yes", "yes")]))
+        write_row(run_dir, "incumbent", "r1", eval_result("r1", [("yes", "no"), ("yes", "yes")]))
         by_criterion = arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent"], suite_id=SUITE, criterion_index=1)
         assert by_criterion[0].row_scores == {"r1": 1.0}
 
     def test_a_row_without_a_score_is_absent_not_zero(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run-0"
-        _write_row(run_dir, "incumbent", "r1", _scored_result("r1", 0.8))
-        _write_row(run_dir, "incumbent", "r2", _eval_result("r2", [("yes", "yes")]))  # weighted_score is None
+        write_row(run_dir, "incumbent", "r1", scored_result("r1", 0.8))
+        write_row(run_dir, "incumbent", "r2", eval_result("r2", [("yes", "yes")]))  # weighted_score is None
         arms = arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent"], suite_id=SUITE)
         assert arms[0].row_scores == {"r1": 0.8}
 
@@ -2149,27 +1905,27 @@ class TestUnbalancedReplicates:
             for n, (row_id, labels) in enumerate(sorted(rows.items())):
                 # The incumbent's third invocation stopped part-way through.
                 if not (i == 2 and n >= truncate_after):
-                    _write_row(run_dir, "incumbent", row_id, _eval_result(row_id, labels))
-                _write_row(run_dir, "candidate", row_id, _eval_result(row_id, labels))
+                    write_row(run_dir, "incumbent", row_id, eval_result(row_id, labels))
+                write_row(run_dir, "candidate", row_id, eval_result(row_id, labels))
             run_dirs.append(run_dir)
         return run_dirs
 
     def test_identical_arms_do_not_separate_when_one_run_was_interrupted(self, tmp_path: Path) -> None:
-        verdict = _gate(self._dirs(tmp_path, truncate_after=12))
+        verdict = activation_verdict(self._dirs(tmp_path, truncate_after=12))
         assert verdict.incumbent_f1 == verdict.candidate_f1
         assert verdict.mean_diff == 0.0
         assert verdict.ci_low == verdict.ci_high == 0.0
         assert holm_promote([verdict])[0].promoted is False
 
     def test_the_trim_is_named_so_the_run_is_re_run_not_read(self, tmp_path: Path) -> None:
-        verdict = _gate(self._dirs(tmp_path, truncate_after=12))
+        verdict = activation_verdict(self._dirs(tmp_path, truncate_after=12))
         note = " ".join(verdict.notes)
         assert "different replicate counts" in note
         assert "trimmed to the smaller count" in note
         assert "Re-run it" in note
 
     def test_balanced_arms_are_untouched(self, tmp_path: Path) -> None:
-        verdict = _gate(self._dirs(tmp_path, truncate_after=20))
+        verdict = activation_verdict(self._dirs(tmp_path, truncate_after=20))
         assert not any("replicate counts" in n for n in verdict.notes)
         assert verdict.rows_paired == 20
 
@@ -2185,16 +1941,16 @@ class TestGuardrailScaleAndHoles:
         line that contradicts itself, and a real win killed by a unit mismatch.
         """
         costs = [0.01] * 11 + [1.00] * 9
-        incumbent = _cost_rows({f"r{i}": [c] for i, c in enumerate(costs)})
-        candidate = _cost_rows({f"r{i}": [c * 1.10] for i, c in enumerate(costs)})
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        incumbent = cost_rows({f"r{i}": [c] for i, c in enumerate(costs)})
+        candidate = cost_rows({f"r{i}": [c * 1.10] for i, c in enumerate(costs)})
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.passed is True, "a 10% increase must not breach a 25% floor"
 
     def test_a_genuinely_large_increase_still_fails_on_the_same_distribution(self) -> None:
         costs = [0.01] * 11 + [1.00] * 9
-        incumbent = _cost_rows({f"r{i}": [c] for i, c in enumerate(costs)})
-        candidate = _cost_rows({f"r{i}": [c * 2.0] for i, c in enumerate(costs)})
-        assert _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate)).passed is False
+        incumbent = cost_rows({f"r{i}": [c] for i, c in enumerate(costs)})
+        candidate = cost_rows({f"r{i}": [c * 2.0] for i, c in enumerate(costs)})
+        assert cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate)).passed is False
 
     def test_a_row_measured_on_one_arm_only_cannot_fabricate_a_zero(self) -> None:
         """`mean([])` is 0.0, so an unfiltered empty cluster reads as "this arm cost nothing".
@@ -2203,9 +1959,9 @@ class TestGuardrailScaleAndHoles:
         recorded on the rest — a 10x increase PASSING with ci_low = -0.1, the incumbent's own mean
         negated by draws where the candidate contributed nothing.
         """
-        incumbent = _cost_rows({f"r{i}": [0.10] for i in range(4)})
-        candidate = _cost_rows({f"r{i}": ([1.00] if i < 2 else [None]) for i in range(4)})  # type: ignore[arg-type]
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        incumbent = cost_rows({f"r{i}": [0.10] for i in range(4)})
+        candidate = cost_rows({f"r{i}": ([1.00] if i < 2 else [None]) for i in range(4)})  # type: ignore[arg-type]
+        check = cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
         assert check.ci_low is not None and check.ci_low > 0.0, "the interval must not include the fabricated zero"
         assert check.passed is False, "a 10x cost increase must breach the floor"
 
@@ -2218,11 +1974,11 @@ class TestAnErroredRowIsAHoleNotAZero:
         from the Pareto front — discarded for crashing, with no `—` in the matrix to show why.
         """
         run_dir = tmp_path / "run-0"
-        _write_row(run_dir, "a", "r0", _scored_result("r0", 0.5))
-        _write_row(run_dir, "a", "r1", _scored_result("r1", 0.5))
-        _write_row(run_dir, "b", "r0", _scored_result("r0", 0.5))
-        errored = _eval_result("r1", []).model_copy(update={"weighted_score": 0.0})
-        _write_row(run_dir, "b", "r1", errored)
+        write_row(run_dir, "a", "r0", scored_result("r0", 0.5))
+        write_row(run_dir, "a", "r1", scored_result("r1", 0.5))
+        write_row(run_dir, "b", "r0", scored_result("r0", 0.5))
+        errored = eval_result("r1", []).model_copy(update={"weighted_score": 0.0})
+        write_row(run_dir, "b", "r1", errored)
 
         arms = arm_row_scores(run_dirs=[run_dir], variant_ids=["a", "b"], suite_id=SUITE)
         assert arms[1].row_scores == {"r0": 0.5}, "the errored row must be ABSENT, not 0.0"
@@ -2238,8 +1994,8 @@ class TestGateResampleCount:
         incumbent = {f"r{i}": [("yes", "yes" if i < 3 else "no")] for i in range(12)}
         candidate = {f"r{i}": [("yes", "yes")] for i in range(12)}
         verdict = activation_gate(
-            incumbent_run_dirs=_shared_dirs(tmp_path, incumbent, candidate),
-            candidate_run_dirs=_shared_dirs(tmp_path / "b", incumbent, candidate),
+            incumbent_run_dirs=shared_dirs(tmp_path, incumbent, candidate),
+            candidate_run_dirs=shared_dirs(tmp_path / "b", incumbent, candidate),
             incumbent_variant="incumbent",
             candidate_variant="candidate",
             suite_id=SUITE,
@@ -2302,7 +2058,7 @@ class TestGateResampleCount:
         # reason that has nothing to do with alpha.
         alpha_literal = re.compile(r"0\.05(?!\d)")
         for module in (*_OPTIMIZE_MODULES, "reports_stats"):
-            source = _module_source(module)
+            source = module_source(module)
             literals = [ln for ln in source.splitlines() if alpha_literal.search(ln) and "DEFAULT_ALPHA = " not in ln]
             assert not literals, f"{module} still spells 0.05 outside DEFAULT_ALPHA: {literals}"
 
@@ -2376,12 +2132,12 @@ class TestBothTracksEmitTheResolutionNote:
     _FAMILY = GATE_MAX_FAMILY + 3
 
     def _activation_family(self, tmp_path: Path) -> list[ActivationGateVerdict]:
-        incumbent, candidate = _tiny_suite(6, 6)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        return [_gate(run_dirs) for _ in range(self._FAMILY)]
+        incumbent, candidate = tiny_suite(6, 6)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        return [activation_verdict(run_dirs) for _ in range(self._FAMILY)]
 
     def _execution_family(self, tmp_path: Path) -> list[ExecutionGateVerdict]:
-        return [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(self._FAMILY)]
+        return [exec_gate(exec_run_dir(tmp_path / f"g{i}", **WINNER)) for i in range(self._FAMILY)]
 
     @staticmethod
     def _note(verdict) -> str:
@@ -2397,11 +2153,11 @@ class TestBothTracksEmitTheResolutionNote:
     @pytest.mark.parametrize("track", ["activation", "execution"])
     def test_a_family_at_the_sized_limit_emits_nothing_on_either_track(self, tmp_path: Path, track: str) -> None:
         if track == "activation":
-            incumbent, candidate = _tiny_suite(6, 6)
-            run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-            decided = holm_promote([_gate(run_dirs) for _ in range(GATE_MAX_FAMILY)])
+            incumbent, candidate = tiny_suite(6, 6)
+            run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+            decided = holm_promote([activation_verdict(run_dirs) for _ in range(GATE_MAX_FAMILY)])
         else:
-            verdicts = [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(GATE_MAX_FAMILY)]
+            verdicts = [exec_gate(exec_run_dir(tmp_path / f"g{i}", **WINNER)) for i in range(GATE_MAX_FAMILY)]
             decided = holm_promote_execution(verdicts)
         assert not any(note.startswith("resolution:") for v in decided for note in v.notes)
 
@@ -2413,18 +2169,21 @@ class TestBothTracksEmitTheResolutionNote:
         verdict it happens to be decorating and reports a different resolution per member — for one
         family, decided at one threshold.
         """
-        # BELOW the fixtures' own default (`_FAST_RESAMPLES`), which is what makes this member the
+        # BELOW the fixtures' own default (`FAST_RESAMPLES`), which is what makes this member the
         # coarsest — a "coarse" count above it would be the family minimum for the wrong reason and
         # the test would pass against a `max`.
-        coarse = _FAST_RESAMPLES // 2
+        coarse = FAST_RESAMPLES // 2
         if track == "activation":
-            incumbent, candidate = _tiny_suite(6, 6)
-            run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-            verdicts = [_gate(run_dirs, n_resamples=coarse), *[_gate(run_dirs) for _ in range(self._FAMILY - 1)]]
+            incumbent, candidate = tiny_suite(6, 6)
+            run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+            verdicts = [
+                activation_verdict(run_dirs, n_resamples=coarse),
+                *[activation_verdict(run_dirs) for _ in range(self._FAMILY - 1)],
+            ]
             decided = holm_promote(verdicts)
         else:
-            first = _exec_gate(_exec_run_dir(tmp_path / "g0", **_WINNER), n_resamples=coarse)
-            rest = [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(1, self._FAMILY)]
+            first = exec_gate(exec_run_dir(tmp_path / "g0", **WINNER), n_resamples=coarse)
+            rest = [exec_gate(exec_run_dir(tmp_path / f"g{i}", **WINNER)) for i in range(1, self._FAMILY)]
             decided = holm_promote_execution([first, *rest])
         expected = TestResolutionDegradedNote._expected(self._FAMILY, coarse)
         # EVERY member reports the family's resolution, including the ones drawn more finely.
@@ -2435,9 +2194,11 @@ class TestBothTracksEmitTheResolutionNote:
     def test_it_survives_a_refusal_because_it_is_not_a_claim_about_the_candidate(self, tmp_path: Path) -> None:
         # Beside the family note and the resolution-floor note, outside the negative-result guard: a
         # statement about the draw count stays true whatever the refusal says.
-        incumbent, candidate = _tiny_suite(3, 3)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        verdicts = [_gate(run_dirs, n_resamples=TestGateRefusal._REFUSAL_RESAMPLES) for _ in range(self._FAMILY)]
+        incumbent, candidate = tiny_suite(3, 3)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        verdicts = [
+            activation_verdict(run_dirs, n_resamples=TestGateRefusal._REFUSAL_RESAMPLES) for _ in range(self._FAMILY)
+        ]
         decided = holm_promote(verdicts)[0]
         assert decided.gate_refusal is not None, "fixture drifted — this is the discreteness refusal"
         assert self._note(decided).startswith("resolution:")
@@ -2534,16 +2295,6 @@ class TestHolmThreshold:
         assert _holm_threshold([0.01] * 4, 0.01, 0.05) == pytest.approx(0.05 / 4)
 
 
-def _tiny_suite(positives: int, distractors: int) -> tuple[dict, dict]:
-    """A suite the incumbent misses entirely and the candidate gets perfect, plus shared distractors."""
-    incumbent = {f"p{i}": [("yes", "no")] for i in range(positives)}
-    candidate = {f"p{i}": [("yes", "yes")] for i in range(positives)}
-    for i in range(distractors):
-        incumbent[f"d{i}"] = [("no", "no")]
-        candidate[f"d{i}"] = [("no", "no")]
-    return incumbent, candidate
-
-
 class TestReusedRunDirIsRefused:
     """`run.json` is per-INVOCATION; the tree under it is APPEND-ONLY.
 
@@ -2558,8 +2309,8 @@ class TestReusedRunDirIsRefused:
     def _clean(self, tmp_path: Path) -> Path:
         run_dir = tmp_path / "run-0"
         for row in ("t1", "t2", "t3"):
-            _write_row(run_dir, "incumbent", row, _eval_result(row, [("yes", "no")]))
-            _write_row(run_dir, "candidate", row, _eval_result(row, [("yes", "yes")]))
+            write_row(run_dir, "incumbent", row, eval_result(row, [("yes", "no")]))
+            write_row(run_dir, "candidate", row, eval_result(row, [("yes", "yes")]))
         return run_dir
 
     def _gate_one(self, run_dir: Path, **kwargs):
@@ -2570,7 +2321,7 @@ class TestReusedRunDirIsRefused:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
             **kwargs,
         )
 
@@ -2579,8 +2330,8 @@ class TestReusedRunDirIsRefused:
         run_dir = self._clean(tmp_path)
         # The earlier invocation's train rows, still on disk, described by no run.json.
         for row in ("r1", "r2"):
-            _write_row(run_dir, "incumbent", row, _eval_result(row, [("yes", "no")]), record=False)
-            _write_row(run_dir, "candidate", row, _eval_result(row, [("yes", "yes")]), record=False)
+            write_row(run_dir, "incumbent", row, eval_result(row, [("yes", "no")]), record=False)
+            write_row(run_dir, "candidate", row, eval_result(row, [("yes", "yes")]), record=False)
 
         # Symmetric contamination: both arms pair the stale rows, so nothing else notices.
         assert set(load_suite_rows(run_dir, "incumbent", SUITE)) == {"t1", "t2", "t3", "r1", "r2"}
@@ -2600,7 +2351,7 @@ class TestReusedRunDirIsRefused:
         # A wiring refusal, so it joins the `NOT A RESULT` family — distinguishable in a ledger
         # from the discreteness refusal, which is the only one that ever carries a p.
         run_dir = self._clean(tmp_path)
-        _write_row(run_dir, "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        write_row(run_dir, "candidate", "stale", eval_result("stale", [("yes", "yes")]), record=False)
         decided = holm_promote([self._gate_one(run_dir)])[0]
         assert decided.p_value is None and decided.promoted is False
         text = render_markdown(decided)
@@ -2617,7 +2368,7 @@ class TestReusedRunDirIsRefused:
         """
         run_dir = self._clean(tmp_path)  # every row recorded at replicate 00
         for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
-            _write_row(run_dir, variant, "t1", _eval_result("t1", [("yes", observed)]), 1, record=False)
+            write_row(run_dir, variant, "t1", eval_result("t1", [("yes", observed)]), 1, record=False)
         verdict = self._gate_one(run_dir)
         assert verdict.gate_refusal is not None
         assert "t1/01" in verdict.gate_refusal
@@ -2627,7 +2378,7 @@ class TestReusedRunDirIsRefused:
         run_dir = self._clean(tmp_path)
         for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
             for row in ("t1", "t2", "t3"):
-                _write_row(run_dir, variant, row, _eval_result(row, [("yes", observed)]), 1)
+                write_row(run_dir, variant, row, eval_result(row, [("yes", observed)]), 1)
         assert self._gate_one(run_dir).gate_refusal is None
 
     def test_an_entry_with_no_replicate_index_covers_every_replicate_of_its_row(self, tmp_path: Path) -> None:
@@ -2635,7 +2386,7 @@ class TestReusedRunDirIsRefused:
         # means "cannot rule this one in", not "this one is stale".
         run_dir = self._clean(tmp_path)
         for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
-            _write_row(run_dir, variant, "t1", _eval_result("t1", [("yes", observed)]), 1, record=False)
+            write_row(run_dir, variant, "t1", eval_result("t1", [("yes", observed)]), 1, record=False)
         payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         for entry in payload["task_results"]:
             entry.pop("replicate_index", None)
@@ -2659,8 +2410,8 @@ class TestReusedRunDirIsRefused:
         inc_dir, cand_dir = tmp_path / "inc", tmp_path / "cand"
         for run_dir, variant, observed in ((inc_dir, "incumbent", "no"), (cand_dir, "candidate", "yes")):
             for row in ("t1", "t2", "t3"):
-                _write_row(run_dir, variant, row, _eval_result(row, [("yes", observed)]))
-            _write_row(run_dir, variant, "stale", _eval_result("stale", [("yes", observed)]), record=False)
+                write_row(run_dir, variant, row, eval_result(row, [("yes", observed)]))
+            write_row(run_dir, variant, "stale", eval_result("stale", [("yes", observed)]), record=False)
         verdict = activation_gate(
             incumbent_run_dirs=[inc_dir],
             candidate_run_dirs=[cand_dir],
@@ -2668,7 +2419,7 @@ class TestReusedRunDirIsRefused:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert verdict.gate_refusal is not None
         assert str(inc_dir) in verdict.gate_refusal and str(cand_dir) in verdict.gate_refusal
@@ -2676,7 +2427,7 @@ class TestReusedRunDirIsRefused:
     def test_more_than_three_stale_results_are_truncated_with_an_ellipsis(self, tmp_path: Path) -> None:
         run_dir = self._clean(tmp_path)
         for row in ("s1", "s2", "s3", "s4"):
-            _write_row(run_dir, "candidate", row, _eval_result(row, [("yes", "yes")]), record=False)
+            write_row(run_dir, "candidate", row, eval_result(row, [("yes", "yes")]), record=False)
         refusal = self._gate_one(run_dir).gate_refusal
         assert refusal is not None
         assert "4 result(s) across 4 row(s)" in refusal and "…" in refusal
@@ -2688,8 +2439,8 @@ class TestReusedRunDirIsRefused:
         for run_dir in (dirty, opaque):
             for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
                 for row in ("t1", "t2", "t3"):
-                    _write_row(run_dir, variant, row, _eval_result(row, [("yes", observed)]))
-        _write_row(dirty, "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+                    write_row(run_dir, variant, row, eval_result(row, [("yes", observed)]))
+        write_row(dirty, "candidate", "stale", eval_result("stale", [("yes", "yes")]), record=False)
         (opaque / "run.json").unlink()
         verdict = activation_gate(
             incumbent_run_dirs=[dirty, opaque],
@@ -2698,7 +2449,7 @@ class TestReusedRunDirIsRefused:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert verdict.gate_refusal is not None
         assert "could not be reconciled either way" in verdict.gate_refusal
@@ -2728,7 +2479,7 @@ class TestReusedRunDirIsRefused:
         # Old run dirs must stay gatable: the one state where contamination is undetectable must
         # not also be the one state that refuses everything.
         run_dir = self._clean(tmp_path)
-        (run_dir / "run.json").write_text(json.dumps({_RUN_SELECTION_KEY: {"split": None}}), encoding="utf-8")
+        (run_dir / "run.json").write_text(json.dumps({RUN_SELECTION_KEY: {"split": None}}), encoding="utf-8")
         verdict = self._gate_one(run_dir)
         assert verdict.gate_refusal is None
         assert any("cannot be reconciled" in note for note in verdict.notes)
@@ -2745,8 +2496,8 @@ class TestReusedRunDirIsRefused:
         # Permissive on ambiguity: the harm is a FALSE refusal blocking a real promotion, and an
         # unattributable entry means "cannot rule this row in", not "this row is stale".
         run_dir = self._clean(tmp_path)
-        _write_row(run_dir, "incumbent", "extra", _eval_result("extra", [("yes", "no")]), record=False)
-        _write_row(run_dir, "candidate", "extra", _eval_result("extra", [("yes", "yes")]), record=False)
+        write_row(run_dir, "incumbent", "extra", eval_result("extra", [("yes", "no")]), record=False)
+        write_row(run_dir, "candidate", "extra", eval_result("extra", [("yes", "yes")]), record=False)
         payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         payload["task_results"].append({"task_id": f"{SUITE}/extra"})  # no variant_id
         (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -2758,7 +2509,7 @@ class TestReusedRunDirIsRefused:
         run_dir = self._clean(tmp_path)
         other = run_dir / "incumbent" / "some-other-suite" / "x" / "00"
         other.mkdir(parents=True)
-        (other / "task.json").write_text(_eval_result("x", [("yes", "yes")]).model_dump_json(), encoding="utf-8")
+        (other / "task.json").write_text(eval_result("x", [("yes", "yes")]).model_dump_json(), encoding="utf-8")
         assert self._gate_one(run_dir).gate_refusal is None
 
     def test_an_empty_row_directory_is_not_a_row(self, tmp_path: Path) -> None:
@@ -2784,8 +2535,8 @@ class TestReusedRunDirIsRefused:
         # because the rebuild below is what writes run.json here — that IS the resume path.
         for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
             for row in ("t1", "t2", "t3"):
-                result = copy_with(_eval_result(row, [("yes", observed)]), variant_id=variant)
-                _write_row(run_dir, variant, row, result, record=False)
+                result = copy_with(eval_result(row, [("yes", observed)]), variant_id=variant)
+                write_row(run_dir, variant, row, result, record=False)
         (run_dir / "run.json").unlink()  # the interrupted run left none
 
         recovered = recover_task_results(run_dir)
@@ -2815,8 +2566,8 @@ class TestReusedRunDirIsRefused:
         rows = ("t1", "t2", "t3")
         for variant, observed in (("incumbent", "no"), ("candidate", "yes")):
             for row in rows:
-                result = copy_with(_eval_result(row, [("yes", observed)]), variant_id=variant)
-                _write_row(run_dir, variant, row, result, record=False)
+                result = copy_with(eval_result(row, [("yes", observed)]), variant_id=variant)
+                write_row(run_dir, variant, row, result, record=False)
         (run_dir / "run.json").unlink()  # the interrupted run left none
 
         # `partition_for_resume` reads the RESOLVED set — what this invocation would run — and
@@ -2929,7 +2680,7 @@ class TestARefusalSuppressesNegativeResultProse:
         ]
         # `p_floor` above every Holm threshold in a family of one, so `_refusal_message` fires
         # whatever the other axes do.
-        refused = _parity_activation(
+        refused = parity_activation(
             mean_diff=mean_diff,
             ci_low=ci_low,
             ci_high=ci_high,
@@ -2937,30 +2688,30 @@ class TestARefusalSuppressesNegativeResultProse:
             p_floor=0.9,
             n_discordant=1,
             sibling_checks=sibling if failing_sibling else [],
-            guardrails=[_failing_cost_check()],
+            guardrails=[failing_cost_check()],
         )
         decided = holm_promote([refused])[0]
         assert decided.gate_refusal is not None, "the fixture must refuse for this to mean anything"
         assert decided.promoted is False
         assert _negative_result_notes(decided.notes) == [], decided.notes
-        assert _headline_line(render_markdown(decided)).startswith("CANNOT SEPARATE AT THIS SIZE")
+        assert headline_line(render_markdown(decided)).startswith("CANNOT SEPARATE AT THIS SIZE")
 
     @pytest.mark.parametrize("mean_diff", [0.5, -0.3])
     @pytest.mark.parametrize(("ci_low", "ci_high"), [(0.2, 0.75), (-0.5, -0.1), (-0.05, 0.6)])
     @pytest.mark.parametrize("p_value", [0.001, 0.9])
     def test_the_execution_ladder_is_silent_under_a_refusal(self, mean_diff, ci_low, ci_high, p_value) -> None:
-        refused = _parity_execution(
+        refused = parity_execution(
             mean_diff=mean_diff,
             ci_low=ci_low,
             ci_high=ci_high,
             p_value=p_value,
             gate_refusal="the observed difference is below this suite's MDE",
-            guardrails=[_failing_cost_check()],
+            guardrails=[failing_cost_check()],
         )
         decided = holm_promote_execution([refused])[0]
         assert decided.promoted is False
         assert _negative_result_notes(decided.notes) == [], decided.notes
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
 
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
     @pytest.mark.parametrize(
@@ -2974,7 +2725,7 @@ class TestARefusalSuppressesNegativeResultProse:
             ({"p_value": 0.9}, "did not clear the Holm threshold"),
             ({"mean_diff": -0.3, "ci_low": -0.5, "ci_high": -0.1}, "not promoted:"),
             ({"ci_low": -0.05}, "still contains zero"),
-            ({"guardrails": [_failing_cost_check()]}, "FAILED — this forces"),
+            ({"guardrails": [failing_cost_check()]}, "FAILED — this forces"),
         ],
         ids=["lost", "wrong-direction", "ci-contains-zero", "vetoed"],
     )
@@ -3000,7 +2751,7 @@ class TestARefusalSuppressesNegativeResultProse:
         it.**` with `not promoted: the interval separates in the incumbent's favour.` directly
         beneath. `promoted` was already correctly False — the defect was confined to the prose.
         """
-        verdict = _parity_activation(
+        verdict = parity_activation(
             p_value=0.01, p_floor=0.2, mean_diff=-0.3, ci_low=-0.5, ci_high=-0.1, rows_paired=6, n_discordant=1
         )
         decided = holm_promote([verdict])[0]
@@ -3016,11 +2767,11 @@ class TestARefusalSuppressesNegativeResultProse:
         keeps its family note outside `if not refused:` for exactly that reason. Sweeping them in
         would leave a refused block unable to say what family it was decided in.
         """
-        refusing = {"p_floor": 0.9, "n_discordant": 1} if build is _parity_activation else {"gate_refusal": "refused"}
+        refusing = {"p_floor": 0.9, "n_discordant": 1} if build is parity_activation else {"gate_refusal": "refused"}
         decided = gate([build(**refusing)])[0]
         assert decided.gate_refusal is not None
         assert any("Holm applied across a family of" in note for note in decided.notes)
-        if build is _parity_activation:
+        if build is parity_activation:
             # The near-floor note is the other rung that must NOT be swept in: it is a statement
             # about the DRAW COUNT's resolution, which stays true whatever the refusal says. The
             # fixture's p = 0.001 against a 2,000-draw floor of 0.0010 puts it inside
@@ -3038,9 +2789,9 @@ class TestGateRefusal:
     _REFUSAL_RESAMPLES = 2_000
 
     def _gated(self, tmp_path: Path, positives: int, distractors: int, family: int, **kwargs):
-        incumbent, candidate = _tiny_suite(positives, distractors)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        verdicts = [_gate(run_dirs, n_resamples=self._REFUSAL_RESAMPLES, **kwargs) for _ in range(family)]
+        incumbent, candidate = tiny_suite(positives, distractors)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        verdicts = [activation_verdict(run_dirs, n_resamples=self._REFUSAL_RESAMPLES, **kwargs) for _ in range(family)]
         return holm_promote(verdicts)
 
     def test_six_row_suite_refuses_rather_than_reporting_a_negative(self, tmp_path: Path) -> None:
@@ -3106,9 +2857,9 @@ class TestGateRefusal:
             ci_high=1.4,
             passed=False,
         )
-        incumbent, candidate = _tiny_suite(3, 3)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        base = _gate(run_dirs, n_resamples=self._REFUSAL_RESAMPLES)
+        incumbent, candidate = tiny_suite(3, 3)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        base = activation_verdict(run_dirs, n_resamples=self._REFUSAL_RESAMPLES)
         decided = holm_promote([base.model_copy(update={"guardrails": [failing]})] * 2)
         text = render_markdown(decided[0])
         assert "CANNOT SEPARATE AT THIS SIZE" in text
@@ -3157,7 +2908,7 @@ class TestGateRefusal:
         in this workflow (a wrong `plugins:` path gives exactly this shape).
         """
         rows = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(8)}
-        verdict = _gate(_shared_dirs(tmp_path, rows, dict(rows)))
+        verdict = activation_verdict(shared_dirs(tmp_path, rows, dict(rows)))
         assert verdict.p_floor == 1.0
         decided = holm_promote([verdict, verdict])[0]
         assert decided.promoted is False
@@ -3198,7 +2949,7 @@ class TestGateRefusal:
     def test_the_identical_arms_message_carries_none_of_the_row_remedy(self, tmp_path: Path) -> None:
         # The R = 0 branch owns its own diagnosis; the discordance remedy must not leak into it.
         rows = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(8)}
-        decided = holm_promote([_gate(_shared_dirs(tmp_path, rows, dict(rows)))] * 2)[0]
+        decided = holm_promote([activation_verdict(shared_dirs(tmp_path, rows, dict(rows)))] * 2)[0]
         assert decided.n_discordant == 0
         assert decided.gate_refusal is not None
         assert "DISAGREE on" not in decided.gate_refusal
@@ -3288,9 +3039,9 @@ class TestGateRefusal:
 
 class TestPFloorOnTheVerdict:
     def test_the_gate_sets_it_from_the_discordant_rows(self, tmp_path: Path) -> None:
-        incumbent, candidate = _tiny_suite(3, 3)
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
-        assert verdict.p_floor == pytest.approx(_discreteness_floor(6, 3, _FAST_RESAMPLES))
+        incumbent, candidate = tiny_suite(3, 3)
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
+        assert verdict.p_floor == pytest.approx(_discreteness_floor(6, 3, FAST_RESAMPLES))
 
     def test_a_row_whose_replicates_are_reordered_is_concordant(self, tmp_path: Path) -> None:
         # Multiset comparison, not sequence: the same pairs in a different replicate order is the
@@ -3301,13 +3052,13 @@ class TestPFloorOnTheVerdict:
             for arm, order in (("incumbent", 0), ("candidate", 1)):
                 for row in range(4):
                     labels = [("yes", "yes")] if (i == order) else [("yes", "no")]
-                    _write_row(run_dir, arm, f"r{row}", _eval_result(f"r{row}", labels))
+                    write_row(run_dir, arm, f"r{row}", eval_result(f"r{row}", labels))
             run_dirs.append(run_dir)
-        verdict = _gate(run_dirs)
-        assert verdict.p_floor == pytest.approx(_discreteness_floor(4, 0, _FAST_RESAMPLES))
+        verdict = activation_verdict(run_dirs)
+        assert verdict.p_floor == pytest.approx(_discreteness_floor(4, 0, FAST_RESAMPLES))
 
     def test_no_interval_means_no_floor(self, tmp_path: Path) -> None:
-        verdict = _gate(_shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
+        verdict = activation_verdict(shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
         assert verdict.p_value is None
         assert verdict.p_floor is None
         # `None`, not 0: "the arms agreed everywhere" is a finding, "there was no comparison" is not.
@@ -3315,58 +3066,33 @@ class TestPFloorOnTheVerdict:
         assert holm_promote([verdict])[0].gate_refusal is None
 
     def test_the_gate_records_the_count_the_floor_came_from(self, tmp_path: Path) -> None:
-        incumbent, candidate = _tiny_suite(3, 7)
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        incumbent, candidate = tiny_suite(3, 7)
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
         assert (verdict.rows_paired, verdict.n_discordant) == (10, 3)
-        assert verdict.p_floor == pytest.approx(_discreteness_floor(10, 3, _FAST_RESAMPLES))
+        assert verdict.p_floor == pytest.approx(_discreteness_floor(10, 3, FAST_RESAMPLES))
 
     def test_all_rows_discordant_records_the_row_count(self, tmp_path: Path) -> None:
-        incumbent, candidate = _tiny_suite(4, 0)
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        incumbent, candidate = tiny_suite(4, 0)
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
         assert verdict.n_discordant == verdict.rows_paired == 4
 
     def test_render_prints_the_discordant_count_beside_the_paired_one(self, tmp_path: Path) -> None:
         # The quantity `p_floor` is computed from, visible without having to trigger a refusal.
-        incumbent, candidate = _tiny_suite(3, 7)
-        verdict = _gate(_shared_dirs(tmp_path, incumbent, candidate))
+        incumbent, candidate = tiny_suite(3, 7)
+        verdict = activation_verdict(shared_dirs(tmp_path, incumbent, candidate))
         assert "Rows paired: 10 · discordant: 3 · excluded: 0" in render_markdown(verdict)
 
     def test_render_shows_a_dash_when_there_was_no_comparison(self, tmp_path: Path) -> None:
-        verdict = _gate(_shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
+        verdict = activation_verdict(shared_dirs(tmp_path, {"r0": [("yes", "yes")]}, {"r0": [("yes", "yes")]}))
         assert "discordant: —" in render_markdown(verdict)
 
     def test_render_reports_both_floors(self, tmp_path: Path) -> None:
-        incumbent, candidate = _tiny_suite(6, 6)
-        verdict = holm_promote([_gate(_shared_dirs(tmp_path, incumbent, candidate))])[0]
+        incumbent, candidate = tiny_suite(6, 6)
+        verdict = holm_promote([activation_verdict(shared_dirs(tmp_path, incumbent, candidate))])[0]
         text = render_markdown(verdict)
-        assert f"estimator {bootstrap_p_floor(_FAST_RESAMPLES):.4f}" in text
+        assert f"estimator {bootstrap_p_floor(FAST_RESAMPLES):.4f}" in text
         assert verdict.p_floor is not None
         assert f"this suite {verdict.p_floor:.4f}" in text
-
-
-def _weighted_arm(tmp_path: Path, variant: str, per_row: dict[str, list[float]], *, run_dirs: int = 1) -> list[Path]:
-    """One arm whose rows carry N replicates each, spread across ``run_dirs`` directories.
-
-    `weighted_score` is set EXPLICITLY on every result: it is `float | None` with default None,
-    populated by the orchestrator, so a fixture that forgets it makes every cluster empty and the
-    floor silently comes back None.
-    """
-    dirs = [tmp_path / f"run-{i}" for i in range(run_dirs)]
-    for row_id, scores in per_row.items():
-        for i, score in enumerate(scores):
-            run_dir = dirs[i % run_dirs]
-            replicate = i // run_dirs
-            _write_row(run_dir, variant, row_id, _scored_result(row_id, score), replicate)
-    return dirs
-
-
-def _execution_floor(run_dirs: list[Path], **kwargs) -> NoiseFloor | None:
-    return measure_execution_noise_floor(
-        run_dirs=run_dirs,
-        variant_id="incumbent",
-        suite_id=SUITE,
-        **{"model": "claude-haiku-4-5", "n_resamples": _FAST_RESAMPLES, **kwargs},
-    )
 
 
 class TestExecutionNoiseFloor:
@@ -3381,21 +3107,21 @@ class TestExecutionNoiseFloor:
         # One run dir, 3 replicates per row -> a floor. The SAME data spread one-replicate-per-dir
         # across 3 dirs still pools to 3 replicates per row, so it also works; what does NOT is a
         # fixture where no row has 2 replicates at all.
-        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", self._spread()))
+        floor = execution_floor(weighted_arm(tmp_path, "incumbent", self._spread()))
         assert floor is not None and floor.mde > 0.0
 
-        single = _weighted_arm(tmp_path / "b", "incumbent", {f"r{i}": [0.5] for i in range(8)})
-        assert _execution_floor(single) is None
+        single = weighted_arm(tmp_path / "b", "incumbent", {f"r{i}": [0.5] for i in range(8)})
+        assert execution_floor(single) is None
 
     def test_pools_replicates_across_run_dirs(self, tmp_path: Path) -> None:
         # The split axis is replicates, but they may arrive from several run directories — one
         # `--repeats 3` invocation or three separate ones both give a row 3 replicates.
-        spread = _weighted_arm(tmp_path, "incumbent", self._spread(), run_dirs=3)
-        assert _execution_floor(spread) is not None
+        spread = weighted_arm(tmp_path, "incumbent", self._spread(), run_dirs=3)
+        assert execution_floor(spread) is not None
 
     def test_is_none_without_enough_replicated_rows(self, tmp_path: Path) -> None:
         one_row = {"r0": [0.2, 0.9, 0.4], "r1": [0.5]}  # only r0 qualifies
-        assert _execution_floor(_weighted_arm(tmp_path, "incumbent", one_row)) is None
+        assert execution_floor(weighted_arm(tmp_path, "incumbent", one_row)) is None
 
     def test_is_none_when_weighted_score_is_unset(self, tmp_path: Path, caplog) -> None:
         # A result with criteria but no weighted_score yields None from row_score, so every
@@ -3403,9 +3129,9 @@ class TestExecutionNoiseFloor:
         run_dir = tmp_path / "run-0"
         for i in range(8):
             for replicate in range(3):
-                _write_row(run_dir, "incumbent", f"r{i}", _eval_result(f"r{i}", [("yes", "yes")]), replicate)
+                write_row(run_dir, "incumbent", f"r{i}", eval_result(f"r{i}", [("yes", "yes")]), replicate)
         with caplog.at_level(logging.WARNING):
-            assert _execution_floor([run_dir]) is None
+            assert execution_floor([run_dir]) is None
         assert "carry 2+ replicates" in caplog.text
 
     def test_splits_three_replicates_two_one(self, tmp_path: Path) -> None:
@@ -3418,7 +3144,7 @@ class TestExecutionNoiseFloor:
         # the second half; under 1/2 it would be averaged with a middle value, narrowing the
         # interval. The two produce different floors, which is what makes this test discriminating.
         rows = {"r0": [0.1, 0.1, 0.9], "r1": [0.2, 0.2, 0.8], "r2": [0.3, 0.3, 0.7]}
-        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", rows))
+        floor = execution_floor(weighted_arm(tmp_path, "incumbent", rows))
         assert floor is not None
         # first half mean = 0.1, second = 0.9 for r0 -> the diff is large and the floor is not 0.
         assert floor.mde > 0.1
@@ -3435,8 +3161,8 @@ class TestExecutionNoiseFloor:
         run_dir = tmp_path / "run-0"
         for i in range(8):
             for replicate, score in enumerate((0.2 + 0.05 * i, 0.55, 0.9 - 0.05 * i)):
-                result = _eval_result(f"r{i}", [("yes", "yes")]).model_copy(update={"weighted_score": score})
-                _write_row(run_dir, "incumbent", f"r{i}", result, replicate)
+                result = eval_result(f"r{i}", [("yes", "yes")]).model_copy(update={"weighted_score": score})
+                write_row(run_dir, "incumbent", f"r{i}", result, replicate)
 
         f1_floor = measure_noise_floor(
             run_dirs=[run_dir, run_dir],
@@ -3444,11 +3170,11 @@ class TestExecutionNoiseFloor:
             suite_id=SUITE,
             criterion_index=0,
             model="claude-haiku-4-5",
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert f1_floor is not None and f1_floor.mde == 0.0, "the F1 floor is the meaningless 0.000 N2 names"
 
-        execution = _execution_floor([run_dir])
+        execution = execution_floor([run_dir])
         assert execution is not None and execution.mde > 0.0
 
     def test_a_different_repeat_count_is_a_different_cache_entry(self, tmp_path: Path) -> None:
@@ -3464,8 +3190,8 @@ class TestExecutionNoiseFloor:
         three = {f"r{i}": [0.2 + 0.05 * i, 0.55, 0.9 - 0.05 * i] for i in range(8)}
         two = {row: scores[:2] for row, scores in three.items()}
 
-        floor_3 = _execution_floor(_weighted_arm(tmp_path / "a", "incumbent", three))
-        floor_2 = _execution_floor(_weighted_arm(tmp_path / "b", "incumbent", two))
+        floor_3 = execution_floor(weighted_arm(tmp_path / "a", "incumbent", three))
+        floor_2 = execution_floor(weighted_arm(tmp_path / "b", "incumbent", two))
         assert floor_3 is not None and floor_2 is not None
         assert (floor_3.n_replicates, floor_2.n_replicates) == (3, 2)
         assert floor_3.mde != floor_2.mde, "the fixture no longer distinguishes replicate counts"
@@ -3476,7 +3202,7 @@ class TestExecutionNoiseFloor:
         assert len(measurements.noise_floors) == 2, "the 2-replicate floor REPLACED the 3-replicate one"
 
         # And the round that actually ran at --repeats 3 gets its own number back.
-        reused = _execution_floor(_weighted_arm(tmp_path / "c", "incumbent", three), measurements=measurements)
+        reused = execution_floor(weighted_arm(tmp_path / "c", "incumbent", three), measurements=measurements)
         assert reused is not None and reused.mde == floor_3.mde
 
     def test_rows_with_uneven_replicate_counts_are_balanced(self, tmp_path: Path) -> None:
@@ -3489,7 +3215,7 @@ class TestExecutionNoiseFloor:
         before the balancing: 0.056.
         """
         uneven = {f"r{i}": [1.0 if i % 2 else 0.0] * (3 if i < 4 else 2) for i in range(8)}
-        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", uneven))
+        floor = execution_floor(weighted_arm(tmp_path, "incumbent", uneven))
         assert floor is not None
         assert floor.mde == 0.0, "an unbalanced row leaked between-row spread into the null"
         assert floor.n_replicates == 2, "balancing trims to the smallest qualifying row"
@@ -3498,12 +3224,12 @@ class TestExecutionNoiseFloor:
         # "no row carries 2+ replicates" would send the reader off to check --repeats when the real
         # cause is a wrong variant, suite or run directory.
         with caplog.at_level(logging.WARNING):
-            assert _execution_floor([tmp_path / "typo"]) is None
+            assert execution_floor([tmp_path / "typo"]) is None
         assert "wrong variant id, a wrong suite id or a wrong run directory" in caplog.text
         assert "--repeats" not in caplog.text
 
     def test_records_its_metric(self, tmp_path: Path) -> None:
-        floor = _execution_floor(_weighted_arm(tmp_path, "incumbent", self._spread()))
+        floor = execution_floor(weighted_arm(tmp_path, "incumbent", self._spread()))
         assert floor is not None
         assert floor.metric == "weighted_score"
         assert floor.criterion_index is None
@@ -3518,13 +3244,13 @@ class TestEveryMissingFloorSaysWhy:
     """A silent None on a spend-gating function was the shipped defect; each one now names why."""
 
     def test_activation_floor_names_too_few_invocations(self, tmp_path: Path, caplog) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {f"r{i}": [("yes", "yes")] for i in range(6)}, invocations=1)
+        run_dirs = write_arm(tmp_path, "incumbent", {f"r{i}": [("yes", "yes")] for i in range(6)}, invocations=1)
         with caplog.at_level(logging.WARNING):
             assert noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0) is None
         assert "at least 2 invocations" in caplog.text
 
     def test_activation_floor_names_too_few_scored_rows(self, tmp_path: Path, caplog) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=3)
+        run_dirs = write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=3)
         with caplog.at_level(logging.WARNING):
             assert noise_floor_mde(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0) is None
         assert "in BOTH halves of the invocation split" in caplog.text
@@ -3564,7 +3290,7 @@ class TestEveryMissingFloorSaysWhy:
 
     def test_execution_floor_names_too_few_replicated_rows(self, tmp_path: Path, caplog) -> None:
         with caplog.at_level(logging.WARNING):
-            assert _execution_floor(_weighted_arm(tmp_path, "incumbent", {"r0": [0.1, 0.2]})) is None
+            assert execution_floor(weighted_arm(tmp_path, "incumbent", {"r0": [0.1, 0.2]})) is None
         assert "carry 2+ replicates" in caplog.text
 
 
@@ -3594,20 +3320,20 @@ class TestActivationPreflight:
             (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
 
     def test_a_clean_pair_refuses_nothing_and_notes_nothing(self, tmp_path: Path) -> None:
-        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        dirs = shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
         assert self._preflight(dirs, dirs) == (None, [])
 
     def test_a_cross_split_pair_refuses(self, tmp_path: Path) -> None:
-        inc = _write_arm(tmp_path / "i", "incumbent", self.ROWS, invocations=1)
-        cand = _write_arm(tmp_path / "c", "candidate", self.ROWS, invocations=1)
+        inc = write_arm(tmp_path / "i", "incumbent", self.ROWS, invocations=1)
+        cand = write_arm(tmp_path / "c", "candidate", self.ROWS, invocations=1)
         self._split(inc, "train")
         self._split(cand, "test")
         refusal, _notes = self._preflight(inc, cand)
         assert refusal is not None and "DIFFERENT --split values" in refusal
 
     def test_a_contaminated_tree_refuses(self, tmp_path: Path) -> None:
-        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
-        _write_row(dirs[0], "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        dirs = shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        write_row(dirs[0], "candidate", "stale", eval_result("stale", [("yes", "yes")]), record=False)
         refusal, _notes = self._preflight(dirs, dirs)
         assert refusal is not None and "no recorded invocation wrote" in refusal
 
@@ -3619,25 +3345,25 @@ class TestActivationPreflight:
         without first understanding the other. Reversing the two checks would silently swap which
         message a user acts on.
         """
-        inc = _write_arm(tmp_path / "i", "incumbent", self.ROWS, invocations=1)
-        cand = _write_arm(tmp_path / "c", "candidate", self.ROWS, invocations=1)
+        inc = write_arm(tmp_path / "i", "incumbent", self.ROWS, invocations=1)
+        cand = write_arm(tmp_path / "c", "candidate", self.ROWS, invocations=1)
         self._split(inc, "train")
         self._split(cand, "test")
-        _write_row(cand[0], "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        write_row(cand[0], "candidate", "stale", eval_result("stale", [("yes", "yes")]), record=False)
         refusal, _notes = self._preflight(inc, cand)
         assert refusal is not None
         assert "DIFFERENT --split values" in refusal
         assert "no recorded invocation wrote" not in refusal
 
     def test_missing_provenance_is_a_note_not_a_refusal(self, tmp_path: Path) -> None:
-        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        dirs = shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
         (dirs[0] / "run.json").unlink()
         refusal, notes = self._preflight(dirs, dirs)
         assert refusal is None, "old run dirs stay gatable"
         assert any("row-selection provenance is missing" in note for note in notes)
 
     def test_an_unreconcilable_dir_is_a_note_not_a_refusal(self, tmp_path: Path) -> None:
-        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        dirs = shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
         payload = json.loads((dirs[0] / "run.json").read_text(encoding="utf-8"))
         payload.pop("task_results", None)
         (dirs[0] / "run.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -3648,8 +3374,8 @@ class TestActivationPreflight:
     def test_the_unknown_count_survives_inside_a_refusal(self, tmp_path: Path) -> None:
         # Both halves must reach the reader: a refusal whose totals silently exclude a directory
         # that could not be checked is a refusal a user cannot reconcile with the tree.
-        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=2)
-        _write_row(dirs[0], "candidate", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        dirs = shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=2)
+        write_row(dirs[0], "candidate", "stale", eval_result("stale", [("yes", "yes")]), record=False)
         payload = json.loads((dirs[1] / "run.json").read_text(encoding="utf-8"))
         payload.pop("task_results", None)
         (dirs[1] / "run.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -3666,9 +3392,9 @@ class TestActivationPreflight:
         discarded. Returning a fresh list and `extend`-ing preserves that; re-binding `notes` to a
         concatenation would not, and every later note would land in a list no verdict ever sees.
         """
-        dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        dirs = shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
         (dirs[0] / "run.json").unlink()
-        verdict = _gate(dirs)
+        verdict = activation_verdict(dirs)
         # The preflight's note AND a note `load_and_pair` wrote before it are both on the verdict,
         # which can only happen if one list carried both.
         assert any("row-selection provenance is missing" in note for note in verdict.notes)
@@ -3698,7 +3424,7 @@ class TestTheTwoDeduplications:
             lambda: measure_noise_floor(
                 run_dirs=dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0, model="m"
             ),
-            lambda: _execution_floor(dirs),
+            lambda: execution_floor(dirs),
         ):
             caplog.clear()
             with caplog.at_level(logging.WARNING):
@@ -3721,9 +3447,9 @@ class TestTheTwoDeduplications:
         indices agree and a broken mapping still passes.
         """
         verdicts = [
-            _parity_activation(p_value=0.001),
-            _parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None),
-            _parity_activation(p_value=0.002),
+            parity_activation(p_value=0.001),
+            parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None),
+            parity_activation(p_value=0.002),
         ]
         family, rejected_at = holm_family(verdicts, DEFAULT_ALPHA)
         assert [i for i, _p in family] == [0, 2], "membership is by ORIGINAL index"
@@ -3734,7 +3460,7 @@ class TestTheTwoDeduplications:
         assert [v.promoted for v in decided] == [True, False, True]
 
     def test_holm_family_handles_an_empty_family(self) -> None:
-        verdicts = [_parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None)]
+        verdicts = [parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None)]
         family, rejected_at = holm_family(verdicts, DEFAULT_ALPHA)
         assert family == [] and rejected_at == set()
 
@@ -3774,28 +3500,28 @@ class TestTheMdeNoteNamesTheRealCause:
 
     def _reasons(self, **kwargs) -> list[str]:
         reasons: list[str] = []
-        noise_floor_mde(**{"criterion_index": 0, "n_resamples": _FAST_RESAMPLES, "reasons": reasons, **kwargs})
+        noise_floor_mde(**{"criterion_index": 0, "n_resamples": FAST_RESAMPLES, "reasons": reasons, **kwargs})
         return reasons
 
     def test_too_few_invocations(self, tmp_path: Path) -> None:
-        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
+        dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
         assert "at least 2 invocations" in " ".join(
             self._reasons(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE)
         )
 
     def test_a_contaminated_tree(self, tmp_path: Path) -> None:
-        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
-        _write_row(dirs[-1], "incumbent", "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        write_row(dirs[-1], "incumbent", "stale", eval_result("stale", [("yes", "yes")]), record=False)
         reasons = self._reasons(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE)
         assert "no recorded invocation wrote" in " ".join(reasons)
 
     def test_a_wrong_path(self, tmp_path: Path) -> None:
-        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
         reasons = self._reasons(run_dirs=dirs, variant_id="typo", suite_id=SUITE)
         assert "wrong variant id" in " ".join(reasons)
 
     def test_a_cross_split_pair(self, tmp_path: Path) -> None:
-        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
         for run_dir, split in zip(dirs, ("train", "test"), strict=True):
             payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
             payload["row_selection"] = {"split": split}
@@ -3805,7 +3531,7 @@ class TestTheMdeNoteNamesTheRealCause:
         )
 
     def test_too_few_rows_scored_in_both_halves(self, tmp_path: Path) -> None:
-        dirs = _write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=2)
+        dirs = write_arm(tmp_path, "incumbent", {"only": [("yes", "yes")]}, invocations=2)
         assert "in BOTH halves of the invocation split" in " ".join(
             self._reasons(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE)
         )
@@ -3818,10 +3544,10 @@ class TestTheMdeNoteNamesTheRealCause:
         """
         incumbent = {"only": [("yes", "yes")], "other": [("yes", "no")]}
         candidate = {"only": [("yes", "yes")], "other": [("yes", "yes")]}
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate, invocations=2)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate, invocations=2)
         # Strip one row from the incumbent's second invocation so only one row scores in BOTH.
         shutil.rmtree(run_dirs[1] / "incumbent" / SUITE / "other")
-        verdict = _gate(run_dirs)
+        verdict = activation_verdict(run_dirs)
         assert verdict.mde is None
         note = next(n for n in verdict.notes if "minimum detectable effect could not be computed" in n)
         assert "in BOTH halves of the invocation split" in note
@@ -3830,7 +3556,7 @@ class TestTheMdeNoteNamesTheRealCause:
 
     def test_the_reasons_keyword_is_additive(self, tmp_path: Path) -> None:
         """Every existing caller keeps working untouched — the whole point of a sink."""
-        dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
         without = noise_floor_mde(run_dirs=dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0)
         collected: list[str] = []
         with_sink = noise_floor_mde(
@@ -3861,12 +3587,12 @@ class TestStageAReadersReconcileTheTree:
 
     def _contaminate(self, run_dirs: list[Path], variant: str = "incumbent") -> None:
         """One row nothing recorded, in the LAST dir — an earlier invocation of a re-used --run-dir."""
-        _write_row(run_dirs[-1], variant, "stale", _eval_result("stale", [("yes", "yes")]), record=False)
+        write_row(run_dirs[-1], variant, "stale", eval_result("stale", [("yes", "yes")]), record=False)
 
     def test_the_activation_floor_refuses_and_names_the_directory_and_a_pair(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        run_dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
         self._contaminate(run_dirs)
         with caplog.at_level(logging.WARNING):
             floor = measure_noise_floor(
@@ -3875,17 +3601,17 @@ class TestStageAReadersReconcileTheTree:
                 suite_id=SUITE,
                 criterion_index=0,
                 model="claude-haiku-4-5",
-                n_resamples=_FAST_RESAMPLES,
+                n_resamples=FAST_RESAMPLES,
             )
         assert floor is None
         assert f"{run_dirs[-1]}/incumbent" in caplog.text
         assert "stale/00" in caplog.text, "the (row, replicate) pair is what a reader acts on"
 
     def test_the_execution_floor_refuses_the_same_way(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        run_dirs = _weighted_arm(tmp_path, "incumbent", {f"r{i}": [0.1 * i, 0.2 * i, 0.3] for i in range(4)})
-        _write_row(run_dirs[0], "incumbent", "stale", _scored_result("stale", 1.0), 7, record=False)
+        run_dirs = weighted_arm(tmp_path, "incumbent", {f"r{i}": [0.1 * i, 0.2 * i, 0.3] for i in range(4)})
+        write_row(run_dirs[0], "incumbent", "stale", scored_result("stale", 1.0), 7, record=False)
         with caplog.at_level(logging.WARNING):
-            assert _execution_floor(run_dirs) is None
+            assert execution_floor(run_dirs) is None
         assert f"{run_dirs[0]}/incumbent" in caplog.text
         assert "stale/07" in caplog.text
 
@@ -3894,7 +3620,7 @@ class TestStageAReadersReconcileTheTree:
     ) -> None:
         # The warn-not-refuse half: `ArmRowScores` has no field a refusal could live in, so the
         # answer is still produced — with the same message the floors refuse with.
-        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
+        run_dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
         self._contaminate(run_dirs)
         with caplog.at_level(logging.WARNING):
             arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
@@ -3910,7 +3636,7 @@ class TestStageAReadersReconcileTheTree:
         second reconcile here would read every run.json twice per arm and warn twice about one
         fault — so the suppression is the record, and this test is what keeps it true.
         """
-        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
+        run_dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=1)
         self._contaminate(run_dirs)
         with caplog.at_level(logging.WARNING):
             cost_quality_points(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
@@ -3921,14 +3647,14 @@ class TestStageAReadersReconcileTheTree:
     ) -> None:
         # Both arms live under one run dir, as a real experiment writes them. Reconciling inside
         # the per-arm loop would read that dir's run.json once per arm.
-        run_dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
+        run_dirs = shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
         self._contaminate(run_dirs, "candidate")
         with caplog.at_level(logging.WARNING):
             arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent", "candidate"], suite_id=SUITE, criterion_index=0)
         assert caplog.text.count("Row scores may be over a contaminated tree") == 1
 
     def test_a_clean_tree_is_byte_identical_and_silent(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        run_dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
         with caplog.at_level(logging.WARNING):
             floor = measure_noise_floor(
                 run_dirs=run_dirs,
@@ -3936,7 +3662,7 @@ class TestStageAReadersReconcileTheTree:
                 suite_id=SUITE,
                 criterion_index=0,
                 model="claude-haiku-4-5",
-                n_resamples=_FAST_RESAMPLES,
+                n_resamples=FAST_RESAMPLES,
             )
             arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
         assert floor is not None and floor.n_rows == 3
@@ -3950,7 +3676,7 @@ class TestStageAReadersReconcileTheTree:
         state where contamination is undetectable must not also be the one that refuses everything.
         Asserted at WARNING level, because a floor that WAS measured must not log as if it was not.
         """
-        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        run_dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
         for run_dir in run_dirs:
             payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
             payload.pop("task_results", None)
@@ -3962,7 +3688,7 @@ class TestStageAReadersReconcileTheTree:
                 suite_id=SUITE,
                 criterion_index=0,
                 model="claude-haiku-4-5",
-                n_resamples=_FAST_RESAMPLES,
+                n_resamples=FAST_RESAMPLES,
             )
             arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, criterion_index=0)
         assert floor is not None
@@ -3974,7 +3700,7 @@ class TestStageAReadersReconcileTheTree:
     ) -> None:
         # The reconcile runs BEFORE the load, so the ordering has to be checked: a wrong variant
         # leaves nothing on disk to be unrecorded, and the wrong-path message must still win.
-        run_dirs = _write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
+        run_dirs = write_arm(tmp_path, "incumbent", self.ROWS, invocations=2)
         with caplog.at_level(logging.WARNING):
             assert (
                 measure_noise_floor(
@@ -4013,11 +3739,17 @@ class TestInstanceBestFront:
 
     def test_keeps_a_single_row_winner(self) -> None:
         # The whole reason a merge reads this set rather than the coverage one.
-        arms = [self._arm("broad", r1=0.9, r2=0.9, r3=0.9), self._arm("narrow", r1=0.1, r2=0.1, r3=1.0)]
+        arms = [
+            self._arm("broad", r1=0.9, r2=0.9, r3=0.9),
+            self._arm("narrow", r1=0.1, r2=0.1, r3=1.0),
+        ]
         assert pareto_front(arms) == ["broad", "narrow"]
         assert instance_best_front(arms) == ["broad", "narrow"]
         # And when the narrow arm IS dominated, coverage drops it while instance-best keeps it.
-        arms = [self._arm("broad", r1=0.9, r2=0.9, r3=1.0), self._arm("narrow", r1=0.1, r2=0.1, r3=1.0)]
+        arms = [
+            self._arm("broad", r1=0.9, r2=0.9, r3=1.0),
+            self._arm("narrow", r1=0.1, r2=0.1, r3=1.0),
+        ]
         assert pareto_front(arms) == ["broad"]
         assert instance_best_front(arms) == ["broad", "narrow"]
 
@@ -4190,21 +3922,12 @@ class TestRowReplicates:
         assert "Zero variance on BOTH arms" not in text
 
 
-def _cost_quality_arm(tmp_path: Path, variant: str, per_row: dict[str, tuple[float, float | None]]) -> Path:
-    """One arm's rows as (weighted_score, cost) pairs. A None cost records no cost at all."""
-    run_dir = tmp_path / "run-0"
-    for row_id, (score, cost) in per_row.items():
-        result = _costed_result(row_id, [("yes", "yes")], cost=cost, duration=10.0)
-        _write_row(run_dir, variant, row_id, result.model_copy(update={"weighted_score": score}))
-    return run_dir
-
-
 class TestCostQualityFront:
     """Cost as a second AXIS of the shortlist — never a second gate."""
 
     def _points(self, tmp_path: Path, arms: dict[str, dict[str, tuple[float, float | None]]]):
         for variant, per_row in arms.items():
-            _cost_quality_arm(tmp_path, variant, per_row)
+            cost_quality_arm(tmp_path, variant, per_row)
         return cost_quality_points(
             run_dirs=[tmp_path / "run-0"], variant_ids=list(arms), suite_id=SUITE, criterion_index=None
         )
@@ -4299,14 +4022,14 @@ class TestCostQualityFront:
         """
         run_dir = tmp_path / "run-0"
         for row in range(6):
-            good = _costed_result(f"r{row}", [("yes", "yes")], cost=1.0, duration=10.0)
-            _write_row(run_dir, "incumbent", f"r{row}", good.model_copy(update={"weighted_score": 0.9}))
+            good = costed_result(f"r{row}", [("yes", "yes")], cost=1.0, duration=10.0)
+            write_row(run_dir, "incumbent", f"r{row}", good.model_copy(update={"weighted_score": 0.9}))
             # The candidate finished r0 and crashed the rest: no criterion results, cost still recorded.
             if row == 0:
-                _write_row(run_dir, "crashy", f"r{row}", good.model_copy(update={"weighted_score": 1.0}))
+                write_row(run_dir, "crashy", f"r{row}", good.model_copy(update={"weighted_score": 1.0}))
             else:
-                crashed = _costed_result(f"r{row}", [], cost=1.0, duration=10.0)
-                _write_row(run_dir, "crashy", f"r{row}", crashed.model_copy(update={"weighted_score": 0.0}))
+                crashed = costed_result(f"r{row}", [], cost=1.0, duration=10.0)
+                write_row(run_dir, "crashy", f"r{row}", crashed.model_copy(update={"weighted_score": 0.0}))
 
         points = cost_quality_points(
             run_dirs=[run_dir], variant_ids=["incumbent", "crashy"], suite_id=SUITE, criterion_index=None
@@ -4386,14 +4109,14 @@ class TestOneRowCostDefinition:
         CE037-class defect this repo already added a lint rule for in the F1 direction.
         """
         per_row = {f"r{i}": (0.8, 0.5 + 0.1 * i) for i in range(8)}
-        _cost_quality_arm(tmp_path, "incumbent", per_row)
-        _cost_quality_arm(tmp_path, "candidate", per_row)
+        cost_quality_arm(tmp_path, "incumbent", per_row)
+        cost_quality_arm(tmp_path, "candidate", per_row)
         run_dir = tmp_path / "run-0"
 
         points = cost_quality_points(
             run_dirs=[run_dir], variant_ids=["incumbent", "candidate"], suite_id=SUITE, criterion_index=None
         )
-        check = _cost_check(
+        check = cost_check(
             cost_latency_guardrails(
                 incumbent_rows=load_arm_rows([run_dir], "incumbent", SUITE),
                 candidate_rows=load_arm_rows([run_dir], "candidate", SUITE),
@@ -4406,11 +4129,11 @@ class TestOneRowCostDefinition:
     def test_row_cost_levels_is_the_only_row_cost_reduction(self) -> None:
         # Called directly and compared against the guardrail's reported level on a fixture with
         # UNEVEN replicate counts, so the shared reduction is exercised rather than assumed.
-        rows = _cost_rows({"r0": [1.0, 3.0], "r1": [2.0], "r2": [4.0, 4.0, 4.0]})
+        rows = cost_rows({"r0": [1.0, 3.0], "r1": [2.0], "r2": [4.0, 4.0, 4.0]})
         levels = row_cost_levels([row_costs(rows[rid]) for rid in sorted(rows)])
         assert levels == [2.0, 2.0, 4.0]
 
-        check = _cost_check(cost_latency_guardrails(incumbent_rows=rows, candidate_rows=rows, n_resamples=200))
+        check = cost_check(cost_latency_guardrails(incumbent_rows=rows, candidate_rows=rows, n_resamples=200))
         assert check.incumbent == pytest.approx(median_or_none(levels))
 
     def test_an_empty_cluster_is_absent_not_zero(self) -> None:
@@ -4606,37 +4329,6 @@ class TestGraderFingerprint:
 # ---------------------------------------------------------------------------
 # The headroom ceiling — what a suite can resolve, before a candidate is written
 # ---------------------------------------------------------------------------
-
-
-# The real vector from `runs/baseline-3` (Sonnet, 15 rows) and the rule attribution measured with
-# it, NOT a fixture reverse-engineered to hit the answer. It is the round the ceiling was derived
-# from, and `tests/lint/computed_claims.py` imports both names to check the skill's Step 7 table
-# against the code — so the fixture, the function and the prose cannot drift apart in pairs.
-HEADROOM_ROW_SCORES = {
-    "budget-variance": 1.000,
-    "clean-inventory": 1.000,
-    "cumulative-revenue": 1.000,
-    "dept-cost-ranking": 0.857,
-    "extend-existing-budget": 0.857,
-    "growth-projection": 0.833,
-    "loaded-cost": 0.857,
-    "opex-ratio": 1.000,
-    "order-value-lookup": 1.000,
-    "region-product-pivot": 1.000,
-    "sales-summary": 1.000,
-    "sku-labels": 0.750,
-    "tier-classification": 1.000,
-    "top-regions": 0.800,
-    "two-sheet-model": 0.833,
-}
-HEADROOM_RULE_ROWS = {
-    "R1": {"sku-labels", "top-regions"},
-    "R6": {"growth-projection", "two-sheet-model"},
-    "R7": {"dept-cost-ranking", "loaded-cost"},
-    "R8": {"extend-existing-budget"},
-}
-# The floor that round measured, and what the ceilings were compared against.
-HEADROOM_FLOOR = 0.0255
 
 
 def _grader_result(row_id: str, score: float, rules: dict[str, str] | None, *, line: str | None = None):
@@ -4908,96 +4600,12 @@ class TestRenderHeadroomCeilings:
         assert "never blocks a promotion" in render_headroom_ceilings(self._ceilings(), HEADROOM_FLOOR)
 
 
-# ---------------------------------------------------------------------------
-# The execution track's gate
-# ---------------------------------------------------------------------------
-
-EXEC_SUITE = SUITE
-
-
-def _experiment_json(run_dir: Path, variant_ids: list[str], per_replicate: dict[str, dict[str, list[float]]]) -> Path:
-    """A minimal two-variant `experiment.json`, written where a real run writes it.
-
-    Built through `ExperimentResult` rather than as a hand-rolled dict, so a field the model
-    requires cannot be forgotten here and pass anyway.
-    """
-    result = ExperimentResult(
-        experiment_id="round1-gate",
-        description="gate",
-        variant_ids=variant_ids,
-        task_summaries=[],
-        variant_aggregates={},
-        total_duration_seconds=1.0,
-        per_replicate_scores=per_replicate,
-    )
-    run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / "experiment.json"
-    path.write_text(result.model_dump_json(), encoding="utf-8")
-    return path
-
-
-def _exec_run_dir(
-    tmp_path: Path,
-    *,
-    incumbent: dict[str, list[float]],
-    candidate: dict[str, list[float]],
-    declare_incumbent_first: bool = True,
-    extra_scores: dict[str, dict[str, list[float]]] | None = None,
-    variant_ids: list[str] | None = None,
-) -> Path:
-    """One Stage B gate run directory: both arms' rows on disk plus the experiment file.
-
-    The directory name is FIXED, so two calls under one ``tmp_path`` would write into the same tree
-    — the second arm's rows landing beside the first's while `experiment.json` is overwritten. That
-    is silent and it drifts a fixture without failing anything: measured, a test comparing a refused
-    fixture against a clean control ran the control over the refused arm's leftover rows and moved
-    its `mde` from 2.8e-17 to 0.030, with the assertion still green. Refusing to build twice is what
-    turns that into a test error; the fix at a call site is a distinct `tmp_path / "<name>"`.
-    """
-    run_dir = tmp_path / "round1-gate"
-    assert not run_dir.exists(), (
-        f"{run_dir} already exists — two _exec_run_dir calls under one tmp_path merge silently. "
-        "Give each fixture its own subdirectory, e.g. _exec_run_dir(tmp_path / 'winner', ...)."
-    )
-    for variant, per_row in (("incumbent", incumbent), ("candidate", candidate)):
-        for row_id, scores in per_row.items():
-            for replicate, score in enumerate(scores):
-                _write_row(run_dir, variant, row_id, _scored_result(row_id, score), replicate)
-
-    per_replicate = {
-        variant: {f"{EXEC_SUITE}/{row_id}": list(scores) for row_id, scores in per_row.items()}
-        for variant, per_row in (("incumbent", incumbent), ("candidate", candidate))
-    }
-    for variant, extra in (extra_scores or {}).items():
-        per_replicate.setdefault(variant, {}).update(extra)
-    declared = variant_ids or (["incumbent", "candidate"] if declare_incumbent_first else ["candidate", "incumbent"])
-    _experiment_json(run_dir, declared, per_replicate)
-    return run_dir
-
-
-def _exec_gate(run_dir: Path, **kwargs) -> ExecutionGateVerdict:
-    return execution_gate(
-        run_dir=run_dir,
-        incumbent_variant="incumbent",
-        candidate_variant="candidate",
-        suite_id=EXEC_SUITE,
-        **{"n_resamples": _FAST_RESAMPLES, **kwargs},
-    )
-
-
-# A candidate that wins on every row, with within-row spread so the paired t has variance.
-_WINNER = {
-    "incumbent": {"r1": [0.2, 0.3], "r2": [0.4, 0.5], "r3": [0.1, 0.2], "r4": [0.5, 0.6]},
-    "candidate": {"r1": [0.7, 0.8], "r2": [0.9, 1.0], "r3": [0.6, 0.8], "r4": [0.9, 0.9]},
-}
-
-
 class TestExecutionGateSign:
     """The single most important assertion in this phase: the tool resolves the subtraction."""
 
     def test_the_candidate_wins_positively_whichever_arm_is_declared_first(self, tmp_path: Path) -> None:
-        first = _exec_gate(_exec_run_dir(tmp_path / "a", **_WINNER, declare_incumbent_first=True))
-        second = _exec_gate(_exec_run_dir(tmp_path / "b", **_WINNER, declare_incumbent_first=False))
+        first = exec_gate(exec_run_dir(tmp_path / "a", **WINNER, declare_incumbent_first=True))
+        second = exec_gate(exec_run_dir(tmp_path / "b", **WINNER, declare_incumbent_first=False))
         assert first.mean_diff is not None and first.mean_diff > 0.0
         assert second.mean_diff == pytest.approx(first.mean_diff)
         assert second.p_value == pytest.approx(first.p_value)
@@ -5006,56 +4614,54 @@ class TestExecutionGateSign:
         # Negating an interval reverses it; without the re-order a promoted candidate reports a
         # "low" above its "high".
         for i, order in enumerate((True, False)):
-            verdict = _exec_gate(_exec_run_dir(tmp_path / f"o{i}", **_WINNER, declare_incumbent_first=order))
+            verdict = exec_gate(exec_run_dir(tmp_path / f"o{i}", **WINNER, declare_incumbent_first=order))
             assert verdict.ci_low is not None and verdict.ci_high is not None
             assert verdict.ci_low <= verdict.ci_high
 
     def test_the_effect_size_carries_the_sign_too(self, tmp_path: Path) -> None:
-        first = _exec_gate(_exec_run_dir(tmp_path / "a", **_WINNER, declare_incumbent_first=True))
-        second = _exec_gate(_exec_run_dir(tmp_path / "b", **_WINNER, declare_incumbent_first=False))
+        first = exec_gate(exec_run_dir(tmp_path / "a", **WINNER, declare_incumbent_first=True))
+        second = exec_gate(exec_run_dir(tmp_path / "b", **WINNER, declare_incumbent_first=False))
         assert first.effect_size is not None and first.effect_size > 0.0
         assert second.effect_size == pytest.approx(first.effect_size)
 
     def test_a_losing_candidate_reads_negative(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["candidate"], candidate=_WINNER["incumbent"])
-        verdict = _exec_gate(run_dir)
+        run_dir = exec_run_dir(tmp_path, incumbent=WINNER["candidate"], candidate=WINNER["incumbent"])
+        verdict = exec_gate(run_dir)
         assert verdict.mean_diff is not None and verdict.mean_diff < 0.0
 
 
 class TestExecutionGateLoading:
     def test_narrows_to_the_target_suite(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(
+        run_dir = exec_run_dir(
             tmp_path,
-            **_WINNER,
+            **WINNER,
             extra_scores={
                 "incumbent": {"other-suite/r1": [0.1], "other-suite/r2": [0.1]},
                 "candidate": {"other-suite/r1": [0.9], "other-suite/r2": [0.9]},
             },
         )
-        assert _exec_gate(run_dir).rows_paired == 4
+        assert exec_gate(run_dir).rows_paired == 4
 
     def test_a_missing_experiment_file_is_refused_not_raised(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         (run_dir / "experiment.json").unlink()
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert (verdict.mean_diff, verdict.ci_low, verdict.p_value) == (None, None, None)
         assert verdict.gate_refusal is not None
         assert "experiment.json" in verdict.gate_refusal and "-e" in verdict.gate_refusal
-        assert _headline_line(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith(
-            "NOT A RESULT"
-        )
+        assert headline_line(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith("NOT A RESULT")
 
     def test_a_malformed_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         (run_dir / "experiment.json").write_text("{not json", encoding="utf-8")
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.p_value is None
         assert verdict.gate_refusal is not None and "could not be read or parsed" in verdict.gate_refusal
 
     def test_an_unreadable_experiment_file_is_noted_not_raised(self, tmp_path: Path) -> None:
         # The docstring promises "Never an exception". `except ValueError` did not cover a
         # permission error or a file that vanished between the is_file() and the read.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         real_read_text = Path.read_text
 
         def _raise_on_the_experiment_file(self: Path, *args, **kwargs) -> str:
@@ -5065,26 +4671,26 @@ class TestExecutionGateLoading:
 
         # Patched rather than `chmod 000`, which is a no-op as root and in many CI containers.
         with mock.patch.object(Path, "read_text", _raise_on_the_experiment_file):
-            verdict = _exec_gate(run_dir)
+            verdict = exec_gate(run_dir)
         assert verdict.p_value is None and verdict.mean_diff is None
         assert verdict.gate_refusal is not None and "could not be read or parsed" in verdict.gate_refusal
 
     def test_a_three_variant_experiment_names_the_exactly_two_precondition(self, tmp_path: Path) -> None:
         # The triage file re-passed at Stage B: the mistake reaching the gate.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER, variant_ids=["incumbent", "candidate", "cand-b"])
-        verdict = _exec_gate(run_dir)
+        run_dir = exec_run_dir(tmp_path, **WINNER, variant_ids=["incumbent", "candidate", "cand-b"])
+        verdict = exec_gate(run_dir)
         assert verdict.p_value is None
         assert verdict.gate_refusal is not None
         assert "EXACTLY two" in verdict.gate_refusal and "round<N>-gate.yaml" in verdict.gate_refusal
 
     def test_a_variant_the_experiment_does_not_carry_names_both_actual_ids(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         verdict = execution_gate(
             run_dir=run_dir,
             incumbent_variant="incumbent",
             candidate_variant="typo-arm",
             suite_id=EXEC_SUITE,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert verdict.mean_diff is None
         assert verdict.gate_refusal is not None
@@ -5100,13 +4706,13 @@ class TestExecutionGateLoading:
         the outcome, and before it returned, the block reported a real, significant
         `inc-A - candidate` difference under a header naming `incumbent`.
         """
-        run_dir = _exec_run_dir(
+        run_dir = exec_run_dir(
             tmp_path,
-            **_WINNER,
-            extra_scores={"inc-A": {f"{EXEC_SUITE}/{r}": s for r, s in _WINNER["incumbent"].items()}},
+            **WINNER,
+            extra_scores={"inc-A": {f"{EXEC_SUITE}/{r}": s for r, s in WINNER["incumbent"].items()}},
             variant_ids=["inc-A", "candidate"],
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert (verdict.mean_diff, verdict.ci_low, verdict.ci_high) == (None, None, None)
         assert (verdict.p_value, verdict.effect_size) == (None, None)
         # The message is what attributes it: both arms DID load rows, so the zero-row cause cannot
@@ -5120,83 +4726,83 @@ class TestExecutionGateLoading:
         # The way the fault actually arrives: a typo makes the id unknown to the experiment file
         # AND empties the arm, so both this phase's halves fire. Kept beside the isolating test
         # above rather than instead of it — this is the realistic shape, that one is attributable.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         verdict = execution_gate(
             run_dir=run_dir,
             incumbent_variant="incumbnet",
             candidate_variant="candidate",
             suite_id=EXEC_SUITE,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert (verdict.mean_diff, verdict.ci_low, verdict.ci_high) == (None, None, None)
         assert (verdict.p_value, verdict.effect_size) == (None, None)
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is not True
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_fewer_than_two_paired_rows_is_refused_with_the_count_still_carried(self, tmp_path: Path) -> None:
         # No interval can be computed at all, so there is nothing for a reader to weigh — rendering
         # it as NOT PROMOTED says the candidate lost a comparison that never happened. The COUNTS
         # stay on the verdict either way, which is what distinguishes this from a wiring fault: a
         # reader can see `paired 1` rather than having it flattened into the message.
-        run_dir = _exec_run_dir(tmp_path, incumbent={"r1": [0.2, 0.3]}, candidate={"r1": [0.8, 0.9]})
-        verdict = _exec_gate(run_dir)
+        run_dir = exec_run_dir(tmp_path, incumbent={"r1": [0.2, 0.3]}, candidate={"r1": [0.8, 0.9]})
+        verdict = exec_gate(run_dir)
         assert verdict.rows_paired == 1
         assert verdict.p_value is None
         assert verdict.gate_refusal is not None
         assert "fewer than the 2 a paired interval needs" in verdict.gate_refusal
 
     def test_an_unpairable_row_is_carried_as_excluded(self, tmp_path: Path) -> None:
-        incumbent = {**_WINNER["incumbent"], "r5": [0.4]}
-        run_dir = _exec_run_dir(tmp_path, incumbent=incumbent, candidate=_WINNER["candidate"])
-        verdict = _exec_gate(run_dir)
+        incumbent = {**WINNER["incumbent"], "r5": [0.4]}
+        run_dir = exec_run_dir(tmp_path, incumbent=incumbent, candidate=WINNER["candidate"])
+        verdict = exec_gate(run_dir)
         assert (verdict.rows_paired, verdict.rows_excluded) == (4, 1)
 
 
 class TestExecutionGateIntegrity:
     def test_engagement_below_one_fails_and_names_the_drop(self, tmp_path: Path) -> None:
-        # `_scored_result` writes observed="no" below 0.5, which is a recall.yes miss.
-        candidate = {**_WINNER["candidate"], "r3": [0.6, 0.2]}
-        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=candidate)
-        verdict = _exec_gate(run_dir)
+        # `scored_result` writes observed="no" below 0.5, which is a recall.yes miss.
+        candidate = {**WINNER["candidate"], "r3": [0.6, 0.2]}
+        run_dir = exec_run_dir(tmp_path, incumbent=WINNER["incumbent"], candidate=candidate)
+        verdict = exec_gate(run_dir)
         engagement = next(c for c in verdict.integrity_checks if "engagement" in c.name)
         assert engagement.candidate is not None and engagement.candidate < 1.0
         assert not engagement.passed
 
     def test_engagement_at_one_on_both_arms_passes(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(
+        run_dir = exec_run_dir(
             tmp_path,
             incumbent={f"r{i}": [0.6, 0.7] for i in range(4)},
             candidate={f"r{i}": [0.8, 0.9] for i in range(4)},
         )
-        engagement = next(c for c in _exec_gate(run_dir).integrity_checks if "engagement" in c.name)
+        engagement = next(c for c in exec_gate(run_dir).integrity_checks if "engagement" in c.name)
         assert engagement.passed and engagement.candidate == 1.0
 
     def test_a_non_classification_index_is_unevaluated_not_a_pass_on_the_merits(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
-        verdict = _exec_gate(run_dir, engagement_criterion_index=7)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        verdict = exec_gate(run_dir, engagement_criterion_index=7)
         engagement = next(c for c in verdict.integrity_checks if "engagement" in c.name)
         assert engagement.note is not None and "NOT evaluated" in engagement.note
         assert "criterion_aggregates" in engagement.note
         assert (engagement.incumbent, engagement.candidate) == (None, None)
 
     def test_none_skips_engagement_and_leaves_only_completion(self, tmp_path: Path) -> None:
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER), engagement_criterion_index=None)
+        verdict = exec_gate(exec_run_dir(tmp_path, **WINNER), engagement_criterion_index=None)
         assert [c.name for c in verdict.integrity_checks] == ["completion_rate"]
 
     def test_a_lower_completion_rate_on_the_candidate_fails(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         # An errored replicate: the row directory exists, but nothing scored.
-        hollow = _scored_result("r2", 0.9).model_copy(update={"success_criteria_results": []})
-        _write_row(run_dir, "candidate", "r2", hollow, 1)
-        completion = next(c for c in _exec_gate(run_dir).integrity_checks if c.name == "completion_rate")
+        hollow = scored_result("r2", 0.9).model_copy(update={"success_criteria_results": []})
+        write_row(run_dir, "candidate", "r2", hollow, 1)
+        completion = next(c for c in exec_gate(run_dir).integrity_checks if c.name == "completion_rate")
         assert not completion.passed
         assert completion.candidate is not None and completion.incumbent is not None
         assert completion.candidate < completion.incumbent
 
     def test_equal_completion_passes(self, tmp_path: Path) -> None:
         completion = next(
-            c for c in _exec_gate(_exec_run_dir(tmp_path, **_WINNER)).integrity_checks if c.name == "completion_rate"
+            c for c in exec_gate(exec_run_dir(tmp_path, **WINNER)).integrity_checks if c.name == "completion_rate"
         )
         assert completion.passed and completion.candidate == completion.incumbent == 1.0
 
@@ -5228,12 +4834,12 @@ class TestExecutionGateIntegrity:
 class TestExecutionGateMde:
     def test_a_floor_of_exactly_zero_survives_as_zero(self, tmp_path: Path) -> None:
         # Every replicate identical -> a real 0.000 floor. `measured.mde or None` would erase it.
-        run_dir = _exec_run_dir(
+        run_dir = exec_run_dir(
             tmp_path,
             incumbent={f"r{i}": [0.4, 0.4] for i in range(4)},
             candidate={f"r{i}": [0.9, 0.9] for i in range(4)},
         )
-        assert _exec_gate(run_dir).mde == 0.0
+        assert exec_gate(run_dir).mde == 0.0
 
     def test_a_difference_below_the_mde_is_refused(self, tmp_path: Path) -> None:
         """An effect under the suite's own resolution is not a result — it is noise with a p.
@@ -5251,7 +4857,7 @@ class TestExecutionGateMde:
         incumbent = {"r0": [0.1, 0.9], "r1": [0.3, 0.5], "r2": [0.0, 0.95], "r3": [0.45, 0.55], "r4": [0.2, 0.8]}
         shifts = {"r0": 0.02, "r1": 0.03, "r2": 0.01, "r3": 0.025, "r4": 0.015}
         candidate = {row: [round(v + shifts[row], 3) for v in values] for row, values in incumbent.items()}
-        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        verdict = exec_gate(exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
         assert verdict.mde is not None and verdict.mean_diff is not None
         assert verdict.effect_size is not None, "fixture drifted — the zero-variance cause must NOT apply"
         assert abs(verdict.mean_diff) < verdict.mde, "fixture drifted — the difference is no longer below the floor"
@@ -5266,7 +4872,7 @@ class TestExecutionGateMde:
         # "this suite can resolve anything" — the opposite of what it means.
         rows = {f"r{i}": [0.1, 0.5] for i in range(4)}
         candidate = {f"r{i}": [0.6 + 0.01 * i, 0.9 + 0.01 * i] for i in range(4)}
-        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=rows, candidate=candidate))
+        verdict = exec_gate(exec_run_dir(tmp_path, incumbent=rows, candidate=candidate))
         assert verdict.mde == 0.0, "fixture drifted — this test is about an unmeasurable floor"
         assert verdict.gate_refusal is None
         assert any("NOT checked against a noise floor" in note for note in verdict.notes)
@@ -5275,19 +4881,19 @@ class TestExecutionGateMde:
         # The anti-over-fire half: the note must not print on a suite that DID price its floor.
         incumbent = {"r0": [0.1, 0.9], "r1": [0.3, 0.5], "r2": [0.0, 0.95], "r3": [0.45, 0.55], "r4": [0.2, 0.8]}
         candidate = {row: [round(v + 0.02, 3) for v in values] for row, values in incumbent.items()}
-        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        verdict = exec_gate(exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
         assert verdict.mde is not None and verdict.mde > 0.0
         assert not any("NOT checked against a noise floor" in note for note in verdict.notes)
 
     def test_a_difference_above_a_measurable_mde_is_not_refused(self, tmp_path: Path) -> None:
-        # The anti-over-fire half. `_WINNER` cannot witness this: its floor is 2.8e-17, so
+        # The anti-over-fire half. `WINNER` cannot witness this: its floor is 2.8e-17, so
         # "difference above the floor" is satisfied by any non-zero win at all and the assertion
         # would pass on a 1e-9 one. This fixture prices a real floor and clears it by a margin.
         # Every shifted CANDIDATE value must land in [0.5, 1.0], and the fixture asserts it rather
         # than trusting the arithmetic. Above 1.0 the score fails EvaluationResult validation,
         # `load_suite_rows` logs and SKIPS that task.json, and the arm trips the completion_rate
         # integrity check — `r2`'s 0.55 shifted to 1.01 and did exactly that, a replicate silently
-        # missing here for the fixture's whole life. Below 0.5 `_scored_result` labels the row
+        # missing here for the fixture's whole life. Below 0.5 `scored_result` labels the row
         # `no`, so the arm did not engage the skill on it and the engagement check trips — `r2`'s
         # 0.0 shifted to 0.46 and did THAT. Both were invisible while a failed check was advisory;
         # both block the promotion now, which is the point of the change this fixture now backs.
@@ -5296,9 +4902,9 @@ class TestExecutionGateMde:
             row: [round(v + 0.42 + 0.02 * i, 3) for v in values] for i, (row, values) in enumerate(incumbent.items())
         }
         assert all(0.5 <= v <= 1.0 for values in candidate.values() for v in values), "fixture drifted out of range"
-        decided = holm_promote_execution(
-            [_exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))]
-        )[0]
+        decided = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))])[
+            0
+        ]
         assert decided.mde is not None and decided.mde > 0.05, "fixture drifted — the floor must be REAL"
         assert decided.mean_diff is not None and abs(decided.mean_diff) > 2 * decided.mde
         assert all(check.passed for check in (*decided.integrity_checks, *decided.guardrails))
@@ -5316,14 +4922,14 @@ class TestExecutionGateMde:
         # Differences straddling zero: a candidate that helps on some rows and hurts on others.
         shifts = {"r0": 0.02, "r1": -0.03, "r2": 0.01, "r3": -0.02, "r4": 0.015}
         candidate = {row: [round(v + shifts[row], 3) for v in values] for row, values in incumbent.items()}
-        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        verdict = exec_gate(exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
         assert verdict.mde is not None and verdict.mean_diff is not None and verdict.ci_low is not None
         assert abs(verdict.mean_diff) < verdict.mde, "fixture drifted — it must be BELOW the floor"
         assert verdict.ci_low < 0.0 < (verdict.ci_high or 0.0), "and its interval must contain zero"
         assert verdict.gate_refusal is None, "below the floor AND consistent with zero is not a refusal"
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is False
-        assert _headline_line(render_execution_markdown(decided)) == "NOT PROMOTED"
+        assert headline_line(render_execution_markdown(decided)) == "NOT PROMOTED"
 
     def test_an_interval_tighter_than_the_floor_is_a_caveat_not_a_refusal(self, tmp_path: Path) -> None:
         """A large, consistent win reports an absurd p — the PRECISION is wrong, not the decision.
@@ -5336,7 +4942,7 @@ class TestExecutionGateMde:
         incumbent = {"r0": [0.1, 0.5], "r1": [0.2, 0.3], "r2": [0.0, 0.55], "r3": [0.25, 0.35], "r4": [0.15, 0.45]}
         shifts = {"r0": 0.40, "r1": 0.405, "r2": 0.395, "r3": 0.40, "r4": 0.405}
         candidate = {row: [round(v + shifts[row], 3) for v in values] for row, values in incumbent.items()}
-        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
+        verdict = exec_gate(exec_run_dir(tmp_path, incumbent=incumbent, candidate=candidate))
         assert verdict.mde is not None and verdict.ci_low is not None and verdict.ci_high is not None
         half_width = (verdict.ci_high - verdict.ci_low) / 2.0
         assert half_width < verdict.mde, "fixture drifted — the interval is no longer tighter than the floor"
@@ -5350,24 +4956,11 @@ class TestExecutionGateMde:
         # to REACH the verdict — pydantic copies the notes list and `gate_refusal` is passed at
         # construction for the same reason.
         rows = {f"r{i}": [0.4, 0.6] for i in range(4)}
-        verdict = _exec_gate(_exec_run_dir(tmp_path, incumbent=rows, candidate=dict(rows)))
+        verdict = exec_gate(exec_run_dir(tmp_path, incumbent=rows, candidate=dict(rows)))
         assert verdict.mean_diff is not None and verdict.effect_size is None
         assert verdict.gate_refusal is not None and "zero variance" in verdict.gate_refusal
         # Subsumed, not printed beside it: one message per finding.
         assert not any("Cohen's d is undefined" in note for note in verdict.notes)
-
-
-def _uniform_shift(n_rows: int, *, shift: float = 0.5) -> dict[str, dict[str, list[float]]]:
-    """Two flat arms differing by an IDENTICAL amount on every row — zero paired variance.
-
-    The shape the shipped `outcome-rows.jsonl` train split produces: per-row `weighted_score` is a
-    weighted mean over a handful of discrete criterion scores, so identical per-row differences are
-    ordinary rather than exotic. The paired t then reports p = 0.0000 with a zero-width interval.
-    """
-    return {
-        "incumbent": {f"r{i}": [0.5, 0.5] for i in range(n_rows)},
-        "candidate": {f"r{i}": [round(0.5 + shift, 3)] * 2 for i in range(n_rows)},
-    }
 
 
 # The shipped outcome template's weights, READ from the template rather than retyped. The exact
@@ -5441,10 +5034,10 @@ def _weighted_run_dir(
             blended: list[float] = []
             for replicate, scores in enumerate(replicates):
                 result = _weighted_result(row_id, scores, arm_weights)
-                _write_row(run_dir, variant, row_id, result, replicate)
+                write_row(run_dir, variant, row_id, result, replicate)
                 blended.append(result.weighted_score)
             per_replicate[variant][f"{SUITE}/{row_id}"] = blended
-    _experiment_json(run_dir, ["incumbent", "candidate"], per_replicate)
+    experiment_json(run_dir, ["incumbent", "candidate"], per_replicate)
     return run_dir
 
 
@@ -5474,7 +5067,7 @@ class TestDeadWeight:
     def test_the_shipped_template_configuration_reports_its_own_attenuation(self, tmp_path: Path) -> None:
         weights = _template_weights()
         arms = self._two_constant_one_varying()
-        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
+        verdict = exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
 
         dead = weights[0] + weights[1]
         assert verdict.dead_weight == pytest.approx(dead / sum(weights))
@@ -5487,7 +5080,7 @@ class TestDeadWeight:
             candidate={f"r{i}": [[0.4, 0.5, 0.6]] for i in range(4)},
             weights=weights,  # type: ignore[arg-type]
         )
-        assert _exec_gate(run_dir).dead_weight == 0.0
+        assert exec_gate(run_dir).dead_weight == 0.0
 
     def test_an_unrecorded_weight_is_unknown_and_never_zero(self, tmp_path: Path) -> None:
         """`None`, not 0.0 — "no dilution" and "we cannot tell" are the two states this separates.
@@ -5500,7 +5093,7 @@ class TestDeadWeight:
             candidate={f"r{i}": [[1.0, 0.8]] for i in range(4)},
             weights=[None, None],
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.dead_weight is None
         assert any("dead weight is UNKNOWN" in note for note in verdict.notes)
         # The rendered line names NO cause — there are four and only the note knows which.
@@ -5518,7 +5111,7 @@ class TestDeadWeight:
             weights=[1.0, 1.0, 2.0],
             candidate_weights=[1.0, 1.0],
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.dead_weight is None
         assert any("criteria lists" in note and "disagree" in note for note in verdict.notes)
 
@@ -5558,7 +5151,7 @@ class TestDeadWeight:
             candidate={f"r{i}": [[1.0, 0.8]] for i in range(4)},
             weights=[0.0, 0.0],
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.dead_weight is None
         assert any("zero total weight" in note for note in verdict.notes)
 
@@ -5569,14 +5162,14 @@ class TestDeadWeight:
             candidate={"r0": [[1.0, 0.8]]},
             weights=[1.0, 1.0],
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.dead_weight is None
         assert any("fewer than two rows paired" in note for note in verdict.notes)
 
     def test_the_note_names_the_dead_criteria_by_index_and_description(self, tmp_path: Path) -> None:
         weights = _template_weights()
         arms = self._two_constant_one_varying()
-        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
+        verdict = exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
 
         note = next(n for n in verdict.notes if "of the compared weight is dead" in n)
         assert "[0] 'criterion 0 for row r0'" in note and "[1] 'criterion 1 for row r0'" in note
@@ -5594,7 +5187,7 @@ class TestDeadWeight:
             candidate={f"r{i}": [[1.0, 0.7]] for i in range(4)},
             weights=weights,  # type: ignore[arg-type]
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.gate_refusal is not None, "fixture drifted — this is the zero-variance refusal"
         assert verdict.dead_weight == pytest.approx(0.5)
 
@@ -5648,7 +5241,7 @@ class TestDeadWeight:
             scores[variant][f"{SUITE}/ghost"] = value
         experiment.write_text(copy_with(raw, per_replicate_scores=scores).model_dump_json(), encoding="utf-8")
 
-        verdict = _exec_gate(run_dir, primary_criterion_index=2)
+        verdict = exec_gate(run_dir, primary_criterion_index=2)
         assert verdict.rows_paired == 5, "fixture drifted — experiment.json must pair the ghost row"
         note = next((n for n in verdict.notes if "DIFFERENT numbers of rows" in n), None)
         assert note is not None, "a block whose three magnitudes came from three samples must say so"
@@ -5666,7 +5259,7 @@ class TestDeadWeight:
         # prints on every healthy block and stops being read.
         weights = _template_weights()
         arms = self._two_constant_one_varying()
-        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights), primary_criterion_index=2)  # type: ignore[arg-type]
+        verdict = exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights), primary_criterion_index=2)  # type: ignore[arg-type]
         assert not any("DIFFERENT numbers of rows" in note for note in verdict.notes)
         assert verdict.mean_diff == pytest.approx(verdict.primary_mean_diff * (1.0 - (verdict.dead_weight or 0.0)))  # type: ignore[operator]
 
@@ -5686,7 +5279,7 @@ class TestDeadWeight:
         """
         weights = _template_weights()
         arms = self._two_constant_one_varying()
-        verdict = _exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
+        verdict = exec_gate(_weighted_run_dir(tmp_path, **arms, weights=weights))  # type: ignore[arg-type]
 
         block = render_execution_markdown(verdict)
         assert "- Dead weight: 51.2% of the compared weight (see notes)" in block
@@ -5705,7 +5298,7 @@ class TestDeadWeight:
             candidate={f"r{i}": [[1.0, 0.8], [0.0, 0.9]] for i in range(4)},
             weights=weights,  # type: ignore[arg-type]
         )
-        assert _exec_gate(run_dir).dead_weight == pytest.approx(0.5)
+        assert exec_gate(run_dir).dead_weight == pytest.approx(0.5)
 
 
 class TestExecutionGateRefusesAReusedRunDir:
@@ -5718,13 +5311,13 @@ class TestExecutionGateRefusesAReusedRunDir:
     """
 
     def test_a_stale_replicate_flips_the_verdict_and_is_refused(self, tmp_path: Path) -> None:
-        clean = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path / "clean", **_WINNER))])[0]
+        clean = holm_promote_execution([exec_gate(exec_run_dir(tmp_path / "clean", **WINNER))])[0]
         assert clean.promoted is True and clean.gate_refusal is None, "control drifted"
 
-        dirty_dir = _exec_run_dir(tmp_path / "dirty", **_WINNER)
+        dirty_dir = exec_run_dir(tmp_path / "dirty", **WINNER)
         for row in ("r1", "r2", "r3", "r4"):
-            _write_row(dirty_dir, "incumbent", row, _scored_result(row, 0.0), 7, record=False)
-        dirty = holm_promote_execution([_exec_gate(dirty_dir)])[0]
+            write_row(dirty_dir, "incumbent", row, scored_result(row, 0.0), 7, record=False)
+        dirty = holm_promote_execution([exec_gate(dirty_dir)])[0]
 
         # Same winning candidate; without the preflight this reported promoted=False on a
         # completion_rate the stale replicates invented, with no refusal and no note.
@@ -5735,20 +5328,20 @@ class TestExecutionGateRefusesAReusedRunDir:
     def test_a_contaminated_candidate_arm_is_refused_too(self, tmp_path: Path) -> None:
         # The error runs the other way when the CANDIDATE carries the stale rows, so both arms
         # are reconciled rather than just the incumbent.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
-        _write_row(run_dir, "candidate", "r1", _scored_result("r1", 1.0), 7, record=False)
-        verdict = _exec_gate(run_dir)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        write_row(run_dir, "candidate", "r1", scored_result("r1", 1.0), 7, record=False)
+        verdict = exec_gate(run_dir)
         assert verdict.gate_refusal is not None and "candidate" in verdict.gate_refusal
 
     def test_a_clean_gate_run_dir_is_untouched(self, tmp_path: Path) -> None:
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER))
+        verdict = exec_gate(exec_run_dir(tmp_path, **WINNER))
         assert verdict.gate_refusal is None
 
     def test_it_renders_as_not_a_result(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
-        _write_row(run_dir, "incumbent", "r1", _scored_result("r1", 0.0), 7, record=False)
-        decided = holm_promote_execution([_exec_gate(run_dir)])[0]
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        write_row(run_dir, "incumbent", "r1", scored_result("r1", 0.0), 7, record=False)
+        decided = holm_promote_execution([exec_gate(run_dir)])[0]
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
 
     def test_refused_already_is_reachable_as_true(self, tmp_path: Path) -> None:
         """The test whose absence let `_execution_diagnostics`'s docstring call two guards dead.
@@ -5765,8 +5358,8 @@ class TestExecutionGateRefusesAReusedRunDir:
         needs `mde >= FLOOR_RESOLUTION`), so no fixture can cover both. The other half is covered
         by `TestExecutionDiagnostics::test_refused_already_suppresses_both_advisory_notes`.
         """
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
-        _write_row(run_dir, "incumbent", "r1", _scored_result("r1", 0.0), 7, record=False)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        write_row(run_dir, "incumbent", "r1", scored_result("r1", 0.0), 7, record=False)
 
         seen: list[bool] = []
         real = _execution_diagnostics
@@ -5776,10 +5369,10 @@ class TestExecutionGateRefusesAReusedRunDir:
             return real(**kwargs)
 
         with mock.patch.object(optimize_execution, "_execution_diagnostics", _spy):
-            decided = holm_promote_execution([_exec_gate(run_dir)])[0]
+            decided = holm_promote_execution([exec_gate(run_dir)])[0]
 
         assert seen == [True], "the reconciliation cause must reach the ladder already refused"
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
         assert not any(fragment in note for note in decided.notes for fragment in _MDE_ADVISORY_FRAGMENTS), (
             decided.notes
         )
@@ -5796,7 +5389,7 @@ class TestExecutionGateRefusesAZeroVarianceSample:
     @pytest.mark.parametrize("n_rows", [2, 4, 8])
     def test_it_refuses_at_any_row_count(self, tmp_path: Path, n_rows: int) -> None:
         # Variance is the defect, not size, so the refusal must not depend on the row count.
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(n_rows)))
+        verdict = exec_gate(exec_run_dir(tmp_path, **uniform_shift(n_rows)))
         decided = holm_promote_execution([verdict])[0]
         assert decided.p_value == 0.0, "fixture drifted — the degenerate p is what makes this dangerous"
         assert decided.gate_refusal is not None
@@ -5805,12 +5398,12 @@ class TestExecutionGateRefusesAZeroVarianceSample:
     def test_the_gate_sets_it_before_holm_runs(self, tmp_path: Path) -> None:
         # Pins the setter's location: `execution_gate` already evaluates this predicate, so moving
         # the detection into `holm_promote_execution` would be a second declaration of it.
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
+        verdict = exec_gate(exec_run_dir(tmp_path, **uniform_shift(4)))
         assert verdict.promoted is None
         assert verdict.gate_refusal is not None
 
     def test_the_message_names_the_row_count_and_the_constant_difference(self, tmp_path: Path) -> None:
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4, shift=0.3)))
+        verdict = exec_gate(exec_run_dir(tmp_path, **uniform_shift(4, shift=0.3)))
         assert verdict.gate_refusal is not None
         assert "0.300" in verdict.gate_refusal and "4 paired row" in verdict.gate_refusal
 
@@ -5822,7 +5415,7 @@ class TestExecutionGateRefusesAZeroVarianceSample:
         the remedy differs: identical arms are a finding about the CANDIDATE (a wrong `plugins:`
         path gives exactly this shape), so "add rows the arms disagree on" is the wrong advice.
         """
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4, shift=0.0)))
+        verdict = exec_gate(exec_run_dir(tmp_path, **uniform_shift(4, shift=0.0)))
         assert verdict.mean_diff == 0.0 and verdict.p_value == 1.0
         assert verdict.gate_refusal is not None
         assert "p = 1.0000" in verdict.gate_refusal
@@ -5833,15 +5426,15 @@ class TestExecutionGateRefusesAZeroVarianceSample:
         assert "do NOT agree on" not in verdict.gate_refusal
 
     def test_a_healthy_sample_is_not_refused(self, tmp_path: Path) -> None:
-        # The anti-over-fire test. `_WINNER` has within-row spread, so the paired t has variance.
-        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+        # The anti-over-fire test. `WINNER` has within-row spread, so the paired t has variance.
+        decided = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **WINNER))])[0]
         assert decided.gate_refusal is None
         assert decided.promoted is True
 
     def test_zero_variance_favouring_the_incumbent_carries_no_negative_result_note(self, tmp_path: Path) -> None:
         # `promoted` was already False here; what changes is the headline — and an unguarded note
         # would print an ordinary negative result directly under a refusal.
-        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4, shift=-0.3)))])[0]
+        decided = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **uniform_shift(4, shift=-0.3)))])[0]
         assert decided.mean_diff is not None and decided.mean_diff < 0.0
         assert decided.gate_refusal is not None and decided.promoted is False
         assert not any("favours the incumbent" in note for note in decided.notes)
@@ -5884,7 +5477,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
             "suite_id": SUITE,
             "criterion_index": 0,
             "confidence": 0.95,
-            "n_resamples": _FAST_RESAMPLES,
+            "n_resamples": FAST_RESAMPLES,
             "rows_paired": 8,
             "rows_excluded": 0,
             "incumbent_f1": 0.4,
@@ -5904,7 +5497,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
             "candidate_variant": "cand",
             "suite_id": EXEC_SUITE,
             "confidence": 0.95,
-            "n_resamples": _FAST_RESAMPLES,
+            "n_resamples": FAST_RESAMPLES,
             "rows_paired": 8,
             "rows_excluded": 0,
             "mean_diff": 0.2,
@@ -5976,7 +5569,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
             rendered = render_execution_markdown(
                 holm_promote_execution([execution_verdict])[0] if via_holm else execution_verdict
             )
-        assert _headline_line(rendered).startswith(expected[track]), rung
+        assert headline_line(rendered).startswith(expected[track]), rung
 
     @staticmethod
     def _headline_assignments_inside_a_branch(function: ast.FunctionDef) -> list[int]:
@@ -6013,7 +5606,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
         renderer nobody added it to. The shape that actually drifted twice is exactly the shape it
         catches, which is the whole claim — not that no bespoke rung is expressible.
         """
-        tree = ast.parse(_module_source("reports_optimize"))
+        tree = ast.parse(module_source("reports_optimize"))
         function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == renderer)
         branched = self._headline_assignments_inside_a_branch(function)
         assert branched == [], (
@@ -6040,7 +5633,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
         it claims: a renamed local or a changed AST shape would otherwise make the two assertions
         above silently green.
         """
-        tree = ast.parse(_module_source("reports_optimize"))
+        tree = ast.parse(module_source("reports_optimize"))
         confirm = next(
             node
             for node in ast.walk(tree)
@@ -6063,7 +5656,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
         )[0]
         assert decided.p_value is not None, "the premise: this refusal DID compute a p"
         assert (
-            _headline_line(render_execution_markdown(decided))
+            headline_line(render_execution_markdown(decided))
             == "NOT A RESULT — zero variance in the paired differences"
         )
 
@@ -6083,7 +5676,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
         )
         assert (blocked_arm.separated, clean_arm.separated) == (True, True)
         assert (blocked_arm.holm_rejected, clean_arm.holm_rejected) == (False, False)
-        headlines = [_headline_line(render_execution_markdown(v)) for v in (blocked_arm, clean_arm)]
+        headlines = [headline_line(render_execution_markdown(v)) for v in (blocked_arm, clean_arm)]
         assert headlines == ["NOT PROMOTED", "NOT PROMOTED"], "identical statistics must read identically"
 
     def test_blocked_and_not_promoted_differ_only_by_separated(self) -> None:
@@ -6103,7 +5696,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
             [self._verdict(gate_refusal="zero variance in the paired differences", guardrails=[_FAILING_GUARDRAIL])]
         )[0]
         assert decided.separated is True and decided.promoted is False
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT")
 
     def test_a_blocked_candidate_stays_in_the_holm_family(self) -> None:
         # The veto must not change `m` for its siblings: a blocked candidate was still TESTED, and
@@ -6139,7 +5732,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
 
     @pytest.mark.parametrize(
         ("model", "build"),
-        [(ActivationGateVerdict, _parity_activation), (ExecutionGateVerdict, _parity_execution)],
+        [(ActivationGateVerdict, parity_activation), (ExecutionGateVerdict, parity_execution)],
         ids=["activation", "execution"],
     )
     def test_separated_is_not_a_serialized_field(self, model, build) -> None:
@@ -6150,34 +5743,18 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
         assert "separated" not in build().model_dump()
 
 
-def _confirm_dir(tmp_path: Path, *, split: str | None, **arms) -> Path:
-    """A gate run dir whose `run.json` records a given `--split`.
-
-    The split is rewritten AFTER the rows go down, not before: `_exec_run_dir` refuses to build into
-    an existing directory (two calls under one tmp_path merge silently), and `_write_row` creates
-    `run.json` on the first row. So `row_selection` is patched in place, leaving `task_results` — which
-    the tree reconciliation reads — exactly as the row writer left it.
-    """
-    run_dir = _exec_run_dir(tmp_path, **(arms or _WINNER))
-    path = run_dir / "run.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload[_RUN_SELECTION_KEY] = RowSelection(split=split).model_dump(mode="json")
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return run_dir
-
-
 def _train_verdict(tmp_path: Path, **kwargs) -> ExecutionGateVerdict:
-    return holm_promote_execution([_exec_gate(_confirm_dir(tmp_path, split="train"), **kwargs)])[0]
+    return holm_promote_execution([exec_gate(confirm_dir(tmp_path, split="train"), **kwargs)])[0]
 
 
 def _confirm(tmp_path: Path, train: ExecutionGateVerdict, *, split: str | None = "test", **overrides) -> ConfirmVerdict:
     return confirm_gate_execution(
         train_verdict=train,
-        confirm_run_dir=_confirm_dir(tmp_path, split=split),
+        confirm_run_dir=confirm_dir(tmp_path, split=split),
         incumbent_variant="incumbent",
         candidate_variant="candidate",
         suite_id=EXEC_SUITE,
-        n_resamples=_FAST_RESAMPLES,
+        n_resamples=FAST_RESAMPLES,
         **overrides,
     )
 
@@ -6285,7 +5862,7 @@ class TestTheClassifierIsShared:
     def test_neither_track_module_defines_its_own(self, module: str) -> None:
         # A SOURCE scan, not an attribute check: both modules IMPORT these names, so `hasattr` passes
         # either way and only the source says whether a second implementation was written.
-        source = _module_source(module)
+        source = module_source(module)
         for name in ("classify_confirm", "build_confirm_verdict"):
             assert f"def {name}(" not in source, (
                 f"{module} defines its own {name} — the two track modules may not import each "
@@ -6294,7 +5871,7 @@ class TestTheClassifierIsShared:
 
     def test_both_tracks_call_the_shared_builder(self) -> None:
         for module in ("optimize.activation", "optimize.execution"):
-            assert "build_confirm_verdict(" in _module_source(module)
+            assert "build_confirm_verdict(" in module_source(module)
 
 
 class TestConfirmGateExecution:
@@ -6303,7 +5880,7 @@ class TestConfirmGateExecution:
     def test_a_deterministic_confirm_is_undecided_and_still_reports_its_numbers(self, tmp_path: Path) -> None:
         train = _train_verdict(tmp_path / "train")
         confirm = _confirm(tmp_path / "test", train)
-        # `_WINNER`'s replicates agree within each row, so its null split returns RESIDUE rather than
+        # `WINNER`'s replicates agree within each row, so its null split returns RESIDUE rather than
         # a floor — which is why the outcome is UNDECIDED. Asserted directly rather than worked
         # around: it is what a real confirm over a deterministic suite produces, and `== 0.0` would
         # not have seen it.
@@ -6337,7 +5914,7 @@ class TestConfirmGateExecution:
     def test_an_unrecorded_split_is_a_note_not_a_refusal(self, tmp_path: Path) -> None:
         """A run predating the provenance field is an expected input, not a wiring fault."""
         train = _train_verdict(tmp_path / "train")
-        run_dir = _exec_run_dir(tmp_path / "test", **_WINNER)
+        run_dir = exec_run_dir(tmp_path / "test", **WINNER)
         (run_dir / "run.json").unlink()
         confirm = confirm_gate_execution(
             train_verdict=train,
@@ -6345,14 +5922,14 @@ class TestConfirmGateExecution:
             incumbent_variant="incumbent",
             candidate_variant="candidate",
             suite_id=EXEC_SUITE,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert confirm.confirm_refusal is None
         assert any("provenance is missing" in note for note in confirm.notes)
 
     def test_a_refused_train_verdict_is_undecided_and_names_the_train_cause(self, tmp_path: Path) -> None:
         refused = holm_promote_execution(
-            [_exec_gate(_confirm_dir(tmp_path / "train", split="train", **_uniform_shift(4)))]
+            [exec_gate(confirm_dir(tmp_path / "train", split="train", **uniform_shift(4)))]
         )[0]
         assert refused.gate_refusal is not None, "fixture drifted — the train verdict must refuse"
         confirm = _confirm(tmp_path / "test", refused)
@@ -6365,7 +5942,7 @@ class TestConfirmGateExecution:
         with pytest.raises(TypeError, match="ONE variant id"):
             confirm_gate_execution(
                 train_verdict=train,
-                confirm_run_dir=_confirm_dir(tmp_path / "test", split="test"),
+                confirm_run_dir=confirm_dir(tmp_path / "test", split="test"),
                 incumbent_variant="incumbent",
                 candidate_variant=["candidate", "cand-b"],  # type: ignore[arg-type]
                 suite_id=EXEC_SUITE,
@@ -6383,7 +5960,7 @@ class TestConfirmGateExecution:
         # rows' labels derive from their scores, so the incumbent's low rows read `no` and the
         # engagement integrity check fails, which is exactly that shape.
         train = holm_promote_execution(
-            [_exec_gate(_confirm_dir(tmp_path / "train", split="train", **TestConfirmGateOutcomesEndToEnd._arms(0.30)))]
+            [exec_gate(confirm_dir(tmp_path / "train", split="train", **TestConfirmGateOutcomesEndToEnd._arms(0.30)))]
         )[0]
         assert (train.separated, train.promoted) == (True, False), "fixture drifted — need a vetoed winner"
         confirm = _confirm(tmp_path / "test", train)
@@ -6396,7 +5973,7 @@ class TestConfirmGateExecution:
         train = _train_verdict(tmp_path / "train")
         confirm = _confirm(tmp_path / "test", train)
         assert confirm.test_mde == confirm.test_verdict.mde
-        source = _module_source("optimize.execution")
+        source = module_source("optimize.execution")
         body = source[source.index("def confirm_gate_execution(") : source.index("def holm_promote_execution(")]
         assert "measure_execution_noise_floor" not in body
 
@@ -6410,7 +5987,7 @@ class TestConfirmGateExecution:
 class TestConfirmGateOutcomesEndToEnd:
     """All four outcomes reachable through the real gate, with a measurable confirm floor.
 
-    The `_WINNER` fixture's replicates agree within each row, so its null split reduces to a floor of
+    The `WINNER` fixture's replicates agree within each row, so its null split reduces to a floor of
     exactly 0.000 and every confirm over it is UNDECIDED — correctly. These fixtures give the confirm
     run a MEASURABLE floor by varying the replicate spread per row, which is what a real
     `--repeats 3` confirm produces.
@@ -6434,15 +6011,15 @@ class TestConfirmGateOutcomesEndToEnd:
         self, tmp_path: Path, *, train_shift: float, test_shift: float, swap_test: bool = False
     ) -> ConfirmVerdict:
         train = holm_promote_execution(
-            [_exec_gate(_confirm_dir(tmp_path / "train", split="train", **self._arms(train_shift)))]
+            [exec_gate(confirm_dir(tmp_path / "train", split="train", **self._arms(train_shift)))]
         )[0]
         return confirm_gate_execution(
             train_verdict=train,
-            confirm_run_dir=_confirm_dir(tmp_path / "test", split="test", **self._arms(test_shift, swap=swap_test)),
+            confirm_run_dir=confirm_dir(tmp_path / "test", split="test", **self._arms(test_shift, swap=swap_test)),
             incumbent_variant="incumbent",
             candidate_variant="candidate",
             suite_id=EXEC_SUITE,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
 
     def test_a_sign_flip_is_reversed(self, tmp_path: Path) -> None:
@@ -6500,7 +6077,7 @@ class TestPrimaryCriterionIndex:
         """
         weights = _template_weights()
         run_dir = _weighted_run_dir(tmp_path, **self._dead_weight_arms(), weights=weights)  # type: ignore[arg-type]
-        verdict = _exec_gate(run_dir, primary_criterion_index=2)
+        verdict = exec_gate(run_dir, primary_criterion_index=2)
 
         assert verdict.primary_mean_diff is not None and verdict.mean_diff is not None
         assert verdict.primary_mean_diff != pytest.approx(verdict.mean_diff)
@@ -6510,9 +6087,9 @@ class TestPrimaryCriterionIndex:
     def test_setting_it_changes_no_decision(self, tmp_path: Path) -> None:
         weights = _template_weights()
         arms = self._dead_weight_arms()
-        plain = holm_promote_execution([_exec_gate(_weighted_run_dir(tmp_path / "a", **arms, weights=weights))])[0]  # type: ignore[arg-type]
+        plain = holm_promote_execution([exec_gate(_weighted_run_dir(tmp_path / "a", **arms, weights=weights))])[0]  # type: ignore[arg-type]
         primary = holm_promote_execution(
-            [_exec_gate(_weighted_run_dir(tmp_path / "b", **arms, weights=weights), primary_criterion_index=2)]  # type: ignore[arg-type]
+            [exec_gate(_weighted_run_dir(tmp_path / "b", **arms, weights=weights), primary_criterion_index=2)]  # type: ignore[arg-type]
         )[0]
         assert (plain.promoted, plain.holm_rejected, plain.separated) == (
             primary.promoted,
@@ -6527,17 +6104,17 @@ class TestPrimaryCriterionIndex:
         An over-long index makes `row_score` return None on every row, so the vector is EMPTY and
         indistinguishable from a suite whose rows all errored on that criterion. Refused explicitly.
         """
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER), primary_criterion_index=7)
+        verdict = exec_gate(exec_run_dir(tmp_path, **WINNER), primary_criterion_index=7)
         assert verdict.primary_mean_diff is None
         assert verdict.gate_refusal is not None and "selected no usable row" in verdict.gate_refusal
         assert holm_promote_execution([verdict])[0].promoted is False
 
     def test_a_negative_index_raises_at_the_boundary(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="criterion_index must be >= 0"):
-            _exec_gate(_exec_run_dir(tmp_path, **_WINNER), primary_criterion_index=-1)
+            exec_gate(exec_run_dir(tmp_path, **WINNER), primary_criterion_index=-1)
 
     def test_it_defaults_to_absent(self, tmp_path: Path) -> None:
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER))
+        verdict = exec_gate(exec_run_dir(tmp_path, **WINNER))
         assert verdict.primary_criterion_index is None and verdict.primary_mean_diff is None
 
     def test_the_rendered_block_prints_it_only_when_predeclared(self, tmp_path: Path) -> None:
@@ -6548,8 +6125,8 @@ class TestPrimaryCriterionIndex:
         """
         weights = _template_weights()
         arms = self._dead_weight_arms()
-        plain = _exec_gate(_weighted_run_dir(tmp_path / "a", **arms, weights=weights))  # type: ignore[arg-type]
-        primary = _exec_gate(
+        plain = exec_gate(_weighted_run_dir(tmp_path / "a", **arms, weights=weights))  # type: ignore[arg-type]
+        primary = exec_gate(
             _weighted_run_dir(tmp_path / "b", **arms, weights=weights),  # type: ignore[arg-type]
             primary_criterion_index=2,
         )
@@ -6574,7 +6151,7 @@ class TestRenderConfirmMarkdown:
             "test_mde": 0.02,
             "delta": -0.005,
             "outcome": outcome,
-            "test_verdict": _full_execution_verdict(),
+            "test_verdict": full_execution_verdict(),
         }
         return ConfirmVerdict(**{**base, **overrides})
 
@@ -6590,7 +6167,7 @@ class TestRenderConfirmMarkdown:
     def test_the_rung_is_reachable(self, rung: str, overrides: dict, expected: str) -> None:
         outcome = "undecided" if rung == "refusal" else rung
         block = render_confirm_markdown(self._verdict(outcome, **overrides))
-        assert _headline_line(block).startswith(expected)
+        assert headline_line(block).startswith(expected)
 
     def test_a_refusal_is_printed_once_not_twice(self, tmp_path: Path) -> None:
         # `holm_promote`'s rule for `gate_refusal`, applied here: notes is the distrust-the-numbers
@@ -6609,7 +6186,7 @@ class TestRenderConfirmMarkdown:
             train_effect=0.08,
             test_effect=0.075,
             test_mde=0.02,
-            test_verdict=_full_execution_verdict(),
+            test_verdict=full_execution_verdict(),
             confirm_refusal="the confirm run recorded --split 'train'",
             notes=["a qualification worth keeping"],
         )
@@ -6622,13 +6199,13 @@ class TestRenderConfirmMarkdown:
         block = render_confirm_markdown(
             self._verdict("reversed", confirm_refusal="the confirm run recorded --split 'train'")
         )
-        assert _headline_line(block).startswith("NOT A COMPARISON")
-        assert "REVERSED" not in _headline_line(block)
+        assert headline_line(block).startswith("NOT A COMPARISON")
+        assert "REVERSED" not in headline_line(block)
 
     def test_reversed_says_do_not_promote_in_the_headline(self) -> None:
         # A reversal is a headline, not a footnote: a reader who skims past it promotes on a number
         # that does not hold on held-out rows.
-        assert "Do not promote" in _headline_line(render_confirm_markdown(self._verdict("reversed")))
+        assert "Do not promote" in headline_line(render_confirm_markdown(self._verdict("reversed")))
 
     def test_the_block_carries_both_effects_the_delta_and_the_margin(self) -> None:
         block = render_confirm_markdown(self._verdict("reproduced"))
@@ -6658,7 +6235,7 @@ class TestHolmPromoteExecution:
             "candidate_variant": "cand",
             "suite_id": EXEC_SUITE,
             "confidence": 0.95,
-            "n_resamples": _FAST_RESAMPLES,
+            "n_resamples": FAST_RESAMPLES,
             "rows_paired": 8,
             "rows_excluded": 0,
             "mean_diff": 0.2,
@@ -6751,15 +6328,15 @@ class TestHolmPromoteExecution:
         assert any("cost (USD/row) FAILED" in note for note in decided.notes)
         # On the HEADLINE: the note above quotes the headline's own words, so a whole-page
         # substring test passes whichever rung the block actually took.
-        assert _headline_line(render_execution_markdown(decided)).startswith("BLOCKED BY A GUARDRAIL")
+        assert headline_line(render_execution_markdown(decided)).startswith("BLOCKED BY A GUARDRAIL")
 
 
 class TestRenderExecutionMarkdown:
     def _decided(self, tmp_path: Path, **kwargs) -> ExecutionGateVerdict:
-        return holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER), **kwargs)])[0]
+        return holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **WINNER), **kwargs)])[0]
 
     def test_says_undecided_before_holm_has_run(self, tmp_path: Path) -> None:
-        text = render_execution_markdown(_exec_gate(_exec_run_dir(tmp_path, **_WINNER)))
+        text = render_execution_markdown(exec_gate(exec_run_dir(tmp_path, **WINNER)))
         assert "UNDECIDED" in text
         assert "NOT PROMOTED" not in text
 
@@ -6771,9 +6348,9 @@ class TestRenderExecutionMarkdown:
         assert "Guardrails" in text
 
     def test_a_failing_integrity_check_blocks_the_headline(self, tmp_path: Path) -> None:
-        candidate = {**_WINNER["candidate"], "r3": [0.6, 0.2]}
-        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=candidate)
-        decided = holm_promote_execution([_exec_gate(run_dir, n_resamples=_FAST_RESAMPLES)])[0]
+        candidate = {**WINNER["candidate"], "r3": [0.6, 0.2]}
+        run_dir = exec_run_dir(tmp_path, incumbent=WINNER["incumbent"], candidate=candidate)
+        decided = holm_promote_execution([exec_gate(run_dir, n_resamples=FAST_RESAMPLES)])[0]
         # Unconditional on BOTH halves, so neither assertion can become a silent no-op: the check
         # vetoes the promotion, and `separated` records that the statistic itself came out — which
         # is what makes the BLOCKED headline reachable rather than an ordinary NOT PROMOTED.
@@ -6781,40 +6358,40 @@ class TestRenderExecutionMarkdown:
         assert decided.separated is True
         text = render_execution_markdown(decided)
         # The headline, not the page — the failed-check note quotes this phrase too.
-        assert _headline_line(text).startswith("BLOCKED BY A GUARDRAIL")
+        assert headline_line(text).startswith("BLOCKED BY A GUARDRAIL")
         assert "engagement" in text
 
     def test_renders_a_missing_effect_size_as_a_dash(self, tmp_path: Path) -> None:
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER)).model_copy(update={"effect_size": None})
+        verdict = exec_gate(exec_run_dir(tmp_path, **WINNER)).model_copy(update={"effect_size": None})
         assert "Cohen's d: —" in render_execution_markdown(verdict)
 
     def test_a_refused_verdict_leads_with_not_a_result(self, tmp_path: Path) -> None:
-        # SEPARATE tmp dirs: `_exec_run_dir` always writes `<tmp>/round1-gate` and never clears it,
+        # SEPARATE tmp dirs: `exec_run_dir` always writes `<tmp>/round1-gate` and never clears it,
         # so building both fixtures under one `tmp_path` leaves the refused arm's rows on disk for
         # the control — measured, it moved the control's `mde` from 2.8e-17 to 0.030.
-        decided = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path / "refused", **_uniform_shift(4)))])[0]
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        decided = holm_promote_execution([exec_gate(exec_run_dir(tmp_path / "refused", **uniform_shift(4)))])[0]
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
         # And the assertion is not a no-op: a clean fixture WITH spread headlines PROMOTED, so the
         # headline above is discriminating rather than whatever this renderer happens to print.
-        assert _headline_line(render_execution_markdown(self._decided(tmp_path / "winner"))) == "PROMOTED"
+        assert headline_line(render_execution_markdown(self._decided(tmp_path / "winner"))) == "PROMOTED"
 
     def test_a_refusal_outranks_a_failing_guardrail(self, tmp_path: Path) -> None:
         # Reading a guardrail presupposes a statistic that separated, so the refusal is above it —
         # matching `render_markdown`'s precedence. Guaranteed only indirectly today (a refusal
         # forces `promoted=False`, which makes the BLOCKED rung unreachable), which is exactly why
         # it is pinned: a change that stopped forcing it would reorder the ladder silently.
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
+        verdict = exec_gate(exec_run_dir(tmp_path, **uniform_shift(4)))
         failing = GuardrailCheck(
             name="cost (USD/row)", incumbent=1.0, candidate=3.0, relative_change=2.0, tolerance=0.25, passed=False
         )
         decided = holm_promote_execution([verdict.model_copy(update={"guardrails": [failing]})])[0]
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_undecided_still_outranks_the_refusal(self, tmp_path: Path) -> None:
         # A verdict Holm never saw has no decision to refuse, so `promoted is None` wins the ladder.
-        verdict = _exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4)))
+        verdict = exec_gate(exec_run_dir(tmp_path, **uniform_shift(4)))
         assert verdict.gate_refusal is not None
-        assert _headline_line(render_execution_markdown(verdict)).startswith("UNDECIDED")
+        assert headline_line(render_execution_markdown(verdict)).startswith("UNDECIDED")
 
     def test_the_refusal_text_survives_the_undecided_headline(self, tmp_path: Path) -> None:
         """The message must reach the reader on EVERY render path, not only when it wins.
@@ -6824,12 +6401,12 @@ class TestRenderExecutionMarkdown:
         confident interval and four green checks with nothing anywhere saying the rows are missing
         — measured, and the exact silent-zero this module's docstring promises never happens.
         """
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         shutil.rmtree(run_dir / "incumbent")
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.promoted is None and verdict.gate_refusal is not None
         block = render_execution_markdown(verdict)
-        assert _headline_line(block).startswith("UNDECIDED"), "the ladder is unchanged — this is about the TEXT"
+        assert headline_line(block).startswith("UNDECIDED"), "the ladder is unchanged — this is about the TEXT"
         assert verdict.gate_refusal in block
         # And it appears exactly once: when the headline DOES carry it, the extra line must not.
         decided = holm_promote_execution([verdict])[0]
@@ -6844,14 +6421,14 @@ class TestRenderExecutionMarkdown:
         the read's own note is what the reader gets. If that ever changes, this test is the thing
         that says the unreachability claim in `execution_gate` is no longer true.
         """
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         raw = ExperimentResult.model_validate_json((run_dir / "experiment.json").read_text(encoding="utf-8"))
         scores = {v: dict(per) for v, per in raw.per_replicate_scores.items()}
         scores["candidate"][f"{EXEC_SUITE}/r1"] = [float("nan"), 0.8]
         (run_dir / "experiment.json").write_text(
             raw.model_copy(update={"per_replicate_scores": scores}).model_dump_json(), encoding="utf-8"
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert (verdict.mean_diff, verdict.p_value) == (None, None)
         assert verdict.gate_refusal is not None and "could not be read or parsed" in verdict.gate_refusal
         assert holm_promote_execution([verdict])[0].promoted is False
@@ -6862,23 +6439,6 @@ class TestRenderExecutionMarkdown:
 # ---------------------------------------------------------------------------
 
 _VERDICT_PINS = Path(__file__).parent / "_fixtures" / "optimize_verdicts"
-
-
-def _pinned_suite() -> tuple[dict, dict]:
-    """`_tiny_suite` plus a SIBLING criterion the candidate annexes one row of.
-
-    Load-bearing for the pins rather than decoration. `_tiny_suite`'s rows carry one criterion, so
-    `sibling_checks` comes back `[]` — which is the model default, so a construction that dropped
-    the `sibling_checks=` keyword entirely would reproduce the pin byte for byte. Measured: with a
-    single-criterion suite, deleting `sibling_checks=` from both return paths left the whole file
-    green. It is the field `holm_promote` folds into `promoted`, so it is the last one a
-    behaviour pin may be blind to.
-    """
-    incumbent, candidate = _tiny_suite(4, 4)
-    return (
-        {rid: [*labels, ("yes", "yes")] for rid, labels in incumbent.items()},
-        {rid: [*labels, ("yes", "no" if rid == "p0" else "yes")] for rid, labels in candidate.items()},
-    )
 
 
 def _assert_matches_pin(verdict, name: str) -> None:
@@ -6906,7 +6466,7 @@ class TestConstructionIsBehaviourPreserving:
     """The three construction paths the rewrite touches, pinned against pre-rewrite output."""
 
     def test_the_activation_verdict_is_unchanged(self, tmp_path: Path) -> None:
-        _assert_matches_pin(_gate(_shared_dirs(tmp_path, *_pinned_suite())), "activation_gate")
+        _assert_matches_pin(activation_verdict(shared_dirs(tmp_path, *pinned_suite())), "activation_gate")
 
     def test_the_activation_early_return_is_unchanged(self, tmp_path: Path) -> None:
         # The `bootstrap is None` path, which used to OVERWRITE two keys in the shared dict before
@@ -6916,16 +6476,18 @@ class TestConstructionIsBehaviourPreserving:
         # `mde` was `None` could not see a dropped `mde=` keyword.
         incumbent = {f"p{i}": [("yes", "no"), ("yes", "yes")] for i in range(3)}
         candidate = {"p0": [("yes", "yes"), ("yes", "no")]}
-        _assert_matches_pin(_gate(_shared_dirs(tmp_path, incumbent, candidate)), "activation_gate_early_return")
+        _assert_matches_pin(
+            activation_verdict(shared_dirs(tmp_path, incumbent, candidate)), "activation_gate_early_return"
+        )
 
     def test_the_execution_verdict_is_unchanged(self, tmp_path: Path) -> None:
-        _assert_matches_pin(_exec_gate(_exec_run_dir(tmp_path, **_WINNER)), "execution_gate")
+        _assert_matches_pin(exec_gate(exec_run_dir(tmp_path, **WINNER)), "execution_gate")
 
     def test_the_refused_execution_verdict_is_unchanged(self, tmp_path: Path) -> None:
         # `gate_refusal` is the one value `_verdict` reads from its closure rather than taking as a
         # parameter, and it is `None` on every healthy verdict — so a pin that never refuses cannot
         # see it dropped.
-        _assert_matches_pin(_exec_gate(_exec_run_dir(tmp_path, **_uniform_shift(4))), "execution_gate_refused")
+        _assert_matches_pin(exec_gate(exec_run_dir(tmp_path, **uniform_shift(4))), "execution_gate_refused")
 
 
 class TestLoadAndPair:
@@ -6951,7 +6513,7 @@ class TestLoadAndPair:
 
     def test_a_clean_pair_carries_every_row_and_no_notes(self, tmp_path: Path) -> None:
         rows = {f"r{i}": [("yes", "yes" if i else "no")] for i in range(4)}
-        paired = self._pair(_shared_dirs(tmp_path, rows, rows))
+        paired = self._pair(shared_dirs(tmp_path, rows, rows))
         assert paired.scored_row_ids == ["r0", "r1", "r2", "r3"]
         assert paired.rows_excluded == 0
         assert paired.notes == []
@@ -6962,7 +6524,7 @@ class TestLoadAndPair:
         assert paired.n_discordant == 0
 
     def test_a_zero_row_incumbent_says_which_arm_and_what_did_not_match(self, tmp_path: Path) -> None:
-        run_dirs = _write_arm(tmp_path, "candidate", {"r1": [("yes", "yes")]})
+        run_dirs = write_arm(tmp_path, "candidate", {"r1": [("yes", "yes")]})
         paired = self._pair(run_dirs)
         assert paired.scored_row_ids == []
         assert any("the incumbent arm loaded ZERO rows" in n for n in paired.notes)
@@ -6971,33 +6533,33 @@ class TestLoadAndPair:
     def test_an_unpaired_row_on_each_side_is_excluded_and_counted(self, tmp_path: Path) -> None:
         incumbent = {"shared": [("yes", "yes")], "only-inc": [("yes", "yes")]}
         candidate = {"shared": [("yes", "yes")], "only-cand": [("yes", "yes")]}
-        paired = self._pair(_shared_dirs(tmp_path, incumbent, candidate))
+        paired = self._pair(shared_dirs(tmp_path, incumbent, candidate))
         assert paired.scored_row_ids == ["shared"]
         assert paired.rows_excluded == 2
         assert any("only-cand, only-inc" in n for n in paired.notes)
 
     def test_a_hollow_row_is_dropped_from_both_vectors(self, tmp_path: Path) -> None:
         # The row directory exists on both arms, so it PAIRS — but only one arm scored it.
-        run_dirs = _shared_dirs(tmp_path, {"r1": [("yes", "yes")]}, {"r1": [("yes", "yes")]})
+        run_dirs = shared_dirs(tmp_path, {"r1": [("yes", "yes")]}, {"r1": [("yes", "yes")]})
         for run_dir in run_dirs:
-            _write_row(run_dir, "candidate", "hollow", _eval_result("hollow", []))
-            _write_row(run_dir, "incumbent", "hollow", _eval_result("hollow", [("yes", "yes")]))
+            write_row(run_dir, "candidate", "hollow", eval_result("hollow", []))
+            write_row(run_dir, "incumbent", "hollow", eval_result("hollow", [("yes", "yes")]))
         paired = self._pair(run_dirs)
         assert paired.scored_row_ids == ["r1"]
         assert paired.rows_excluded == 1
         assert any("scored on only one arm" in n and "hollow" in n for n in paired.notes)
 
     def test_unbalanced_replicates_are_trimmed_and_the_drop_is_counted(self, tmp_path: Path) -> None:
-        run_dirs = _shared_dirs(tmp_path, {"r1": [("yes", "yes")]}, {"r1": [("yes", "yes")]})
+        run_dirs = shared_dirs(tmp_path, {"r1": [("yes", "yes")]}, {"r1": [("yes", "yes")]})
         # A fourth candidate replicate for r1 only, which would otherwise weigh 4:3.
-        _write_row(run_dirs[0], "candidate", "r1", _eval_result("r1", [("yes", "yes")]), replicate=1)
+        write_row(run_dirs[0], "candidate", "r1", eval_result("r1", [("yes", "yes")]), replicate=1)
         paired = self._pair(run_dirs)
         assert len(paired.incumbent_pairs) == len(paired.candidate_pairs) == 3
         assert any("dropping 1 observation(s)" in n for n in paired.notes)
 
     def test_a_criterion_index_past_the_end_is_named_as_a_wiring_mistake(self, tmp_path: Path) -> None:
         rows = {"r1": [("yes", "yes")]}
-        paired = self._pair(_shared_dirs(tmp_path, rows, rows), criterion_index=7)
+        paired = self._pair(shared_dirs(tmp_path, rows, rows), criterion_index=7)
         assert paired.incumbent_pairs == [] and paired.candidate_pairs == []
         assert any("criterion_index=7 selected NO classification results" in n for n in paired.notes)
         assert any("the index is past the end" in n for n in paired.notes)
@@ -7006,7 +6568,7 @@ class TestLoadAndPair:
         # Pydantic COPIES the list at construction, so a note appended after the model is built is
         # silently discarded. The gate must hold THIS list, not a copy of it.
         rows = {"r1": [("yes", "yes")]}
-        paired = self._pair(_shared_dirs(tmp_path, rows, rows))
+        paired = self._pair(shared_dirs(tmp_path, rows, rows))
         before = len(paired.notes)
         paired.notes.append("added by the caller")
         assert len(paired.notes) == before + 1
@@ -7024,13 +6586,13 @@ def test_the_gate_notes_keep_their_order(tmp_path: Path) -> None:
     """
     incumbent = {"shared": [("yes", "yes")], "only-inc": [("yes", "yes")]}
     candidate = {"shared": [("yes", "yes")]}
-    run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+    run_dirs = shared_dirs(tmp_path, incumbent, candidate)
     for run_dir in run_dirs:
-        _write_row(run_dir, "candidate", "hollow", _eval_result("hollow", []))
-        _write_row(run_dir, "incumbent", "hollow", _eval_result("hollow", [("yes", "yes")]))
-    _write_row(run_dirs[0], "candidate", "shared", _eval_result("shared", [("yes", "yes")]), replicate=1)
+        write_row(run_dir, "candidate", "hollow", eval_result("hollow", []))
+        write_row(run_dir, "incumbent", "hollow", eval_result("hollow", [("yes", "yes")]))
+    write_row(run_dirs[0], "candidate", "shared", eval_result("shared", [("yes", "yes")]), replicate=1)
 
-    verdict = _gate(run_dirs)
+    verdict = activation_verdict(run_dirs)
     prefixes = [
         "1 row(s) present in only one arm",
         "1 row(s) scored on only one arm",
@@ -7192,7 +6754,7 @@ class TestExecutionDiagnostics:
         )
 
     def _run(self, tmp_path: Path, **kwargs) -> tuple[str | None, list[str]]:
-        rows = {"r1": [_scored_result("r1", 1.0)]}
+        rows = {"r1": [scored_result("r1", 1.0)]}
         return _execution_diagnostics(
             **{
                 "incumbent_rows": rows,
@@ -7384,7 +6946,7 @@ def _cost_quality_pin_points(tmp_path: Path) -> list[CostQualityPoint]:
         "cand-costless": {f"r{i}": (0.95, None) for i in range(4)},
     }
     for variant, per_row in arms.items():
-        _cost_quality_arm(tmp_path, variant, per_row)
+        cost_quality_arm(tmp_path, variant, per_row)
     return cost_quality_points(
         run_dirs=[tmp_path / "run-0"], variant_ids=list(arms), suite_id=SUITE, criterion_index=None
     )
@@ -7399,18 +6961,18 @@ class TestRenderingIsBehaviourPreserving:
     """
 
     def test_the_activation_block_is_unchanged(self, tmp_path: Path) -> None:
-        verdict = holm_promote([_gate(_shared_dirs(tmp_path, *_pinned_suite()))])[0]
+        verdict = holm_promote([activation_verdict(shared_dirs(tmp_path, *pinned_suite()))])[0]
         _assert_matches_render_pin(render_markdown(verdict), "activation_gate")
 
     def test_the_refused_activation_block_is_unchanged(self, tmp_path: Path) -> None:
         # The discreteness refusal, which is the one refused verdict carrying no filesystem path.
-        incumbent, candidate = _tiny_suite(3, 3)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        verdicts = [_gate(run_dirs, n_resamples=TestGateRefusal._REFUSAL_RESAMPLES) for _ in range(2)]
+        incumbent, candidate = tiny_suite(3, 3)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        verdicts = [activation_verdict(run_dirs, n_resamples=TestGateRefusal._REFUSAL_RESAMPLES) for _ in range(2)]
         _assert_matches_render_pin(render_markdown(holm_promote(verdicts)[0]), "activation_gate_refused")
 
     def test_the_execution_block_is_unchanged(self, tmp_path: Path) -> None:
-        verdict = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
+        verdict = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **WINNER))])[0]
         _assert_matches_render_pin(render_execution_markdown(verdict), "execution_gate")
 
     def test_the_family_of_eight_block_is_unchanged(self, tmp_path: Path) -> None:
@@ -7421,7 +6983,7 @@ class TestRenderingIsBehaviourPreserving:
         so there is no step for `docs/REPORT_SCHEMA.md`'s `## Estimator changes` table to attribute.
         If this ever starts MODIFYING one of its siblings, the change reached further than intended.
         """
-        verdicts = [_exec_gate(_exec_run_dir(tmp_path / f"g{i}", **_WINNER)) for i in range(GATE_MAX_FAMILY + 3)]
+        verdicts = [exec_gate(exec_run_dir(tmp_path / f"g{i}", **WINNER)) for i in range(GATE_MAX_FAMILY + 3)]
         decided = holm_promote_execution(verdicts)[0]
         _assert_matches_render_pin(render_execution_markdown(decided), "execution_gate_family8")
 
@@ -7449,8 +7011,8 @@ class TestRenderingIsBehaviourPreserving:
         # is the REVERSED rung. `TestConfirmGateExecution` covers that note on its own.
         train = holm_promote_execution(
             [
-                _exec_gate(
-                    _confirm_dir(tmp_path / "train", split="train", **TestConfirmGateOutcomesEndToEnd._arms(0.30)),
+                exec_gate(
+                    confirm_dir(tmp_path / "train", split="train", **TestConfirmGateOutcomesEndToEnd._arms(0.30)),
                     engagement_criterion_index=None,
                 )
             ]
@@ -7458,14 +7020,14 @@ class TestRenderingIsBehaviourPreserving:
         assert train.promoted is True, "fixture drifted — the pin's train verdict must be a WINNER"
         confirm = confirm_gate_execution(
             train_verdict=train,
-            confirm_run_dir=_confirm_dir(
+            confirm_run_dir=confirm_dir(
                 tmp_path / "test", split="test", **TestConfirmGateOutcomesEndToEnd._arms(0.30, swap=True)
             ),
             incumbent_variant="incumbent",
             candidate_variant="candidate",
             suite_id=EXEC_SUITE,
             engagement_criterion_index=None,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert confirm.outcome == "reversed", "fixture drifted — this pin exists for the REVERSED rung"
         _assert_matches_render_pin(render_confirm_markdown(confirm), "confirm_gate_reversed")
@@ -7496,59 +7058,11 @@ class TestRenderingIsBehaviourPreserving:
         # exists to witness the block that class's corpus-regression case renders, and an inlined
         # copy would silently stop mirroring it the day that vector is edited.
         comparison = search_compare(
-            _arm("head", TestSearchCompare._HEAD),
-            _arm("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
+            arm_row_scores_for("head", TestSearchCompare._HEAD),
+            arm_row_scores_for("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
             corpus=corpus,
         )
         _assert_matches_render_pin(render_search_comparison(comparison), "search_comparison")
-
-
-def _full_guardrail_check() -> GuardrailCheck:
-    """A `GuardrailCheck` with every field set away from its default."""
-    return GuardrailCheck(
-        name="cost (USD/row)",
-        incumbent=1.0,
-        candidate=2.0,
-        relative_change=1.0,
-        tolerance=0.25,
-        ci_low=0.5,
-        ci_high=1.5,
-        rate=0.25,
-        passed=False,
-        note="a note",
-    )
-
-
-def _full_activation_verdict() -> ActivationGateVerdict:
-    return ActivationGateVerdict(
-        incumbent_variant="incumbent",
-        candidate_variant="cand",
-        suite_id=SUITE,
-        criterion_index=1,
-        confidence=0.9,
-        n_resamples=99,
-        rows_paired=8,
-        rows_excluded=2,
-        incumbent_f1=0.4,
-        candidate_f1=0.8,
-        mean_diff=0.4,
-        ci_low=0.1,
-        ci_high=0.7,
-        p_value=0.01,
-        p_floor=0.005,
-        n_discordant=4,
-        gate_refusal="refused",
-        holm_alpha=0.05,
-        holm_rejected=True,  # rejected at its rank, yet not promoted — the refusal is what vetoed
-        # False, not True: a refusal forces `promoted=False`, and a carrier fixture that pairs a
-        # refusal with a promotion is a state no gate can emit.
-        promoted=False,
-        range_non_overlap=True,
-        mde=0.2,
-        sibling_checks=[_full_guardrail_check()],
-        guardrails=[_full_guardrail_check()],
-        notes=["a note"],
-    )
 
 
 class TestFailedVetoes:
@@ -7576,8 +7090,8 @@ class TestFailedVetoes:
         field names in the source (CE048).
         """
         if track == "activation":
-            return copy_with(_full_activation_verdict(), sibling_checks=own, guardrails=guardrails)
-        return copy_with(_full_execution_verdict(), integrity_checks=own, guardrails=guardrails)
+            return copy_with(full_activation_verdict(), sibling_checks=own, guardrails=guardrails)
+        return copy_with(full_execution_verdict(), integrity_checks=own, guardrails=guardrails)
 
     @pytest.mark.parametrize("track", ["activation", "execution"])
     def test_it_unions_both_lists_in_order(self, track: str) -> None:
@@ -7619,7 +7133,7 @@ class TestFailedVetoes:
     @pytest.mark.parametrize("track", ["activation", "execution"])
     def test_it_is_not_persisted(self, track: str) -> None:
         """The fixture-stability guard: a `computed_field` would add a key to every pinned JSON."""
-        build = _full_activation_verdict if track == "activation" else _full_execution_verdict
+        build = full_activation_verdict if track == "activation" else full_execution_verdict
         assert "failed_vetoes" not in build().model_dump()
         assert "failed_vetoes" not in build().model_dump_json()
 
@@ -7639,7 +7153,7 @@ class TestFailedVetoes:
         expression, so it is the DECISION being pinned.
         """
         verdict = copy_with(
-            _full_activation_verdict(),
+            full_activation_verdict(),
             gate_refusal=None,
             promoted=None,
             sibling_checks=[self._check("sibling recall.yes [criterion 1]", passed=False)],
@@ -7656,7 +7170,7 @@ class TestFailedVetoes:
 
     def test_the_polarity_survived_the_collapse_on_the_execution_track(self) -> None:
         verdict = copy_with(
-            _full_execution_verdict(),
+            full_execution_verdict(),
             gate_refusal=None,
             promoted=None,
             integrity_checks=[self._check("engagement", passed=False)],
@@ -7678,7 +7192,7 @@ class TestFailedVetoes:
         much".
         """
         sibling_failed = copy_with(
-            _full_activation_verdict(),
+            full_activation_verdict(),
             gate_refusal=None,
             promoted=None,
             sibling_checks=[self._check("sibling recall.yes [criterion 1]", passed=False)],
@@ -7691,7 +7205,7 @@ class TestFailedVetoes:
         assert not any("sibling recall.yes [criterion 1]" in note for note in notes)
 
         guardrail_failed = copy_with(
-            _full_activation_verdict(),
+            full_activation_verdict(),
             gate_refusal=None,
             promoted=None,
             sibling_checks=[self._check("sibling recall.yes [criterion 1]", passed=True)],
@@ -7713,36 +7227,8 @@ def _full_confirm_verdict(execution: bool = True) -> ConfirmVerdict:
         test_mde=0.02,
         delta=-0.005,
         outcome="reproduced",
-        test_verdict=_full_execution_verdict() if execution else _full_activation_verdict(),
+        test_verdict=full_execution_verdict() if execution else full_activation_verdict(),
         confirm_refusal="refused",
-        notes=["a note"],
-    )
-
-
-def _full_execution_verdict() -> ExecutionGateVerdict:
-    return ExecutionGateVerdict(
-        incumbent_variant="incumbent",
-        candidate_variant="cand",
-        suite_id=SUITE,
-        confidence=0.9,
-        n_resamples=99,
-        rows_paired=8,
-        rows_excluded=2,
-        mean_diff=0.4,
-        ci_low=0.1,
-        ci_high=0.7,
-        effect_size=1.2,
-        p_value=0.01,
-        gate_refusal="refused",
-        holm_alpha=0.05,
-        holm_rejected=True,  # rejected at its rank, yet not promoted — the refusal is what vetoed
-        promoted=False,  # as above: a refusal forces this False
-        mde=0.2,
-        dead_weight=0.5,
-        primary_criterion_index=1,
-        primary_mean_diff=0.9,
-        integrity_checks=[_full_guardrail_check()],
-        guardrails=[_full_guardrail_check()],
         notes=["a note"],
     )
 
@@ -7758,10 +7244,10 @@ class TestTypedConstruction:
     @pytest.mark.parametrize(
         ("build", "typo"),
         [
-            (_full_activation_verdict, "mean_dif"),
-            (_full_execution_verdict, "mean_dif"),
+            (full_activation_verdict, "mean_dif"),
+            (full_execution_verdict, "mean_dif"),
             (_full_confirm_verdict, "test_efect"),
-            (_full_guardrail_check, "relative_chnge"),
+            (full_guardrail_check, "relative_chnge"),
         ],
         ids=["activation", "execution", "confirm", "guardrail"],
     )
@@ -7773,7 +7259,7 @@ class TestTypedConstruction:
 
     @pytest.mark.parametrize(
         "build",
-        [_full_activation_verdict, _full_execution_verdict, _full_confirm_verdict, _full_guardrail_check],
+        [full_activation_verdict, full_execution_verdict, _full_confirm_verdict, full_guardrail_check],
         ids=["activation", "execution", "confirm", "guardrail"],
     )
     def test_a_fully_populated_instance_round_trips(self, build) -> None:
@@ -7838,7 +7324,7 @@ class TestDeriveSiblingIndices:
     def test_skips_a_non_classification_criterion_between_two_classification_ones(self, tmp_path: Path) -> None:
         # Positions are ABSOLUTE. A "count the classification criteria" implementation returns [1]
         # here, which is the file_check — the exact case this test exists for.
-        result = _eval_result("r1", [("yes", "yes")])
+        result = eval_result("r1", [("yes", "yes")])
         basic = CriterionResult(criterion_type="file_check", description="f", score=1.0)
         sibling = ClassificationCriterionResult(
             criterion_type="skill_triggered",
@@ -7854,24 +7340,24 @@ class TestDeriveSiblingIndices:
         assert derive_sibling_indices(rows, primary_index=2) == [0]
 
     def test_a_single_criterion_suite_derives_nothing(self) -> None:
-        rows = {"r1": [_eval_result("r1", [("yes", "yes")])]}
+        rows = {"r1": [eval_result("r1", [("yes", "yes")])]}
         assert derive_sibling_indices(rows, primary_index=0) == []
 
     def test_unions_both_arms_rather_than_letting_one_shadow_the_other(self) -> None:
         # `{**incumbent, **candidate}` would drop the incumbent's list for every shared row id —
         # which is every row in the common case — and derive from the candidate alone.
-        incumbent = {"r1": [_eval_result("r1", [("yes", "yes"), ("no", "no")])]}
-        candidate = {"r1": [_eval_result("r1", [("yes", "yes")])]}
+        incumbent = {"r1": [eval_result("r1", [("yes", "yes"), ("no", "no")])]}
+        candidate = {"r1": [eval_result("r1", [("yes", "yes")])]}
         assert derive_sibling_indices(incumbent, candidate, primary_index=0) == [1]
         assert derive_sibling_indices(candidate, incumbent, primary_index=0) == [1]
 
     def test_a_row_with_no_results_contributes_nothing_rather_than_truncating(self) -> None:
-        errored = _eval_result("r2", []).model_copy(update={"success_criteria_results": []})
-        rows = {"r1": [_eval_result("r1", [("yes", "yes"), ("no", "no")])], "r2": [errored]}
+        errored = eval_result("r2", []).model_copy(update={"success_criteria_results": []})
+        rows = {"r1": [eval_result("r1", [("yes", "yes"), ("no", "no")])], "r2": [errored]}
         assert derive_sibling_indices(rows, primary_index=0) == [1]
 
     def test_a_primary_past_the_end_does_not_raise(self) -> None:
-        rows = {"r1": [_eval_result("r1", [("yes", "yes"), ("no", "no")])]}
+        rows = {"r1": [eval_result("r1", [("yes", "yes"), ("no", "no")])]}
         assert derive_sibling_indices(rows, primary_index=9) == [0, 1]
 
 
@@ -7884,40 +7370,40 @@ class TestSiblingIndicesDefault:
         # annexes on half of the sibling's true rows.
         incumbent = {f"r{i}": [("yes", "yes"), ("yes", "yes")] for i in range(4)}
         candidate = {f"r{i}": [("yes", "yes"), ("yes", "no" if i < 2 else "yes")] for i in range(4)}
-        return _shared_dirs(tmp_path, incumbent, candidate)
+        return shared_dirs(tmp_path, incumbent, candidate)
 
     def test_the_default_derives_the_same_list_as_passing_it_explicitly(self, tmp_path: Path) -> None:
         run_dirs = self._stacked(tmp_path)
-        derived = _gate(run_dirs)
-        explicit = _gate(run_dirs, sibling_indices=[1])
+        derived = activation_verdict(run_dirs)
+        explicit = activation_verdict(run_dirs, sibling_indices=[1])
         assert [c.name for c in derived.sibling_checks] == [c.name for c in explicit.sibling_checks]
         assert derived.sibling_checks and "criterion 1" in derived.sibling_checks[0].name
 
     def test_an_empty_tuple_still_checks_nothing(self, tmp_path: Path) -> None:
-        assert _gate(self._stacked(tmp_path), sibling_indices=()).sibling_checks == []
+        assert activation_verdict(self._stacked(tmp_path), sibling_indices=()).sibling_checks == []
 
     def test_a_single_criterion_suite_is_silent(self, tmp_path: Path) -> None:
-        incumbent, candidate = _tiny_suite(4, 4)
-        assert _gate(_shared_dirs(tmp_path, incumbent, candidate)).sibling_checks == []
+        incumbent, candidate = tiny_suite(4, 4)
+        assert activation_verdict(shared_dirs(tmp_path, incumbent, candidate)).sibling_checks == []
 
 
 class TestAnnexationRate:
     def test_reports_the_fraction_the_candidate_alone_lost(self, tmp_path: Path) -> None:
         run_dirs = TestSiblingIndicesDefault._stacked(tmp_path)
-        check = _gate(run_dirs).sibling_checks[0]
+        check = activation_verdict(run_dirs).sibling_checks[0]
         # 4 true-yes sibling rows; the candidate turned 2 of them to "no" and the incumbent none.
         assert check.rate == pytest.approx(0.5)
         assert not check.passed  # the RECALL drop is what fails it, not the rate
 
     def test_an_equal_arm_reports_zero_and_passes(self, tmp_path: Path) -> None:
         rows = {f"r{i}": [("yes", "yes"), ("yes", "yes")] for i in range(4)}
-        check = _gate(_shared_dirs(tmp_path, rows, dict(rows))).sibling_checks[0]
+        check = activation_verdict(shared_dirs(tmp_path, rows, dict(rows))).sibling_checks[0]
         assert check.rate == 0.0
         assert check.passed
 
     def test_a_sibling_with_no_true_instances_reports_none(self, tmp_path: Path) -> None:
         rows = {f"r{i}": [("yes", "yes"), ("no", "no")] for i in range(4)}
-        check = _gate(_shared_dirs(tmp_path, rows, dict(rows))).sibling_checks[0]
+        check = activation_verdict(shared_dirs(tmp_path, rows, dict(rows))).sibling_checks[0]
         assert check.rate is None
         assert check.passed
         assert check.note is not None and "nothing to regress" in check.note
@@ -7927,12 +7413,12 @@ class TestAnnexationRate:
         # check passes while the rate is non-zero. The rate is a reading, never a second gate.
         incumbent = {f"r{i}": [("yes", "yes"), ("yes", "yes" if i == 0 else "no")] for i in range(4)}
         candidate = {f"r{i}": [("yes", "yes"), ("yes", "no" if i == 0 else "yes")] for i in range(4)}
-        check = _gate(_shared_dirs(tmp_path, incumbent, candidate)).sibling_checks[0]
+        check = activation_verdict(shared_dirs(tmp_path, incumbent, candidate)).sibling_checks[0]
         assert check.rate == pytest.approx(0.25)
         assert check.passed
 
     def test_render_prints_the_rate_only_when_there_is_one(self, tmp_path: Path) -> None:
-        with_rate = _gate(TestSiblingIndicesDefault._stacked(tmp_path)).sibling_checks[0]
+        with_rate = activation_verdict(TestSiblingIndicesDefault._stacked(tmp_path)).sibling_checks[0]
         assert f"rate {with_rate.rate:.3f}" in "\n".join(_render_checks("Sibling checks", [with_rate]))
 
         no_rate = GuardrailCheck(
@@ -7951,13 +7437,13 @@ class TestExecutionGateCannotBeQuietlyMisread:
         #
         # A wrong SUITE id also empties both arms, but the more specific cause fires first: no row
         # of that suite scored on both arms, and naming the suite is what the reader has to fix.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         verdict = execution_gate(
             run_dir=run_dir,
             incumbent_variant="incumbent",
             candidate_variant="candidate",
             suite_id="a-suite-that-was-never-run",
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert verdict.gate_refusal is not None
         # Pin WHICH cause: the zero-row message interpolates the suite id too, so asserting the id
@@ -7967,45 +7453,43 @@ class TestExecutionGateCannotBeQuietlyMisread:
         assert "loaded ZERO rows" not in verdict.gate_refusal
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is not True
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_both_arms_empty_produce_exactly_one_refusal_naming_both(self, tmp_path: Path) -> None:
         # Every id correct and the experiment file valid — only the row tree is gone. That is the
         # case no other cause can see, and it is where the zero-row message earns its place. ONE
         # refusal naming both arms: the loop this replaced appended the same finding twice.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         shutil.rmtree(run_dir / "incumbent")
         shutil.rmtree(run_dir / "candidate")
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.gate_refusal is not None and "loaded ZERO rows" in verdict.gate_refusal
         assert "the incumbent arm ('incumbent')" in verdict.gate_refusal
         assert "the candidate arm ('candidate')" in verdict.gate_refusal
         assert not any("loaded ZERO rows" in note for note in verdict.notes), "one message, not one per arm"
-        assert _headline_line(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith(
-            "NOT A RESULT"
-        )
+        assert headline_line(render_execution_markdown(holm_promote_execution([verdict])[0])).startswith("NOT A RESULT")
 
     def test_one_empty_arm_is_refused_where_the_variant_check_does_not_fire(self, tmp_path: Path) -> None:
         # A VALID incumbent id whose rows are simply not on disk (right id, wrong run dir). The
         # variant-mismatch return cannot see this — the experiment file names the arm perfectly
         # well — so the zero-row refusal is the only thing standing between it and PROMOTED.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         shutil.rmtree(run_dir / "incumbent")
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.mean_diff is not None, "the statistic still computes — that is the whole hazard"
         assert verdict.gate_refusal is not None
         assert "the incumbent arm" in verdict.gate_refusal
         assert "the candidate arm" not in verdict.gate_refusal, "only the empty arm may be named"
         decided = holm_promote_execution([verdict])[0]
         assert decided.promoted is False
-        assert _headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
+        assert headline_line(render_execution_markdown(decided)).startswith("NOT A RESULT — ")
 
     def test_a_wiring_refusal_outranks_a_zero_variance_one(self, tmp_path: Path) -> None:
         # Both causes at once. If the rows never loaded, whether their differences vary is moot —
         # so the wiring message is what renders, and its remedy is the one the reader needs.
-        run_dir = _exec_run_dir(tmp_path, **_uniform_shift(4))
+        run_dir = exec_run_dir(tmp_path, **uniform_shift(4))
         shutil.rmtree(run_dir / "incumbent")
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         # BOTH halves of the variance predicate (`mean_diff is not None and effect_size is None`):
         # asserting only the second would let a fixture that produced no comparison at all pass
         # this test without the second cause ever applying.
@@ -8020,13 +7504,13 @@ class TestExecutionGateCannotBeQuietlyMisread:
         # Sign resolution keys on the candidate, so a duplicated id used to yield `vid_a - vid_b`
         # labelled `candidate - incumbent` with both labels identical — a significant, sign-flipped
         # verdict about an arm compared to itself.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         verdict = execution_gate(
             run_dir=run_dir,
             incumbent_variant="incumbent",
             candidate_variant="incumbent",
             suite_id=EXEC_SUITE,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert (verdict.mean_diff, verdict.p_value, verdict.ci_low) == (None, None, None)
         assert verdict.gate_refusal is not None and "both 'incumbent'" in verdict.gate_refusal
@@ -8034,9 +7518,9 @@ class TestExecutionGateCannotBeQuietlyMisread:
     def test_a_row_that_vanished_from_one_arm_lowers_its_completion_rate(self, tmp_path: Path) -> None:
         # Computed over the paired intersection, this check reported 8/8 against 8/8 and PASSED
         # while two of the incumbent's rows were missing from the candidate entirely.
-        incumbent = {**_WINNER["incumbent"], "r5": [0.4, 0.5], "r6": [0.4, 0.5]}
-        run_dir = _exec_run_dir(tmp_path, incumbent=incumbent, candidate=_WINNER["candidate"])
-        verdict = _exec_gate(run_dir)
+        incumbent = {**WINNER["incumbent"], "r5": [0.4, 0.5], "r6": [0.4, 0.5]}
+        run_dir = exec_run_dir(tmp_path, incumbent=incumbent, candidate=WINNER["candidate"])
+        verdict = exec_gate(run_dir)
         completion = next(c for c in verdict.integrity_checks if c.name == "completion_rate")
         assert completion.incumbent == 1.0
         assert completion.candidate is not None and completion.candidate < 1.0
@@ -8046,7 +7530,7 @@ class TestExecutionGateCannotBeQuietlyMisread:
     def test_the_checks_are_computed_over_the_rows_the_statistic_paired(self, tmp_path: Path) -> None:
         # A row on disk for both arms but carrying no score for one is IN the disk intersection and
         # OUT of the pairing, so the two sets differ — and a guardrail must guard its own sample.
-        run_dir = _exec_run_dir(tmp_path, **_WINNER)
+        run_dir = exec_run_dir(tmp_path, **WINNER)
         raw = (run_dir / "experiment.json").read_text(encoding="utf-8")
         result = ExperimentResult.model_validate_json(raw)
         scores = {v: dict(per) for v, per in result.per_replicate_scores.items()}
@@ -8054,7 +7538,7 @@ class TestExecutionGateCannotBeQuietlyMisread:
         (run_dir / "experiment.json").write_text(
             result.model_copy(update={"per_replicate_scores": scores}).model_dump_json(), encoding="utf-8"
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert verdict.rows_paired == 3
         assert verdict.rows_excluded == 1
         assert any("scored for one arm only" in note for note in verdict.notes)
@@ -8068,8 +7552,8 @@ class TestTheSiblingCheckIsBalancedLikeThePrimaryOne:
         # Criterion 0 is the primary; criterion 1 is the sibling, true-yes on both rows.
         sibling = ("yes", "no") if annexed else ("yes", "yes")
         return {
-            "r1": [_eval_result("r1", [("yes", "yes"), sibling])] * replicates,
-            "r2": [_eval_result("r2", [("yes", "yes"), ("yes", "yes")])] * replicates,
+            "r1": [eval_result("r1", [("yes", "yes"), sibling])] * replicates,
+            "r2": [eval_result("r2", [("yes", "yes"), ("yes", "yes")])] * replicates,
         }
 
     def test_identical_labels_read_identically_despite_an_extra_replicate(self) -> None:
@@ -8088,12 +7572,12 @@ class TestTheSiblingCheckIsBalancedLikeThePrimaryOne:
         # An unbalanced row used to shift every later row's alignment, so a candidate that annexed
         # half the sibling's true rows rendered `rate` 0.000 — "took nothing".
         incumbent = {
-            "r1": [_eval_result("r1", [("yes", "yes"), ("yes", "yes")])] * 3,
-            "r2": [_eval_result("r2", [("yes", "yes"), ("yes", "yes")])] * 2,
+            "r1": [eval_result("r1", [("yes", "yes"), ("yes", "yes")])] * 3,
+            "r2": [eval_result("r2", [("yes", "yes"), ("yes", "yes")])] * 2,
         }
         candidate = {
-            "r1": [_eval_result("r1", [("yes", "yes"), ("yes", "yes")])] * 2,
-            "r2": [_eval_result("r2", [("yes", "yes"), ("yes", "no")])] * 2,
+            "r1": [eval_result("r1", [("yes", "yes"), ("yes", "yes")])] * 2,
+            "r2": [eval_result("r2", [("yes", "yes"), ("yes", "no")])] * 2,
         }
         check = _sibling_checks(
             incumbent_rows=incumbent, candidate_rows=candidate, paired_row_ids=["r1", "r2"], sibling_indices=[1]
@@ -8105,8 +7589,8 @@ class TestTheSiblingCheckIsBalancedLikeThePrimaryOne:
     def test_a_one_sided_sibling_is_still_detected_after_balancing(self) -> None:
         # Balancing trims a one-sided row to nothing, so PRESENCE must be read from the untrimmed
         # pools or the "results on one arm only" note disappears.
-        incumbent = {"r1": [_eval_result("r1", [("yes", "yes"), ("yes", "yes")])]}
-        candidate = {"r1": [_eval_result("r1", [("yes", "yes")])]}
+        incumbent = {"r1": [eval_result("r1", [("yes", "yes"), ("yes", "yes")])]}
+        candidate = {"r1": [eval_result("r1", [("yes", "yes")])]}
         check = _sibling_checks(
             incumbent_rows=incumbent, candidate_rows=candidate, paired_row_ids=["r1"], sibling_indices=[1]
         )[0]
@@ -8127,12 +7611,12 @@ class TestGuardrailsNeverRaiseOnACallerSuppliedRow:
         # `scoped_scores` keeps `task_id == suite_id`, so `removeprefix` leaves the SUITE id as the
         # row id — which no row directory is named. The contract is a noted verdict, not a raise.
         run_dir = tmp_path / "round1-gate"
-        _experiment_json(
+        experiment_json(
             run_dir,
             ["incumbent", "candidate"],
             {"incumbent": {EXEC_SUITE: [0.4, 0.5]}, "candidate": {EXEC_SUITE: [0.8, 0.9]}},
         )
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         # The row tree is what is missing, and that outranks the "fewer than 2 paired rows" the
         # unfanned scores also produce: an arm with no rows at all is the more specific fault.
         assert verdict.gate_refusal is not None and "loaded ZERO rows" in verdict.gate_refusal
@@ -8339,10 +7823,6 @@ class TestCandidateLeaks:
         assert "min_chars" not in inspect.signature(candidate_leaks).parameters
 
 
-def _arm(variant: str, scores: dict[str, float]) -> ArmRowScores:
-    return ArmRowScores(variant_id=variant, row_scores=scores)
-
-
 class TestLineageHeadScores:
     """The head lookup, which the skill's snippet used to do with a bare `next()`/`max()`."""
 
@@ -8350,7 +7830,7 @@ class TestLineageHeadScores:
         return OptimizeMeasurements(skill="my-skill", round_scores=list(rounds))
 
     def test_none_when_no_round_recorded_a_head(self) -> None:
-        rounds = RoundScores(round=1, arm_row_scores=[_arm("a", {"r1": 1.0})])
+        rounds = RoundScores(round=1, arm_row_scores=[arm_row_scores_for("a", {"r1": 1.0})])
         assert lineage_head_scores(self._measurements(rounds)) is None
 
     def test_none_on_an_empty_sidecar(self) -> None:
@@ -8359,15 +7839,15 @@ class TestLineageHeadScores:
     def test_takes_the_highest_round_that_named_one(self) -> None:
         # Highest ROUND, not last-in-list: the sidecar replaces per round, so ordering is a
         # write-order artefact while `round` is the real sequence.
-        early = RoundScores(round=3, arm_row_scores=[_arm("a", {"r1": 1.0})], lineage_head="a")
-        late = RoundScores(round=7, arm_row_scores=[_arm("b", {"r1": 0.5})], lineage_head="b")
+        early = RoundScores(round=3, arm_row_scores=[arm_row_scores_for("a", {"r1": 1.0})], lineage_head="a")
+        late = RoundScores(round=7, arm_row_scores=[arm_row_scores_for("b", {"r1": 0.5})], lineage_head="b")
         head = lineage_head_scores(self._measurements(late, early))
         assert head is not None and head.variant_id == "b"
 
     def test_skips_a_later_round_that_accepted_nothing(self) -> None:
         # A round with no accept leaves the head where it was; it must not blank the lineage.
-        kept = RoundScores(round=2, arm_row_scores=[_arm("a", {"r1": 1.0})], lineage_head="a")
-        quiet = RoundScores(round=3, arm_row_scores=[_arm("b", {"r1": 0.5})])
+        kept = RoundScores(round=2, arm_row_scores=[arm_row_scores_for("a", {"r1": 1.0})], lineage_head="a")
+        quiet = RoundScores(round=3, arm_row_scores=[arm_row_scores_for("b", {"r1": 0.5})])
         head = lineage_head_scores(self._measurements(kept, quiet))
         assert head is not None and head.variant_id == "a"
 
@@ -8381,34 +7861,41 @@ class TestSearchCompare:
     _HEAD: ClassVar[dict[str, float]] = {"r1": 1.0, "r2": 0.0, "r3": 1.0, "r4": 0.0}  # mean 0.5
 
     def test_a_better_candidate_is_accepted(self) -> None:
-        result = search_compare(_arm("head", self._HEAD), _arm("cand", {"r1": 1.0, "r2": 1.0, "r3": 1.0, "r4": 0.0}))
+        result = search_compare(
+            arm_row_scores_for("head", self._HEAD),
+            arm_row_scores_for("cand", {"r1": 1.0, "r2": 1.0, "r3": 1.0, "r4": 0.0}),
+        )
         assert result.beats and result.accepted
         assert result.head_score == 0.5 and result.candidate_score == 0.75
         assert result.shared_rows == ("r1", "r2", "r3", "r4")
         assert result.blocker is None
 
     def test_a_worse_candidate_is_not_accepted(self) -> None:
-        result = search_compare(_arm("head", self._HEAD), _arm("cand", dict.fromkeys(self._HEAD, 0.0)))
+        result = search_compare(
+            arm_row_scores_for("head", self._HEAD), arm_row_scores_for("cand", dict.fromkeys(self._HEAD, 0.0))
+        )
         assert not result.beats and not result.accepted
         assert result.blocker is None, "losing is an ordinary result, not a blocked one"
 
     def test_a_tie_is_not_a_win(self) -> None:
         # Strictly greater. A tie that advanced the head would move the bar on an accident, and
         # the next round would then have to beat a number nothing earned.
-        result = search_compare(_arm("head", self._HEAD), _arm("cand", dict(self._HEAD)))
+        result = search_compare(arm_row_scores_for("head", self._HEAD), arm_row_scores_for("cand", dict(self._HEAD)))
         assert result.head_score == result.candidate_score
         assert not result.beats and not result.accepted
 
     def test_no_shared_rows_is_a_wiring_blocker_not_a_hole(self) -> None:
         # Checked BEFORE holes: no overlap at all is a wiring fault, and reporting it as a hole
         # sends the reader looking for a flaky row instead of an unpinned sample seed.
-        result = search_compare(_arm("head", self._HEAD), _arm("cand", {"other": 1.0}))
+        result = search_compare(arm_row_scores_for("head", self._HEAD), arm_row_scores_for("cand", {"other": 1.0}))
         assert not result.accepted and result.head_score is None and result.candidate_score is None
         assert result.blocker is not None and "sample_seed" in result.blocker
 
     def test_a_hole_refuses_rather_than_averaging_around_it(self) -> None:
         # The candidate errored on r2 — its mean over the survivors would be 1.0 and would "win".
-        result = search_compare(_arm("head", self._HEAD), _arm("cand", {"r1": 1.0, "r3": 1.0, "r4": 1.0}))
+        result = search_compare(
+            arm_row_scores_for("head", self._HEAD), arm_row_scores_for("cand", {"r1": 1.0, "r3": 1.0, "r4": 1.0})
+        )
         assert not result.accepted and result.holes == ("r2",)
         assert result.head_score is None, "a refused comparison must report no number to misread"
         assert result.blocker is not None and "r2" in result.blocker
@@ -8416,7 +7903,9 @@ class TestSearchCompare:
     def test_a_row_only_the_candidate_scored_is_not_a_hole(self) -> None:
         # Holes are asymmetric on purpose: an extra row the head never measured cannot make the
         # candidate look better, because the comparison runs over the intersection either way.
-        result = search_compare(_arm("head", self._HEAD), _arm("cand", {**self._HEAD, "r5": 1.0}))
+        result = search_compare(
+            arm_row_scores_for("head", self._HEAD), arm_row_scores_for("cand", {**self._HEAD, "r5": 1.0})
+        )
         assert result.holes == () and result.blocker is None
         assert result.shared_rows == ("r1", "r2", "r3", "r4")
 
@@ -8425,8 +7914,8 @@ class TestSearchCompare:
         # the lineage, so a re-lost row rides forward until a multi-arm round notices.
         corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
         result = search_compare(
-            _arm("head", self._HEAD),
-            _arm("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
+            arm_row_scores_for("head", self._HEAD),
+            arm_row_scores_for("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
             corpus=corpus,
         )
         assert result.beats, "the aggregate really does improve — that is what makes this dangerous"
@@ -8437,8 +7926,8 @@ class TestSearchCompare:
     def test_a_corpus_row_the_candidate_holds_does_not_block(self) -> None:
         corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
         result = search_compare(
-            _arm("head", self._HEAD),
-            _arm("cand", {"r1": 1.0, "r2": 1.0, "r3": 1.0, "r4": 0.0}),
+            arm_row_scores_for("head", self._HEAD),
+            arm_row_scores_for("cand", {"r1": 1.0, "r2": 1.0, "r3": 1.0, "r4": 0.0}),
             corpus=corpus,
         )
         assert result.accepted and result.regressions == () and result.blocker is None
@@ -8446,20 +7935,24 @@ class TestSearchCompare:
     def test_the_corpus_threshold_is_forwarded(self) -> None:
         # A fractional execution suite needs a bar other than 1.0; the parameter exists for it.
         corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="partial credit is fine")]
-        candidate = _arm("cand", {"r1": 0.8, "r2": 1.0, "r3": 1.0, "r4": 1.0})
-        assert not search_compare(_arm("head", self._HEAD), candidate, corpus=corpus).accepted
-        assert search_compare(_arm("head", self._HEAD), candidate, corpus=corpus, threshold=0.5).accepted
+        candidate = arm_row_scores_for("cand", {"r1": 0.8, "r2": 1.0, "r3": 1.0, "r4": 1.0})
+        assert not search_compare(arm_row_scores_for("head", self._HEAD), candidate, corpus=corpus).accepted
+        assert search_compare(arm_row_scores_for("head", self._HEAD), candidate, corpus=corpus, threshold=0.5).accepted
 
     def test_a_losing_candidate_is_not_blocked_by_the_corpus(self) -> None:
         # It already failed on the score; adding a corpus blocker would misreport WHY.
         corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
-        result = search_compare(_arm("head", self._HEAD), _arm("cand", dict.fromkeys(self._HEAD, 0.0)), corpus=corpus)
+        result = search_compare(
+            arm_row_scores_for("head", self._HEAD),
+            arm_row_scores_for("cand", dict.fromkeys(self._HEAD, 0.0)),
+            corpus=corpus,
+        )
         assert not result.beats and not result.accepted and result.blocker is None
 
     def test_an_empty_head_is_a_blocker_not_a_crash(self) -> None:
         # `RoundScores`' validator makes this unreachable through the sidecar, but the function
         # is public and must not divide by zero on a hand-built arm.
-        result = search_compare(_arm("head", {}), _arm("cand", {"r1": 1.0}))
+        result = search_compare(arm_row_scores_for("head", {}), arm_row_scores_for("cand", {"r1": 1.0}))
         assert not result.accepted and result.blocker is not None
 
 
@@ -8505,19 +7998,23 @@ class TestAcceptedIsDerived:
 class TestRenderSearchComparison:
     def test_an_accepted_comparison_names_both_numbers_and_the_row_count(self) -> None:
         block = render_search_comparison(
-            search_compare(_arm("head", {"r1": 0.0, "r2": 1.0}), _arm("cand", {"r1": 1.0, "r2": 1.0}))
+            search_compare(
+                arm_row_scores_for("head", {"r1": 0.0, "r2": 1.0}), arm_row_scores_for("cand", {"r1": 1.0, "r2": 1.0})
+            )
         )
         assert "ACCEPT" in block and "0.500" in block and "1.000" in block and "2" in block
 
     def test_a_blocked_comparison_leads_with_the_blocker(self) -> None:
-        block = render_search_comparison(search_compare(_arm("head", {"r1": 1.0}), _arm("cand", {"other": 1.0})))
+        block = render_search_comparison(
+            search_compare(arm_row_scores_for("head", {"r1": 1.0}), arm_row_scores_for("cand", {"other": 1.0}))
+        )
         assert "sample_seed" in block
         # Read the discriminating LINE. The old form here asserted that "ACCEPT" was absent from
         # the block once the negative headline had been stripped out of it — vacuous on this
         # fixture, whose headline is CANNOT COMPARE: the strip removed nothing, so the absence
         # assertion could not fail while reading as a strong guard.
         #
-        # Not `_headline_line`: that helper returns the first line starting with `**`, and
+        # Not `headline_line`: that helper returns the first line starting with `**`, and
         # `render_search_comparison` leads with an `###` heading on all three of its paths, so
         # calling it here raises StopIteration. Same discipline, differently-shaped block.
         assert block.splitlines()[0] == "### Search round — CANNOT COMPARE"
@@ -8531,8 +8028,8 @@ class TestRenderSearchComparison:
         """
         corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
         comparison = search_compare(
-            _arm("head", {"r1": 1.0, "r2": 0.0, "r3": 0.0, "r4": 0.0}),
-            _arm("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
+            arm_row_scores_for("head", {"r1": 1.0, "r2": 0.0, "r3": 0.0, "r4": 0.0}),
+            arm_row_scores_for("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
             corpus=corpus,
         )
         assert comparison.beats and not comparison.accepted
@@ -8568,7 +8065,9 @@ class TestRenderSearchComparison:
     def test_it_says_a_search_accept_is_not_a_promotion(self) -> None:
         # The block is printed into a ledger a human reads later, and this is the one thing that
         # must not be inferred from a green word.
-        block = render_search_comparison(search_compare(_arm("head", {"r1": 0.0}), _arm("cand", {"r1": 1.0})))
+        block = render_search_comparison(
+            search_compare(arm_row_scores_for("head", {"r1": 0.0}), arm_row_scores_for("cand", {"r1": 1.0}))
+        )
         assert "not a promotion" in block.lower()
 
 
@@ -8577,26 +8076,18 @@ class TestRenderSearchComparison:
 # ---------------------------------------------------------------------------
 
 
-def _set_split(run_dir: Path, split: str | None) -> None:
-    """Overwrite a fixture run dir's recorded split (``_write_row`` stamps `None` by default)."""
-    (run_dir / "run.json").write_text(
-        json.dumps({"row_selection": {"split": split, "max_rows": None, "sample_per_stratum": None}}),
-        encoding="utf-8",
-    )
-
-
 class TestReadSplitProvenance:
     """`None` (no --split was passed) and "unrecorded" (we cannot tell) are different answers."""
 
     def test_a_recorded_split_is_read(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "r"
-        _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
-        _set_split(run_dir, "train")
+        write_row(run_dir, "v", "r1", eval_result("r1", [("yes", "yes")]))
+        set_split(run_dir, "train")
         assert read_split_provenance([run_dir]) == SplitProvenance(recorded=frozenset({"train"}), unrecorded=0)
 
     def test_a_recorded_null_split_is_recorded_not_unrecorded(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "r"
-        _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
+        write_row(run_dir, "v", "r1", eval_result("r1", [("yes", "yes")]))
         provenance = read_split_provenance([run_dir])
         assert provenance == SplitProvenance(recorded=frozenset({None}), unrecorded=0)
         assert provenance.value is None
@@ -8625,8 +8116,8 @@ class TestReadSplitProvenance:
 
     def test_mixed_dirs_report_both_halves(self, tmp_path: Path) -> None:
         recorded = tmp_path / "a"
-        _write_row(recorded, "v", "r1", _eval_result("r1", [("yes", "yes")]))
-        _set_split(recorded, "test")
+        write_row(recorded, "v", "r1", eval_result("r1", [("yes", "yes")]))
+        set_split(recorded, "test")
         missing = tmp_path / "b"
         missing.mkdir()
         provenance = read_split_provenance([recorded, missing])
@@ -8637,15 +8128,15 @@ class TestReadSplitProvenance:
     def test_different_recorded_splits_are_mismatched(self, tmp_path: Path) -> None:
         a, b = tmp_path / "a", tmp_path / "b"
         for run_dir, split in ((a, "train"), (b, "test")):
-            _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
-            _set_split(run_dir, split)
+            write_row(run_dir, "v", "r1", eval_result("r1", [("yes", "yes")]))
+            set_split(run_dir, split)
         assert read_split_provenance([a, b]).mismatched is True
 
     def test_the_same_split_everywhere_is_not_mismatched(self, tmp_path: Path) -> None:
         a, b = tmp_path / "a", tmp_path / "b"
         for run_dir in (a, b):
-            _write_row(run_dir, "v", "r1", _eval_result("r1", [("yes", "yes")]))
-            _set_split(run_dir, "train")
+            write_row(run_dir, "v", "r1", eval_result("r1", [("yes", "yes")]))
+            set_split(run_dir, "train")
         provenance = read_split_provenance([a, b])
         assert provenance.mismatched is False and provenance.value == "train"
 
@@ -8658,10 +8149,10 @@ class TestConfirmGateActivation:
         """Two arms over 6 rows, each scoring a given number of them, under a recorded split."""
         inc_labels = {f"r{i}": [("yes", "yes" if i < incumbent_hits else "no")] for i in range(6)}
         cand_labels = {f"r{i}": [("yes", "yes" if i < candidate_hits else "no")] for i in range(6)}
-        inc = _write_arm(tmp_path, "incumbent", inc_labels, invocations=2, prefix="inc-")
-        cand = _write_arm(tmp_path, "candidate", cand_labels, invocations=2, prefix="cand-")
+        inc = write_arm(tmp_path, "incumbent", inc_labels, invocations=2, prefix="inc-")
+        cand = write_arm(tmp_path, "candidate", cand_labels, invocations=2, prefix="cand-")
         for d in (*inc, *cand):
-            _set_split(d, split)
+            set_split(d, split)
         return inc, cand
 
     def _confirm(self, tmp_path: Path, *, split: str | None = "test", train: ActivationGateVerdict | None = None):
@@ -8677,7 +8168,7 @@ class TestConfirmGateActivation:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
 
     def test_it_produces_a_confirm_verdict_on_f1(self, tmp_path: Path) -> None:
@@ -8702,7 +8193,7 @@ class TestConfirmGateActivation:
         """
         inc, cand = self._arms(tmp_path / "c", split="test", incumbent_hits=2, candidate_hits=5)
         for d in cand:
-            _set_split(d, "train")
+            set_split(d, "train")
         t_inc, t_cand = self._arms(tmp_path / "t", split="train", incumbent_hits=2, candidate_hits=5)
         train = holm_promote([TestCrossSplitRefusal._gate(t_inc, t_cand)])[0]
         confirm = confirm_gate(
@@ -8713,7 +8204,7 @@ class TestConfirmGateActivation:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert confirm.confirm_refusal is not None
         assert "'train'" in confirm.confirm_refusal and "'test'" in confirm.confirm_refusal
@@ -8722,7 +8213,7 @@ class TestConfirmGateActivation:
         inc, cand = self._arms(tmp_path, split="test", incumbent_hits=2, candidate_hits=5)
         with pytest.raises(TypeError, match="ONE variant id"):
             confirm_gate(
-                train_verdict=_full_activation_verdict(),
+                train_verdict=full_activation_verdict(),
                 incumbent_run_dirs=inc,
                 candidate_run_dirs=cand,
                 incumbent_variant="incumbent",
@@ -8732,7 +8223,7 @@ class TestConfirmGateActivation:
             )
 
     def test_a_refused_train_verdict_is_undecided(self, tmp_path: Path) -> None:
-        refused = _full_activation_verdict()  # carries `gate_refusal="refused"`
+        refused = full_activation_verdict()  # carries `gate_refusal="refused"`
         assert refused.gate_refusal is not None
         confirm = self._confirm(tmp_path, train=refused)
         assert confirm.outcome == "undecided"
@@ -8742,7 +8233,7 @@ class TestConfirmGateActivation:
         assert self._confirm(tmp_path).test_verdict.promoted is not None
 
     def test_it_measures_no_floor_of_its_own(self, tmp_path: Path) -> None:
-        source = _module_source("optimize.activation")
+        source = module_source("optimize.activation")
         body = source[source.index("def confirm_gate(") : source.index("def holm_promote(")]
         assert "measure_noise_floor" not in body
         # ONE verdict's two fields, not one field from each of two independently gated runs.
@@ -8762,14 +8253,14 @@ class TestSeedStability:
             "candidate_variant": "candidate",
             "suite_id": SUITE,
             "criterion_index": 0,
-            "n_resamples": _FAST_RESAMPLES,
+            "n_resamples": FAST_RESAMPLES,
         }
 
     def test_agreeing_seeds_read_unanimous(self, tmp_path: Path) -> None:
         # A wide, unambiguous win: no seed can move it.
         incumbent = {f"r{i}": [("yes", "no")] for i in range(8)}
         candidate = {f"r{i}": [("yes", "yes")] for i in range(8)}
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         stability = gate_seed_stability(**self._kwargs(run_dirs))
 
         assert stability.seeds == (0, 1, 2)
@@ -8782,7 +8273,7 @@ class TestSeedStability:
         # candidate LOSES here, which no seed can turn into a promotion.
         incumbent = {f"r{i}": [("yes", "yes")] for i in range(8)}
         candidate = {f"r{i}": [("yes", "no" if i < 4 else "yes")] for i in range(8)}
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         stability = gate_seed_stability(**self._kwargs(run_dirs))
         assert stability.promote_agreement == 0 and stability.unanimous is True
         assert "would promote at none of 3 seeds" in render_seed_stability(stability)
@@ -8811,8 +8302,8 @@ class TestSeedStability:
 
     def test_the_block_states_that_it_costs_no_runs(self, tmp_path: Path) -> None:
         # Three bootstraps over rows already loaded. Unsaid, a reader assumes it triples the round.
-        incumbent, candidate = _tiny_suite(4, 4)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        incumbent, candidate = tiny_suite(4, 4)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         block = render_seed_stability(gate_seed_stability(**self._kwargs(run_dirs)))
         assert "zero** extra agent runs" in block and "CPU only" in block
 
@@ -8825,8 +8316,8 @@ class TestSeedStability:
         spread over one value is `0.0`, which reads as "the seeds agreed" when only one of them
         answered.
         """
-        incumbent, candidate = _tiny_suite(4, 4)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        incumbent, candidate = tiny_suite(4, 4)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         one = gate_seed_stability(seeds=(0,), **self._kwargs(run_dirs))
 
         assert one.seeds == (0,)
@@ -8848,22 +8339,22 @@ class TestSeedStability:
 
         assert "seeds" not in inspect.signature(activation_gate).parameters
         # And the reading's first seed reproduces the gate's own default exactly.
-        incumbent, candidate = _tiny_suite(4, 4)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        alone = holm_promote([_gate(run_dirs)])[0]
+        incumbent, candidate = tiny_suite(4, 4)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        alone = holm_promote([activation_verdict(run_dirs)])[0]
         stability = gate_seed_stability(**self._kwargs(run_dirs))
         assert stability.p_values[0] == alone.p_value
 
     def test_passing_seed_instead_of_seeds_raises(self, tmp_path: Path) -> None:
         # The seed is the axis being varied, so a caller pinning it has misread the function.
-        incumbent, candidate = _tiny_suite(4, 4)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        incumbent, candidate = tiny_suite(4, 4)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         with pytest.raises(TypeError, match="pass `seeds=`"):
             gate_seed_stability(seed=7, **self._kwargs(run_dirs))
 
     def test_an_empty_seed_list_raises(self, tmp_path: Path) -> None:
-        incumbent, candidate = _tiny_suite(4, 4)
-        run_dirs = _shared_dirs(tmp_path, incumbent, candidate)
+        incumbent, candidate = tiny_suite(4, 4)
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         with pytest.raises(ValueError, match="at least one seed"):
             gate_seed_stability(seeds=(), **self._kwargs(run_dirs))
 
@@ -8930,7 +8421,7 @@ class TestConfirmSplitCheckIsShared:
         # The drift this closes was already present: the execution side had gained the
         # "not the Stage B winner" note that the activation side lacked, while the activation
         # docstring claimed both worked "for the reasons the execution twin's docstring gives".
-        source = _module_source(module)
+        source = module_source(module)
         assert "confirm_split_check(" in source
         assert "reproduces by construction" not in source, f"{module} carries its own copy of the remedy"
 
@@ -8951,7 +8442,7 @@ class TestConfirmSplitCheckIsShared:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert confirm.confirm_refusal is not None and "--split 'train'" in confirm.confirm_refusal
         assert confirm.outcome == "undecided"
@@ -8983,7 +8474,7 @@ class TestConfirmGateActivationOutcomes:
         for index, labels in enumerate(cls._flaky(hits)):
             run_dir = base / f"{prefix}run-{index}"
             for row, pair in labels.items():
-                _write_row(run_dir, variant, row, _eval_result(row, [pair]))
+                write_row(run_dir, variant, row, eval_result(row, [pair]))
             dirs.append(run_dir)
         return dirs
 
@@ -8992,7 +8483,7 @@ class TestConfirmGateActivationOutcomes:
         inc = cls._arm(base, "incumbent", incumbent_hits, "inc-")
         cand = cls._arm(base, "candidate", candidate_hits, "cand-")
         for run_dir in (*inc, *cand):
-            _set_split(run_dir, split)
+            set_split(run_dir, split)
         return inc, cand
 
     @classmethod
@@ -9014,7 +8505,7 @@ class TestConfirmGateActivationOutcomes:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
 
     def test_the_same_effect_reproduces(self, tmp_path: Path) -> None:
@@ -9054,12 +8545,12 @@ class TestCrossSplitRefusal:
     @staticmethod
     def _arms(tmp_path: Path, incumbent_split: str | None, candidate_split: str | None):
         labels = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(6)}
-        inc = _write_arm(tmp_path, "incumbent", labels, invocations=2, prefix="inc-")
-        cand = _write_arm(tmp_path, "candidate", labels, invocations=2, prefix="cand-")
+        inc = write_arm(tmp_path, "incumbent", labels, invocations=2, prefix="inc-")
+        cand = write_arm(tmp_path, "candidate", labels, invocations=2, prefix="cand-")
         for d in inc:
-            _set_split(d, incumbent_split)
+            set_split(d, incumbent_split)
         for d in cand:
-            _set_split(d, candidate_split)
+            set_split(d, candidate_split)
         return inc, cand
 
     @staticmethod
@@ -9071,7 +8562,7 @@ class TestCrossSplitRefusal:
             candidate_variant="candidate",
             suite_id=SUITE,
             criterion_index=0,
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
 
     def test_a_train_vs_test_pair_is_refused_with_both_splits_named(self, tmp_path: Path) -> None:
@@ -9110,7 +8601,7 @@ class TestCrossSplitRefusal:
     def test_a_within_arm_mismatch_is_caught_too(self, tmp_path: Path) -> None:
         """Stage B runs one arm three times; those three can disagree with each other."""
         inc, cand = self._arms(tmp_path, "train", "train")
-        _set_split(inc[0], "test")
+        set_split(inc[0], "test")
         verdict = self._gate(inc, cand)
         assert verdict.gate_refusal is not None and verdict.p_value is None
 
@@ -9126,12 +8617,12 @@ class TestCrossSplitRefusal:
         labels_cand = {f"r{i}": [("yes", "yes")] for i in range(12)}
 
         def _pair(root: Path, inc_split: str | None, cand_split: str | None):
-            inc = _write_arm(root, "incumbent", labels_inc, invocations=2, prefix="inc-")
-            cand = _write_arm(root, "candidate", labels_cand, invocations=2, prefix="cand-")
+            inc = write_arm(root, "incumbent", labels_inc, invocations=2, prefix="inc-")
+            cand = write_arm(root, "candidate", labels_cand, invocations=2, prefix="cand-")
             for d in inc:
-                _set_split(d, inc_split)
+                set_split(d, inc_split)
             for d in cand:
-                _set_split(d, cand_split)
+                set_split(d, cand_split)
             return inc, cand
 
         (promoted,) = holm_promote([self._gate(*_pair(tmp_path / "same", "train", "train"))])
@@ -9157,8 +8648,8 @@ class TestCrossSplitRefusal:
         every sibling — the uncorrected-p degeneration, arrived at from the other side.
         """
         refused = self._gate(*self._arms(tmp_path / "x", "train", "test"))
-        incumbent, candidate = _tiny_suite(positives=6, distractors=6)
-        sibling = _gate(_shared_dirs(tmp_path / "y", incumbent, candidate))
+        incumbent, candidate = tiny_suite(positives=6, distractors=6)
+        sibling = activation_verdict(shared_dirs(tmp_path / "y", incumbent, candidate))
         assert sibling.p_value is not None, "the sibling fixture must actually produce a p"
 
         alone = holm_promote([sibling])[0]
@@ -9203,9 +8694,9 @@ class TestCrossSplitRendering:
         6 rows / 3 discordant gives a floor of 0.031 against a family-of-2 threshold of 0.025 —
         the established refusal fixture, which crucially DOES compute a p.
         """
-        incumbent, candidate = _tiny_suite(positives=3, distractors=3)
-        dirs = _shared_dirs(tmp_path, incumbent, candidate)
-        decided = holm_promote([_gate(dirs, n_resamples=2_000) for _ in range(2)])
+        incumbent, candidate = tiny_suite(positives=3, distractors=3)
+        dirs = shared_dirs(tmp_path, incumbent, candidate)
+        decided = holm_promote([activation_verdict(dirs, n_resamples=2_000) for _ in range(2)])
         for verdict in decided:
             assert verdict.gate_refusal is not None and verdict.p_value is not None
             block = render_markdown(verdict)
@@ -9219,8 +8710,8 @@ class TestAllNegativeSubsetNote:
     @staticmethod
     def _decided(tmp_path: Path, pairs: tuple[str, str]):
         rows = {f"r{i}": [pairs] for i in range(8)}
-        dirs = _shared_dirs(tmp_path, rows, rows)
-        (decided,) = holm_promote([_gate(dirs, n_resamples=2_000)])
+        dirs = shared_dirs(tmp_path, rows, rows)
+        (decided,) = holm_promote([activation_verdict(dirs, n_resamples=2_000)])
         return decided
 
     def test_a_suite_with_no_yes_anywhere_names_the_missing_positive_rows(self, tmp_path: Path) -> None:
@@ -9251,8 +8742,8 @@ class TestAllNegativeSubsetNote:
         "it is already refused anyway" argument does not hold.
         """
         rows = {f"r{i}": [("yes", "no")] for i in range(6)}
-        dirs = _shared_dirs(tmp_path, rows, rows)
-        verdict = _gate(dirs, criterion_index=9, n_resamples=_FAST_RESAMPLES)
+        dirs = shared_dirs(tmp_path, rows, rows)
+        verdict = activation_verdict(dirs, criterion_index=9, n_resamples=FAST_RESAMPLES)
 
         assert verdict.rows_paired == 0 and verdict.n_discordant is None
         assert not any("undefined on BOTH arms" in note for note in verdict.notes)
@@ -9283,22 +8774,22 @@ class TestExecutionGateSplitNote:
     """
 
     def test_the_note_names_the_recorded_split(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=_WINNER["candidate"])
-        _set_split(run_dir, "test")
-        verdict = _exec_gate(run_dir)
+        run_dir = exec_run_dir(tmp_path, incumbent=WINNER["incumbent"], candidate=WINNER["candidate"])
+        set_split(run_dir, "test")
+        verdict = exec_gate(run_dir)
         assert any("--split 'test'" in note for note in verdict.notes)
         assert verdict.gate_refusal is None
 
     def test_a_full_suite_run_says_nothing(self, tmp_path: Path) -> None:
         """A recorded `split: null` is the ordinary case; silence is the right output."""
-        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=_WINNER["candidate"])
-        verdict = _exec_gate(run_dir)
+        run_dir = exec_run_dir(tmp_path, incumbent=WINNER["incumbent"], candidate=WINNER["candidate"])
+        verdict = exec_gate(run_dir)
         assert not any("--split" in note or "provenance" in note for note in verdict.notes)
 
     def test_an_unrecorded_run_dir_says_so(self, tmp_path: Path) -> None:
-        run_dir = _exec_run_dir(tmp_path, incumbent=_WINNER["incumbent"], candidate=_WINNER["candidate"])
+        run_dir = exec_run_dir(tmp_path, incumbent=WINNER["incumbent"], candidate=WINNER["candidate"])
         (run_dir / "run.json").unlink()
-        verdict = _exec_gate(run_dir)
+        verdict = exec_gate(run_dir)
         assert any("provenance is missing" in note for note in verdict.notes)
         assert verdict.gate_refusal is None, "provenance is never a refusal on this track"
 
@@ -9314,9 +8805,9 @@ class TestNoiseFloorCarriesItsSplit:
     @staticmethod
     def _dirs(tmp_path: Path, splits: list[str | None]) -> list[Path]:
         labels = {f"r{i}": [("yes", "yes" if i % 2 else "no")] for i in range(6)}
-        dirs = _write_arm(tmp_path, "incumbent", labels, invocations=len(splits))
+        dirs = write_arm(tmp_path, "incumbent", labels, invocations=len(splits))
         for run_dir, split in zip(dirs, splits, strict=True):
-            _set_split(run_dir, split)
+            set_split(run_dir, split)
         return dirs
 
     def test_a_matching_split_is_stamped_on_the_floor(self, tmp_path: Path) -> None:
@@ -9326,7 +8817,7 @@ class TestNoiseFloorCarriesItsSplit:
             suite_id=SUITE,
             criterion_index=0,
             model="claude-haiku-4-5",
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         assert floor is not None and floor.split == "train"
 
@@ -9340,7 +8831,7 @@ class TestNoiseFloorCarriesItsSplit:
                 suite_id=SUITE,
                 criterion_index=0,
                 model="claude-haiku-4-5",
-                n_resamples=_FAST_RESAMPLES,
+                n_resamples=FAST_RESAMPLES,
             )
         assert floor is None, "a null split pooled across two row sets is not a floor"
         assert "DIFFERENT row selections" in caplog.text
@@ -9354,14 +8845,14 @@ class TestNoiseFloorCarriesItsSplit:
             suite_id=SUITE,
             criterion_index=0,
             model="claude-haiku-4-5",
-            n_resamples=_FAST_RESAMPLES,
+            n_resamples=FAST_RESAMPLES,
         )
         # Still MEASURED — an unrecorded run dir stays usable — but carrying the sentinel, so
         # `record_noise_floor` refuses to write it and no lookup can ever match it.
         assert floor is not None and floor.split == UNRECORDED_SPLIT
 
     def test_the_execution_floor_carries_its_split_too(self, tmp_path: Path) -> None:
-        dirs = _weighted_arm(tmp_path, "incumbent", {f"r{i}": [0.2, 0.55, 0.9] for i in range(8)})
-        _set_split(dirs[0], "test")
-        floor = _execution_floor(dirs)
+        dirs = weighted_arm(tmp_path, "incumbent", {f"r{i}": [0.2, 0.55, 0.9] for i in range(8)})
+        set_split(dirs[0], "test")
+        floor = execution_floor(dirs)
         assert floor is not None and floor.split == "test"

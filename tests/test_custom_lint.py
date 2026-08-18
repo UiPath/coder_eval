@@ -7319,16 +7319,19 @@ class TestCE039ComputedClaims:
         """The behavioural half's self-test, driving the REAL claim function.
 
         A claim whose behavioural half was reverted to `return []` would pass every other test in
-        this class. So `_exec_gate` — which the claim imports at call time — is swapped for a
+        this class. So `exec_gate` — which the claim imports at call time — is swapped for a
         wrapper that negates `mean_diff` on one declaration order only: exactly the shape a gate
         reading `first_declared - second_declared` produces, and exactly the defect the method
         file says promotes the arm that lost.
+
+        Patched on `tests.optimize_fixtures`, the shared builder module the claim now imports from —
+        NOT on the test file it used to live in, which is the inversion that module exists to undo.
         """
-        import tests.test_optimize_gate as gate_tests
+        import tests.optimize_fixtures as fixtures
         from tests.lint.computed_claims import METHOD, _check_execution_sign_resolution
 
         text = METHOD.read_text(encoding="utf-8")
-        real_exec_gate = gate_tests._exec_gate
+        real_exec_gate = fixtures.exec_gate
 
         def _sign_blind(run_dir, **kwargs):
             verdict = real_exec_gate(run_dir, **kwargs)
@@ -7338,7 +7341,7 @@ class TestCE039ComputedClaims:
                 return verdict.model_copy(update={"mean_diff": -verdict.mean_diff})  # CE048 scans src/ only
             return verdict
 
-        monkeypatch.setattr(gate_tests, "_exec_gate", _sign_blind)
+        monkeypatch.setattr(fixtures, "exec_gate", _sign_blind)
         failures = _check_execution_sign_resolution(text, tmp_path / "blind")
         assert failures, "the claim's behavioural half did not notice a sign-blind gate"
         assert any("candidate first" in f for f in failures), failures
@@ -9010,6 +9013,107 @@ class TestCE058MirroredResultFieldsAreStamped:
         # `BaseRule` does not declare, so all three copies of this assertion could never fail.
         assert any(getattr(rule, "id", None) == "CE059" for rule in ALL_RULES), (
             "the attribute this probe reads is wrong again — it must be able to SEE a wired rule"
+        )
+
+
+@pytest.mark.lint
+class TestTheSharedFixtureModuleIsNotInverted:
+    """`tests/optimize_fixtures.py` may not import from the test tree.
+
+    A lint-layer module (`tests/lint/computed_claims.py`) was importing private helpers out of
+    `tests/test_optimize_gate.py`: the lint layer reasons ABOUT the tree, so reaching into a test
+    file for fixtures inverts the dependency, and it is what blocked splitting that file. Extracting
+    the builders fixes it only while the new module stays a leaf — if it ever imports a `test_*`
+    module or `tests.lint`, the inversion is back one hop over.
+
+    A test rather than a CE rule: one file, one predicate, and a rule would need a scope no other
+    module in the tree shares. Two boundaries: it reads IMPORT statements only, so a runtime
+    `importlib.import_module("tests.…")` is invisible to it; and it routes every module string
+    through `resolved_module` (CE051) rather than reading `node.module`, treating an unresolvable
+    RELATIVE import as an offender — inside `tests/`, which is a package, a relative import can only
+    point back into the test tree.
+    """
+
+    FIXTURES = Path(__file__).parent / "optimize_fixtures.py"
+
+    @staticmethod
+    def _test_tree_imports(path: Path) -> list[str]:
+        """Import statements in ``path`` that reach into the test tree."""
+        offenders: list[str] = []
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom):
+                module = resolved_module(node, str(path))
+                if module is None:
+                    # `resolved_module` answers None outside a `coder_eval/` package root, which is
+                    # every path here. A level-0 import is absolute and resolves straight through;
+                    # anything left is relative, and relative from inside `tests/` is the test tree.
+                    if node.level:
+                        offenders.append(f"{path.name}:{node.lineno} -> a relative import")
+                elif module.split(".")[0] == "tests":
+                    # `from tests import test_optimize_gate` puts the offending name in `node.names`
+                    # and leaves `module` as the bare package — the case `resolved_module`'s own
+                    # docstring warns about, so the imported NAMES are read here too.
+                    for alias in node.names:
+                        offenders.append(f"{path.name}:{node.lineno} -> {module}.{alias.name}")
+            elif isinstance(node, ast.Import):
+                offenders += [
+                    f"{path.name}:{node.lineno} -> {a.name}" for a in node.names if a.name.split(".")[0] == "tests"
+                ]
+        return offenders
+
+    def test_the_fixture_module_imports_nothing_from_the_test_tree(self) -> None:
+        offenders = self._test_tree_imports(self.FIXTURES)
+        assert offenders == [], (
+            f"tests/optimize_fixtures.py imports from the test tree: {offenders}. It is a leaf on "
+            "`tests/lint/import_resolution.py`'s precedent — `coder_eval` and stdlib only, or the "
+            "inverted dependency it was extracted to remove is back one hop over"
+        )
+
+    def test_the_scan_can_see_both_import_shapes(self, tmp_path: Path) -> None:
+        """Anti-vacuity: a scan that resolves nothing reports [] on a file full of violations.
+
+        The real subject is clean, so the detector is proven on a synthetic module — the CE044/CE045
+        lesson, where a sensor passed because it was looking at nothing.
+        """
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "from tests.optimize_fixtures import write_row\n"
+            "import tests.test_optimize_gate\n"
+            "from tests import test_optimize_gate as gate_tests\n"
+            "from .sibling import thing\n",
+            encoding="utf-8",
+        )
+        found = self._test_tree_imports(probe)
+        assert len(found) == 4, f"the scan misses one of the four import shapes: {found}"
+        # The `node.level` branch specifically — the one added because CE051 fired on reading
+        # `node.module`, and therefore the one most likely to be wrong and never exercised.
+        assert any("a relative import" in entry for entry in found)
+        # And the `from tests import <module>` shape, whose offending name is in `node.names`.
+        assert any(entry.endswith("tests.test_optimize_gate") for entry in found)
+
+    def test_it_is_not_collected_as_a_test_module(self) -> None:
+        # Named `optimize_fixtures.py`, not `test_optimize_fixtures.py`: pytest would collect it, and
+        # a builder taking a `variant` argument would be reported as a test with a missing fixture.
+        assert not self.FIXTURES.name.startswith("test_")
+        assert not any(
+            node.name.startswith("test_")
+            for node in ast.parse(self.FIXTURES.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.FunctionDef | ast.ClassDef)
+        ), "a name starting with `test_` in a non-test module is a test nothing runs"
+
+    def test_no_lint_module_reaches_into_a_test_file(self) -> None:
+        """The original defect, asserted where it happened rather than only where it was fixed."""
+        lint_root = Path(__file__).parent / "lint"
+        assert lint_root.is_dir(), "anchor drifted — this would be checking nothing"
+        offenders = [
+            entry
+            for path in sorted(lint_root.rglob("*.py"))
+            for entry in self._test_tree_imports(path)
+            if "test_" in entry.split("->")[-1]
+        ]
+        assert offenders == [], (
+            f"a lint-layer module imports from a test module: {offenders}. Shared builders belong in "
+            "`tests/optimize_fixtures.py`, which both layers may import"
         )
 
 
