@@ -1,6 +1,6 @@
 """The activation track, end to end: preflight, gate, and the family decision.
 
-Rank 2 of the optimize family, beside :mod:`coder_eval.optimize_execution` and importing nothing
+Rank 2 of the optimize family, beside :mod:`coder_eval.optimize.execution` and importing nothing
 from it. Whether a candidate skill DESCRIPTION beats the incumbent at getting the skill engaged —
 measured as ``f1.yes`` over a ``skill_triggered`` criterion, with a paired cluster bootstrap over
 rows.
@@ -31,7 +31,7 @@ from coder_eval.models import (
     OptimizeMeasurements,
     copy_with,
 )
-from coder_eval.optimize_gate import (
+from coder_eval.optimize.gate import (
     _NOTE_CI_CONTAINS_ZERO,
     _NOTE_OUTSIDE_FAMILY,
     GATE_RESAMPLES,
@@ -52,7 +52,7 @@ from coder_eval.optimize_gate import (
     confirm_train_refusal,
     cost_latency_guardrails,
 )
-from coder_eval.optimize_load import (
+from coder_eval.optimize.load import (
     _balance_pair,
     _format_splits,
     _label_pairs,
@@ -67,7 +67,7 @@ from coder_eval.optimize_load import (
     load_suite_rows,
     read_split_provenance,
 )
-from coder_eval.optimize_store import UNRESOLVED_MODEL
+from coder_eval.optimize.store import UNRESOLVED_MODEL
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
     bootstrap_p_floor,
@@ -1071,7 +1071,7 @@ class SeedStability(NamedTuple):
     """Whether a gate's decision survives a change of bootstrap seed. A READING, never a verdict.
 
     A `NamedTuple` beside the function that produces it rather than a model in ``models/optimize.py``,
-    following :class:`~coder_eval.optimize_fronts.RuleCeiling` — whose docstring states the rule this
+    following :class:`~coder_eval.optimize.fronts.RuleCeiling` — whose docstring states the rule this
     family goes by outright, "computed and rendered, never persisted". The verdict models are the
     other category: decision records with ``extra="forbid"``, dumped to pinned fixtures. This is
     neither, so it is not exported from ``coder_eval.models`` either.
@@ -1171,9 +1171,9 @@ def confirm_gate(
 ) -> ConfirmVerdict:
     """Stage C on the activation track: did the Stage B ``f1.yes`` effect REPRODUCE on the test split?
 
-    The twin of :func:`~coder_eval.optimize_execution.confirm_gate_execution`, and it shares the
-    classification and the record's assembly with it — :func:`~coder_eval.optimize_gate.classify_confirm`
-    and :func:`~coder_eval.optimize_gate.build_confirm_verdict` both live at rank 1 precisely because
+    The twin of :func:`~coder_eval.optimize.execution.confirm_gate_execution`, and it shares the
+    classification and the record's assembly with it — :func:`~coder_eval.optimize.gate.classify_confirm`
+    and :func:`~coder_eval.optimize.gate.build_confirm_verdict` both live at rank 1 precisely because
     the two rank-2 track modules may not import each other, so writing the rule here and mirroring it
     there would be two copies of promotion-relevant arithmetic.
 

@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import RoundScores, RunCommandCriterion, TaskDefinition, copy_with
-from coder_eval.optimize_store import grader_changed, suite_changed
+from coder_eval.optimize.store import grader_changed, suite_changed
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.suite_fingerprint import (
     _NOT_SCORING_RELEVANT,

@@ -28,7 +28,7 @@ from coder_eval.models import (
     ClassificationCriterionResult,
     EvaluationResult,
 )
-from coder_eval.optimize_store import UNRECORDED_SPLIT
+from coder_eval.optimize.store import UNRECORDED_SPLIT
 from coder_eval.path_utils import replicate_subdir_name
 from coder_eval.reports_stats import (
     mean,

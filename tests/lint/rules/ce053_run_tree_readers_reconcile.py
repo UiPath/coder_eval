@@ -27,8 +27,12 @@ declaration, so a reader routed through it is satisfied rather than suppressed.
 ``load_arm_rows`` is exempt BY NAME: it calls ``load_suite_rows`` and is the primitive both
 tracks compose from, so a primitive that reconciled would double every gate's work.
 
-The scope is the ``optimize_*`` PREFIX rather than a list of module names, so the post-split
-family is covered before it exists and a seventh module cannot silently leave the rule's reach.
+The scope is the ``optimize/`` DIRECTORY rather than a list of module names, so the whole family
+is covered and a new module cannot silently leave the rule's reach. It replaced an ``optimize_*``
+filename prefix when the family became a package, and the two are INCOMPARABLE rather than ordered:
+a directory covers whatever is put in it without relying on a naming convention, and is blind to a
+reader written at ``src/coder_eval/optimize_new.py`` — which the prefix caught, and which is now
+the wrong place to put one. Stated rather than glossed, because this rule's failure mode is silence.
 
 **The boundary, stated so a green ``make lint`` is not mistaken for a proof.**
 
@@ -55,12 +59,13 @@ from tests.lint.rules.base import BaseRule
 # Matched against the forward-slash-normalized path (the convention CE009 sets), so a backslash
 # alternative here would be dead: `filepath.replace` runs first.
 #
-# A PREFIX, deliberately, not the six-name alternation this was first written as. An enumeration
-# fails OPEN on the one change most likely to break it: a reader moving into a SEVENTH module
-# reports zero violations, which is byte-identical to a clean tree — the CE051 direction. The
-# prefix costs nothing to be wrong about, since a module here with no tree reader is simply never
-# matched (`optimize_store.py` is one today).
-_OPTIMIZE_MODULES = re.compile(r"/coder_eval/optimize_[a-z_]+\.py$")
+# The package DIRECTORY, deliberately, not the six-name alternation this was first written as (nor
+# the `optimize_*` filename prefix that replaced it). An enumeration fails OPEN on the one change
+# most likely to break it: a reader moving into a SEVENTH module reports zero violations, which is
+# byte-identical to a clean tree — the CE051 direction. The directory costs nothing to be wrong
+# about, since a module here with no tree reader is simply never matched (`optimize/store.py` is one
+# today), and it does not depend on a future module being named to a convention.
+_OPTIMIZE_MODULES = re.compile(r"/coder_eval/optimize/[a-z_]+\.py$")
 
 _TREE_READERS = frozenset({"load_suite_rows", "load_arm_rows"})
 # The primitive and the whole-arm sweep that wraps it. See the module docstring for why both.

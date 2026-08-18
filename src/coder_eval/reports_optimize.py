@@ -6,13 +6,13 @@ the gate decides, this renders the decision, and a decision layer that also owns
 cannot be reviewed as one.
 
 **The layering rule, which a test pins rather than leaving to this sentence** — no filesystem, no
-estimator, and **no runtime import of** ``optimize_gate``. A renderer that reaches back for a run
+estimator, and **no runtime import of** ``optimize.gate``. A renderer that reaches back for a run
 directory or recomputes a statistic is a gate with a table on it, and the module boundary would
 then document a separation that does not exist.
 
-The NamedTuples it renders — :class:`~coder_eval.optimize_search.SearchComparison`,
-:class:`~coder_eval.optimize_fronts.CostQualityPoint`, :class:`~coder_eval.optimize_fronts.RuleCeiling`
-and :class:`~coder_eval.optimize_activation.SeedStability` — stay with the code that PRODUCES them and
+The NamedTuples it renders — :class:`~coder_eval.optimize.search.SearchComparison`,
+:class:`~coder_eval.optimize.fronts.CostQualityPoint`, :class:`~coder_eval.optimize.fronts.RuleCeiling`
+and :class:`~coder_eval.optimize.activation.SeedStability` — stay with the code that PRODUCES them and
 are imported here under ``if TYPE_CHECKING`` only, exactly the shape
 ``reports_stats.PairedComparison`` → ``reports_experiment`` already has. That every one of them is a
 NamedTuple is the pattern rather than a coincidence: a computed-and-rendered value stays with its
@@ -52,9 +52,9 @@ if TYPE_CHECKING:
     # across its ranks — the fronts and the search loop at rank 3, `SeedStability` at rank 2. Which
     # rank produces one does not matter here; that all four are NamedTuples does, because that is what
     # makes deferring them right rather than a way to dodge the layering rule.
-    from coder_eval.optimize_activation import SeedStability
-    from coder_eval.optimize_fronts import CostQualityPoint, RuleCeiling
-    from coder_eval.optimize_search import SearchComparison
+    from coder_eval.optimize.activation import SeedStability
+    from coder_eval.optimize.fronts import CostQualityPoint, RuleCeiling
+    from coder_eval.optimize.search import SearchComparison
 
 
 def _fmt(value: float | None, spec: str = ".3f") -> str:
@@ -242,7 +242,7 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
         threshold" line directly underneath. ``holm_rejected`` is the field that closes it.
 
       Both fields live on ``ExecutionGateVerdict`` rather than as helpers here, precisely so this
-      file needs no runtime import of ``optimize_gate``.
+      file needs no runtime import of ``optimize.gate``.
     - **PROMOTED / NOT PROMOTED** — the ordinary outcomes.
 
     ``UNDECIDED`` outranking the refusal is right — a verdict Holm never saw has no decision to
@@ -719,13 +719,13 @@ def render_headroom_ceilings(ceilings: list[RuleCeiling], floor: float | None, *
     the most room; a fabricated floor says nothing true at all.
 
     ``unattributed`` is the count of rows that carried no ``RULES`` line
-    (:attr:`~coder_eval.optimize_load.RuleAttribution.unattributed`), and it is keyword-only and
+    (:attr:`~coder_eval.optimize.load.RuleAttribution.unattributed`), and it is keyword-only and
     defaulted so existing calls are unchanged. When non-zero the block says every ceiling below is
     an **under**-estimate — a row nothing attributed is in no rule's failing set, so its headroom
     is counted in no rule. Without that line a ``GAP`` verdict, which tells a reader to stop
     working on a rule, can be produced by a stdout the criterion truncated at 4000 characters.
 
-    Advisory, always. See :func:`~coder_eval.optimize_fronts.headroom_ceiling` for why a table
+    Advisory, always. See :func:`~coder_eval.optimize.fronts.headroom_ceiling` for why a table
     built on an AUTHORED attribution must never be able to block a promotion.
     """
     if not ceilings:

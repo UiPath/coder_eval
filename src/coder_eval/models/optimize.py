@@ -80,8 +80,8 @@ class ActivationGateVerdict(BaseModel):
     visible.
 
     ``promoted`` is deliberately ``bool | None``: a single gate cannot decide a family, so
-    :func:`coder_eval.optimize_activation.activation_gate` leaves it ``None`` and only
-    :func:`coder_eval.optimize_activation.holm_promote` — which sees every survivor at once — sets it.
+    :func:`coder_eval.optimize.activation.activation_gate` leaves it ``None`` and only
+    :func:`coder_eval.optimize.activation.holm_promote` — which sees every survivor at once — sets it.
     Rendering a ``None`` as a non-promotion would let a forgotten Holm pass look like an honest
     negative result.
     """
@@ -157,7 +157,7 @@ class ActivationGateVerdict(BaseModel):
             "there was no interval; 0 is the meaningful 'the arms agreed everywhere'. It is the "
             "COUNT that binds, not the rate, and the count is almost flat in the suite size: 3 "
             "discordant rows suffice at 8 paired rows and 4 at 10, 20 or 100 (see "
-            "optimize_activation.min_discordant_rows, which computes it). What does NOT help is adding "
+            "optimize.activation.min_discordant_rows, which computes it). What does NOT help is adding "
             "rows the arms agree on — at a fixed R that RAISES the floor."
         ),
     )
@@ -244,7 +244,7 @@ class ActivationGateVerdict(BaseModel):
 
         The ONE declaration of "the statistic came out in the candidate's favour and its interval
         excludes zero", and the exact twin of :attr:`ExecutionGateVerdict.separated` — same
-        expression, same rationale. :func:`~coder_eval.optimize_activation.holm_promote` needs it to
+        expression, same rationale. :func:`~coder_eval.optimize.activation.holm_promote` needs it to
         decide ``promoted``; ``reports_optimize.render_markdown`` needs it to tell a candidate that
         LOST from one that WON AND WAS BLOCKED. The renderer read ``promoted`` for that second
         question until the guardrail was folded in, at which point the BLOCKED rung became
@@ -268,7 +268,7 @@ class ExecutionGateVerdict(BaseModel):
 
     Mirrors :class:`ActivationGateVerdict`'s conventions deliberately — statistics are ``None``
     rather than fabricated, ``notes`` is the distrust-the-numbers channel, and ``promoted`` is
-    ``None`` until :func:`coder_eval.optimize_execution.holm_promote_execution` has seen the whole
+    ``None`` until :func:`coder_eval.optimize.execution.holm_promote_execution` has seen the whole
     family — but it is a separate flat model rather than a track-discriminated union with it. A
     union would carry ``p_floor`` / ``n_discordant`` / ``criterion_index`` as permanently-``None``
     noise on one side and ``effect_size`` on the other, and every reader would have to know which
@@ -573,7 +573,7 @@ class ConfirmVerdict(BaseModel):
     )
     outcome: Literal["reproduced", "shrank", "reversed", "undecided"] = Field(
         description=(
-            "The train->test classification, from `optimize_gate.classify_confirm`. `reversed`: the "
+            "The train->test classification, from `optimize.gate.classify_confirm`. `reversed`: the "
             "test effect's sign opposes the train effect's. `shrank`: same sign, but below the train "
             "effect by more than the confirm split's MDE — and a test effect of exactly 0.0 is "
             "SHRANK, not reproduced, because 'same sign' is undefined there. `reproduced`: same "
@@ -581,7 +581,7 @@ class ConfirmVerdict(BaseModel):
             "effect is absent; the TRAIN effect is not a win (Stage C confirms an improvement, and "
             "there is none to hold — passing a verdict that lost, or one that measured exactly zero, "
             "used to produce actively misleading REPRODUCED and SHRANK readings); the margin is "
-            "undefined, which means `None` or anything below `optimize_gate.FLOOR_RESOLUTION` rather "
+            "undefined, which means `None` or anything below `optimize.gate.FLOOR_RESOLUTION` rather "
             "than only exactly 0.0 (a null split returns residue like 2.8e-17 on a deterministic "
             "suite, and an `== 0.0` test goes inert on exactly those); or a non-finite value reached "
             "the comparison."
@@ -646,7 +646,7 @@ class NoiseFloor(BaseModel):
     suite_id: str = Field(min_length=1, description="Suite the floor was measured on (the pre-fan-out task_id).")
     variant_id: str = Field(min_length=1, description="Arm the null comparison split. Renamed per round, so keyed.")
     model: str = Field(
-        min_length=1, description="Model the rows ran under. Sourced ONLY from optimize_execution.resolve_model."
+        min_length=1, description="Model the rows ran under. Sourced ONLY from optimize.execution.resolve_model."
     )
     metric: str = Field(
         default=f"f1.{TARGET_LABEL}",
@@ -688,7 +688,7 @@ class NoiseFloor(BaseModel):
             "The ``--split`` the runs this floor was measured over recorded, derived from their "
             "``run.json`` provenance rather than passed by a caller. ``None`` means every run "
             "recorded no split (a full-suite measurement); "
-            "``optimize_store.UNRECORDED_SPLIT`` means at least one run directory carried no "
+            "``optimize.store.UNRECORDED_SPLIT`` means at least one run directory carried no "
             "provenance at all, which makes the floor UNCACHEABLE — it is neither written nor "
             "matched, because a floor pooled over runs that might have used different row sets "
             "is not a floor for any one of them. In the key because a split selects a fixed, "

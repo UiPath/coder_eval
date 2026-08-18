@@ -7,7 +7,7 @@ the ``Skill`` branch (``result_status != "success"``) and a DENYLIST on the file
 where it mattered: a turn crashing before a ``Read(SKILL.md)`` result arrives force-closes the
 call to ``"unknown"``, which the denylist let through as engagement while the identical crash
 on a ``Skill`` call was correctly excluded. That is a false positive on ``f1.yes``, the metric
-``optimize_activation.activation_gate`` promotes on. The fix was to write the predicate once, as
+``optimize.activation.activation_gate`` promotes on. The fix was to write the predicate once, as
 ``_delivered``, and call it from both branches.
 
 **It counts comparison SITES, not enclosing functions, and that distinction is the whole rule.**

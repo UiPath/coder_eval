@@ -135,7 +135,7 @@ run_limits:
 # Measured when this happened by accident on a real suite: on the same 11 rows the mean went
 # 0.9158 clean -> 0.9461 leaked, with two rows flipping from partial to perfect. That is
 # larger than most effects an optimization round exists to detect, and it inflates every arm,
-# so no cross-arm comparison reveals it. `optimize_search.candidate_leaks` does NOT cover this:
+# so no cross-arm comparison reveals it. `optimize.search.candidate_leaks` does NOT cover this:
 # it checks whether a CANDIDATE reproduces train-row text, not whether the FIXTURE ships the
 # marking scheme.
 sandbox:

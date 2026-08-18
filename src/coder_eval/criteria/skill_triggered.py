@@ -62,9 +62,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# ONE declaration of the positive label. The criterion PRODUCES it and `optimize_gate` CONSUMES
+# ONE declaration of the positive label. The criterion PRODUCES it and `optimize.gate` CONSUMES
 # it (its activation gate reads `f1.yes`), so the two must agree — but the dependency has to point
-# this way: `models/optimize.py` is a cycle-free leaf that `optimize_gate` imports, and `models`
+# this way: `models/optimize.py` is a cycle-free leaf that `optimize.gate` imports, and `models`
 # cannot import `criteria`. `_NO` is left as a literal; it has no twin anywhere.
 _YES = TARGET_LABEL
 _NO = "no"

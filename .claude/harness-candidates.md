@@ -563,7 +563,7 @@ with the two `action.yml` items above — one considered change to the action's 
 - [x] **CLOSED.** The search loop's accept/revert arithmetic lived in a markdown snippet rather
       than a tested function, against `models/optimize.py`'s own stated principle ("the gate's
       verdict is a typed value the skill prints, instead of arithmetic an agent performs by hand").
-      Now `optimize_search.search_compare` + `lineage_head_scores` + `render_search_comparison`, with
+      Now `optimize.search.search_compare` + `lineage_head_scores` + `render_search_comparison`, with
       18 unit tests: the four guards (shared-row intersection, no-overlap-before-holes, refuse on a
       hole, corpus regression blocks an accept) are asserted rather than copied. The deferral
       reasoning — that every snippet in this skill is hand-written the same way — was right about
@@ -576,7 +576,7 @@ with the two `action.yml` items above — one considered change to the action's 
       no raise, no log, and the field it was meant to set stays at its default. This is the exact
       hole CE041 closed for *construction*, still open for *update*, and it matters most where it
       is worst: `ActivationGateVerdict.promoted` / `holm_alpha` and their execution-track twins are
-      written ONLY this way (`optimize_activation.holm_promote`, `holm_promote_execution`), so the two
+      written ONLY this way (`optimize.activation.holm_promote`, `holm_promote_execution`), so the two
       fields that ARE the promotion decision are the two the runtime backstop does not cover. Not
       done with CE041 because the fix is not a matching rule: `update=` legitimately takes a dict
       in every one of this repo's ~9 call sites, so a rule that flags the CALL is wrong and one
@@ -820,7 +820,7 @@ with the two `action.yml` items above — one considered change to the action's 
 
       **Resolution (Plan B+C Phase 1):** closed, and the return-contract question resolved by
       SPLITTING on it rather than picking one answer. The DETECTION is shared —
-      `optimize_load._reconcile_arms` is the one sweep every whole-arm reader routes through
+      `optimize.load._reconcile_arms` is the one sweep every whole-arm reader routes through
       (`execution_gate` still calls `reconcile_tree_against_run_json` directly — it works one run
       dir per variant and needs the per-dir result), and `_stale_tree_reason` is the one message
       the readers share — while the RESPONSE follows the return type:
@@ -835,15 +835,16 @@ with the two `action.yml` items above — one considered change to the action's 
       correction the entry itself needed: the four readers are `measure_noise_floor`,
       **`measure_execution_noise_floor`**, `arm_row_scores` and `cost_quality_points` —
       `noise_floor_mde` reaches the tree only through `measure_noise_floor`. **CE053** is the
-      standing guard, and its path scope is the `optimize_*` PREFIX rather than a list of module
-      names, so Phase 7 moving a reader — or a seventh module — cannot take it out of reach.
+      standing guard, and its path scope is the `optimize/` DIRECTORY rather than a list of module
+      names (it was the `optimize_*` filename prefix until the family became a package), so moving a
+      reader — or adding a module — cannot take it out of reach.
 
 - [ ] **A dotted `coder_eval.<module>.<name>` reference in PROSE is unchecked.** The snippet
       sensor (`tests/test_custom_lint.py::_snippet_binding_failures`) resolves imports inside
       ` ```python ` fences only. The six-module split (Plan B+C Phase 7) left **fourteen** files
       naming a moved symbol by its old dotted path — including
       `plugins/coder-eval/reference/proposal-prompt.md`, which told the proposer to call
-      `coder_eval.optimize_gate.candidate_leaks(...)` (now `optimize_search`, so the import
+      `coder_eval.optimize_gate.candidate_leaks(...)` (now `optimize.search`, so the import
       raises), and two Pydantic FIELD DESCRIPTIONS, which are public model documentation. All
       were found by a reviewer reading files, not by any sensor. The guard is a scan for
       `coder_eval\.[\w.]+\.[A-Za-z_]\w*` across `src/`, `docs/`, `plugins/` and `.claude/`,
@@ -1002,7 +1003,7 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       the same 11 rows the mean went **0.9158 clean -> 0.9461 leaked**, two rows flipping from
       partial to perfect. That is larger than most effects an optimization round exists to detect,
       and it inflates **every arm**, so no cross-arm comparison can reveal it.
-      `optimize_search.candidate_leaks` does not cover this — it asks whether a CANDIDATE
+      `optimize.search.candidate_leaks` does not cover this — it asks whether a CANDIDATE
       reproduces train-row text, not whether the FIXTURE ships the marking scheme.
 
       **Not built now, deliberately: it would pass vacuously.** The only discoverable subject in

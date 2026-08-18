@@ -394,7 +394,7 @@ def _check_sizing_table(text: str, _tmp: Path) -> list[str]:
     essentially regardless of suite size"), over a range the table does not enumerate. A mirror of
     the table alone could only detect an edit; this can detect that the table is wrong.
     """
-    from coder_eval.optimize_activation import min_discordant_rows
+    from coder_eval.optimize.activation import min_discordant_rows
     from coder_eval.reports_stats import DEFAULT_ALPHA
 
     table = next((t for t in parse_markdown_tables(text) if table_signature(t) == _SIZING_SIGNATURE), None)
@@ -456,7 +456,7 @@ def _check_interval_from_one_run_dir(text: str, tmp: Path) -> list[str]:
             "directory — the false version of this claim ('the statistic cannot be') shipped once"
         )
 
-    from coder_eval.optimize_activation import activation_gate
+    from coder_eval.optimize.activation import activation_gate
 
     def _gate(run_dirs: list[Path]):
         return activation_gate(
@@ -575,14 +575,14 @@ def _check_headroom_ceilings(text: str, _tmp: Path) -> list[str]:
 
     Three things are checked, and they fail on different edits:
 
-    * each cell against :func:`~coder_eval.optimize_fronts.headroom_ceiling` over the real vector,
+    * each cell against :func:`~coder_eval.optimize.fronts.headroom_ceiling` over the real vector,
       so the table cannot drift from the estimator OR from the round;
     * the ceiling cell's own expression, evaluated, so a hand-edited number fails;
     * the DENOMINATOR of that expression against the suite's full row count — the single property
       the whole block rests on, since dividing by the rows that failed reports a per-row lift and
       makes every rule look promotable.
     """
-    from coder_eval.optimize_fronts import headroom_ceiling
+    from coder_eval.optimize.fronts import headroom_ceiling
     from tests.test_optimize_gate import HEADROOM_ROW_SCORES, HEADROOM_RULE_ROWS
 
     table = next((t for t in parse_markdown_tables(text) if table_signature(t) == _HEADROOM_SIGNATURE), None)

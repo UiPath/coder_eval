@@ -1,6 +1,6 @@
 """The search loop's accept/revert decision, and the anti-memorization preflight.
 
-Rank 3 of the optimize family, beside :mod:`coder_eval.optimize_fronts` and importing nothing from
+Rank 3 of the optimize family, beside :mod:`coder_eval.optimize.fronts` and importing nothing from
 it — :class:`~coder_eval.models.ArmRowScores` is a MODEL, so there is no edge between them.
 
 **Nothing here is a gate.** :func:`search_compare` compares across invocations, unpaired,

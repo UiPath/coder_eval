@@ -4,7 +4,7 @@
 its own docstring already says so: *"Callers MUST use this helper rather than hand-rolling the
 f-string so future format changes (e.g., NN → NNN) touch exactly one place."* Four sites outside it
 hand-rolled the padding anyway — two ``f"{replicate_index:02d}"`` spellings in ``reports_junit.py``,
-a ``glob("*/[0-9][0-9]/task.json")`` in ``optimize_gate.py`` and a ``glob("[0-9][0-9]")`` in
+a ``glob("*/[0-9][0-9]/task.json")`` in ``optimize/gate.py`` and a ``glob("[0-9][0-9]")`` in
 ``reports_stats.py``.
 
 The day that padding widens, none of them raises. The globs simply match nothing: **both optimize
@@ -12,7 +12,7 @@ gates load ZERO rows**, and the zero-row note then blames a wrong variant id, a 
 wrong run directory — sending a reader to check the one thing that is correct.
 
 **Why a rule rather than a shared constant.** The three readers glob at different depths —
-``optimize_gate`` two levels down from a *suite* directory, ``reports_junit`` / ``reports_stats``
+``optimize/gate.py`` two levels down from a *suite* directory, ``reports_junit`` / ``reports_stats``
 one level down from a *task* directory — so a single shared glob constant would have to be
 concatenated at two of the three sites, which is the duplication again wearing a constant's name.
 The invariant being protected is *"a replicate directory's name is not a pattern any reader may

@@ -73,7 +73,7 @@ selection is *not* a promise that every row ran. Read the task YAML for that hal
 
 A consumer comparing two runs must not pair different `split` values — a train run and a test
 run of one suite are two different row sets, and reporting their difference as one measurement
-is the failure this field exists to prevent. `optimize_activation.activation_gate` enforces exactly
+is the failure this field exists to prevent. `optimize.activation.activation_gate` enforces exactly
 that: it REFUSES a pair whose arms recorded different splits, and NOTES an unrecorded one rather
 than assuming it matched. The refusal leaves `promoted` at `null` like every other activation
 verdict — `holm_promote` is what forces it to `false` and what makes the block headline

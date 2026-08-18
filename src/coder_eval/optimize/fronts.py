@@ -24,7 +24,7 @@ from typing import NamedTuple
 from coder_eval.models import (
     ArmRowScores,
 )
-from coder_eval.optimize_load import (
+from coder_eval.optimize.load import (
     _median,
     _pool,
     _reconcile_arms,
@@ -228,7 +228,7 @@ def headroom_ceiling(
     (``rows=None``, every row) and the rule-level "can a candidate for R?" — because they are the
     same arithmetic over different subsets. Note that ``rows=None`` and ``rows=set()`` are
     DIFFERENT and the difference matters: a rule that failed nowhere is absent from
-    :func:`~coder_eval.optimize_load.rule_row_map`, and passing its missing entry through as
+    :func:`~coder_eval.optimize.load.rule_row_map`, and passing its missing entry through as
     ``None`` would silently report the whole suite's ceiling under that rule's name.
 
     **It is advisory and never gates.** A "below the floor" verdict is arithmetically sound — the

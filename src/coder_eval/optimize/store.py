@@ -7,12 +7,12 @@ floor supersedes it, whereas a row an earlier promotion was built on is never re
 deliberately NOT the free-form narrative ledger next door (``history.json``), which is append-only
 prose about what happened.
 
-Carved out of :mod:`coder_eval.optimize_gate` on the precedent
+Carved out of :mod:`coder_eval.optimize.gate` on the precedent
 :mod:`coder_eval.leak_detection` already set: the gate DECIDES, this module PERSISTS, and a
 decision layer that also owns its storage cannot be reasoned about separately from it.
 
 **One-way dependency.** This module imports :mod:`coder_eval.models` and nothing else from the
-package — never ``optimize_gate``, which imports it. ``UNRESOLVED_MODEL`` and ``UNRECORDED_SPLIT``
+package — never ``optimize.gate``, which imports it. ``UNRESOLVED_MODEL`` and ``UNRECORDED_SPLIT``
 live here rather than with the gate for exactly that reason: both are cache-key sentinels that
 ``record_noise_floor`` refuses to write, so keeping them in the gate would make this module import
 the gate and close a cycle.

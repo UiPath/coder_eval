@@ -1,14 +1,14 @@
 """The decision primitives BOTH optimize-skill tracks share.
 
-Rank 1 of the optimize family: it imports from :mod:`coder_eval.optimize_load` and from nothing
+Rank 1 of the optimize family: it imports from :mod:`coder_eval.optimize.load` and from nothing
 else in the family, and both track modules import from it. What lives here is what is neither
 track's alone — the gate-wide constants, the notes both Holm wrappers emit verbatim, the
 noise-floor refusal channel and the cluster half both floors share, the cost/latency guardrails
 both gates run, and :func:`_holm_family`, the ONE
 :func:`~coder_eval.reports_stats.holm_rejections` call site.
 
-The two gates themselves live one rank up, in :mod:`coder_eval.optimize_activation` and
-:mod:`coder_eval.optimize_execution`. The split is BY TRACK because the activation/execution pair
+The two gates themselves live one rank up, in :mod:`coder_eval.optimize.activation` and
+:mod:`coder_eval.optimize.execution`. The split is BY TRACK because the activation/execution pair
 is this feature's dominant organising principle — almost every concept in it is a two-track pair —
 and because the module it was carved out of had grown to 3,500 lines with an E-grade function.
 
@@ -39,8 +39,8 @@ from coder_eval.models import (
     OptimizeMeasurements,
     copy_with,
 )
-from coder_eval.optimize_load import SplitProvenance, _balance_pair, _median, _row_cost_levels, _row_costs
-from coder_eval.optimize_store import UNRESOLVED_MODEL, lookup_noise_floor
+from coder_eval.optimize.load import SplitProvenance, _balance_pair, _median, _row_cost_levels, _row_costs
+from coder_eval.optimize.store import UNRESOLVED_MODEL, lookup_noise_floor
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
     cluster_bootstrap_diff_ci,

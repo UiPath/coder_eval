@@ -357,7 +357,7 @@ experiment reporter renders — mean difference, 95% confidence interval, Cohen'
 header next to the figure rather than resolving the direction from memory: read backwards, it
 promotes the arm that lost, and every later number in the ledger then agrees with the mistake.
 
-**Since this round ran, the sign is resolved for you.** `optimize_execution.execution_gate` reuses
+**Since this round ran, the sign is resolved for you.** `optimize.execution.execution_gate` reuses
 the same paired statistic but knows which arm is the incumbent, so its `mean_diff` is always
 *candidate − incumbent* whichever order the experiment file declared — with the interval bounds
 ordered to match. It also carries the cost and latency guardrails and two integrity checks

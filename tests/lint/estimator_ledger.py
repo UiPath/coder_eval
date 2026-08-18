@@ -59,21 +59,21 @@ from tests.lint.markdown_tables import parse_markdown_tables, table_signature
 
 
 # (repo-relative module path, constant name). Not bare names: `reports_stats.py` is not the only
-# home. Every one of `optimize_gate.py`'s four gate constants steps a rendered gate number exactly
+# home. Every one of `optimize/gate.py`'s four gate constants steps a rendered gate number exactly
 # the way `BOOTSTRAP_RESAMPLES` stepped a rendered CI.
 WATCHED_CONSTANTS: tuple[tuple[str, str], ...] = (
     ("src/coder_eval/reports_stats.py", "BOOTSTRAP_RESAMPLES"),
     ("src/coder_eval/reports_stats.py", "DEFAULT_ALPHA"),
-    ("src/coder_eval/optimize_gate.py", "MATERIALITY_FLOOR"),
-    ("src/coder_eval/optimize_gate.py", "GATE_P_PRECISION"),
-    ("src/coder_eval/optimize_gate.py", "GATE_MAX_FAMILY"),
-    ("src/coder_eval/optimize_gate.py", "GATE_RESAMPLES"),
+    ("src/coder_eval/optimize/gate.py", "MATERIALITY_FLOOR"),
+    ("src/coder_eval/optimize/gate.py", "GATE_P_PRECISION"),
+    ("src/coder_eval/optimize/gate.py", "GATE_MAX_FAMILY"),
+    ("src/coder_eval/optimize/gate.py", "GATE_RESAMPLES"),
     # These two are not resample counts, but they move rendered output just as directly:
     # FLOOR_RESOLUTION decides whether an MDE counts as measurable at all (and therefore whether
     # the execution gate REFUSES), and NEAR_FLOOR_MULTIPLE gates the "p is at or near this
     # bootstrap's resolution floor" note.
-    ("src/coder_eval/optimize_gate.py", "FLOOR_RESOLUTION"),
-    ("src/coder_eval/optimize_activation.py", "NEAR_FLOOR_MULTIPLE"),
+    ("src/coder_eval/optimize/gate.py", "FLOOR_RESOLUTION"),
+    ("src/coder_eval/optimize/activation.py", "NEAR_FLOOR_MULTIPLE"),
 )
 
 # BOTH halves of the pinned-render tree. `report_snapshots/` alone would watch the reports and

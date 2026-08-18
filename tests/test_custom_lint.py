@@ -534,7 +534,7 @@ class TestCE040BootstrapPFloorSeam:
 
     The floor is a property of the ESTIMATOR — `1/m` under the naive count, `2/(m+1)` under
     Phipson & Smyth — so a consumer that spells it inline keeps reporting the old value after
-    the estimator moves. That is exactly what happened: four sites in `optimize_gate.py` and two
+    the estimator moves. That is exactly what happened: four sites in `optimize/gate.py` and two
     field descriptions understated it by 2x, in a block a user reads to decide whether to spend.
     """
 
@@ -2491,7 +2491,7 @@ class TestPluginArtifacts:
         assert score == 0.5, output
         assert "raised" in output, output
 
-    # --- rule attribution: the RULES line `optimize_load.rule_row_map` reads -------------------
+    # --- rule attribution: the RULES line `optimize.load.rule_row_map` reads -------------------
 
     @staticmethod
     def _rules_line(output: str) -> dict[str, str]:
@@ -3968,7 +3968,7 @@ class TestPluginArtifacts:
         # Derived from the skill's own import lines rather than a list here, so a snippet that
         # starts importing something new is covered without anyone remembering to extend this.
         #
-        # EVERY `coder_eval` module, not just `optimize_gate`: the snippets also import
+        # EVERY `coder_eval` module, not just `optimize.gate`: the snippets also import
         # `expand_dataset` / `load_task` from `coder_eval.orchestration.task_loader` and models
         # from `coder_eval.models`, and a rename there fails in the user's terminal after the runs
         # are paid for — which is precisely the failure this sensor's own comment describes.
@@ -3980,9 +3980,9 @@ class TestPluginArtifacts:
 
         # The DECISION layer is six modules since the split, and the snippets import from five of
         # them. Asserting the family rather than one name keeps this from going blind the next time
-        # a name moves — which is exactly what it did when `optimize_gate` stopped exporting the
+        # a name moves — which is exactly what it did when `optimize.gate` stopped exporting the
         # gates themselves.
-        family = {m for m in imported if m.startswith("coder_eval.optimize_")}
+        family = {m for m in imported if m.startswith("coder_eval.optimize.")}
         assert len(family) >= 4, (
             f"optimize-skill's SKILL.md imports from only {sorted(family)} — either the snippets "
             "are gone or the import line changed shape and this sensor is blind"
@@ -4040,7 +4040,7 @@ class TestPluginArtifacts:
         # The self-test. Without it the binder could be reverted to a no-op with everything green.
         markdown = (
             "```python\n"
-            "from coder_eval.optimize_activation import activation_gate\n\n"
+            "from coder_eval.optimize.activation import activation_gate\n\n"
             "activation_gate(suite_id='s', bogus_kwarg=1)\n"
             "```\n"
         )
@@ -4056,7 +4056,7 @@ class TestPluginArtifacts:
         """
         markdown = (
             "```python\n"
-            "from coder_eval.optimize_activation import a_name_that_moved\n\n"
+            "from coder_eval.optimize.activation import a_name_that_moved\n\n"
             "a_name_that_moved(suite_id='s')\n"
             "```\n"
         )
@@ -4072,7 +4072,7 @@ class TestPluginArtifacts:
         `SearchComparison`, `TASK_JSON_GLOB`, `GATE_RESAMPLES` and `MATERIALITY_FLOOR` are all
         imported-not-called in the shipped skill, which is why the check runs over the import map.
         """
-        markdown = "```python\nfrom coder_eval.optimize_activation import A_CONSTANT_THAT_MOVED\n```\n"
+        markdown = "```python\nfrom coder_eval.optimize.activation import A_CONSTANT_THAT_MOVED\n```\n"
         failures = _snippet_binding_failures(markdown)
         assert len(failures) == 1 and "A_CONSTANT_THAT_MOVED" in failures[0], failures
 
@@ -4102,7 +4102,7 @@ class TestPluginArtifacts:
     def test_the_binder_reports_rather_than_crashes_on_a_wholesale_module_rename(self):
         """The Phase 7 rehearsal, on the REAL file: the sensor must survive being wrong."""
         raw = (PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8")
-        mutated = raw.replace("from coder_eval.optimize_", "from coder_eval.nowhere_optimize_")
+        mutated = raw.replace("from coder_eval.optimize.", "from coder_eval.nowhere_optimize.")
         assert mutated != raw, "the anchor moved — re-derive it from the skill's snippets"
         failures = _snippet_binding_failures(mutated)
         assert len(failures) >= 15, failures
@@ -4114,14 +4114,14 @@ class TestPluginArtifacts:
         The call loop's `not callable` skip must survive: it exists for exactly these, and the new
         existence check must not start reporting them.
         """
-        markdown = "```python\nfrom coder_eval.optimize_store import UNRESOLVED_MODEL, UNRECORDED_SPLIT\n```\n"
+        markdown = "```python\nfrom coder_eval.optimize.store import UNRESOLVED_MODEL, UNRECORDED_SPLIT\n```\n"
         assert _snippet_binding_failures(markdown) == []
 
     @pytest.mark.parametrize(
         "markdown",
         [
-            "```python\nfrom coder_eval.optimize_load import (\n    load_arm_rows,\n    gone_missing,\n)\n```\n",
-            "```python\nfrom coder_eval.optimize_load import load_arm_rows, gone_missing\n```\n",
+            "```python\nfrom coder_eval.optimize.load import (\n    load_arm_rows,\n    gone_missing,\n)\n```\n",
+            "```python\nfrom coder_eval.optimize.load import load_arm_rows, gone_missing\n```\n",
         ],
         ids=["parenthesized", "single-line"],
     )
@@ -4135,7 +4135,7 @@ class TestPluginArtifacts:
         # A snippet that rebinds an imported name locally must not be bound against the import.
         markdown = (
             "```python\n"
-            "from coder_eval.optimize_activation import activation_gate\n\n"
+            "from coder_eval.optimize.activation import activation_gate\n\n"
             "activation_gate = lambda **kw: None\n"
             "activation_gate(bogus_kwarg=1)\n"
             "```\n"
@@ -4206,14 +4206,14 @@ class TestPluginArtifacts:
         # pricing.py <-> pricing.ts mirror this repo had to add a parity test to defend — and it
         # goes stale silently, because nothing about changing a constant makes anyone reread a
         # markdown file. Derived from the constant, so this cannot itself go stale.
-        from coder_eval.optimize_gate import MATERIALITY_FLOOR
+        from coder_eval.optimize.gate import MATERIALITY_FLOOR
 
         method = _normalized(PLUGIN_ROOT / "reference" / "optimize-method.md")
         forbidden = {f"{MATERIALITY_FLOOR:.0%}", f"{MATERIALITY_FLOOR:g}", f"{MATERIALITY_FLOOR:.2f}"}
         present = sorted(f for f in forbidden if f in method)
         assert not present, (
             f"reference/optimize-method.md quotes {present} — the rendered value of MATERIALITY_FLOOR. "
-            "The guardrail tolerance is owned by coder_eval.optimize_gate; describe the guardrail as "
+            "The guardrail tolerance is owned by coder_eval.optimize.gate; describe the guardrail as "
             "bootstrap-derived and carry no figure, or the prose drifts the moment the constant moves."
         )
 
@@ -4366,7 +4366,7 @@ class TestPluginArtifacts:
         # DEFAULT_ALPHA rides the same sensor rather than a third near-identical one. The sizing
         # table put it at risk: it needs the Holm threshold in a cell, and the honest way to write
         # that is `alpha/S` bound to the constant by the CE039 claim — not a retyped `0.05/5`.
-        from coder_eval.optimize_gate import GATE_RESAMPLES
+        from coder_eval.optimize.gate import GATE_RESAMPLES
         from coder_eval.reports_stats import DEFAULT_ALPHA
 
         forbidden = {
@@ -6914,7 +6914,7 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
     exemption weakening a real check.
 
     The detection PRIMITIVE lives in `coder_eval.leak_detection`, shared with
-    `optimize_search.candidate_leaks`, which asks the same question pointed the other way. The
+    `optimize.search.candidate_leaks`, which asks the same question pointed the other way. The
     containment direction below is all this rule adds to it.
     """
 
@@ -7618,14 +7618,14 @@ class TestCE045SkipOnIgnoredPath:
 
 @pytest.mark.lint
 class TestHolmRejectionsIsConfined:
-    """`holm_rejections` may be called only from `optimize_gate`, and only by `_holm_family`.
+    """`holm_rejections` may be called only from `optimize.gate`, and only by `_holm_family`.
 
     Holm is a property of a FAMILY. A call site that sees one candidate at a time degenerates to
     an uncorrected `p <= alpha` while still looking like a correction — the failure mode the two
     wrappers exist to prevent, and one no type or test of theirs can catch from the outside.
 
     CLAUDE.md said `holm_promote` was the ONLY call site until the execution track got its own
-    gate, and then "both call sites live in optimize_gate". There is now exactly ONE: the two
+    gate, and then "both call sites live in optimize.gate". There is now exactly ONE: the two
     wrappers spelled the same three-line preamble 700 lines apart, and `_holm_family` is the single
     declaration they both call. **That is strictly stricter to audit than two were** — the
     membership rule (`p_value is not None`) and the original-index mapping are stated once, so the
@@ -7634,7 +7634,7 @@ class TestHolmRejectionsIsConfined:
 
     CALL NODES are counted, not files. A file-set assertion was already true before this existed
     and would have proved nothing; counting calls is what catches another one appearing INSIDE
-    `optimize_gate`, which is exactly where it would be written.
+    `optimize.gate`, which is exactly where it would be written.
     """
 
     SRC = Path(__file__).parent.parent / "src" / "coder_eval"
@@ -7667,18 +7667,20 @@ class TestHolmRejectionsIsConfined:
         for module in sorted(self.SRC.rglob("*.py")):
             sites = self._call_sites(ast.parse(module.read_text(encoding="utf-8")))
             if sites:
-                found[module.name] = sites
+                # Keyed on the path relative to `src/coder_eval`, not the bare filename: since the
+                # family became a package, `gate.py` alone no longer says WHICH gate.
+                found[module.relative_to(self.SRC).as_posix()] = sites
 
-        assert set(found) == {"optimize_gate.py"}, (
+        assert set(found) == {"optimize/gate.py"}, (
             f"holm_rejections is called from {sorted(found)}. Holm corrects a FAMILY, so every call "
             "site has to see the whole family at once — which is why both wrappers route through "
             "one helper in one module. A caller elsewhere is almost certainly correcting one "
             "candidate at a time."
         )
-        callers = sorted(name for name, _line in found["optimize_gate.py"])
+        callers = sorted(name for name, _line in found["optimize/gate.py"])
         assert callers == sorted(self.ALLOWED), (
             f"holm_rejections is called by {callers}, not {sorted(self.ALLOWED)}. A SECOND call — even "
-            "inside optimize_gate — is a family being decided somewhere that cannot see all of it, "
+            "inside optimize.gate — is a family being decided somewhere that cannot see all of it, "
             "and a second declaration of the membership rule the two tracks must agree on."
         )
 
@@ -7873,7 +7875,7 @@ class TestEstimatorLedger:
         # number exactly the way BOOTSTRAP_RESAMPLES stepped a rendered CI.
         from tests.lint.estimator_ledger import check
 
-        module = "src/coder_eval/optimize_gate.py"
+        module = "src/coder_eval/optimize/gate.py"
         failures = check(
             [module],
             {module: "-MATERIALITY_FLOOR = 0.25\n+MATERIALITY_FLOOR = 0.10\n"},
@@ -8142,7 +8144,7 @@ class TestCE053RunTreeReadersReconcile:
     The failure is silent in every case — a contaminated tree loads, parses and returns.
     """
 
-    GATE = "src/coder_eval/optimize_gate.py"
+    GATE = "src/coder_eval/optimize/gate.py"
 
     def _check(self, source: str, path: str | None = None) -> list[object]:
         return list(RunTreeReadersReconcile(path or self.GATE).check(ast.parse(textwrap.dedent(source))))
@@ -8227,9 +8229,9 @@ class TestCE053RunTreeReadersReconcile:
         stray noqa anywhere in the function body would silence it.
         """
         # Under a `coder_eval/` segment, because the rule's scope is a PATH regex.
-        package = tmp_path / "coder_eval"
-        package.mkdir()
-        module = package / "optimize_fronts.py"
+        package = tmp_path / "coder_eval" / "optimize"
+        package.mkdir(parents=True)
+        module = package / "fronts.py"
         module.write_text(
             "def a_reader(run_dirs, variant_id, suite_id):\n"
             "    # someone else reconciles for this one\n"
@@ -8248,22 +8250,24 @@ class TestCE053RunTreeReadersReconcile:
     @pytest.mark.parametrize(
         "module",
         [
-            "optimize_gate",
-            "optimize_load",
-            "optimize_activation",
-            "optimize_execution",
-            "optimize_fronts",
-            "optimize_search",
-            # Not a planned module — the prefix scope is what makes a SEVENTH one covered too.
+            "optimize/gate",
+            "optimize/load",
+            "optimize/activation",
+            "optimize/execution",
+            "optimize/fronts",
+            "optimize/search",
+            # Not a real module — the DIRECTORY scope is what makes an eighth one covered too.
             # An enumerated scope fails OPEN here: zero violations reads exactly like a clean tree.
-            "optimize_something_nobody_has_written_yet",
+            "optimize/something_nobody_has_written_yet",
         ],
     )
     def test_every_module_of_the_optimize_family_is_in_scope(self, module: str) -> None:
-        """Scope is the `optimize_*` PREFIX, so a reader cannot move out of the rule's reach.
+        """Scope is the `optimize/` DIRECTORY, so a reader cannot move out of the rule's reach.
 
-        Most of these do not exist yet. That is the point: a rule scoped to today's file names
-        would go silent on exactly the change that redistributes these readers.
+        The last of these does not exist. That is the point: a rule scoped to today's file names
+        would go silent on exactly the change that redistributes these readers. The directory
+        replaced an `optimize_*` filename prefix and the two are incomparable, not ordered — see the
+        rule's own docstring.
         """
         source = """
             def a_reader(run_dirs, variant_id, suite_id):
@@ -8273,10 +8277,22 @@ class TestCE053RunTreeReadersReconcile:
 
     def test_every_optimize_module_on_disk_is_in_scope(self) -> None:
         """Parity, so the scope cannot drift away from the family it is named for."""
-        on_disk = sorted(p.name for p in (SRC / "coder_eval").glob("optimize_*.py"))
-        assert on_disk, "no optimize_*.py modules — CE053 would be checking nothing"
-        out_of_scope = [name for name in on_disk if not RunTreeReadersReconcile(f"src/coder_eval/{name}")._in_scope]
+        on_disk = sorted(p.name for p in (SRC / "coder_eval" / "optimize").glob("*.py") if p.name != "__init__.py")
+        assert on_disk, "no modules under coder_eval/optimize/ — CE053 would be checking nothing"
+        out_of_scope = [
+            name for name in on_disk if not RunTreeReadersReconcile(f"src/coder_eval/optimize/{name}")._in_scope
+        ]
         assert out_of_scope == [], out_of_scope
+
+    def test_the_scope_moved_to_the_package_rather_than_widening_to_both(self) -> None:
+        """The fail-open guard on the re-scope itself.
+
+        A regex that matched the OLD flat filename as well would pass every other test here while
+        proving nothing about the move — and CE053's failure mode is silence, so the negative half
+        has to be asserted explicitly.
+        """
+        assert RunTreeReadersReconcile("src/coder_eval/optimize/fronts.py")._in_scope
+        assert not RunTreeReadersReconcile("src/coder_eval/optimize_fronts.py")._in_scope
 
     def test_the_violation_anchors_at_the_earliest_read(self) -> None:
         """The anchor is where the `# noqa: CE053` must sit, so it has to be the FIRST read.
@@ -8304,7 +8320,7 @@ class TestCE053RunTreeReadersReconcile:
         stopped matching, which is byte-identical to a clean tree.
         """
         suppressed: list[str] = []
-        for path in sorted((SRC / "coder_eval").rglob("optimize_*.py")):
+        for path in sorted((SRC / "coder_eval" / "optimize").glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             reported = {v.line for v in RunTreeReadersReconcile(str(path)).check(tree)}
             for node in ast.walk(tree):
@@ -8325,7 +8341,7 @@ class TestCE054ResultStatusSingleSeam:
     an allowlist on the `Skill` branch, a denylist on the file-read branch — and the two
     drifted, so a crash-force-closed `Read(SKILL.md)` scored as engagement while the identical
     crash on a `Skill` call did not. That is a false positive on `f1.yes`, which
-    `optimize_activation.activation_gate` promotes on.
+    `optimize.activation.activation_gate` promotes on.
 
     The FIRST test below is the one that matters: both halves of the real bug lived inside a
     single function, so the per-function spelling of this rule — which is what it was first
@@ -8435,12 +8451,12 @@ class TestCE048NoBareModelCopyUpdate:
 
     def test_it_fires_on_a_bare_update_call(self) -> None:
         source = "def f(v, notes):\n    return v.model_copy(update={'promoted': False, 'notes': notes})\n"
-        violations = NoBareModelCopyUpdate("src/coder_eval/optimize_gate.py").check(ast.parse(source))
+        violations = NoBareModelCopyUpdate("src/coder_eval/optimize/gate.py").check(ast.parse(source))
         assert len(violations) == 1 and violations[0].rule_id == "CE048", violations
 
     def test_it_is_silent_on_copy_with(self) -> None:
         source = "def f(v, notes):\n    return copy_with(v, promoted=False, notes=notes)\n"
-        assert NoBareModelCopyUpdate("src/coder_eval/optimize_gate.py").check(ast.parse(source)) == []
+        assert NoBareModelCopyUpdate("src/coder_eval/optimize/gate.py").check(ast.parse(source)) == []
 
     def test_it_is_silent_on_a_model_copy_with_no_update(self) -> None:
         # `model_copy(deep=True)` copies without setting anything, so no key can be wrong.
@@ -9212,7 +9228,10 @@ class TestResolvedModule:
             ("from ....x import y", "cli/plan_command.py", None),
             ("from ...models import X", "orchestration/task_loader.py", None),
             # A module sitting directly in the package: `..` is already above the root.
-            ("from ..models import X", "optimize_gate.py", None),
+            ("from ..models import X", "reports_optimize.py", None),
+            # And one level deeper, in a SUBPACKAGE, where the same spelling does resolve.
+            ("from ..models import X", "optimize/gate.py", "coder_eval.models"),
+            ("from .load import X", "optimize/gate.py", "coder_eval.optimize.load"),
         ],
         ids=[
             "absolute",
@@ -9223,6 +9242,8 @@ class TestResolvedModule:
             "above-root",
             "at-root",
             "top-level-module",
+            "subpackage-parent",
+            "subpackage-sibling",
         ],
     )
     def test_it_resolves(self, source: str, relative_path: str, expected: str | None) -> None:
@@ -9394,7 +9415,7 @@ def _walk(tree):
         assert any("cannot verify the resolver is used" in v.message for v in violations)
 
     def test_it_is_silent_outside_the_rules_package(self) -> None:
-        assert self._check(_CE051_UNRESOLVED, "src/coder_eval/optimize_gate.py") == []
+        assert self._check(_CE051_UNRESOLVED, "src/coder_eval/optimize/gate.py") == []
 
     def test_the_helper_is_reported_not_its_caller(self) -> None:
         # CE041's shape: the matching lives in a module-level helper, so that is where the fix
@@ -9604,7 +9625,7 @@ class TestCE047NoBareAssertInCli:
                 assert rows, "internal invariant"
             """
         )
-        assert NoBareAssertInCli("src/coder_eval/optimize_gate.py").check(ast.parse(source)) == []
+        assert NoBareAssertInCli("src/coder_eval/optimize/gate.py").check(ast.parse(source)) == []
 
     def test_the_scope_match_survives_windows_separators(self) -> None:
         source = "def f():\n    assert True\n"

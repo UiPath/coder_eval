@@ -1,13 +1,13 @@
 """Verbatim-leak detection: is a substantive string from one place present in another?
 
 One declaration, two consumers pointing in opposite directions. CE036 asks whether a dataset
-row's PROMPT contains a value a criterion grades it on. :func:`coder_eval.optimize_gate.
+row's PROMPT contains a value a criterion grades it on. :func:`coder_eval.optimize.search.
 candidate_leaks` asks whether a candidate ``SKILL.md`` newly contains train-row content it should
 have generalized. Same primitive; a second copy would agree on ordinary input and diverge exactly
 where either one was written for.
 
-Its own module rather than three names on ``optimize_gate``: CE036 is a rule about *task files*
-and ``optimize_gate`` is the optimize loop's library, so a task-lint test importing from the
+Its own module rather than three names on ``optimize.gate``: CE036 is a rule about *task files*
+and ``optimize.gate`` is the optimize loop's library, so a task-lint test importing from the
 optimize gate inverts the dependency. Same separation ``pricing.py`` and ``path_utils.py`` already
 have.
 

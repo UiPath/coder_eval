@@ -17,17 +17,17 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import ArmRowScores, NoiseFloor, OptimizeMeasurements, RegressionRow, RoundScores
-from coder_eval.optimize_activation import (
+from coder_eval.optimize.activation import (
     measure_noise_floor,
     noise_floor_mde,
 )
-from coder_eval.optimize_gate import (
+from coder_eval.optimize.gate import (
     GATE_RESAMPLES,
 )
-from coder_eval.optimize_search import (
+from coder_eval.optimize.search import (
     regression_check,
 )
-from coder_eval.optimize_store import (
+from coder_eval.optimize.store import (
     MEASUREMENTS_FILENAME,
     UNRECORDED_SPLIT,
     UNRESOLVED_MODEL,
@@ -37,7 +37,7 @@ from coder_eval.optimize_store import (
     record_noise_floor,
     record_round_scores,
 )
-from tests.test_optimize_gate import SUITE, _eval_result, _write_row
+from tests.test_optimize_gate import SUITE, _eval_result, _module_source, _write_row
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -608,7 +608,7 @@ class TestTargetLabelMoved:
 
     @pytest.mark.parametrize(
         "module",
-        ["optimize_load", "optimize_gate", "optimize_activation", "optimize_execution"],
+        ["optimize.load", "optimize.gate", "optimize.activation", "optimize.execution"],
     )
     def test_the_family_imports_it_rather_than_redeclaring_it(self, module: str) -> None:
         """Every module in the family that reads the label must import it, not respell it.
@@ -623,7 +623,7 @@ class TestTargetLabelMoved:
         from coder_eval.models import TARGET_LABEL
 
         imported = importlib.import_module(f"coder_eval.{module}")
-        source = (REPO_ROOT / "src" / "coder_eval" / f"{module}.py").read_text(encoding="utf-8")
+        source = _module_source(module)
         if not hasattr(imported, "TARGET_LABEL"):
             # A module that does not read the label at all is fine; it just must not declare one.
             assert "TARGET_LABEL = " not in source, f"{module} declares TARGET_LABEL without using it"
@@ -815,7 +815,7 @@ class TestSplitIsPartOfTheCacheKey:
     def test_split_is_in_the_derived_key_not_a_hand_written_list(self) -> None:
         """`_floor_key` reads `NoiseFloor.model_fields`, which is what makes adding a key field
         a one-line change that cannot be forgotten here."""
-        from coder_eval.optimize_store import _FLOOR_MEASUREMENT_FIELDS
+        from coder_eval.optimize.store import _FLOOR_MEASUREMENT_FIELDS
 
         key_fields = [n for n in NoiseFloor.model_fields if n not in _FLOOR_MEASUREMENT_FIELDS]
         assert "split" in key_fields

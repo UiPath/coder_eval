@@ -540,10 +540,10 @@ Compute it and report it *before* proposing anything:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_load import load_arm_rows
-from coder_eval.optimize_activation import noise_floor_mde
-from coder_eval.optimize_execution import resolve_model
-from coder_eval.optimize_store import load_measurements
+from coder_eval.optimize.load import load_arm_rows
+from coder_eval.optimize.activation import noise_floor_mde
+from coder_eval.optimize.execution import resolve_model
+from coder_eval.optimize.store import load_measurements
 
 baseline_dirs = [Path("<runs>/baseline-1"), Path("<runs>/baseline-2")]
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
@@ -588,7 +588,7 @@ requirement is knowable now, and it is not a row count — it is how many rows t
 **disagreeing** on. Print it before proposing anything:
 
 ```python
-from coder_eval.optimize_activation import min_discordant_rows
+from coder_eval.optimize.activation import min_discordant_rows
 from coder_eval.reports_stats import DEFAULT_ALPHA
 
 survivors = 3  # how many candidates you plan to gate at Stage B
@@ -759,10 +759,10 @@ worst possible suite shape and why `/coder-eval:task` tells an author to write d
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_execution import measure_execution_noise_floor, resolve_model
-from coder_eval.optimize_fronts import arm_row_scores, headroom_ceiling
-from coder_eval.optimize_load import load_arm_rows, rule_row_map
-from coder_eval.optimize_store import UNRESOLVED_MODEL, load_measurements
+from coder_eval.optimize.execution import measure_execution_noise_floor, resolve_model
+from coder_eval.optimize.fronts import arm_row_scores, headroom_ceiling
+from coder_eval.optimize.load import load_arm_rows, rule_row_map
+from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
 from coder_eval.reports_optimize import render_headroom_ceilings
 
 run_dirs = [Path("<runs>/baseline-1")]
@@ -938,7 +938,7 @@ rather than after a stage:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_search import candidate_leaks, skill_text
+from coder_eval.optimize.search import candidate_leaks, skill_text
 from coder_eval.orchestration.task_loader import expand_dataset, load_task
 
 suite = Path("<the suite yaml>")
@@ -1044,12 +1044,12 @@ floor** free — it is arithmetic over a run directory that already exists. Read
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_load import load_arm_rows
-from coder_eval.optimize_execution import (
+from coder_eval.optimize.load import load_arm_rows
+from coder_eval.optimize.execution import (
     measure_execution_noise_floor,
     resolve_model,
 )
-from coder_eval.optimize_store import (
+from coder_eval.optimize.store import (
     UNRESOLVED_MODEL,
     load_measurements,
 )
@@ -1243,12 +1243,12 @@ mechanical:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_fronts import arm_row_scores
-from coder_eval.optimize_search import (
+from coder_eval.optimize.fronts import arm_row_scores
+from coder_eval.optimize.search import (
     lineage_head_scores,
     search_compare,
 )
-from coder_eval.optimize_store import (
+from coder_eval.optimize.store import (
     load_measurements,
 )
 from coder_eval.reports_optimize import (
@@ -1386,7 +1386,7 @@ discard. Only the per-row vectors tell them apart, so print them:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_fronts import arm_row_scores, instance_best_front, pareto_front
+from coder_eval.optimize.fronts import arm_row_scores, instance_best_front, pareto_front
 from coder_eval.reports_optimize import render_row_matrix
 
 arms = arm_row_scores(
@@ -1448,8 +1448,8 @@ show it:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_search import regression_check
-from coder_eval.optimize_store import load_measurements
+from coder_eval.optimize.search import regression_check
+from coder_eval.optimize.store import load_measurements
 
 # Defined here rather than reused from Step 6: that snippet is activation-only, so on the
 # execution track the name does not exist in this session.
@@ -1483,7 +1483,7 @@ reason that is an artefact of the procedure.
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_fronts import cost_quality_front, cost_quality_points
+from coder_eval.optimize.fronts import cost_quality_front, cost_quality_points
 from coder_eval.reports_optimize import render_cost_quality
 
 points = cost_quality_points(
@@ -1519,7 +1519,7 @@ either. Print the per-row replicate values beside it:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_load import load_arm_rows
+from coder_eval.optimize.load import load_arm_rows
 from coder_eval.reports_optimize import render_row_replicates
 
 suite_id = "<the suite's task_id>"
@@ -1564,7 +1564,7 @@ in Step 1:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_activation import activation_gate, holm_promote
+from coder_eval.optimize.activation import activation_gate, holm_promote
 from coder_eval.reports_optimize import render_markdown
 
 # The three --run-dir paths from the three invocations above, as Path objects.
@@ -1600,7 +1600,7 @@ cannot say whether that happened. `gate_seed_stability` gates at three seeds and
 agreement:
 
 ```python
-from coder_eval.optimize_activation import gate_seed_stability
+from coder_eval.optimize.activation import gate_seed_stability
 from coder_eval.reports_optimize import render_seed_stability
 
 # The SAME keywords `activation_gate` takes, minus `seed` — the seeds are the axis being varied, so
@@ -1697,7 +1697,7 @@ readings the method's promote-only-when list requires and a human used to check 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_execution import execution_gate, holm_promote_execution
+from coder_eval.optimize.execution import execution_gate, holm_promote_execution
 from coder_eval.reports_optimize import render_execution_markdown
 
 # ONE run dir per candidate: the paired statistic fires only for exactly two variants, so each
@@ -1821,7 +1821,7 @@ confirm run did not record `--split test`.
 ```python
 from pathlib import Path
 
-from coder_eval.optimize_execution import confirm_gate_execution
+from coder_eval.optimize.execution import confirm_gate_execution
 from coder_eval.reports_optimize import render_confirm_markdown, render_execution_markdown
 
 # EXECUTION TRACK. `promoted_verdict` is the ONE Stage B winner, post-`holm_promote_execution`.
@@ -1839,7 +1839,7 @@ print(render_execution_markdown(confirm.test_verdict))
 
 # ACTIVATION TRACK — the twin, taking that track's run-dir lists instead:
 #
-# from coder_eval.optimize_activation import confirm_gate
+# from coder_eval.optimize.activation import confirm_gate
 # from coder_eval.reports_optimize import render_markdown
 #
 # confirm = confirm_gate(
@@ -1953,17 +1953,17 @@ from pathlib import Path
 
 from coder_eval.models import RegressionRow, RoundScores
 from coder_eval.orchestration.task_loader import expand_dataset, load_task
-from coder_eval.optimize_load import load_arm_rows
-from coder_eval.optimize_activation import measure_noise_floor
-from coder_eval.optimize_execution import (
+from coder_eval.optimize.load import load_arm_rows
+from coder_eval.optimize.activation import measure_noise_floor
+from coder_eval.optimize.execution import (
     measure_execution_noise_floor,
     resolve_model,
 )
-from coder_eval.optimize_fronts import (
+from coder_eval.optimize.fronts import (
     instance_best_front,
     pareto_front,
 )
-from coder_eval.optimize_store import (
+from coder_eval.optimize.store import (
     UNRESOLVED_MODEL,
     append_regression_rows,
     grader_changed,

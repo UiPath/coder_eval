@@ -1,6 +1,6 @@
 """The execution track, end to end: gate, diagnostics, and the family decision.
 
-Rank 2 of the optimize family, beside :mod:`coder_eval.optimize_activation` and importing nothing
+Rank 2 of the optimize family, beside :mod:`coder_eval.optimize.activation` and importing nothing
 from it. Whether a candidate skill BODY produces better outcomes than the incumbent — measured as
 per-row ``weighted_score`` through :func:`coder_eval.reports_stats.paired_comparison`, the
 reporter's own paired *t*, REUSED rather than re-derived so the gate cannot disagree with the
@@ -30,7 +30,7 @@ from coder_eval.models import (
     OptimizeMeasurements,
     copy_with,
 )
-from coder_eval.optimize_gate import (
+from coder_eval.optimize.gate import (
     _NOTE_CI_CONTAINS_ZERO,
     _NOTE_OUTSIDE_FAMILY,
     FLOOR_RESOLUTION,
@@ -52,7 +52,7 @@ from coder_eval.optimize_gate import (
     confirm_train_refusal,
     cost_latency_guardrails,
 )
-from coder_eval.optimize_load import (
+from coder_eval.optimize.load import (
     _criterion_weights,
     _label_pairs,
     _observed_result_types,
@@ -69,7 +69,7 @@ from coder_eval.optimize_load import (
     read_split_provenance,
     reconcile_tree_against_run_json,
 )
-from coder_eval.optimize_store import UNRESOLVED_MODEL
+from coder_eval.optimize.store import UNRESOLVED_MODEL
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
     PairedComparison,
@@ -293,7 +293,7 @@ def _dead_weight(
 
     **Replicates collapse by MEAN, per row, per arm, before pairing**, which is the same reduction
     :func:`~coder_eval.reports_stats.paired_comparison` applies to ``weighted_score`` and
-    :func:`~coder_eval.optimize_fronts.arm_row_scores` applies to its vectors — so the three
+    :func:`~coder_eval.optimize.fronts.arm_row_scores` applies to its vectors — so the three
     surfaces agree about what a row scored. A mean over identical floats is still that float
     exactly, so the ``== 0.0`` test below survives the reduction: the comparison is on the raw
     subtraction and deliberately carries no tolerance, since a criterion that is genuinely constant
@@ -1209,7 +1209,7 @@ def confirm_gate_execution(
     """Stage C on the execution track: did the Stage B effect REPRODUCE on the held-out split?
 
     Runs this track's own gate on the confirm run directory and classifies the train -> test delta
-    through :func:`~coder_eval.optimize_gate.classify_confirm`, the shared four-way rule. Stage C used
+    through :func:`~coder_eval.optimize.gate.classify_confirm`, the shared four-way rule. Stage C used
     to be prose — "report that block verbatim alongside the test numbers" — which left the reader to
     eyeball two intervals and decide whether one reproduced the other.
 
@@ -1223,7 +1223,7 @@ def confirm_gate_execution(
     carried block is a DECIDED one rather than rendering as ``UNDECIDED``.
 
     **The confirm run must have recorded ``--split test``.** Read through
-    :func:`~coder_eval.optimize_load.read_split_provenance`, the existing reader — a second reader of
+    :func:`~coder_eval.optimize.load.read_split_provenance`, the existing reader — a second reader of
     ``run.json``'s ``row_selection.split`` is the duplication this repo removes on sight. The two
     non-``test`` cases differ and are treated differently: an UNRECORDED split is a NOTE (a run
     predating the field), while a recorded ``train`` is a REFUSAL — that is Stage C silently

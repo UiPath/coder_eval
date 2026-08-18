@@ -7,7 +7,7 @@ value therefore MOVES when the estimator changes, and every consumer that re-der
 reporting the old one.
 
 That is not hypothetical — it is what this rule was extracted from. Four sites in
-``optimize_gate.py`` and two field descriptions in ``models/optimize.py`` spelled ``1/n_resamples``
+``optimize/gate.py`` and two field descriptions in ``models/optimize.py`` spelled ``1/n_resamples``
 inline; when the estimator changed they all silently understated the floor by 2x, in a verdict
 block a user reads to decide whether to spend money on another round. They were found by grep in
 review, one at a time. :func:`reports_stats.bootstrap_p_floor` now names the value once, and this

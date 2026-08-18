@@ -9,10 +9,10 @@ that track has no script grader at all.
 **Its own module because the store PERSISTS and this COMPUTES.** That is the precedent
 :mod:`coder_eval.leak_detection` and :mod:`coder_eval.reports_optimize` already record in
 ``CLAUDE.md``, and it is the whole reason — **not** a dependency cycle, which does not exist:
-:mod:`coder_eval.optimize_store` imports :mod:`coder_eval.models` and nothing else from the package,
+:mod:`coder_eval.optimize.store` imports :mod:`coder_eval.models` and nothing else from the package,
 :class:`~coder_eval.models.TaskDefinition` is in ``coder_eval.models``, so a digest living in the
 store would close no cycle. What it would do is make a persistence module the derivation site for
-the value it stores, which cannot then be reviewed as one thing. :mod:`coder_eval.optimize_load` is
+the value it stores, which cannot then be reviewed as one thing. :mod:`coder_eval.optimize.load` is
 the other near-fit and is wrong for a different reason: its charter is every question answered by
 READING a finalized run directory, and this is computed from task definitions before any run exists.
 

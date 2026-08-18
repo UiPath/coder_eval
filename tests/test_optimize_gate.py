@@ -1,4 +1,4 @@
-"""Unit tests for the activation track's promotion gate (`coder_eval.optimize_gate`).
+"""Unit tests for the activation track's promotion gate (`coder_eval.optimize.gate`).
 
 Fixtures write real ``task.json`` files into a ``tmp_path`` run-dir tree, so the loader is
 exercised against the on-disk contract rather than against a mock of it.
@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import math
+import pkgutil
 import random
 import re
 import shutil
@@ -19,13 +20,14 @@ import sys
 import textwrap
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 from typing import ClassVar
 from unittest import mock
 
 import pytest
 from pydantic import ValidationError
 
-from coder_eval import optimize_execution
+import coder_eval.optimize
 from coder_eval.leak_detection import LEAK_MIN_CHARS
 from coder_eval.models import (
     ActivationGateVerdict,
@@ -52,7 +54,8 @@ from coder_eval.models import (
     TokenUsage,
     copy_with,
 )
-from coder_eval.optimize_activation import (
+from coder_eval.optimize import execution as optimize_execution
+from coder_eval.optimize.activation import (
     SeedStability,
     _activation_preflight,
     _discreteness_floor,
@@ -68,7 +71,7 @@ from coder_eval.optimize_activation import (
     min_discordant_rows,
     noise_floor_mde,
 )
-from coder_eval.optimize_execution import (
+from coder_eval.optimize.execution import (
     _dead_weight,
     _execution_diagnostics,
     confirm_gate_execution,
@@ -77,7 +80,7 @@ from coder_eval.optimize_execution import (
     measure_execution_noise_floor,
     resolve_model,
 )
-from coder_eval.optimize_fronts import (
+from coder_eval.optimize.fronts import (
     CostQualityPoint,
     RuleCeiling,
     arm_row_scores,
@@ -87,7 +90,7 @@ from coder_eval.optimize_fronts import (
     instance_best_front,
     pareto_front,
 )
-from coder_eval.optimize_gate import (
+from coder_eval.optimize.gate import (
     _NOTE_OUTSIDE_FAMILY,
     FLOOR_RESOLUTION,
     GATE_MAX_FAMILY,
@@ -103,7 +106,7 @@ from coder_eval.optimize_gate import (
     confirm_split_check,
     cost_latency_guardrails,
 )
-from coder_eval.optimize_load import (
+from coder_eval.optimize.load import (
     TASK_JSON_GLOB,
     RuleAttribution,
     SplitProvenance,
@@ -120,7 +123,7 @@ from coder_eval.optimize_load import (
     read_split_provenance,
     rule_row_map,
 )
-from coder_eval.optimize_search import (
+from coder_eval.optimize.search import (
     SearchComparison,
     candidate_leaks,
     lineage_head_scores,
@@ -128,7 +131,7 @@ from coder_eval.optimize_search import (
     search_compare,
     skill_text,
 )
-from coder_eval.optimize_store import UNRECORDED_SPLIT, grader_changed, record_noise_floor
+from coder_eval.optimize.store import UNRECORDED_SPLIT, grader_changed, record_noise_floor
 from coder_eval.reports_optimize import (
     CEILING_MARGIN,
     COST_FRONT_ADVISORY,
@@ -406,7 +409,7 @@ class TestEveryWrongPathMessageDerivesFromTheGlob:
 
     def test_no_message_spells_the_padding_itself(self) -> None:
         # The whole point of the seam: a message may name the glob, never the padding it replaced.
-        # Over the WHOLE family: every message that names the glob moved out of `optimize_gate.py`
+        # Over the WHOLE family: every message that names the glob moved out of `optimize/gate.py`
         # in the split, which left this scan reading a file with none of its subjects in it.
         assert "*/NN/task.json" not in _family_source()
         assert TASK_JSON_GLOB == "*/*/task.json"
@@ -441,13 +444,12 @@ class TestBalancePair:
 def _family_source() -> str:
     """Every decision-family module's source, concatenated.
 
-    Scans that read `optimize_gate.py` alone went VACUOUS the moment the split moved their
+    Scans that read `optimize/gate.py` alone went VACUOUS the moment the split moved their
     subjects: proven by mutation, an inlined `min(len(a), len(b))` and a respelled shared note both
     passed. A whole-family read is what keeps them asserting something — and it is derived from
     `_OPTIMIZE_RANKS`, so a seventh module joins every scan at once.
     """
-    root = Path(__file__).parent.parent / "src" / "coder_eval"
-    return "\n".join((root / f"{module}.py").read_text(encoding="utf-8") for module in _OPTIMIZE_RANKS)
+    return "\n".join(_module_source(module) for module in _OPTIMIZE_RANKS)
 
 
 def test_the_trim_is_declared_once() -> None:
@@ -502,7 +504,7 @@ class TestBothTracksEmitTheSameHolmNotes:
             assert _note_holm_family(1, DEFAULT_ALPHA) in verdict.notes
 
     def test_neither_wrapper_respells_a_shared_note(self) -> None:
-        # Over the WHOLE family: BOTH wrappers left `optimize_gate.py` in the split, so a scan of
+        # Over the WHOLE family: BOTH wrappers left `optimize/gate.py` in the split, so a scan of
         # that file alone counts zero of everything and passes on a respelled note.
         source = _family_source()
         for fragment in (
@@ -912,38 +914,80 @@ class TestRenderMarkdown:
         assert "a note the reader needs" in text
 
 
-# The three modules the optimize gate was split into. Named once: two module-scoped assertions and
-# the layering tests below all reason over the same surface, and a list that drifted would leave a
-# new module silently unchecked by whichever one forgot it.
-# The whole optimize family, in RANK order, plus the two siblings that were never part of the
-# split. Every layering test iterates this, so a new module is covered by all of them at once —
-# which is why the split's structural assertions needed no new tests, only a longer tuple.
-_OPTIMIZE_MODULES = (
-    "optimize_load",
-    "optimize_gate",
-    "optimize_activation",
-    "optimize_execution",
-    "optimize_fronts",
-    "optimize_search",
-    "optimize_store",
-    "reports_optimize",
-)
+# The package's own contents, DERIVED — a new module joins every layering test at once, without
+# anyone remembering to extend a tuple. Names are dotted and package-relative to `coder_eval`
+# (`_module_path`'s docstring says why). `iter_modules` does not yield `__init__` but it DOES yield
+# a private module, so the leading-underscore filter is load-bearing rather than defensive: a future
+# `_helpers.py` is a file-local detail, not a family member with a rank.
+_PACKAGE_MODULES = {
+    f"optimize.{name}" for _, name, _ in pkgutil.iter_modules(coder_eval.optimize.__path__) if not name.startswith("_")
+}
+
+# The whole optimize family plus the one sibling that was never part of the split. `reports_optimize`
+# is named separately because it belongs to the REPORTS family by design, and the assertion that no
+# family module imports it is precisely that boundary. Every layering test iterates this.
+_OPTIMIZE_MODULES = (*sorted(_PACKAGE_MODULES), "reports_optimize")
 
 # The DECISION layer's six modules, at their ranks. An import may only point at a STRICTLY lower
 # rank: `activation -> execution` is acyclic and still wrong, because the two tracks are meant to
 # be independently readable.
+#
+# DECLARED, never derived, and a future author will reasonably propose deriving it — do not. Compute
+# each rank as its longest path in the import DAG and `activation -> execution` simply makes
+# `execution` rank 2 and `activation` rank 3: the assert then passes over the exact violation it
+# exists to catch. This map IS the specification; `pkgutil` supplies only the COVERAGE check below.
 _OPTIMIZE_RANKS = {
-    "optimize_load": 0,
-    "optimize_gate": 1,
-    "optimize_activation": 2,
-    "optimize_execution": 2,
-    "optimize_fronts": 3,
-    "optimize_search": 3,
+    "optimize.load": 0,
+    "optimize.gate": 1,
+    "optimize.activation": 2,
+    "optimize.execution": 2,
+    "optimize.fronts": 3,
+    "optimize.search": 3,
 }
+
+# `store` is the sidecar every rank imports and is deliberately outside the ladder — the ONE
+# documented exception, for the same reason `reports_optimize` is the one tail above.
+_LADDER_EXEMPT = frozenset({"optimize.store"})
+
+
+def _rank_coverage_gap(package_modules: set[str]) -> tuple[list[str], list[str]]:
+    """(unranked package modules, ranked names the package no longer has).
+
+    A FUNCTION rather than an inline comparison so the module-scope assert below and the test that
+    proves it can fail run the same code. Inlining it twice is how a coverage check ends up with a
+    test that re-implements the comparison and therefore cannot fail — measured on the first draft
+    of exactly this pair.
+    """
+    ranked = set(_OPTIMIZE_RANKS)
+    return sorted(package_modules - _LADDER_EXEMPT - ranked), sorted(ranked - package_modules)
+
+
+# The COVERAGE check on the ladder above: a new module fails LOUDLY here instead of joining the
+# family unranked and unchecked. It also catches the reverse — a rank naming a module that is gone,
+# which is what makes an EMPTY derivation fail rather than pass over nothing (six literal names
+# against `set()`). `store` is the one name it cannot see either way, so it is asserted separately:
+# a derivation that lost only the sidecar would otherwise satisfy this untouched.
+assert _rank_coverage_gap(_PACKAGE_MODULES) == ([], []), (
+    f"the ranks and coder_eval/optimize/ disagree: {_rank_coverage_gap(_PACKAGE_MODULES)}. Give a "
+    "new module a rank in _OPTIMIZE_RANKS, or add it to _LADDER_EXEMPT with the reason, as "
+    "`store` is"
+)
+assert _LADDER_EXEMPT <= _PACKAGE_MODULES, f"the ladder-exempt sidecar is missing: {sorted(_LADDER_EXEMPT)}"
+
+
+def _module_path(module: str) -> Path:
+    """The file behind a family module name.
+
+    Names are DOTTED and package-relative to `coder_eval` — `"optimize.load"`, never `"load"` and
+    never the pre-package `"optimize_load"` — which is what keeps the rank test's
+    `imported.removeprefix("coder_eval.")` comparable with `_OPTIMIZE_RANKS`'s keys. The one flat
+    sibling, `"reports_optimize"`, splits into a single component and resolves at the top level.
+    """
+    return Path(__file__).parent.parent.joinpath("src", "coder_eval", *module.split(".")).with_suffix(".py")
 
 
 def _module_source(module: str) -> str:
-    return (Path(__file__).parent.parent / "src" / "coder_eval" / f"{module}.py").read_text(encoding="utf-8")
+    return _module_path(module).read_text(encoding="utf-8")
 
 
 def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None) -> dict[str, set[str]]:
@@ -957,13 +1001,13 @@ def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None
 
     Routed through ``resolved_module`` (CE051). Matching ``node.module`` alone made this blind to
     the RELATIVE spelling, which is how most of ``src/`` imports — and these three modules are
-    siblings, so ``from .optimize_gate import CostQualityPoint`` in ``reports_optimize.py`` is the
+    siblings, so ``from .optimize.gate import CostQualityPoint`` in ``reports_optimize.py`` is the
     natural way to write the very import this pins. ``node.module`` would then be
-    ``"optimize_gate"``, the ``startswith("coder_eval")`` test would be False, and both layering
+    ``"optimize.gate"``, the ``startswith("coder_eval")`` test would be False, and both layering
     tests would pass over a broken boundary — the same fail-open shape, on what CLAUDE.md calls
     out as pinned "by a test, not by this sentence".
     """
-    path = str((Path(__file__).parent.parent / "src" / "coder_eval" / f"{module}.py").resolve())
+    path = str(_module_path(module).resolve())
     tree = ast.parse(_module_source(module))
     guarded: set[int] = set()
     for node in ast.walk(tree):
@@ -1005,9 +1049,9 @@ def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
     # producer and is deferred here. A MODEL would be imported at runtime from `coder_eval.models`
     # instead, so a new name appearing in this dict is a signal to check which category it is.
     assert deferred == {
-        "coder_eval.optimize_activation": {"SeedStability"},
-        "coder_eval.optimize_fronts": {"CostQualityPoint", "RuleCeiling"},
-        "coder_eval.optimize_search": {"SearchComparison"},
+        "coder_eval.optimize.activation": {"SeedStability"},
+        "coder_eval.optimize.fronts": {"CostQualityPoint", "RuleCeiling"},
+        "coder_eval.optimize.search": {"SearchComparison"},
     }, deferred
 
     # No filesystem call anywhere in the module.
@@ -1025,13 +1069,13 @@ def test_the_presentation_module_makes_no_decisions_and_reads_no_disk() -> None:
 
 def test_the_gate_never_imports_its_presentation() -> None:
     # The mirror direction. If anything drives you to add this edge, the split boundary is wrong.
-    assert "coder_eval.reports_optimize" not in _coder_eval_imports("optimize_gate")
+    assert "coder_eval.reports_optimize" not in _coder_eval_imports("optimize.gate")
 
 
 def test_the_store_module_imports_only_models() -> None:
-    # `optimize_gate` -> `optimize_store` is the only edge between the three non-model modules, so
+    # `optimize.gate` -> `optimize.store` is the only edge between the three non-model modules, so
     # anything else here would close a cycle.
-    assert set(_coder_eval_imports("optimize_store")) <= {"coder_eval.models"}
+    assert set(_coder_eval_imports("optimize.store")) <= {"coder_eval.models"}
 
 
 def test_a_moved_name_lives_in_exactly_one_module() -> None:
@@ -1067,10 +1111,74 @@ def test_a_moved_name_lives_in_exactly_one_module() -> None:
             assert not leftovers, f"{owner} names still defined on {other}: {leftovers}"
 
 
+def test_the_optimize_package_reexports_nothing() -> None:
+    """No facade, and it is machine-checked rather than remembered.
+
+    A package `__init__` re-exporting the family would let every pre-package import keep working
+    and make the split cosmetic — exactly the property
+    `test_a_moved_name_lives_in_exactly_one_module` forbids one module over. A submodule bound by
+    an importing test is fine; a function, class or constant is not.
+    """
+    bound = {
+        name: value
+        for name, value in vars(coder_eval.optimize).items()
+        if not name.startswith("__") and not isinstance(value, ModuleType)
+    }
+    assert not bound, (
+        f"coder_eval/optimize/__init__.py binds {sorted(bound)} — the package re-exports NOTHING "
+        "on purpose, so that no pre-package import path can keep working"
+    )
+
+
+def test_no_flat_shim_module_survives_the_move() -> None:
+    """The other half of "no facade": a leftover `optimize_load.py` re-exporting the new home.
+
+    Not the same guarantee as `test_the_optimize_package_reexports_nothing` — a package `__init__`
+    cannot make `coder_eval.optimize_load` importable, so only a SHIM at the old path can, and only
+    this test would see it. Both are needed: the facade property and the old-path property.
+    """
+    import importlib
+
+    for name in _PACKAGE_MODULES:
+        flat = "coder_eval." + name.replace(".", "_")
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(flat)
+
+
+def test_the_rank_coverage_check_fails_on_an_unranked_module() -> None:
+    """The module-scope coverage assert, exercised through the same predicate it uses.
+
+    Without this nobody knows the assert can fail. Both directions, because both are silent: a new
+    module joining `coder_eval/optimize/` unranked, and a rank left behind naming a module that no
+    longer exists — the second is what makes an EMPTY derivation fail loudly rather than pass over
+    nothing.
+    """
+    assert _rank_coverage_gap(_PACKAGE_MODULES) == ([], [])
+
+    unranked, _ = _rank_coverage_gap(_PACKAGE_MODULES | {"optimize.newcomer"})
+    assert unranked == ["optimize.newcomer"]
+
+    _, orphaned = _rank_coverage_gap(set())
+    assert orphaned == sorted(_OPTIMIZE_RANKS), "an empty derivation must report every rank orphaned"
+
+
+def test_the_derived_package_module_set_is_the_family_and_every_file_exists() -> None:
+    """Non-vacuity, and the ONE place the family is spelled out rather than derived.
+
+    The rank map plus `_LADDER_EXEMPT` is the specification; this asserts the derivation agrees with
+    it and that every name resolves to a real file — so a `__path__` that silently found the wrong
+    directory cannot read as a clean tree.
+    """
+    assert set(_OPTIMIZE_RANKS) | set(_LADDER_EXEMPT) == _PACKAGE_MODULES, sorted(_PACKAGE_MODULES)
+    assert len(_PACKAGE_MODULES) == 7, sorted(_PACKAGE_MODULES)
+    for name in _PACKAGE_MODULES:
+        assert _module_path(name).is_file(), name
+
+
 def test_the_import_graph_respects_the_rank_order() -> None:
     """Strictly downward, never sideways — and acyclicity alone would not say that.
 
-    `optimize_activation -> optimize_execution` is perfectly acyclic and still wrong: the two
+    `optimize.activation -> optimize.execution` is perfectly acyclic and still wrong: the two
     tracks are meant to be independently readable, which is the whole reason the split is BY TRACK.
     So the assertion is on the RANKS, not on the absence of cycles.
     """
@@ -1092,14 +1200,14 @@ def test_the_store_edge_is_sentinels_and_one_lookup() -> None:
     they are cache-key sentinels the STORE refuses to write — declaring them here would make the
     store import the family and close a cycle.
     """
-    edge = {module: _coder_eval_imports(module).get("coder_eval.optimize_store", set()) for module in _OPTIMIZE_RANKS}
+    edge = {module: _coder_eval_imports(module).get("coder_eval.optimize.store", set()) for module in _OPTIMIZE_RANKS}
     assert edge == {
-        "optimize_load": {"UNRECORDED_SPLIT"},
-        "optimize_gate": {"UNRESOLVED_MODEL", "lookup_noise_floor"},
-        "optimize_activation": {"UNRESOLVED_MODEL"},
-        "optimize_execution": {"UNRESOLVED_MODEL"},
-        "optimize_fronts": set(),
-        "optimize_search": set(),
+        "optimize.load": {"UNRECORDED_SPLIT"},
+        "optimize.gate": {"UNRESOLVED_MODEL", "lookup_noise_floor"},
+        "optimize.activation": {"UNRESOLVED_MODEL"},
+        "optimize.execution": {"UNRESOLVED_MODEL"},
+        "optimize.fronts": set(),
+        "optimize.search": set(),
     }, edge
     # And nothing in the family imports the RENDERER: a decision layer depending on its own
     # presentation is what would make that split cosmetic too.
@@ -1119,7 +1227,7 @@ def test_module_imports_no_cli_machinery() -> None:
     for module in _OPTIMIZE_MODULES:
         source = _module_source(module)
         for banned in ("import typer", "import rich", "from typer", "from rich", "coder_eval.cli"):
-            assert banned not in source, f"{module}.py imports {banned!r} — it is a library, not a CLI surface"
+            assert banned not in source, f"{module} imports {banned!r} — it is a library, not a CLI surface"
 
 
 def _costed_result(
@@ -2122,7 +2230,7 @@ class TestGateResampleCount:
         """
         import inspect
 
-        import coder_eval.optimize_gate as gate
+        import coder_eval.optimize.gate as gate
 
         offenders = []
         for name in dir(gate):
@@ -2155,7 +2263,7 @@ class TestGateResampleCount:
         for module in (*_OPTIMIZE_MODULES, "reports_stats"):
             source = _module_source(module)
             literals = [ln for ln in source.splitlines() if alpha_literal.search(ln) and "DEFAULT_ALPHA = " not in ln]
-            assert not literals, f"{module}.py still spells 0.05 outside DEFAULT_ALPHA: {literals}"
+            assert not literals, f"{module} still spells 0.05 outside DEFAULT_ALPHA: {literals}"
 
 
 class TestResolutionDegradedNote:
@@ -4424,7 +4532,7 @@ class TestGraderFingerprint:
     def test_store_round_trips_the_fingerprint(self, tmp_path: Path) -> None:
         # `record_round_scores` model_dump_json's the whole record, so the field needs no writer
         # change — asserted rather than assumed.
-        from coder_eval.optimize_store import load_measurements, record_round_scores
+        from coder_eval.optimize.store import load_measurements, record_round_scores
 
         sidecar = tmp_path / "my-skill" / "measurements.json"
         record_round_scores(sidecar, RoundScores(round=1, grader_fingerprint="abc123"))
@@ -5052,7 +5160,7 @@ class TestExecutionGateIntegrity:
     def test_the_gate_reads_no_suite_json(self, tmp_path: Path) -> None:
         # The positional read of `criterion_aggregates` the planning spike falsified: that list is
         # FILTERED, so position i there is not criterion i. Nothing here may depend on it.
-        from coder_eval import optimize_execution as gate
+        from coder_eval.optimize import execution as gate
 
         # A PATH JOIN is what a read looks like — `run_dir / ... / "suite.json"`. Both functions
         # also NAME the file in prose (a docstring, and the wrong-index note that tells a user the
@@ -5880,7 +5988,7 @@ def _confirm(tmp_path: Path, train: ExecutionGateVerdict, *, split: str | None =
 class TestClassifyConfirm:
     """The four answers, as a pure function of three floats — one rule, shared by both tracks.
 
-    It lives in `optimize_gate` because both rank-2 track modules need it and neither may import the
+    It lives in `optimize.gate` because both rank-2 track modules need it and neither may import the
     other, so per-track would mean two copies of promotion-relevant arithmetic. `TestTheClassifierIsShared`
     below asserts that placement, so a future copy in either module fails the build.
     """
@@ -5970,25 +6078,25 @@ class TestClassifyConfirm:
 class TestTheClassifierIsShared:
     """One declaration, at rank 1, and a copy in either track module must fail the build."""
 
-    def test_it_lives_in_optimize_gate(self) -> None:
-        import coder_eval.optimize_gate as gate
+    def test_it_lives_in_the_shared_gate_module(self) -> None:
+        import coder_eval.optimize.gate as gate
 
         assert classify_confirm.__module__ == gate.__name__
         assert build_confirm_verdict.__module__ == gate.__name__
 
-    @pytest.mark.parametrize("module", ["optimize_activation", "optimize_execution"])
+    @pytest.mark.parametrize("module", ["optimize.activation", "optimize.execution"])
     def test_neither_track_module_defines_its_own(self, module: str) -> None:
         # A SOURCE scan, not an attribute check: both modules IMPORT these names, so `hasattr` passes
         # either way and only the source says whether a second implementation was written.
         source = _module_source(module)
         for name in ("classify_confirm", "build_confirm_verdict"):
             assert f"def {name}(" not in source, (
-                f"{module}.py defines its own {name} — the two track modules may not import each "
+                f"{module} defines its own {name} — the two track modules may not import each "
                 "other, so a per-track copy is two copies of promotion-relevant arithmetic"
             )
 
     def test_both_tracks_call_the_shared_builder(self) -> None:
-        for module in ("optimize_activation", "optimize_execution"):
+        for module in ("optimize.activation", "optimize.execution"):
             assert "build_confirm_verdict(" in _module_source(module)
 
 
@@ -6091,7 +6199,7 @@ class TestConfirmGateExecution:
         train = _train_verdict(tmp_path / "train")
         confirm = _confirm(tmp_path / "test", train)
         assert confirm.test_mde == confirm.test_verdict.mde
-        source = _module_source("optimize_execution")
+        source = _module_source("optimize.execution")
         body = source[source.index("def confirm_gate_execution(") : source.index("def holm_promote_execution(")]
         assert "measure_execution_noise_floor" not in body
 
@@ -6295,7 +6403,7 @@ class TestRenderConfirmMarkdown:
         assert block.count(reason) == 1
 
     def test_a_refused_verdict_carries_no_classification_note(self, tmp_path: Path) -> None:
-        from coder_eval.optimize_gate import build_confirm_verdict
+        from coder_eval.optimize.gate import build_confirm_verdict
 
         verdict = build_confirm_verdict(
             incumbent_variant="incumbent",
@@ -8284,7 +8392,7 @@ class TestConfirmGateActivation:
         assert self._confirm(tmp_path).test_verdict.promoted is not None
 
     def test_it_measures_no_floor_of_its_own(self, tmp_path: Path) -> None:
-        source = _module_source("optimize_activation")
+        source = _module_source("optimize.activation")
         body = source[source.index("def confirm_gate(") : source.index("def holm_promote(")]
         assert "measure_noise_floor" not in body
         # ONE verdict's two fields, not one field from each of two independently gated runs.
@@ -8414,7 +8522,7 @@ class TestSeedStability:
         import coder_eval.models as models
 
         assert not hasattr(models, "SeedStability")
-        assert SeedStability.__module__ == "coder_eval.optimize_activation"
+        assert SeedStability.__module__ == "coder_eval.optimize.activation"
 
 
 class TestConfirmSplitCheckIsShared:
@@ -8467,14 +8575,14 @@ class TestConfirmSplitCheckIsShared:
         refusal, _note = confirm_split_check(self._provenance("train", "holdout"), [Path("d")])
         assert refusal is not None and "'holdout'" in refusal and "'train'" in refusal
 
-    @pytest.mark.parametrize("module", ["optimize_activation", "optimize_execution"])
+    @pytest.mark.parametrize("module", ["optimize.activation", "optimize.execution"])
     def test_neither_track_reimplements_the_rule(self, module: str) -> None:
         # The drift this closes was already present: the execution side had gained the
         # "not the Stage B winner" note that the activation side lacked, while the activation
         # docstring claimed both worked "for the reasons the execution twin's docstring gives".
         source = _module_source(module)
         assert "confirm_split_check(" in source
-        assert "reproduces by construction" not in source, f"{module}.py carries its own copy of the remedy"
+        assert "reproduces by construction" not in source, f"{module} carries its own copy of the remedy"
 
     def test_the_activation_gate_refuses_a_train_beside_an_unrecorded_dir_end_to_end(self, tmp_path: Path) -> None:
         # Through the real gate, not only the helper: this track pools dirs per arm, so the state is
@@ -8500,7 +8608,7 @@ class TestConfirmSplitCheckIsShared:
 
 
 class TestConfirmGateActivationOutcomes:
-    """All three DECIDED outcomes reached through `optimize_activation.confirm_gate` itself.
+    """All three DECIDED outcomes reached through `optimize.activation.confirm_gate` itself.
 
     Asserting `outcome in {the four values}` proves nothing — the field is a `Literal` of exactly
     those — and the refusal tests next door only ever reach `undecided`. So REPRODUCED, SHRANK and

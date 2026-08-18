@@ -128,7 +128,7 @@ under test happened, and an A/B arm that *deleted* that behaviour would pass it 
 
 **Validation, before the candidate is snapshotted.** Review every generated candidate for train-row
 content it reproduces word for word. The mechanical half is
-`coder_eval.optimize_search.candidate_leaks(candidate_text, baseline_text, train_rows)`, which
+`coder_eval.optimize.search.candidate_leaks(candidate_text, baseline_text, train_rows)`, which
 reports the substantive spans the candidate adds and the text it was edited from lacks; the skill's
 Step 8 runs it.
 
@@ -156,7 +156,7 @@ Three constraints on it, all of them consequences rather than rules:
   template's `allowed_tools` comment carries why — or the candidate is scored on a prohibition
   instead of on its instruction.
 - **The leak check reads the whole directory.** `candidate_leaks` is handed
-  `optimize_search.skill_text(<arm>/skills/<skill>)`, so a graded string pasted into `scripts/` is
+  `optimize.search.skill_text(<arm>/skills/<skill>)`, so a graded string pasted into `scripts/` is
   flagged exactly as one in the body is. It was not, before scripts were on the table.
 - **Activation is untouched by this.** Adding a script changes no frontmatter, and the skill listing
   the model chooses from carries name and description only — so a scripts-only candidate cannot move
