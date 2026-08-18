@@ -230,8 +230,11 @@ Notes:
   you add `ContractCase` fixtures** for the new type in the same change,
   reaching every polarity its instances claim via
   `live_decidable_polarities()`. An out-of-tree plugin criterion is invisible
-  to CE036's union walk — reuse `contract_violations` from that module in your
-  plugin's own test suite instead.
+  to CE036's union walk — and the module lives under `tests/`, which is not
+  shipped in the PyPI wheel — so copy the replay pattern (a `ContractCase`-style
+  fixture plus the prefix-by-prefix determinism/monotonicity walk) into your
+  plugin's own test suite, using `tests/lint/live_verdict_contract.py` in this
+  repo as the reference implementation.
 
 > A duplicate `criterion_type` **overwrites** the earlier checker with a warning (not
 > a hard error, unlike agents) — keep type strings unique.

@@ -49,9 +49,11 @@ supplied*, not in general. A careless implementation with an agreeable fixture s
 passes. The rule raises the cost of the bug and puts the contract in front of the next
 implementer; it does not close the hole. Nothing short of a proof would. (2) It covers
 the in-tree ``SuccessCriterion`` union only — an out-of-tree plugin criterion never
-appears in ``live_criterion_types``, so a plugin shipping a live criterion should reuse
-``contract_violations`` / ``ContractCase`` in its own test suite (docs/EXTENDING.md
-says so where plugin authors will read it). (3) The determinism probe is two
+appears in ``live_criterion_types``, and this module lives under ``tests/`` (not shipped
+in the wheel), so a plugin shipping a live criterion should copy the replay pattern —
+a ``ContractCase``-style fixture plus the prefix walk — into its own test suite, with
+this module as the reference implementation (docs/EXTENDING.md says so where plugin
+authors will read it). (3) The determinism probe is two
 back-to-back calls on identical input: it catches RNG and per-call mutable state, but
 two calls microseconds apart will rarely disagree on a *wall-clock* read, so a
 slowly-varying ``datetime.now()`` dependency largely escapes it (the monotonicity
