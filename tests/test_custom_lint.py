@@ -30,6 +30,7 @@ from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
 from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRulesHandleLevel
 from tests.lint.rules.ce053_run_tree_readers_reconcile import RunTreeReadersReconcile
 from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
+from tests.lint.rules.ce059_no_sibling_private_imports import NoSiblingPrivateImports
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_submodule_model_imports import NoSubmoduleModelImports
 from tests.lint.runner import ALL_RULES, check_paths
@@ -7618,7 +7619,7 @@ class TestCE045SkipOnIgnoredPath:
 
 @pytest.mark.lint
 class TestHolmRejectionsIsConfined:
-    """`holm_rejections` may be called only from `optimize.gate`, and only by `_holm_family`.
+    """`holm_rejections` may be called only from `optimize.gate`, and only by `holm_family`.
 
     Holm is a property of a FAMILY. A call site that sees one candidate at a time degenerates to
     an uncorrected `p <= alpha` while still looking like a correction — the failure mode the two
@@ -7626,7 +7627,7 @@ class TestHolmRejectionsIsConfined:
 
     CLAUDE.md said `holm_promote` was the ONLY call site until the execution track got its own
     gate, and then "both call sites live in optimize.gate". There is now exactly ONE: the two
-    wrappers spelled the same three-line preamble 700 lines apart, and `_holm_family` is the single
+    wrappers spelled the same three-line preamble 700 lines apart, and `holm_family` is the single
     declaration they both call. **That is strictly stricter to audit than two were** — the
     membership rule (`p_value is not None`) and the original-index mapping are stated once, so the
     two tracks cannot drift on either, and this assertion now fails on a SECOND call site rather
@@ -7638,7 +7639,7 @@ class TestHolmRejectionsIsConfined:
     """
 
     SRC = Path(__file__).parent.parent / "src" / "coder_eval"
-    ALLOWED: ClassVar[set[str]] = {"_holm_family"}
+    ALLOWED: ClassVar[set[str]] = {"holm_family"}
 
     @staticmethod
     def _call_sites(tree: ast.AST) -> list[tuple[str, int]]:
@@ -8162,7 +8163,7 @@ class TestCE053RunTreeReadersReconcile:
     def test_it_is_silent_when_the_reader_reconciles(self) -> None:
         source = """
             def measure_noise_floor(run_dirs, variant_id, suite_id):
-                stale, _unknown = _reconcile_arms([(variant_id, run_dirs)], suite_id)
+                stale, _unknown = reconcile_arms([(variant_id, run_dirs)], suite_id)
                 if stale:
                     return None
                 return [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
@@ -8181,9 +8182,9 @@ class TestCE053RunTreeReadersReconcile:
         assert self._check(source) == []
 
     def test_one_violation_per_function_however_many_reads(self) -> None:
-        # `_load_and_pair` reads twice, once per arm. Two noqas for one fault would be noise.
+        # `load_and_pair` reads twice, once per arm. Two noqas for one fault would be noise.
         source = """
-            def _load_and_pair(incumbent_run_dirs, candidate_run_dirs, a, b, suite_id):
+            def load_and_pair(incumbent_run_dirs, candidate_run_dirs, a, b, suite_id):
                 inc = [load_suite_rows(d, a, suite_id) for d in incumbent_run_dirs]
                 cand = [load_suite_rows(d, b, suite_id) for d in candidate_run_dirs]
                 return inc, cand
@@ -8195,7 +8196,7 @@ class TestCE053RunTreeReadersReconcile:
         # per composing gate rather than once per gate.
         source = """
             def load_arm_rows(run_dirs, variant_id, suite_id):
-                return _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
+                return pool_replicates([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
         """
         assert self._check(source) == []
 
@@ -8328,7 +8329,7 @@ class TestCE053RunTreeReadersReconcile:
                     range(node.lineno, (node.end_lineno or node.lineno) + 1)
                 ):
                     suppressed.append(node.name)
-        assert sorted(suppressed) == ["_load_and_pair", "cost_quality_points"], suppressed
+        assert sorted(suppressed) == ["cost_quality_points", "load_and_pair"], suppressed
         # And every one of them is genuinely suppressed rather than merely absent from `make lint`.
         assert check_paths([SRC], [RunTreeReadersReconcile]) == []
 
@@ -8793,14 +8794,14 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
         from tests.lint.runner import ALL_RULES
 
         assert not (Path(__file__).parent / "lint" / "rules" / "ce057_outcome_prompt_leak.py").exists()
-        assert not any(getattr(rule, "rule_id", None) == "CE057" for rule in ALL_RULES)
+        assert not any(getattr(rule, "id", None) == "CE057" for rule in ALL_RULES)
 
     def test_ce056_is_still_reserved_and_unimplemented(self):
         # CE057 was chosen because CE056 is RESERVED with a promotion trigger that has not fired.
         # Renumbering onto it would silently retire that reservation.
         from tests.lint.runner import ALL_RULES
 
-        assert not any(getattr(rule, "rule_id", None) == "CE056" for rule in ALL_RULES)
+        assert not any(getattr(rule, "id", None) == "CE056" for rule in ALL_RULES)
 
 
 @pytest.mark.lint
@@ -9004,7 +9005,64 @@ class TestCE058MirroredResultFieldsAreStamped:
         from tests.lint.runner import ALL_RULES
 
         assert not (Path(__file__).parent / "lint" / "rules" / "ce058_mirrored_result_fields.py").exists()
-        assert not any(getattr(rule, "rule_id", None) == "CE058" for rule in ALL_RULES)
+        assert not any(getattr(rule, "id", None) == "CE058" for rule in ALL_RULES)
+        # Anti-vacuity for the probe itself: it read `rule_id` for three releases, an attribute
+        # `BaseRule` does not declare, so all three copies of this assertion could never fail.
+        assert any(getattr(rule, "id", None) == "CE059" for rule in ALL_RULES), (
+            "the attribute this probe reads is wrong again — it must be able to SEE a wired rule"
+        )
+
+
+@pytest.mark.lint
+class TestCE059NoSiblingPrivateImports:
+    """CE059 — inside `coder_eval/optimize/`, a name two modules share may not be private.
+
+    One underscore cannot mark two boundaries. Before the package landed, 29 names carried an
+    underscore while four modules imported them — the middle tier spelled like the innermost, which
+    tells a reader "safe to change this signature" about a helper a change here breaks in three other
+    files. The decay is silent: the next author adding a cross-module helper has even odds of
+    prefixing it out of habit and nothing fails.
+    """
+
+    GATE = str(SRC / "coder_eval" / "optimize" / "gate.py")
+
+    def _check(self, source: str, path: str | None = None) -> list[object]:
+        return list(NoSiblingPrivateImports(path or self.GATE).check(ast.parse(textwrap.dedent(source))))
+
+    def test_it_fires_on_a_private_sibling_import(self) -> None:
+        violations = self._check("from coder_eval.optimize.load import pool_replicates, _PairedRows")
+        assert len(violations) == 1
+        assert "_PairedRows" in violations[0].message  # type: ignore[attr-defined]
+
+    def test_the_relative_spelling_fires_too(self) -> None:
+        """The CE051 parity shape, and the test that proves the resolver is actually wired.
+
+        Matching `node.module` alone reads `from .load import _pool` as the bare module `"load"`,
+        which does not start with `coder_eval.optimize.` — so the rule reports nothing, which is
+        byte-identical to a clean tree. That is the fail-OPEN direction CE051 exists for.
+        """
+        assert len(self._check("from .load import _pool")) == 1
+        assert len(self._check("from .load import pool_replicates")) == 0
+
+    def test_a_public_sibling_name_does_not_fire(self) -> None:
+        assert self._check("from coder_eval.optimize.load import load_arm_rows, row_score") == []
+
+    def test_a_private_name_from_outside_the_package_does_not_fire(self) -> None:
+        # Not this rule's business: the tier argument is about names shared INSIDE the package.
+        assert self._check("from coder_eval.reports_stats import _betacf") == []
+        assert self._check("from coder_eval.models import _anything") == []
+
+    def test_a_file_outside_the_package_does_not_fire(self) -> None:
+        """`reports_optimize.py` is outside by construction, so a widening is a deliberate act."""
+        outside = str(SRC / "coder_eval" / "reports_optimize.py")
+        assert self._check("from coder_eval.optimize.load import _PairedRows", outside) == []
+
+    def test_it_reports_no_violations_on_the_real_tree(self) -> None:
+        """The acceptance test for the 29 renames being COMPLETE, not merely started."""
+        assert check_paths([SRC], [NoSiblingPrivateImports]) == []
+
+    def test_the_rule_is_wired_into_all_rules(self) -> None:
+        assert NoSiblingPrivateImports in ALL_RULES
 
 
 @pytest.mark.lint
@@ -9159,6 +9217,15 @@ class TestImportRulesResolveRelativeImports:
             "src/coder_eval/orchestration/task_loader.py",
             "from coder_eval.models import TaskDefinition\nTaskDefinition(**d)\n",
             "from ..models import TaskDefinition\nTaskDefinition(**d)\n",
+        ),
+        (
+            # A REAL path under the package, because `resolved_module` stats for `__init__.py` at the
+            # root and returns None for a path that does not exist — a synthetic one would make both
+            # halves of this row pass for the wrong reason.
+            NoSiblingPrivateImports,
+            str(SRC / "coder_eval" / "optimize" / "gate.py"),
+            "from coder_eval.optimize.load import _PairedRows",
+            "from .load import _PairedRows",
         ),
     ]
 

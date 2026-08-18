@@ -820,16 +820,16 @@ with the two `action.yml` items above — one considered change to the action's 
 
       **Resolution (Plan B+C Phase 1):** closed, and the return-contract question resolved by
       SPLITTING on it rather than picking one answer. The DETECTION is shared —
-      `optimize.load._reconcile_arms` is the one sweep every whole-arm reader routes through
+      `optimize.load.reconcile_arms` is the one sweep every whole-arm reader routes through
       (`execution_gate` still calls `reconcile_tree_against_run_json` directly — it works one run
-      dir per variant and needs the per-dir result), and `_stale_tree_reason` is the one message
+      dir per variant and needs the per-dir result), and `stale_tree_reason` is the one message
       the readers share — while the RESPONSE follows the return type:
       `measure_noise_floor` and `measure_execution_noise_floor` return `None` through the existing
-      `_no_floor` channel, and `arm_row_scores` logs a WARNING and returns its vector, because
+      `no_floor` channel, and `arm_row_scores` logs a WARNING and returns its vector, because
       `ArmRowScores` has no field a refusal could live in. A shared `_refuse_or_warn` helper was
       considered and rejected — it would take a mode flag, which is two functions in a trench coat.
       Two readers deliberately do NOT reconcile and carry a reasoned `# noqa: CE053` naming who
-      reconciles for them: `_load_and_pair` (its only caller `activation_gate` sweeps both arms
+      reconciles for them: `load_and_pair` (its only caller `activation_gate` sweeps both arms
       first) and `cost_quality_points` (it reaches the tree through `arm_row_scores`, so a second
       sweep would read every `run.json` twice per arm and warn twice about one fault). The
       correction the entry itself needed: the four readers are `measure_noise_floor`,
@@ -1108,3 +1108,21 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       which is more machinery than the defect (a stale attribution in prose) justifies today. The
       limitation is stated in the test itself so the next reader is not misled. — caught in the
       2026-08-17 optimize measurement-unit / confirm-gate plan, Phase 6 review.
+
+- [ ] **A public function returning a PRIVATE `NamedTuple` is a cross-module signature CE059 cannot
+      see.** CE059 matches an imported NAME, so it fires on `from .load import _PairedRows` and is
+      structurally blind to the same type reached as a return value. `optimize/load.py`'s public
+      `load_and_pair` returns `_PairedRows`, whose fields `optimize/activation.py` reads at eleven
+      sites, and `optimize/gate.py`'s public `holm_family` returns `_HolmFamily`, destructured in
+      both track modules. Neither is IMPORTED by a sibling, which is why the package-internal
+      convention left both private — but a sibling that wanted to annotate either could not without
+      tripping the rule, and the underscore tells a reader "safe to change this signature" about a
+      field set four modules depend on, which is the exact error CE059's docstring calls the
+      expensive direction. Not cheap to guard: the honest predicate is "a public function's return
+      ANNOTATION names a private type defined in this package", which means resolving annotations
+      (string-ified under `from __future__ import annotations`) rather than matching import lines —
+      a different kind of check from every rule under `tests/lint/rules/`, and it would want a
+      companion pass over parameter annotations to be worth having. Renaming the two types is the
+      one-line alternative and was deliberately NOT taken mid-phase, since the plan had verified and
+      recorded both as single-module. — caught in the 2026-08-18 optimize subsystem architecture
+      plan, Phase 3 quality review.

@@ -31,43 +31,43 @@ from coder_eval.models import (
     copy_with,
 )
 from coder_eval.optimize.gate import (
-    _NOTE_CI_CONTAINS_ZERO,
-    _NOTE_OUTSIDE_FAMILY,
     FLOOR_RESOLUTION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
-    _family_resamples,
-    _floor_from_clusters,
-    _holm_family,
-    _metric,
-    _no_floor,
-    _note_check_failed,
-    _note_holm_family,
-    _note_ordinary_negative,
-    _note_resolution_degraded,
+    NOTE_CI_CONTAINS_ZERO,
+    NOTE_OUTSIDE_FAMILY,
     build_confirm_verdict,
+    classification_metric,
     confirm_one_candidate,
     confirm_split_check,
     confirm_train_note,
     confirm_train_refusal,
     cost_latency_guardrails,
+    floor_from_clusters,
+    holm_family,
+    no_floor,
+    note_check_failed,
+    note_holm_family,
+    note_ordinary_negative,
+    note_resolution_degraded,
+    resamples_for_family,
 )
 from coder_eval.optimize.load import (
-    _criterion_weights,
-    _label_pairs,
-    _observed_result_types,
-    _pool,
-    _reconcile_arms,
-    _require_valid_criterion_index,
-    _row_score,
-    _split_mismatch_reason,
-    _stale_tree_reason,
-    _task_json_pattern,
-    _wrong_path_reason,
+    criterion_weights,
+    label_pairs,
     load_arm_rows,
     load_suite_rows,
+    observed_result_types,
+    pool_replicates,
     read_split_provenance,
+    reconcile_arms,
     reconcile_tree_against_run_json,
+    require_valid_criterion_index,
+    row_score,
+    split_mismatch_reason,
+    stale_tree_reason,
+    task_json_pattern,
+    wrong_path_reason,
 )
 from coder_eval.optimize.store import UNRESOLVED_MODEL
 from coder_eval.reports_stats import (
@@ -137,16 +137,16 @@ def measure_execution_noise_floor(
     # The activation floor's preflight, on this track's split axis and for a sharper reason: the
     # replicate half of the reconciliation keys on `<NN>`, and a re-used `--run-dir` with a smaller
     # `--repeats` leaves exactly the stale replicates this splits into halves. See its twin above.
-    stale, _unknown_dirs = _reconcile_arms([(variant_id, run_dirs)], suite_id)
+    stale, _unknown_dirs = reconcile_arms([(variant_id, run_dirs)], suite_id)
     if stale:
-        return _no_floor(_stale_tree_reason(stale))
+        return no_floor(stale_tree_reason(stale))
 
-    rows = _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
+    rows = pool_replicates([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
     # A mistyped variant, suite or run directory is the documented SILENT-ZERO failure mode, and
     # "no row carries 2+ replicates" would send the reader off to check --repeats instead of the
     # path. Distinguished here for the same reason `activation_gate` distinguishes it.
     if not rows:
-        return _no_floor(_wrong_path_reason(variant_id, suite_id, run_dirs))
+        return no_floor(wrong_path_reason(variant_id, suite_id, run_dirs))
 
     # Same refusal as the activation floor, and for the same reason: a null comparison pooled
     # over run directories that selected different row sets is not a floor for any of them.
@@ -154,17 +154,17 @@ def measure_execution_noise_floor(
     # sequence, and Stage B may hand it several.
     provenance = read_split_provenance(run_dirs)
     if provenance.mismatched:
-        return _no_floor(_split_mismatch_reason("the replicate split", provenance, run_dirs))
+        return no_floor(split_mismatch_reason("the replicate split", provenance, run_dirs))
 
     # `criterion_index=None` is already the "read the row's weighted_score" mode, so this reuses
     # the existing extractor rather than adding a second definition of what a row scored.
     replicated: list[list[float]] = []
     for _row_id, results in sorted(rows.items()):
-        values = [v for r in results if (v := _row_score(r, None)) is not None]
+        values = [v for r in results if (v := row_score(r, None)) is not None]
         if len(values) >= 2:
             replicated.append(values)
     if len(replicated) < 2:
-        return _no_floor(
+        return no_floor(
             f"only {len(replicated)} of {len(rows)} row(s) of {suite_id!r} carry 2+ replicates with a "
             + "weighted_score — the replicate split needs 2. Was this run made with --repeats 2 or more?"
         )
@@ -198,7 +198,7 @@ def measure_execution_noise_floor(
         mde=0.0,
         computed_at=datetime.now(UTC),
     )
-    return _floor_from_clusters([a for a, _b in halves], [b for _a, b in halves], mean, probe, measurements)
+    return floor_from_clusters([a for a, _b in halves], [b for _a, b in halves], mean, probe, measurements)
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +252,8 @@ def _paired_criterion_diffs(
     """
     diffs: list[float] = []
     for row_id in row_ids:
-        incumbent = [s for r in incumbent_rows.get(row_id, []) if (s := _row_score(r, criterion_index)) is not None]
-        candidate = [s for r in candidate_rows.get(row_id, []) if (s := _row_score(r, criterion_index)) is not None]
+        incumbent = [s for r in incumbent_rows.get(row_id, []) if (s := row_score(r, criterion_index)) is not None]
+        candidate = [s for r in candidate_rows.get(row_id, []) if (s := row_score(r, criterion_index)) is not None]
         if incumbent and candidate:
             diffs.append(mean(candidate) - mean(incumbent))
     return diffs
@@ -307,8 +307,8 @@ def _dead_weight(
 
     incumbent_results = [result for rid in row_ids for result in incumbent_rows.get(rid, [])]
     candidate_results = [result for rid in row_ids for result in candidate_rows.get(rid, [])]
-    weights = _criterion_weights(incumbent_results)
-    candidate_weights = _criterion_weights(candidate_results)
+    weights = criterion_weights(incumbent_results)
+    candidate_weights = criterion_weights(candidate_results)
     if not weights or not candidate_weights:
         return None, [
             "dead weight was not computed: at least one arm produced no criterion results over the "
@@ -331,7 +331,7 @@ def _dead_weight(
             + "share is deliberately not reported as 0.0, which would claim no dilution."
         ]
 
-    # Every weight is a float from here; the reference result is the one `_criterion_weights` read
+    # Every weight is a float from here; the reference result is the one `criterion_weights` read
     # them off, so index i of both lists describes one criterion.
     known = [weight for weight in weights if weight is not None]
     reference = next((result for result in incumbent_results if result.success_criteria_results), None)
@@ -437,10 +437,10 @@ def _integrity_checks(
 
     if engagement_criterion_index is not None:
         index = engagement_criterion_index
-        incumbent_pairs = [p for rid in row_ids for p in _label_pairs(incumbent_rows.get(rid, []), index)]
-        candidate_pairs = [p for rid in row_ids for p in _label_pairs(candidate_rows.get(rid, []), index)]
+        incumbent_pairs = [p for rid in row_ids for p in label_pairs(incumbent_rows.get(rid, []), index)]
+        candidate_pairs = [p for rid in row_ids for p in label_pairs(candidate_rows.get(rid, []), index)]
         if not incumbent_pairs and not candidate_pairs:
-            found = _observed_result_types(incumbent_rows, engagement_criterion_index) | _observed_result_types(
+            found = observed_result_types(incumbent_rows, engagement_criterion_index) | observed_result_types(
                 candidate_rows, engagement_criterion_index
             )
             checks.append(
@@ -461,8 +461,8 @@ def _integrity_checks(
                 )
             )
         else:
-            incumbent_recall = _metric(incumbent_pairs, metric_name)
-            candidate_recall = _metric(candidate_pairs, metric_name)
+            incumbent_recall = classification_metric(incumbent_pairs, metric_name)
+            candidate_recall = classification_metric(candidate_pairs, metric_name)
             # The bar is 1.0 flat, not "no worse than the incumbent": a row the skill never engaged
             # on measured the ABSENCE of the thing under test, so it is not evidence about the
             # candidate's body however the incumbent did on it. (Recall is bounded above by 1.0, so
@@ -588,8 +588,8 @@ def execution_gate(
 
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
-    _require_valid_criterion_index(engagement_criterion_index)
-    _require_valid_criterion_index(primary_criterion_index)
+    require_valid_criterion_index(engagement_criterion_index)
+    require_valid_criterion_index(primary_criterion_index)
     notes: list[str] = []
     # The run's row-selection provenance, as a NOTE and never a refusal — deliberately unlike
     # `activation_gate`, and the asymmetry is a consequence of the data sources rather than drift:
@@ -899,9 +899,9 @@ def execution_gate(
         if primary_diffs:
             primary_mean_diff = mean(primary_diffs)
         elif check_row_ids:
-            # `_require_valid_criterion_index` bounds only BELOW — deliberately, since rows may
+            # `require_valid_criterion_index` bounds only BELOW — deliberately, since rows may
             # legitimately differ in criteria count and an over-long index should skip a row rather
-            # than raise. That is the wrong answer HERE: an over-long primary index makes `_row_score`
+            # than raise. That is the wrong answer HERE: an over-long primary index makes `row_score`
             # return None on every row, so the vector is EMPTY and indistinguishable from a suite of
             # rows that all errored on that criterion.
             _refuse(
@@ -1030,7 +1030,7 @@ def _execution_diagnostics(
         _refuse(
             f"{named} loaded ZERO rows: nothing matched "
             # `<variant>` literally: this one message names BOTH arms, so it cannot spell either id.
-            + f"{_task_json_pattern('<variant>', suite_id)} under {run_dir}. That is a wrong variant "
+            + f"{task_json_pattern('<variant>', suite_id)} under {run_dir}. That is a wrong variant "
             + "id, a wrong suite id or a wrong run directory. Every guardrail and integrity check "
             + "below is computed over the rows that DID load, so they all pass — over nothing when "
             + "both arms are empty, and as a large candidate improvement when only one is — and the "
@@ -1345,8 +1345,8 @@ def holm_promote_execution(
     genuine candidate reading NOT PROMOTED because a sibling's sample was degenerate — which is the
     multiplicity that was actually incurred, and the conservative direction.
     """
-    family, rejected_at = _holm_family(verdicts, alpha)
-    family_resamples = _family_resamples(verdicts, family)
+    family, rejected_at = holm_family(verdicts, alpha)
+    family_resamples = resamples_for_family(verdicts, family)
 
     decided: list[ExecutionGateVerdict] = []
     for i, verdict in enumerate(verdicts):
@@ -1356,7 +1356,7 @@ def holm_promote_execution(
             # cause lands here carrying a refusal, so an unguarded note would print an ordinary
             # negative result directly under a refusal headline.
             if verdict.gate_refusal is None:
-                notes.append(_NOTE_OUTSIDE_FAMILY)
+                notes.append(NOTE_OUTSIDE_FAMILY)
             # Outside the family, so nothing was rejected — False rather than None, which would
             # read as "Holm has not run" on a verdict it has.
             decided.append(copy_with(verdict, promoted=False, holm_rejected=False, holm_alpha=alpha, notes=notes))
@@ -1396,9 +1396,9 @@ def holm_promote_execution(
                     + "resolved as candidate - incumbent, so this reads the way it looks.)"
                 )
             elif rejected and not excludes_zero:
-                notes.append(_NOTE_CI_CONTAINS_ZERO)
+                notes.append(NOTE_CI_CONTAINS_ZERO)
             elif not rejected:
-                notes.append(_note_ordinary_negative(verdict.p_value, len(family), alpha))
+                notes.append(note_ordinary_negative(verdict.p_value, len(family), alpha))
         # Guarded on exactly what makes the sentence true — the three conjuncts the BLOCKED
         # headline is keyed on, and the same guard the activation twin applies. Under a refusal the
         # headline is NOT A RESULT; on a candidate that merely LOST the check forced nothing, since
@@ -1407,15 +1407,15 @@ def holm_promote_execution(
         # rendered Integrity checks / Guardrails lists on every path — only the CLAIM is withheld.
         if not refused and rejected and verdict.separated:
             notes += [
-                _note_check_failed(check.name)
+                note_check_failed(check.name)
                 for check in (*verdict.integrity_checks, *verdict.guardrails)
                 if not check.passed
             ]
-        notes.append(_note_holm_family(len(family), alpha))
+        notes.append(note_holm_family(len(family), alpha))
         # Not a negative-result claim, so it sits OUTSIDE the refusal guard beside the family note:
         # it is a statement about the draw count, which stays true whatever the refusal says. The
         # family's SMALLEST draw count is what bounds its resolution.
-        if (degraded := _note_resolution_degraded(len(family), family_resamples, alpha)) is not None:
+        if (degraded := note_resolution_degraded(len(family), family_resamples, alpha)) is not None:
             notes.append(degraded)
         decided.append(copy_with(verdict, promoted=promoted, holm_rejected=rejected, holm_alpha=alpha, notes=notes))
     return decided

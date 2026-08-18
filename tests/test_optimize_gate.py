@@ -91,37 +91,36 @@ from coder_eval.optimize.fronts import (
     pareto_front,
 )
 from coder_eval.optimize.gate import (
-    _NOTE_OUTSIDE_FAMILY,
     FLOOR_RESOLUTION,
     GATE_MAX_FAMILY,
     GATE_P_PRECISION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
-    _holm_family,
-    _note_holm_family,
-    _note_ordinary_negative,
-    _note_resolution_degraded,
+    NOTE_OUTSIDE_FAMILY,
     build_confirm_verdict,
     classify_confirm,
     confirm_split_check,
     cost_latency_guardrails,
+    holm_family,
+    note_holm_family,
+    note_ordinary_negative,
+    note_resolution_degraded,
 )
 from coder_eval.optimize.load import (
     TASK_JSON_GLOB,
     RuleAttribution,
     SplitProvenance,
-    _balance_pair,
-    _label_pairs,
-    _load_and_pair,
-    _median,
-    _row_cost_levels,
-    _row_costs,
     _rules_verdicts,
-    _wrong_path_reason,
+    balance_pair,
+    label_pairs,
+    load_and_pair,
     load_arm_rows,
     load_suite_rows,
     read_split_provenance,
+    row_cost_levels,
+    row_costs,
     rule_row_map,
+    wrong_path_reason,
 )
 from coder_eval.optimize.search import (
     SearchComparison,
@@ -154,6 +153,7 @@ from coder_eval.reports_stats import (
     PairedComparison,
     bootstrap_p_floor,
     holm_rejections,
+    median_or_none,
 )
 from tests.lint.import_resolution import resolved_module
 
@@ -419,26 +419,26 @@ class TestBalancePair:
     """The per-row replicate trim, which was spelled three times in three shapes."""
 
     def test_equal_lengths_pass_through(self) -> None:
-        assert _balance_pair([1.0, 2.0], [3.0, 4.0]) == ([1.0, 2.0], [3.0, 4.0])
+        assert balance_pair([1.0, 2.0], [3.0, 4.0]) == ([1.0, 2.0], [3.0, 4.0])
 
     def test_a_longer_incumbent_trims_to_the_candidate(self) -> None:
-        assert _balance_pair([1.0, 2.0, 3.0], [4.0]) == ([1.0], [4.0])
+        assert balance_pair([1.0, 2.0, 3.0], [4.0]) == ([1.0], [4.0])
 
     def test_a_longer_candidate_trims_to_the_incumbent(self) -> None:
-        assert _balance_pair([1.0], [4.0, 5.0, 6.0]) == ([1.0], [4.0])
+        assert balance_pair([1.0], [4.0, 5.0, 6.0]) == ([1.0], [4.0])
 
     def test_an_empty_side_yields_two_empty_lists(self) -> None:
         # The row is then dropped by whichever caller's own emptiness rule applies — a different
         # question from balancing, and deliberately not this function's to answer.
-        assert _balance_pair([], [1.0, 2.0]) == ([], [])
-        assert _balance_pair([1.0, 2.0], []) == ([], [])
+        assert balance_pair([], [1.0, 2.0]) == ([], [])
+        assert balance_pair([1.0, 2.0], []) == ([], [])
 
     def test_it_is_generic_over_the_element_type(self) -> None:
         # Both real element types: the guardrail trims floats, the F1 and sibling paths trim
         # label pairs. A signature that only served one would have left two of the three sites.
         pairs = [("yes", "yes"), ("no", "no"), ("yes", "no")]
-        assert _balance_pair(pairs, pairs[:1]) == ([("yes", "yes")], [("yes", "yes")])
-        assert _balance_pair([0.1, 0.2, 0.3], [0.4, 0.5]) == ([0.1, 0.2], [0.4, 0.5])
+        assert balance_pair(pairs, pairs[:1]) == ([("yes", "yes")], [("yes", "yes")])
+        assert balance_pair([0.1, 0.2, 0.3], [0.4, 0.5]) == ([0.1, 0.2], [0.4, 0.5])
 
 
 def _family_source() -> str:
@@ -453,7 +453,7 @@ def _family_source() -> str:
 
 
 def test_the_trim_is_declared_once() -> None:
-    """`min(len(a), len(b))` may appear in exactly one function: `_balance_pair`.
+    """`min(len(a), len(b))` may appear in exactly one function: `balance_pair`.
 
     Counts call NODES, mirroring `TestHolmRejectionsIsConfined`. The trim was spelled three times
     in three shapes and only one of the three surfaced the dropped observations to the user, which
@@ -475,9 +475,9 @@ def test_the_trim_is_declared_once() -> None:
             two_lens = len(node.args) == 2 and all(
                 isinstance(a, ast.Call) and isinstance(a.func, ast.Name) and a.func.id == "len" for a in node.args
             )
-            if two_lens and function.name != "_balance_pair":
+            if two_lens and function.name != "balance_pair":
                 offenders.append(f"{function.name}:{node.lineno}")
-    assert not offenders, f"a per-arm observation trim outside _balance_pair: {offenders}"
+    assert not offenders, f"a per-arm observation trim outside balance_pair: {offenders}"
 
 
 class TestBothTracksEmitTheSameHolmNotes:
@@ -490,8 +490,8 @@ class TestBothTracksEmitTheSameHolmNotes:
     def test_the_ordinary_negative_note_is_identical_across_tracks(self, tmp_path: Path) -> None:
         # Same p, same family size, same alpha on both tracks — so any difference in the produced
         # string is a difference in the DECLARATION, which is what this pins.
-        activation = _note_ordinary_negative(0.4321, 3, DEFAULT_ALPHA)
-        assert activation == _note_ordinary_negative(0.4321, 3, DEFAULT_ALPHA)
+        activation = note_ordinary_negative(0.4321, 3, DEFAULT_ALPHA)
+        assert activation == note_ordinary_negative(0.4321, 3, DEFAULT_ALPHA)
         assert "0.4321" in activation and "family of 3" in activation
 
     def test_both_wrappers_emit_the_shared_declarations(self, tmp_path: Path) -> None:
@@ -501,7 +501,7 @@ class TestBothTracksEmitTheSameHolmNotes:
         activation = holm_promote([_gate(_shared_dirs(tmp_path, incumbent, incumbent))])[0]
         execution = holm_promote_execution([_exec_gate(_exec_run_dir(tmp_path, **_WINNER))])[0]
         for verdict in (activation, execution):
-            assert _note_holm_family(1, DEFAULT_ALPHA) in verdict.notes
+            assert note_holm_family(1, DEFAULT_ALPHA) in verdict.notes
 
     def test_neither_wrapper_respells_a_shared_note(self) -> None:
         # Over the WHOLE family: BOTH wrappers left `optimize/gate.py` in the split, so a scan of
@@ -521,16 +521,16 @@ class TestLabelPairs:
         # Two stacked skill_triggered criteria whose descriptions BOTH interpolate the row id,
         # mirroring the shipped templates. A description-keyed implementation fails this.
         results = [_eval_result("r1", [("yes", "yes"), ("no", "yes")])]
-        assert _label_pairs(results, 0) == [("yes", "yes")]
-        assert _label_pairs(results, 1) == [("no", "yes")]
+        assert label_pairs(results, 0) == [("yes", "yes")]
+        assert label_pairs(results, 1) == [("no", "yes")]
 
     def test_skips_rows_with_too_few_results(self) -> None:
         results = [_eval_result("r1", [("yes", "yes")])]
-        assert _label_pairs(results, 5) == []
+        assert label_pairs(results, 5) == []
 
     def test_skips_non_classification_results(self) -> None:
         results = [_eval_result("r1", [("yes", "yes")], extra_basic=True)]
-        assert _label_pairs(results, 1) == []
+        assert label_pairs(results, 1) == []
 
 
 class TestActivationGate:
@@ -777,7 +777,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
         assert decided.promoted is True
         assert decided.holm_alpha == DEFAULT_ALPHA
         assert decided.gate_refusal is None
-        assert decided.notes and _note_holm_family(1, DEFAULT_ALPHA) in decided.notes
+        assert decided.notes and note_holm_family(1, DEFAULT_ALPHA) in decided.notes
 
     def test_an_unfamilied_activation_verdict_carries_no_stray_attribute(self, tmp_path: Path) -> None:
         # The `p_value is None` branch, which writes three fields rather than four.
@@ -1307,6 +1307,34 @@ class TestResolveModel:
 
 
 class TestCostLatencyGuardrails:
+    def test_a_non_finite_cost_reports_unmeasured_rather_than_nan_arithmetic(self) -> None:
+        """The end-to-end guard, not just the helper's unit contract.
+
+        A corrupt `total_cost_usd` used to reach the relative-change arithmetic as a `nan`, where
+        every comparison answers neither way while the check still reports a number. `row_cost_levels`
+        drops such a row exactly as it drops an empty one, so the arm genuinely has no measurement
+        and the existing "not evaluated" note is TRUE of it — which is what licenses the collapse in
+        `reports_stats.median_or_none`. Asserted here because the claim is about the CALLERS; the
+        helper's own tests cannot see whether their messages survive it.
+        """
+        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = _cost_rows({f"r{i}": [float("nan")] for i in range(12)})
+
+        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        assert check.candidate is None, "a corrupt arm must read as unmeasured, never as a nan level"
+        assert check.relative_change is None
+        assert check.passed is True, "an unevaluable guardrail may not veto — it has measured nothing"
+        assert check.note is not None and "not evaluated" in check.note
+
+    def test_one_corrupt_row_does_not_poison_the_rest_of_the_arm(self) -> None:
+        # The row is dropped, not the arm: eleven clean rows still produce a real comparison.
+        incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
+        candidate = _cost_rows({f"r{i}": [2.0] for i in range(11)} | {"r11": [float("inf")]})
+
+        check = _cost_check(cost_latency_guardrails(incumbent_rows=incumbent, candidate_rows=candidate))
+        assert check.candidate == 2.0
+        assert check.passed is False
+
     def test_fails_on_a_large_consistent_increase(self) -> None:
         incumbent = _cost_rows({f"r{i}": [1.0] for i in range(12)})
         candidate = _cost_rows({f"r{i}": [2.0] for i in range(12)})
@@ -1885,7 +1913,7 @@ class TestCriterionIndexIsBoundedBelow:
         Every other test here uses single-criterion rows, where `-1` and `0` select the same
         result and the bug is invisible. Here row `r1` carries two criteria and `r2` one, so
         `success_criteria_results[-1]` is a DIFFERENT criterion on the two rows — and on `r1` it is
-        a `file_check`, not the `skill_triggered` the caller named. `_label_pairs` keeps only
+        a `file_check`, not the `skill_triggered` the caller named. `label_pairs` keeps only
         `ClassificationCriterionResult`s, so before the guard this returned a confident F1
         computed over a silently different, silently smaller set of rows.
         """
@@ -1894,14 +1922,14 @@ class TestCriterionIndexIsBoundedBelow:
         _write_row(run_dir, "incumbent", "r2", _eval_result("r2", [("yes", "yes")]))
 
         rows = load_suite_rows(run_dir, "incumbent", SUITE)
-        # What `-1` would have selected: `file_check` on r1 (dropped by _label_pairs, so the row
+        # What `-1` would have selected: `file_check` on r1 (dropped by label_pairs, so the row
         # vanishes from the sample) and the row's only classification result on r2.
         assert [type(rows[rid][0].success_criteria_results[-1]).__name__ for rid in ("r1", "r2")] == [
             "CriterionResult",
             "ClassificationCriterionResult",
         ]
         # Index 0 — what the caller asked for — is a classification result on BOTH rows.
-        assert all(len(_label_pairs(rows[rid], 0)) == 1 for rid in ("r1", "r2"))
+        assert all(len(label_pairs(rows[rid], 0)) == 1 for rid in ("r1", "r2"))
         # And the boundary now refuses to answer the question at all.
         with pytest.raises(ValueError, match=r"criterion_index must be >= 0, got -1"):
             arm_row_scores(run_dirs=[run_dir], variant_ids=["incumbent"], suite_id=SUITE, criterion_index=-1)
@@ -2243,7 +2271,16 @@ class TestGateResampleCount:
                 param = inspect.signature(obj).parameters.get("n_resamples")
             except (TypeError, ValueError):  # not introspectable
                 continue
-            if param is not None and param.default is not GATE_RESAMPLES:
+            # A REQUIRED `n_resamples` has no default to get wrong — the caller must supply the
+            # count, which is the safe shape. Only a defaulted one can silently be the report-grade
+            # figure. `note_resolution_degraded` is the one function this distinction is needed for:
+            # it takes the count required and became visible to this scan when the package's
+            # cross-module names lost their underscore.
+            if (
+                param is not None
+                and param.default is not inspect.Parameter.empty
+                and param.default is not GATE_RESAMPLES
+            ):
                 offenders.append(f"{name}(n_resamples={param.default!r})")
         assert not offenders, (
             f"{offenders} default to something other than GATE_RESAMPLES. Everything in this module "
@@ -2291,13 +2328,13 @@ class TestResolutionDegradedNote:
     @pytest.mark.parametrize("family_size", [1, 3, GATE_MAX_FAMILY])
     def test_nothing_is_said_at_or_below_the_family_the_gate_is_sized_for(self, family_size: int) -> None:
         # The declared precision holds there, and a note saying so on every verdict is noise.
-        assert _note_resolution_degraded(family_size, GATE_RESAMPLES, DEFAULT_ALPHA) is None
+        assert note_resolution_degraded(family_size, GATE_RESAMPLES, DEFAULT_ALPHA) is None
 
     @pytest.mark.parametrize("family_size", [GATE_MAX_FAMILY + 1, 8, 10])
     def test_the_note_reports_the_threshold_the_precision_and_the_count_that_restores_it(
         self, family_size: int
     ) -> None:
-        note = _note_resolution_degraded(family_size, GATE_RESAMPLES, DEFAULT_ALPHA)
+        note = note_resolution_degraded(family_size, GATE_RESAMPLES, DEFAULT_ALPHA)
         assert note is not None
         threshold, achieved, needed = self._expected(family_size)
         assert f"alpha/{family_size} = {threshold:.5f}" in note
@@ -2306,14 +2343,14 @@ class TestResolutionDegradedNote:
         assert f"{GATE_P_PRECISION:.2f} this gate declares" in note
 
     def test_it_is_not_a_refusal_and_says_so(self) -> None:
-        note = _note_resolution_degraded(8, GATE_RESAMPLES, DEFAULT_ALPHA)
+        note = note_resolution_degraded(8, GATE_RESAMPLES, DEFAULT_ALPHA)
         assert note is not None and "The decision above stands" in note
 
     def test_a_coarser_draw_count_reports_a_worse_precision(self) -> None:
         # Read off the verdict rather than from the constant: a caller may pass a custom count, and
         # the note has to describe the measurement that actually happened.
-        coarse = _note_resolution_degraded(8, 2_000, DEFAULT_ALPHA)
-        fine = _note_resolution_degraded(8, GATE_RESAMPLES, DEFAULT_ALPHA)
+        coarse = note_resolution_degraded(8, 2_000, DEFAULT_ALPHA)
+        fine = note_resolution_degraded(8, GATE_RESAMPLES, DEFAULT_ALPHA)
         assert coarse is not None and fine is not None and coarse != fine
         assert f"{self._expected(8, 2_000)[1]:.4f}" in coarse
 
@@ -2321,13 +2358,13 @@ class TestResolutionDegradedNote:
     def test_the_degenerate_inputs_are_guarded_rather_than_dividing(self, family_size: int, n_resamples: int) -> None:
         # Unreachable from either wrapper (no members means no notes loop), but the division is
         # guarded rather than left to raise out of a user's inline snippet.
-        assert _note_resolution_degraded(family_size, n_resamples, DEFAULT_ALPHA) is None
+        assert note_resolution_degraded(family_size, n_resamples, DEFAULT_ALPHA) is None
 
 
 class TestBothTracksEmitTheResolutionNote:
     """One function, two call sites, and the same sentence — the reason these notes are shared.
 
-    `_note_holm_family` and `_note_ordinary_negative` are shared for exactly this: byte-identical
+    `note_holm_family` and `note_ordinary_negative` are shared for exactly this: byte-identical
     copies 600 lines apart drift, and a ledger read back weeks later then has the two tracks
     describing one decision differently.
     """
@@ -2571,7 +2608,7 @@ class TestReusedRunDirIsRefused:
 
         Re-using a run dir with a smaller `--repeats` leaves the earlier call's `<NN>` dirs inside
         rows the new run.json DOES record. `load_suite_rows` pools every replicate it finds and
-        `_balance_pair` trims symmetrically — so, again, nothing else flags it and the gate returns
+        `balance_pair` trims symmetrically — so, again, nothing else flags it and the gate returns
         a confident interval over contaminated clusters.
         """
         run_dir = self._clean(tmp_path)  # every row recorded at replicate 00
@@ -3357,7 +3394,7 @@ class TestExecutionNoiseFloor:
         assert _execution_floor(_weighted_arm(tmp_path, "incumbent", one_row)) is None
 
     def test_is_none_when_weighted_score_is_unset(self, tmp_path: Path, caplog) -> None:
-        # A result with criteria but no weighted_score yields None from _row_score, so every
+        # A result with criteria but no weighted_score yields None from row_score, so every
         # cluster is empty. It must return None rather than a confident 0.0.
         run_dir = tmp_path / "run-0"
         for i in range(8):
@@ -3620,7 +3657,7 @@ class TestActivationPreflight:
     def test_the_notes_list_the_caller_holds_is_the_one_that_reaches_the_verdict(self, tmp_path: Path) -> None:
         """The identity contract the extraction had to preserve.
 
-        `activation_gate` holds the SAME list object `_load_and_pair` returned, because pydantic
+        `activation_gate` holds the SAME list object `load_and_pair` returned, because pydantic
         COPIES it at construction — so a note appended after the model is built is silently
         discarded. Returning a fresh list and `extend`-ing preserves that; re-binding `notes` to a
         concatenation would not, and every later note would land in a list no verdict ever sees.
@@ -3628,7 +3665,7 @@ class TestActivationPreflight:
         dirs = _shared_dirs(tmp_path, self.ROWS, self.ROWS, invocations=1)
         (dirs[0] / "run.json").unlink()
         verdict = _gate(dirs)
-        # The preflight's note AND a note `_load_and_pair` wrote before it are both on the verdict,
+        # The preflight's note AND a note `load_and_pair` wrote before it are both on the verdict,
         # which can only happen if one list carried both.
         assert any("row-selection provenance is missing" in note for note in verdict.notes)
         # And a note the gate appends AFTER the preflight also survives.
@@ -3636,7 +3673,7 @@ class TestActivationPreflight:
 
 
 class TestTheTwoDeduplications:
-    """`_wrong_path_reason` and `_holm_family` each replace a byte-identical copy.
+    """`wrong_path_reason` and `holm_family` each replace a byte-identical copy.
 
     A dedup that changes user-facing text is a silent report change, so the messages are asserted
     against pre-change LITERALS rather than against each other — comparing the two call sites to
@@ -3648,11 +3685,11 @@ class TestTheTwoDeduplications:
             f"nothing matched <run>/incumbent/{SUITE}/*/*/task.json under {tmp_path}/a, {tmp_path}/b — "
             "that is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
         )
-        assert _wrong_path_reason("incumbent", SUITE, [tmp_path / "a", tmp_path / "b"]) == expected
+        assert wrong_path_reason("incumbent", SUITE, [tmp_path / "a", tmp_path / "b"]) == expected
 
     def test_both_floors_emit_that_message_verbatim(self, tmp_path: Path, caplog) -> None:
         dirs = [tmp_path / "a", tmp_path / "b"]
-        expected = _wrong_path_reason("incumbent", SUITE, dirs)
+        expected = wrong_path_reason("incumbent", SUITE, dirs)
         for call in (
             lambda: measure_noise_floor(
                 run_dirs=dirs, variant_id="incumbent", suite_id=SUITE, criterion_index=0, model="m"
@@ -3671,7 +3708,7 @@ class TestTheTwoDeduplications:
         so an empty sequence read as a message trailing `under ` on one track and named the case on
         the other. Both now name it — the fuller form wins, which loses nothing.
         """
-        assert "under no run dirs were given" in _wrong_path_reason("incumbent", SUITE, [])
+        assert "under no run dirs were given" in wrong_path_reason("incumbent", SUITE, [])
 
     def test_holm_family_maps_original_indices_with_an_excluded_verdict_in_the_middle(self) -> None:
         """The off-by-one a naive `enumerate` over the filtered list produces.
@@ -3684,7 +3721,7 @@ class TestTheTwoDeduplications:
             _parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None),
             _parity_activation(p_value=0.002),
         ]
-        family, rejected_at = _holm_family(verdicts, DEFAULT_ALPHA)
+        family, rejected_at = holm_family(verdicts, DEFAULT_ALPHA)
         assert [i for i, _p in family] == [0, 2], "membership is by ORIGINAL index"
         assert rejected_at == {0, 2}
         # And end to end: the excluded verdict is index 1, and its neighbours keep their decisions.
@@ -3694,7 +3731,7 @@ class TestTheTwoDeduplications:
 
     def test_holm_family_handles_an_empty_family(self) -> None:
         verdicts = [_parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None)]
-        family, rejected_at = _holm_family(verdicts, DEFAULT_ALPHA)
+        family, rejected_at = holm_family(verdicts, DEFAULT_ALPHA)
         assert family == [] and rejected_at == set()
 
     @pytest.mark.parametrize(("gate", "build"), _TRACKS)
@@ -3724,7 +3761,7 @@ class TestTheMdeNoteNamesTheRealCause:
     reason is threaded out through `noise_floor_mde(reasons=...)`, an additive keyword-only sink,
     so the public `float | None` return the skill's snippets import is unchanged.
 
-    Five REACHABLE causes, each witnessed below. `_floor_from_clusters` records a sixth — the
+    Five REACHABLE causes, each witnessed below. `floor_from_clusters` records a sixth — the
     bootstrap declining on fewer than 2 clusters — which both floors' own `< 2` guards make
     unreachable from them, so it is deliberately not tested through this surface.
     """
@@ -4249,7 +4286,7 @@ class TestCostQualityFront:
     def test_a_crashed_arm_cannot_take_the_front_on_the_rows_it_skipped(self, tmp_path: Path) -> None:
         """Both coordinates must be averaged over the SAME rows — the ones the arm actually scored.
 
-        A crashed row produces no criterion results, so `_row_score` returns None and quality
+        A crashed row produces no criterion results, so `row_score` returns None and quality
         excludes it — but the row still burned tokens, so an unrestricted cost median includes it.
         Measured before the fix: an arm completing 1 of 6 rows at a perfect score took the whole
         front and knocked the incumbent off it, rendered as two clean numbers with nothing showing
@@ -4339,7 +4376,7 @@ class TestCostQualityFront:
 
 class TestOneRowCostDefinition:
     def test_cost_quality_points_agree_with_the_guardrail_about_a_row_cost(self, tmp_path: Path) -> None:
-        """Both surfaces print the same number, because both route through _row_cost_levels.
+        """Both surfaces print the same number, because both route through row_cost_levels.
 
         This is the test that stops a second definition of "what a row cost" from appearing — the
         CE037-class defect this repo already added a lint rule for in the F1 direction.
@@ -4366,15 +4403,15 @@ class TestOneRowCostDefinition:
         # Called directly and compared against the guardrail's reported level on a fixture with
         # UNEVEN replicate counts, so the shared reduction is exercised rather than assumed.
         rows = _cost_rows({"r0": [1.0, 3.0], "r1": [2.0], "r2": [4.0, 4.0, 4.0]})
-        levels = _row_cost_levels([_row_costs(rows[rid]) for rid in sorted(rows)])
+        levels = row_cost_levels([row_costs(rows[rid]) for rid in sorted(rows)])
         assert levels == [2.0, 2.0, 4.0]
 
         check = _cost_check(cost_latency_guardrails(incumbent_rows=rows, candidate_rows=rows, n_resamples=200))
-        assert check.incumbent == pytest.approx(_median(levels))
+        assert check.incumbent == pytest.approx(median_or_none(levels))
 
     def test_an_empty_cluster_is_absent_not_zero(self) -> None:
         # `mean([])` is 0.0, so an unfiltered empty cluster would read as "this row cost nothing".
-        assert _row_cost_levels([[1.0], [], [3.0]]) == [1.0, 3.0]
+        assert row_cost_levels([[1.0], [], [3.0]]) == [1.0, 3.0]
 
 
 class TestGraderFingerprint:
@@ -6325,9 +6362,9 @@ class TestPrimaryCriterionIndex:
         assert plain.mean_diff == pytest.approx(primary.mean_diff)
 
     def test_an_over_range_index_is_refused_rather_than_reported_as_empty(self, tmp_path: Path) -> None:
-        """`_require_valid_criterion_index` bounds only BELOW, deliberately — and that is wrong here.
+        """`require_valid_criterion_index` bounds only BELOW, deliberately — and that is wrong here.
 
-        An over-long index makes `_row_score` return None on every row, so the vector is EMPTY and
+        An over-long index makes `row_score` return None on every row, so the vector is EMPTY and
         indistinguishable from a suite whose rows all errored on that criterion. Refused explicitly.
         """
         verdict = _exec_gate(_exec_run_dir(tmp_path, **_WINNER), primary_criterion_index=7)
@@ -6740,7 +6777,7 @@ class TestLoadAndPair:
     """
 
     def _pair(self, run_dirs: list[Path], **kwargs):
-        return _load_and_pair(
+        return load_and_pair(
             **{
                 "incumbent_run_dirs": run_dirs,
                 "candidate_run_dirs": run_dirs,
@@ -8798,7 +8835,7 @@ class TestCrossSplitRefusal:
         assert decided.gate_refusal == verdict.gate_refusal
         # Outside the family by the p-based rule, so the "outside the family" note would be
         # redundant AND contradictory under a refusal headline.
-        assert _NOTE_OUTSIDE_FAMILY not in decided.notes
+        assert NOTE_OUTSIDE_FAMILY not in decided.notes
 
     def test_a_refused_verdict_does_not_shrink_a_siblings_holm_threshold(self, tmp_path: Path) -> None:
         """Family membership is `p_value is not None` and nothing else.
@@ -8815,10 +8852,10 @@ class TestCrossSplitRefusal:
         with_refused = next(v for v in holm_promote([sibling, refused]) if v.p_value is not None)
         # Asserted on the RANK-DEPENDENT quantity, not on `holm_alpha`: that one is assigned
         # `alpha` unconditionally in both branches, so comparing it is 0.05 == 0.05 and passes
-        # even with the family filter broken. `_note_ordinary_negative` and `_note_holm_family`
+        # even with the family filter broken. `note_ordinary_negative` and `note_holm_family`
         # both spell the family SIZE, which is the number a dropped verdict would move.
-        assert _note_holm_family(1, DEFAULT_ALPHA) in alone.notes
-        assert _note_holm_family(1, DEFAULT_ALPHA) in with_refused.notes, (
+        assert note_holm_family(1, DEFAULT_ALPHA) in alone.notes
+        assert note_holm_family(1, DEFAULT_ALPHA) in with_refused.notes, (
             "the refused verdict was counted in the family — dropping it would shrink m and "
             "LOOSEN alpha/m for every sibling"
         )

@@ -4,7 +4,7 @@ Rank 1 of the optimize family: it imports from :mod:`coder_eval.optimize.load` a
 else in the family, and both track modules import from it. What lives here is what is neither
 track's alone — the gate-wide constants, the notes both Holm wrappers emit verbatim, the
 noise-floor refusal channel and the cluster half both floors share, the cost/latency guardrails
-both gates run, and :func:`_holm_family`, the ONE
+both gates run, and :func:`holm_family`, the ONE
 :func:`~coder_eval.reports_stats.holm_rejections` call site.
 
 The two gates themselves live one rank up, in :mod:`coder_eval.optimize.activation` and
@@ -39,13 +39,14 @@ from coder_eval.models import (
     OptimizeMeasurements,
     copy_with,
 )
-from coder_eval.optimize.load import SplitProvenance, _balance_pair, _median, _row_cost_levels, _row_costs
+from coder_eval.optimize.load import SplitProvenance, balance_pair, row_cost_levels, row_costs
 from coder_eval.optimize.store import UNRESOLVED_MODEL, lookup_noise_floor
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
     cluster_bootstrap_diff_ci,
     holm_rejections,
     mean,
+    median_or_none,
 )
 
 
@@ -104,7 +105,7 @@ GATE_RESAMPLES = math.ceil(2.0 / (GATE_P_PRECISION**2 * (DEFAULT_ALPHA / GATE_MA
 FLOOR_RESOLUTION = 1e-9
 
 
-def _metric(pairs: list[tuple[str, str]], name: str) -> float:
+def classification_metric(pairs: list[tuple[str, str]], name: str) -> float:
     """A classification metric over ``pairs``, through the criterion layer's own routine.
 
     Empty pairs and an absent metric name both read 0.0, and both conventions are declared in
@@ -149,7 +150,7 @@ def cost_latency_guardrails(
     ids = sorted(set(incumbent_rows) & set(candidate_rows)) if row_ids is None else list(row_ids)
     checks: list[GuardrailCheck] = []
 
-    for name, extract in (("cost (USD/row)", _row_costs), ("latency (seconds/row)", _row_durations)):
+    for name, extract in (("cost (USD/row)", row_costs), ("latency (seconds/row)", _row_durations)):
         # Only rows BOTH arms measured, and balanced to the same observation count per row — the
         # same two rules the F1 gate applies. Without the first, a draw whose rows are all
         # cost-less on one arm pools to `[]`, `mean([])` reads 0.0, and the interval says that arm
@@ -163,20 +164,20 @@ def cost_latency_guardrails(
         # A row with no measurement on one arm already falls through to the note-and-None path.
         paired = [(extract(incumbent_rows.get(rid, [])), extract(candidate_rows.get(rid, []))) for rid in ids]
         measured = sum(1 for inc, _c in paired if inc), sum(1 for _i, cand in paired if cand)
-        comparable = [_balance_pair(inc, cand) for inc, cand in paired]
+        comparable = [balance_pair(inc, cand) for inc, cand in paired]
         # A different rule, applied AFTER the trim: drop rows one arm did not measure at all.
         comparable = [(inc, cand) for inc, cand in comparable if inc and cand]
 
         incumbent_clusters = [inc for inc, _c in comparable]
         candidate_clusters = [cand for _i, cand in comparable]
-        incumbent_median = _median(_row_cost_levels(incumbent_clusters))
-        candidate_median = _median(_row_cost_levels(candidate_clusters))
+        incumbent_median = median_or_none(row_cost_levels(incumbent_clusters))
+        candidate_median = median_or_none(row_cost_levels(candidate_clusters))
         # The floor scales by the incumbent's MEAN, because the interval it is compared against is
         # an interval on the difference of means. Scaling a mean-difference by a median is a unit
         # mismatch on any skewed distribution — and per-row cost is strongly right-skewed, so a
         # uniform 10% increase measured as FAIL against a 25% floor. The medians stay as the
         # reported level, which is the robust thing to READ; the mean is what is being tested.
-        incumbent_mean = mean(_row_cost_levels(incumbent_clusters)) if incumbent_clusters else 0.0
+        incumbent_mean = mean(row_cost_levels(incumbent_clusters)) if incumbent_clusters else 0.0
 
         if incumbent_median is None or candidate_median is None:
             checks.append(
@@ -234,7 +235,7 @@ def cost_latency_guardrails(
     return checks
 
 
-def _no_floor(reason: str, *, reasons: list[str] | None = None) -> None:
+def no_floor(reason: str, *, reasons: list[str] | None = None) -> None:
     """Log why a null comparison could not be made, optionally record it, and return None.
 
     ``reasons`` is an out-parameter SINK rather than a changed return type, and that is the whole
@@ -264,7 +265,7 @@ def _no_floor(reason: str, *, reasons: list[str] | None = None) -> None:
     return None
 
 
-def _floor_from_clusters[T](
+def floor_from_clusters[T](
     clusters_a: list[list[T]],
     clusters_b: list[list[T]],
     statistic: Callable[[list[T]], float],
@@ -298,7 +299,7 @@ def _floor_from_clusters[T](
         seed=probe.seed,
     )
     if bootstrap is None:
-        return _no_floor(
+        return no_floor(
             f"the bootstrap declined on {len(clusters_a)} cluster(s) for {probe.suite_id!r} — it needs 2",
             reasons=reasons,
         )
@@ -314,14 +315,14 @@ def _floor_from_clusters[T](
 # — the execution track's zero-row case became a `gate_refusal` with different text, and its MDE
 # note names `weighted_score` because that is the statistic its gate reads. Two tracks saying
 # different things there is the finding, not drift.
-_NOTE_OUTSIDE_FAMILY = "not promoted: the sample could not support a p-value, so this arm is outside the family."
-_NOTE_CI_CONTAINS_ZERO = (
+NOTE_OUTSIDE_FAMILY = "not promoted: the sample could not support a p-value, so this arm is outside the family."
+NOTE_CI_CONTAINS_ZERO = (
     "not promoted: the Holm-corrected test rejects but the confidence interval still "
     "contains zero, so the effect is not separated at the reported interval width."
 )
 
 
-def _note_ordinary_negative(p_value: float, family_size: int, alpha: float) -> str:
+def note_ordinary_negative(p_value: float, family_size: int, alpha: float) -> str:
     return (
         f"not promoted: p = {p_value:.4f} did not clear the Holm threshold for its rank in a "
         f"family of {family_size} (alpha={alpha}). This is the ordinary negative result — the "
@@ -329,11 +330,11 @@ def _note_ordinary_negative(p_value: float, family_size: int, alpha: float) -> s
     )
 
 
-def _note_holm_family(family_size: int, alpha: float) -> str:
+def note_holm_family(family_size: int, alpha: float) -> str:
     return f"Holm applied across a family of {family_size} at alpha={alpha}."
 
 
-def _note_resolution_degraded(family_size: int, n_resamples: int, alpha: float) -> str | None:
+def note_resolution_degraded(family_size: int, n_resamples: int, alpha: float) -> str | None:
     """What resolution the gate ACTUALLY achieved on a family larger than it is sized for.
 
     :data:`GATE_RESAMPLES` is derived from :data:`GATE_P_PRECISION` at the strictest Holm threshold
@@ -343,7 +344,7 @@ def _note_resolution_degraded(family_size: int, n_resamples: int, alpha: float) 
     printed the family size and the declared precision was documented on a constant nobody reads at
     that moment.
 
-    **``str | None``, unlike :func:`_note_holm_family` beside it, which is unconditional.** Returning
+    **``str | None``, unlike :func:`note_holm_family` beside it, which is unconditional.** Returning
     ``None`` below the threshold puts the condition in ONE place. The alternative — a ``str`` return
     plus an ``if`` duplicated at the two call sites — is exactly the shape that lets the two tracks
     drift, which is the whole reason these notes are shared.
@@ -632,7 +633,7 @@ class _HolmFamily(NamedTuple):
     rejected_at: set[int]
 
 
-def _holm_family(verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict], alpha: float) -> _HolmFamily:
+def holm_family(verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict], alpha: float) -> _HolmFamily:
     """The one place :func:`~coder_eval.reports_stats.holm_rejections` is called.
 
     Both wrappers spelled these three lines identically, 700 lines apart. Holm corrects a FAMILY,
@@ -654,7 +655,7 @@ def _holm_family(verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict
     return _HolmFamily(members, {i for (i, _p), reject in zip(members, rejections, strict=True) if reject})
 
 
-def _family_resamples(
+def resamples_for_family(
     verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict], family: list[tuple[int, float]]
 ) -> int:
     """The COARSEST draw count among the family's members — what bounds the family's resolution.
@@ -663,13 +664,13 @@ def _family_resamples(
     count, and over family MEMBERS only: a verdict with no p was not tested at any resolution.
 
     Shared because the line was byte-identical in both Holm wrappers, which is the duplication
-    :func:`_note_resolution_degraded` was put at this rank to avoid — and :func:`_holm_family` already
+    :func:`note_resolution_degraded` was put at this rank to avoid — and :func:`holm_family` already
     accepts both verdict types, so there was nothing structural keeping it apart.
     """
     return min((verdicts[i].n_resamples for i, _p in family), default=GATE_RESAMPLES)
 
 
-def _note_check_failed(check_name: str) -> str:
+def note_check_failed(check_name: str) -> str:
     """Which non-primary check vetoed a promotion the statistic had otherwise won.
 
     A fifth shared note beside the four above, and for the same reason they exist: both tracks now

@@ -25,19 +25,19 @@ from coder_eval.models import (
     ArmRowScores,
 )
 from coder_eval.optimize.load import (
-    _median,
-    _pool,
-    _reconcile_arms,
-    _require_valid_criterion_index,
-    _row_cost_levels,
-    _row_costs,
-    _row_score,
-    _stale_tree_reason,
     load_arm_rows,
     load_suite_rows,
+    pool_replicates,
+    reconcile_arms,
+    require_valid_criterion_index,
+    row_cost_levels,
+    row_costs,
+    row_score,
+    stale_tree_reason,
 )
 from coder_eval.reports_stats import (
     mean,
+    median_or_none,
 )
 
 
@@ -66,22 +66,22 @@ def arm_row_scores(
     return type rather than a softer stance: ``ArmRowScores`` is a vector with nowhere to put a
     refusal, and the three fronts computed from it take a list. Both noise floors, which return
     ``NoiseFloor | None``, refuse on the same detection. The message is the same either way
-    (:func:`_stale_tree_reason`) so the two read alike in a log.
+    (:func:`stale_tree_reason`) so the two read alike in a log.
     """
-    _require_valid_criterion_index(criterion_index)
+    require_valid_criterion_index(criterion_index)
     # ONE sweep over every arm before any load. It does NOT save a `run.json` parse — reconciling
     # is per (variant, dir) either way — but it collects every location into one message, so a run
     # dir carrying both arms reports one warning naming both rather than one warning per arm for
     # what is a single re-used `--run-dir`.
-    stale, _unknown_dirs = _reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
+    stale, _unknown_dirs = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
     if stale:
-        logger.warning("Row scores may be over a contaminated tree: %s", _stale_tree_reason(stale))
+        logger.warning("Row scores may be over a contaminated tree: %s", stale_tree_reason(stale))
     arms: list[ArmRowScores] = []
     for variant_id in variant_ids:
-        rows = _pool([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
+        rows = pool_replicates([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
         scores: dict[str, float] = {}
         for row_id, results in sorted(rows.items()):
-            values = [v for r in results if (v := _row_score(r, criterion_index)) is not None]
+            values = [v for r in results if (v := row_score(r, criterion_index)) is not None]
             if values:
                 scores[row_id] = mean(values)
         arms.append(ArmRowScores(variant_id=variant_id, row_scores=scores))
@@ -97,7 +97,7 @@ def _finite_scores(arm: ArmRowScores) -> dict[str, float]:
     front by incomparability, rendered in bold beside arms that earned it. Treating it as absent
     instead routes it through the coverage rule, which is the answer already agreed for a hole.
 
-    Nothing produces a non-finite score today (``_row_score`` returns means of scores bounded
+    Nothing produces a non-finite score today (``row_score`` returns means of scores bounded
     [0, 1]), which is exactly why it would be silent.
     """
     return {row_id: value for row_id, value in arm.row_scores.items() if math.isfinite(value)}
@@ -176,7 +176,7 @@ def instance_best_front(arms: list[ArmRowScores]) -> list[str]:
             # Non-finite values are skipped when SEEDING the maximum. `value > nan` is False, so a
             # single NaN landing in a row would pin that row's maximum at NaN forever — and then
             # `v == best[r]` is False for every arm, dropping not just the NaN arm but the arm that
-            # genuinely won the row. Nothing produces one today (`_row_score` returns means of
+            # genuinely won the row. Nothing produces one today (`row_score` returns means of
             # scores bounded [0, 1]), which is exactly why it would be silent.
             if math.isfinite(value) and (row_id not in best or value > best[row_id]):
                 best[row_id] = value
@@ -294,7 +294,7 @@ def cost_quality_points(
     """Each arm's mean row score against its median per-row cost.
 
     Quality reuses :func:`arm_row_scores`, so this view and the row matrix cannot disagree about
-    what a row scored. Cost reuses :func:`_row_cost_levels`, so it and the guardrail cannot
+    what a row scored. Cost reuses :func:`row_cost_levels`, so it and the guardrail cannot
     disagree about what a row cost.
 
     **BOTH coordinates are reduced over the same rows: the ones the arm actually scored.** Cost is
@@ -319,7 +319,7 @@ def cost_quality_points(
     reads that criterion's score (the activation track). The same switch ``arm_row_scores``
     already has, rather than a second track parameter.
     """
-    _require_valid_criterion_index(criterion_index)
+    require_valid_criterion_index(criterion_index)
     arms = arm_row_scores(
         run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
     )
@@ -330,12 +330,12 @@ def cost_quality_points(
         # fault — measured, and the reason the suppression is the record rather than a second call.
         rows = load_arm_rows(run_dirs, arm.variant_id, suite_id)  # noqa: CE053
         scored_ids = sorted(arm.row_scores)
-        levels = _row_cost_levels([_row_costs(rows.get(rid, [])) for rid in scored_ids])
+        levels = row_cost_levels([row_costs(rows.get(rid, [])) for rid in scored_ids])
         points.append(
             CostQualityPoint(
                 variant_id=arm.variant_id,
                 score=mean(list(arm.row_scores.values())) if arm.row_scores else None,
-                cost_per_row=_median(levels),
+                cost_per_row=median_or_none(levels),
                 row_ids=frozenset(scored_ids),
             )
         )

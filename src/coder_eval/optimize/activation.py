@@ -32,40 +32,40 @@ from coder_eval.models import (
     copy_with,
 )
 from coder_eval.optimize.gate import (
-    _NOTE_CI_CONTAINS_ZERO,
-    _NOTE_OUTSIDE_FAMILY,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
-    _family_resamples,
-    _floor_from_clusters,
-    _holm_family,
-    _metric,
-    _no_floor,
-    _note_check_failed,
-    _note_holm_family,
-    _note_ordinary_negative,
-    _note_resolution_degraded,
+    NOTE_CI_CONTAINS_ZERO,
+    NOTE_OUTSIDE_FAMILY,
     build_confirm_verdict,
+    classification_metric,
     confirm_one_candidate,
     confirm_split_check,
     confirm_train_note,
     confirm_train_refusal,
     cost_latency_guardrails,
+    floor_from_clusters,
+    holm_family,
+    no_floor,
+    note_check_failed,
+    note_holm_family,
+    note_ordinary_negative,
+    note_resolution_degraded,
+    resamples_for_family,
 )
 from coder_eval.optimize.load import (
-    _balance_pair,
-    _format_splits,
-    _label_pairs,
-    _load_and_pair,
-    _pool,
-    _reconcile_arms,
-    _require_valid_criterion_index,
-    _split_mismatch_reason,
-    _stale_locations,
-    _stale_tree_reason,
-    _wrong_path_reason,
+    balance_pair,
+    format_splits,
+    label_pairs,
+    load_and_pair,
     load_suite_rows,
+    pool_replicates,
     read_split_provenance,
+    reconcile_arms,
+    require_valid_criterion_index,
+    split_mismatch_reason,
+    stale_locations,
+    stale_tree_reason,
+    wrong_path_reason,
 )
 from coder_eval.optimize.store import UNRESOLVED_MODEL
 from coder_eval.reports_stats import (
@@ -86,7 +86,7 @@ NEAR_FLOOR_MULTIPLE = 5.0
 
 
 def _f1_yes(pairs: list[tuple[str, str]]) -> float:
-    return _metric(pairs, f"f1.{TARGET_LABEL}")
+    return classification_metric(pairs, f"f1.{TARGET_LABEL}")
 
 
 def _discreteness_floor(n_rows: int, n_discordant: int, n_resamples: int) -> float:
@@ -195,11 +195,11 @@ def noise_floor_mde(
     ``--split`` values, and fewer than 2 rows scored in both halves — and the hardcoded sentence
     ``activation_gate`` used to print named only the first.
 
-    **At most ONE reason is recorded per call**, because every ``_no_floor`` call site is a
+    **At most ONE reason is recorded per call**, because every ``no_floor`` call site is a
     ``return``: the first cause to fire ends the function. So a caller reads ``reasons[0]`` and a
     fresh list per call is the intended use. Reusing one list across arms would silently keep the
     first arm's cause in front of the second arm's, which the five-cause list above might otherwise
-    suggest is an accumulation. (:func:`_floor_from_clusters` records a
+    suggest is an accumulation. (:func:`floor_from_clusters` records a
     sixth, the bootstrap declining, which both floors' own ``< 2`` guards make unreachable from
     them; it is defence in depth for a direct caller, and it forwards the sink so a future path
     that does reach it is not silent.)
@@ -207,7 +207,7 @@ def noise_floor_mde(
     To RECORD what this measured, call :func:`measure_noise_floor` instead — it returns the whole
     keyed record, including the row count, which this function does not expose.
     """
-    _require_valid_criterion_index(criterion_index)
+    require_valid_criterion_index(criterion_index)
     measured = measure_noise_floor(
         reasons=reasons,
         run_dirs=run_dirs,
@@ -255,9 +255,9 @@ def measure_noise_floor(
     recorded, since every refusal here is a ``return``. See :func:`noise_floor_mde`, which forwards
     it, for the five causes and for why this is a sink rather than a widened return type.
     """
-    _require_valid_criterion_index(criterion_index)
+    require_valid_criterion_index(criterion_index)
     if len(run_dirs) < 2:
-        return _no_floor(
+        return no_floor(
             f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}", reasons=reasons
         )
 
@@ -270,11 +270,11 @@ def measure_noise_floor(
     # BEFORE the load, so a contaminated tree costs no parse; a WRONG path leaves nothing on disk
     # to be unrecorded, so the wrong-path message below still wins its own case.
     # An `unknown` dir is a NOTE, never a refusal — the module's settled missing-provenance stance,
-    # so old run dirs stay measurable. `_reconcile_arms` logs it; this function has no `notes`
+    # so old run dirs stay measurable. `reconcile_arms` logs it; this function has no `notes`
     # channel to surface it in, so the count is deliberately unused here.
-    stale, _unknown_dirs = _reconcile_arms([(variant_id, run_dirs)], suite_id)
+    stale, _unknown_dirs = reconcile_arms([(variant_id, run_dirs)], suite_id)
     if stale:
-        return _no_floor(_stale_tree_reason(stale), reasons=reasons)
+        return no_floor(stale_tree_reason(stale), reasons=reasons)
 
     per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
     # The same wrong-path guard `measure_execution_noise_floor` carries, and for the same reason: a
@@ -285,24 +285,24 @@ def measure_noise_floor(
     # `not any(per_dir)` rather than the twin's `not rows`: that one pools once, this one keeps the
     # per-invocation maps because it splits them into halves.
     if not any(per_dir):
-        return _no_floor(_wrong_path_reason(variant_id, suite_id, run_dirs), reasons=reasons)
+        return no_floor(wrong_path_reason(variant_id, suite_id, run_dirs), reasons=reasons)
 
     # The null split assumes both halves measure the SAME thing. Pooling a train invocation with
     # a test one breaks that assumption before any arithmetic happens, so refuse rather than
     # report a floor for a row set that does not exist.
     provenance = read_split_provenance(run_dirs)
     if provenance.mismatched:
-        return _no_floor(_split_mismatch_reason("the null split", provenance, run_dirs), reasons=reasons)
+        return no_floor(split_mismatch_reason("the null split", provenance, run_dirs), reasons=reasons)
 
     midpoint = (len(per_dir) + 1) // 2
-    first, second = _pool(per_dir[:midpoint]), _pool(per_dir[midpoint:])
+    first, second = pool_replicates(per_dir[:midpoint]), pool_replicates(per_dir[midpoint:])
 
     shared = sorted(set(first) & set(second))
-    clusters_a = [_label_pairs(first[rid], criterion_index) for rid in shared]
-    clusters_b = [_label_pairs(second[rid], criterion_index) for rid in shared]
+    clusters_a = [label_pairs(first[rid], criterion_index) for rid in shared]
+    clusters_b = [label_pairs(second[rid], criterion_index) for rid in shared]
     scored = [(a, b) for a, b in zip(clusters_a, clusters_b, strict=True) if a and b]
     if len(scored) < 2:
-        return _no_floor(
+        return no_floor(
             f"only {len(scored)} row(s) of {suite_id!r} scored a classification result at criterion "
             + f"{criterion_index} in BOTH halves of the invocation split — an interval needs 2",
             reasons=reasons,
@@ -326,7 +326,7 @@ def measure_noise_floor(
         mde=0.0,
         computed_at=datetime.now(UTC),
     )
-    return _floor_from_clusters(
+    return floor_from_clusters(
         [a for a, _b in scored], [b for _a, b in scored], _f1_yes, probe, measurements, reasons=reasons
     )
 
@@ -355,7 +355,7 @@ def derive_sibling_indices(*rows_maps: dict[str, list[EvaluationResult]], primar
     through ``activation_gate``, which validates first; reachable by anyone calling this directly,
     which the parameter's different NAME makes easy to overlook.
     """
-    _require_valid_criterion_index(primary_index)
+    require_valid_criterion_index(primary_index)
     found: set[int] = set()
     for rows in rows_maps:
         for results in rows.values():
@@ -389,9 +389,9 @@ def _balanced_sibling_pairs(
     """
     per_row: list[tuple[list[tuple[str, str]], list[tuple[str, str]]]] = []
     for row_id in paired_row_ids:
-        incumbent = _label_pairs(incumbent_rows.get(row_id, []), index)
-        candidate = _label_pairs(candidate_rows.get(row_id, []), index)
-        per_row.append(_balance_pair(incumbent, candidate))
+        incumbent = label_pairs(incumbent_rows.get(row_id, []), index)
+        candidate = label_pairs(candidate_rows.get(row_id, []), index)
+        per_row.append(balance_pair(incumbent, candidate))
     return per_row
 
 
@@ -453,13 +453,13 @@ def _sibling_checks(
         # PRESENCE is read from the untrimmed pools — "this arm produced no results here at all" is
         # an arm-level fact, and balancing would erase it by trimming a one-sided row to nothing.
         # The METRICS are read from the balanced ones, so an extra replicate cannot move recall.
-        raw_incumbent = [p for rid in paired_row_ids for p in _label_pairs(incumbent_rows.get(rid, []), index)]
-        raw_candidate = [p for rid in paired_row_ids for p in _label_pairs(candidate_rows.get(rid, []), index)]
+        raw_incumbent = [p for rid in paired_row_ids for p in label_pairs(incumbent_rows.get(rid, []), index)]
+        raw_candidate = [p for rid in paired_row_ids for p in label_pairs(candidate_rows.get(rid, []), index)]
         per_row = _balanced_sibling_pairs(incumbent_rows, candidate_rows, paired_row_ids, index)
         incumbent_pairs = [p for inc, _c in per_row for p in inc]
         candidate_pairs = [p for _i, cand in per_row for p in cand]
-        incumbent_recall = _metric(incumbent_pairs, metric_name)
-        candidate_recall = _metric(candidate_pairs, metric_name)
+        incumbent_recall = classification_metric(incumbent_pairs, metric_name)
+        candidate_recall = classification_metric(candidate_pairs, metric_name)
 
         note: str | None = None
         one_sided = bool(raw_incumbent) != bool(raw_candidate)
@@ -541,7 +541,7 @@ def _activation_preflight(
     candidate_provenance = read_split_provenance(candidate_run_dirs)
     union = incumbent_provenance.recorded | candidate_provenance.recorded
     if len(union) > 1:
-        splits = _format_splits(union)
+        splits = format_splits(union)
         return (
             f"the two arms recorded DIFFERENT --split values ({splits}) — "
             f"{incumbent_variant!r} over {', '.join(str(d) for d in incumbent_run_dirs)} and "
@@ -555,7 +555,7 @@ def _activation_preflight(
     missing = incumbent_provenance.unrecorded + candidate_provenance.unrecorded
     total_dirs = len(incumbent_run_dirs) + len(candidate_run_dirs)
     if missing:
-        # "directories" unconditionally: `_load_and_pair` does NOT return early on an empty arm
+        # "directories" unconditionally: `load_and_pair` does NOT return early on an empty arm
         # (it notes zero rows and continues), so `total_dirs == 1` is reachable via an empty arm.
         # A plural on a count of one is a cosmetic wart; a comment claiming an invariant that does
         # not hold is worse, so this says which it is.
@@ -572,11 +572,11 @@ def _activation_preflight(
     # second invocation rewrites `row_selection` to a single split while the first split's results
     # stay on disk, so provenance reads clean and the gate pools both splits into one arm. See
     # `reconcile_tree_against_run_json` for why this matches (row, replicate) rather than counting.
-    stale, unknown_dirs = _reconcile_arms(
+    stale, unknown_dirs = reconcile_arms(
         ((incumbent_variant, incumbent_run_dirs), (candidate_variant, candidate_run_dirs)), suite_id
     )
     if stale:
-        locations = _stale_locations(stale)
+        locations = stale_locations(stale)
         refusal = (
             "the run directory tree holds results that no recorded invocation wrote — "
             f"{locations}. run.json is written per INVOCATION while the tree is APPEND-ONLY, so a "
@@ -643,14 +643,14 @@ def activation_gate(
     statistic at all: that returns ``promoted=False`` outright, because there is no p-value for a
     family decision to correct.)
     """
-    _require_valid_criterion_index(criterion_index)
+    require_valid_criterion_index(criterion_index)
     for index in sibling_indices or ():
-        # Same guard, different parameter NAME — which is exactly why it was missed. `_label_pairs`
+        # Same guard, different parameter NAME — which is exactly why it was missed. `label_pairs`
         # bounds only above, so a negative sibling index grades the LAST criterion under a label
         # reading `criterion -1`, and `holm_promote` folds `sibling_checks` into `promoted`: the
         # wrong criterion then vetoes, or fails to veto, a promotion.
-        _require_valid_criterion_index(index)
-    paired = _load_and_pair(
+        require_valid_criterion_index(index)
+    paired = load_and_pair(
         incumbent_run_dirs=incumbent_run_dirs,
         candidate_run_dirs=candidate_run_dirs,
         incumbent_variant=incumbent_variant,
@@ -661,7 +661,7 @@ def activation_gate(
     incumbent_rows, candidate_rows = paired.incumbent_rows, paired.candidate_rows
     scored_row_ids, n_discordant = paired.scored_row_ids, paired.n_discordant
     # THE SAME list object, not a copy: pydantic copies it at construction, so every note this
-    # function still adds has to land in the list `_load_and_pair` returned, before either return.
+    # function still adds has to land in the list `load_and_pair` returned, before either return.
     notes = paired.notes
 
     def _refuse_activation(refusal: str) -> ActivationGateVerdict:
@@ -704,7 +704,7 @@ def activation_gate(
         candidate_variant=candidate_variant,
         suite_id=suite_id,
     )
-    # EXTEND, never re-bind: `notes` is the SAME list object `_load_and_pair` returned, and pydantic
+    # EXTEND, never re-bind: `notes` is the SAME list object `load_and_pair` returned, and pydantic
     # copies it at construction — so `notes = notes + preflight_notes` would leave every later
     # append landing in a list no verdict ever sees.
     notes.extend(preflight_notes)
@@ -856,11 +856,11 @@ def activation_gate(
     # Retained as a DIAGNOSTIC, never as the gate: the per-invocation ranges are what the old
     # rule compared, and reporting them keeps a reader's intuition calibrated against the CI.
     incumbent_per_invocation = [
-        _f1_yes([p for rid in scored_row_ids if rid in rows for p in _label_pairs(rows[rid], criterion_index)])
+        _f1_yes([p for rid in scored_row_ids if rid in rows for p in label_pairs(rows[rid], criterion_index)])
         for rows in paired.incumbent_by_dir
     ]
     candidate_per_invocation = [
-        _f1_yes([p for rid in scored_row_ids if rid in rows for p in _label_pairs(rows[rid], criterion_index)])
+        _f1_yes([p for rid in scored_row_ids if rid in rows for p in label_pairs(rows[rid], criterion_index)])
         for rows in paired.candidate_by_dir
     ]
     range_non_overlap = bool(
@@ -1026,7 +1026,7 @@ def _activation_notes(
 
     if refusal is None:
         if rejected and favours_candidate and siblings_hold and not excludes_zero:
-            notes.append(_NOTE_CI_CONTAINS_ZERO)
+            notes.append(NOTE_CI_CONTAINS_ZERO)
         if rejected and not siblings_hold:
             notes.append(
                 "not promoted: the interval separates but a sibling's recall.yes dropped — this candidate "
@@ -1035,14 +1035,14 @@ def _activation_notes(
         if rejected and not favours_candidate:
             notes.append("not promoted: the interval separates in the incumbent's favour.")
         if not rejected:
-            notes.append(_note_ordinary_negative(p_value, family_size, alpha))
+            notes.append(note_ordinary_negative(p_value, family_size, alpha))
         # Names WHICH guardrail vetoed, mirroring the execution track's loop. `sibling_checks` is
         # deliberately NOT iterated: the rung above is already the single declaration for a sibling
         # failure. Guarded further on `rejected and separated`, the same conjuncts the BLOCKED
         # headline is keyed on — on a candidate that merely lost the guardrail forced nothing, so
         # the note would claim a veto that did not happen.
         if rejected and verdict.separated:
-            notes += [_note_check_failed(check.name) for check in verdict.guardrails if not check.passed]
+            notes += [note_check_failed(check.name) for check in verdict.guardrails if not check.passed]
 
     # A p at the resample floor is a resolution statement, not a measurement: the corrected
     # threshold can sit BELOW what the bootstrap can express, and then no candidate can ever
@@ -1059,10 +1059,10 @@ def _activation_notes(
             + "n_resamples before believing either answer. A small suite has its own coarser floor: with "
             + "few positive rows the smallest achievable p is bounded well above the estimator's."
         )
-    notes.append(_note_holm_family(family_size, alpha))
+    notes.append(note_holm_family(family_size, alpha))
     # The second rung outside the refusal guard, for the same reason as the resolution-floor note
     # above it: a statement about the draw count rather than about this candidate.
-    if (degraded := _note_resolution_degraded(family_size, family_resamples, alpha)) is not None:
+    if (degraded := note_resolution_degraded(family_size, family_resamples, alpha)) is not None:
         notes.append(degraded)
     return notes
 
@@ -1218,7 +1218,7 @@ def confirm_gate(
         # block reporting UNDECIDED with no reason would send the reader to the gate's notes to find
         # out why. Below the split check: a mismatch that INCLUDES a non-test split is the more
         # specific fault, and `confirm_split_check` names every off-split value it saw.
-        _refuse(_split_mismatch_reason("the confirm run's", provenance, confirm_dirs))
+        _refuse(split_mismatch_reason("the confirm run's", provenance, confirm_dirs))
 
     test_verdict = holm_promote(
         [
@@ -1296,8 +1296,8 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     nothing else: a refused verdict is outside it, so ``m`` (and therefore every sibling's
     ``alpha/m``) is unchanged by its presence.
     """
-    family, rejected_at = _holm_family(verdicts, alpha)
-    family_resamples = _family_resamples(verdicts, family)
+    family, rejected_at = holm_family(verdicts, alpha)
+    family_resamples = resamples_for_family(verdicts, family)
 
     decided: list[ActivationGateVerdict] = []
     for i, verdict in enumerate(verdicts):
@@ -1308,7 +1308,7 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
             # track, and its verdicts always arrive with `p_value is None`. Unguarded, a refused
             # block would print an ordinary negative-result note directly under a refusal headline.
             if verdict.gate_refusal is None:
-                notes.append(_NOTE_OUTSIDE_FAMILY)
+                notes.append(NOTE_OUTSIDE_FAMILY)
             # Outside the family, so nothing was rejected — False rather than None, which would
             # read as "Holm has not run" on a verdict it has. The execution twin says the same.
             decided.append(copy_with(verdict, promoted=False, holm_rejected=False, holm_alpha=alpha, notes=notes))

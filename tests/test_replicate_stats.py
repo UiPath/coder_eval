@@ -11,6 +11,7 @@ from coder_eval.reports_stats import (
     cluster_bootstrap_diff_ci,
     cohens_d,
     holm_rejections,
+    median_or_none,
     paired_t_ci,
     paired_t_test,
     student_t_critical,
@@ -419,3 +420,34 @@ class TestHolmRejections:
     def test_rejects_non_finite_p_values(self):
         with pytest.raises(ValueError, match="must all be finite"):
             holm_rejections([0.01, float("nan")])
+
+
+class TestMedianOrNone:
+    """The empty-sample contract, which is the entire reason this exists beside `mean`.
+
+    `mean` folds an empty sample to `0.0`, and a cost guardrail cannot tell that from an arm that
+    genuinely cost nothing — so `None` and `0.0` must never collapse into each other.
+    """
+
+    def test_returns_none_on_an_empty_sample(self):
+        assert median_or_none([]) is None
+
+    def test_a_median_of_zero_is_not_none(self):
+        assert median_or_none([0.0]) == 0.0
+        assert median_or_none([0.0]) is not None
+        assert median_or_none([-1.0, 0.0, 1.0]) == 0.0
+
+    def test_it_is_the_ordinary_median_otherwise(self):
+        assert median_or_none([3.0, 1.0, 2.0]) == 2.0
+        # Even count averages the middle pair, as `statistics.median` does.
+        assert median_or_none([1.0, 2.0, 3.0, 4.0]) == 2.5
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_sample_is_none_rather_than_nan(self, bad):
+        """A `nan` median reaches a guardrail's relative-change arithmetic and answers neither way.
+
+        Both callers already branch on `None` — one emits an unevaluated check with a note, the
+        other treats the point as absent — and neither has a branch for a `nan`.
+        """
+        assert median_or_none([bad]) is None
+        assert median_or_none([1.0, 2.0, bad]) is None

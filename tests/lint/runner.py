@@ -35,6 +35,7 @@ from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
 from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRulesHandleLevel
 from tests.lint.rules.ce053_run_tree_readers_reconcile import RunTreeReadersReconcile
 from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
+from tests.lint.rules.ce059_no_sibling_private_imports import NoSiblingPrivateImports
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -93,6 +94,7 @@ ALL_RULES: list[RuleClass] = [
     ImportFromRulesHandleLevel,
     RunTreeReadersReconcile,
     ResultStatusSingleSeam,
+    NoSiblingPrivateImports,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

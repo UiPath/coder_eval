@@ -4,14 +4,14 @@ Rank 0 of the optimize family: it imports nothing from its siblings and everythi
 from it. What lives here is every question answered by READING a finalized run directory —
 walking ``<run>/<variant>/<suite_id>/<row_id>/NN/task.json``, pooling replicates, pairing two arms,
 reading ``run.json``'s row-selection provenance, and reconciling a tree against what its own
-``run.json`` says it ran — plus the row primitives (:func:`_row_score`, :func:`_row_costs`,
-:func:`_row_cost_levels`, :func:`_label_pairs`) that more than one track reduces rows with.
+``run.json`` says it ran — plus the row primitives (:func:`row_score`, :func:`row_costs`,
+:func:`row_cost_levels`, :func:`label_pairs`) that more than one track reduces rows with.
 
 **Nothing here decides anything.** No promotion, no refusal, no statistic: a caller gets rows,
 counts and notes, and the two gates decide on them. That is what makes the rank boundary real
 rather than a filing convention.
 
-:data:`TASK_JSON_GLOB` and :func:`_task_json_pattern` are the ONE declaration of where a row's
+:data:`TASK_JSON_GLOB` and :func:`task_json_pattern` are the ONE declaration of where a row's
 replicate results live and of how that path is spelled back to a user (CE042).
 """
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-import statistics as _stats
+import math
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 TASK_JSON_GLOB = "*/*/task.json"
 
 
-def _task_json_pattern(variant_id: str, suite_id: str) -> str:
+def task_json_pattern(variant_id: str, suite_id: str) -> str:
     """The glob as a user-facing path, so a wrong-path message cannot describe a different tree.
 
     Four messages tell a reader what did not match; they used to spell the pattern as a string, so
@@ -59,23 +59,23 @@ def _task_json_pattern(variant_id: str, suite_id: str) -> str:
     return f"<run>/{variant_id}/{suite_id}/{TASK_JSON_GLOB}"
 
 
-def _wrong_path_reason(variant_id: str, suite_id: str, run_dirs: Sequence[Path]) -> str:
+def wrong_path_reason(variant_id: str, suite_id: str, run_dirs: Sequence[Path]) -> str:
     """The SILENT-ZERO message: nothing matched, and that is a path fault rather than a result.
 
-    Beside :func:`_task_json_pattern` and for the same reason. Both floors returned this sentence
+    Beside :func:`task_json_pattern` and for the same reason. Both floors returned this sentence
     byte-identically, 130 lines apart, and the copies had already diverged: the execution twin
     appended ``or "no run dirs were given"`` for an empty sequence and the activation one did not,
     so the same fault read as ``under `` on one track and named the case on the other. The divergence
     is exactly what duplication produces, so the fuller form is folded in for both — an empty
     ``run_dirs`` now reads the same either way.
 
-    Two paraphrases elsewhere are deliberately NOT collapsed into this: ``_load_and_pair`` prefixes
+    Two paraphrases elsewhere are deliberately NOT collapsed into this: ``load_and_pair`` prefixes
     ``the {arm} arm loaded ZERO rows:`` and ``_execution_diagnostics`` names both arms and carries a
     guardrail tail. They share this clause; they are not this message.
     """
     searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
     return (
-        f"nothing matched {_task_json_pattern(variant_id, suite_id)} under {searched} — that "
+        f"nothing matched {task_json_pattern(variant_id, suite_id)} under {searched} — that "
         + "is a wrong variant id, a wrong suite id or a wrong run directory, not a measurement"
     )
 
@@ -107,7 +107,7 @@ def load_suite_rows(run_dir: Path, variant_id: str, suite_id: str) -> dict[str, 
     return rows
 
 
-def _pool(per_invocation: list[dict[str, list[EvaluationResult]]]) -> dict[str, list[EvaluationResult]]:
+def pool_replicates(per_invocation: list[dict[str, list[EvaluationResult]]]) -> dict[str, list[EvaluationResult]]:
     """Merge per-invocation row maps into one, appending replicates rather than overwriting."""
     merged: dict[str, list[EvaluationResult]] = {}
     for rows in per_invocation:
@@ -123,10 +123,10 @@ def load_arm_rows(run_dirs: Sequence[Path], variant_id: str, suite_id: str) -> d
     directory. Those are the row's replicates — the within-cluster data the bootstrap resamples —
     so they are appended, never overwritten.
     """
-    return _pool([load_suite_rows(run_dir, variant_id, suite_id) for run_dir in run_dirs])
+    return pool_replicates([load_suite_rows(run_dir, variant_id, suite_id) for run_dir in run_dirs])
 
 
-def _require_valid_criterion_index(criterion_index: int | None) -> None:
+def require_valid_criterion_index(criterion_index: int | None) -> None:
     """Reject a negative criterion index at the API boundary.
 
     Selection is POSITIONAL, so a negative index does not fail — it silently grades the criterion
@@ -149,7 +149,7 @@ def _require_valid_criterion_index(criterion_index: int | None) -> None:
         )
 
 
-def _label_pairs(results: list[EvaluationResult], criterion_index: int) -> list[tuple[str, str]]:
+def label_pairs(results: list[EvaluationResult], criterion_index: int) -> list[tuple[str, str]]:
     """``(expected_label, observed_label)`` for one criterion INSTANCE across some results.
 
     Selection is **positional**, mirroring ``reports._compute_suite_rollup``: the checker appends
@@ -170,7 +170,7 @@ def _label_pairs(results: list[EvaluationResult], criterion_index: int) -> list[
     return pairs
 
 
-def _balance_pair[T](incumbent: list[T], candidate: list[T]) -> tuple[list[T], list[T]]:
+def balance_pair[T](incumbent: list[T], candidate: list[T]) -> tuple[list[T], list[T]]:
     """Trim two arms' observations for ONE row to a common count, the shorter one winning.
 
     A row's weight in an arm's metric is its observation count, so an arm that contributed 3
@@ -180,7 +180,7 @@ def _balance_pair[T](incumbent: list[T], candidate: list[T]) -> tuple[list[T], l
     every row produced f1 0.818 vs 0.750 with an interval excluding zero (:func:`activation_gate`),
     and the sibling check read recall.yes 0.5 against 0.6 from one row's extra replicate.
 
-    Generic over the element type, exactly as :func:`_floor_from_clusters` is and for the same
+    Generic over the element type, exactly as :func:`floor_from_clusters` is and for the same
     reason: the guardrail trims floats, the F1 and sibling paths trim label pairs. It was spelled
     three times, in three shapes, and only one of the three surfaced the trim to the user.
 
@@ -192,7 +192,7 @@ def _balance_pair[T](incumbent: list[T], candidate: list[T]) -> tuple[list[T], l
     return incumbent[:keep], candidate[:keep]
 
 
-def _observed_result_types(rows: dict[str, list[EvaluationResult]], criterion_index: int) -> set[str]:
+def observed_result_types(rows: dict[str, list[EvaluationResult]], criterion_index: int) -> set[str]:
     """The result types actually sitting at ``criterion_index`` — for the wrong-index note."""
     found: set[str] = set()
     for results in rows.values():
@@ -202,7 +202,7 @@ def _observed_result_types(rows: dict[str, list[EvaluationResult]], criterion_in
     return found
 
 
-def _row_costs(results: list[EvaluationResult]) -> list[float]:
+def row_costs(results: list[EvaluationResult]) -> list[float]:
     """Per-replicate total cost for one row, skipping replicates that recorded none."""
     return [
         result.total_token_usage.total_cost_usd
@@ -211,13 +211,17 @@ def _row_costs(results: list[EvaluationResult]) -> list[float]:
     ]
 
 
-def _median(values: list[float]) -> float | None:
-    """The median, or ``None`` for an empty sample — distinct from a median that happens to be 0.0."""
-    return _stats.median(values) if values else None
+def row_cost_levels(clusters: Sequence[list[float]]) -> list[float]:
+    """One value per row: the mean over that row's measured replicates. Unmeasurable rows are absent.
 
-
-def _row_cost_levels(clusters: Sequence[list[float]]) -> list[float]:
-    """One value per row: the mean over that row's measured replicates. Empty rows are absent.
+    An EMPTY row is absent, and so is one whose mean is not finite. The second is the same statement
+    as the first: a row carrying a non-finite cost or duration measured nothing usable, and both
+    consumers already read absence correctly — the guardrail reports "not evaluated" and the cost
+    front excludes the point rather than placing it at zero. Without the finite filter a single
+    corrupt ``total_cost_usd`` propagates a ``nan`` through :func:`reports_stats.median_or_none` into
+    a guardrail's relative-change arithmetic, where every comparison answers neither way while the
+    check still reports a number. That is the silent-wrong-answer shape this repo guards against by
+    pairing every clamp with :func:`math.isfinite`.
 
     The single definition of "what a row measured", called by :func:`cost_latency_guardrails` — for
     **both** its cost and its latency clusters — and by :func:`cost_quality_points`. Two
@@ -231,7 +235,8 @@ def _row_cost_levels(clusters: Sequence[list[float]]) -> list[float]:
     the N-arm view reduces one arm's clusters directly. A signature taking the row mapping could
     only serve the second, which would leave the duplication in place.
     """
-    return [mean(c) for c in clusters if c]
+    levels = (mean(c) for c in clusters if c)
+    return [level for level in levels if math.isfinite(level)]
 
 
 class SplitProvenance(NamedTuple):
@@ -331,7 +336,7 @@ class TreeReconciliation(NamedTuple):
 # The replicate level of the suite glob, DERIVED rather than respelled: `TASK_JSON_GLOB` is
 # `<row>/<NN>/task.json` relative to a suite dir, so dropping its first segment gives the same
 # pattern relative to one row dir. Spelling it again would let the two describe different trees,
-# which is the whole reason `_task_json_pattern` exists (CE042).
+# which is the whole reason `task_json_pattern` exists (CE042).
 _REPLICATE_TASK_JSON_GLOB = TASK_JSON_GLOB.split("/", 1)[1]
 
 
@@ -359,7 +364,7 @@ def reconcile_tree_against_run_json(run_dir: Path, variant_id: str, suite_id: st
     **The REPLICATE half of the key is load-bearing, not thoroughness.** Row ids alone are blind to
     a stale ``<NN>`` inside a row this run.json does record — the identical defect one level down,
     triggered by something as mundane as re-using a run dir with a smaller ``--repeats``.
-    ``load_suite_rows`` pools every replicate it finds, ``_balance_pair`` trims symmetrically and
+    ``load_suite_rows`` pools every replicate it finds, ``balance_pair`` trims symmetrically and
     therefore not at all, and the gate returns a confident interval over contaminated clusters.
     ``task_results`` carries ``replicate_index``, so this costs nothing.
 
@@ -424,7 +429,7 @@ def reconcile_tree_against_run_json(run_dir: Path, variant_id: str, suite_id: st
     return TreeReconciliation(unrecorded, len(recorded) + len(whole_rows), len(on_disk), unknown=False)
 
 
-def _reconcile_arms(
+def reconcile_arms(
     arms: Sequence[tuple[str, Sequence[Path]]], suite_id: str
 ) -> tuple[dict[str, frozenset[tuple[str, str]]], int]:
     """Reconcile every ``(variant, run dirs)`` arm: stale results keyed by location, plus unknowns.
@@ -436,7 +441,7 @@ def _reconcile_arms(
     :func:`reconcile_tree_against_run_json` directly. CE053 therefore accepts either name.
 
     What is deliberately NOT shared is the RESPONSE, which differs by return type: a gate refuses,
-    a floor returns ``None`` through :func:`_no_floor`, and ``ArmRowScores`` has nowhere to put a
+    a floor returns ``None`` through :func:`no_floor`, and ``ArmRowScores`` has nowhere to put a
     refusal so it warns and continues. One helper spanning all three would take a mode flag, which
     is two functions in a trench coat.
 
@@ -460,7 +465,7 @@ def _reconcile_arms(
                 stale[f"{run_dir}/{variant}"] = reconciliation.unrecorded
     if unknown_dirs:
         # `debug`, not `warning`: a floor that WAS measured must not log through the channel
-        # `_no_floor` uses to say it was not.
+        # `no_floor` uses to say it was not.
         logger.debug(
             "%d of %d run directories for %s record no `task_results`, so contamination could not be ruled out",
             unknown_dirs,
@@ -470,7 +475,7 @@ def _reconcile_arms(
     return stale, unknown_dirs
 
 
-def _stale_locations(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
+def stale_locations(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
     """The stale results PER LOCATION — never a tree-wide total.
 
     A sum over (arm x dir) is unreconcilable with the ``Rows paired: N`` line in the same block —
@@ -485,20 +490,20 @@ def _stale_locations(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
     )
 
 
-def _stale_tree_reason(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
+def stale_tree_reason(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
     """Why a tree holding unrecorded results is not something to measure over.
 
-    Shared by both noise floors (which REFUSE with it, through :func:`_no_floor`) and by
+    Shared by both noise floors (which REFUSE with it, through :func:`no_floor`) and by
     :func:`arm_row_scores` (which WARNS with it and continues). Sharing the message is what makes
     the two responses read alike in a log; the responses themselves stay separate — see
-    :func:`_reconcile_arms`.
+    :func:`reconcile_arms`.
 
     Deliberately NOT shared with the two gates' refusals, which say more: ``activation_gate``'s
     names both arms and appends an unreconcilable-directory tail, ``execution_gate``'s names the
     one variant it broke on. Those are decisions a user acts on; this is a measurement declining.
     """
     return (
-        f"the run directory tree holds results that no recorded invocation wrote — {_stale_locations(stale)}. "
+        f"the run directory tree holds results that no recorded invocation wrote — {stale_locations(stale)}. "
         + "run.json is written per INVOCATION while the tree is APPEND-ONLY, so a re-used --run-dir leaves an "
         + "earlier call's results behind while `row_selection` is rewritten to describe only the latest one. "
         + "They are pooled into this measurement, which is therefore over a row set no invocation ran. Re-run "
@@ -506,7 +511,7 @@ def _stale_tree_reason(stale: dict[str, frozenset[tuple[str, str]]]) -> str:
     )
 
 
-def _format_splits(values: Iterable[str | None]) -> str:
+def format_splits(values: Iterable[str | None]) -> str:
     """The recorded splits as one readable list, ``None`` first.
 
     Shared by the floor's refusal and the gate's, because the whole value of those two messages is
@@ -517,12 +522,12 @@ def _format_splits(values: Iterable[str | None]) -> str:
     return ", ".join(repr(v) for v in sorted(values, key=lambda v: (v is not None, v or "")))
 
 
-def _split_mismatch_reason(label: str, provenance: SplitProvenance, run_dirs: Sequence[Path]) -> str:
+def split_mismatch_reason(label: str, provenance: SplitProvenance, run_dirs: Sequence[Path]) -> str:
     """The message a cross-split refusal carries, naming the splits AND where they came from."""
     where = ", ".join(str(d) for d in run_dirs)
     return (
         f"{label} pooled run directories recording DIFFERENT row selections "
-        f"(splits: {_format_splits(provenance.recorded)}) under {where}"
+        f"(splits: {format_splits(provenance.recorded)}) under {where}"
     )
 
 
@@ -554,7 +559,7 @@ class _PairedRows(NamedTuple):
     notes: list[str]
 
 
-def _load_and_pair(
+def load_and_pair(
     *,
     incumbent_run_dirs: Sequence[Path],
     candidate_run_dirs: Sequence[Path],
@@ -578,8 +583,8 @@ def _load_and_pair(
     # here as well would read every run.json twice per arm for one fault.
     incumbent_by_dir = [load_suite_rows(d, incumbent_variant, suite_id) for d in incumbent_run_dirs]  # noqa: CE053
     candidate_by_dir = [load_suite_rows(d, candidate_variant, suite_id) for d in candidate_run_dirs]
-    incumbent_rows = _pool(incumbent_by_dir)
-    candidate_rows = _pool(candidate_by_dir)
+    incumbent_rows = pool_replicates(incumbent_by_dir)
+    candidate_rows = pool_replicates(candidate_by_dir)
 
     paired_row_ids = sorted(set(incumbent_rows) & set(candidate_rows))
     unpaired = sorted((set(incumbent_rows) | set(candidate_rows)) - set(paired_row_ids))
@@ -595,7 +600,7 @@ def _load_and_pair(
             searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
             notes.append(
                 f"the {arm} arm loaded ZERO rows: nothing matched "
-                + f"{_task_json_pattern(variant_id, suite_id)} under {searched}. "
+                + f"{task_json_pattern(variant_id, suite_id)} under {searched}. "
                 + "That is a wrong variant id, a wrong suite id or a wrong run directory — not a result. "
                 + "Fix the path before reading anything below."
             )
@@ -607,7 +612,7 @@ def _load_and_pair(
         )
 
     per_row = {
-        rid: (_label_pairs(incumbent_rows[rid], criterion_index), _label_pairs(candidate_rows[rid], criterion_index))
+        rid: (label_pairs(incumbent_rows[rid], criterion_index), label_pairs(candidate_rows[rid], criterion_index))
         for rid in paired_row_ids
     }
 
@@ -640,7 +645,7 @@ def _load_and_pair(
     dropped = 0
     for rid in scored_row_ids:
         inc, cand = per_row[rid]
-        kept_inc, kept_cand = _balance_pair(inc, cand)
+        kept_inc, kept_cand = balance_pair(inc, cand)
         dropped += len(inc) + len(cand) - len(kept_inc) - len(kept_cand)
         balanced[rid] = (kept_inc, kept_cand)
     unbalanced_rows = [rid for rid in scored_row_ids if len(per_row[rid][0]) != len(per_row[rid][1])]
@@ -660,7 +665,7 @@ def _load_and_pair(
     candidate_pairs = [p for cluster in candidate_clusters for p in cluster]
 
     if paired_row_ids and not (incumbent_pairs or candidate_pairs):
-        found = _observed_result_types(incumbent_rows, criterion_index) | _observed_result_types(
+        found = observed_result_types(incumbent_rows, criterion_index) | observed_result_types(
             candidate_rows, criterion_index
         )
         notes.append(
@@ -695,7 +700,7 @@ def _load_and_pair(
     )
 
 
-def _row_score(result: EvaluationResult, criterion_index: int | None) -> float | None:
+def row_score(result: EvaluationResult, criterion_index: int | None) -> float | None:
     """The row's score for one arm: the criterion's score, or the row's weighted score.
 
     ``None`` when the row produced no criterion results at all. That case matters on the execution
@@ -713,7 +718,7 @@ def _row_score(result: EvaluationResult, criterion_index: int | None) -> float |
     return result.success_criteria_results[criterion_index].score
 
 
-def _criterion_weights(results: Sequence[EvaluationResult]) -> list[float | None]:
+def criterion_weights(results: Sequence[EvaluationResult]) -> list[float | None]:
     """The suite's per-criterion weights, POSITIONALLY, off the first result that scored anything.
 
     ``None`` in a slot means the weight was NOT RECORDED — a run predating
@@ -726,8 +731,10 @@ def _criterion_weights(results: Sequence[EvaluationResult]) -> list[float | None
     that errored rather than a suite that changed. A caller comparing two arms still has to decide
     what to do when their lengths disagree; this function answers one arm's question only.
 
-    Private, matching :func:`_row_score` beside it: it is an internal primitive of this family, and
-    CE053's path scope reasons about the family's PUBLIC run-tree readers.
+    Package-internal, matching :func:`row_score` beside it: nothing outside this family imports
+    either, and the underscore they both carried came off when the family became a package — inside
+    it, a name two modules share is public (CE059). CE053 is unaffected either way: it reasons about
+    which functions CALL a run-tree reader, not about how the reader's name is spelled.
     """
     for result in results:
         if result.success_criteria_results:
@@ -833,7 +840,7 @@ def rule_row_map(rows: dict[str, list[EvaluationResult]], criterion_index: int) 
 
     Takes already-loaded rows, so CE053 does not apply: whoever loaded them reconciled them.
     """
-    _require_valid_criterion_index(criterion_index)
+    require_valid_criterion_index(criterion_index)
     failed: dict[str, set[str]] = {}
     unattributed: list[str] = []
     for row_id, results in sorted(rows.items()):

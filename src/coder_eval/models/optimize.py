@@ -422,7 +422,7 @@ class ExecutionGateVerdict(BaseModel):
             "be safe to pass: an index that selects NO usable row while the blended statistic had "
             "rows is a `gate_refusal`, which DOES force `promoted=False`. That is a wiring fault "
             "rather than a reading — an empty primary vector is indistinguishable from a suite whose "
-            "rows all errored on that criterion, and `_require_valid_criterion_index` bounds only "
+            "rows all errored on that criterion, and `require_valid_criterion_index` bounds only "
             "below. "
             "Distinct from `engagement_criterion_index`, which is an integrity CHECK's subject "
             "rather than a reported reading, and from ActivationGateVerdict.criterion_index, which "

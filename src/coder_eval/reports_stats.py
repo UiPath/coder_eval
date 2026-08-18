@@ -35,6 +35,34 @@ def stddev(values: list[float]) -> float:
     return _stats.stdev(values) if len(values) >= 2 else 0.0
 
 
+def median_or_none(values: list[float]) -> float | None:
+    """The median, or ``None`` for a sample nothing can be read off — empty, or non-finite.
+
+    The empty case IS the reason this exists beside :func:`mean`: ``mean`` folds an empty sample to
+    ``0.0``, which a cost guardrail cannot tell from a genuinely free arm, while a median that
+    happens to BE ``0.0`` must stay ``0.0``. It lives here rather than in the optimize family
+    because it is a plain statistics helper over a list of floats, and that family's rank-0 module
+    answers "what can be read off a finalized run directory" — a median is not one of those.
+
+    A non-finite value collapses to the same ``None`` rather than propagating: ``statistics.median``
+    would return ``nan`` for a sample containing one, and a ``nan`` median flows into a guardrail's
+    relative-change arithmetic as a comparison that silently answers neither way, while the check
+    still reports a number. Refusing with ``ValueError`` was the alternative and is worse: it would
+    lose a whole verdict to one corrupt figure.
+
+    This is a BACKSTOP, not the place the distinction is drawn. Both callers read ``None`` as "not
+    measurable" and say so to the user — one emits an unevaluated check noting nothing was recorded,
+    the other excludes the point rather than placing it at zero — and those messages are only true
+    if an unusable sample really is an absent one. That is the producer's job:
+    :func:`coder_eval.optimize.load.row_cost_levels` drops a non-finite row exactly as it drops an
+    empty one, so by the time a sample reaches here it should already be clean. If it is not, ``None``
+    is still the safer answer than a ``nan`` neither caller has a branch for.
+    """
+    if not values or not all(math.isfinite(v) for v in values):
+        return None
+    return _stats.median(values)
+
+
 def _betacf(a: float, b: float, x: float) -> float:
     """Continued fraction for the regularized incomplete beta (Lentz's method)."""
     max_iterations = 200

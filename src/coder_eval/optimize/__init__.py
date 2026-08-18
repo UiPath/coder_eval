@@ -17,9 +17,10 @@ import keep working and make the split cosmetic, which is precisely what
 ``test_the_optimize_package_reexports_nothing`` asserts this file binds no non-module public name,
 and ``test_no_flat_shim_module_survives_the_move`` asserts no module answers at an old flat path.
 
-**Inside this package a name shared between siblings is public.** Only a file-local name keeps a
-leading underscore, because one underscore cannot mark two boundaries — a helper four modules
-import, spelled like a module-local one, tells a reader "safe to change this signature" about the
-opposite. The skill-facing surface is not marked at all; it is the set the ``SKILL.md`` snippet
+**Inside this package a name shared between siblings is public**, and **CE059** keeps it that way.
+Only a file-local name keeps a leading underscore, because one underscore cannot mark two
+boundaries — a helper four modules import, spelled like a module-local one, tells a reader "safe to
+change this signature" about the opposite. There are really three tiers here and only two markers:
+the skill-facing API is not marked at all, and remains derivable as the set the ``SKILL.md`` snippet
 binder resolves.
 """

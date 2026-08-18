@@ -686,7 +686,7 @@ def _ceiling_verdict(entry: RuleCeiling, floor: float) -> str:
 
     * **Every selected row missing from the vector** is a wiring fault — a stale rule map, a
       crashed arm — not a rule without headroom, and the whole family goes out of its way to keep
-      those apart (``_wrong_path_reason``, ``_no_floor``).
+      those apart (``wrong_path_reason``, ``no_floor``).
     * **A floor of exactly 0.0 is a real answer**, not a missing one: a deterministic grader whose
       replicates agree measures no noise. But ``ceiling < 0.0`` is then false for a rule with NO
       headroom at all, so the one rule nothing can improve would collect the most encouraging

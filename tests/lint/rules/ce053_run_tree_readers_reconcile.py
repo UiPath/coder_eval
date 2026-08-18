@@ -15,7 +15,7 @@ contaminated tree loads, parses and returns a confident number. There is nothing
 
 **What it detects, precisely.** In the six optimize-gate modules, a function whose body calls
 ``load_suite_rows`` or ``load_arm_rows`` must also call ``reconcile_tree_against_run_json`` or
-``_reconcile_arms``, the sweep over a whole ``(variant, run dirs)`` set that wraps it. One
+``reconcile_arms``, the sweep over a whole ``(variant, run dirs)`` set that wraps it. One
 violation per function, anchored at the first offending read.
 
 Two accepted names rather than one because the two are genuinely different grains and both are
@@ -40,7 +40,7 @@ the wrong place to put one. Stated rather than glossed, because this rule's fail
   helper is invisible to it, and so is a reconcile performed by the caller — which is why the two
   legitimate cases in the tree carry a reasoned ``# noqa: CE053`` rather than a second call.
 - It checks that the sweep is CALLED, never that its result is acted on. ``stale, _ =
-  _reconcile_arms(...)`` with the ``if stale:`` branch dropped passes — which is the likeliest
+  reconcile_arms(...)`` with the ``if stale:`` branch dropped passes — which is the likeliest
   future regression, since copying the call is easy and copying the branch is a second step.
   Nothing an AST walk can see distinguishes the two; the behavioural tests in
   ``tests/test_optimize_gate.py::TestStageAReadersReconcileTheTree`` are what cover it.
@@ -69,7 +69,7 @@ _OPTIMIZE_MODULES = re.compile(r"/coder_eval/optimize/[a-z_]+\.py$")
 
 _TREE_READERS = frozenset({"load_suite_rows", "load_arm_rows"})
 # The primitive and the whole-arm sweep that wraps it. See the module docstring for why both.
-_RECONCILE = frozenset({"reconcile_tree_against_run_json", "_reconcile_arms"})
+_RECONCILE = frozenset({"reconcile_tree_against_run_json", "reconcile_arms"})
 
 # The primitive itself: `load_arm_rows` IS a `load_suite_rows` caller, and reconciling inside it
 # would run the sweep once per composing gate rather than once per gate.
