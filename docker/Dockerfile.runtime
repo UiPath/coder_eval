@@ -46,21 +46,32 @@ ARG PYTHON_VERSION=3.13
 RUN uv python install ${PYTHON_VERSION}
 RUN uv venv --python ${PYTHON_VERSION} /opt/coder-eval/venv
 
-# --- 2. Install coder-eval (+ codex) into the kit venv. ----------------------
+# --- 2. Install coder-eval (+ codex, antigravity) into the kit venv. --------
 # Build context is the repo root; copy the install-relevant subset for cache hits.
 WORKDIR /src
 COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 COPY experiments/default.yaml ./experiments/default.yaml
 
-ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex"
+# Mirrors docker/Dockerfile: the google-antigravity release tracks the
+# rapidly-moving Gemini harness and may be newer than the min-age gate window.
+# The kit installs that same pinned wheel (see --extra antigravity below), so
+# without the exclusion this build is one antigravity release away from failing
+# where `make docker-image` succeeds. Callers may override.
+ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex,google-antigravity"
 # Install the locked deps, then coder_eval itself NON-editable. An editable/path
 # install would leave the package source at /src (outside the kit), so the
 # `COPY --from /opt/coder-eval` overlay would ship a venv that can't import
 # coder_eval. --no-emit-project excludes the root from the export; we install it
 # explicitly from /src so its source lands in the venv's site-packages.
+#
+# Both `codex` AND `antigravity` extras are installed so an injected task image
+# (one that keeps its OWN base image) can run any agent type a rebased image can.
+# Without --extra antigravity, AntigravityAgent fails at dispatch with
+# "Antigravity SDK not installed" on EVERY inject-mode task -- a whole-task
+# failure before the agent runs at all, not a capability signal.
 RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS}" && \
-    uv export --frozen --no-emit-project --extra codex \
+    uv export --frozen --no-emit-project --extra codex --extra antigravity \
       | uv pip install --python /opt/coder-eval/venv/bin/python -r /dev/stdin && \
     uv pip install --python /opt/coder-eval/venv/bin/python --no-deps /src
 

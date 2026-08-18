@@ -517,6 +517,15 @@ class EvaluationResult(BaseModel):
         default=False,
         description="Whether any iteration hit the agent max_turns limit without the agent voluntarily completing",
     )
+    forced_kill: bool = Field(
+        default=False,
+        description=(
+            "Whether a structural timeout (task_timeout or turn_timeout) hard-killed this run. "
+            "Kept alongside final_status, like max_turns_exhausted, because the run is graded after "
+            "the kill and can therefore finalize SUCCESS -- without this flag a timed-out run that "
+            "passed its criteria is indistinguishable from one that finished inside its budget."
+        ),
+    )
     weighted_score: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"
     )

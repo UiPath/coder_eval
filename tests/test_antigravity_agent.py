@@ -5,6 +5,7 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 """
 
 import asyncio
+import contextlib
 import os
 import sys
 from collections.abc import Callable
@@ -881,17 +882,26 @@ async def test_communicate_handles_two_sequential_background_jobs(monkeypatch):
 
 
 async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
-    """A pathological, never-closing background job must not poll forever --
-    the hard _MAX_BACKGROUND_POLLS cap bounds it independent of the turn budget."""
+    """A pathological, never-closing background job must not poll forever.
+
+    With no configured turn_timeout the flat _MAX_BACKGROUND_POLL_WALL_SECONDS
+    backstop is the sole bound (a parallel cycle cap was removed: it overrode
+    large configured timeouts and bounded nothing the deadline didn't). Drive
+    it with a fake clock that only the poll sleeps advance, so the assertion is
+    on the real exit condition rather than on a cycle count.
+    """
     from coder_eval.agents import antigravity_agent
 
-    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 3)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 15.0)
     sleep_calls: list[float] = []
+    fake_now = [0.0]
 
     async def _record_sleep(seconds: float) -> None:
         sleep_calls.append(seconds)
+        fake_now[0] += seconds
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _record_sleep)
+    monkeypatch.setattr(antigravity_agent.time, "monotonic", lambda: fake_now[0])
 
     never_closing = [
         _step(
@@ -908,7 +918,8 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
     agent = _agent_with_steps([never_closing])
     tr = await agent.communicate("do it forever")
 
-    assert len(sleep_calls) == 3  # exactly _MAX_BACKGROUND_POLLS, not infinite
+    # 15s budget / 5s per cycle = 3 cycles, then the deadline stops it.
+    assert len(sleep_calls) == 3
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
     assert bash.result_status == "unknown"  # force-closed as UNRESOLVED by finalize()
 
@@ -919,7 +930,7 @@ async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(m
     the poll loop's own graceful path -- force-close the orphan, grade normally
     -- instead of the ThreadedWatchdog cutting the whole turn at `timeout` first.
 
-    Pre-fix, `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS` (120 *
+    Pre-fix, the poll budget (120 *
     5s = 600s) was DOUBLE the 300s default, so the watchdog always won that race
     and this exact scenario -- a tool call spuriously left ACTIVE with no real
     background job behind it, confirmed live in the final validation run -- burned
@@ -984,12 +995,12 @@ class _WatchdogFiresLater:
 async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(monkeypatch):
     """A watchdog timeout landing BETWEEN poll cycles (state.timeout_hit flips
     to True while the loop is sleeping) must stop the loop on its next condition
-    check, not burn through the rest of _MAX_BACKGROUND_POLLS waiting for a
+    check, not burn through the rest of the poll budget waiting for a
     cancellation that may not land on this coroutine right away (final-review
     finding: the loop condition must read the flag the watchdog already set)."""
     from coder_eval.agents import antigravity_agent
 
-    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 50)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 250.0)
     monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
 
     sleep_calls: list[float] = []
@@ -1563,3 +1574,594 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     assert [c.tool_id for c in record.commands if c.result_status == "unknown"] == ["bg2"]
     assert conv.receive_steps_call_count == 2  # initial drain + one poll re-drain, then stop
     assert conv.cancel_call_count == 1
+
+
+def _make_turn_state(agent, *, max_turns=None):
+    """Build a bare _AntigravityTurnState the way communicate() does, for tests
+    that call _drain() directly rather than through the full poll loop."""
+    from coder_eval.agents.antigravity_agent import _AntigravityTurnState
+    from coder_eval.streaming.callbacks import CompositeStreamCallback
+    from coder_eval.streaming.collector import EventCollector
+
+    collector = EventCollector()
+    emit = CompositeStreamCallback([collector])
+    return _AntigravityTurnState(
+        agent=agent,
+        emit=emit,
+        task_id="antigravity",
+        turn_id="antigravity-1",
+        collector=collector,
+        user_input="test",
+        iteration=1,
+        model="gemini-3.5-flash",
+        turn_start_time=0.0,
+        max_turns=max_turns,
+    )
+
+
+class _NeverYieldsConversation:
+    """A receive_steps() whose first step-fetch never resolves on its own --
+    only a cancellation (from asyncio.wait_for's per-step timeout) can end it."""
+
+    last_response = ""
+
+    def __init__(self):
+        self.receive_steps_call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def receive_steps(self):
+        self.receive_steps_call_count += 1
+        await asyncio.Event().wait()
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    async def cancel(self):
+        return None
+
+
+async def test_drain_returns_control_when_a_single_step_fetch_blocks_too_long(monkeypatch):
+    """A receive_steps() call whose next step never arrives must not block
+    _drain() forever -- the per-step timeout returns control to the caller."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.05)
+
+    agent = _agent_with_steps([])
+    state = _make_turn_state(agent)
+    conversation = _NeverYieldsConversation()
+
+    await asyncio.wait_for(agent._drain(conversation, state, None), timeout=5.0)
+
+    assert conversation.receive_steps_call_count == 1
+    assert state.step_fetch_timed_out is True
+
+
+class _SlowFirstStepThenNormalConversation:
+    """First receive_steps() call's only step-fetch never resolves (proving
+    _drain() really did return with zero steps on that call); the SECOND call
+    yields a complete, non-orphaned turn. Used to prove communicate()'s poll
+    loop re-enters via state.step_fetch_timed_out -- NOT via
+    has_orphaned_tool_call(), which is False here since no tool call was ever
+    ACTIVE."""
+
+    last_response = ""
+
+    def __init__(self, second_batch):
+        self._second_batch = second_batch
+        self.receive_steps_call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def receive_steps(self):
+        self.receive_steps_call_count += 1
+        if self.receive_steps_call_count == 1:
+            await asyncio.Event().wait()
+            return
+            yield  # pragma: no cover - unreachable, keeps this an async generator
+        for s in self._second_batch:
+            yield s
+
+    async def cancel(self):
+        return None
+
+
+async def test_communicate_finalizes_a_normal_turn_whose_first_step_is_slow(monkeypatch):
+    """Regression test for the step_fetch_timed_out mechanism: a normal turn's
+    first receive_steps() call timing out with zero steps must NOT be mistaken
+    for "the model produced nothing" -- the poll loop must re-drain and pick up
+    the turn's real, complete output on the next call."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    final_batch = [
+        _step("TEXT_RESPONSE", "DONE", content="all done", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    conversation = _SlowFirstStepThenNormalConversation(final_batch)
+    agent = _agent_with_steps([])
+    agent._sdk_agent.conversation = conversation
+
+    tr = await agent.communicate("do it")
+
+    assert not tr.crashed
+    assert tr.agent_output == "all done"
+    # Proves re-entry happened via step_fetch_timed_out, not
+    # has_orphaned_tool_call() (no tool call was ever ACTIVE in this scenario).
+    assert conversation.receive_steps_call_count == 2
+
+
+class _ReentrancyThenTimeoutConversation:
+    """First receive_steps() call raises RuntimeError (a stuck re-entrancy
+    guard from a prior drain, consuming one _RECEIVE_STEPS_REENTRY_RETRIES
+    attempt); the SECOND call's only step-fetch never resolves, tripping the
+    per-step timeout. Proves the two mechanisms don't interfere: the
+    TimeoutError must not be caught by the outer `except RuntimeError:` clause
+    and must not trigger a third call within this _drain() invocation."""
+
+    last_response = ""
+
+    def __init__(self):
+        self.call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def receive_steps(self):
+        self.call_count += 1
+        if self.call_count == 1:
+            raise RuntimeError("Concurrent receive_steps() calls are not supported on this connection.")
+            yield  # pragma: no cover - unreachable, keeps this an async generator
+        await asyncio.Event().wait()
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    async def cancel(self):
+        return None
+
+
+async def test_drain_per_step_timeout_does_not_trigger_reentrancy_retry_path(monkeypatch):
+    """A TimeoutError from the per-step wait is a plain, unexceptional return --
+    it must not be caught by the outer `except RuntimeError:` clause, and must
+    not consume a second _RECEIVE_STEPS_REENTRY_RETRIES attempt on its own."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.05)
+
+    agent = _agent_with_steps([])
+    state = _make_turn_state(agent)
+    conversation = _ReentrancyThenTimeoutConversation()
+
+    await asyncio.wait_for(agent._drain(conversation, state, None), timeout=5.0)
+
+    # Exactly 2 calls: attempt 1 (RuntimeError, retried) + attempt 2 (times out,
+    # returns normally) -- no third call, proving the timeout didn't get routed
+    # through the RuntimeError retry path.
+    assert conversation.call_count == 2
+    assert state.step_fetch_timed_out is True
+
+
+class _OneStepThenStallConversation:
+    """A single receive_steps() call yields ONE real (non-terminal) step, then
+    its NEXT step-fetch never resolves -- proves state.step_fetch_timed_out
+    tracks the call's DECIDING exit reason, not merely "were zero steps ever
+    seen" (a mid-stream stall after real content already landed used to leave
+    the flag cleared, silently finalizing a still-generating turn as an
+    ordinary COMPLETED with no timeout mark)."""
+
+    last_response = ""
+
+    def __init__(self, first_step):
+        self._first_step = first_step
+        self.receive_steps_call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def receive_steps(self):
+        self.receive_steps_call_count += 1
+        yield self._first_step
+        await asyncio.Event().wait()
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    async def cancel(self):
+        return None
+
+
+async def test_drain_marks_timed_out_even_after_processing_a_real_step_first(monkeypatch):
+    """A per-step timeout occurring AFTER at least one real step already landed
+    in the same _drain() call must still set state.step_fetch_timed_out."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.05)
+
+    thinking_step = _step("THINKING", "ACTIVE", thinking="planning")
+    agent = _agent_with_steps([])
+    state = _make_turn_state(agent)
+    conversation = _OneStepThenStallConversation(thinking_step)
+
+    await asyncio.wait_for(agent._drain(conversation, state, None), timeout=5.0)
+
+    assert conversation.receive_steps_call_count == 1
+    assert state.step_fetch_timed_out is True
+
+
+class _AlwaysEmptyConversation:
+    """A receive_steps() that never emits a single step, for the whole turn --
+    no tool call, no text, nothing. Every call's step-fetch blocks until its
+    per-step timeout fires."""
+
+    last_response = ""
+
+    def __init__(self):
+        self.receive_steps_call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def receive_steps(self):
+        self.receive_steps_call_count += 1
+        await asyncio.Event().wait()
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    async def cancel(self):
+        return None
+
+
+async def test_communicate_raises_timeout_when_connection_never_produces_a_single_step(monkeypatch):
+    """A connection that never emits ANY step for the whole turn must not
+    silently finalize as an ordinary COMPLETED turn once the poll budget is
+    exhausted -- that would defeat the whole point of grading forced-kill
+    timeouts (the orchestrator's _grade_after_forced_kill only runs on
+    TurnTimeoutError/TaskTimeoutError). It must raise TurnTimeoutError,
+    matching what happened pre-Phase-2 when this same scenario blocked inside
+    _drain() until the ThreadedWatchdog genuinely fired."""
+    from coder_eval.agents import antigravity_agent
+    from coder_eval.errors import TurnTimeoutError
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 0.05)
+    monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
+
+    conversation = _AlwaysEmptyConversation()
+    agent = _agent_with_steps([])
+    agent._sdk_agent.conversation = conversation
+
+    with pytest.raises(TurnTimeoutError):
+        await agent.communicate("do it")
+
+    # Salvaged for the orchestrator's forced-kill grading path (Phase 1), not
+    # silently dropped.
+    assert agent.pending_turn is not None
+    assert agent.pending_turn.crashed is True
+
+
+# Worst backgrounded-job duration observed in the confirmed-broken tasks that
+# motivated d3f1432 ("poll for backgrounded work instead of grading it
+# incomplete"). The poll budget must keep covering it.
+_WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS = 300.0
+
+
+def test_per_step_timeout_is_not_aliased_to_the_poll_interval():
+    """Regression test (final-review finding): the per-step timeout must NOT
+    be aliased to _BACKGROUND_POLL_INTERVAL_SECONDS. Aliasing them (an earlier
+    revision did this) meant any ordinary foreground tool call or thinking
+    burst lasting longer than the poll interval (5s) got misclassified as
+    "looks orphaned", feeding false step_fetch_timed_out cycles into
+    poll_deadline and materially shrinking the usable
+    turn budget for completely normal work. The two constants measure
+    different things (how often to re-check an idle connection vs. how long a
+    genuinely in-progress step-fetch may go quiet) and must be tuned
+    independently, with the per-step bound considerably more generous."""
+    from coder_eval.agents import antigravity_agent
+
+    assert (
+        antigravity_agent._RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS != antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
+    )
+    assert (
+        antigravity_agent._RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS
+        >= 6 * antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
+    )
+
+
+async def test_a_merely_quiet_turn_keeps_almost_the_whole_turn_budget(monkeypatch):
+    """Regression test (code review 2026-08-17): the poll deadline must bound a
+    genuinely STUCK turn tightly and a merely QUIET one only barely.
+
+    A >=30s gap between steps is ordinary agent behaviour (a long thinking
+    burst). Charging that turn the STUCK deadline meant one that would have
+    finished at 260s of a 300s budget was killed at 240s for pausing. Exempting
+    it from any deadline was the first fix and overshot: the bound became the
+    watchdog's hard task-cancel at 1.0 * timeout, which leaves only
+    _WAIT_FOR_GRACE_SECONDS for exit bookkeeping and skips the graceful
+    conversation.cancel(). So a quiet turn gets its OWN, much later deadline.
+
+    The three fractions are set far apart here so "cut at the stuck deadline",
+    "cut at the quiet deadline" and "ran to the watchdog" are distinguishable.
+
+    Real clock on purpose: freezing time.monotonic also freezes asyncio's event
+    loop, so no timer would ever fire.
+    """
+    import time as _time
+
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_BACKGROUND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_POLL_DEADLINE_TIMEOUT_FRACTION", 0.05)
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_TIMEOUT_FRACTION", 0.5)
+    # Scaled with the rest: the real 5s safety margin would otherwise dominate a
+    # 1s budget entirely and collapse the quiet deadline onto the stuck one.
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_SAFETY_SECONDS", 0.02)
+
+    turn_timeout = 1.0  # stuck: 0.05s | quiet: 0.5s | watchdog: 1.0s
+    agent = _agent_with_steps([])
+    agent._sdk_agent.conversation = _AlwaysEmptyConversation()
+
+    started = _time.monotonic()
+    with contextlib.suppress(Exception):
+        await agent.communicate("go", timeout=turn_timeout)
+    elapsed = _time.monotonic() - started
+
+    assert elapsed > 0.3, f"quiet turn was cut at the STUCK deadline after {elapsed:.3f}s"
+    assert elapsed < 0.9, f"quiet turn ran past its own deadline to the watchdog ({elapsed:.3f}s)"
+
+
+async def test_a_stuck_turn_is_still_cut_at_the_tighter_deadline(monkeypatch):
+    """Converse of the above: an orphaned tool call IS a state that cannot
+    resolve itself, so the tight deadline still applies there -- that is the
+    graceful path (force-close the orphan, grade normally) that has to win its
+    race with the watchdog."""
+    import time as _time
+
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_BACKGROUND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_POLL_DEADLINE_TIMEOUT_FRACTION", 0.05)
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_TIMEOUT_FRACTION", 0.5)
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_SAFETY_SECONDS", 0.02)
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="backgrounded it", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([never_closing])
+
+    started = _time.monotonic()
+    tr = await agent.communicate("do it", timeout=1.0)
+    elapsed = _time.monotonic() - started
+
+    # Cut at ~0.05s by the stuck deadline, well before the quiet one at 0.5s.
+    assert elapsed < 0.3, f"stuck turn was not cut at the tighter deadline ({elapsed:.3f}s)"
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"  # force-closed, turn still graded
+
+
+async def test_a_non_positive_timeout_still_falls_back_to_the_flat_backstop(monkeypatch):
+    """ThreadedWatchdog starts no timer for timeout <= 0, so a quiet turn must
+    NOT be handed to a watchdog that was never armed -- it takes the flat
+    wall-clock backstop like the timeout=None path (code review, 2026-08-17)."""
+    import time as _time
+
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_BACKGROUND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 0.2)
+
+    agent = _agent_with_steps([])
+    agent._sdk_agent.conversation = _AlwaysEmptyConversation()
+
+    started = _time.monotonic()
+    with contextlib.suppress(Exception):
+        await agent.communicate("go", timeout=0)
+    elapsed = _time.monotonic() - started
+
+    # Bounded by the 0.2s backstop rather than polling for ever.
+    assert elapsed < 2.0, f"a timeout=0 quiet turn was not bounded by the backstop ({elapsed:.3f}s)"
+
+
+async def test_teardown_is_retryable_when_a_close_is_cancelled(monkeypatch):
+    """Regression test (code review 2026-08-17): an interrupted teardown must
+    stay retryable.
+
+    The forced-kill quiesce bounds kill() with asyncio.wait_for, so a cancel can
+    land inside stack.aclose() -- and contextlib.suppress(Exception) does not
+    catch CancelledError. Clearing _exit_stack BEFORE the close meant the later
+    _cleanup() -> stop() -> _teardown() retry saw None, no-oped, and the
+    localharness subprocess was never reaped.
+    """
+    from coder_eval.models import parse_agent_config
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    attempts: list[str] = []
+
+    class _Stack:
+        def __init__(self):
+            self.closed = False
+
+        async def aclose(self):
+            attempts.append("aclose")
+            if len(attempts) == 1:
+                raise asyncio.CancelledError()  # first attempt interrupted
+            self.closed = True
+
+    stack = _Stack()
+    agent._exit_stack = stack  # type: ignore[assignment]
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await agent._teardown()
+
+    # The handle must survive the interrupted attempt...
+    assert agent._exit_stack is stack, "an interrupted teardown dropped its handle"
+
+    # ...so the ordinary cleanup retry can finish reaping the harness.
+    await agent._teardown()
+    assert stack.closed is True
+    assert agent._exit_stack is None
+    assert attempts == ["aclose", "aclose"]
+
+
+def test_quiet_poll_deadline_leaves_room_for_one_worst_case_drain():
+    """Regression test (code review 2026-08-18): the quiet deadline must be
+    DRAIN-AWARE, not a flat fraction.
+
+    The post-sleep guard only decides whether to START a drain -- it cannot
+    interrupt one -- so the last cycle admitted before the deadline can still
+    spend a full _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS inside _drain. Unless
+    the deadline leaves at least that much room, the ThreadedWatchdog fires
+    mid-drain and its hard task-cancel skips the graceful exit's bounded
+    conversation.cancel() -- defeating the reason the quiet deadline is later
+    than the stuck one in the first place.
+
+    The timing tests above deliberately shrink the per-step timeout to 0.01s,
+    which is precisely what makes this invisible to them; this pins it in the
+    real units instead.
+    """
+    from coder_eval.agents.antigravity_agent import (
+        _POLL_DEADLINE_TIMEOUT_FRACTION,
+        _QUIET_POLL_DEADLINE_TIMEOUT_FRACTION,
+        _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS,
+        _quiet_poll_deadline_offset,
+    )
+
+    # The framework default in experiments/default.yaml, plus a spread around it.
+    for turn_timeout in (300.0, 600.0, 960.0):
+        offset = _quiet_poll_deadline_offset(turn_timeout)
+        remaining = turn_timeout - offset
+        assert remaining >= _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS, (
+            f"turn_timeout={turn_timeout:g}s leaves only {remaining:.1f}s after the quiet deadline, "
+            f"less than one worst-case {_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS:g}s drain"
+        )
+        # Still strictly later than the stuck deadline (that is the whole point)
+        # and never beyond the proportional cap.
+        assert offset > turn_timeout * _POLL_DEADLINE_TIMEOUT_FRACTION
+        assert offset <= turn_timeout * _QUIET_POLL_DEADLINE_TIMEOUT_FRACTION
+
+    # A budget too small to fit two drains has no margin to preserve; the stuck
+    # fraction wins rather than the deadline going negative.
+    assert _quiet_poll_deadline_offset(10.0) == 10.0 * _POLL_DEADLINE_TIMEOUT_FRACTION
+
+
+def test_background_poll_budget_still_covers_the_worst_observed_backgrounded_job():
+    """Regression test (code-review finding): the poll budget for a genuinely
+    backgrounded job is measured in EMPTY polls, not in 35s worst-case cycles.
+
+    The installed SDK's ``LocalConnection.receive_steps()`` returns immediately
+    (``if self.is_idle and self._processor.step_queue.empty(): return``) in
+    exactly the state a backgrounded job leaves behind, so ``_drain()`` comes
+    back instantly with ``step_fetch_timed_out=False`` and such a cycle costs
+    only ``_BACKGROUND_POLL_INTERVAL_SECONDS`` -- the per-step timeout is never
+    reached. d3f1432 sized this budget against confirmed-broken tasks whose
+    backgrounded work ran 60-300s (~60 consecutive 5s-empty polls); a cap
+    derived from a 35s/cycle assumption silently cuts that budget to ~85s and
+    re-opens the bug (the turn gets graded on work that had not happened yet).
+
+    Pin the budget in SECONDS so any future re-tuning has to keep covering the
+    measured worst case.
+
+    SCOPE — this covers the ``turn_timeout: null`` path only, and deliberately
+    says so rather than overclaiming. With a turn_timeout CONFIGURED, the
+    binding bound is `_POLL_DEADLINE_TIMEOUT_FRACTION * turn_timeout` measured
+    from TURN START (it has to be turn-anchored to win its race with the
+    ThreadedWatchdog), so at the repo default `turn_timeout: 300` the poll
+    budget is at most 240s — already below this 300s worst case, and less by
+    however long the turn ran before backgrounding. That is a real, known
+    limitation of the configured-timeout path, asserted explicitly below so it
+    is visible rather than implied; raising it is a defaults change, not a
+    constants change.
+    """
+    from coder_eval.agents import antigravity_agent
+
+    # timeout=None path: the flat backstop is anchored at POLL-LOOP ENTRY, so
+    # this budget is actually achievable rather than being eaten by whatever
+    # the turn already spent.
+    assert antigravity_agent._MAX_BACKGROUND_POLL_WALL_SECONDS >= _WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS
+    # ...and that budget must buy enough 5s idle cycles to outlast the job.
+    cycles = antigravity_agent._MAX_BACKGROUND_POLL_WALL_SECONDS / antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
+    assert cycles >= _WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS / antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
+
+    # Configured-timeout path: document the achievable budget at the repo
+    # default. This asserts the CURRENT limitation, so raising the default (or
+    # the fraction) deliberately trips it and forces this comment to be revised.
+    default_turn_timeout = 300.0
+    configured_budget = default_turn_timeout * antigravity_agent._POLL_DEADLINE_TIMEOUT_FRACTION
+    assert configured_budget == 240.0
+    assert configured_budget < _WORST_OBSERVED_BACKGROUNDED_JOB_SECONDS
+
+
+class _ForegroundToolWithARealGapConversation:
+    """A single receive_steps() call: opens a tool call, waits a REAL delay
+    longer than the poll interval (but under the per-step timeout) before the
+    tool's DONE step arrives, then finishes with a text response -- all in ONE
+    call. Models an ordinary foreground tool call that simply takes a few
+    seconds between SDK-visible steps -- the exact case that must NOT be
+    misclassified as "looks orphaned"."""
+
+    last_response = ""
+
+    def __init__(self, active_step, done_step, final_step, gap_seconds: float):
+        self._steps = [active_step, done_step, final_step]
+        self._gap_seconds = gap_seconds
+        self.receive_steps_call_count = 0
+
+    async def send(self, prompt, **kwargs):
+        return None
+
+    async def receive_steps(self):
+        self.receive_steps_call_count += 1
+        yield self._steps[0]
+        await asyncio.sleep(self._gap_seconds)
+        for s in self._steps[1:]:
+            yield s
+
+    async def cancel(self):
+        return None
+
+
+async def test_communicate_does_not_misclassify_a_slow_but_real_foreground_gap_as_orphaned(monkeypatch):
+    """A foreground tool call whose DONE step legitimately takes longer than
+    the OLD (aliased-to-poll-interval) 5s threshold must still complete within
+    a single receive_steps() call and never enter the poll loop, as long as
+    the gap stays under the per-step timeout -- proving the fix in practice,
+    not just via the constants' relationship."""
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.3)
+
+    active = _step(
+        "TOOL_CALL",
+        "ACTIVE",
+        target="TARGET_ENVIRONMENT",
+        tool_calls=[_tc("run_command", "t1", {"command_line": "pytest"})],
+    )
+    done = _step(
+        "TOOL_CALL",
+        "DONE",
+        target="TARGET_ENVIRONMENT",
+        tool_calls=[_tc("run_command", "t1", {"command_line": "pytest", "exit_code": 0, "combined_output": "ok"})],
+    )
+    final = _step("TEXT_RESPONSE", "DONE", content="tests passed", complete=True, usage=_usage(10, 0, 1, 0))
+    # 0.15s: longer than the OLD aliased-to-5s-poll-interval production value
+    # would have tolerated in spirit (proportionally), well under the 0.3s
+    # per-step timeout patched in for this test.
+    conversation = _ForegroundToolWithARealGapConversation(active, done, final, gap_seconds=0.15)
+    agent = _agent_with_steps([])
+    agent._sdk_agent.conversation = conversation
+
+    tr = await agent.communicate("run the tests")
+
+    assert not tr.crashed
+    assert tr.agent_output == "tests passed"
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "success"
+    # The poll loop must never have entered -- everything completed within the
+    # single initial receive_steps() call.
+    assert conversation.receive_steps_call_count == 1

@@ -393,6 +393,129 @@ with the two `action.yml` items above — one considered change to the action's 
   `agents/` is touched, since a second agent adding its own disconnected sleep-loop
   constant would reintroduce the exact same shape.
 
+## From the timeout-grading fix (2026-08-14)
+
+- [ ] **A forced-kill exception handler that sets a terminal `FinalStatus` must
+  attempt success-criteria grading before giving up.** Real nightly run data
+  (`runs/gemini-3-1-pro-full/default/energy-unit-commitment/01`) showed a
+  `TurnTimeoutError` land as `FinalStatus.ERROR` with zero criteria evaluated,
+  even though the agent's real, complete, correct output was already on disk —
+  `run()`'s `except TurnTimeoutError`/`except TaskTimeoutError` handlers never
+  called `check_all_async` at all. Fixed by adding `_grade_after_forced_kill()`
+  and calling it from both handlers. **Not promoted in this pass**: the
+  mechanical check would need a whole-tree rule asserting every `except` block
+  in `orchestrator.py` that sets `self.result.final_status` also reaches a
+  `check_all_async` call (directly or via a helper) or explicitly justifies not
+  doing so — a real design (which exception types are exempt, how to trace
+  "reaches a call" through a helper indirection), not a 30-minute rule.
+
+## From the final review of the timeout-grading fix (2026-08-14)
+
+- [ ] **`AgentCrashError` is not wired to `_grade_after_forced_kill`.** Only
+  `TurnTimeoutError`/`TaskTimeoutError` get the new forced-kill grading path;
+  `AgentCrashError` still falls through `run()`'s generic `except Exception:`
+  to `FinalStatus.ERROR` with grading unconditionally skipped, even though
+  `_on_attempt_failure` drains the same `pending_turn` slot for crashes as it
+  does for turn timeouts (`orchestrator.py`'s `_communicate_with_retry`).
+  Explicitly out of scope for this fix (the plan scoped it to the two timeout
+  exception types), but the asymmetry — timeouts get graded, crashes don't —
+  is a natural next candidate if a crashed-but-complete agent output turns out
+  to be common enough to matter. Flagged by an independent final-review agent.
+- [ ] **Unverified assumption: a per-step `asyncio.wait_for` timeout's
+  cancellation unwinds the real SDK's two-layer delegating generator the same
+  way a cooperative-stop `break` does.** `AntigravityAgent._drain()`'s
+  docstring analyzes the re-entrancy retry needed after a `break` at a
+  suspended yield point (`should_stop`/`max_turns_reached`); the new
+  `except TimeoutError:` break results from `asyncio.wait_for` cancelling
+  `steps.__anext__()` while it is ACTIVELY awaiting, not suspended at a yield
+  — a different unwind mechanism the docstring doesn't cover. The existing
+  `_RECEIVE_STEPS_REENTRY_RETRIES` retry loop would likely absorb any extra
+  `RuntimeError` this causes on the next `receive_steps()` call, but this is
+  reasoned by analogy, not confirmed against the installed
+  `google-antigravity` SDK's actual re-entrancy guard under this exact path.
+  **Not promoted**: verifying it needs a live/integration test against the
+  real SDK (or a fake that faithfully reproduces the two-layer delegation AND
+  a genuinely-in-flight cancellation, harder to construct than the existing
+  `_TwoLayerReentrancyGuardedConversation` fixture), not a static rule. Revisit
+  if a live Antigravity run ever surfaces an unexpected `RuntimeError` spike
+  correlated with per-step timeouts.
+
+## From the /coder-eval-code-review pass on timeout-grading-and-blocking-drain (2026-08-14)
+
+Three independent reviewers (2 Opus fallback + 1 Opus specialized-lens) converged
+on the per-step-timeout-too-aggressive High finding, fixed in this pass
+(`_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS` decoupled from the poll interval and
+raised to 30s). NOTE: that pass also recalibrated `_MAX_BACKGROUND_POLLS` to 17 from
+a 35s-per-cycle assumption; a later review round found that arithmetic does not apply
+to the idle backgrounded-job mode (a cycle there costs 5s, so the real budget was 85s,
+not ~10 minutes) and reverted it to 120, adding a separate
+`_MAX_BACKGROUND_POLL_WALL_SECONDS = 600.0` wall-clock backstop for the wedged mode. Also fixed: `_grade_after_forced_kill` skipping
+re-grading when criteria are already populated, the FIRED-ONLY early-stop gate
+(`_gate_passed`), a wall-clock bound on the salvage grading pass, the bogus
+"after 0s" message, a missing `conversation.cancel()`, CE022's coverage of the two
+new `# noqa: PLR0915` sites, and `docs/agents/HARNESS_PARITY.md`'s stale claims.
+
+Deferred (not fixed this pass):
+
+- [ ] **`_grade_after_forced_kill` still duplicates the load_reference →
+  check_all_async → store → calculate_weighted_score sequence** found in
+  `_evaluation_loop` and `_run_dialog_criteria_check`, rather than sharing one
+  helper. The FIRED-ONLY gate-selection *boolean* was extracted into
+  `_gate_passed` and is now shared, but the surrounding grading sequence and
+  `_evaluation_loop`'s own inline gate-selection block (which carries
+  additional per-branch logging — `armed_count`, disarmed-vs-never-fired
+  messages) were deliberately left untouched: refactoring that already-tested,
+  delicate correctness path purely for a DRY win risked a regression in
+  well-established normal-path code for no correctness benefit. Also, fully
+  sharing `_run_dialog_criteria_check` from `_grade_after_forced_kill` would
+  require hoisting `judge_usage_accum` (currently a `_simulation_dialog_loop`
+  local) onto `self` so both scopes can reach it — a real refactor, not a
+  drive-by fix. **Not promoted**: this is a structural improvement, not a
+  regression risk (the correctness gaps it exposed — double-grading, lost
+  judge-usage accumulation — are already closed by the "skip if already
+  graded" fix above), so it's lower priority than the items already fixed.
+- [ ] **`except TimeoutError:` in `_drain()`'s per-step wait also catches a
+  genuine transport-level `TimeoutError`** (an `OSError` subclass) raised from
+  inside the SDK, indistinguishable from `asyncio.wait_for`'s own expiry —
+  a real connection failure would be reclassified as "still waiting" and
+  polled out to the budget instead of surfacing as a diagnosable crash.
+  **Not promoted**: distinguishing the two reliably needs an elapsed-time
+  check around the call (compare actual elapsed against the configured
+  timeout, with a safety margin for scheduling jitter) — cheap in isolation,
+  but the margin needs live-SDK validation to pick a value that doesn't
+  itself introduce false classifications, so it's not a pure ≲30-minute
+  mechanical change. Low severity: this only matters if the SDK ever raises a
+  real socket-level `TimeoutError`, which hasn't been observed.
+- [x] **CLOSED (code review, 2026-08-14)** — `_grade_after_forced_kill`'s
+  `passed_count` log line ran `zip(criteria_results,
+  self.task.success_criteria, strict=True)` before the status decision was
+  committed, inside the same broad `try`, so a length mismatch would have
+  discarded the already-computed `all_passed` in favor of `fallback_status`.
+  Fixed directly rather than deferred: the tally moved into
+  `_log_graded_after_forced_kill`, which runs AFTER the status decision and
+  swallows its own `ValueError`. No lint rule — this was a one-off ordering
+  bug in a single function, not a mechanically detectable pattern.
+- [ ] **CE022's self-guard cannot see a blanket `# noqa` or a file-level
+  `# ruff: noqa: PLR0915`.** It matches only the ordinary
+  `# noqa: PLR0915` form (the one in use). A bare `# noqa` on a `def` line
+  genuinely suppresses PLR0915 for ruff, but `runner._is_suppressed` would
+  also drop CE022's own violation reported on that same line (`_NOQA_ALL`),
+  so the marker is unreachable for this rule no matter how it matches.
+  **Not promoted**: closing it properly means teaching the runner that some
+  rules opt out of blanket-noqa suppression — a runner-wide semantic change
+  affecting all CE rules, well past a ≲30-minute mechanical fix. Low severity:
+  both forms are absent from `src/` today (verified by grep) and using one to
+  dodge CE022 would be deliberate.
+- [x] **CLOSED (code review, 2026-08-14)** — CE022's "register every new
+  `# noqa: PLR0915` in `_TARGETS`" contract was documented but enforced by
+  nothing, so a fourth suppression would have been unbounded (ruff's check
+  off, the rule skipping it) while `test_no_violations` still reported the
+  tree clean. Promoted per the ≲30-minute rule: `NoqaPlr0915StatementCap`
+  now reads the `def` header from source and flags any carrier absent from
+  `_TARGETS` (`_carries_suppression`), covered by
+  `test_flags_an_unregistered_noqa_plr0915` and a negative test for a
+  registered target and a body-only PLR0915 mention.
+
 ## From 2026-08-04 published-action verification review
 
 - [ ] **CE041 — `VAR=$(… | grep …)` under `set -e` followed by an emptiness check

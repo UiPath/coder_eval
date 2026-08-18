@@ -380,22 +380,31 @@ class TestCE021GuardedEvaluationResultParse:
         assert not self._run(src)
 
 
+def _with_source(rule, src: str):
+    """Attach source lines the way ``runner.check_file`` does."""
+    rule.source_lines = src.splitlines()
+    return rule
+
+
 @pytest.mark.lint
 class TestCE022SimulationDialogLoopStatementCap:
-    """CE022 bounds the regrowth of the noqa'd _simulation_dialog_loop.
+    """CE022 bounds the regrowth of every function that keeps a
+    ``# noqa: PLR0915`` (currently ``_simulation_dialog_loop``, ``run``, and
+    ``communicate``).
 
-    The whole-tree zero-violations guarantee (the live function is at/under the cap)
-    is asserted by the parametrized ``test_no_violations`` above; these pin that the
-    rule actually fires on regrowth and stays narrow.
+    The whole-tree zero-violations guarantee (each live target is at/under its
+    cap) is asserted by the parametrized ``test_no_violations`` above; these
+    pin that the rule actually fires on regrowth and stays scoped to its
+    registered targets.
     """
 
     @staticmethod
     def _run(src: str, *, path: str = "src/coder_eval/orchestrator.py"):
         import ast
 
-        from tests.lint.rules.ce022_dialog_loop_statement_cap import SimulationDialogLoopStatementCap
+        from tests.lint.rules.ce022_dialog_loop_statement_cap import NoqaPlr0915StatementCap
 
-        return SimulationDialogLoopStatementCap(path).check(ast.parse(src))
+        return NoqaPlr0915StatementCap(path).check(ast.parse(src))
 
     @staticmethod
     def _padded_loop(name: str, n_statements: int) -> str:
@@ -429,6 +438,74 @@ class TestCE022SimulationDialogLoopStatementCap:
         body = "\n".join(f"    x{i} = {i}" for i in range(200))
         src = f"def _simulation_dialog_loop(self, initial_prompt, sandbox_dir):\n{body}"
         assert len(self._run(src)) == 1
+
+    def test_flags_oversized_communicate_in_antigravity_agent(self):
+        """antigravity_agent.py::communicate is a registered target too (added
+        by the step_fetch_timed_out post-loop branch's # noqa: PLR0915)."""
+        violations = self._run(self._padded_loop("communicate", 200), path="src/coder_eval/agents/antigravity_agent.py")
+        assert len(violations) == 1
+        assert violations[0].rule_id == "CE022"
+
+    def test_ignores_communicate_outside_its_registered_file(self):
+        """A same-named `communicate` in a different file is not a target."""
+        assert not self._run(self._padded_loop("communicate", 200), path="src/coder_eval/other.py")
+
+    def test_flags_an_unregistered_noqa_plr0915(self, tmp_path):
+        """The "register your new noqa in _TARGETS" contract is self-enforcing.
+
+        An unregistered function carrying the suppression is bounded by
+        nothing — ruff's check is off and the cap table skips it — so CE022
+        itself must flag it. Without this the contract is documentation only
+        and ``test_no_violations`` gives a false sense of coverage.
+        """
+        import ast
+
+        from tests.lint.rules.ce022_dialog_loop_statement_cap import NoqaPlr0915StatementCap
+
+        src = "def brand_new_helper(self):  # noqa: PLR0915 — new suppression\n    x = 1\n"
+        f = tmp_path / "some_module.py"
+        f.write_text(src)
+
+        # source_lines is what runner.check_file passes; the rule reads ONLY
+        # that, never the path, so tree and text can never disagree.
+        violations = _with_source(NoqaPlr0915StatementCap(str(f)), src).check(ast.parse(src))
+
+        assert len(violations) == 1
+        assert violations[0].rule_id == "CE022"
+        assert "not registered in CE022's _TARGETS" in violations[0].message
+
+    def test_does_not_flag_a_registered_noqa_or_an_unsuppressed_function(self, tmp_path):
+        """The self-guard must stay quiet for (a) a registered target and (b) an
+        ordinary function with no suppression — including one whose BODY merely
+        mentions PLR0915 (a docstring, or this rule's own message text)."""
+        import ast
+
+        from tests.lint.rules.ce022_dialog_loop_statement_cap import NoqaPlr0915StatementCap
+
+        registered = "def _simulation_dialog_loop(self):  # noqa: PLR0915\n    x = 1\n"
+        f = tmp_path / "orchestrator.py"
+        f.write_text(registered)
+        assert not _with_source(NoqaPlr0915StatementCap(str(f)), registered).check(ast.parse(registered))
+
+        body_mention = 'def helper(self):\n    """Mentions PLR0915 and noqa in the body only."""\n    x = 1\n'
+        g = tmp_path / "plain_module.py"
+        g.write_text(body_mention)
+        assert not _with_source(NoqaPlr0915StatementCap(str(g)), body_mention).check(ast.parse(body_mention))
+
+    def test_no_source_lines_disables_the_self_guard(self, tmp_path):
+        """Constructed with only a path (no source), the rule must NOT re-read
+        that path to hunt for suppressions -- a tree from one source and text
+        from another is how a synthetic-path unit test turns into a silent
+        false positive, and it makes the result cwd-dependent."""
+        import ast
+
+        from tests.lint.rules.ce022_dialog_loop_statement_cap import NoqaPlr0915StatementCap
+
+        src = "def brand_new_helper(self):  # noqa: PLR0915\n    x = 1\n"
+        f = tmp_path / "some_module.py"
+        f.write_text(src)
+
+        assert not NoqaPlr0915StatementCap(str(f)).check(ast.parse(src))
 
 
 @pytest.mark.lint
@@ -2964,3 +3041,83 @@ class TestCE035WorkflowOutputParity:
         assert len(findings) == 1
         assert findings[0].line == 7, f"expected line 7, got {findings[0].line}"
         assert str(findings[0]).startswith(f"{wf}:7 — ")
+
+
+@pytest.mark.lint
+class TestCE036CriteriaResultsSingleWriter:
+    """CE036 keeps `success_criteria_results` behind its single writer.
+
+    The whole-tree zero-violations guarantee is asserted by the parametrized
+    ``test_no_violations`` above; these pin that the rule fires on a split
+    write and stays narrow.
+    """
+
+    @staticmethod
+    def _run(src: str, *, path: str = "src/coder_eval/orchestrator.py"):
+        import ast
+
+        from tests.lint.rules.ce036_criteria_results_single_writer import CriteriaResultsSingleWriter
+
+        return CriteriaResultsSingleWriter(path).check(ast.parse(src))
+
+    def test_flags_an_assignment_outside_the_single_writer(self):
+        src = (
+            "class Orchestrator:\n"
+            "    def _some_new_grading_path(self, results):\n"
+            "        self.result.success_criteria_results = results\n"
+        )
+        violations = self._run(src)
+        assert len(violations) == 1
+        assert violations[0].rule_id == "CE036"
+        assert "_record_criteria" in violations[0].message
+
+    def test_allows_the_single_writer_itself(self):
+        src = (
+            "class Orchestrator:\n"
+            "    def _record_criteria(self, results):\n"
+            "        self.result.success_criteria_results = results\n"
+            "        self._graded_iteration_count = len(self.result.iterations)\n"
+        )
+        assert not self._run(src)
+
+    def test_ignores_reads(self):
+        """Only assignment is guarded -- reading the field is ordinary."""
+        src = (
+            "class Orchestrator:\n"
+            "    def _grade(self):\n"
+            "        if self.result.success_criteria_results:\n"
+            "            return len(self.result.success_criteria_results)\n"
+            "        return 0\n"
+        )
+        assert not self._run(src)
+
+    def test_flags_an_annotated_assignment(self):
+        """An annotated assignment stores just the same, and slipped the seam."""
+        src = (
+            "class Orchestrator:\n"
+            "    def _sneaky(self, results):\n"
+            "        self.result.success_criteria_results: list = results\n"
+        )
+        assert len(self._run(src)) == 1
+
+    def test_flags_an_augmented_assignment(self):
+        """`+=` mutates the stored list without stamping the counter."""
+        src = "class Orchestrator:\n    def _sneaky(self, r):\n        self.result.success_criteria_results += r\n"
+        assert len(self._run(src)) == 1
+
+    def test_flags_a_tuple_unpacking_target(self):
+        src = (
+            "class Orchestrator:\n"
+            "    def _sneaky(self, r, n):\n"
+            "        self.result.success_criteria_results, self.x = r, n\n"
+        )
+        assert len(self._run(src)) == 1
+
+    def test_is_scoped_to_the_orchestrator_module(self):
+        """Elsewhere in src/ the advice ("call self._record_criteria") is nonsense.
+
+        A reports/experiment module building a synthetic EvaluationResult is not
+        the grading seam this rule governs.
+        """
+        src = "def build(result, results):\n    result.success_criteria_results = results\n"
+        assert not self._run(src, path="src/coder_eval/reports.py")

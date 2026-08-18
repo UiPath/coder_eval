@@ -17,10 +17,11 @@ from tests.lint.rules.ce018_no_final_status_name_denylist import NoFinalStatusNa
 from tests.lint.rules.ce019_telemetry_non_fatal import TelemetryNonFatal
 from tests.lint.rules.ce020_no_sdk_typed_base_agent_fields import NoSdkTypedBaseAgentFields
 from tests.lint.rules.ce021_guarded_evaluationresult_parse import GuardedEvaluationResultParse
-from tests.lint.rules.ce022_dialog_loop_statement_cap import SimulationDialogLoopStatementCap
+from tests.lint.rules.ce022_dialog_loop_statement_cap import NoqaPlr0915StatementCap
 from tests.lint.rules.ce023_no_proxy_shim_import import NoProxyShimImports
 from tests.lint.rules.ce024_discriminated_unions import DiscriminatedUnions
 from tests.lint.rules.ce032_criteria_path_seam import CriteriaPathSeam
+from tests.lint.rules.ce036_criteria_results_single_writer import CriteriaResultsSingleWriter
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -61,10 +62,11 @@ ALL_RULES: list[RuleClass] = [
     TelemetryNonFatal,
     NoSdkTypedBaseAgentFields,
     GuardedEvaluationResultParse,
-    SimulationDialogLoopStatementCap,
+    NoqaPlr0915StatementCap,
     NoProxyShimImports,
     DiscriminatedUnions,
     CriteriaPathSeam,
+    CriteriaResultsSingleWriter,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule
@@ -117,7 +119,9 @@ def check_file(path: Path, rules: list[RuleClass] | None = None) -> list[Violati
     source_lines = source.splitlines()
     violations: list[Violation] = []
     for rule_class in rules:
-        for v in rule_class(str(path)).check(tree):
+        rule = rule_class(str(path))
+        rule.source_lines = source_lines
+        for v in rule.check(tree):
             if not _is_suppressed(source_lines, v):
                 violations.append(v)
     return violations

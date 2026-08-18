@@ -7,7 +7,6 @@ import os
 import re
 import time
 from collections.abc import Callable, Sequence
-from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
@@ -34,6 +33,7 @@ from claude_agent_sdk.types import SystemPromptPreset
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
+from coder_eval.agents._process_tree import kill_process_tree
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.errors import (
@@ -1288,15 +1288,21 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         self._mark_stopped()
 
     async def kill(self) -> None:
-        """Force-terminate the in-flight Claude CLI subprocess, if any.
+        """Force-terminate the in-flight Claude CLI subprocess tree, if any.
 
-        Async wrapper around ``kill_sync`` for callers that prefer async.
+        Offloaded to a thread rather than calling ``kill_sync`` inline: reaping
+        the tree walks ``/proc`` (and forks ``ps`` on a host without it), and
+        with no suspension point in the body the orchestrator's
+        ``asyncio.wait_for(agent.kill(), ...)`` quiesce could not actually bound
+        it -- while a parallel ``run_batch`` would have every other in-flight
+        task's turn stalled on the same loop.
+
         The threaded watchdog inside communicate() uses ``_kill_transport``
         directly on a captured transport (not via ``self._active_transport``)
         to avoid a cross-turn race where a stale watchdog could kill a later
         turn's subprocess.
         """
-        self.kill_sync()
+        await asyncio.to_thread(self.kill_sync)
 
     def kill_sync(self) -> None:
         """Synchronously SIGKILL the in-flight Claude CLI subprocess, if any.
@@ -1336,11 +1342,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         proc = getattr(transport, "_process", None)
         if proc is None or proc.returncode is not None:
             return
-        logger.warning("Hard-killing Claude CLI subprocess (pid=%s)", getattr(proc, "pid", "?"))
-        # OSError covers ProcessLookupError (already exited) and permission /
-        # ESRCH races; any other exception would be a real bug worth raising.
-        with suppress(OSError):
-            proc.kill()
+        logger.warning("Hard-killing Claude CLI subprocess tree (pid=%s)", proc.pid)
+        # Never raises -- kill_process_tree swallows the already-exited /
+        # permission / ESRCH races internally.
+        kill_process_tree(proc.pid)
 
     def _finalize_commands(
         self, pending_commands: dict[str, dict[str, Any]], messages: list[Message]
