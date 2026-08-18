@@ -1956,14 +1956,17 @@ async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
         def __exit__(self, *exc):
             return False
 
-    def _make_transport():
+    def _make_transport(pid: int):
         transport = MagicMock()
         transport._process = MagicMock()
         transport._process.returncode = None  # still running, so kill() would fire
+        # A real int pid: the hard kill reaps the process TREE, so the pid is
+        # arithmetic input (sentinel / process-group guards), not an opaque handle.
+        transport._process.pid = pid
         return transport
 
-    transport_a = _make_transport()
-    transport_b = _make_transport()
+    transport_a = _make_transport(100001)
+    transport_b = _make_transport(100002)
 
     async def mock_query(prompt, options, transport=None):
         # Clean turn: yield nothing so communicate finalizes via COMPLETED.
@@ -1987,6 +1990,8 @@ async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
     # Both turns finished, so self._active_transport is None. Fire turn 1's
     # watchdog: it must kill turn 1's captured transport (not no-op on the
     # cleared instance attr) and must not touch turn 2's transport.
-    captured_callbacks[0]()
-    transport_a._process.kill.assert_called_once()
-    transport_b._process.kill.assert_not_called()
+    with patch("coder_eval.agents.claude_code_agent.kill_process_tree") as kill_tree:
+        captured_callbacks[0]()
+    # Killed as a TREE (the CLI's Bash children must not outlive it), and only
+    # turn 1's transport.
+    assert [c.args[0] for c in kill_tree.call_args_list] == [100001]

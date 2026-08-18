@@ -5,6 +5,7 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 """
 
 import asyncio
+import contextlib
 import os
 import sys
 from collections.abc import Callable
@@ -1862,6 +1863,191 @@ def test_per_step_timeout_is_not_aliased_to_the_poll_interval():
         antigravity_agent._RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS
         >= 6 * antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS
     )
+
+
+async def test_a_merely_quiet_turn_keeps_almost_the_whole_turn_budget(monkeypatch):
+    """Regression test (code review 2026-08-17): the poll deadline must bound a
+    genuinely STUCK turn tightly and a merely QUIET one only barely.
+
+    A >=30s gap between steps is ordinary agent behaviour (a long thinking
+    burst). Charging that turn the STUCK deadline meant one that would have
+    finished at 260s of a 300s budget was killed at 240s for pausing. Exempting
+    it from any deadline was the first fix and overshot: the bound became the
+    watchdog's hard task-cancel at 1.0 * timeout, which leaves only
+    _WAIT_FOR_GRACE_SECONDS for exit bookkeeping and skips the graceful
+    conversation.cancel(). So a quiet turn gets its OWN, much later deadline.
+
+    The three fractions are set far apart here so "cut at the stuck deadline",
+    "cut at the quiet deadline" and "ran to the watchdog" are distinguishable.
+
+    Real clock on purpose: freezing time.monotonic also freezes asyncio's event
+    loop, so no timer would ever fire.
+    """
+    import time as _time
+
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_BACKGROUND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_POLL_DEADLINE_TIMEOUT_FRACTION", 0.05)
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_TIMEOUT_FRACTION", 0.5)
+    # Scaled with the rest: the real 5s safety margin would otherwise dominate a
+    # 1s budget entirely and collapse the quiet deadline onto the stuck one.
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_SAFETY_SECONDS", 0.02)
+
+    turn_timeout = 1.0  # stuck: 0.05s | quiet: 0.5s | watchdog: 1.0s
+    agent = _agent_with_steps([])
+    agent._sdk_agent.conversation = _AlwaysEmptyConversation()
+
+    started = _time.monotonic()
+    with contextlib.suppress(Exception):
+        await agent.communicate("go", timeout=turn_timeout)
+    elapsed = _time.monotonic() - started
+
+    assert elapsed > 0.3, f"quiet turn was cut at the STUCK deadline after {elapsed:.3f}s"
+    assert elapsed < 0.9, f"quiet turn ran past its own deadline to the watchdog ({elapsed:.3f}s)"
+
+
+async def test_a_stuck_turn_is_still_cut_at_the_tighter_deadline(monkeypatch):
+    """Converse of the above: an orphaned tool call IS a state that cannot
+    resolve itself, so the tight deadline still applies there -- that is the
+    graceful path (force-close the orphan, grade normally) that has to win its
+    race with the watchdog."""
+    import time as _time
+
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_BACKGROUND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_POLL_DEADLINE_TIMEOUT_FRACTION", 0.05)
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_TIMEOUT_FRACTION", 0.5)
+    monkeypatch.setattr(antigravity_agent, "_QUIET_POLL_DEADLINE_SAFETY_SECONDS", 0.02)
+
+    never_closing = [
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "stuck", {"command_line": "sleep 999999"})],
+        ),
+        _step("TEXT_RESPONSE", "DONE", content="backgrounded it", complete=True, usage=_usage(10, 0, 1, 0)),
+    ]
+    agent = _agent_with_steps([never_closing])
+
+    started = _time.monotonic()
+    tr = await agent.communicate("do it", timeout=1.0)
+    elapsed = _time.monotonic() - started
+
+    # Cut at ~0.05s by the stuck deadline, well before the quiet one at 0.5s.
+    assert elapsed < 0.3, f"stuck turn was not cut at the tighter deadline ({elapsed:.3f}s)"
+    bash = next(c for c in tr.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"  # force-closed, turn still graded
+
+
+async def test_a_non_positive_timeout_still_falls_back_to_the_flat_backstop(monkeypatch):
+    """ThreadedWatchdog starts no timer for timeout <= 0, so a quiet turn must
+    NOT be handed to a watchdog that was never armed -- it takes the flat
+    wall-clock backstop like the timeout=None path (code review, 2026-08-17)."""
+    import time as _time
+
+    from coder_eval.agents import antigravity_agent
+
+    monkeypatch.setattr(antigravity_agent, "_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_BACKGROUND_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLL_WALL_SECONDS", 0.2)
+
+    agent = _agent_with_steps([])
+    agent._sdk_agent.conversation = _AlwaysEmptyConversation()
+
+    started = _time.monotonic()
+    with contextlib.suppress(Exception):
+        await agent.communicate("go", timeout=0)
+    elapsed = _time.monotonic() - started
+
+    # Bounded by the 0.2s backstop rather than polling for ever.
+    assert elapsed < 2.0, f"a timeout=0 quiet turn was not bounded by the backstop ({elapsed:.3f}s)"
+
+
+async def test_teardown_is_retryable_when_a_close_is_cancelled(monkeypatch):
+    """Regression test (code review 2026-08-17): an interrupted teardown must
+    stay retryable.
+
+    The forced-kill quiesce bounds kill() with asyncio.wait_for, so a cancel can
+    land inside stack.aclose() -- and contextlib.suppress(Exception) does not
+    catch CancelledError. Clearing _exit_stack BEFORE the close meant the later
+    _cleanup() -> stop() -> _teardown() retry saw None, no-oped, and the
+    localharness subprocess was never reaped.
+    """
+    from coder_eval.models import parse_agent_config
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    attempts: list[str] = []
+
+    class _Stack:
+        def __init__(self):
+            self.closed = False
+
+        async def aclose(self):
+            attempts.append("aclose")
+            if len(attempts) == 1:
+                raise asyncio.CancelledError()  # first attempt interrupted
+            self.closed = True
+
+    stack = _Stack()
+    agent._exit_stack = stack  # type: ignore[assignment]
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await agent._teardown()
+
+    # The handle must survive the interrupted attempt...
+    assert agent._exit_stack is stack, "an interrupted teardown dropped its handle"
+
+    # ...so the ordinary cleanup retry can finish reaping the harness.
+    await agent._teardown()
+    assert stack.closed is True
+    assert agent._exit_stack is None
+    assert attempts == ["aclose", "aclose"]
+
+
+def test_quiet_poll_deadline_leaves_room_for_one_worst_case_drain():
+    """Regression test (code review 2026-08-18): the quiet deadline must be
+    DRAIN-AWARE, not a flat fraction.
+
+    The post-sleep guard only decides whether to START a drain -- it cannot
+    interrupt one -- so the last cycle admitted before the deadline can still
+    spend a full _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS inside _drain. Unless
+    the deadline leaves at least that much room, the ThreadedWatchdog fires
+    mid-drain and its hard task-cancel skips the graceful exit's bounded
+    conversation.cancel() -- defeating the reason the quiet deadline is later
+    than the stuck one in the first place.
+
+    The timing tests above deliberately shrink the per-step timeout to 0.01s,
+    which is precisely what makes this invisible to them; this pins it in the
+    real units instead.
+    """
+    from coder_eval.agents.antigravity_agent import (
+        _POLL_DEADLINE_TIMEOUT_FRACTION,
+        _QUIET_POLL_DEADLINE_TIMEOUT_FRACTION,
+        _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS,
+        _quiet_poll_deadline_offset,
+    )
+
+    # The framework default in experiments/default.yaml, plus a spread around it.
+    for turn_timeout in (300.0, 600.0, 960.0):
+        offset = _quiet_poll_deadline_offset(turn_timeout)
+        remaining = turn_timeout - offset
+        assert remaining >= _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS, (
+            f"turn_timeout={turn_timeout:g}s leaves only {remaining:.1f}s after the quiet deadline, "
+            f"less than one worst-case {_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS:g}s drain"
+        )
+        # Still strictly later than the stuck deadline (that is the whole point)
+        # and never beyond the proportional cap.
+        assert offset > turn_timeout * _POLL_DEADLINE_TIMEOUT_FRACTION
+        assert offset <= turn_timeout * _QUIET_POLL_DEADLINE_TIMEOUT_FRACTION
+
+    # A budget too small to fit two drains has no margin to preserve; the stuck
+    # fraction wins rather than the deadline going negative.
+    assert _quiet_poll_deadline_offset(10.0) == 10.0 * _POLL_DEADLINE_TIMEOUT_FRACTION
 
 
 def test_background_poll_budget_still_covers_the_worst_observed_backgrounded_job():

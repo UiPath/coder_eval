@@ -21,6 +21,7 @@ from tests.lint.rules.ce022_dialog_loop_statement_cap import NoqaPlr0915Statemen
 from tests.lint.rules.ce023_no_proxy_shim_import import NoProxyShimImports
 from tests.lint.rules.ce024_discriminated_unions import DiscriminatedUnions
 from tests.lint.rules.ce032_criteria_path_seam import CriteriaPathSeam
+from tests.lint.rules.ce036_criteria_results_single_writer import CriteriaResultsSingleWriter
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -65,6 +66,7 @@ ALL_RULES: list[RuleClass] = [
     NoProxyShimImports,
     DiscriminatedUnions,
     CriteriaPathSeam,
+    CriteriaResultsSingleWriter,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

@@ -197,7 +197,11 @@ as every other agent.
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead
    of finalizing on an idle step stream, so slow work does complete — but the wait is
-   bounded by 80% of `turn_timeout` (600s when the task sets no timeout). What happens
+   bounded by a deadline below `turn_timeout`: 80% of it while a tool call is still
+   ACTIVE (so the graceful force-close beats the watchdog), and for a merely quiet
+   connection as late as still leaves room for one worst-case 30s step wait —
+   `turn_timeout - 35s`, clamped between that 80% floor and a 95% ceiling, so 265s of
+   a 300s budget. A task that sets no timeout gets a flat 600s backstop instead. What happens
    at that bound depends on what is in flight: a job still ACTIVE is force-closed as
    `result_status: unknown` and graded as an ordinary low score rather than a timeout;
    a connection that never produced a clean turn end with nothing ACTIVE raises a real

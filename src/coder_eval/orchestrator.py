@@ -1,7 +1,6 @@
 """Main orchestrator for coordinating task evaluation."""
 
 import asyncio
-import contextlib
 import logging
 import re
 import time
@@ -623,18 +622,30 @@ class Orchestrator:
                 # awaits below run normally after the CancelledError is caught.
                 teardown_interrupt: BaseException | None = None
                 try:
+                    # FIRST, before anything else touches the sandbox: a grading
+                    # pass that outlived its budget still has criteria running on
+                    # to_thread workers. _run_post_run_commands executes shell
+                    # commands in that same tree, so draining here rather than
+                    # after it is what stops a post-run command from mutating a
+                    # file a live criterion is mid-read of (code review,
+                    # 2026-08-17). Inside this try, not ahead of it:
+                    # _await_pending_grade is written not to raise, but that is a
+                    # contract rather than a mechanism, and an unguarded raise
+                    # here would skip _cleanup() (tempdir leaked) AND
+                    # _finalize_result() (task.json lost) -- the exact failure the
+                    # interrupt-proof teardown above exists to prevent.
+                    teardown_interrupt = await self._await_pending_grade()
                     # BEFORE post-run/cleanup: needs the live sandbox to resolve
                     # the agent-aligned `uip`, and post-task tool state on disk.
                     self._refresh_runtime_tool_versions()
                     await self._run_post_run_commands()
                 except (Exception, asyncio.CancelledError) as e:
-                    teardown_interrupt = e
+                    teardown_interrupt = teardown_interrupt or e
                     logger.warning(
                         "Teardown interrupted during post-run (%s: %s); completing cleanup before re-raising",
                         type(e).__name__,
                         e,
                     )
-                await self._await_pending_grade()
                 await self._cleanup()
                 # Capture the sanitised log tail AFTER teardown so any errors
                 # logged during post-run / cleanup also land in the report,
@@ -775,11 +786,22 @@ class Orchestrator:
         # nondeterministic in both directions. Best-effort and suppressed:
         # failing to quiesce is never a reason to skip grading.
         #
-        # RESIDUAL (not closed by this): on Antigravity the harness backgrounds
-        # any command over ~10s -- that is why the poll loop exists -- and
-        # cancelling the conversation does not reap a detached shell job. So a
-        # criterion can still read a tree a backgrounded build is mutating.
-        # result.forced_kill marks such runs so a mid-write verdict is at least
+        # Scope: this is NOT Antigravity-specific. claude-code runs Bash tool
+        # calls as children of the CLI, so killing the CLI alone left them
+        # writing into the tree the criteria below are about to read --
+        # `kill_process_tree` now reaps the whole tree for that backend.
+        #
+        # RESIDUAL (not closed), two backends:
+        #   - Antigravity: the harness backgrounds any command over ~10s -- that
+        #     is why the poll loop exists -- and cancelling the conversation does
+        #     not reap a detached shell job, which is not this process's child to
+        #     signal.
+        #   - Codex: kill_sync() interrupts the turn and closes the SDK client,
+        #     which reaps the client's own subprocess but walks no descendant
+        #     tree, so a shell command it launched can outlive the kill the same
+        #     way claude-code's used to.
+        # Either way a criterion can still read a tree a live build is mutating.
+        # result.forced_kill marks such runs so a mid-write verdict stays
         # distinguishable from a settled one.
         if self.agent is not None:
             try:
@@ -858,8 +880,7 @@ class Orchestrator:
             # of every earlier turn (no-op outside simulation: the accumulator
             # is empty and each result keeps its own usage).
             self._accumulate_judge_usage(criteria_results, self._judge_usage_accum)
-            self.result.success_criteria_results = criteria_results
-            self._graded_iteration_count = len(self.result.iterations)
+            self._record_criteria(criteria_results)
             all_passed = self._gate_passed()
             self.result.calculate_weighted_score(self.task.success_criteria)
             self._emit_criteria_event(criteria_results)
@@ -885,7 +906,7 @@ class Orchestrator:
             )
             self.result.final_status = fallback_status
 
-    async def _await_pending_grade(self) -> None:
+    async def _await_pending_grade(self) -> BaseException | None:
         """Let an over-budget grading pass finish before the sandbox is torn down.
 
         ``_grade_after_forced_kill`` stops WAITING for the verdict at
@@ -899,21 +920,31 @@ class Orchestrator:
         """
         grade = self._pending_grade
         if grade is None:
-            return
+            return None
         self._pending_grade = None
         logger.warning(
             "[%s] Waiting for an over-budget grading pass to finish before sandbox teardown",
             self.task.task_id,
         )
-        # CancelledError IS suppressed here, unlike the quiesce above: this runs
-        # inside run()'s teardown, which the file already establishes must be
-        # interrupt-proof (see the teardown_interrupt handling in run()) --
-        # aborting here would skip _cleanup() and leak the sandbox, and would
-        # also abandon the very thread we are waiting for. The awaited result is
-        # deliberately discarded: the status was decided from the fallback, and
-        # this await exists purely to order teardown after the worker thread.
-        with contextlib.suppress(Exception, asyncio.CancelledError):
+        # CancelledError is caught here, unlike the quiesce (which lets it
+        # propagate): this runs inside run()'s teardown, which the file already
+        # establishes must be interrupt-proof -- aborting would skip _cleanup()
+        # and leak the sandbox, and would abandon the very worker thread we are
+        # waiting for. But it is RETURNED rather than dropped, so run() can fold
+        # it into teardown_interrupt and re-raise after teardown completes; a
+        # silently swallowed cancel is what the review flagged. The awaited
+        # result is deliberately discarded -- the status was already decided
+        # from the fallback.
+        try:
             await grade
+        except asyncio.CancelledError as e:
+            return e
+        except Exception as e:
+            # Not fatal and not returned: the status was already decided from
+            # the fallback, so a failing late grade changes nothing. Logged with
+            # the exception so it is still diagnosable.
+            logger.debug("[%s] Over-budget grading pass ended in %r", self.task.task_id, e, exc_info=True)
+        return None
 
     def _log_graded_after_forced_kill(self, criteria_results: list[CriterionResult]) -> None:
         """Human-readable pass tally for ``_grade_after_forced_kill``.
@@ -937,6 +968,22 @@ class Orchestrator:
             passed_count,
             len(criteria_results),
         )
+
+    def _record_criteria(self, criteria_results: list[CriterionResult]) -> None:
+        """Store a grading pass's results AND stamp the trajectory it covers.
+
+        The single writer of ``success_criteria_results``. The two assignments
+        are inseparable: ``_grade_after_forced_kill``'s skip-regrade shortcut
+        keys on ``_graded_iteration_count == len(result.iterations)``, so a
+        grading site that stored results without stamping would leave the
+        counter stale, defeat the shortcut, and silently re-run -- double-
+        spending every ``llm_judge`` / ``agent_judge`` criterion on a run whose
+        budget is already blown. Four hand-written copies of this pair invited
+        exactly that (code review, 2026-08-17); CE036 now enforces the seam.
+        """
+        assert self.result is not None
+        self.result.success_criteria_results = criteria_results
+        self._graded_iteration_count = len(self.result.iterations)
 
     def _gate_passed(self) -> bool:
         """FIRED-ONLY gate selection, mirroring ``_evaluation_loop``'s exact rule.
@@ -1799,8 +1846,7 @@ class Orchestrator:
                 reference_dir=reference_dir,
                 turn_records=self.result.iterations,
             )
-            self.result.success_criteria_results = criteria_results
-            self._graded_iteration_count = len(self.result.iterations)
+            self._record_criteria(criteria_results)
             return self.result.all_criteria_passed(self.task.success_criteria)
 
         # Working directory context prepended to every prompt (including feedback).
@@ -1858,8 +1904,7 @@ class Orchestrator:
             reference_dir=reference_dir,
             turn_records=self.result.iterations,
         )
-        self.result.success_criteria_results = criteria_results
-        self._graded_iteration_count = len(self.result.iterations)
+        self._record_criteria(criteria_results)
 
         # Determine if all criteria passed their thresholds. all_passed is
         # single-sourced via the model gate; passed_count/total_count are kept
@@ -1978,8 +2023,7 @@ class Orchestrator:
             turn_records=self.result.iterations,
         )
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
-        self.result.success_criteria_results = criteria_results
-        self._graded_iteration_count = len(self.result.iterations)
+        self._record_criteria(criteria_results)
         self.result.calculate_weighted_score(self.task.success_criteria)
         return criteria_results
 

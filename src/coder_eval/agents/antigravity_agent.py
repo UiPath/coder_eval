@@ -27,7 +27,7 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NoReturn
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
@@ -147,11 +147,65 @@ _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS = 30.0
 # evaluated, a strict regression for that input class.
 _POLL_DEADLINE_TIMEOUT_FRACTION = 0.8
 
+# The same idea, applied to a turn that is merely QUIET rather than stuck: the
+# last step-fetch timed out but NO tool call is left ACTIVE, so nothing is
+# structurally wrong -- a >=30s gap between steps is ordinary agent behaviour (a
+# long thinking burst), and such a turn may still finish on its own.
+#
+# Charging it the stuck fraction meant a turn that would have finished at 260s
+# of a 300s budget was killed at 240s for pausing (code review, 2026-08-17).
+# Exempting it from the deadline ENTIRELY was the first fix and went too far the
+# other way: the bound then became the ThreadedWatchdog at 1.0 * timeout, whose
+# hard task-cancel leaves only _WAIT_FOR_GRACE_SECONDS (2.0s) for this turn's
+# own exit bookkeeping to park a partial TurnRecord, and skips the best-effort
+# conversation.cancel() that the graceful exit performs -- so the harness stays
+# live into grading. A high fraction keeps ~all of the budget AND keeps the
+# graceful path: at the framework default turn_timeout: 300 the quiet turn now
+# gets 285s and 15s of exit margin.
+_QUIET_POLL_DEADLINE_TIMEOUT_FRACTION = 0.95
+
+# ...but a FRACTION alone cannot guarantee the graceful exit, because the last
+# poll cycle admitted before the deadline can still spend a whole
+# _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS inside _drain: the post-sleep guard
+# only decides whether to START a drain, never interrupts one. So the loop can
+# overshoot its deadline by ~30s, and at the framework default turn_timeout: 300
+# a flat 0.95 left just 15s of margin -- the watchdog fired mid-drain and its
+# hard task-cancel skipped the very conversation.cancel() the fraction was
+# raised to preserve (code review, 2026-08-18).
+#
+# The quiet deadline is therefore pulled back far enough that one worst-case
+# drain still lands before the watchdog, with this much slack to spare.
+_QUIET_POLL_DEADLINE_SAFETY_SECONDS = 5.0
+
+
+def _quiet_poll_deadline_offset(timeout: float) -> float:
+    """Seconds into the turn at which a merely-QUIET poll loop must stop.
+
+    Clamped on both sides: never earlier than the stuck deadline (a quiet turn
+    must not be cut sooner than a stuck one), never later than
+    _QUIET_POLL_DEADLINE_TIMEOUT_FRACTION (so a very large turn_timeout still
+    keeps a proportional margin rather than a fixed 35s sliver). Between those,
+    it is driven by the worst-case drain -- which is what makes the graceful
+    exit reachable instead of merely likely.
+
+    For a small turn_timeout the drain-aware value goes negative and the stuck
+    fraction wins: at that scale one 30s drain simply cannot fit inside the
+    budget twice, so there is no margin to preserve and the watchdog is the
+    honest bound.
+    """
+    drain_aware = timeout - (_RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS + _QUIET_POLL_DEADLINE_SAFETY_SECONDS)
+    return min(
+        timeout * _QUIET_POLL_DEADLINE_TIMEOUT_FRACTION,
+        max(timeout * _POLL_DEADLINE_TIMEOUT_FRACTION, drain_aware),
+    )
+
+
 # Wall-clock backstop on the background-work poll loop for a task that sets no
 # run_limits.turn_timeout/task_timeout at all (timeout=None), since
-# _POLL_DEADLINE_TIMEOUT_FRACTION has nothing to multiply in that case. It is
-# the SOLE bound on that path; with a timeout configured, 0.8 * timeout
-# replaces it entirely.
+# the two fractions above have nothing to multiply in that case. It is the SOLE
+# bound on that path (there is no watchdog either), and it applies to the stuck
+# and quiet cases alike; with a timeout configured, the fraction of it replaces
+# this backstop entirely.
 #
 # 600s is ~2x the 60-300s worst backgrounded-job duration observed in the
 # confirmed-broken tasks that motivated d3f1432, and it covers both cost modes
@@ -584,7 +638,39 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 )
                 await asyncio.sleep(0)
 
-    async def communicate(  # noqa: PLR0915 — the new step_fetch_timed_out post-loop branch pushed it over the cap; decomposing this poll-loop-plus-finalize method is out of scope for this fix.
+    async def _raise_stalled_poll_timeout(
+        self,
+        state: "_AntigravityTurnState",
+        conversation: Any,
+        timeout: float | None,
+        turn_start_time: float,
+        poll_count: int,
+    ) -> NoReturn:
+        """Finalize a poll loop that ran out of budget with nothing settled.
+
+        Extracted from ``communicate`` to keep it under CE022's cap: a review
+        round flagged that growing it and bumping the cap makes the growth
+        invisible to ``make check``. Always raises ``TurnTimeoutError``.
+        """
+        self._log.warning(
+            "Poll budget exhausted (poll_count=%d) with no clean turn end; treating as a timeout.",
+            poll_count,
+        )
+        # Best-effort server-side cancel, mirroring the stopped_early/max_turns
+        # exit: nothing legitimate is in flight here (no orphaned tool call), so
+        # there is no reason to leave the harness running while the orchestrator
+        # grades the sandbox. Bounded because this branch has just declared the
+        # connection unresponsive and cancel() bottoms out in a send on that same
+        # connection, outside the ThreadedWatchdog block.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(conversation.cancel(), timeout=_CANCEL_TIMEOUT_SECONDS)
+        # Reachable with `timeout` set (exhausted via poll_deadline) or None
+        # (via the wall-clock backstop) -- report the configured timeout when
+        # there is one, else real elapsed, instead of a nonsense "after 0s".
+        elapsed = time.monotonic() - turn_start_time
+        self._finalize_and_raise_timeout(state.finalize, timeout if timeout is not None else elapsed)
+
+    async def communicate(  # noqa: PLR0915 — poll-loop-plus-finalize driver, 89 ruff-stmts; partially decomposed already (_raise_stalled_poll_timeout), bounded by CE022's cap rather than ruff's.
         self,
         user_input: str,
         *,
@@ -684,7 +770,17 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 #     -- silently re-opening the very bug the poll loop exists
                 #     to fix (an ACTIVE tool call force-closed as unresolved and
                 #     graded on work that had not happened yet).
-                poll_deadline = turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
+                # `timeout and timeout > 0` mirrors ThreadedWatchdog's own
+                # contract (None OR <= 0 -> no timer started), so a non-positive
+                # timeout takes the flat-backstop path rather than deriving a
+                # deadline from a watchdog that was never armed.
+                watchdog_armed = bool(timeout and timeout > 0)
+                stuck_deadline = (
+                    turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if watchdog_armed and timeout else None
+                )
+                quiet_deadline = (
+                    turn_start_time + _quiet_poll_deadline_offset(timeout) if watchdog_armed and timeout else None
+                )
                 try:
                     await conversation.send(user_input)
                     # The cooperative should_stop poll runs AFTER process_step (the
@@ -706,28 +802,50 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     # either way a normal turn that finished cleanly within
                     # _RECEIVE_STEPS_PER_STEP_TIMEOUT_SECONDS takes this branch
                     # zero times.
-                    # Anchored HERE, not at turn start -- see poll_deadline above.
-                    if poll_deadline is None:
-                        poll_deadline = time.monotonic() + _MAX_BACKGROUND_POLL_WALL_SECONDS
+                    # Anchored HERE, not at turn start -- see the deadlines above.
+                    if stuck_deadline is None or quiet_deadline is None:
+                        backstop = time.monotonic() + _MAX_BACKGROUND_POLL_WALL_SECONDS
+                        stuck_deadline = quiet_deadline = backstop
+
+                    def poll_budget_exhausted() -> bool:
+                        """Has THIS cycle's deadline passed, for the state we are in?
+
+                        One expression, evaluated at both the loop head and the
+                        post-sleep break, so the two bounds cannot drift apart --
+                        they did once: an earlier revision exempted a quiet turn
+                        at the head but keyed the break on the orphan flag alone,
+                        which bought a quiet turn one extra `_drain` (up to the
+                        full 30s per-step timeout) past an already-expired
+                        backstop.
+
+                        Which deadline applies depends on whether a tool call is
+                        still ACTIVE: that state cannot resolve itself, so bailing
+                        out early and gracefully is right, while a merely quiet
+                        turn may still finish and keeps nearly its whole budget.
+                        """
+                        assert stuck_deadline is not None and quiet_deadline is not None
+                        deadline = stuck_deadline if state.has_orphaned_tool_call() else quiet_deadline
+                        return time.monotonic() >= deadline
+
                     while (
                         not state.stopped_early_hit
                         and not state.max_turns_hit
                         and not state.timeout_hit
                         and (state.has_orphaned_tool_call() or state.step_fetch_timed_out)
-                        # ONE bound: the deadline. A parallel cycle cap was
-                        # tried and removed -- it silently overrode a large
+                        # ONE bound, whose value depends on stuck-vs-quiet --
+                        # see poll_budget_exhausted(). A parallel cycle cap was
+                        # tried and removed: it silently overrode a large
                         # configured turn_timeout (a task asking for 960s of
                         # polling got 120*5s = 600s), and on the timeout=None
                         # path it expired at the same instant as the wall-clock
-                        # backstop anyway, so it bounded nothing the deadline
-                        # didn't already bound.
-                        and time.monotonic() < poll_deadline
+                        # backstop anyway.
+                        and not poll_budget_exhausted()
                     ):
                         poll_count += 1
                         reason = "orphaned tool call" if state.has_orphaned_tool_call() else "step fetch timed out"
                         self._log.debug("Polling for backgrounded work (%s); attempt %d", reason, poll_count)
                         await asyncio.sleep(_BACKGROUND_POLL_INTERVAL_SECONDS)
-                        if state.timeout_hit or time.monotonic() >= poll_deadline:
+                        if state.timeout_hit or poll_budget_exhausted():
                             # The watchdog decided to fire during the sleep above, or
                             # this loop's own (earlier) deadline just passed: skip the
                             # re-drain (which could itself await indefinitely on
@@ -755,7 +873,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         # turn is still graded normally on everything else.
                         bound = (
                             f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
-                            if timeout
+                            if watchdog_armed and timeout
                             else f"wall-clock backstop ({_MAX_BACKGROUND_POLL_WALL_SECONDS:g}s)"
                         )
                         msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
@@ -798,35 +916,21 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 and not state.stopped_early_hit
                 and not state.max_turns_hit
             ):
-                # Poll budget exhausted (poll_deadline or the cycle cap) with the
-                # connection never producing a clean end and nothing in flight to
-                # show for it (no orphaned tool call -- that case is graded
-                # normally above). Pre-fix, this scenario blocked inside _drain()
+                # Poll budget exhausted (the quiet deadline at
+                # _QUIET_POLL_DEADLINE_TIMEOUT_FRACTION of turn_timeout, or the
+                # flat backstop when none was set) with the connection never
+                # producing a clean end and nothing in flight to show for it (no
+                # orphaned tool call -- that case is graded normally above). This
+                # stays reachable BECAUSE the quiet deadline is a fraction below
+                # the watchdog: exempting a quiet turn from any deadline handed
+                # every such turn to the watchdog's hard cancel instead, which
+                # skips the bounded conversation.cancel() just below.
+                # Pre-fix, this scenario blocked inside _drain()
                 # until the ThreadedWatchdog genuinely fired; raise the same
                 # TurnTimeoutError here instead of silently finalizing as an
                 # ordinary COMPLETED turn with no timeout mark, so the
                 # orchestrator's forced-kill grading path gets a chance to run.
-                self._log.warning(
-                    "Poll budget exhausted (poll_count=%d) with no clean turn end; treating as a timeout.",
-                    poll_count,
-                )
-                # Best-effort server-side cancel, mirrors the stopped_early/
-                # max_turns exit above -- nothing legitimate is in flight here
-                # (no orphaned tool call), so there's no reason to leave the
-                # harness running while the orchestrator grades the sandbox.
-                # Bounded: this branch has just declared the connection
-                # unresponsive, and cancel() bottoms out in a send on that same
-                # connection -- outside the ThreadedWatchdog block, so nothing
-                # else would stop it hanging.
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(conversation.cancel(), timeout=_CANCEL_TIMEOUT_SECONDS)
-                # This branch is reachable with `timeout` either set
-                # (exhausted via poll_deadline) or None (exhausted via the
-                # wall-clock backstop) -- report the configured timeout when
-                # there is one, else the real elapsed wall-clock time, instead
-                # of a nonsense "after 0s" for the timeout=None case.
-                elapsed = time.monotonic() - turn_start_time
-                self._finalize_and_raise_timeout(state.finalize, timeout if timeout is not None else elapsed)
+                await self._raise_stalled_poll_timeout(state, conversation, timeout, turn_start_time, poll_count)
         except (AgentCrashError, TurnTimeoutError):
             raise
         except asyncio.CancelledError:
@@ -901,11 +1005,30 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     async def _teardown(self) -> None:
         """Close the SDK Agent context (reaps the localharness subprocess)."""
         stack = self._exit_stack
-        self._exit_stack = None
+        # Dropped up front either way: a teardown has begun, so communicate()'s
+        # `self._sdk_agent is None` guard must fail fast with "Agent not started"
+        # rather than drive a half-closed conversation. Only _exit_stack governs
+        # whether the close can be retried.
         self._sdk_agent = None
-        if stack is not None:
-            with contextlib.suppress(Exception):
-                await stack.aclose()
+        if stack is None:
+            return
+        # _exit_stack is cleared only AFTER aclose() returns, and anything raised
+        # skips the clear by falling straight out of this method. Clearing first
+        # meant a cancellation landing inside aclose() (the forced-kill quiesce
+        # bounds kill() with asyncio.wait_for, and contextlib.suppress(Exception)
+        # does not catch CancelledError) left _exit_stack already None -- so the
+        # later _cleanup() -> stop() -> _teardown() retry saw None, no-oped, and
+        # the localharness subprocess was never reaped (code review, 2026-08-17).
+        #
+        # Best-effort, not a guarantee: AsyncExitStack.__aexit__ pops each
+        # callback before awaiting it, so the one the interrupt landed inside is
+        # already gone from the stack and the retry will not re-enter it. The
+        # retry still unwinds every callback the interrupt never reached, which is
+        # strictly better than abandoning the stack entirely.
+        with contextlib.suppress(Exception):
+            await stack.aclose()
+        if self._exit_stack is stack:
+            self._exit_stack = None
 
 
 class _AntigravityTurnState:

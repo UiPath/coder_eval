@@ -795,6 +795,119 @@ async def test_over_budget_grading_is_awaited_before_sandbox_teardown(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_pending_grade_is_drained_before_post_run_commands(tmp_path) -> None:
+    """Regression test (code review 2026-08-17): the barrier must sit BEFORE
+    post-run, not between post-run and cleanup.
+
+    _run_post_run_commands executes shell commands in the sandbox -- the same
+    tree a still-running criterion thread is reading. Draining after it left the
+    exact race the barrier exists to close, just against a different mutator.
+    """
+    order: list[str] = []
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+
+    async def fake_eval_loop():
+        return True
+
+    async def fake_post_run():
+        order.append("post_run")
+
+    async def fake_drain():
+        order.append("drain_grade")
+        return None
+
+    orchestrator._evaluation_loop = fake_eval_loop  # type: ignore[method-assign]
+    orchestrator._run_post_run_commands = fake_post_run  # type: ignore[method-assign]
+    orchestrator._await_pending_grade = fake_drain  # type: ignore[method-assign]
+
+    await orchestrator.run()
+
+    assert order == ["drain_grade", "post_run"], f"barrier ran in the wrong order: {order}"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_the_drain_is_re_raised_after_teardown(tmp_path) -> None:
+    """Regression test (code review 2026-08-17): _await_pending_grade catches
+    CancelledError so teardown stays interrupt-proof, but it must RETURN it so
+    run() folds it into teardown_interrupt and re-raises -- a silently swallowed
+    cancel is what the review flagged."""
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    cleanup_ran: list[str] = []
+
+    async def fake_eval_loop():
+        return True
+
+    async def fake_cleanup():
+        cleanup_ran.append("cleanup")
+
+    async def cancelled_drain():
+        return asyncio.CancelledError()
+
+    orchestrator._evaluation_loop = fake_eval_loop  # type: ignore[method-assign]
+    orchestrator._cleanup = fake_cleanup  # type: ignore[method-assign]
+    orchestrator._await_pending_grade = cancelled_drain  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrator.run()
+
+    # Teardown still completed before the cancel surfaced.
+    assert cleanup_ran == ["cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_await_pending_grade_returns_a_cancel_instead_of_swallowing_it(tmp_path) -> None:
+    """Direct coverage of the new contract (code review 2026-08-17).
+
+    The sibling test above stubs _await_pending_grade out entirely, so it only
+    covers run()'s folding. This drives the real method: a genuine _pending_grade
+    future, cancelled while it is awaited, must be RETURNED (so run() re-raises
+    after teardown) rather than suppressed -- and _pending_grade must be cleared
+    either way so a second drain cannot await a dead future.
+    """
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+
+    async def never_finishes():
+        await asyncio.Event().wait()
+
+    grade = asyncio.ensure_future(never_finishes())
+    orchestrator._pending_grade = grade
+
+    async def drain_then_read():
+        return await orchestrator._await_pending_grade()
+
+    drainer = asyncio.create_task(drain_then_read())
+    await asyncio.sleep(0)  # let it reach the await
+    grade.cancel()
+    returned = await drainer
+
+    assert isinstance(returned, asyncio.CancelledError), f"cancel was swallowed, got {returned!r}"
+    assert orchestrator._pending_grade is None
+
+
+@pytest.mark.asyncio
+async def test_await_pending_grade_absorbs_a_failing_late_grade(tmp_path) -> None:
+    """A late grade that ERRORS changes nothing: the status was already decided
+    from the fallback, so it must be logged and absorbed, not returned as an
+    interrupt that run() would re-raise."""
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+
+    async def boom():
+        raise RuntimeError("criterion blew up after the budget expired")
+
+    orchestrator._pending_grade = asyncio.ensure_future(boom())
+
+    assert await orchestrator._await_pending_grade() is None
+    assert orchestrator._pending_grade is None
+
+
+@pytest.mark.asyncio
 async def test_grade_after_forced_kill_marks_the_run_even_when_it_upgrades_to_success(tmp_path) -> None:
     """Regression test (code-review finding): a hard-killed run must stay
     identifiable after the status upgrade.

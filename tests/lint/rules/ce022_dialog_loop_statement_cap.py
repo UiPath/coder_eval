@@ -21,10 +21,15 @@ Registered targets (file, function, cap):
 - ``orchestrator.py::_simulation_dialog_loop`` (cap 128; 122 CE022-stmts ≙ 124
   ruff-stmts) — sequential dialog driver, irreducible without a state-object
   rewrite (2026-06-23 decompose-god-functions plan, Phase 5).
-- ``antigravity_agent.py::communicate`` (cap 81; 77 CE022-stmts ≙ 82
+- ``antigravity_agent.py::communicate`` (cap 87; 81 CE022-stmts ≙ 89
   ruff-stmts) — the poll-loop-plus-finalize driver; the
   ``step_fetch_timed_out`` post-loop branch (2026-08-14) pushed it over
-  ruff's ceiling.
+  ruff's ceiling. Re-measured 2026-08-18: the stuck/quiet deadline split and its
+  shared ``poll_budget_exhausted()`` predicate grew it from 77 to 81 CE022-stmts
+  even after ``_raise_stalled_poll_timeout`` was extracted out, which had left it
+  sitting exactly ON the old cap (zero headroom, so the next statement anyone
+  added would have failed CE022 rather than the regrowth it is meant to catch).
+  Still 89 ruff-stmts, so the suppression is NOT removable.
 
 Adding a new ``# noqa: PLR0915`` anywhere in ``src/`` means adding its
 ``(file, function, cap)`` to ``_TARGETS`` below too. That contract is
@@ -63,7 +68,7 @@ class NoqaPlr0915StatementCap(BaseRule):
     # sibling like ``x_orchestrator.py`` can't accidentally match.
     _TARGETS: tuple[tuple[str, str, int], ...] = (
         ("orchestrator.py", "_simulation_dialog_loop", 128),
-        ("antigravity_agent.py", "communicate", 81),
+        ("antigravity_agent.py", "communicate", 87),
     )
 
     def _carries_suppression(self, node: ast.AsyncFunctionDef | ast.FunctionDef) -> bool:

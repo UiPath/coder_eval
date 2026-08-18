@@ -144,17 +144,21 @@ LABEL org.coder-eval.version="<ver>"
 ```
 
 `make coder-eval-runtime` builds the kit (`docker/Dockerfile.runtime`): a
-standalone CPython + Node + the `coder-eval` CLI + Claude Code, all under
-`/opt/coder-eval`, plus the entrypoint at the **same** `/usr/local/bin/...` path
-the host pins. The kit is **glibc-only** — it runs on debian/ubuntu/fedora/rhel/…
-but not musl/Alpine.
+standalone CPython + Node + the `coder-eval` CLI + Claude Code + the Codex and
+Antigravity harnesses, all under `/opt/coder-eval`, plus the entrypoint at the
+**same** `/usr/local/bin/...` path the host pins. The kit is **glibc-only** — it
+runs on debian/ubuntu/fedora/rhel/… but not musl/Alpine. Note that the bundled
+Antigravity `localharness` ELF carries its own glibc floor (see the `antigravity`
+extra in `pyproject.toml`), and because the kit is `COPY --from`'d onto the task's
+own base image in inject mode, that floor applies to every such base image too.
 
 Both base images are independent and persistent — build each once and run any mix of rebase
 and inject tasks without rebuilding. To build both in one shot (no credentials needed), use
 **`make docker-images`** (= `make docker-image` + `make coder-eval-runtime`); reach for the
 individual targets when you only need one.
 
-> The kit installs the **no-credential** set only (core + codex), like `make docker-image` —
+> The kit installs the **no-credential** set only (core + codex + antigravity), like
+> `make docker-image` —
 > it never installs the `[uipath]` extra, so there is no `make docker-images-full`. An
 > inject-mode task that needs the LLMGW/`uipath` judge isn't supported by the kit as built.
 

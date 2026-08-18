@@ -3041,3 +3041,83 @@ class TestCE035WorkflowOutputParity:
         assert len(findings) == 1
         assert findings[0].line == 7, f"expected line 7, got {findings[0].line}"
         assert str(findings[0]).startswith(f"{wf}:7 — ")
+
+
+@pytest.mark.lint
+class TestCE036CriteriaResultsSingleWriter:
+    """CE036 keeps `success_criteria_results` behind its single writer.
+
+    The whole-tree zero-violations guarantee is asserted by the parametrized
+    ``test_no_violations`` above; these pin that the rule fires on a split
+    write and stays narrow.
+    """
+
+    @staticmethod
+    def _run(src: str, *, path: str = "src/coder_eval/orchestrator.py"):
+        import ast
+
+        from tests.lint.rules.ce036_criteria_results_single_writer import CriteriaResultsSingleWriter
+
+        return CriteriaResultsSingleWriter(path).check(ast.parse(src))
+
+    def test_flags_an_assignment_outside_the_single_writer(self):
+        src = (
+            "class Orchestrator:\n"
+            "    def _some_new_grading_path(self, results):\n"
+            "        self.result.success_criteria_results = results\n"
+        )
+        violations = self._run(src)
+        assert len(violations) == 1
+        assert violations[0].rule_id == "CE036"
+        assert "_record_criteria" in violations[0].message
+
+    def test_allows_the_single_writer_itself(self):
+        src = (
+            "class Orchestrator:\n"
+            "    def _record_criteria(self, results):\n"
+            "        self.result.success_criteria_results = results\n"
+            "        self._graded_iteration_count = len(self.result.iterations)\n"
+        )
+        assert not self._run(src)
+
+    def test_ignores_reads(self):
+        """Only assignment is guarded -- reading the field is ordinary."""
+        src = (
+            "class Orchestrator:\n"
+            "    def _grade(self):\n"
+            "        if self.result.success_criteria_results:\n"
+            "            return len(self.result.success_criteria_results)\n"
+            "        return 0\n"
+        )
+        assert not self._run(src)
+
+    def test_flags_an_annotated_assignment(self):
+        """An annotated assignment stores just the same, and slipped the seam."""
+        src = (
+            "class Orchestrator:\n"
+            "    def _sneaky(self, results):\n"
+            "        self.result.success_criteria_results: list = results\n"
+        )
+        assert len(self._run(src)) == 1
+
+    def test_flags_an_augmented_assignment(self):
+        """`+=` mutates the stored list without stamping the counter."""
+        src = "class Orchestrator:\n    def _sneaky(self, r):\n        self.result.success_criteria_results += r\n"
+        assert len(self._run(src)) == 1
+
+    def test_flags_a_tuple_unpacking_target(self):
+        src = (
+            "class Orchestrator:\n"
+            "    def _sneaky(self, r, n):\n"
+            "        self.result.success_criteria_results, self.x = r, n\n"
+        )
+        assert len(self._run(src)) == 1
+
+    def test_is_scoped_to_the_orchestrator_module(self):
+        """Elsewhere in src/ the advice ("call self._record_criteria") is nonsense.
+
+        A reports/experiment module building a synthetic EvaluationResult is not
+        the grading seam this rule governs.
+        """
+        src = "def build(result, results):\n    result.success_criteria_results = results\n"
+        assert not self._run(src, path="src/coder_eval/reports.py")
