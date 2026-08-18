@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "regression-2's expectations — the second GUARD row, held back in the `test` split.",
+    "See core-1.json for the full contract and regression-1.json for what a guard row is for."
+  ],
+  "path": "REPLACE/output/summary.md",
+  "checks": {
+    "mentions#core": {
+      "all_of": ["REPLACE: the second already-working behaviour, stated as the artifact shows it"]
+    },
+    "mentions#detail": {
+      "all_of": ["REPLACE: a second aspect of it that an edit could plausibly drop"]
+    },
+    "mentions#structure": {
+      "all_of": ["REPLACE: the shape this scenario's output already has today"]
+    },
+    "mentions#regression": {
+      "all_of": ["REPLACE: a fourth thing whose loss would be a regression nobody asked for"]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "core-2's expectations. See core-1.json for the full contract; the short version is four",
+    "applicable checks minimum, each from a DIFFERENT rule in the Step 2.5 inventory, and one",
+    "file per row id in outcome-rows.jsonl.",
+    "",
+    "This row exercises a different instruction in the body from core-1, so its checks should",
+    "name different rules — a suite whose rows all grade R1 measures one sentence."
+  ],
+  "path": "REPLACE/output/summary.md",
+  "checks": {
+    "mentions#core": {
+      "all_of": ["REPLACE: what this scenario's instruction should have produced"]
+    },
+    "mentions#detail": {
+      "all_of": ["REPLACE: an independent second thing this instruction implies"]
+    },
+    "mentions#structure": {
+      "all_of": ["REPLACE: a third thing, from a rule core-1 does not cover"]
+    },
+    "mentions#regression": {
+      "all_of": ["REPLACE: behaviour that already worked and must survive this scenario too"]
+    }
+  }
+}

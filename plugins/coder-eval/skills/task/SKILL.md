@@ -212,6 +212,29 @@ here. Only two things are yours to decide, and neither is in the template:
   every later confirmation meaningless — and it is invisible, because the numbers keep looking
   fine.
 
+**Outcome mode — three row-design rules, each with the failure it prevents.** A suite that
+satisfies the template's schema can still be incapable of measuring anything, and none of these is
+visible in a file that validates:
+
+- **Declare a role per row**, in the rows JSONL, as `role: "discriminator"` or `role: "guard"`.
+  A *discriminator* is a row the incumbent **fails** — it has headroom, so a better body can show
+  up on it. A *guard* is a row the incumbent **passes**; it cannot show improvement, only
+  regression. Both are useful and a suite needs both, but conflating them produces a suite that is
+  mostly dead weight. Measured: rows sitting at a baseline of 1.000 discriminated between arms
+  **12%** of the time; rows with headroom, **71%**.
+  Nothing validates this field — it is rows-JSONL data, which coder-eval treats as opaque, so a
+  mistyped `role: gaurd` is silent. That is why Step 7 prints the **role tally**: a typo shows up
+  as counts that do not add up to the row count.
+- **The temptation test.** A good discriminator is a scenario where *the path of least resistance
+  violates the rule*. Before writing the row, write the laziest plausible implementation of it in
+  your head; if that lazy version does not break the rule, the row will sit at the ceiling and
+  measure nothing no matter how many arms you run through it.
+- **Depth over breadth.** A suite meant to improve rule R should be mostly rows that **fail** R.
+  One row per rule is the worst possible shape: it maximises the denominator every effect is
+  divided by while minimising the headroom available on any single rule. The arithmetic is
+  `/coder-eval:optimize-skill` Step 7's ceiling table — read it there rather than re-deriving it
+  here, and note that every row *passing* R makes R harder to improve measurably.
+
 ## Step 4 — Write the file(s)
 
 One file per task, named after the task ID with underscores
@@ -294,6 +317,35 @@ exit 0 is not the whole answer here: a partly-labelled dataset plans clean. `--s
 matching rows and silently DROPS the unlabelled ones, so the counts, not the exit code, are what
 tell you every later metric would be computed over a smaller suite than the file suggests. `plan`
 prints a ⚠ when it happens; the counts are how you confirm it did not.
+
+**Outcome mode: rows ↔ expectations parity, BOTH directions.** Every row id in the JSONL must have
+an `outcome-grader/expectations/<row id>.json`, and every expectations file must have a row. List
+both sets and diff them; do not eyeball it. Each direction fails differently and neither is loud:
+
+- a **missing expectations file** scores that row a hard `0.0000` on every arm — indistinguishable
+  from a catastrophically bad body, and it cost a full 15-row run to find once;
+- an **orphan expectations file** means a row was renamed, so something you wrote a marking scheme
+  for is now silently ungraded.
+
+A suite with no expectations directory at all (one scored only by `file_check`, say) has nothing to
+compare, so this check is a no-op there rather than a failure.
+
+**Outcome mode: the applicable-check floor.** Report the **min / mean / max** number of checks
+declared per row, and require a minimum of **4**. Below four a row's score takes at most five
+values and behaves like a binary grader — which is how the execution gate's zero-variance refusal
+gets manufactured: two arms of genuinely different quality both land on the same handful of values,
+every paired difference is zero, and the gate correctly reports it cannot separate them.
+
+Two honest caveats to state rather than paper over:
+
+- The floor is on **declared** checks, because applicability is only knowable after a run: a check
+  that returns N/A leaves the denominator, so the applicable count on a real row can be lower than
+  the declared one. Say the declared count is an upper bound, never the applicable count.
+- More checks is more chances to write an **unfair** one. That trade is real, and Step 6.5 is what
+  catches the unfair check — the floor and the discrimination gate are two halves of one argument,
+  not competing advice.
+- A **guard** row deliberately sitting at 1.000 is not an error and must not read as one; its
+  `role` is what says so, which is why Step 7 prints the tally.
 
 Then re-read your own work and check:
 
@@ -381,6 +433,16 @@ Then:
 - **Outcome mode:** the Step 2.5 rule table, marking which rules were **implicit** (inferred rather
   than declared by the skill) and which are **ungraded** because no mechanical check reaches them.
   Both are judgements the user may disagree with, and neither is visible in the files you wrote.
+- **Outcome mode:** the **role tally** — how many rows are `discriminator`, how many are `guard`,
+  and how many carry neither. The third count is what surfaces a typo in a field nothing validates,
+  and a suite that is nearly all guards is one that can only report regressions.
+- **Outcome mode:** the **per-row check counts** (min / mean / max) from Step 6, and the projected
+  cost of a full round. Do not restate the stage arithmetic here: take the formulas from
+  `${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md`'s cost table, substitute the row count you
+  just wrote, and print the **run counts per stage**. Per-row cost stays a variable the user fills
+  in from their first measured row — a hand-computed projection that guessed it projected $109 for
+  a round that spent about $143. Give run counts, name the unknown, and let the measured row close
+  it.
 - **What the run showed**, if it happened — particularly if it scored 1.000 and what you
   concluded about that.
 - Any assumptions you made.

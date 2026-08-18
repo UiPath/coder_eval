@@ -2313,29 +2313,107 @@ class TestPluginArtifacts:
         assert result.score == 0.5
         assert "mentions#b" in (result.details or ""), "the detail lines did not survive into the criterion result"
 
-    def test_shipped_example_expectations_declares_real_checks(self, tmp_path: Path):
-        # The shipped example is the shape every author copies, and nothing else in the tree reads
-        # it: a JSON syntax error or a check name absent from CHECKS would ship green.
+    # The four shipped expectations files, one per row of `outcome-rows.jsonl`. Read once here
+    # rather than in each assertion below, and asserted non-empty so a moved directory reports a
+    # GAP instead of passing vacuously over nothing.
+    @staticmethod
+    def _shipped_expectations() -> dict[str, dict]:
         import json
 
-        example = self.GRADER.parent / "expectations" / "example-row.json"
-        spec = json.loads(example.read_text(encoding="utf-8"))
-        assert isinstance(spec.get("path"), str) and isinstance(spec.get("checks"), dict)
+        directory = TestPluginArtifacts.GRADER.parent / "expectations"
+        specs = {p.stem: json.loads(p.read_text(encoding="utf-8")) for p in sorted(directory.glob("*.json"))}
+        assert specs, f"GAP: no expectations files under {directory} — this whole group would pass vacuously"
+        return specs
 
-        source = self.GRADER.read_text(encoding="utf-8")
-        for key in spec["checks"]:
-            name = key.split("#", 1)[0]
-            assert f'"{name}": check_' in source, (
-                f"the example declares check {name!r}, which verify.py's CHECKS table does not "
-                "register — an author copying this file gets a SKIP and a silently smaller denominator"
+    @staticmethod
+    def _shipped_row_ids() -> list[str]:
+        import json
+
+        rows = TestPluginArtifacts.TEMPLATES / "outcome-rows.jsonl"
+        ids = [json.loads(line)["id"] for line in rows.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert ids, f"GAP: {rows} carries no rows — the parity assertions below would compare two empty sets"
+        return ids
+
+    def test_outcome_template_rows_and_expectations_are_in_parity(self):
+        # BOTH directions, because each fails differently and neither is loud. A row with no
+        # expectations file scores a hard 0.0000 on every arm — indistinguishable from a
+        # catastrophically bad body, and it cost a full 15-row run to find. An orphan expectations
+        # file means a row was renamed and something is now silently ungraded.
+        #
+        # The sensor for the invariant `/coder-eval:task` step 6 states, not a restatement of it:
+        # the shipped template is what every author copies, so it must satisfy its own rule.
+        rows = set(self._shipped_row_ids())
+        specs = set(self._shipped_expectations())
+        assert rows == specs, (
+            f"the shipped outcome template is out of parity: rows with no expectations file "
+            f"{sorted(rows - specs)}, expectations files with no row {sorted(specs - rows)}"
+        )
+
+    def test_outcome_template_meets_its_own_check_floor(self):
+        # Four DECLARED checks minimum. Below four a row's score takes at most five values and
+        # behaves like a binary grader, which is how the execution gate's zero-variance refusal
+        # gets manufactured. The template cannot teach a shape the skill forbids.
+        for row_id, spec in self._shipped_expectations().items():
+            checks = spec.get("checks")
+            assert isinstance(checks, dict), f"{row_id}.json declares no `checks` object"
+            assert len(checks) >= 4, (
+                f"{row_id}.json declares {len(checks)} checks. `/coder-eval:task` step 6 requires "
+                "four, so the shipped template would fail the rule it teaches"
             )
 
-        # And it must be CONTINUOUS: a row whose applicable checks number one can only score 0.0 or
-        # 1.0, which is the zero-variance shape the execution gate refuses to rule on.
-        applicable = [k for k, params in spec["checks"].items() if params]
-        assert len(applicable) >= 3, (
-            f"the example row declares only {len(applicable)} applicable checks, so it teaches a "
-            "near-binary grader — the defect `score_from_stdout` was chosen to avoid"
+    def test_shipped_expectations_declare_real_checks(self):
+        # Every shipped expectations file is a shape an author copies, and nothing else in the tree
+        # reads them: a JSON syntax error or a check name absent from CHECKS would ship green.
+        source = self.GRADER.read_text(encoding="utf-8")
+        for row_id, spec in self._shipped_expectations().items():
+            assert isinstance(spec.get("path"), str) and isinstance(spec.get("checks"), dict), (
+                f"{row_id}.json is not an object with a string `path` and an object `checks`"
+            )
+            for key in spec["checks"]:
+                name = key.split("#", 1)[0]
+                assert f'"{name}": check_' in source, (
+                    f"{row_id}.json declares check {name!r}, which verify.py's CHECKS table does not "
+                    "register — an author copying this file gets a SKIP and a silently smaller denominator"
+                )
+
+            # And it must be CONTINUOUS: a row whose applicable checks number one can only score
+            # 0.0 or 1.0, which is the zero-variance shape the execution gate refuses to rule on.
+            # Weaker than the declared-check floor above on purpose — `json_field: {}` is the
+            # documented opt-out, so a file may declare four and apply three.
+            applicable = [k for k, params in spec["checks"].items() if params]
+            assert len(applicable) >= 3, (
+                f"{row_id}.json declares only {len(applicable)} applicable checks, so it teaches a "
+                "near-binary grader — the defect `score_from_stdout` was chosen to avoid"
+            )
+
+    def test_task_skill_documents_row_roles_and_check_floor(self):
+        # The two authoring-time rules an author cannot infer from a file that validates. A suite
+        # can satisfy every schema in the tree and still be incapable of resolving anything.
+        text = _normalized(PLUGIN_ROOT / "skills" / "task" / "SKILL.md")
+        for token, why in (
+            (
+                "discriminator",
+                "a row the incumbent already passes cannot show improvement, only regression — "
+                "conflating the two roles is what produces a suite of mostly dead weight",
+            ),
+            ("guard", "the other half of the role split, and the reason a 1.000 row is not an error"),
+            (
+                "temptation test",
+                "a discriminator whose lazy implementation already satisfies the rule sits at the "
+                "ceiling and measures nothing, however many arms are run through it",
+            ),
+            (
+                "Depth over breadth",
+                "one row per rule maximises the denominator while minimising per-rule headroom — "
+                "the worst possible suite shape, and the one an author writes by default",
+            ),
+        ):
+            assert token in text, f"task/SKILL.md no longer states {token!r} — {why}"
+
+        assert "min / mean / max" in text and "minimum of **4**" in text, (
+            "task/SKILL.md's outcome-mode validation lost the applicable-check floor. Below four "
+            "checks a row behaves like a binary grader, which manufactures the execution gate's "
+            "zero-variance refusal out of a suite that looks fine"
         )
 
     def test_outcome_grader_missing_artifact_scores_zero_and_exits_zero(self, tmp_path: Path):
@@ -4397,7 +4475,7 @@ class TestPluginArtifacts:
         # point at is the ONE safeguard against a silently-wrong grader.
         citing = (
             PLUGIN_ROOT / "reference" / "templates" / "outcome-grader" / "verify.py",
-            PLUGIN_ROOT / "reference" / "templates" / "outcome-grader" / "expectations" / "example-row.json",
+            PLUGIN_ROOT / "reference" / "templates" / "outcome-grader" / "expectations" / "core-1.json",
             PLUGIN_ROOT / "reference" / "templates" / "outcome.yaml",
             PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md",
         )

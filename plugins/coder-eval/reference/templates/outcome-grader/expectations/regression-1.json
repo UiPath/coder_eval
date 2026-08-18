@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "regression-1's expectations — a GUARD row. See core-1.json for the full contract.",
+    "",
+    "A guard row is one the incumbent already passes, so it cannot show improvement, only",
+    "regression. That is a role, not a defect: it is the only thing that catches a body edit",
+    "silently breaking what used to work. Keep the four-check floor anyway — a guard scored by",
+    "one check is a guard that can only say `broken` or `fine`."
+  ],
+  "path": "REPLACE/output/report.md",
+  "checks": {
+    "mentions#core": {
+      "all_of": ["REPLACE: the behaviour that works today and must keep working"]
+    },
+    "mentions#detail": {
+      "all_of": ["REPLACE: a second aspect of that same working behaviour"]
+    },
+    "mentions#structure": {
+      "all_of": ["REPLACE: the shape or ordering the body already gets right"]
+    },
+    "mentions#regression": {
+      "all_of": ["REPLACE: a fourth thing whose loss would be a regression nobody asked for"]
+    }
+  }
+}

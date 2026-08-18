@@ -1,16 +1,23 @@
 {
   "_comment": [
-    "One file per row, named <row id>.json — `verify.py <row_id>` reads exactly this name.",
-    "REPLACE this file with one per row in outcome-rows.jsonl (core-1.json, regression-1.json, ...).",
+    "One file per row, named <row id>.json — `verify.py <row_id>` reads exactly this name, and",
+    "there must be ONE OF THESE PER ROW in outcome-rows.jsonl. A row with no file scores a hard",
+    "0.0000, which is indistinguishable from a catastrophically bad arm; an orphan file here means",
+    "a row was renamed and something is now silently ungraded. `/coder-eval:task` step 6 checks",
+    "both directions before a stage is paid for.",
+    "",
+    "REPLACE every marker below. This file is core-1's; its three siblings are core-2.json,",
+    "regression-1.json and regression-2.json.",
     "",
     "`path` is the artifact, resolved against the SANDBOX (the grader's cwd at run time).",
     "",
     "`checks` maps a check to its params. The key is a name from verify.py's CHECKS table,",
-    "optionally suffixed with #<label> so one check can be declared several times — three",
-    "`mentions#...` checks below rather than one with three needles, because each check is pass",
+    "optionally suffixed with #<label> so one check can be declared several times — four",
+    "`mentions#...` checks below rather than one with four needles, because each check is pass",
     "or fail and the score is passed/applicable: a row with ONE check can only score 0.0 or 1.0,",
     "which is the zero-variance shape an outcome suite exists to avoid. Several independent",
-    "checks are what make the row continuous.",
+    "checks are what make the row continuous. FOUR APPLICABLE CHECKS IS THE FLOOR: below that a",
+    "row's score takes at most five values and behaves like a binary grader.",
     "",
     "A name with no entry in CHECKS is SKIPPED and excluded from the denominator, so a typo here",
     "cannot inflate a row — but it cannot fail one either, which is why the discrimination gate",
@@ -20,7 +27,9 @@
     "expectations are templated across rows: it returns NOT APPLICABLE and leaves the numerator",
     "and the denominator. Note what makes that legal — the trigger is this FILE declaring nothing,",
     "never the artifact being the wrong shape. See verify.py's docstring: an N/A that keys on the",
-    "artifact lets an arm shrink its own denominator by ignoring a requirement."
+    "artifact lets an arm shrink its own denominator by ignoring a requirement.",
+    "",
+    "Prove the whole set discriminates before spending on a stage: `/coder-eval:task` step 6.5."
   ],
   "path": "REPLACE/output/report.md",
   "checks": {
@@ -29,6 +38,9 @@
     },
     "mentions#detail": {
       "all_of": ["REPLACE: a second, independent thing — never boilerplate the prompt dictated"]
+    },
+    "mentions#structure": {
+      "all_of": ["REPLACE: a third thing, from a different rule than the two above"]
     },
     "mentions#regression": {
       "all_of": ["REPLACE: something that already worked and must keep working"]
