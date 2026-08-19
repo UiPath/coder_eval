@@ -37,8 +37,16 @@ logger = logging.getLogger(__name__)
 # (early_stop.py::_prev_verdicts) are correct only because both existing
 # implementations (skill_triggered, command_executed) honor this. A non-monotonic or
 # non-deterministic override compiles and passes CE025 (which only checks
-# LiveSuccessCriterion subclassing / live_verdict pairing, not this) but silently corrupts the stop
-# logic — there is currently no automated enforcement beyond this docstring.
+# LiveSuccessCriterion subclassing / live_verdict pairing, not this) but silently corrupts
+# the stop logic.
+#
+# ENFORCEMENT: lint rule CE036 (tests/lint/live_verdict_contract.py) replays every live
+# criterion against every prefix of recorded trajectories and asserts both properties —
+# monotonicity over arbitrary Python is undecidable, so replay is the only sound check.
+# Adding a LiveSuccessCriterion REQUIRES adding ContractCase fixtures for it in the same
+# change (CE036 fails on a live type with no cases, and on a polarity its instances claim
+# decidable but no fixture reaches). Note the limit: CE036 proves the contract on the
+# trajectories an author supplied, not in general — honoring it is still on the author.
 LiveVerdict = Literal["pass", "fail", "undecided"]
 
 
@@ -432,8 +440,9 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         source of truth for "is this criterion type live-observable", checked
         by ``validate_early_stop`` / ``EarlyStopWatcher`` and enforced by lint
         rule CE025. An override MUST also satisfy the deterministic + monotonic
-        contract documented on the ``LiveVerdict`` type above (not enforced by
-        CE025 or any other automated check).
+        contract documented on the ``LiveVerdict`` type above, enforced by lint
+        rule CE036 — which requires this criterion type to supply replay fixtures
+        (``tests/lint/live_verdict_contract.py::CASES``) in the same change.
         """
         return "undecided"
 

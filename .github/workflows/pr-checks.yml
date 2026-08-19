@@ -96,6 +96,15 @@ jobs:
       - name: Type check with pyright
         run: .venv/bin/pyright
 
+      # The CE036 contract engine lives under tests/, which [tool.pyright] excludes
+      # -- and `exclude` beats both a CLI file arg and an `include` entry, so it can
+      # only be reached through a config of its own, derived from [tool.pyright] so
+      # the two passes cannot drift. Mirrors `make typecheck`.
+      - name: Type check the CE036 contract engine
+        run: |
+          .venv/bin/python -m tests.lint.pyright_config .pyright-tests.json
+          .venv/bin/pyright -p .pyright-tests.json
+
       # PHASE 3: Security scanning
       - name: Security - Dependency vulnerabilities (pip-audit)
         run: .venv/bin/pip-audit --desc --skip-editable --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2025-183 # pygments 2.19.2 ReDoS + pip 26.0.1 tar/ZIP ambiguity + pyjwt 2.12.1 weak-encryption (disputed by supplier; key length is application-chosen); no fixes available on PyPI yet — revisit quarterly
@@ -386,6 +395,11 @@ jobs:
 
       - name: Type check with pyright
         run: .venv/Scripts/pyright
+
+      - name: Type check the CE036 contract engine
+        run: |
+          .venv/Scripts/python -m tests.lint.pyright_config .pyright-tests.json
+          .venv/Scripts/pyright -p .pyright-tests.json
 
       - name: Run test suite
         run: .venv/Scripts/pytest tests/ -v -m "not live and not lint"

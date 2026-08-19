@@ -1,4 +1,4 @@
-"""CE036: a module-level private helper in ``src/`` must have a caller.
+"""CE037: a module-level private helper in ``src/`` must have a caller.
 
 A ``def _helper(...)`` that nothing in ``src/`` references is not merely dead
 weight — it actively misleads. The bug that motivated this rule shipped an
@@ -24,7 +24,7 @@ nag:
   reference is the decorator, not a call),
 * a name re-exported in ``__all__`` is skipped.
 
-Use ``# noqa: CE036`` for a deliberate SPI hook that genuinely has no in-tree
+Use ``# noqa: CE037`` for a deliberate SPI hook that genuinely has no in-tree
 caller, with a comment naming who calls it.
 """
 
@@ -56,7 +56,7 @@ def _all_source_text() -> str:
 
 
 class NoDeadPrivateHelper(BaseRule):
-    id = "CE036"
+    id = "CE037"
 
     _SRC_PATH = re.compile(r"[/\\]src[/\\]coder_eval[/\\]")
     _corpus: str | None = None
@@ -101,7 +101,7 @@ class NoDeadPrivateHelper(BaseRule):
             node,
             f"private helper '{name}' has no caller anywhere in src/coder_eval — either wire it into the "
             + "code path its docstring describes, or delete it. A helper that documents a bug the shipped "
-            + "code still has is worse than no helper (see CE036's docstring for the motivating case)",
+            + "code still has is worse than no helper (see CE037's docstring for the motivating case)",
         )
 
 
