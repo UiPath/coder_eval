@@ -468,6 +468,26 @@ Semantics:
   before weighting) — only the combination rule (weighted average vs strict
   AND) changes, which is what makes the `gate_threshold=1.0` default an exact
   equivalence with the strict `all(...)` rule.
+- **Why the bounds stop at the armed subset (design decision).** The
+  ceiling/floor rule deliberately does **not** extend to unarmed or
+  non-observable criteria (`llm_judge`, `reference_comparison`, the file
+  checks). A mid-run score bound for those would require either scoring the
+  unfinished sandbox (the end-state peeking `live_verdict` forbids by
+  construction — it reads only `turn_records`) or re-running judges on every
+  tool call (expensive, and judge scores over a partial trajectory are not
+  monotonic — exactly the false-stop risk the bound design exists to rule
+  out). So a non-observable criterion's bound can never tighten past the
+  vacuous `[0, 1]` — and folding permanently-vacuous bounds into the gate
+  degenerates to "never stop": an undecided criterion holds the ceiling up
+  (suppressing every fail-stop) and the floor down (vetoing every pass-stop)
+  for the whole run. Scoping the gate to the armed subset is therefore not a
+  simplification but the design: **arming is the author's declaration of
+  which criteria the smoke verdict is allowed to hinge on**, and the
+  authoritative full-set score always comes from the kill-switched run. If a
+  run should end early on overall-score grounds, arm the observable criteria
+  with appropriate `weight`s and lower `stop_early_gate_threshold` — that is
+  the weighted-score break, expressed over the subset that can actually
+  decide mid-run.
 - **Decision-step timeout.** `stop_early: {decide_within: N}`. If the
   criterion is still **undecided**
   after N tool-call steps, the watcher latches an **effective fail** for it and

@@ -69,3 +69,6 @@ refs/
 
 # SkillsBench tasks for testing
 /resources/
+
+# Derived pyright config for the CE036 contract engine (tests/lint/pyright_config.py)
+.pyright-tests.json
