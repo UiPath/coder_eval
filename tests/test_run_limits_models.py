@@ -11,6 +11,7 @@ from coder_eval.models import (
     RunLimits,
     TaskDefinition,
 )
+from coder_eval.orchestration.run_limits import INEFFECTIVE_TASK_TIMEOUT_WARNING, validate_run_limits
 
 
 def _minimal_task(**overrides) -> TaskDefinition:
@@ -127,6 +128,40 @@ class TestRunLimitsValidation:
     def test_extra_forbid_still_rejects_unknowns(self):
         with pytest.raises(ValidationError):
             RunLimits.model_validate({"expected_turn": 5})
+
+
+class TestRunLimitsCrossFieldWarnings:
+    def test_warning_wording_states_the_single_iteration_semantic(self):
+        assert INEFFECTIVE_TASK_TIMEOUT_WARNING == (
+            "A larger task_timeout cannot extend the agent's single iteration; the agent budget is turn_timeout."
+        )
+
+    @pytest.mark.parametrize(
+        ("task_timeout", "turn_timeout", "warns"),
+        [
+            (121, 120, True),
+            (120, 120, False),
+            (119, 120, False),
+            (None, 120, False),
+            (120, None, False),
+        ],
+    )
+    def test_warns_only_when_task_timeout_exceeds_turn_timeout(self, task_timeout, turn_timeout, warns):
+        task = _minimal_task(run_limits={"task_timeout": task_timeout, "turn_timeout": turn_timeout})
+
+        messages = validate_run_limits(task)
+
+        assert bool(messages) is warns
+        if warns:
+            assert INEFFECTIVE_TASK_TIMEOUT_WARNING in messages[0]
+
+    def test_dialog_simulation_still_warns_for_each_agent_call(self):
+        task = _minimal_task(
+            run_limits={"task_timeout": 121, "turn_timeout": 120},
+            simulation={"enabled": True, "persona": "user", "goal": "finish"},
+        )
+
+        assert INEFFECTIVE_TASK_TIMEOUT_WARNING in validate_run_limits(task)[0]
 
 
 class TestRunLimitsOnTaskDefinition:

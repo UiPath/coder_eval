@@ -154,3 +154,6 @@ class RunLimits(BaseModel):
     # plan_command's generic per-variant "resolution failed" branch, which
     # prints red text but does NOT flip the exit code by design (unlike
     # EarlyStopConfigError), so a model-level raise would silently pass CI.
+    # Other cross-field semantics that are warnings rather than errors live in
+    # orchestration/run_limits.py::validate_run_limits for the same post-merge
+    # visibility without rejecting or mutating the resolved values.

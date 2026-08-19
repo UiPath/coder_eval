@@ -82,6 +82,15 @@ class CriterionResult(BaseModel):
     )
     details: str | None = Field(default=None, description="Additional details about the result")
     error: str | None = Field(default=None, description="Error message if the check failed")
+    evaluation_status: Literal["evaluated", "not_evaluated"] = Field(
+        default="evaluated",
+        description=(
+            "Whether the criterion ran. ``not_evaluated`` is distinct from an evaluated "
+            "criterion whose score is 0.0 or whose checker returned an error. Defaults to "
+            "``evaluated`` so task.json files written before this field existed retain their "
+            "original meaning."
+        ),
+    )
     pass_threshold: float = Field(
         default=0.9,
         ge=0.0,
@@ -216,8 +225,9 @@ class JudgeCriterionResult(CriterionResult):
     transcript_path: str | None = Field(
         default=None,
         description=(
-            "Filename of the sibling JSON file holding this result's full transcript "
-            "(e.g. ``judge-0.yaml``), relative to the directory containing ``task.json``. "
+            "Filename of the sibling YAML file holding this result's full transcript "
+            "(``judge-N.yaml`` for canonical results or ``post-failure-judge-N.yaml`` "
+            "for diagnostic results), relative to the directory containing ``task.json``. "
             "Set by ``spill_judge_transcripts`` after the run; reloaded by "
             "``load_judge_transcripts`` for re-rendering. None when no transcript was captured."
         ),
@@ -529,6 +539,16 @@ class EvaluationResult(BaseModel):
             "``transcript``, ``ClassificationCriterionResult.observed_label``) round-trip "
             "concretely through ``model_dump_json`` → ``model_validate_json``. Legacy task.json "
             "files without ``result_kind`` are inferred from ``criterion_type``."
+        ),
+    )
+    post_failure_criteria_results: list[CriterionResultUnion] = Field(
+        default_factory=list,
+        description=(
+            "Diagnostic criterion evidence collected after a terminal agent failure while the "
+            "sandbox is still readable. These results are intentionally separate from "
+            "success_criteria_results: they do not affect weighted_score, task gating, or suite "
+            "aggregation. A result with evaluation_status='not_evaluated' records that its "
+            "required inputs or remaining task-timeout budget were unavailable."
         ),
     )
 
@@ -952,9 +972,16 @@ def judge_cost_usd(result: EvaluationResult) -> float | None:
 
     Covers both flavors: ``llm_judge`` prices its own one-shot call from the
     criterion's model, ``agent_judge`` inherits the SDK's cost on the sub-agent's
-    turn. ``None`` when no criterion reported cost.
+    turn. Post-failure diagnostic judges are included because their calls still
+    incur real spend even though their results cannot affect the canonical score.
+    ``None`` when no criterion reported cost.
     """
-    usages = [u for cr in result.success_criteria_results if (u := getattr(cr, "token_usage", None)) is not None]
+    criterion_results = result.success_criteria_results + result.post_failure_criteria_results
+    usages = [
+        cr.token_usage
+        for cr in criterion_results
+        if isinstance(cr, JudgeCriterionResult) and cr.token_usage is not None
+    ]
     return sum_costs(*(u.total_cost_usd for u in usages))
 
 

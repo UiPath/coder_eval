@@ -20,11 +20,45 @@ import {
     findMatureSourceRuns,
     isExcludedArtifact,
     type MessageEvent,
+    parseCriterionResults,
     sortArtifacts,
     toTaskRow,
     visibleTurnsFromRaw,
     walkArtifacts,
 } from "../runs";
+
+describe("parseCriterionResults", () => {
+    test("preserves evaluated versus not-evaluated evidence", () => {
+        const results = parseCriterionResults([
+            {
+                criterion_type: "file_exists",
+                description: "artifact exists",
+                score: 1,
+                evaluation_status: "evaluated",
+            },
+            {
+                criterion_type: "run_command",
+                description: "validator runs",
+                score: 0,
+                evaluation_status: "not_evaluated",
+            },
+        ]);
+
+        expect(results.map((result) => result.evaluationStatus)).toEqual([
+            "evaluated",
+            "not_evaluated",
+        ]);
+    });
+
+    test("legacy results default to evaluated", () => {
+        const [result] = parseCriterionResults([
+            { criterion_type: "file_exists", score: 0 },
+        ]);
+        expect(result.evaluationStatus).toBe("evaluated");
+        expect(result.passThreshold).toBe(0.9);
+        expect(result.gating).toBe(true);
+    });
+});
 
 describe("toTaskRow", () => {
     test("propagates total_turns and expected_turns", () => {

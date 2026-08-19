@@ -239,7 +239,7 @@ run_limits:
   # Structural caps
   max_turns: 20                       # hard cap on agent inner-loop turns per iteration
   expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
-  task_timeout: 600                   # wall-clock cap across all iterations, seconds
+  task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
 
   # Budget caps
@@ -254,8 +254,8 @@ run_limits:
 |-------|---------|------------|-------------|
 | `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
 | `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
-| `task_timeout` | *unset* | `>= 30` | Max seconds for the whole evaluation loop (all iterations). |
-| `turn_timeout` | *unset* | `>= 10` | Max seconds for a single agent `communicate()` call. |
+| `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
+| `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
 | `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
 | `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
@@ -264,6 +264,11 @@ run_limits:
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
 | `stop_early_gate_threshold` | `1.0` | `[0.0, 1.0]` (but `> 0.0` is enforced at resolution on an armed task) | Minimum weighted score over the armed subset required for an **early-stopped** run to gate as a pass. See [`stop_early`](#stop_early-opt-in-early-stop). |
+
+If resolved `task_timeout` is larger than `turn_timeout`, `plan` and runtime emit
+a non-blocking warning: a larger `task_timeout` cannot extend the agent's single
+iteration; the agent budget is `turn_timeout`. The values are not rejected or
+changed because `task_timeout` still governs grading and other run-envelope work.
 
 The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
 a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
@@ -954,6 +959,20 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
   ignore_flags: ["output"]             # Flags dropped before matching (default: ["output"])
 ```
 
+**One operation, several verbs.** Use `verb_any_of` instead of `verb` (mutually exclusive); it matches if any entry does. Each entry is a *complete* verb in the form `verb` takes — not one token of a chain:
+
+```yaml
+- type: "cli_called"
+  description: "Read the project through the CLI"
+  verb_any_of: ["ixp projects list", "ixp projects get"]
+```
+
+Do **not** shorten the verb instead. `verb: "ixp projects"` matches all of its subcommands, so a positive assertion that the agent *read* a project is equally satisfied by `ixp projects delete`. Two entries are rejected when one prefixes the other, since the shorter already accepts everything the longer does.
+
+**The argument tail stays open.** `positional` is a prefix too, so `verb: "ixp projects list"` with `positional: ["proj-1"]` also matches `ixp projects list proj-1 dummy`. To require a specific tail, name every argument in it. `positional: []` is rejected — it would assert nothing.
+
+**Declare value-bearing flags when you use `positional`.** An undeclared flag is treated as a switch, so its value stays among the non-flag arguments and shifts the ones you named. `get proj-1 --folder Finance` matches `positional: ["proj-1"]`, but `get --folder Finance proj-1` does **not** — `Finance` takes the first slot. Add `folder` to `value_flags` (or name it in `flags`) to fix it. Resolving the ambiguity this way is deliberate: guessing that an unknown flag consumes the next token let `--yes proj-1` bind `yes=proj-1` and swallow the project name, which made a `max_count: 0` delete guard pass on the delete it forbade.
+
 `log` defaults to `cli_mocks/calls.jsonl`, where [`sandbox.record_cli`](#recording-cli-invocations) writes — so a task using generated recorders never sets it. Point it elsewhere only when supplying your own mock.
 
 **Log format.** One JSON object per line. Only `argv` is required; `tool` lets one log serve several shadowed executables, and `exit`/`ts` are recorded for reporting rather than matched. Unknown keys are ignored, so a mock may record more.
@@ -1041,7 +1060,7 @@ flags:
 
 **Negative guards.** Set `min_count: 0` and `max_count: 0` to assert a call did **not** happen. A missing log file *fails* rather than counting as zero matches — otherwise a mock writing to the wrong path would make every negative guard pass vacuously.
 
-**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`.
+**Why not a regex over a flattened log line.** A flat `cmd arg arg` string cannot express "verb X was called AND flag Y had value Z" without stacked lookaheads; cannot distinguish a quoted argument containing spaces from two arguments; and cannot stop a match from running across shell operators. Matching `argv` element-wise removes all three problems. `verb` is an **ordered prefix compared token by token**, so `ixp labellings confirm` is never satisfied by `ixp labellings unconfirm`, nor `ixp projects list` by `ixp projects lists`. What a prefix leaves open is the *tail*: `positional` constrains the arguments you name, and anything past them is unconstrained.
 
 ### `commands_efficiency`
 

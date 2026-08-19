@@ -105,39 +105,62 @@ export function FlowDebugSection({ flowDebug }: { flowDebug: FlowDebugResult }) 
     );
 }
 
-export function CriteriaSection({ criteria }: { criteria: CriterionResult[] }) {
+export function CriteriaSection({
+    criteria,
+    title = "Success criteria",
+    diagnostic = false,
+}: {
+    criteria: CriterionResult[];
+    title?: string;
+    diagnostic?: boolean;
+}) {
     return (
         <section className="space-y-2">
             <h2 className="text-sm font-semibold text-gray-900">
-                Success criteria ({criteria.length})
-                {criteria.some((c) => !c.gating) && (
+                {title} ({criteria.length})
+                {!diagnostic && criteria.some((c) => !c.gating) && (
                     <span className="ml-2 font-normal text-gray-500">
                         {criteria.filter((c) => !c.gating).length}{" "}
                         informational
                     </span>
                 )}
             </h2>
+            {diagnostic && (
+                <p className="text-xs text-gray-500">
+                    Diagnostic evidence collected after the agent failed. It
+                    does not affect status, score, or pass/fail gating.
+                </p>
+            )}
             <div className="space-y-2">
                 {criteria.map((c, i) => {
                     // Compare against the criterion's own threshold, not === 1:
                     // fractional criteria pass below 1.0 (default threshold 0.9).
                     const passed = (c.score ?? 0) >= c.passThreshold;
+                    const evaluated = c.evaluationStatus === "evaluated";
                     return (
                         <Expandable
                             key={i}
                             header={
                                 <div className="flex items-center gap-3">
-                                    <ResultPill
-                                        passed={passed}
-                                        gating={c.gating}
-                                    />
+                                    {evaluated ? (
+                                        <ResultPill
+                                            passed={passed}
+                                            gating={c.gating}
+                                        />
+                                    ) : (
+                                        <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                                            NOT EVALUATED
+                                        </span>
+                                    )}
                                     <span className="text-sm text-gray-900">
                                         {c.description ??
                                             c.criterionType ??
                                             `criterion ${i + 1}`}
                                     </span>
                                     <span className="ml-auto text-xs text-gray-500 tabular-nums">
-                                        score {c.score ?? "—"}
+                                        {evaluated
+                                            ? `score ${c.score ?? "—"}`
+                                            : "no score"}
                                     </span>
                                 </div>
                             }

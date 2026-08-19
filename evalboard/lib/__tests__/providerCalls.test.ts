@@ -88,6 +88,14 @@ beforeEach(async () => {
         `${RUN}/default/${TASK}/00/task.json`,
         JSON.stringify({
             final_status: "success",
+            post_failure_criteria_results: [
+                {
+                    criterion_type: "file_exists",
+                    description: "artifact exists",
+                    score: 1,
+                    evaluation_status: "evaluated",
+                },
+            ],
             iterations: [
                 {
                     model_used: "deepseek/deepseek-v4-pro",
@@ -139,5 +147,9 @@ describe("readTaskDetail: providerCalls", () => {
         });
         expect(turn.calls[1].callId).toBe("call-2");
         expect(turn.calls[1].costUsd).toBe(0.0034);
+        expect(detail!.postFailureCriteria).toHaveLength(1);
+        expect(detail!.postFailureCriteria[0].evaluationStatus).toBe(
+            "evaluated",
+        );
     });
 });

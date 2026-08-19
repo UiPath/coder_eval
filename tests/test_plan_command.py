@@ -7,7 +7,14 @@ import pytest
 import typer
 
 from coder_eval.cli.plan_command import plan_command
-from coder_eval.models import AgentConfig, ExperimentDefinition, ExperimentVariant, TaskDefinition, parse_agent_config
+from coder_eval.models import (
+    AgentConfig,
+    ExperimentDefinition,
+    ExperimentVariant,
+    RunLimits,
+    TaskDefinition,
+    parse_agent_config,
+)
 from coder_eval.models.enums import AgentKind
 
 
@@ -208,6 +215,27 @@ class TestPlanCommandExperiment:
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "test-exp" in printed
+
+    def test_plan_warns_when_task_timeout_cannot_extend_single_iteration(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        task = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        resolved_task = task.model_copy(update={"run_limits": RunLimits(task_timeout=1500, turn_timeout=1200)})
+
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {}, 1)),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            plan_command(task_files=[task_file])
+
+        printed = " ".join(str(call) for call in mock_console.print.call_args_list)
+        assert "A larger task_timeout cannot extend the agent's single iteration" in printed
+        assert "the agent budget is turn_timeout" in printed
 
     def test_plan_exits_when_default_experiment_missing(self, tmp_path: Path) -> None:
         """When default experiment file is missing and no --experiment given, plan should exit."""

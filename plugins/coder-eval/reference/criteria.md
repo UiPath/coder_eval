@@ -87,9 +87,10 @@ Optional:
 | Field | What it is |
 | --- | --- |
 | `log` | Path to the JSON Lines invocation log, relative to the sandbox working directory. Defaults to 'cli_mocks/calls.jsonl', where SandboxConfig.record_cli writes, so a task using generated recorders never repeats it |
-| `verb` | Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's non-flag arguments. Order matters, so 'labellings confirm' never matches 'labellings unconfirm' |
+| `verb` | Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's non-flag arguments, compared token by token (so 'projects list' never matches 'projects lists'). Order matters, so 'labellings confirm' never matches 'labellings unconfirm'. Prefer the full verb over a short one: the tokens after it are unconstrained, which is safe for a max_count 0 guard (it fires on more) but NOT for a positive assertion, where 'projects' credits 'projects delete' as readily as 'projects get'. When one operation has several spellings, use verb_any_of |
+| `verb_any_of` | Alternative whole verbs; matches if ANY of them does, e.g. ['projects list', 'projects get']. Each entry is a complete verb in the same form `verb` takes, NOT one token of a chain — a chain belongs in `verb` as a single string. Mutually exclusive with `verb` |
 | `tool` | Match only records whose 'tool' equals this (e.g. 'uip'). None matches any tool |
-| `positional` | Non-flag arguments that must follow the verb, in order |
+| `positional` | Non-flag arguments that must follow the verb, in order. A PREFIX of what followed, so anything past them is unconstrained: ['proj-1'] also matches 'get proj-1 dummy'. To require a specific tail, name every argument in it. Depends on value_flags being complete — an undeclared flag's value stays non-flag and shifts these slots |
 | `flags` | Flag name (without leading dashes) to predicate. A bare scalar means 'equals'. Flags not listed here are ignored, so an extra --output json never breaks a match |
 | `value_flags` | Flag names (no leading dashes) that consume a following token as their value. Keys of `flags` are value-bearing already; everything else is a switch whose following token stays positional. Declare a flag here when its value would otherwise be read as a positional, e.g. [folder] for `--folder F proj-1`. Defaults to [output] |
 | `min_count` | Minimum matching invocations. Combine min_count: 0 with max_count: 0 for must-NOT-match. Scoring is BINARY (in vs out of bounds), unlike command_executed's fractional field of the same name |

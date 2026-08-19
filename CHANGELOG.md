@@ -2,6 +2,437 @@
 
 <!-- version list -->
 
+## v0.10.2 (2026-08-18)
+
+### Continuous Integration
+
+- Exclude attestation sidecars from the PyPI artifact-identity assert
+  ([#124](https://github.com/UiPath/coder_eval/pull/124),
+  [`7d8a771`](https://github.com/UiPath/coder_eval/commit/7d8a771f51fc8694a90f55477d410a55235a4d8a))
+
+
+## v0.10.1 (2026-08-18)
+
+### Continuous Integration
+
+- Bump gh-action-pypi-publish to v1.14.2 to accept Metadata-Version 2.5
+  ([#123](https://github.com/UiPath/coder_eval/pull/123),
+  [`a65ee69`](https://github.com/UiPath/coder_eval/commit/a65ee69a65f97bb3e7e2fbff942c2a110b3c07ee))
+
+
+## v0.10.0 (2026-08-18)
+
+### Bug Fixes
+
+- Code review fixes for the Claude Code plugin marketplace
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Code review fixes for the plugin generic-adopter plan
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Code review fixes for the plugin-audit P0/P1 plan
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Derive the poll loop's exit bound from the turn's actual timeout
+  ([#111](https://github.com/UiPath/coder_eval/pull/111),
+  [`d3f1432`](https://github.com/UiPath/coder_eval/commit/d3f14327b7d5ee0664b457fc0712ea8a1ad2c1ab))
+
+- Make lint-tasks' read-only rule outlive the frontmatter deny
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Reconcile the plugin branch with main after rebase
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Remove redundant asyncio re-import flagged by CodeQL
+  ([#111](https://github.com/UiPath/coder_eval/pull/111),
+  [`d3f1432`](https://github.com/UiPath/coder_eval/commit/d3f14327b7d5ee0664b457fc0712ea8a1ad2c1ab))
+
+- **agent**: Address PR review — simulator replace mode, preset-aware reports, replace validator
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **agent**: Address PR review — unconditional preset, judge replace seam
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **agent**: Align Codex system_prompt with the append-only contract
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **agent**: Append system_prompt to the Claude Code preset instead of replacing
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **agent**: Reject a blank system_prompt_file under replace mode
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **agent**: Resolve system_prompt_file atomically and reject blank prompts
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **antigravity**: Poll for backgrounded work instead of grading it incomplete
+  ([#111](https://github.com/UiPath/coder_eval/pull/111),
+  [`d3f1432`](https://github.com/UiPath/coder_eval/commit/d3f14327b7d5ee0664b457fc0712ea8a1ad2c1ab))
+
+- **ci**: Address PR #81 review — undefined step output, dead job gate, CE035
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+- **ci**: Close the five gate-correctness findings from the code review
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+- **ci**: Code review fixes for the published-action verification
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+- **ci**: Fail the published-action gate on a run-limit breach
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+- **ci**: Harden promote ordering and stop preflight misdiagnosing healthy lag
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+- **claude**: Make Claude speak English, not Claudish
+  ([#118](https://github.com/UiPath/coder_eval/pull/118),
+  [`5006c91`](https://github.com/UiPath/coder_eval/commit/5006c914347d6bdbc94f6f7c70384903028ffd50))
+
+- **cli-called**: Move alternation to verb_any_of, close review findings
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **codex**: Fold sub-agent tokens on a turn-cap stop
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **codex**: Report per-turn tokens instead of the thread-cumulative total
+  ([#113](https://github.com/UiPath/coder_eval/pull/113),
+  [`80f3523`](https://github.com/UiPath/coder_eval/commit/80f352316813676d8fffb3b9d8cb30d7fcd7f9c2))
+
+- **deps**: Bump sqlparse 0.5.5 -> 0.6.0 to clear the pip-audit gate
+  ([#120](https://github.com/UiPath/coder_eval/pull/120),
+  [`ea5a3fc`](https://github.com/UiPath/coder_eval/commit/ea5a3fc89c3448bfab723b573ea18e11db4184ec))
+
+- **deps**: Bump sqlparse to 0.6.0 and close pre/post-run subprocess transports
+  ([#120](https://github.com/UiPath/coder_eval/pull/120),
+  [`ea5a3fc`](https://github.com/UiPath/coder_eval/commit/ea5a3fc89c3448bfab723b573ea18e11db4184ec))
+
+- **evalboard**: Address review findings on the Scribe source layer
+  ([#116](https://github.com/UiPath/coder_eval/pull/116),
+  [`d6f8d7b`](https://github.com/UiPath/coder_eval/commit/d6f8d7bd44c3a48109e745fecbe2ac5c7ce2451d))
+
+- **evaluation**: Harden post-failure evidence
+  ([#119](https://github.com/UiPath/coder_eval/pull/119),
+  [`636e87d`](https://github.com/UiPath/coder_eval/commit/636e87d5cbf28fe1ade30876a7251cbb7b24d950))
+
+- **orchestrator**: Close pre/post-run subprocess transports so Windows CI stops leaking
+  ([#120](https://github.com/UiPath/coder_eval/pull/120),
+  [`ea5a3fc`](https://github.com/UiPath/coder_eval/commit/ea5a3fc89c3448bfab723b573ea18e11db4184ec))
+
+- **plugin**: Address PR #82 review — reachable activation suites, least-privilege CI
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: Address the three PR #82 findings left open
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: Make analyze compute its numbers, and weight smoke criteria honestly
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: Name the tautological-criterion trap in init and task
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: Wire the skill source into the ci skill's scheduled drift run
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **tasks**: Armed positives must require success, guarded by CE034
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **test**: Resolve bash by absolute path so Windows CI stops hitting WSL
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+### Chores
+
+- Reconcile the published-action verification with main
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+- Renumber a rebase-collided lint-rule candidate
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+- **agents**: Drop config_support and the Antigravity tool mapping
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **agents**: Drop the system_prompt changes from this PR
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **plugin**: Pin plugin.json to 0.9.6 after rebasing onto the release
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: Regenerate the bundled criteria reference
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+### Code Style
+
+- Sort claude_agent_sdk.types import ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+### Continuous Integration
+
+- **release**: Promote v0 only after PyPI publish, verify the published action
+  ([#81](https://github.com/UiPath/coder_eval/pull/81),
+  [`9cc45da`](https://github.com/UiPath/coder_eval/commit/9cc45daf04c86bb0d0e50779927b72878554bb76))
+
+### Documentation
+
+- Add Tutorial 07 for the plugin, and fix two gaps in PLUGIN.md
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Defer one harness candidate from the plugin-audit run
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Rework Tutorial 07 after review — accuracy fixes and far less narration
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Stop teaching the recursive task glob the ci skill forbids
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- Use current-generation models in examples ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **claude**: Drop the config_support contract from the repo guide
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **cli-called**: Drop the hardcoded subcommand count
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **cli-called**: Fix the guide's orphaned exact_positional prerequisites
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **cli-called**: Fix two unclear field descriptions
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **cli-called**: Name the bug the detail renderer's source avoids
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **cli-called**: Put the offset comment's two reasons on their own lines
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **cli-called**: Trim comments to the whys ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **parity**: State the real final_status of a capped run
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **run-limits**: Keep the contract on the page, the measurements in the PR
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **run-limits**: Re-measure the antigravity timeout case after the poll loop
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **run-limits**: Record the measured cross-harness parity results
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+### Features
+
+- **agent**: Emit system_prompt_semantics from the Agent base
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **agent**: Record system_prompt_semantics marker in environment_info
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **agents**: Honor run_limits.max_turns on codex and antigravity
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **agents**: Make a base-config field mean the same thing on every harness
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **cli-called**: Accept a list of verb spellings
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **cli-called**: Accept alternative verbs via verb_any_of
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **cli-called**: Add exact_positional to pin the argument tail
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **evalboard**: Add a Scribe tab, reading the Autopilot suite's own blob container
+  ([#116](https://github.com/UiPath/coder_eval/pull/116),
+  [`d6f8d7b`](https://github.com/UiPath/coder_eval/commit/d6f8d7bd44c3a48109e745fecbe2ac5c7ce2451d))
+
+- **evaluation**: Preserve criteria after agent failures
+  ([#119](https://github.com/UiPath/coder_eval/pull/119),
+  [`636e87d`](https://github.com/UiPath/coder_eval/commit/636e87d5cbf28fe1ade30876a7251cbb7b24d950))
+
+- **lint**: CE026 clause 4 — snippet `with:` keys must be real action inputs
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 1/5 — the bundled criteria reference explains optional fields
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 1/6 — discover the eval tree instead of assuming tasks/ and runs/latest
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 1/6 — marketplace + coder-eval plugin skeleton
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 2/5 — shared adversarial task rubric, applied by `task`
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 2/6 — analyze reads the run's actual schema, not one generation's
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 2/6 — generate the bundled criteria reference, guard it with CE032
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 3/5 — a real run becomes part of done in `task`
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 3/6 — resolve the version a project pins before validating anything
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 3/6 — skill-check skill and the canonical activation suite
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 4/5 — `/coder-eval:lint-tasks`, a read-only reviewer of existing tasks
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 4/6 — init and task skills ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 4/6 — look before you write: skill-check, init, lint-tasks
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 5/5 — activation budgets in `skill-check`, layer routing in `analyze`
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 5/6 — analyze and ci skills ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 5/6 — repo convention wins, and the CI gate stops measuring the wrong set
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 6/6 — document the criterion aliases the loader accepts, from the models
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: 6/6 — validate the plugin in CI, extend CE026, document it
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: CLI-driving skills offer to install coder-eval, asking first
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **plugin**: Ship coder_eval as a Claude Code plugin + marketplace
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+### Refactoring
+
+- Retire the repo-local twins of the plugin's authoring skills
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **agent**: Resolve the system prompt to a value, not a mode string
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+- **cli-called**: Collapse the pairwise verb check to itertools.combinations
+  ([#103](https://github.com/UiPath/coder_eval/pull/103),
+  [`f7e9fda`](https://github.com/UiPath/coder_eval/commit/f7e9fda4d09d97654821bee24c61ecd76838277a))
+
+- **plugin**: Rename skill-check to check-skill, and write the naming rule down
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **reports**: Read the recorded prompt regime instead of sniffing its shape
+  ([#92](https://github.com/UiPath/coder_eval/pull/92),
+  [`fddd3c5`](https://github.com/UiPath/coder_eval/commit/fddd3c55ffa2074061caf1ba5128005df0c5a3b0))
+
+### Testing
+
+- Defer the plugin-skill repo-file containment guard
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **antigravity**: Clear the CodeQL findings on the fake SDK helper
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **antigravity**: Pin the SDK half of the env seam contract
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **plugin**: Make a new skill declare whether it needs eval-root discovery
+  ([#82](https://github.com/UiPath/coder_eval/pull/82),
+  [`02e5151`](https://github.com/UiPath/coder_eval/commit/02e515106e2a59acc1640642957a28f3f737b436))
+
+- **run-limits**: Add cross-harness max_turns / turn_timeout fixtures
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **run-limits**: Make the max_turns fixture assert the cap bound
+  ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+- **run-limits**: Tag the parity fixtures ([#110](https://github.com/UiPath/coder_eval/pull/110),
+  [`12c5031`](https://github.com/UiPath/coder_eval/commit/12c5031078c64b363f01a1a92803cf3fa06ac400))
+
+
 ## v0.9.6 (2026-08-11)
 
 ### Bug Fixes
