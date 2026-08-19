@@ -161,8 +161,11 @@ from coder_eval.models import CriterionResult
 class MyChecker(BaseCriterion[MyCriterion]):
     criterion_type = "my_criterion"          # must match the model discriminator
 
-    def _check_impl(self, criterion, sandbox, reference_code=None, *,
+    def _check_impl(self, criterion, sandbox, *,
                     turn_records=None, context=None) -> CriterionResult:
+        # `context` carries the live run state: `context.route` (for criteria
+        # that call a model) and `context.reference_dir` (the staged reference
+        # copy, for criteria that grade against a reference solution).
         ok = ...  # your logic
         return CriterionResult(
             criterion_type=self.criterion_type,

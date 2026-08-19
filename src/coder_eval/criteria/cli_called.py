@@ -188,7 +188,6 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         self,
         criterion: CliCalledCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: CheckContext | None = None,
@@ -198,7 +197,6 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         Args:
             criterion: CLI-called criterion
             sandbox: Sandbox instance for file access
-            reference_code: Not used for this criterion
 
         Returns:
             Result with binary score (1.0 when the match count is within

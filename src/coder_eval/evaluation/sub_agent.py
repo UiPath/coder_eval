@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.evaluation.verdict_tool import VerdictCapture
 from coder_eval.models import ClaudeCodeAgentConfig
+from coder_eval.path_utils import ignore_patterns_and_symlinks
 
 
 if TYPE_CHECKING:
@@ -27,29 +28,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _ignore_patterns_and_symlinks(patterns: list[str]):
-    """``copytree`` ``ignore`` callable that drops pattern matches AND every symlink.
-
-    Symlinks in the sandbox — whether malicious or accidental — are rejected
-    rather than dereferenced into the judge workspace, which would leak host
-    files (e.g. a ``creds -> /root/.aws/credentials`` plant) to a Bash-enabled
-    judge.
-    """
-    pattern_ignore = shutil.ignore_patterns(*patterns)
-
-    def _ignore(src: str, names: list[str]) -> set[str]:
-        ignored = set(pattern_ignore(src, names))
-        src_path = Path(src)
-        for name in names:
-            if name in ignored:
-                continue
-            if (src_path / name).is_symlink():
-                ignored.add(name)
-        return ignored
-
-    return _ignore
 
 
 class SubAgentRunner:
@@ -116,7 +94,7 @@ class SubAgentRunner:
         # ``_reference`` (defense-in-depth against agent-planted collisions at
         # the mount point), but reusing it here would silently drop a customer
         # subdir of the same name. Symlinks are stripped unconditionally by
-        # ``_ignore_patterns_and_symlinks([])``.
+        # ``ignore_patterns_and_symlinks([])``.
         self._reference_ignore_patterns = reference_ignore_patterns or []
         # Runtime-only in-process MCP server injection (e.g. the judge
         # submit_verdict tool). NOT routed through ``sdk_options`` —
@@ -173,7 +151,7 @@ class SubAgentRunner:
                 src_dir,
                 judge_dir,
                 symlinks=True,
-                ignore=_ignore_patterns_and_symlinks(self._ignore_patterns),
+                ignore=ignore_patterns_and_symlinks(self._ignore_patterns),
                 dirs_exist_ok=True,  # mkdtemp already created the target; allow merging in
             )
 
@@ -209,7 +187,7 @@ class SubAgentRunner:
                     self._reference_dir,
                     ref_dest,
                     symlinks=True,
-                    ignore=_ignore_patterns_and_symlinks(self._reference_ignore_patterns),
+                    ignore=ignore_patterns_and_symlinks(self._reference_ignore_patterns),
                 )
 
             agent = ClaudeCodeAgent(

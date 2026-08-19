@@ -58,7 +58,6 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
         self,
         criterion: RunCommandCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: CheckContext | None = None,

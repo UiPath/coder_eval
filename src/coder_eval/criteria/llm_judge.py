@@ -63,13 +63,13 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         self,
         criterion: LLMJudgeCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: "list[TurnRecord] | None" = None,
         context: CheckContext | None = None,
     ) -> CriterionResult:
         ctx = context or CheckContext()
         route = ctx.route
+        reference_dir = ctx.reference_dir
 
         # Master enablement gate. Skipped criteria don't make an LLM call and don't
         # affect cost; weighted score includes them as 1.0 so they don't penalize.
@@ -97,7 +97,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 max_file_chars=criterion.max_file_chars,
             ).build,
             sandbox,
-            reference_code,
+            reference_dir,
             turn_records,
         )
 
@@ -121,7 +121,18 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 ),
             )
 
-        scrub_key = reference_code if criterion.include_reference else None
+        # Scrub keys are the per-FILE contents of the reference directory, not the
+        # single rendered block: the model is far more likely to echo one file back
+        # than to reproduce the whole concatenation verbatim, and a whole-block key
+        # would never match.
+        #
+        # Taken from the CONTEXT, not recomputed from `criterion.include_reference`:
+        # the builder records every reference-derived byte it actually attached,
+        # which includes `$REFERENCE_DIR/...` entries in `files:` — the documented
+        # way to show a judge one reference asset with include_reference=false.
+        # Gating on the flag left exactly that combination unscrubbed, persisting
+        # the solution verbatim into the archived judge transcript.
+        scrub_key = judge_ctx.reference_secrets or None
 
         # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
         # from the usage the backend reported in its response.

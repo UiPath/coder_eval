@@ -61,7 +61,7 @@ def test_success_checker_populates_pass_threshold_on_results():
             pass_threshold = 0.42
             is_gating = True
 
-        result = checker._check_single(_Fake(), reference_code=None)  # type: ignore[arg-type]
+        result = checker._check_single(_Fake())  # type: ignore[arg-type]
         assert result.pass_threshold == 0.42
         assert result.score == 0.0
 

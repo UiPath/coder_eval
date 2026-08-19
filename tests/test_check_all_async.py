@@ -80,7 +80,7 @@ class _SleepyAsyncChecker(BaseCriterion[LLMJudgeCriterion]):
         self.events = events
         self.label = label
 
-    async def _check_impl_async(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+    async def _check_impl_async(self, criterion, sandbox, *, turn_records=None, context=None):
         self.calls += 1
         if self.events is not None:
             self.events.append(f"{self.label}-start")
@@ -101,7 +101,7 @@ class _SleepyThreadChecker(BaseCriterion[FileExistsCriterion]):
         self.events = events
         self.label = label
 
-    def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+    def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
         if self.events is not None:
             self.events.append(f"{self.label}-start")
         time.sleep(self.sleep_seconds)
@@ -116,7 +116,7 @@ class _RaisingAsyncChecker(BaseCriterion[LLMJudgeCriterion]):
     def __init__(self, exc: Exception):
         self.exc = exc
 
-    async def _check_impl_async(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+    async def _check_impl_async(self, criterion, sandbox, *, turn_records=None, context=None):
         raise self.exc
 
 
@@ -350,13 +350,9 @@ class TestNativeAsyncErrorHandling:
         ran: list[str] = []
 
         class _TrackingAsyncChecker(_SleepyAsyncChecker):
-            async def _check_impl_async(
-                self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None
-            ):
+            async def _check_impl_async(self, criterion, sandbox, *, turn_records=None, context=None):
                 ran.append(criterion.description)
-                return await super()._check_impl_async(
-                    criterion, sandbox, reference_code, turn_records=turn_records, context=context
-                )
+                return await super()._check_impl_async(criterion, sandbox, turn_records=turn_records, context=context)
 
         checker._checker_instances["llm_judge"] = _RaisingAsyncChecker(JudgeInfrastructureError("down"))
         checker._checker_instances["agent_judge"] = _TrackingAsyncChecker(sleep_seconds=0.0)
@@ -388,9 +384,7 @@ class TestNativeAsyncErrorHandling:
             def __init__(self):
                 raise RuntimeError("ctor boom")
 
-            async def _check_impl_async(
-                self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None
-            ):
+            async def _check_impl_async(self, criterion, sandbox, *, turn_records=None, context=None):
                 raise NotImplementedError
 
         CriterionRegistry.register(_BoomOnInitChecker)
@@ -444,7 +438,7 @@ class TestNativeAsyncDetection:
         class _ThrowawaySyncChecker(BaseCriterion[FileExistsCriterion]):
             criterion_type = "throwaway_sync_test"
 
-            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
                 raise NotImplementedError
 
         CriterionRegistry.register(_ThrowawaySyncChecker)
@@ -460,9 +454,7 @@ class TestNativeAsyncDetection:
         class _ThrowawayAsyncChecker(BaseCriterion[LLMJudgeCriterion]):
             criterion_type = "throwaway_async_test"
 
-            async def _check_impl_async(
-                self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None
-            ):
+            async def _check_impl_async(self, criterion, sandbox, *, turn_records=None, context=None):
                 raise NotImplementedError
 
         CriterionRegistry.register(_ThrowawayAsyncChecker)
@@ -521,7 +513,7 @@ class TestBaseCriterionSyncAsyncDerivation:
             def __init__(self):
                 self.check_impl_thread_ident: int | None = None
 
-            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
                 self.check_impl_thread_ident = threading.get_ident()
                 return CriterionResult(criterion_type=self.criterion_type, description=criterion.description, score=1.0)
 
@@ -568,10 +560,10 @@ class TestBaseCriterionSyncAsyncDerivation:
 
         from coder_eval.models import FileExistsCriterion
 
-        def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+        def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
             raise NotImplementedError
 
-        async def _check_impl_async(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+        async def _check_impl_async(self, criterion, sandbox, *, turn_records=None, context=None):
             raise NotImplementedError
 
         with pytest.raises(TypeError, match="not both"):
