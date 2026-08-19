@@ -3092,6 +3092,24 @@ class TestCE036LiveVerdictContract:
         assert len(violations) == 1, violations
         assert "RAISED" in violations[0] and "prefix length 1" in violations[0], violations
 
+    def test_a_raise_on_the_final_prefix_does_not_stack_a_phantom_reaches_breach(self):
+        """The terminal prefix has no verdict when it raises, so the `reaches` and
+        polarity checks are skipped rather than judging the PREVIOUS prefix's stale
+        verdict — which would report a second, derived breach on top of the real one."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        def raises_at_the_end(records):
+            if len(records[0].commands) == 2:
+                raise ValueError("boom")
+            return "undecided"
+
+        checker = self._checker(raises_at_the_end)
+        # The case declares "pass"; the stale value from prefix 1 is "undecided", so the
+        # unguarded comparison would append a phantom "reaches" violation here.
+        violations = contract_violations(checker, self._positive_case("synthetic", "pass"))
+        assert len(violations) == 1, violations
+        assert "RAISED" in violations[0] and "prefix length 2" in violations[0], violations
+
     def test_detects_a_fixture_that_stopped_exercising_its_decision_path(self):
         """Fixture rot: the case claims a decision the trajectory no longer reaches."""
         from tests.lint.live_verdict_contract import contract_violations
@@ -3110,10 +3128,18 @@ class TestCE036LiveVerdictContract:
         assert any("live_decidable_polarities" in v for v in violations), violations
 
     def test_detects_a_live_type_with_no_cases(self):
-        """The completeness check must fail on an empty table, not pass vacuously."""
-        from tests.lint.live_verdict_contract import missing_case_types
+        """The completeness check must fail on an empty table, not pass vacuously.
 
-        assert missing_case_types({}) == ["command_executed", "skill_triggered"]
+        Compared against the registry, not a hardcoded list: pinning today's type
+        names would red THIS test the moment someone adds a live criterion — at
+        exactly the moment `test_every_live_criterion_type_has_cases` is already
+        failing them with the actionable message, pointing at the wrong file.
+        """
+        from tests.lint.live_verdict_contract import live_criterion_types, missing_case_types
+
+        expected = sorted(live_criterion_types())
+        assert expected, "the union walk found no live criterion types — the check would pass vacuously"
+        assert missing_case_types({}) == expected
 
     def test_detects_an_all_undecided_fixture_set(self):
         """A type whose only case never decides claims coverage it does not have."""
@@ -3169,5 +3195,39 @@ class TestCE036LiveVerdictContract:
         # Clean on the authored ordering (it decides only on the final prefix)...
         assert not [v for v in contract_violations(checker, case) if "NON-MONOTONIC" in v]
         # ...caught under permutation.
+        violations = permuted_violations(checker, case)
+        assert any("NON-MONOTONIC" in v for v in violations), violations
+
+    def test_permutation_renumbers_so_a_sequence_sorting_checker_is_still_probed(self):
+        """The watcher hands `live_verdict` a trajectory sorted by `sequence_number`
+        (`EarlyStopWatcher._collect_verdicts`), so a checker may legitimately sort by it
+        too. If the shuffle left the original numbers attached, that sort would undo
+        every permutation and this layer would silently probe nothing. Renumbering keeps
+        the same recency bug detectable through the sort."""
+        from coder_eval.models import SkillTriggeredCriterion
+        from tests.lint.live_verdict_contract import ContractCase, cmd, permuted_violations
+
+        def sorted_recency_verdict(records):
+            commands = sorted(records[0].commands, key=lambda c: c.sequence_number)
+            if commands and commands[-1].parameters.get("command") == "pwd":
+                return "pass"
+            return "undecided"
+
+        checker = self._checker(sorted_recency_verdict)
+        case = ContractCase(
+            label="synthetic recency behind a sequence sort",
+            criterion=SkillTriggeredCriterion(
+                type="skill_triggered",
+                description="synthetic",
+                skill_name="alpha",
+                expected_skill="alpha",
+            ),
+            commands=(
+                cmd("Bash", {"command": "ls"}, sequence_number=0),
+                cmd("Bash", {"command": "cat x"}, sequence_number=1),
+                cmd("Bash", {"command": "pwd"}, sequence_number=2),
+            ),
+            reaches="pass",
+        )
         violations = permuted_violations(checker, case)
         assert any("NON-MONOTONIC" in v for v in violations), violations

@@ -26,8 +26,11 @@ Design choices, each load-bearing:
   determinism + monotonicity walk over seeded reorderings of each case's commands —
   an order-sensitive bug (verdict read off the *latest* command instead of the
   accumulated set) can look perfectly monotone on the one ordering the author wrote
-  and flip on a reordering. The terminal-verdict and polarity checks stay
-  authored-ordering-only, where they are sound.
+  and flip on a reordering. Each shuffle is RENUMBERED (``sequence_number`` reassigned
+  in the new order) so it stays a trajectory the watcher could actually hand over — it
+  sorts by that field before calling ``live_verdict`` — which also keeps the layer
+  effective for a checker that sorts by it too. The terminal-verdict and polarity
+  checks stay authored-ordering-only, where they are sound.
 * **Fixtures are mandatory, and the registry says so.** A property test over random
   trajectories would return ``"undecided"`` almost always and pass *vacuously*,
   proving nothing. So each live criterion type must supply cases in ``CASES``, and
@@ -347,14 +350,16 @@ def _walk_prefixes(
     criterion: LiveSuccessCriterion,
     commands: tuple[CommandTelemetry, ...],
     label: str,
-) -> tuple[list[str], LiveVerdict]:
+) -> tuple[list[str], LiveVerdict | None]:
     """Prefix-by-prefix determinism + monotonicity walk over ONE command ordering.
 
     The shared core of both replay modes: ``contract_violations`` walks the
     fixture's authored ordering (and layers the terminal-verdict/polarity checks
     on top), ``permuted_violations`` walks seeded reorderings (where those extra
     checks would be unsound — see its docstring). Returns the breach list and the
-    full-trajectory verdict.
+    full-trajectory verdict — or ``None`` for that verdict when the TERMINAL prefix
+    raised, since there is then no verdict to compare against and the stale value
+    from the previous prefix would stack a bogus breach on the real one.
 
     1. **Determinism** — ``live_verdict`` called twice on an identical prefix must
        agree. Catches RNG and per-call mutable state; NOT a reliable wall-clock
@@ -372,7 +377,7 @@ def _walk_prefixes(
     violations: list[str] = []
     decided: LiveVerdict | None = None
     decided_at = 0
-    final: LiveVerdict = "undecided"
+    final: LiveVerdict | None = "undecided"
 
     for prefix_len in range(len(commands) + 1):
         try:
@@ -381,19 +386,23 @@ def _walk_prefixes(
         except Exception as exc:  # any raise, of any type, IS the violation being reported
             violations.append(
                 f"{label}: live_verdict RAISED {exc!r} at prefix length {prefix_len} — it must "
-                f"degrade to 'undecided' on inputs it cannot judge, never raise."
+                + "degrade to 'undecided' on inputs it cannot judge, never raise."
             )
+            # No verdict for THIS prefix. Clear the running terminal value so a raise on
+            # the last prefix cannot leave the previous prefix's verdict standing in for
+            # it (which would stack a phantom `reaches` breach on top of the real one).
+            final = None
             continue
         if first != second:
             violations.append(
                 f"{label}: live_verdict is NON-DETERMINISTIC at prefix length {prefix_len} "
-                f"({first!r} then {second!r} for the same input) — it must be a pure function of turn_records."
+                + f"({first!r} then {second!r} for the same input) — it must be a pure function of turn_records."
             )
         if decided is not None and first != decided:
             violations.append(
                 f"{label}: live_verdict is NON-MONOTONIC — decided {decided!r} at prefix length "
-                f"{decided_at}, then returned {first!r} at prefix length {prefix_len}. Once decided, a "
-                f"verdict must hold for every longer prefix."
+                + f"{decided_at}, then returned {first!r} at prefix length {prefix_len}. Once decided, "
+                + "a verdict must hold for every longer prefix."
             )
         elif decided is None and first != "undecided":
             decided = first
@@ -414,13 +423,20 @@ def contract_violations(checker: BaseCriterion[Any], case: ContractCase) -> list
     5. **Polarity honesty** — a terminal decision must be a polarity the instance's
        own ``live_decidable_polarities()`` claims; deciding one it does not claim
        leaves the watcher treating a live trigger as inert.
+
+    Checks 4 and 5 are skipped when the terminal prefix RAISED (``final is None``):
+    there is no verdict to judge, and the raise reported by ``_walk_prefixes`` is
+    already the finding — adding a derived ``reaches`` breach would only bury it.
     """
     violations, final = _walk_prefixes(checker, case.criterion, case.commands, repr(case.label))
+
+    if final is None:
+        return violations
 
     if final != case.reaches:
         violations.append(
             f"{case.label!r}: full trajectory reaches {final!r}, but the case declares {case.reaches!r}. "
-            f"Update ContractCase.reaches, or fix the fixture so it exercises the intended decision path."
+            + "Update ContractCase.reaches, or fix the fixture so it exercises the intended decision path."
         )
 
     if final != "undecided":
@@ -428,8 +444,8 @@ def contract_violations(checker: BaseCriterion[Any], case: ContractCase) -> list
         if final not in claimed:
             violations.append(
                 f"{case.label!r}: live_verdict decided {final!r}, but this instance's "
-                f"live_decidable_polarities() claims only {set(claimed) or '{}'}. EarlyStopWatcher would "
-                f"treat that trigger as inert while the checker actually decides it."
+                + f"live_decidable_polarities() claims only {set(claimed) or '{}'}. EarlyStopWatcher "
+                + "would treat that trigger as inert while the checker actually decides it."
             )
 
     return violations
@@ -456,6 +472,15 @@ def permuted_violations(
     such a checker can look perfectly monotone on the authored ordering and flip
     on a reordering. Seeded shuffles probe those orderings essentially for free.
 
+    Each shuffle is RENUMBERED (``sequence_number`` reassigned 0..N-1 in the new
+    order) so the permuted trajectory is one the runtime could actually produce:
+    ``EarlyStopWatcher._collect_verdicts`` keeps its partial trajectory sorted by
+    ``sequence_number``, so ``live_verdict`` never sees a list whose order
+    contradicts those numbers. Without the renumber this layer would (a) report
+    breaches on inputs the watcher cannot construct, and (b) degrade to a silent
+    no-op for any future checker that sorts by ``sequence_number`` itself — the
+    shuffle would just sort straight back to the authored ordering.
+
     Deliberately NOT checked here: ``case.reaches`` and polarity honesty. A
     reordering may legitimately change the terminal verdict for a criterion whose
     semantics are order-sensitive, so pinning either would make this layer
@@ -467,10 +492,13 @@ def permuted_violations(
     for round_no in range(shuffles):
         shuffled = list(case.commands)
         rng.shuffle(shuffled)
+        renumbered = tuple(
+            command.model_copy(update={"sequence_number": position}) for position, command in enumerate(shuffled)
+        )
         walk, _final = _walk_prefixes(
             checker,
             case.criterion,
-            tuple(shuffled),
+            renumbered,
             f"{case.label!r} [shuffle {round_no + 1}/{shuffles}, seed {seed}]",
         )
         violations.extend(walk)
@@ -519,6 +547,6 @@ def polarity_gaps(cases: dict[str, tuple[ContractCase, ...]] | None = None) -> l
         for polarity in sorted(claimed - reached):
             gaps.append(
                 f"{ctype}: fixtures claim polarity {polarity!r} is live-decidable, but no ContractCase "
-                f"reaches it — that decision path is untested."
+                + "reaches it — that decision path is untested."
             )
     return gaps
