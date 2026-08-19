@@ -38,7 +38,6 @@ class UiPathEvalChecker(BaseCriterion[UiPathEvalCriterion]):
         self,
         criterion: UiPathEvalCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: CheckContext | None = None,
@@ -48,7 +47,6 @@ class UiPathEvalChecker(BaseCriterion[UiPathEvalCriterion]):
         Args:
             criterion: UiPathEvalCriterion with agent_name, eval_set, and thresholds
             sandbox: Sandbox instance for file access and command execution
-            reference_code: Not used for this criterion
             turn_records: Not used for this criterion
 
         Returns:

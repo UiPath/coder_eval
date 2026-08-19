@@ -25,14 +25,17 @@ from coder_eval.isolation.docker_runner import (
     CLAUDE_COPY_MAX_ATTEMPTS,
     CONTAINER_ENTRYPOINT,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_REFERENCE_DIR,
+    CONTAINER_TASK_DIR,
     DockerRunError,
     DockerRunner,
     _copy_claude_home,
     _resolve_workspace_dir,
     _sanitize_container_name_component,
     _validate_extra_mount,
+    grant_container_access,
 )
-from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
+from coder_eval.models import FileExistsCriterion, ReferenceSource, SandboxConfig, TaskDefinition
 
 
 # DockerRunner targets Linux containers from POSIX hosts. On Windows the test
@@ -675,3 +678,430 @@ class TestWorkspaceDir:
     def test_container_paths_reexported_from_docker_runner(self):
         # Existing importers read CONTAINER_OUTPUT_DIR from docker_runner; keep that working.
         assert CONTAINER_OUTPUT_DIR == "/work/output"
+
+
+class TestReferenceMountAntiCheat:
+    """The reference must reach the harness but never the agent under evaluation."""
+
+    def _make_runner(self, tmp_path: Path, *, reference: str | None) -> DockerRunner:
+        task = TaskDefinition(
+            task_id="test",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="test criterion", path="test.txt")],
+            reference=ReferenceSource(directory=reference) if reference else None,
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = tmp_path / "task.yaml"
+        rt.task_file.write_text("# task", encoding="utf-8")
+        return DockerRunner(rt)
+
+    def _argv(self, runner: DockerRunner, tmp_path: Path, *, prepare: bool = True) -> list[str]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True)
+        if prepare:
+            # OUTSIDE the task dir: _prepare_task_dir_mount copytrees the task
+            # dir, and staging nested inside its own source recurses. Production
+            # staging is a mkdtemp in the system temp dir, so this mirrors it.
+            staging = Path(tempfile.mkdtemp())
+            runner._prepare_reference_mount(staging)
+            runner._prepare_task_dir_mount(staging)
+        return runner._build_argv(input_dir, output_dir, container_name="test-container")
+
+    @staticmethod
+    def _mounts(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+
+    @staticmethod
+    def _tmpfs(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "--tmpfs"]
+
+    def _reference_mount(self, argv: list[str]) -> str | None:
+        for spec in self._mounts(argv):
+            if CONTAINER_REFERENCE_DIR in spec:
+                return spec
+        return None
+
+    def test_dac_capabilities_are_dropped(self, tmp_path):
+        """Without this, the mode-000 window is a no-op against container root.
+
+        Verified empirically: a `chmod 000` directory stays readable by root in a
+        default container, and becomes Permission denied once these caps are gone.
+        """
+        argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
+
+        dropped = {argv[i + 1] for i, a in enumerate(argv) if a == "--cap-drop"}
+        # Set EQUALITY, not membership. Membership let two of the four dropped
+        # caps go unasserted, so silently weakening the container's anti-cheat
+        # posture failed no test. It also pins the deliberate NON-drop below.
+        assert dropped == {"DAC_OVERRIDE", "DAC_READ_SEARCH"}
+
+    def test_fowner_and_chown_are_deliberately_kept(self, tmp_path):
+        """Dropping FOWNER would disable the harness's OWN chmod.
+
+        chmod(2) is gated on owner-or-CAP_FOWNER, and the in-container
+        orchestrator that applies the mode-000 window is the same root process
+        with the same capability set as the agent. On native Linux the bind
+        mount preserves the host uid that ran coder-eval, so with FOWNER dropped
+        `chmod 000 /work/references` fails with EPERM and the run completes
+        UNPROTECTED while still looking protected. Verified in a container:
+        root + uid-1000-owned dir + FOWNER dropped -> "Operation not permitted".
+
+        So the drop only ever bites on the hosts where it also disables the
+        control. Closing the re-chmod hole needs a different uid, not a smaller
+        capability set -- see docs/DOCKER_ISOLATION.md.
+        """
+        argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
+
+        dropped = {argv[i + 1] for i, a in enumerate(argv) if a == "--cap-drop"}
+        assert "FOWNER" not in dropped
+        assert "CHOWN" not in dropped
+
+    def test_reference_mount_is_writable(self, tmp_path):
+        """REGRESSION GUARD for a real leak found by tasks/anti_cheat_reference.
+
+        The in-container orchestrator holds THIS path at mode 000 for every agent
+        turn, and `chmod` on a `:ro` bind mount fails with EROFS. Mounting it
+        read-only leaves /work/references readable to the agent for the entire
+        run -- the agent simply `cat`s the solution.
+        """
+        (tmp_path / "reference").mkdir()
+        argv = self._argv(self._make_runner(tmp_path, reference="reference"), tmp_path)
+
+        spec = self._reference_mount(argv)
+        assert spec is not None
+        assert spec.endswith(f":{CONTAINER_REFERENCE_DIR}"), f"must not be read-only: {spec}"
+        assert not spec.endswith(":ro")
+
+    def test_reference_mount_source_is_a_copy_not_the_checkout(self, tmp_path):
+        """The container chmods this path, so it must not be the user's tree."""
+        reference = tmp_path / "reference"
+        reference.mkdir()
+        (reference / "solution.py").write_text("SECRET", encoding="utf-8")
+        argv = self._argv(self._make_runner(tmp_path, reference="reference"), tmp_path)
+
+        spec = self._reference_mount(argv)
+        assert spec is not None
+        source = Path(spec.rsplit(":", 1)[0])
+        assert source != reference.resolve()
+        assert (source / "solution.py").read_text(encoding="utf-8") == "SECRET"
+
+    def test_reference_inside_task_dir_needs_no_tmpfs_mask(self, tmp_path):
+        """The tmpfs mask is obsolete: the task dir is now a SHIELDED COPY.
+
+        The mask existed only because the task dir was bind-mounted at its host
+        path `:ro`, which handed the agent `$TASK_DIR/<reference dir>`. Layering
+        an empty filesystem over that one subpath was the only way to hide it --
+        and it could not cover a sibling task's reference at all. The copy is
+        held at mode 000 for every agent turn instead, which covers the whole
+        tree.
+        """
+        (tmp_path / "reference").mkdir()
+        argv = self._argv(self._make_runner(tmp_path, reference="reference"), tmp_path)
+
+        assert not self._tmpfs(argv)
+        # And the host task dir is not mounted at its own path any more.
+        assert not any(spec.startswith(f"{tmp_path.resolve()}:") for spec in self._mounts(argv))
+
+    def test_reference_outside_task_dir_is_not_masked(self, tmp_path):
+        """A reference that escapes the task dir isn't reachable via $TASK_DIR,
+        so there is nothing to mask — masking it would be a pointless mount."""
+        outside = tmp_path.parent / f"outside_ref_{tmp_path.name}"
+        outside.mkdir(exist_ok=True)
+        try:
+            argv = self._argv(self._make_runner(tmp_path, reference=f"../{outside.name}"), tmp_path)
+            assert self._reference_mount(argv) is not None
+            assert not self._tmpfs(argv)
+        finally:
+            outside.rmdir()
+
+    def test_no_reference_emits_no_reference_mount(self, tmp_path):
+        argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
+
+        assert CONTAINER_REFERENCE_DIR not in " ".join(argv)
+        assert not self._tmpfs(argv)
+
+    def test_missing_reference_dir_warns_and_skips_the_mount(self, tmp_path, caplog):
+        """Host-side argv building must not be what fails the run; the
+        in-container orchestrator raises with better attribution."""
+        runner = self._make_runner(tmp_path, reference="absent")
+
+        with caplog.at_level("WARNING"):
+            argv = self._argv(runner, tmp_path)
+
+        assert CONTAINER_REFERENCE_DIR not in " ".join(argv)
+        assert "does not resolve to a directory" in caplog.text
+
+
+class TestContainerAccessWidening:
+    """`--cap-drop DAC_OVERRIDE` revokes root's bypass on every framework mount.
+
+    The container runs as root but does NOT own the bind mounts -- on native
+    Linux they preserve the uid that ran ``coder-eval``. Every access is
+    therefore an "other" access, and it only ever worked via the capability.
+    The drop shipped without this widening and killed every `driver: docker`
+    task on its first `open('/work/output/task.log', 'w')`; macOS Docker
+    Desktop hid it, because virtiofs reports the mount as root-owned.
+    """
+
+    @staticmethod
+    def _other_bits(path: Path) -> int:
+        return path.stat().st_mode & 0o007
+
+    def test_output_dir_becomes_other_writable(self, tmp_path: Path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(mode=0o755)
+
+        grant_container_access(run_dir, writable=True)
+
+        # rwx: the container must create task.json/task.log inside it, which
+        # needs write AND search on the directory.
+        assert self._other_bits(run_dir) == 0o007
+
+    def test_read_only_grant_withholds_write(self, tmp_path: Path):
+        ref = tmp_path / "reference"
+        ref.mkdir(mode=0o700)
+        (ref / "solution.py").write_text("answer", encoding="utf-8")
+
+        grant_container_access(ref, writable=False)
+
+        assert self._other_bits(ref) == 0o005
+        # No `o+w` anywhere: an agent that reaches the copy between windows can
+        # read it (the known gap) but cannot forge it.
+        assert self._other_bits(ref / "solution.py") == 0o004
+
+    def test_widens_nested_tree(self, tmp_path: Path):
+        root = tmp_path / "claude-home"
+        (root / "plugins" / "deep").mkdir(mode=0o700, parents=True)
+        secret = root / "plugins" / "deep" / "settings.json"
+        secret.write_text("{}", encoding="utf-8")
+        secret.chmod(0o600)
+
+        grant_container_access(root, writable=True)
+
+        assert self._other_bits(root) == 0o007
+        assert self._other_bits(root / "plugins" / "deep") == 0o007
+        assert self._other_bits(secret) == 0o006
+
+    def test_execute_bit_follows_capital_x_semantics(self, tmp_path: Path):
+        root = tmp_path / "home"
+        root.mkdir()
+        script = root / "hook.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        script.chmod(0o700)
+        data = root / "config.json"
+        data.write_text("{}", encoding="utf-8")
+        data.chmod(0o600)
+
+        grant_container_access(root, writable=True)
+
+        # Already-executable file keeps (gains) o+x; a plain data file must not
+        # silently become executable.
+        assert self._other_bits(script) == 0o007
+        assert self._other_bits(data) == 0o006
+
+    def test_symlink_target_is_not_rewritten(self, tmp_path: Path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "id_rsa"
+        victim.write_text("PRIVATE", encoding="utf-8")
+        victim.chmod(0o600)
+        root = tmp_path / "claude-home"
+        root.mkdir()
+        (root / "link").symlink_to(victim)
+
+        grant_container_access(root, writable=True)
+
+        # chmod follows symlinks; ~/.claude is copied with symlinks=True, so a
+        # naive walk would re-mode an arbitrary host path outside the staging tree.
+        assert self._other_bits(victim) == 0o000
+
+    def test_is_idempotent(self, tmp_path: Path):
+        root = tmp_path / "run"
+        root.mkdir(mode=0o755)
+
+        grant_container_access(root, writable=True)
+        first = root.stat().st_mode
+        grant_container_access(root, writable=True)
+
+        assert root.stat().st_mode == first
+
+
+class TestOutputMountWidenedBeforeLaunch:
+    """The widening must actually be WIRED, not merely defined.
+
+    `TestContainerAccessWidening` proves the helper computes the right modes;
+    this proves `run()` applies it to the run dir before `docker run` starts.
+    The shipped regression was precisely a correct primitive that no live path
+    invoked (cf. lint rule CE037), and no unit test of the helper alone could
+    have caught it.
+    """
+
+    async def test_run_widens_output_dir_before_container_starts(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("CODER_EVAL_NO_CLAUDE_MOUNT", "1")
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(mode=0o755)
+        task = TaskDefinition(
+            task_id="widen",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="t.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = run_dir
+        rt.replicate_index = 0
+        rt.variant_id = "default"
+        rt.config_lineage = {}
+        rt.source_yaml = "# task"
+        rt.task_file = tmp_path / "task.yaml"
+        rt.task_file.write_text("# task", encoding="utf-8")
+        runner = DockerRunner(rt)
+
+        seen: dict[str, int] = {}
+
+        async def fake_exec(*argv, **kwargs):
+            # Sampled at launch time: this is the exact moment the container
+            # would open /work/output/task.log.
+            seen["other"] = run_dir.stat().st_mode & 0o007
+            raise FileNotFoundError("docker not present in this test")
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        with pytest.raises(Exception):  # noqa: B017 - the launch failure itself is not under test
+            await runner.run()
+
+        assert seen.get("other") == 0o007, (
+            "run() must widen the run dir before launching; the container is root but not its owner, "
+            "and DAC_OVERRIDE is dropped"
+        )
+
+
+class TestTaskDirCopyMount:
+    """$TASK_DIR is a shielded copy at a fixed container path, not the host tree.
+
+    Three constraints force this shape, and each was verified against a real
+    container rather than reasoned about:
+
+    * `:ro` makes the agent-turn window inexpressible -- `chmod` returns
+      `Read-only file system`.
+    * Read-write without a copy chmods the OPERATOR's `tasks/` tree: the host
+      directory came back 0600 and even the harness's own cleanup then failed
+      with `Permission denied`.
+    * Mounting the host tree symmetrically exposes the task YAML's whole parent
+      directory. For a flat task (`tasks/foo.yaml`) that is every sibling task,
+      including their reference solutions.
+    """
+
+    def _runner(self, tmp_path: Path) -> tuple[DockerRunner, Path]:
+        task_dir = tmp_path / "tasks" / "demo"
+        task_dir.mkdir(parents=True)
+        (task_dir / "fixture.json").write_text('{"expected": 1}', encoding="utf-8")
+        task_file = task_dir / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+        task = TaskDefinition(
+            task_id="demo",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="t.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = task_file
+        return DockerRunner(rt), task_dir
+
+    def _prepared_argv(self, tmp_path: Path) -> tuple[list[str], Path]:
+        runner, task_dir = self._runner(tmp_path)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_task_dir_mount(staging)
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        argv = runner._build_argv(input_dir, output_dir, container_name="c")
+        return argv, task_dir
+
+    @staticmethod
+    def _mounts(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+
+    def test_mounted_at_the_container_path_not_the_host_path(self, tmp_path: Path):
+        argv, task_dir = self._prepared_argv(tmp_path)
+
+        specs = [m for m in self._mounts(argv) if m.endswith(CONTAINER_TASK_DIR)]
+        assert len(specs) == 1
+        assert not specs[0].startswith(str(task_dir))
+
+    def test_mount_is_read_write(self, tmp_path: Path):
+        argv, _ = self._prepared_argv(tmp_path)
+
+        spec = next(m for m in self._mounts(argv) if m.endswith(CONTAINER_TASK_DIR))
+        # A `:ro` suffix here would make the agent-turn chmod fail with EROFS,
+        # silently reducing the window to a per-turn warning.
+        assert not spec.endswith(":ro")
+
+    def test_task_dir_flag_points_inside_the_container(self, tmp_path: Path):
+        argv, task_dir = self._prepared_argv(tmp_path)
+
+        flag = argv[argv.index("--task-dir") + 1]
+        assert flag == CONTAINER_TASK_DIR
+        assert str(task_dir) not in flag
+
+    def test_copy_carries_the_task_dir_contents(self, tmp_path: Path):
+        runner, _ = self._runner(tmp_path)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        runner._prepare_task_dir_mount(staging)
+
+        copy = runner._task_dir_mount_src
+        assert copy is not None
+        # run_command criteria resolve $TASK_DIR/... against this copy, so a
+        # missing fixture would score 0.0 and read as an agent failure.
+        assert (copy / "fixture.json").read_text(encoding="utf-8") == '{"expected": 1}'
+        assert (copy / "task.yaml").exists()
+
+    def test_copy_is_not_the_source(self, tmp_path: Path):
+        runner, task_dir = self._runner(tmp_path)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        runner._prepare_task_dir_mount(staging)
+
+        copy = runner._task_dir_mount_src
+        assert copy is not None and copy.resolve() != task_dir.resolve()
+        # The whole point: chmodding the copy must never touch the operator's tree.
+        assert copy.is_relative_to(staging)
+
+    def test_copy_is_other_readable_but_not_writable(self, tmp_path: Path):
+        runner, _ = self._runner(tmp_path)
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        runner._prepare_task_dir_mount(staging)
+
+        copy = runner._task_dir_mount_src
+        assert copy is not None
+        # Readable: DAC_OVERRIDE is dropped, so criteria reach it via `other`.
+        # Not writable: an agent must not be able to rewrite the fixtures it is
+        # graded against.
+        assert copy.stat().st_mode & 0o007 == 0o005
+        assert (copy / "fixture.json").stat().st_mode & 0o007 == 0o004
+
+    def test_no_task_file_emits_no_mount(self, tmp_path: Path):
+        runner, _ = self._runner(tmp_path)
+        runner.rt.task_file = None
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        runner._prepare_task_dir_mount(staging)
+
+        assert runner._task_dir_mount_src is None

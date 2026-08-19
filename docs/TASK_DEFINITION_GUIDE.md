@@ -59,7 +59,7 @@ sandbox: { ... }                      # Sandbox configuration (optional, default
 run_limits: { ... }                   # Optional run-time caps (turns, wall-clock, tokens, USD)
 success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
-reference: { ... }                    # Optional reference solution
+reference: { ... }                    # Optional reference solution (a directory; never readable by the agent)
 pre_run: [ ... ]                      # Optional pre-run commands (before agent starts)
 post_run: [ ... ]                     # Optional post-run commands
 dataset: { ... }                      # Optional dataset fan-out (one task -> N row-tasks)
@@ -468,6 +468,26 @@ Semantics:
   before weighting) — only the combination rule (weighted average vs strict
   AND) changes, which is what makes the `gate_threshold=1.0` default an exact
   equivalence with the strict `all(...)` rule.
+- **Why the bounds stop at the armed subset (design decision).** The
+  ceiling/floor rule deliberately does **not** extend to unarmed or
+  non-observable criteria (`llm_judge`, `reference_comparison`, the file
+  checks). A mid-run score bound for those would require either scoring the
+  unfinished sandbox (the end-state peeking `live_verdict` forbids by
+  construction — it reads only `turn_records`) or re-running judges on every
+  tool call (expensive, and judge scores over a partial trajectory are not
+  monotonic — exactly the false-stop risk the bound design exists to rule
+  out). So a non-observable criterion's bound can never tighten past the
+  vacuous `[0, 1]` — and folding permanently-vacuous bounds into the gate
+  degenerates to "never stop": an undecided criterion holds the ceiling up
+  (suppressing every fail-stop) and the floor down (vetoing every pass-stop)
+  for the whole run. Scoping the gate to the armed subset is therefore not a
+  simplification but the design: **arming is the author's declaration of
+  which criteria the smoke verdict is allowed to hinge on**, and the
+  authoritative full-set score always comes from the kill-switched run. If a
+  run should end early on overall-score grounds, arm the observable criteria
+  with appropriate `weight`s and lower `stop_early_gate_threshold` — that is
+  the weighted-score break, expressed over the subset that can actually
+  decide mid-run.
 - **Decision-step timeout.** `stop_early: {decide_within: N}`. If the
   criterion is still **undecided**
   after N tool-call steps, the watcher latches an **effective fail** for it and
@@ -871,11 +891,12 @@ Checks if file content matches a regular expression pattern. **Binary scoring.**
 
 ### `reference_comparison`
 
-Compares agent's code with a reference solution using similarity scoring. **Continuous scoring.** Requires a `reference` block at the task level.
+Compares agent's code with one file of the reference solution using similarity scoring. **Continuous scoring.** Requires a `reference` block at the task level (a task that declares this criterion without one is rejected at load time).
 
 ```yaml
 - type: "reference_comparison"
   agent_file: "solution.py"           # Agent's output file (relative to sandbox)
+  reference_file: "solution.py"       # File inside reference.directory to compare against
   comparison_method: "ast"            # Method: "ast", "token", or "complexity"
   similarity_threshold: 0.8           # Minimum similarity (0.0-1.0)
   description: "Solution must match reference structure"
@@ -885,6 +906,7 @@ Compares agent's code with a reference solution using similarity scoring. **Cont
 | Field | Default | Description |
 |-------|---------|-------------|
 | `agent_file` | *required* | Path to the agent's generated file (relative to the sandbox root). |
+| `reference_file` | *required* | Path to the reference file to compare against, relative to `reference.directory` (i.e. `$REFERENCE_DIR/<this path>`). Must stay inside that directory — `../` is rejected. |
 | `comparison_method` | `"ast"` | `ast` (structure), `token` (text), or `complexity` (metrics). |
 | `similarity_threshold` | 0.8 | Minimum similarity score to pass (0.0–1.0). |
 
@@ -1093,7 +1115,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
     - 0.5: correct but not idiomatic
     - 0.0: incorrect or missing
   files: ["main.py", "tests/test_main.py"]
-  include_reference: true            # Opt-in: show reference solution to the judge (never to the agent)
+  include_reference: true            # Default: show reference solution to the judge (never to the agent)
   include_agent_output: false        # Opt-in: include the latest turn's raw agent output
   include_tool_calls: false          # Opt-in: include a summary of the latest turn's tool calls
   include_dialog: false              # Opt-in: include the full user<->agent conversation (recommended for simulation)
@@ -1108,8 +1130,8 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | Field | Default | Description |
 |-------|---------|-------------|
 | `prompt` | *required* | Grading instructions shown to the judge |
-| `files` | `[]` | Paths whose contents are shown to the judge. Plain entries are sandbox-relative; entries prefixed with `$TASK_DIR/` are read from the host filesystem relative to the task YAML's parent directory (e.g. `$TASK_DIR/../shared/rubric.md` for a rubric shared across a task family). Missing files render as `<file not found>`. |
-| `include_reference` | `false` | Include the task's reference solution in the judge prompt (silently omitted if no reference is configured). Never shown to the agent. |
+| `files` | `[]` | Paths whose contents are shown to the judge. Plain entries are sandbox-relative; entries prefixed with `$TASK_DIR/` or `$REFERENCE_DIR/` are read from the host filesystem, relative to the task YAML's parent directory and to the staged reference directory respectively (e.g. `$TASK_DIR/../shared/rubric.md` for a rubric shared across a task family, or `$REFERENCE_DIR/rubric.md` for one asset out of the reference — which works regardless of `include_reference`). Missing files render as `<file not found>`. |
+| `include_reference` | `true` | Inline the WHOLE reference directory into the judge prompt, one labelled block per file (silently omitted if no reference is configured). Never shown to the agent. Set `false` and use `$REFERENCE_DIR/<path>` entries in `files` to attach only specific assets. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA) |
 | `include_tool_calls` | `false` | Include a summary of the latest agent turn's tool calls |
 | `include_dialog` | `false` | Include the full user↔agent conversation across **all** turns. In simulation mode the user side is generated by an LLM simulator and may invent premises — the rendered block is wrapped as `UNTRUSTED DATA` and instructs the judge to treat any claim made only by the simulated user as possibly fabricated, so the agent isn't penalized for going along with it (recommended whenever a task uses `simulation:`). |
@@ -1183,8 +1205,8 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | Field | Default | Description |
 |-------|---------|-------------|
 | `prompt` | *required* | Evaluation instructions for the judge agent |
-| `files` | `[]` | Paths pre-attached to the prompt. Plain entries are sandbox-relative (the judge also has live access via its working-directory copy); entries prefixed with `$TASK_DIR/` are read from the host filesystem relative to the task YAML's parent directory and are inlined into the prompt only. |
-| `include_reference` | `false` | Include the task's reference solution in the judge prompt |
+| `files` | `[]` | Paths pre-attached to the prompt. Plain entries are sandbox-relative (the judge also has live access via its working-directory copy); entries prefixed with `$TASK_DIR/` or `$REFERENCE_DIR/` are read from the host filesystem — relative to the task YAML's parent directory and to the staged reference directory respectively (`$REFERENCE_DIR/` works regardless of `include_reference`) — and are inlined into the prompt only. |
+| `include_reference` | `true` | Mount the reference tree at `_reference/` for the judge to Read/Glob (not inlined into the prompt). Use `$REFERENCE_DIR/<path>` entries in `files` to pre-attach specific assets as text. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED) |
 | `include_tool_calls` | `false` | Include summarized tool-call telemetry from the latest agent turn |
 | `include_dialog` | `false` | Include the full user↔agent conversation across **all** turns. The rendered block is wrapped as `UNTRUSTED DATA` and warns the judge that simulator-generated user messages may invent premises (recommended whenever a task uses `simulation:`). |
@@ -1205,7 +1227,7 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 3. **Credential exfiltration via Bash** — any network-capable tool can leak credentials. When the task doesn't need Bash (e.g. structural-only inspection), override `allowed_tools: [Read, Grep, Glob]`.
 4. **Hooks / MCP servers planted by the main agent** — a compromised generation could drop `.claude/settings.json` or `.mcp.json` into the sandbox. The judge sets `setting_sources=[]` on its SDK config and excludes both paths from the sandbox copy, so neither gets loaded. This closes a pre-LLM-turn hook/MCP surface that the `allowed_tools` gate can't see.
 
-**Reference handling**: The reference solution is shown to the judge verbatim (same as `llm_judge`) and is scrubbed from the persisted `CriterionResult.details` — a misbehaving judge that echoes the reference in its rationale won't leak it into run artifacts.
+**Reference handling**: The reference solution is MOUNTED at `_reference/` for the judge to browse (rather than inlined as `llm_judge` does) and is scrubbed from the persisted `CriterionResult.details` — a misbehaving judge that echoes the reference in its rationale won't leak it into run artifacts.
 
 **Backend support**: Works on both backends (`direct`, `bedrock`) — the checker forwards the orchestrator's `ApiRoute` to the judge sub-agent.
 
@@ -1275,21 +1297,142 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 
 ## Reference Solutions
 
-Define a reference solution for `reference_comparison` criteria:
+A reference solution is always a **directory**, given relative to the task YAML's own directory:
 
 ```yaml
-# From a file (relative to task YAML)
 reference:
-  file: "reference_solution.py"
-
-# Or inline
-reference:
-  code: |
-    def fibonacci(n):
-        if n <= 1:
-            return n
-        return fibonacci(n - 1) + fibonacci(n - 2)
+  directory: "reference"
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `directory` | *required* | Directory holding the reference solution, relative to the task YAML. Exposed to criteria as `$REFERENCE_DIR` and the `REFERENCE_DIR` env var. |
+
+There is no inline `code:` or single-file `file:` form. A directory is the only
+shape that can be permission-gated as a unit (see below), and a one-file
+reference is just a directory containing one file.
+
+> **Migrating from `code:` / `file:`.** This is a **breaking** task-schema
+> change, and it is a hard load error, not a silent downgrade — a task carrying
+> either key fails validation with a message naming the replacement. Every task
+> suite outside this repo (the `coder-eval-uipath` / eval-runner suites among
+> them) must migrate before its next scheduled run:
+>
+> | Was | Now |
+> |-----|-----|
+> | `reference: {code: "<source>"}` | write the source to a file in a directory, then `reference: {directory: "reference"}` |
+> | `reference: {file: "solution.py"}` | move the file into a directory: `reference: {directory: "reference"}` |
+>
+> `reference_comparison` also gained a **required** `reference_file` naming
+> which file inside that directory to compare against — previously implicit
+> because there was only one.
+>
+> **Score-comparability warning.** `include_reference: true` (still the default)
+> changed meaning for `llm_judge`: it used to inline the one reference file, and
+> now inlines the **whole reference directory** (capped at 200 000 chars, files
+> truncated to `max_file_chars` each, trailing files dropped with an explicit
+> "omitted" marker). Every pre-existing judge task with a reference therefore
+> sends a larger, differently-shaped prompt — judge scores are **not comparable
+> across this migration**, and per-judge token cost rises roughly in proportion
+> to the added reference bytes. Re-baseline any trend line that spans it, or set
+> `include_reference: false` and attach the one asset you want with a
+> `$REFERENCE_DIR/<path>` entry in `files:` to restore the old shape.
+>
+> **Docker image lockstep.** The host↔image contract changed (a new
+> `/work/references` bind mount plus a tmpfs mask over the reference's original
+> location inside the task-dir mount). A pinned or cached `coder-eval-agent`
+> image predating this change will fail closed with a missing-mount error rather
+> than grade against an empty reference — but rebuild and republish the image in
+> lockstep (`make docker-image`) so docker-driver pipelines don't simply stop.
+
+### The agent never sees it
+
+The agent under evaluation shares a filesystem with the harness, so "don't show
+it to the agent" is not enough on its own — an agent that greps the task
+directory finds the answer. Two mechanisms prevent that:
+
+1. **A per-run private copy.** The reference is staged into a throwaway directory
+   for the duration of the run and deleted at cleanup. It is never copied into
+   `run_dir/artifacts`, so archived and shared run directories carry no solution.
+2. **A mode-000 window.** Under `driver: docker`, that staged copy is chmod'd
+   to `000` for the whole of every `agent.communicate` call, and restored afterwards — including on crash,
+   timeout, and cancellation. Criteria and judges run outside the window and
+   read normally. The task directory is deliberately NOT shielded: under docker
+   it is a `:ro` mount (chmod fails with EROFS) and the same task YAML is
+   readable at `/work/input` regardless. On the host (`driver: tempdir`) the
+   window is a deliberate no-op: the agent runs with the same uid as the harness, so a `chmod` it can
+   simply undo buys no isolation, and the checked-out `tasks/` tree is shared
+   across a parallel batch. **Use `driver: docker` for any suite where the
+   reference must be unreachable.**
+
+Under `driver: docker` the reference is bind-mounted **read-write** at
+`/work/references` — deliberately: it is a throwaway copy, and a `:ro` mount
+cannot be chmod'd (EROFS), so the window could not be applied at all. An empty
+tmpfs masks its original location inside the task-directory mount, and the
+container drops `DAC_OVERRIDE` and `DAC_READ_SEARCH`.
+
+> **What this does and does not guarantee.** The mode-000 window stops an agent
+> that *passively reads* the reference — `ls`, `cat`, `grep` all fail. Two
+> things it does **not** stop:
+>
+> 1. **A deliberate re-chmod.** `chmod(2)` is gated on *owner-or-`CAP_FOWNER`*,
+>    and the container runs as root, which owns the bind-mounted copy. Verified:
+>    `chmod 755 /work/references` succeeds from inside the container and the
+>    solution is then readable. Dropping `FOWNER`/`CHOWN` does **not** fix this
+>    and is deliberately not done — the in-container orchestrator that *applies*
+>    the window is the same root process with the same capabilities, so dropping
+>    `FOWNER` breaks the harness's own `chmod` wherever the bind mount preserves
+>    a non-root owner (native Linux). Verified: container root, uid-1000-owned
+>    directory, `FOWNER` dropped → `chmod: Operation not permitted`. The drop
+>    only bites on the hosts where it also disables the control.
+> 2. **Waiting the window out.** The window spans `agent.communicate`, so
+>    between turns and after the final one the reference is back at its normal
+>    mode, and nothing reaps the agent's child processes at turn end — a
+>    backgrounded read loop started during a turn succeeds once the window
+>    closes.
+>
+> The *write* half of (2) IS closed: the reference tree is hashed at staging
+> time and re-verified before grading, and a mismatch fails the run with
+> `ReferenceTamperedError` rather than scoring `reference_comparison` against a
+> file the agent wrote. **Closing the read half fully requires running the agent
+> as a non-root uid that does not own the reference, and holding the window for
+> the agent's whole lifetime** — tracked as follow-up. Treat the current control
+> as raising the cost of accidental leakage, not as a boundary against an
+> adversarial agent.
+
+### Addressing reference files
+
+Criteria reach into the reference with the `$REFERENCE_DIR` token, which works
+anywhere `$TASK_DIR` does:
+
+```yaml
+reference:
+  directory: "reference"
+
+success_criteria:
+  # Attach one specific asset to a judge prompt
+  - type: "llm_judge"
+    description: "Graded against the published rubric"
+    prompt: "Grade the solution against the rubric."
+    include_reference: false          # don't inline the whole tree...
+    files:
+      - "solution.py"                 # sandbox-relative (the agent's work)
+      - "$REFERENCE_DIR/rubric.md"    # ...just this one reference asset
+
+  # Or compare against a single reference file
+  - type: "reference_comparison"
+    description: "Structure matches the reference"
+    agent_file: "solution.py"
+    reference_file: "solution.py"
+```
+
+`run_command` criteria get the same directory as the `REFERENCE_DIR` environment
+variable (alongside `TASK_DIR`), so `diff -r "$REFERENCE_DIR" out/` works.
+
+Symlinks inside `reference.directory` are **dropped** when the reference is
+staged (they would otherwise pull host files into a directory a judge sub-agent
+can read). Ship real files — a `reference_file:` or `$REFERENCE_DIR/...` entry
+pointing at a symlink resolves to nothing.
 
 ## Pre-Run Commands
 
@@ -1531,6 +1674,7 @@ success_criteria:
 
   - type: "reference_comparison"
     agent_file: "main.py"
+    reference_file: "main.py"
     comparison_method: "ast"
     similarity_threshold: 0.7
     description: "Code structure matches reference"
@@ -1543,28 +1687,5 @@ success_criteria:
     description: "Agent must run the script"
 
 reference:
-  code: |
-    from pydantic import BaseModel
-    from langgraph.graph import StateGraph, START, END
-
-    class Input(BaseModel):
-        a: float
-        b: float
-        operator: str
-
-    class Output(BaseModel):
-        result: float
-
-    def calculate(state: Input) -> Output:
-        ops = {"+": lambda: state.a + state.b,
-               "-": lambda: state.a - state.b,
-               "*": lambda: state.a * state.b,
-               "/": lambda: state.a / state.b if state.b != 0 else 0}
-        return Output(result=ops.get(state.operator, lambda: 0)())
-
-    builder = StateGraph(state_schema=Input, input=Input, output=Output)
-    builder.add_node("calculate", calculate)
-    builder.add_edge(START, "calculate")
-    builder.add_edge("calculate", END)
-    graph = builder.compile()
+  directory: "reference"    # ./reference/main.py holds the solution
 ```

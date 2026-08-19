@@ -1,94 +1,128 @@
 """Reference-loading helpers for the orchestrator.
 
-Loads the reference solution (code / file / directory form) consumed by the
+Resolves and stages the reference solution directory consumed by the
 ``reference_comparison``, ``llm_judge``, and ``agent_judge`` criteria.
+
+The reference is always a *directory* (``task.reference.directory``, relative
+to the task YAML). The orchestrator stages a per-run private copy of it rather
+than pointing criteria at the checked-out path, for two reasons:
+
+1. **Concurrency.** A batch run fans many tasks out over the same
+   ``tasks/<name>/`` tree. The anti-cheat window chmods the reference to 000
+   for the duration of each agent turn; doing that to the shared checkout would
+   let one task's turn block a sibling task's judge mid-read.
+2. **Blast radius.** A private copy means a crashed run can only leave a
+   throwaway directory at mode 000, never the user's working tree.
 """
 
 import logging
+import os
+import shutil
 from pathlib import Path
 
-from ..models import TaskDefinition
+from ..models import CONTAINER_REFERENCE_DIR, TaskDefinition
+from ..path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks
 
 
 logger = logging.getLogger(__name__)
 
 
-def load_reference(
-    task: TaskDefinition,
-    task_file: Path | None,
-    cached_reference: str | None,
-) -> tuple[str | None, Path | None, str | None]:
-    """Load reference solution from task definition.
+def resolve_host_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path | None:
+    """Resolve ``task.reference.directory`` against the task YAML's directory.
 
-    Returns the reference in whichever form the task declared:
-    ``code`` / ``file`` produce a string ``reference_code``; ``directory``
-    produces a resolved ``reference_dir`` ``Path``. At most one is non-None
-    on any given call.
+    The ONE place that knows how a reference path is spelled relative to its
+    task file. Both drivers go through it: the in-container/host orchestrator
+    via :func:`resolve_reference_dir` below, and the host-side
+    ``DockerRunner._resolve_host_reference_dir`` which mounts the same directory
+    into the container. When the two resolved independently, a change to the
+    rule made ``$REFERENCE_DIR`` mean different things per driver.
+
+    Returns None when the task declares no reference or has no task file.
+    Existence is NOT checked here — callers differ on whether a missing
+    directory is fatal (orchestrator) or a warning (argv builder).
+    """
+    if task.reference is None or task_file is None:
+        return None
+    return (task_file.parent / task.reference.directory).resolve()
+
+
+def resolve_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path | None:
+    """Resolve ``task.reference.directory`` against the task YAML's directory.
 
     Args:
-        task: Task definition with reference configuration
-        task_file: Path to task YAML file (for resolving relative paths)
-        cached_reference: Previously loaded ``reference_code`` (for caching).
-            Directory paths are resolved fresh each call — path resolution
-            is cheap and the directory contents are read by the consumer.
+        task: Task definition with reference configuration.
+        task_file: Path to the task YAML file (for resolving the relative path).
 
     Returns:
-        Tuple of (reference_code, reference_dir, cached_reference).
-        ``cached_reference`` should be stored for future calls (string forms only).
+        The resolved source directory, or ``None`` when the task declares no
+        reference.
 
     Raises:
-        FileNotFoundError: if the reference file or directory doesn't exist.
-        ValueError: if ``task_file`` is not provided when needed for path resolution.
-
-    Security: the reference is NEVER shown to the agent. It is only consumed
-    by ``llm_judge`` / ``agent_judge`` and ``reference_comparison`` criteria.
+        FileNotFoundError: if the reference directory doesn't exist.
+        ValueError: if ``task_file`` is not provided when needed for resolution.
     """
-    # String-form cache short-circuit. Directory form is resolved fresh below
-    # because Path resolution is nanoseconds and directory content varies.
-    if cached_reference is not None:
-        return cached_reference, None, cached_reference
-
     if not task.reference:
-        return None, None, None
+        return None
 
-    reference_code: str | None = None
-    reference_dir: Path | None = None
+    # Under driver: docker the host bind-mounts the reference at a fixed container
+    # path and layers an empty tmpfs over its original location inside the
+    # task-dir mount, so the agent cannot reach it via $TASK_DIR. Resolving
+    # relative to task_file would therefore find that empty mask, not the
+    # solution — so the container mount wins whenever it is present.
+    #
+    # Gated on the env var AS WELL AS the path, and for the same reason
+    # Sandbox.enforces_permission_windows is: a bare `/work/references` probe
+    # silently hijacks every task's reference on any host that happens to have
+    # that directory (a Linux box using /work as a workspace root is entirely
+    # plausible, and this package is going open-source). The failure would be
+    # invisible — wrong reference content, wrong reference_comparison scores,
+    # wrong judge prompts, no error.
+    container_mount = Path(CONTAINER_REFERENCE_DIR)
+    if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":
+        if container_mount.is_dir():
+            logger.debug("Reference resolved from the container mount at %s", container_mount)
+            return container_mount
+        # Hard fail rather than falling back to task_file.parent. In-container
+        # that fallback resolves to the UN-masked reference under the `:ro`
+        # task-dir bind — which the mode-000 window then cannot chmod (EROFS), so
+        # the run would complete with the solution readable by the agent for the
+        # whole turn, reporting a normal pass/fail. A missing mount means the
+        # host-side wiring is broken; that must be loud, not silently unprotected.
+        raise FileNotFoundError(
+            f"Task declares reference.directory={task.reference.directory!r} but {CONTAINER_REFERENCE_DIR} "
+            + "is not mounted in this container; refusing to run unprotected. Most likely that path does not "
+            + "resolve to a directory next to the task YAML — the host-side DockerRunner logs "
+            + "'does not resolve to a directory' and skips the mount when it doesn't, so check the host log "
+            + "first. Failing that, the coder-eval-agent image may predate the reference mount: rebuild it "
+            + "with `make docker-image`."
+        )
 
-    if task.reference.code:
-        reference_code = task.reference.code
-    elif task.reference.file:
-        if not task_file:
-            raise ValueError("task_file not set, cannot resolve reference file path")
-        ref_path = task_file.parent / task.reference.file
-        if not ref_path.exists():
-            raise FileNotFoundError(f"Reference file not found: {ref_path} (specified in {task_file})")
-        reference_code = ref_path.read_text(encoding="utf-8")
-    elif task.reference.directory:
-        if not task_file:
-            raise ValueError("task_file not set, cannot resolve reference directory path")
-        ref_dir = (task_file.parent / task.reference.directory).resolve()
-        if not ref_dir.is_dir():
-            raise FileNotFoundError(f"Reference directory not found: {ref_dir} (specified in {task_file})")
-        reference_dir = ref_dir
-
-    # Log that reference was loaded (but NOT the content for security)
-    logger.info("Reference solution loaded (content hidden for security)")
-    return reference_code, reference_dir, reference_code
+    if not task_file:
+        raise ValueError("task_file not set, cannot resolve reference directory path")
+    ref_dir = resolve_host_reference_dir(task, task_file)
+    assert ref_dir is not None  # task.reference and task_file are both non-None here
+    if not ref_dir.is_dir():
+        raise FileNotFoundError(
+            f"Reference directory not found: {ref_dir} (specified in {task_file}). "
+            + "reference.directory must name a directory relative to the task YAML."
+        )
+    return ref_dir
 
 
-# Backward-compat alias — orchestrator.py still imports this name in places we
-# didn't yet update. New code should use ``load_reference``.
-def load_reference_code(
-    task: TaskDefinition,
-    task_file: Path | None,
-    cached_reference: str | None,
-) -> tuple[str | None, str | None]:
-    """Compatibility wrapper around ``load_reference`` returning the legacy two-tuple.
+def stage_reference_dir(source: Path, destination: Path) -> Path:
+    """Copy the reference solution into a per-run private ``destination``.
 
-    Use ``load_reference`` directly when you also need the directory path
-    (i.e. anywhere agent_judge can run). Kept so existing call sites that
-    only consume the string form (``reference_comparison``,
-    pre-directory-feature paths) don't have to change.
+    Symlinks are NOT followed: a reference bundle that ships
+    ``creds -> ~/.aws/credentials`` must not pull host files into a location a
+    judge sub-agent can read. An existing ``destination`` is cleared first so a
+    reused ``--run-dir`` cannot blend a previous run's reference into this one.
+
+    Returns the staged destination path.
     """
-    code, _dir, cache = load_reference(task=task, task_file=task_file, cached_reference=cached_reference)
-    return code, cache
+    if destination.exists():
+        shutil.rmtree(destination, ignore_errors=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
+    # Log that the reference was staged, but never its contents.
+    logger.info("Reference solution staged (content hidden for security)")
+    return destination

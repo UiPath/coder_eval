@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -22,6 +23,7 @@ from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors import (
     AgentCrashError,
     BudgetExceededError,
+    ReferenceTamperedError,
     TaskTimeoutError,
     TurnTimeoutError,
 )
@@ -30,6 +32,7 @@ from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
 from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
+    CONTAINER_REFERENCE_DIR,
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ROUTE_NAMES,
     AgentKind,
@@ -47,6 +50,7 @@ from .models import (
     PostRunResult,
     PreRunCommand,
     PreservationMode,
+    ReferenceComparisonCriterion,
     SimulationConfig,
     SimulationTelemetry,
     SuccessCriterion,
@@ -59,9 +63,9 @@ from .models import (
     resolve_route,
 )
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
-from .orchestration.evaluation import load_reference
+from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
 from .orchestration.run_limits import validate_run_limits
-from .path_utils import format_task_log_id, task_log_path
+from .path_utils import digest_tree, format_task_log_id, rmtree_restrictive, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -412,8 +416,28 @@ class Orchestrator:
         # Result tracking
         self.result: EvaluationResult | None = None
 
-        # Reference solution cache (loaded on-demand)
-        self._reference_code: str | None = None
+        # Per-run private copy of task.reference.directory, staged in _setup and
+        # removed in _cleanup. Criteria address it as $REFERENCE_DIR / REFERENCE_DIR.
+        # It is a COPY, not the checked-out path, so the mode-000 anti-cheat window
+        # around each agent turn can't block a sibling task's judge mid-read, and a
+        # crashed run can only leave a throwaway directory unreadable.
+        self._reference_dir: Path | None = None
+
+        # The mkdtemp root that holds ``_reference_dir``, recorded the moment it
+        # is created and BEFORE the copy runs, so a copy that raises part-way
+        # (unreadable source file, ENOSPC) still gets cleaned up. Keying cleanup
+        # on ``_reference_dir.parent`` instead would leak the partial copy of the
+        # reference solution, because ``_reference_dir`` is only assigned on the
+        # success path. None under docker, where the reference is a host-owned
+        # bind mount rather than a tempdir of ours.
+        self._reference_staging_root: Path | None = None
+
+        # SHA-256 of the staged reference tree, taken right after staging and
+        # re-verified before grading. The window is per-turn, so between turns
+        # the (necessarily writable) docker mount is back at its normal mode; an
+        # agent-backgrounded process could overwrite the reference and drive
+        # ``reference_comparison`` to 1.0. See _verify_reference_integrity.
+        self._reference_digest: str | None = None
 
         # Early-stop watcher (created in _setup only when a criterion carries a
         # stop_early: block and the kill switch is not thrown; None otherwise,
@@ -754,15 +778,9 @@ class Orchestrator:
 
         checked: CriteriaResults = []
         if runnable:
-            reference_code, reference_dir, self._reference_code = load_reference(
-                task=self.task,
-                task_file=self.task_file,
-                cached_reference=self._reference_code,
-            )
             checked = await self.success_checker.check_all_async(
                 runnable,
-                reference_code=reference_code,
-                reference_dir=reference_dir,
+                reference_dir=self._reference_dir,
                 turn_records=self.result.iterations,
             )
 
@@ -1145,6 +1163,88 @@ class Orchestrator:
                     total_cost_usd=sum(costs) if costs else None,
                 )
 
+    async def _stage_reference(self) -> None:
+        """Resolve the reference directory this run will expose as REFERENCE_DIR.
+
+        No-op when the task declares no reference. What the anti-cheat window
+        chmods is whatever this sets, so it MUST be the same path the agent can
+        reach — otherwise the window shields a decoy while the agent reads the
+        real thing (exactly the leak ``tasks/anti_cheat_reference`` caught).
+
+        Under ``driver: docker`` that path is the ``/work/references`` mount
+        itself: the host already bind-mounts a throwaway COPY there read-write
+        (``DockerRunner._prepare_reference_mount``) precisely so this process can
+        chmod it. Re-copying it here would be worse than pointless — it would
+        move the shielded path off the one the agent attacks.
+
+        On the host there is no container boundary and the window is a no-op
+        (see ``Sandbox.enforces_permission_windows``), but we still stage a
+        private copy: it strips symlinks and keeps ``$REFERENCE_DIR`` semantics
+        identical across drivers.
+        """
+        source = resolve_reference_dir(self.task, self.task_file)
+        if source is None:
+            return
+        if source == Path(CONTAINER_REFERENCE_DIR):
+            self._reference_dir = source
+        else:
+            # Record the root BEFORE the copy: _cleanup keys on this field, so a
+            # copytree that raises part-way must still leave something to remove.
+            staging = Path(tempfile.mkdtemp(prefix="coder_eval_reference_"))
+            self._reference_staging_root = staging
+            # copytree needs a non-existent leaf; mkdtemp already made the parent.
+            destination = staging / "reference"
+            self._reference_dir = await asyncio.to_thread(stage_reference_dir, source, destination)
+        self._reference_digest = await asyncio.to_thread(digest_tree, self._reference_dir)
+        self._validate_reference_consumers()
+
+    def _validate_reference_consumers(self) -> None:
+        """Fail fast on a criterion that names a reference file which isn't there.
+
+        A typo in ``reference_comparison.reference_file`` is an EVAL-CONFIG error,
+        not an agent failure. Left to check time it surfaces as a gating
+        ``score=0.0`` → ``FinalStatus.FAILURE``, i.e. counted against the agent's
+        pass rate — and on a dataset-fanned suite it zeroes every row silently.
+        Raising here routes it to ``FinalStatus.ERROR`` instead, and does so
+        before the agent burns a single token.
+        """
+        reference_dir = self._reference_dir
+        if reference_dir is None:
+            return
+        for criterion in self.task.success_criteria:
+            if not isinstance(criterion, ReferenceComparisonCriterion):
+                continue
+            candidate = (reference_dir / criterion.reference_file).resolve()
+            if not candidate.is_relative_to(reference_dir.resolve()) or not candidate.is_file():
+                raise ValueError(
+                    f"reference_comparison.reference_file {criterion.reference_file!r} does not name a "
+                    + f"readable file inside the task's reference directory ({self.task.reference.directory!r} "  # type: ignore[union-attr]
+                    + "— task.reference is guaranteed set here by the load-time validator). "
+                    + "This is a task-definition error, not an agent failure."
+                )
+
+    async def _verify_reference_integrity(self) -> None:
+        """Re-hash the reference before grading and hard-fail on a mismatch.
+
+        The mode-000 window spans ``agent.communicate`` only, and nothing reaps
+        the agent's child processes at turn end — so a backgrounded writer can
+        modify the reference once the window closes. Under docker the mount MUST
+        be writable (chmod on a ``:ro`` bind fails with EROFS), so this is the
+        control that stops an agent from overwriting the solution with its own
+        file and scoring ``reference_comparison`` 1.0.
+
+        Read-back is not covered by this; see the KNOWN GAP in ``fs_permissions``.
+        """
+        if self._reference_dir is None or self._reference_digest is None:
+            return
+        current = await asyncio.to_thread(digest_tree, self._reference_dir)
+        if current != self._reference_digest:
+            raise ReferenceTamperedError(
+                "The reference solution changed during the run: its content hash before the agent ran "
+                + f"({self._reference_digest[:12]}...) does not match the hash at grading time "
+                + f"({current[:12]}...). Refusing to grade against a reference the agent may have written."
+            )
+
     async def _setup(self) -> None:
         """Set up all components for evaluation.
 
@@ -1165,9 +1265,15 @@ class Orchestrator:
         if early_stop_active(self.task):
             self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
 
+        # Stage the reference BEFORE either branch returns: judge criteria with
+        # include_reference=true (and any $REFERENCE_DIR/... file entry) expect it
+        # populated in evaluate-only re-grades too, where no agent ever runs.
+        await self._stage_reference()
+
         if self.sandbox is not None:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None
+            self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
             self.route = resolve_route(settings)
@@ -1188,6 +1294,7 @@ class Orchestrator:
         # Create sandbox with retry logic
         task_dir = self.task_file.parent.resolve() if self.task_file else None
         self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id, task_dir=task_dir)
+        self.sandbox.reference_dir = self._reference_dir
 
         # workspace_dir (docker WORKDIR alignment) wins: run the agent in-place at
         # the image's own WORKDIR so its inputs/verifier paths line up, then copy
@@ -1580,16 +1687,41 @@ class Orchestrator:
                     iteration=iteration,
                 ) from None
 
-        turn_record = await execute_with_retry(
-            operation=_communicate_attempt,
-            operation_name=operation_label,
-            context={
-                "task_id": self.task.task_id,
-                "component": "agent",
-                "agent_name": self._agent_name,
-            },
-            on_attempt_error=_on_attempt_failure,
-        )
+        # ANTI-CHEAT WINDOW. The agent shares a filesystem with the harness, so
+        # without this it can simply read the reference solution (and the task YAML
+        # with its criteria) instead of solving the task. Both directories sit at
+        # mode 000 for the whole of every communicate attempt — including retries,
+        # since the wrapper is outside execute_with_retry — and are restored on
+        # every exit path, so criteria and judges that run afterwards read normally.
+        #
+        # Routed through the SANDBOX, which owns whether a chmod window means
+        # anything for its driver.
+        #
+        # task_dir is shielded ALONGSIDE reference_dir. It previously was not,
+        # because under docker it was bind-mounted `:ro` and the chmod returned
+        # EROFS -- producing only a per-turn "could not chmod" warning. It is now
+        # a read-write throwaway copy (docker_runner._prepare_task_dir_mount), so
+        # the window applies. That matters because the task dir holds grading
+        # material beyond the reference: run_command fixtures, expected outputs,
+        # and -- for a task laid out flat, whose parent is the whole `tasks/`
+        # tree -- every SIBLING task's reference solution.
+        #
+        # What this does NOT do is hide the task DEFINITION. `task.yaml` is also
+        # staged at /work/input for the in-container orchestrator to read, and
+        # that mount is untouched by this window. Hiding the criteria from the
+        # agent remains a separate, unsolved problem.
+        assert self.sandbox is not None
+        async with self.sandbox.set_permissions([self._reference_dir, self.sandbox.task_dir]):
+            turn_record = await execute_with_retry(
+                operation=_communicate_attempt,
+                operation_name=operation_label,
+                context={
+                    "task_id": self.task.task_id,
+                    "component": "agent",
+                    "agent_name": self._agent_name,
+                },
+                on_attempt_error=_on_attempt_failure,
+            )
         assert turn_record is not None  # execute_with_retry returns the turn or raises
         return turn_record
 
@@ -1661,15 +1793,9 @@ class Orchestrator:
             # Load reference in evaluate-only mode too: judge criteria with
             # include_reference=true expect this populated even when no agent
             # runs. The agent-driven branch below has the same call.
-            reference_code, reference_dir, self._reference_code = load_reference(
-                task=self.task,
-                task_file=self.task_file,
-                cached_reference=self._reference_code,
-            )
             criteria_results = await self.success_checker.check_all_async(
                 self.task.success_criteria,
-                reference_code=reference_code,
-                reference_dir=reference_dir,
+                reference_dir=self._reference_dir,
                 turn_records=self.result.iterations,
             )
             self.result.success_criteria_results = criteria_results
@@ -1717,17 +1843,12 @@ class Orchestrator:
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
-        # Check success criteria (pass reference code for reference_comparison criterion)
+        # Check success criteria (reference_dir feeds reference_comparison + judges)
         logger.debug("Checking success criteria")
-        reference_code, reference_dir, self._reference_code = load_reference(
-            task=self.task,
-            task_file=self.task_file,
-            cached_reference=self._reference_code,
-        )
+        await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
-            reference_code=reference_code,
-            reference_dir=reference_dir,
+            reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
         )
         self.result.success_criteria_results = criteria_results
@@ -1840,15 +1961,10 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
-        reference_code, reference_dir, self._reference_code = load_reference(
-            task=self.task,
-            task_file=self.task_file,
-            cached_reference=self._reference_code,
-        )
+        await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
-            reference_code=reference_code,
-            reference_dir=reference_dir,
+            reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
         )
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
@@ -2350,7 +2466,15 @@ class Orchestrator:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=self._POST_RUN_STREAM_LIMIT,
-                )  # nosec B602,B604 - commands come from task YAML, not user input
+                )
+                # No `# nosec` here: bandit does not flag
+                # asyncio.create_subprocess_shell at all (B602 is
+                # subprocess.Popen(shell=True)), so the suppression this line
+                # used to carry was inert -- and an inert id silently
+                # pre-suppresses a real finding if a flagged construct is ever
+                # added here. The shell IS intentional: pre/post_run commands are
+                # authored in the task YAML, which is already a trusted artifact
+                # (it can run anything via a run_command criterion).
 
                 stdout_chunks: list[str] = []
                 stderr_chunks: list[str] = []
@@ -2457,6 +2581,30 @@ class Orchestrator:
                 await self.agent.stop()
             except Exception as e:
                 logger.warning(f"Failed to stop agent: {e}")
+
+        # Drop the staged reference copy. Deliberately NOT preserved into
+        # run_dir/artifacts: run directories get archived, uploaded, and shared,
+        # and the reference solution must not ride along.
+        #
+        # Keyed on _reference_staging_root, recorded before the copy — NOT on
+        # _reference_dir.parent, which is only set once the copy succeeds and so
+        # would leak a half-written reference when copytree raises. The field is
+        # None under docker, where the reference is the host-owned bind mount:
+        # that one is not ours to delete, and rmtree'ing its parent would take
+        # /work with it.
+        #
+        # rmtree_restrictive, not rmtree(ignore_errors=True): a run killed
+        # mid-turn leaves the tree at mode 000, where scandir raises
+        # PermissionError and plain rmtree silently declines — orphaning a
+        # tempdir that holds the reference solution, with no log line.
+        staging_root = self._reference_staging_root
+        self._reference_dir = None
+        self._reference_staging_root = None
+        if staging_root is not None:
+            try:
+                await asyncio.to_thread(rmtree_restrictive, staging_root)
+            except Exception as e:
+                logger.warning("Failed to remove staged reference dir %s: %s", staging_root, e)
 
         # Cleanup sandbox. Preservation and cleanup() are SIBLING try blocks:
         # a preservation failure (e.g. disk full during preserve_to) must never

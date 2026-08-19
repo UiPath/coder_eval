@@ -12,7 +12,7 @@ import pytest
 from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.evaluation.sub_agent import (
     SubAgentRunner,
-    _ignore_patterns_and_symlinks,
+    ignore_patterns_and_symlinks,
 )
 from coder_eval.models import AgentKind, ClaudeCodeAgentConfig, TurnRecord, parse_agent_config
 from coder_eval.models.routing import DirectRoute
@@ -471,7 +471,7 @@ def test_ignore_callable_skips_symlinks(tmp_path: Path) -> None:
     (tmp_path / "rel_link").symlink_to("regular.txt")
     (tmp_path / "broken").symlink_to("does_not_exist")
 
-    ignore = _ignore_patterns_and_symlinks(["__pycache__"])
+    ignore = ignore_patterns_and_symlinks(["__pycache__"])
     skipped = ignore(str(tmp_path), ["regular.txt", "sub", "leak", "rel_link", "broken"])
 
     assert "leak" in skipped
@@ -485,7 +485,7 @@ def test_ignore_callable_still_honors_patterns(tmp_path: Path) -> None:
     (tmp_path / "keep.py").write_text("x")
     (tmp_path / "__pycache__").mkdir()
 
-    ignore = _ignore_patterns_and_symlinks(["__pycache__"])
+    ignore = ignore_patterns_and_symlinks(["__pycache__"])
     skipped = ignore(str(tmp_path), ["keep.py", "__pycache__"])
 
     assert "__pycache__" in skipped

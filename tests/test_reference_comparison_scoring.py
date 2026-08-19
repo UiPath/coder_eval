@@ -13,6 +13,7 @@ class TestComplexityBaseline:
     def test_complexity_comparison_uses_reference_code(self, tmp_path):
         """Complexity comparison should derive baseline from reference code, not use empty dict."""
         pytest.importorskip("radon")
+        from coder_eval.criteria.base import CheckContext
         from coder_eval.criteria.reference_comparison import ReferenceComparisonChecker
         from coder_eval.models import ReferenceComparisonCriterion
 
@@ -28,14 +29,19 @@ class TestComplexityBaseline:
         # ignore filtering, exactly-one), not a direct sandbox_dir read.
         sandbox.get_file_content.return_value = agent_code
 
+        reference_dir = tmp_path / "ref"
+        reference_dir.mkdir()
+        (reference_dir / "solution.py").write_text(reference_code)
+
         criterion = ReferenceComparisonCriterion(
             description="Compare complexity",
             agent_file="solution.py",
+            reference_file="solution.py",
             comparison_method="complexity",
         )
 
         checker = ReferenceComparisonChecker()
-        result = checker._check_impl(criterion, sandbox, reference_code=reference_code)
+        result = checker._check_impl(criterion, sandbox, context=CheckContext(reference_dir=reference_dir))
 
         assert result.score > 0.0, "Score should be non-zero for valid code"
         assert result.score >= 0.3, f"Complexity score {result.score} seems wrong for identical code."

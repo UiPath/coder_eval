@@ -1,6 +1,6 @@
 [project]
 name = "coder-eval"
-version = "0.10.2"
+version = "0.11.0"
 description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
@@ -182,6 +182,11 @@ external = [
     "CE012",
     "CE013",
     "CE018",
+    "CE033",
+    "CE035",
+    "CE037",
+    "CE038",
+    "CE039",
 ]  # custom architectural lint rules (tests/lint/)
 
 [tool.ruff.lint.pylint]

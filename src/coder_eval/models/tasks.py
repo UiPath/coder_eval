@@ -9,7 +9,14 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import ResolvedAgentConfig
-from coder_eval.models.criteria import SuccessCriterion
+from coder_eval.models.container_paths import REFERENCE_DIR_TOKEN, command_uses_token, path_uses_token
+from coder_eval.models.criteria import (
+    AgentJudgeCriterion,
+    LLMJudgeCriterion,
+    ReferenceComparisonCriterion,
+    RunCommandCriterion,
+    SuccessCriterion,
+)
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.limits import RunLimits
@@ -191,45 +198,67 @@ class SimulationConfig(BaseModel):
 
 
 class ReferenceSource(BaseModel):
-    """Defines the source for the reference solution.
+    """Defines the source for the reference solution — always a directory.
 
-    The reference is NEVER shown to the agent being evaluated. It is used by:
+    The reference is NEVER shown to the agent being evaluated. The whole
+    directory is staged into a per-run private copy and kept at mode ``000``
+    for the duration of every agent turn (see
+    ``fs_permissions.py``), so an agent cannot read the solution
+    even though it shares a filesystem with the harness.
 
-    - ``LLMJudgeCriterion``: inlines the reference content into the judge prompt
-      (string forms only — ``code`` or ``file``).
-    - ``ReferenceComparisonCriterion``: computes AST/token similarity (string forms only).
-    - ``AgentJudgeCriterion``: with ``include_reference=true``, the reference is
-      copied into the judge sub-agent's working directory (single file inlined
-      into the prompt for ``code``/``file``; ``directory`` is mounted at
-      ``_reference/`` for the judge to ``Glob``/``Read`` over).
+    Criteria address files inside it with the ``$REFERENCE_DIR`` token:
 
-    Exactly one of ``code``, ``file``, or ``directory`` must be provided.
-    Security: reference solutions must never leak into agent prompts or logs.
+    - ``LLMJudgeCriterion`` / ``AgentJudgeCriterion``: list specific files in
+      ``files:`` as ``$REFERENCE_DIR/rubric.md``, or set ``include_reference:
+      true`` to attach the whole reference (inlined for ``llm_judge``, mounted
+      at ``_reference/`` for ``agent_judge`` to ``Glob``/``Read``).
+    - ``ReferenceComparisonCriterion``: names one file via ``reference_file``,
+      resolved inside this directory.
+
+    Inline ``code`` and single-file ``file`` forms were removed: a directory is
+    the only form that can be permission-gated as a unit, and a one-file
+    reference is expressible as a directory containing one file.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    code: str | None = Field(default=None, description="Inline reference code (for simple, short solutions)")
-    file: str | None = Field(default=None, description="Path to file containing reference code (relative to task YAML)")
-    directory: str | None = Field(
-        default=None,
+    directory: str = Field(
         description=(
-            "Path to a directory containing the reference solution (relative to task YAML). "
-            "Only consumed by agent_judge — the judge gets a read-only copy at "
-            "``_reference/`` in its working directory and can browse it with Glob/Read. "
-            "llm_judge and reference_comparison only accept string forms (code/file)."
+            "Path to a directory containing the reference solution, relative to the "
+            "task YAML's own directory. Exposed to criteria as the REFERENCE_DIR env "
+            "var and the $REFERENCE_DIR token; mounted at /work/references under "
+            "driver: docker. Never readable by the agent under evaluation."
         ),
     )
 
-    @model_validator(mode="after")
-    def check_exclusive_source(self) -> Self:
-        """Ensure exactly one of code / file / directory is provided."""
-        provided = sum(1 for v in (self.code, self.file, self.directory) if v is not None)
-        if provided > 1:
-            raise ValueError("Only one of 'code', 'file', or 'directory' can be provided for reference.")
-        if provided == 0:
-            raise ValueError("One of 'code', 'file', or 'directory' must be provided for reference.")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_string_forms(cls, data: Any) -> Any:
+        """Give the removed ``code:`` / ``file:`` forms an actionable error.
+
+        Without this they surface as a bare pair of pydantic errors ("directory
+        Field required" + "file Extra inputs are not permitted") that names
+        neither the replacement nor the reason. Mirrors the treatment the removed
+        ``run_limits.stop_early: true`` key gets.
+        """
+        if isinstance(data, dict):
+            removed = [k for k in ("code", "file") if k in data]
+            if removed:
+                raise ValueError(
+                    f"reference.{'/'.join(removed)} was removed — a reference is now always a DIRECTORY. "
+                    + "Move the solution into a directory and use `reference: {directory: <dir>}` "
+                    + "(a single-file reference is a directory containing one file). "
+                    + "See docs/TASK_DEFINITION_GUIDE.md#reference-solutions."
+                )
+        return data
+
+    @field_validator("directory")
+    @classmethod
+    def _non_empty_directory(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("reference.directory must be a non-empty path relative to the task YAML directory.")
+        return cleaned
 
 
 class Dataset(BaseModel):
@@ -578,29 +607,46 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         return self
 
     @model_validator(mode="after")
-    def check_directory_reference_compatibility(self) -> Self:
-        """Reject ``reference.directory`` paired with criteria that need a string reference.
+    def check_reference_consumers_have_a_reference(self) -> Self:
+        """Reject criteria that DEMAND the reference when no ``reference:`` block is set.
 
-        ``reference_comparison`` and ``llm_judge`` only consume ``reference_code``
-        (the string forms ``code`` / ``file``). When ``reference.directory`` is
-        the only form set, those criteria silently degrade — ``reference_comparison``
-        deterministically scores 0.0 ("No reference code provided") and
-        ``llm_judge`` runs without the reference even when ``include_reference=True``.
-        Catch the misconfiguration at load time instead of at run time.
+        These degrade silently otherwise — ``reference_comparison``
+        deterministically scores 0.0, and a ``$REFERENCE_DIR/...`` entry in
+        ``files:`` records a missing file. Catch it at load time instead.
+
+        ``include_reference`` is deliberately NOT an offender, even when true: its
+        documented contract is "silently omitted if no reference is configured", it
+        DEFAULTS to true, and most judge tasks legitimately run without a reference.
+        (Keying on ``model_fields_set`` to catch only an explicit ``true`` doesn't
+        work either — a ``model_dump()`` round-trip marks every field as set.)
         """
-        if self.reference is None or self.reference.directory is None:
+        if self.reference is not None:
             return self
         offenders: list[str] = []
         for c in self.success_criteria:
-            ctype = c.type
-            if ctype == "reference_comparison":
-                offenders.append("reference_comparison")
-            elif ctype == "llm_judge" and getattr(c, "include_reference", False):
-                offenders.append("llm_judge (include_reference=true)")
+            # isinstance narrowing, NOT getattr(c, "files"/"command"): with an
+            # untyped string probe, renaming LLMJudgeCriterion.files or
+            # RunCommandCriterion.command turns this load-time guard into a
+            # silent no-op that pyright cannot see. The union members are
+            # imported here already.
+            if isinstance(c, ReferenceComparisonCriterion):
+                offenders.append(f"{c.type} (needs a reference to compare against)")
+            elif isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) and any(
+                path_uses_token(f, REFERENCE_DIR_TOKEN) for f in c.files
+            ):
+                offenders.append(f"{c.type} (files: uses {REFERENCE_DIR_TOKEN})")
+            elif isinstance(c, RunCommandCriterion) and command_uses_token(c.command, REFERENCE_DIR_TOKEN):
+                # run_command is the third documented consumer: with no reference
+                # the env var is simply absent, so `diff -r "$REFERENCE_DIR" out/`
+                # expands to an empty argument and misbehaves instead of failing.
+                # command_uses_token, not a raw `in`: the brace form
+                # `${REFERENCE_DIR}` is standard shell and slipped straight past
+                # a substring test, while `$REFERENCE_DIRECTORY` false-positived.
+                offenders.append(f"{c.type} (command: uses {REFERENCE_DIR_TOKEN})")
         if offenders:
             raise ValueError(
-                "reference.directory is only consumed by agent_judge; the following "
-                + f"criteria require a string reference (use 'code' or 'file' instead): {offenders}"
+                "These criteria consume the reference solution but the task defines no "
+                + f"'reference:' block: {offenders}. Add `reference: {{directory: <path>}}`."
             )
         return self
 

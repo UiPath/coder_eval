@@ -714,7 +714,7 @@ class TestJudgeInfrastructureErrorEscalation:
         class _Checker(BaseCriterion[FileExistsCriterion]):
             criterion_type = "file_exists"
 
-            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
                 if exc is not None:
                     raise exc
                 return CriterionResult(
