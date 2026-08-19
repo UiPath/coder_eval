@@ -2178,10 +2178,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # Determine result status from exit code
             result_status = "success" if exit_code == 0 else "error" if exit_code is not None else "unknown"
 
-            # Build result summary with output if available
+            # Build result summary with output if available. Store the output WHOLE:
+            # CommandTelemetry.result_summary is the untruncated tool-result body (its
+            # length drives CommandTelemetry.result_tokens), so truncating here would
+            # under-report tool-output size for every command (see CE043). The output is
+            # already bounded by the Codex harness's own exec-output truncation; any
+            # further trimming for display belongs in the renderers/reports, not capture.
             summary_parts = [f"Exit code: {exit_code}" if exit_code is not None else "Command executed"]
             if output and len(output.strip()) > 0:
-                summary_parts.append(f"Output: {output[:100]}")
+                summary_parts.append(f"Output: {output}")
             result_summary = " | ".join(summary_parts)
 
             # Try to parse output as JSON

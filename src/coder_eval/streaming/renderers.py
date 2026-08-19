@@ -104,14 +104,18 @@ class RichStreamRenderer:
             return f"[cyan]>>> TOOL: {escape(event.tool.tool_name)}[/cyan] | {params_str}"
 
         if isinstance(event, ToolEndEvent):
-            preview = escape(event.tool.result_summary or "")
+            # result_summary is stored WHOLE (untruncated) at capture; cap it here
+            # for the terse live feed so a large command output doesn't flood the
+            # console. The reported char count reflects the true (full) length.
+            full = event.tool.result_summary or ""
+            preview = escape(_truncate(full, _MAX_RESULT_LEN))
             if event.status == ToolEndStatus.OK:
                 tag = "[green]<<< OK[/green]"
             elif event.status == ToolEndStatus.UNRESOLVED:
                 tag = "[yellow]<<< UNRESOLVED:[/yellow]"
             else:
                 tag = f"[red]<<< {escape(event.status.value.upper())}:[/red]"
-            return f"{tag} ({len(preview)} chars) {preview}"
+            return f"{tag} ({len(full)} chars) {preview}"
 
         if isinstance(event, TextChunkEvent):
             return f"[dim]{escape(event.text)}[/dim]"
