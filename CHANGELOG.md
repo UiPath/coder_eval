@@ -2,6 +2,49 @@
 
 <!-- version list -->
 
+## v0.11.0 (2026-08-19)
+
+### Bug Fixes
+
+- **docker**: Restore container access after the DAC cap drop, shield the task dir
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+- **reference**: Address code review and CodeQL findings
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+- **reference**: Address PR review — scoring correctness, fail-closed anti-cheat
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+- **reference**: Clear remaining CodeQL alerts
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+### Documentation
+
+- **reference**: Record why READ_ONLY_MODE exists, and what is left to wire
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+### Features
+
+- **reference**: Directory-only references + anti-cheat permission window
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+### Testing
+
+- **early-stop**: CE036 enforces the live_verdict determinism + monotonicity contract
+  ([#126](https://github.com/UiPath/coder_eval/pull/126),
+  [`d854004`](https://github.com/UiPath/coder_eval/commit/d854004a5ec4fce0dab16d17d809a93c448fa022))
+
+- **reference**: Skip host-side chmod assertions on Windows
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+
 ## v0.10.2 (2026-08-18)
 
 ### Continuous Integration

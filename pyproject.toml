@@ -1,6 +1,6 @@
 [project]
 name = "coder-eval"
-version = "0.10.2"
+version = "0.11.0"
 description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
