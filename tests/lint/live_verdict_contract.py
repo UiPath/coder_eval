@@ -198,11 +198,13 @@ CASES: dict[str, tuple[ContractCase, ...]] = {
         ),
         ContractCase(
             label="positive row: foreign skill path read FIRST via shell, expected read later still passes",
-            # Pinned from the live counterfactual probe
-            # tasks/early_stop_contract_any_engagement.yaml: a first-engagement
+            # Pinned from a live counterfactual run (PR #126): a first-engagement
             # regression (fail on any foreign engagement while the target is
-            # unengaged) is non-monotonic exactly on this walk — it fail-stopped
-            # the live run at tool call 1 and flipped SUCCESS to FAILURE.
+            # unengaged) is non-monotonic exactly on this walk — live, it fail-stopped
+            # at tool call 1, truncating the run before the expected engagement, and
+            # flipped SUCCESS to FAILURE. This case IS the enforced form of that
+            # evidence: the probe task it came from is deliberately not checked in,
+            # since the mutant half is not reproducible from the repo.
             criterion=_skill_crit(skill_name="beta", expected_skill="beta"),
             commands=(
                 _bash("ls skills/alpha/", sequence_number=0),
@@ -264,11 +266,12 @@ CASES: dict[str, tuple[ContractCase, ...]] = {
         ),
         ContractCase(
             label="bounded window then overrun: undecided through [min, max], fail past max",
-            # Pinned from the live counterfactual probe
-            # tasks/early_stop_contract_bounded_pass.yaml: a two-sided mutant
-            # that latches a premature pass at min_count is non-monotonic
-            # exactly on this walk (pass at count 1, fail at count 3) — live it
-            # froze a still-compliant count and flipped FAILURE to SUCCESS.
+            # Pinned from a live counterfactual run (PR #126): a two-sided mutant
+            # that latches a premature pass at min_count is non-monotonic exactly on
+            # this walk (pass at count 1, fail at count 3) — live, it froze a
+            # still-compliant count and flipped FAILURE to SUCCESS. As above, this
+            # case is the enforced form of that evidence; the probe task is not
+            # checked in.
             criterion=_cmd_crit(pattern="echo ping", min_count=1, max_count=2),
             commands=(
                 _bash("echo ping", sequence_number=0),
