@@ -27,15 +27,23 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from coder_eval.models import ACTIVATION_FLOOR_METRIC, EXECUTION_FLOOR_METRIC
+from coder_eval.models import (
+    ACTIVATION_FLOOR_METRIC,
+    EXECUTION_FLOOR_METRIC,
+    ActivationGateVerdict,
+    ExecutionGateVerdict,
+    GateVerdictBase,
+)
 from coder_eval.optimize.activation import (
     activation_gate,
+    confirm_gate,
     gate_seed_stability,
     holm_promote,
     min_discordant_rows,
     noise_floor_mde,
 )
 from coder_eval.optimize.execution import (
+    confirm_gate_execution,
     execution_gate,
     holm_promote_execution,
     measure_execution_noise_floor,
@@ -49,6 +57,7 @@ from coder_eval.optimize.fronts import (
     instance_best_front,
     pareto_front,
 )
+from coder_eval.optimize.gate import confirm_one_candidate
 from coder_eval.optimize.load import (
     load_arm_rows,
     reconcile_arms,
@@ -68,6 +77,8 @@ from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
 from coder_eval.orchestration.task_loader import expand_dataset, load_task
 from coder_eval.reports_optimize import (
     render_attribution_unavailable,
+    render_confirm_family,
+    render_confirm_markdown,
     render_corpus_check,
     render_cost_quality,
     render_discreteness,
@@ -616,6 +627,22 @@ def _resolve_family(candidate_variants: Sequence[str], incumbent_variant: str) -
     return family
 
 
+def _family_shrink_note(decided: Sequence[GateVerdictBase], predeclared: int) -> list[str]:
+    """The one fail-OPEN case in this area, said out loud on every surface that can produce it.
+
+    A verdict with no p-value is not a family member — there is nothing for a correction to correct —
+    so an arm that refused drops out and ``m`` falls. Right for that arm, wrong for its siblings: they
+    were predeclared against the larger family and are decided against the smaller, LOOSER threshold.
+    Only a caller holding the predeclared count can see it, and all four Stage B / Stage C surfaces
+    hold one — including the two that also PRINT that count, where a silent shrink makes the printed
+    number a false claim about the threshold the winner cleared.
+    """
+    in_family = sum(1 for verdict in decided if verdict.p_value is not None)
+    if in_family >= predeclared:
+        return []
+    return [render_family_shrunk(predeclared=predeclared, corrected=in_family)]
+
+
 def activation_gate_report(
     *,
     gate_dirs: Sequence[Path],
@@ -667,7 +694,8 @@ def activation_gate_report(
     # ONE call, over the whole family. `decide_family` inside it is what runs `holm_rejections` once
     # across the p-value vector, and a refusal that left `promoted=None` is forced to False here — so
     # the block a reader acts on is never an undecided verdict.
-    return "\n\n".join(render_markdown(verdict) for verdict in holm_promote(verdicts))
+    decided = holm_promote(verdicts)
+    return "\n\n".join([*_family_shrink_note(decided, len(family)), *map(render_markdown, decided)])
 
 
 def seed_stability_report(
@@ -743,6 +771,27 @@ def _require_gates(gates: Mapping[str, Path]) -> None:
         raise TypeError("gates values must be pathlib.Path run directories: " + "; ".join(wrong))
 
 
+def _require_gate_dirs_exist(gates: Mapping[str, Path]) -> None:
+    """Every candidate's gate run dir exists, named per candidate when one does not.
+
+    RAISES rather than letting the gate refuse per arm, which it would do perfectly well — its
+    refusal names the missing ``experiment.json``. The trade is deliberate and matches
+    :func:`headroom_report` and :func:`leak_report`: a run dir that does not exist is a wiring fault
+    in the round's own plumbing rather than a measurement. The cost is that one bad dir aborts the
+    whole block instead of reporting the other candidates' already-paid-for verdicts — which is the
+    right way round on this track, because a partial family is exactly what shrinks ``m`` and loosens
+    the threshold for the arms that did run.
+    """
+    missing = sorted(f"{candidate} -> {run_dir}" for candidate, run_dir in gates.items() if not run_dir.is_dir())
+    if missing:
+        raise ValueError(
+            "no gate run directory for "
+            + "; ".join(missing)
+            + " — each candidate is gated in its own two-variant round, so each has its own"
+            + " --run-dir to name"
+        )
+
+
 def execution_gate_report(
     *,
     gates: Mapping[str, Path],
@@ -779,20 +828,7 @@ def execution_gate_report(
     if not gates:
         raise ValueError("gates is empty — an empty block reads as 'nothing promoted'")
     _reject_incumbent_as_candidate(list(gates), incumbent_variant, argument="gates")
-    missing = sorted(f"{candidate} -> {run_dir}" for candidate, run_dir in gates.items() if not run_dir.is_dir())
-    if missing:
-        # RAISES rather than letting the gate refuse per arm, which it would do perfectly well (its
-        # refusal names the missing `experiment.json`). The trade is deliberate: a run dir that does
-        # not exist is a wiring fault in the round's own plumbing, not a measurement, and the same
-        # choice `headroom_report` and `leak_report` make. The cost is that one bad dir aborts the
-        # whole block rather than reporting the other candidates' already-paid-for verdicts — which is
-        # the right way round here, because a partial family is exactly what shrinks `m` below.
-        raise ValueError(
-            "no gate run directory for "
-            + "; ".join(missing)
-            + " — each candidate is gated in its own two-variant round, so each has its own"
-            + " --run-dir to name"
-        )
+    _require_gate_dirs_exist(gates)
     verdicts = [
         execution_gate(
             run_dir=gates[candidate],
@@ -814,11 +850,186 @@ def execution_gate_report(
     # ONE call over the whole family, as on the other track — and a refusal from any single arm keeps
     # `promoted=None` until this forces False, so it reaches the block either way.
     decided = holm_promote_execution(verdicts)
-    # A refused arm carries no p-value and is therefore NOT a family member, so `m` falls and the
-    # surviving candidates are corrected against a looser threshold than the round predeclared. Every
-    # other guard here fails closed; this one fails open, and only a caller holding the predeclared
-    # count can see it. Measured: two keys pointing at one run dir promoted the good arm "across a
-    # family of 1".
-    in_family = sum(1 for verdict in decided if verdict.p_value is not None)
-    shrunk = [render_family_shrunk(predeclared=len(gates), corrected=in_family)] if in_family < len(gates) else []
-    return "\n\n".join([*shrunk, *(render_execution_markdown(verdict) for verdict in decided)])
+    return "\n\n".join([*_family_shrink_note(decided, len(gates)), *map(render_execution_markdown, decided)])
+
+
+def _select_stage_b_winner[V: GateVerdictBase](decided: Sequence[V], candidate_variant: str) -> V:
+    """The Stage B verdict Stage C is about, refused only when there is nothing to confirm.
+
+    **It does NOT refuse a candidate that merely lost**, and that boundary is rank 1's rather than
+    this module's: :func:`~coder_eval.optimize.gate.confirm_train_note` says in writing that a reader
+    may legitimately want to confirm a candidate that separated and was then vetoed by a guardrail,
+    and the confirm gate NOTES such a train verdict rather than rejecting it. A rank-4 composite whose
+    contract is that it decides nothing must not decide that the other way.
+
+    What it does refuse is a verdict with **no statistic at all** — a gate that could not measure.
+    That is not a candidate that lost, it is one nothing was learned about, and the causes want
+    different fixes: a wrong ``criterion_index``, a wrong ``suite_id`` or run dir, or a refusal the
+    gate already worded. Reporting any of them as "did not promote" sends a reader to rewrite a
+    candidate whose gate never ran.
+    """
+    by_variant = {verdict.candidate_variant: verdict for verdict in decided}
+    if candidate_variant not in by_variant:
+        raise ValueError(
+            f"{candidate_variant!r} is not in the Stage B family {sorted(by_variant)} — Stage C "
+            + "recomputes that family to recover the corrected verdict, so the candidate has to be "
+            + "one of its members"
+        )
+    winner = by_variant[candidate_variant]
+    if winner.p_value is None:
+        raise ValueError(
+            f"the Stage B gate for {candidate_variant!r} produced no statistic, so there is nothing "
+            + "to confirm — this is NOT a candidate that lost. "
+            + (
+                f"The gate refused: {winner.gate_refusal}"
+                if winner.gate_refusal
+                else (
+                    "Check `criterion_index`, `suite_id` and the gate run dirs: a gate that read no"
+                    + " comparable rows returns no p-value."
+                )
+            )
+        )
+    return winner
+
+
+def _track_verdict[V: GateVerdictBase](verdict: GateVerdictBase, expected: type[V], track_name: str) -> V:
+    """Narrow ``ConfirmVerdict.test_verdict`` to the track that produced it.
+
+    The field is the union of both tracks' verdicts, because ``ConfirmVerdict`` is deliberately ONE
+    model over both. A confirm gate on one track cannot produce the other's verdict, so this is a
+    narrowing rather than a branch — but it raises rather than casting, because a silent
+    ``cast`` here would render the wrong track's block for a caller who mixed the two up.
+    """
+    if not isinstance(verdict, expected):
+        raise TypeError(
+            f"the {track_name} confirm gate returned a {type(verdict).__name__} test verdict — the two "
+            + "tracks' verdicts are not interchangeable and their blocks are not either"
+        )
+    return verdict
+
+
+def confirm_report_activation(
+    *,
+    gate_dirs: Sequence[Path],
+    confirm_dirs: Sequence[Path],
+    incumbent_variant: str,
+    candidate_variants: Sequence[str],
+    candidate_variant: str,
+    suite_id: str,
+    criterion_index: int,
+    sibling_indices: Sequence[int] | None = None,
+) -> str:
+    """Stage C on the activation track: did the Stage B effect REPRODUCE on the held-out split?
+
+    **It recomputes Stage B rather than being handed a verdict**, and that is a deliberate trade.
+    ``confirm_gate`` needs the HOLM-CORRECTED verdict, because ``promoted`` is what Stage C
+    classifies against — and ``measurements.json`` is ``extra="forbid"`` with nowhere to put one. The
+    bootstrap is seeded, so gating the same family over the same trees is bit-identical; the cost is
+    CPU over rows already on disk. It also removes the failure the skill's own prose warned about,
+    where the fence needed a `promoted_verdict` name from an earlier snippet and raised `NameError`
+    in a fresh interpreter after the round had been paid for.
+
+    ``gate_dirs`` + ``candidate_variants`` are the Stage B family; ``candidate_variant`` is the one
+    being confirmed. ``confirm_dirs`` is the confirm run, and it feeds both arms — one two-variant
+    round, as the fence does.
+    """
+    # BEFORE the recomputation, which costs one full bootstrap per family member: a shortlist here
+    # would otherwise die on an unhashable dict key after the whole family had been re-gated. Rank 1
+    # owns the sentence, and `SKILL.md` advertises this guard by name.
+    confirm_one_candidate(candidate_variant)
+    _require_run_dirs(gate_dirs)
+    _require_run_dirs(confirm_dirs)
+    family = _resolve_family(candidate_variants, incumbent_variant)
+    # Recomputed, not persisted — see the docstring. Seeded, so this is the same verdict Stage B
+    # rendered, and the family size goes into the block because nothing on disk records it.
+    decided = holm_promote(
+        [
+            activation_gate(
+                incumbent_run_dirs=gate_dirs,
+                candidate_run_dirs=gate_dirs,
+                incumbent_variant=incumbent_variant,
+                candidate_variant=candidate,
+                suite_id=suite_id,
+                criterion_index=criterion_index,
+                sibling_indices=sibling_indices,
+            )
+            for candidate in family
+        ]
+    )
+    confirm = confirm_gate(
+        train_verdict=_select_stage_b_winner(decided, candidate_variant),
+        incumbent_run_dirs=confirm_dirs,
+        candidate_run_dirs=confirm_dirs,
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        criterion_index=criterion_index,
+        sibling_indices=sibling_indices,
+    )
+    return "\n\n".join(
+        [
+            render_confirm_family(family_size=len(family)),
+            render_confirm_markdown(confirm),
+            render_markdown(_track_verdict(confirm.test_verdict, ActivationGateVerdict, "activation")),
+        ]
+    )
+
+
+def confirm_report_execution(
+    *,
+    gates: Mapping[str, Path],
+    confirm_run_dir: Path,
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    engagement_criterion_index: int | None = 0,
+    primary_criterion_index: int | None = None,
+) -> str:
+    """Stage C on the execution track — the same recomputation, on this track's family shape.
+
+    ``gates`` is Stage B's mapping, candidate id to that candidate's gate run dir, because this
+    track's Holm family lives across run dirs. See :func:`confirm_report_activation` for why the
+    family is recomputed rather than persisted.
+    """
+    confirm_one_candidate(candidate_variant)
+    _require_gates(gates)
+    if not gates:
+        raise ValueError("gates is empty — Stage C recomputes the Stage B family, so there has to be one")
+    _reject_incumbent_as_candidate(list(gates), incumbent_variant, argument="gates")
+    _require_gate_dirs_exist(gates)
+    if not isinstance(confirm_run_dir, Path):
+        raise TypeError(
+            f"confirm_run_dir must be a pathlib.Path, not {type(confirm_run_dir).__name__} — it is "
+            + "joined with `/` to reach the confirm run's rows"
+        )
+    decided = holm_promote_execution(
+        [
+            execution_gate(
+                run_dir=gates[candidate],
+                incumbent_variant=incumbent_variant,
+                candidate_variant=candidate,
+                suite_id=suite_id,
+                engagement_criterion_index=engagement_criterion_index,
+                primary_criterion_index=primary_criterion_index,
+            )
+            for candidate in sorted(gates)
+        ]
+    )
+    shrunk = _family_shrink_note(decided, len(gates))
+    confirm = confirm_gate_execution(
+        train_verdict=_select_stage_b_winner(decided, candidate_variant),
+        confirm_run_dir=confirm_run_dir,
+        incumbent_variant=incumbent_variant,
+        candidate_variant=candidate_variant,
+        suite_id=suite_id,
+        engagement_criterion_index=engagement_criterion_index,
+        primary_criterion_index=primary_criterion_index,
+    )
+    return "\n\n".join(
+        [
+            *shrunk,
+            render_confirm_family(family_size=len(gates)),
+            render_confirm_markdown(confirm),
+            render_execution_markdown(_track_verdict(confirm.test_verdict, ExecutionGateVerdict, "execution")),
+        ]
+    )

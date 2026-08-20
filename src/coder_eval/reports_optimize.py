@@ -1138,3 +1138,15 @@ def render_family_shrunk(*, predeclared: int, corrected: int) -> str:
         + "than the round predeclared. Read their refusals above, fix them, and gate the whole family "
         + "again before acting on any promotion here."
     )
+
+
+def render_confirm_family(*, family_size: int) -> str:
+    """The Stage B family size Stage C recomputed against, stated so a mismatch is visible.
+
+    ``promoted`` is a property of the FAMILY: a shorter family is a smaller ``m`` and therefore a
+    looser threshold, so the verdict Stage C classifies against depends on how many candidates Stage
+    B gated. Nothing in a run tree records that number — which means the composite cannot verify the
+    family it was handed is the one that ran, and a reader comparing this line against their own
+    round is the only check there is.
+    """
+    return f"_Stage B was recomputed over a family of {family_size} to recover the corrected verdict._"

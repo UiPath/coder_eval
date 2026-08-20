@@ -10,15 +10,19 @@ A `NoiseFloor` is deliberately never compared by `model_dump()`: `computed_at` i
 """
 
 import inspect
+from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 import yaml
 
+import coder_eval.optimize.api
 from coder_eval.models import (
     ACTIVATION_FLOOR_METRIC,
     EXECUTION_FLOOR_METRIC,
+    ActivationGateVerdict,
+    ExecutionGateVerdict,
     NoiseFloor,
     RegressionRow,
     RoundScores,
@@ -26,6 +30,7 @@ from coder_eval.models import (
 from coder_eval.optimize.activation import (
     SeedStability,
     activation_gate,
+    confirm_gate,
     gate_seed_stability,
     holm_promote,
     min_discordant_rows,
@@ -34,6 +39,8 @@ from coder_eval.optimize.activation import (
 from coder_eval.optimize.api import (
     activation_floor_report,
     activation_gate_report,
+    confirm_report_activation,
+    confirm_report_execution,
     corpus_report,
     cost_quality_report,
     discreteness_report,
@@ -47,6 +54,7 @@ from coder_eval.optimize.api import (
     seed_stability_report,
 )
 from coder_eval.optimize.execution import (
+    confirm_gate_execution,
     execution_gate,
     holm_promote_execution,
     measure_execution_noise_floor,
@@ -71,6 +79,7 @@ from tests.optimize_fixtures import (
     WINNER,
     arm_row_scores_for,
     assert_matches_render_pin,
+    confirm_dir,
     cost_quality_arm,
     costed_result,
     eval_result,
@@ -78,7 +87,9 @@ from tests.optimize_fixtures import (
     grader_result,
     headline_line,
     scored_result,
+    set_split,
     shared_dirs,
+    shifted_replicate_arms,
     split_labelled_arms,
     tiny_suite,
     weighted_arm,
@@ -299,6 +310,31 @@ def _seed_stability_call(run_dirs) -> str:
     )
 
 
+def _confirm_gate_dirs_call(run_dirs) -> str:
+    return confirm_report_activation(
+        gate_dirs=run_dirs,
+        confirm_dirs=[Path(_MISSING)],
+        incumbent_variant="incumbent",
+        candidate_variants=["cand-a"],
+        candidate_variant="cand-a",
+        suite_id=SUITE,
+        criterion_index=0,
+    )
+
+
+def _confirm_confirm_dirs_call(run_dirs) -> str:
+    # The SECOND run-dir argument, which no other composite has — so it needs its own entry.
+    return confirm_report_activation(
+        gate_dirs=[Path(_MISSING)],
+        confirm_dirs=run_dirs,
+        incumbent_variant="incumbent",
+        candidate_variants=["cand-a"],
+        candidate_variant="cand-a",
+        suite_id=SUITE,
+        criterion_index=0,
+    )
+
+
 def _corpus_call(run_dirs) -> str:
     return corpus_report(
         run_dirs=run_dirs,
@@ -328,6 +364,8 @@ _ENTRY_POINTS = [
     pytest.param(_search_call, id="search"),
     pytest.param(_activation_gate_call, id="activation-gate"),
     pytest.param(_seed_stability_call, id="seed-stability"),
+    pytest.param(_confirm_gate_dirs_call, id="confirm-gate-dirs"),
+    pytest.param(_confirm_confirm_dirs_call, id="confirm-confirm-dirs"),
 ]
 
 
@@ -1351,9 +1389,12 @@ class TestActivationGateReport:
             criterion_index=0,
         )
 
-        # Measured: a one-row suite produces no p, so the verdict comes back NOT PROMOTED outright.
-        # The disjunction this replaced could not fail.
-        assert headline_line(block) == "NOT PROMOTED"
+        # Measured: a one-row suite produces no p, so the verdict comes back NOT PROMOTED outright —
+        # and, having no p, it is also outside the family, so the shrink note leads the block. Both
+        # are true and both are the point; the verdict's own headline is read past the note.
+        assert "The Holm correction saw 0 of 1 predeclared candidate(s)" in block
+        verdict = "### Activation gate" + block.split("### Activation gate", 1)[1]
+        assert headline_line(verdict) == "NOT PROMOTED"
         assert "UNDECIDED" not in block, "the composite always corrects, so this rung is unreachable"
 
     def test_a_string_family_is_a_caller_error(self) -> None:
@@ -1725,20 +1766,396 @@ class TestGatesAreRejectedAtTheBoundary:
     and there is no one-shot iterable — so this covers what remains: the container and the values.
     """
 
-    def test_a_non_mapping_names_the_shape_it_wanted(self) -> None:
-        with pytest.raises(TypeError, match="gates must be a mapping of candidate id"):
-            execution_gate_report(
-                gates=["cand-a"],  # type: ignore[arg-type]
+    ENTRY_POINTS: ClassVar[list] = [
+        pytest.param(
+            lambda gates: execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE),
+            id="execution-gate",
+        ),
+        pytest.param(
+            lambda gates: confirm_report_execution(
+                gates=gates,
+                confirm_run_dir=Path(_MISSING),
                 incumbent_variant="incumbent",
+                candidate_variant="cand-a",
                 suite_id=EXEC_SUITE,
-            )
+            ),
+            id="confirm-execution",
+        ),
+    ]
 
-    def test_a_string_value_is_rejected_before_any_read(self) -> None:
+    @pytest.mark.parametrize("call", ENTRY_POINTS)
+    def test_a_non_mapping_names_the_shape_it_wanted(self, call) -> None:
+        with pytest.raises(TypeError, match="gates must be a mapping of candidate id"):
+            call(["cand-a"])
+
+    @pytest.mark.parametrize("call", ENTRY_POINTS)
+    def test_a_string_value_is_rejected_before_any_read(self, call) -> None:
         # The likeliest mistake from a hand-typed fence, and it used to surface as
         # `AttributeError: 'str' object has no attribute 'is_dir'`.
         with pytest.raises(TypeError, match="gates values must be pathlib"):
-            execution_gate_report(
-                gates={"cand-a": "runs/round1-gate-a"},  # type: ignore[dict-item]
+            call({"cand-a": "runs/round1-gate-a"})
+
+
+class TestConfirmReportActivation:
+    """Stage C, and the recomputation the whole phase rests on."""
+
+    def _gate_arms(self, tmp_path: Path, candidates: Sequence[str]) -> list[Path]:
+        incumbent = {f"r{i}": [("yes", "no")] for i in range(6)}
+        winner = {f"r{i}": [("yes", "yes")] for i in range(6)}
+        run_dirs: list[Path] = []
+        for i in range(3):
+            run_dir = tmp_path / f"gate-{i}"
+            for row_id, labels in incumbent.items():
+                write_row(run_dir, "incumbent", row_id, eval_result(row_id, labels))
+            for candidate in candidates:
+                for row_id, labels in winner.items():
+                    write_row(run_dir, candidate, row_id, eval_result(row_id, labels))
+            run_dirs.append(run_dir)
+        return run_dirs
+
+    def _confirm_arms(self, tmp_path: Path, candidate: str) -> list[Path]:
+        incumbent = {f"r{i}": [("yes", "no")] for i in range(6)}
+        winner = {f"r{i}": [("yes", "yes")] for i in range(6)}
+        run_dirs: list[Path] = []
+        for i in range(3):
+            run_dir = tmp_path / f"confirm-{i}"
+            for row_id, labels in incumbent.items():
+                write_row(run_dir, "incumbent", row_id, eval_result(row_id, labels))
+            for row_id, labels in winner.items():
+                write_row(run_dir, candidate, row_id, eval_result(row_id, labels))
+            set_split(run_dir, "test")
+            run_dirs.append(run_dir)
+        return run_dirs
+
+    def _call(self, tmp_path: Path, gate_dirs, confirm_dirs, candidates, candidate="cand-a") -> str:
+        return confirm_report_activation(
+            gate_dirs=gate_dirs,
+            confirm_dirs=confirm_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=candidates,
+            candidate_variant=candidate,
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+    def test_the_recomputed_train_verdict_is_bit_identical_to_a_direct_gate_plus_holm(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The phase's entire premise, pinned through the COMPOSITE rather than beside it.
+
+        Calling the library twice and comparing only shows the library is deterministic. What has to
+        hold is that the verdict the composite hands `confirm_gate` is the SAME one Stage B rendered
+        — so the spy captures `train_verdict` and compares its `model_dump()` against a direct gate
+        + Holm + select. A future non-seeded estimator would make Stage C classify against a verdict
+        no reader ever saw, and this is what makes that loud.
+        """
+        gate_dirs = self._gate_arms(tmp_path, ["cand-a", "cand-b"])
+        confirm_dirs = self._confirm_arms(tmp_path, "cand-a")
+        captured: list[ActivationGateVerdict] = []
+        real = confirm_gate
+
+        def spy(**kwargs):
+            captured.append(kwargs["train_verdict"])
+            return real(**kwargs)
+
+        monkeypatch.setattr("coder_eval.optimize.api.confirm_gate", spy)
+        self._call(tmp_path, gate_dirs, confirm_dirs, ["cand-a", "cand-b"])
+
+        direct = holm_promote(
+            [
+                activation_gate(
+                    incumbent_run_dirs=gate_dirs,
+                    candidate_run_dirs=gate_dirs,
+                    incumbent_variant="incumbent",
+                    candidate_variant=slug,
+                    suite_id=SUITE,
+                    criterion_index=0,
+                )
+                for slug in ("cand-a", "cand-b")
+            ]
+        )
+        expected = next(v for v in direct if v.candidate_variant == "cand-a")
+        assert len(captured) == 1
+        assert captured[0].model_dump() == expected.model_dump()
+        # And it is the CORRECTED verdict, not a bare gate: `holm_alpha` is only set by the wrapper.
+        assert expected.holm_alpha is not None
+
+    def test_the_block_states_the_family_size_it_recomputed_against(self, tmp_path: Path) -> None:
+        # `promoted` is a property of the FAMILY, and nothing in the run tree records how many
+        # candidates Stage B gated — so a reader comparing this against their own round is the only
+        # check there is, and only if the number is in the block.
+        gate_dirs = self._gate_arms(tmp_path, ["cand-a", "cand-b"])
+        confirm_dirs = self._confirm_arms(tmp_path, "cand-a")
+
+        block = self._call(tmp_path, gate_dirs, confirm_dirs, ["cand-a", "cand-b"])
+
+        assert "recomputed over a family of 2" in block
+
+    def test_both_the_confirm_block_and_the_test_verdict_are_rendered(self, tmp_path: Path) -> None:
+        gate_dirs = self._gate_arms(tmp_path, ["cand-a"])
+        confirm_dirs = self._confirm_arms(tmp_path, "cand-a")
+
+        block = self._call(tmp_path, gate_dirs, confirm_dirs, ["cand-a"])
+
+        assert "### Stage C confirm" in block
+        assert "### Activation gate" in block, "both prints the fence made"
+
+    def test_a_candidate_absent_from_the_family_names_both(self, tmp_path: Path) -> None:
+        gate_dirs = self._gate_arms(tmp_path, ["cand-a"])
+        confirm_dirs = self._confirm_arms(tmp_path, "cand-a")
+
+        with pytest.raises(ValueError, match="is not in the Stage B family") as excinfo:
+            self._call(tmp_path, gate_dirs, confirm_dirs, ["cand-a"], candidate="cand-z")
+
+        assert "cand-z" in str(excinfo.value)
+        assert "cand-a" in str(excinfo.value)
+
+    def test_a_gate_that_produced_no_statistic_raises_and_is_not_called_a_loss(self, tmp_path: Path) -> None:
+        """A gate that could not MEASURE is not a candidate that lost, and the message must not say so.
+
+        A wrong `criterion_index` reads no comparable rows, so there is no p-value — nothing was
+        learned about the candidate. Reporting that as "did not promote" sends a reader to rewrite a
+        candidate whose gate never ran.
+        """
+        gate_dirs = self._gate_arms(tmp_path, ["cand-a"])
+        confirm_dirs = self._confirm_arms(tmp_path, "cand-a")
+
+        with pytest.raises(ValueError, match="produced no statistic") as excinfo:
+            confirm_report_activation(
+                gate_dirs=gate_dirs,
+                confirm_dirs=confirm_dirs,
                 incumbent_variant="incumbent",
+                candidate_variants=["cand-a"],
+                candidate_variant="cand-a",
+                suite_id=SUITE,
+                criterion_index=9,
+            )
+
+        assert "NOT a candidate that lost" in str(excinfo.value)
+
+    def test_a_shortlist_is_refused_before_the_family_is_re_gated(self, tmp_path: Path) -> None:
+        # Rank 1 owns the sentence, and the guard runs BEFORE the recomputation — which costs one
+        # full bootstrap per family member, so a shortlist that died on a dict lookup afterwards
+        # would have burned all of it.
+        with pytest.raises(TypeError, match="must be ONE variant id"):
+            confirm_report_activation(
+                gate_dirs=[tmp_path],
+                confirm_dirs=[tmp_path],
+                incumbent_variant="incumbent",
+                candidate_variants=["cand-a"],
+                candidate_variant=["cand-a"],  # type: ignore[arg-type]
+                suite_id=SUITE,
+                criterion_index=0,
+            )
+
+    def test_a_family_of_one_is_correct_at_stage_c_and_not_warned_about(self, tmp_path: Path) -> None:
+        # Holm at m = 1 is the uncorrected alpha by construction, which is the right answer for a
+        # round that gated one candidate.
+        gate_dirs = self._gate_arms(tmp_path, ["cand-a"])
+        confirm_dirs = self._confirm_arms(tmp_path, "cand-a")
+
+        block = self._call(tmp_path, gate_dirs, confirm_dirs, ["cand-a"])
+
+        assert "recomputed over a family of 1" in block
+        # And nothing warns about it: Holm at m = 1 IS the uncorrected alpha, which is the right
+        # answer for a round that gated one candidate rather than a case to caveat.
+        assert "family of 1 at alpha=0.05" in block
+
+
+class TestConfirmReportExecution:
+    def _gates(self, tmp_path: Path, candidates: Sequence[str]) -> dict[str, Path]:
+        return {
+            candidate: exec_run_dir(
+                tmp_path / f"gate-{candidate}",
+                incumbent=WINNER["incumbent"],
+                candidate=WINNER["candidate"],
+                candidate_variant=candidate,
+            )
+            for candidate in candidates
+        }
+
+    def _confirm(self, tmp_path: Path, candidate: str, *, split: str | None = "test", **arms) -> Path:
+        return confirm_dir(
+            tmp_path / f"confirm-{candidate}",
+            split=split,
+            candidate_variant=candidate,
+            **(arms or {"incumbent": WINNER["incumbent"], "candidate": WINNER["candidate"]}),
+        )
+
+    def _call(self, gates: dict[str, Path], confirm: Path, candidate: str = "cand-a") -> str:
+        return confirm_report_execution(
+            gates=gates,
+            confirm_run_dir=confirm,
+            incumbent_variant="incumbent",
+            candidate_variant=candidate,
+            suite_id=EXEC_SUITE,
+        )
+
+    def test_the_recomputed_train_verdict_is_bit_identical(self, tmp_path: Path, monkeypatch) -> None:
+        # Spike A's claim on this track, and through the composite: what must hold is that the
+        # verdict handed to `confirm_gate_execution` is the one Stage B rendered.
+        gates = self._gates(tmp_path, ["cand-a", "cand-b"])
+        captured: list[ExecutionGateVerdict] = []
+        real = confirm_gate_execution
+
+        def spy(**kwargs):
+            captured.append(kwargs["train_verdict"])
+            return real(**kwargs)
+
+        monkeypatch.setattr("coder_eval.optimize.api.confirm_gate_execution", spy)
+        self._call(gates, self._confirm(tmp_path, "cand-a"))
+
+        direct = holm_promote_execution(
+            [
+                execution_gate(
+                    run_dir=gates[c],
+                    incumbent_variant="incumbent",
+                    candidate_variant=c,
+                    suite_id=EXEC_SUITE,
+                )
+                for c in sorted(gates)
+            ]
+        )
+        expected = next(v for v in direct if v.candidate_variant == "cand-a")
+        assert len(captured) == 1
+        assert captured[0].model_dump() == expected.model_dump()
+
+    def test_both_blocks_render_and_the_family_size_is_stated(self, tmp_path: Path) -> None:
+        gates = self._gates(tmp_path, ["cand-a", "cand-b"])
+
+        block = self._call(gates, self._confirm(tmp_path, "cand-a"))
+
+        assert "recomputed over a family of 2" in block
+        assert "### Stage C confirm" in block
+        assert "### Execution gate" in block
+
+    def test_a_confirm_run_with_no_recorded_split_refuses_in_the_block(self, tmp_path: Path) -> None:
+        # The confirm gate refuses outright if the run did not record `--split test`, and that
+        # refusal has to reach the reader rather than being swallowed.
+        gates = self._gates(tmp_path, ["cand-a"])
+
+        block = self._call(gates, self._confirm(tmp_path, "cand-a", split=None))
+
+        assert "split" in block.lower()
+        assert "### Stage C confirm" in block
+
+    def test_a_train_verdict_that_is_not_a_result_reaches_the_block_as_a_refusal(self, tmp_path: Path) -> None:
+        """Rank 1's decision, not this module's.
+
+        `confirm_train_refusal` and `confirm_train_note` exist precisely so a train verdict that did
+        not promote is NAMED rather than rejected — the second's docstring says a reader may
+        legitimately want to confirm a candidate that separated and was then vetoed by a guardrail.
+        A rank-4 composite that raised here would be overriding that.
+        """
+        flat = {f"r{i}": [0.5, 0.5] for i in range(4)}
+        gates = {
+            "cand-a": exec_run_dir(tmp_path / "gate-flat", incumbent=flat, candidate=flat, candidate_variant="cand-a")
+        }
+
+        block = self._call(gates, self._confirm(tmp_path, "cand-a"))
+
+        assert "the TRAIN verdict is not a result" in block
+        assert "### Stage C confirm" in block, "it is a rendered refusal, not a raise"
+
+    def test_an_empty_family_is_a_caller_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="gates is empty"):
+            confirm_report_execution(
+                gates={},
+                confirm_run_dir=tmp_path,
+                incumbent_variant="incumbent",
+                candidate_variant="cand-a",
                 suite_id=EXEC_SUITE,
             )
+
+    @pytest.mark.parametrize(
+        ("test_shift", "swap", "expected"),
+        [
+            pytest.param(0.30, False, "REPRODUCED", id="reproduced"),
+            pytest.param(0.15, False, "SHRANK", id="shrank"),
+            pytest.param(0.30, True, "REVERSED", id="reversed"),
+        ],
+    )
+    def test_each_classification_renders_through_the_composite(
+        self, tmp_path: Path, test_shift: float, swap: bool, expected: str
+    ) -> None:
+        """The three outcomes Stage C exists to tell apart, through the composite that prints them.
+
+        The renderer's own suite pins the REVERSED rung whole; what this adds is that the composite
+        reaches each rung at all. A confirm split with no priced MDE renders UNDECIDED for every
+        input, so `shifted_replicate_arms` (varied per-row spreads) is what makes the ladder
+        reachable — a uniform shift is refused for zero variance and pins nothing.
+
+        `engagement_criterion_index=None`: these rows' labels derive from their scores, so the
+        incumbent's low rows read `no` and the engagement check would block the train verdict. The
+        same reason `test_the_confirm_block_is_unchanged` gives.
+        """
+        gates = {"candidate": confirm_dir(tmp_path / "gate", split="train", **shifted_replicate_arms(0.30))}
+        confirm = confirm_dir(tmp_path / "confirm", split="test", **shifted_replicate_arms(test_shift, swap=swap))
+
+        block = confirm_report_execution(
+            gates=gates,
+            confirm_run_dir=confirm,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            engagement_criterion_index=None,
+        )
+
+        assert headline_line(block).startswith(expected)
+
+    def test_a_missing_gate_dir_names_the_candidate(self, tmp_path: Path) -> None:
+        # The Stage B twin's guard, and it matters MORE here: a gate dir that cannot be read makes
+        # the recomputation correct over a smaller `m` than the family-size line claims, and the
+        # error would otherwise read "did not promote at Stage B" for a wiring fault.
+        gates = self._gates(tmp_path, ["cand-a"])
+        gates["cand-b"] = tmp_path / "never-ran"
+
+        with pytest.raises(ValueError, match="no gate run directory for") as excinfo:
+            self._call(gates, self._confirm(tmp_path, "cand-a"))
+
+        assert "cand-b" in str(excinfo.value)
+
+    def test_a_refused_arm_shrinking_the_recomputed_family_is_named(self, tmp_path: Path) -> None:
+        # Worse here than at Stage B: the block STATES the family size it recomputed against, so a
+        # silently smaller `m` makes that line a false claim about the threshold the winner cleared.
+        run_dir = self._gates(tmp_path, ["cand-a"])["cand-a"]
+
+        block = confirm_report_execution(
+            gates={"cand-a": run_dir, "cand-b": run_dir},
+            confirm_run_dir=self._confirm(tmp_path, "cand-a"),
+            incumbent_variant="incumbent",
+            candidate_variant="cand-a",
+            suite_id=EXEC_SUITE,
+        )
+
+        assert "The Holm correction saw 1 of 2 predeclared candidate(s)" in block
+        assert "recomputed over a family of 2" in block, "and the two numbers are both visible"
+
+    def test_a_string_confirm_run_dir_is_rejected_at_the_boundary(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="confirm_run_dir must be a pathlib"):
+            confirm_report_execution(
+                gates=self._gates(tmp_path, ["cand-a"]),
+                confirm_run_dir="runs/round1-confirm",  # type: ignore[arg-type]
+                incumbent_variant="incumbent",
+                candidate_variant="cand-a",
+                suite_id=EXEC_SUITE,
+            )
+
+    def test_stage_c_is_two_entry_points_and_neither_takes_a_track_selector(self) -> None:
+        """The real invariant, not a grep for a spelling.
+
+        A grep is decoration here: the module legitimately carries `_track_verdict(…, track_name)`,
+        so `'track="' not in source` is satisfied by a rename rather than by the design holding. What
+        must hold is that Stage C is TWO public entry points, each mirroring its own gate's parameter
+        list — a single function would carry mutually exclusive arguments and need a runtime assert
+        for a combination the split makes unrepresentable.
+        """
+        for name, forbidden in (
+            (confirm_report_activation, {"gates", "confirm_run_dir", "engagement_criterion_index"}),
+            (confirm_report_execution, {"gate_dirs", "confirm_dirs", "candidate_variants"}),
+        ):
+            params = set(inspect.signature(name).parameters)
+            assert not params & {"track", "track_name"}, f"{name.__name__} takes a track selector"
+            assert not params & forbidden, f"{name.__name__} carries the other track's parameters"
+        # And both are public names on the module, so neither is reachable only through the other.
+        assert {"confirm_report_activation", "confirm_report_execution"} <= set(vars(coder_eval.optimize.api))

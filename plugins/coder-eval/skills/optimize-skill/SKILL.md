@@ -1723,44 +1723,34 @@ template, which is why the block measures it per verdict instead of assuming it.
 ### Stage C — the confirm gate
 
 **Stage C has a computed verdict; do not eyeball two intervals.** Run the confirm experiment
-(`round<N>-confirm.yaml`, exactly two variants, `--split test --repeats 3`), then hand the Stage B
-verdict and the confirm run to the confirm gate for the matching track. It classifies the train→test
+(`round<N>-confirm.yaml`, exactly two variants, `--split test --repeats 3`), then hand the **Stage B
+family** and the confirm run to the composite for the matching track. It classifies the train→test
 delta as **REPRODUCED**, **SHRANK**, **REVERSED** or **UNDECIDED**, and it refuses outright if the
 confirm run did not record `--split test`.
+
+**Hand it the family, not a verdict, and it recomputes.** Stage C classifies against the
+*Holm-corrected* Stage B verdict, and `measurements.json` is `extra="forbid"` with nowhere to put
+one — so the composite re-gates the family and corrects again. The bootstrap is seeded, so that is
+bit-identical to the verdict Stage B printed, and it costs CPU over rows already on disk. It also
+means the block runs in a fresh interpreter: there is no `promoted_verdict` name to have lost.
+**The block states the family size it used**, because nothing on disk records how many candidates
+Stage B gated — and a shorter family is a different `m` and therefore a different verdict.
 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.execution import confirm_gate_execution
-from coder_eval.reports_optimize import render_confirm_markdown, render_execution_markdown
+from coder_eval.optimize.api import confirm_report_execution
 
-# EXECUTION TRACK. `promoted_verdict` is the ONE Stage B winner, post-`holm_promote_execution`.
-confirm = confirm_gate_execution(
-    train_verdict=promoted_verdict,
-    confirm_run_dir=Path("<runs>/round1-confirm"),
-    incumbent_variant="incumbent",
-    candidate_variant=promoted_verdict.candidate_variant,
-    suite_id="<the suite's task_id>",
-    # The primary you predeclared, if any — a reading on both blocks, never a decision.
-    primary_criterion_index=None,
-)
-print(render_confirm_markdown(confirm))
-print(render_execution_markdown(confirm.test_verdict))
-
-# ACTIVATION TRACK — the twin, taking that track's run-dir lists instead:
-#
-# from coder_eval.optimize.activation import confirm_gate
-# from coder_eval.reports_optimize import render_markdown
-#
-# confirm = confirm_gate(
-#     train_verdict=promoted_verdict,
-#     incumbent_run_dirs=confirm_dirs, candidate_run_dirs=confirm_dirs,
-#     incumbent_variant="incumbent", candidate_variant=promoted_verdict.candidate_variant,
-#     suite_id="<the suite's task_id>", criterion_index=0,
-# )
-# print(render_confirm_markdown(confirm))
-# print(render_markdown(confirm.test_verdict))
+print(confirm_report_execution(
+    gates={"cand-a-name-the-action": Path("<runs>/round1-gate-a")},   # the Stage B family
+    confirm_run_dir=Path("<runs>/round1-confirm"), candidate_variant="cand-a-name-the-action",
+    incumbent_variant="incumbent", suite_id="<the suite's task_id>",
+))
 ```
+
+**On the activation track, `confirm_report_activation` is the twin**, taking that track's run-dir
+lists instead of a mapping — `gate_dirs` plus `candidate_variants` for the Stage B family,
+`confirm_dirs` for the confirm run, and `criterion_index`.
 
 **ONE candidate, and the guard is not a formality.** Confirming a shortlist spends the held-out split
 on SELECTION, which is exactly what the "never re-rolled" rule exists to prevent — passing a list
