@@ -27,10 +27,23 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from coder_eval.models import ACTIVATION_FLOOR_METRIC, EXECUTION_FLOOR_METRIC
-from coder_eval.optimize.activation import noise_floor_mde
+from coder_eval.optimize.activation import min_discordant_rows, noise_floor_mde
 from coder_eval.optimize.execution import measure_execution_noise_floor, resolve_arm_model
+from coder_eval.optimize.fronts import (
+    arm_row_scores,
+    cost_quality_front,
+    cost_quality_points,
+    instance_best_front,
+    pareto_front,
+)
 from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
-from coder_eval.reports_optimize import render_noise_floor
+from coder_eval.reports_optimize import (
+    render_cost_quality,
+    render_discreteness,
+    render_noise_floor,
+    render_row_matrix,
+)
+from coder_eval.reports_stats import DEFAULT_ALPHA
 
 
 def _require_run_dirs(run_dirs: Sequence[Path]) -> None:
@@ -140,3 +153,76 @@ def execution_floor_report(*, run_dirs: Sequence[Path], variant_id: str, suite_i
         n_rows=None if floor is None else floor.n_rows,
         n_replicates=None if floor is None else floor.n_replicates,
     )
+
+
+def discreteness_report(*, rows: int, survivors: int) -> str:
+    """How many rows the arms must disagree on before any candidate can promote — activation track.
+
+    The second thing a suite fails on, and the cheaper of the two to read: pure arithmetic over the
+    row count and the family size, so it costs nothing and can stop a whole round.
+
+    ``survivors`` is how many candidates Stage B will gate, because Holm divides the alpha by the
+    family — a requirement stated without it is a requirement for a different test.
+    """
+    if survivors <= 0:
+        raise ValueError(
+            f"survivors must be at least 1, got {survivors} — Holm corrects over a FAMILY, so a "
+            + "Stage B with no candidates has no threshold to state rather than an easier one"
+        )
+    # Both caller errors, and both are why the rendered `None` can name ONE remedy honestly:
+    # `min_discordant_rows` also returns `None` for an empty suite, where "shrink the family" is the
+    # wrong advice. Rejecting that here leaves the family and the draw count as the only cause left.
+    if rows <= 0:
+        raise ValueError(f"rows must be at least 1, got {rows} — an empty suite has no discordant count to state")
+    threshold = DEFAULT_ALPHA / survivors
+    return render_discreteness(
+        min_discordant_rows(rows, threshold), rows=rows, survivors=survivors, threshold=threshold
+    )
+
+
+def row_matrix_report(
+    *,
+    run_dirs: Sequence[Path],
+    variant_ids: Sequence[str],
+    suite_id: str,
+    criterion_index: int | None = None,
+    n_replicates: int = 1,
+) -> str:
+    """The row x arm matrix and both fronts — Stage A's shortlist, never a measurement.
+
+    ``criterion_index=None`` reads each row's ``weighted_score`` (the execution track); an index
+    reads that criterion's score (the activation track). Stated once here rather than in a comment
+    on every call, which is how the fences carried it.
+
+    ``n_replicates`` is what the round was run at, and it is rendered rather than inferred: at one
+    the block prints the caveat that this matrix RANKS and does not MEASURE. It defaults to 1
+    because that is what Stage A costs.
+    """
+    _require_run_dirs(run_dirs)
+    arms = arm_row_scores(
+        run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
+    )
+    return render_row_matrix(
+        arms,
+        pareto_front(arms),
+        instance_best=instance_best_front(arms),
+        n_replicates=n_replicates,
+    )
+
+
+def cost_quality_report(
+    *, run_dirs: Sequence[Path], variant_ids: Sequence[str], suite_id: str, criterion_index: int | None = None
+) -> str:
+    """The quality x cost plane beside the row matrix — advisory, and never a second gate.
+
+    Read from the SAME run dir as the matrix: pooling two passes mixes arm sets and row sets, and
+    the front's coverage rule gates domination on the row count, so a second-pass arm would look
+    better-evidenced for a reason that is an artefact of the procedure.
+
+    ``criterion_index`` means what it means on :func:`row_matrix_report`.
+    """
+    _require_run_dirs(run_dirs)
+    points = cost_quality_points(
+        run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
+    )
+    return render_cost_quality(points, cost_quality_front(points))

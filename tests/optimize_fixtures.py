@@ -15,6 +15,11 @@ transitive closure of both over builder-to-builder references. That last step is
 ``write_run_provenance`` and ``record_task_result`` are referenced by no test body at all, only by
 ``write_row``, so a grep over test bodies leaves them behind and breaks this module at import time.
 
+One entry is an ASSERTION helper rather than a builder, on the same derivation:
+``assert_matches_render_pin`` is used by two test files, which pin the same rendered blocks — one
+through the renderer, one through the composite above it. A second copy of it would be a second
+place a committed pin could be quietly regenerated from.
+
 Names here are PUBLIC. This is a shared module's surface, the same reasoning that took the underscore
 off the optimize package's cross-module helpers (CE059). Two carry a qualifying noun instead of a
 bare de-underscore, because the bare form already names a local somewhere in the suite:
@@ -57,6 +62,32 @@ from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES, DEFAULT_ALPHA
 
 
 SUITE = "my-skill-activation"
+
+RENDER_PINS = Path(__file__).parent / "_fixtures" / "optimize_renders"
+
+
+def assert_matches_render_pin(block: str, name: str, *, tmp_path: Path | None = None) -> None:
+    """Compare a rendered markdown block against a committed capture of it, whole.
+
+    The verdict pins compare a ``model_dump``; this compares the STRING the skill prints. Renderers
+    get split into section helpers and composites get built on top of them, and both are the kind of
+    change that reorders a line without changing a number — which no substring assertion can see.
+
+    Pass ``tmp_path`` for a block that NAMES run directories: a refusal quotes the paths it read,
+    which are per-test temporaries. Normalising them to a placeholder is what lets that block be
+    pinned whole rather than sampled by substring — the pin still covers every other character,
+    including the headline and the order of the lines around it.
+
+    Here rather than module-private in one test file because two now need it: the renderers' own
+    suite and the composites', which pin the SAME blocks reached through a different caller. Adding a
+    pin file is free; EDITING one is an estimator-protocol event (``tests/lint/estimator_ledger.py``
+    matches ``--diff-filter=M`` over this directory), so a second copy of this helper would be a
+    second place a pin could be quietly regenerated from.
+    """
+    if tmp_path is not None:
+        block = block.replace(str(tmp_path), "<TMP>")
+    expected = (RENDER_PINS / f"{name}.md").read_text(encoding="utf-8")
+    assert block == expected
 
 
 def eval_result(row_id: str, labels: list[tuple[str, str]], *, extra_basic: bool = False) -> EvaluationResult:

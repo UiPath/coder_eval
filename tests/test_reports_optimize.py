@@ -42,6 +42,7 @@ from coder_eval.reports_optimize import (
     _front_summary,
     render_confirm_markdown,
     render_cost_quality,
+    render_discreteness,
     render_execution_markdown,
     render_headroom_ceilings,
     render_markdown,
@@ -65,6 +66,7 @@ from tests.optimize_fixtures import (
     activation_verdict,
     activation_verdict_over_arms,
     arm_row_scores_for,
+    assert_matches_render_pin,
     confirm_dir,
     cost_quality_arm,
     exec_gate,
@@ -837,28 +839,6 @@ class TestFrontSummary:
         assert "Coverage is the set to DISCARD from" in text
 
 
-_RENDER_PINS = Path(__file__).parent / "_fixtures" / "optimize_renders"
-
-
-def _assert_matches_render_pin(block: str, name: str, *, tmp_path: Path | None = None) -> None:
-    """Compare a rendered markdown block against output captured BEFORE the module split.
-
-    The verdict pins next door compare a `model_dump`; nothing compared the STRING the skill
-    actually prints. `render_row_matrix` is about to be split into section helpers and every
-    renderer is about to move modules, and both are the kind of change that reorders a line
-    without changing a number — which no substring assertion in this file can see.
-
-    Pass ``tmp_path`` for a block that NAMES run directories: the cross-split refusal quotes the
-    paths it read, which are per-test temporaries. Normalising them to a placeholder is what lets
-    that block be pinned whole rather than sampled by substring — the pin still covers every other
-    character, including the headline and the order of the lines around it.
-    """
-    if tmp_path is not None:
-        block = block.replace(str(tmp_path), "<TMP>")
-    expected = (_RENDER_PINS / f"{name}.md").read_text(encoding="utf-8")
-    assert block == expected
-
-
 def _matrix_arms() -> list[ArmRowScores]:
     """Five arms chosen so every section of `render_row_matrix` renders something.
 
@@ -902,18 +882,18 @@ class TestRenderingIsBehaviourPreserving:
 
     def test_the_activation_block_is_unchanged(self, tmp_path: Path) -> None:
         verdict = holm_promote([activation_verdict(shared_dirs(tmp_path, *pinned_suite()))])[0]
-        _assert_matches_render_pin(render_markdown(verdict), "activation_gate")
+        assert_matches_render_pin(render_markdown(verdict), "activation_gate")
 
     def test_the_refused_activation_block_is_unchanged(self, tmp_path: Path) -> None:
         # The discreteness refusal, which is the one refused verdict carrying no filesystem path.
         incumbent, candidate = tiny_suite(3, 3)
         run_dirs = shared_dirs(tmp_path, incumbent, candidate)
         verdicts = [activation_verdict(run_dirs, n_resamples=REFUSAL_RESAMPLES) for _ in range(2)]
-        _assert_matches_render_pin(render_markdown(holm_promote(verdicts)[0]), "activation_gate_refused")
+        assert_matches_render_pin(render_markdown(holm_promote(verdicts)[0]), "activation_gate_refused")
 
     def test_the_execution_block_is_unchanged(self, tmp_path: Path) -> None:
         verdict = holm_promote_execution([exec_gate(exec_run_dir(tmp_path, **WINNER))])[0]
-        _assert_matches_render_pin(render_execution_markdown(verdict), "execution_gate")
+        assert_matches_render_pin(render_execution_markdown(verdict), "execution_gate")
 
     def test_the_family_of_eight_block_is_unchanged(self, tmp_path: Path) -> None:
         """The resolution note, pinned whole — and a NEW fixture, which is why it owes no ledger row.
@@ -925,7 +905,7 @@ class TestRenderingIsBehaviourPreserving:
         """
         verdicts = [exec_gate(exec_run_dir(tmp_path / f"g{i}", **WINNER)) for i in range(GATE_MAX_FAMILY + 3)]
         decided = holm_promote_execution(verdicts)[0]
-        _assert_matches_render_pin(render_execution_markdown(decided), "execution_gate_family8")
+        assert_matches_render_pin(render_execution_markdown(decided), "execution_gate_family8")
 
     def test_the_seed_stability_block_is_unchanged(self, tmp_path: Path) -> None:
         """A NEW fixture, so it owes no ledger row, and pinned on the UNSTABLE rung.
@@ -936,7 +916,7 @@ class TestRenderingIsBehaviourPreserving:
         threshold at three particular seeds is exactly what drifts.
         """
         split = SeedStability(seeds=(0, 1, 2), promote_agreement=2, p_values=(0.02, 0.03, 0.06), p_spread=0.04)
-        _assert_matches_render_pin(render_seed_stability(split), "seed_stability_unstable")
+        assert_matches_render_pin(render_seed_stability(split), "seed_stability_unstable")
 
     def test_the_confirm_block_is_unchanged(self, tmp_path: Path) -> None:
         """Stage C's block, pinned whole. A NEW fixture, so it owes no ledger row.
@@ -968,7 +948,7 @@ class TestRenderingIsBehaviourPreserving:
             n_resamples=FAST_RESAMPLES,
         )
         assert confirm.outcome == "reversed", "fixture drifted — this pin exists for the REVERSED rung"
-        _assert_matches_render_pin(render_confirm_markdown(confirm), "confirm_gate_reversed")
+        assert_matches_render_pin(render_confirm_markdown(confirm), "confirm_gate_reversed")
 
     def test_the_cross_split_refusal_block_is_unchanged(self, tmp_path: Path) -> None:
         """The fifth headline, pinned whole like its siblings rather than sampled by substring.
@@ -979,16 +959,16 @@ class TestRenderingIsBehaviourPreserving:
         """
         inc, cand = split_labelled_arms(tmp_path, "train", "test")
         verdict = holm_promote([activation_verdict_over_arms(inc, cand)])[0]
-        _assert_matches_render_pin(render_markdown(verdict), "activation_gate_cross_split", tmp_path=tmp_path)
+        assert_matches_render_pin(render_markdown(verdict), "activation_gate_cross_split", tmp_path=tmp_path)
 
     def test_the_row_matrix_is_unchanged(self) -> None:
         arms = _matrix_arms()
         block = render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms))
-        _assert_matches_render_pin(block, "row_matrix")
+        assert_matches_render_pin(block, "row_matrix")
 
     def test_the_cost_quality_table_is_unchanged(self, tmp_path: Path) -> None:
         points = _cost_quality_pin_points(tmp_path)
-        _assert_matches_render_pin(render_cost_quality(points, cost_quality_front(points)), "cost_quality")
+        assert_matches_render_pin(render_cost_quality(points, cost_quality_front(points)), "cost_quality")
 
     def test_the_search_comparison_is_unchanged(self) -> None:
         corpus = [RegressionRow(row_id="r1", promoted_in_round=1, reason="oblique phrasing")]
@@ -1000,7 +980,7 @@ class TestRenderingIsBehaviourPreserving:
             arm_row_scores_for("cand", {"r1": 0.0, "r2": 1.0, "r3": 1.0, "r4": 1.0}),
             corpus=corpus,
         )
-        _assert_matches_render_pin(render_search_comparison(comparison), "search_comparison")
+        assert_matches_render_pin(render_search_comparison(comparison), "search_comparison")
 
 
 class TestRenderSearchComparison:
@@ -1272,7 +1252,7 @@ class TestRenderNoiseFloor:
     """
 
     def test_a_measured_floor_is_pinned(self) -> None:
-        _assert_matches_render_pin(render_noise_floor(0.0255, metric=ACTIVATION_FLOOR_METRIC), "noise_floor")
+        assert_matches_render_pin(render_noise_floor(0.0255, metric=ACTIVATION_FLOOR_METRIC), "noise_floor")
 
     def test_an_unavailable_floor_names_the_precondition_and_is_pinned(self) -> None:
         block = render_noise_floor(
@@ -1280,11 +1260,11 @@ class TestRenderNoiseFloor:
             metric=EXECUTION_FLOOR_METRIC,
             reason="only 1 of 4 row(s) carry 2+ replicates with a weighted_score",
         )
-        _assert_matches_render_pin(block, "noise_floor_unavailable")
+        assert_matches_render_pin(block, "noise_floor_unavailable")
 
     def test_a_sampled_floor_states_the_shape_it_was_measured_over_and_is_pinned(self) -> None:
         block = render_noise_floor(0.0500, metric=EXECUTION_FLOOR_METRIC, n_rows=4, n_replicates=2)
-        _assert_matches_render_pin(block, "noise_floor_sampled")
+        assert_matches_render_pin(block, "noise_floor_sampled")
 
     def test_a_zero_floor_is_a_reading_rather_than_an_absence(self) -> None:
         # A deterministic instrument whose replicates agree measures no noise. It must NOT read like
@@ -1306,3 +1286,24 @@ class TestRenderNoiseFloor:
         # "No cause was recorded" is honest; an empty line where the cause goes is not.
         block = render_noise_floor(None, metric=EXECUTION_FLOOR_METRIC)
         assert "No cause was recorded." in block
+
+
+class TestRenderDiscreteness:
+    """The requirement a reader is most likely to answer with the wrong lever."""
+
+    def test_an_achievable_count_is_pinned(self) -> None:
+        block = render_discreteness(4, rows=12, survivors=3, threshold=0.01667)
+        assert_matches_render_pin(block, "discreteness")
+
+    def test_an_unachievable_threshold_is_pinned(self) -> None:
+        block = render_discreteness(None, rows=8, survivors=1_000, threshold=0.00005)
+        assert_matches_render_pin(block, "discreteness_unachievable")
+
+    def test_both_blocks_refuse_the_row_lever(self) -> None:
+        # The one sentence that must survive any rewording: adding rows the arms AGREE on makes the
+        # floor worse, so "buy rows" is advice that can leave a reader further from a promotion.
+        achievable = render_discreteness(4, rows=12, survivors=3, threshold=0.01667)
+        unachievable = render_discreteness(None, rows=8, survivors=5, threshold=0.01)
+        assert "not a row count" in achievable
+        assert "AGREE on makes the floor worse" in achievable
+        assert "buying rows cannot fix this one" in unachievable

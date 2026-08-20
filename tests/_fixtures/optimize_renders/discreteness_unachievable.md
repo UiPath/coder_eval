@@ -1,0 +1,3 @@
+**No candidate can promote at this size.** Over 8 paired row(s), gating 1000 candidate(s) against a Holm threshold of 0.00005, there is no discordant-row count whose discreteness floor clears it.
+
+That is a statement about the FAMILY and the draw count, not about the rows: at full discordance the floor collapses to the estimator's own resolution. Shrink the family or raise `n_resamples` — buying rows cannot fix this one.

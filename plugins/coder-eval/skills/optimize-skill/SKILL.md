@@ -576,12 +576,10 @@ requirement is knowable now, and it is not a row count — it is how many rows t
 **disagreeing** on. Print it before proposing anything:
 
 ```python
-from coder_eval.optimize.activation import min_discordant_rows
-from coder_eval.reports_stats import DEFAULT_ALPHA
+from coder_eval.optimize.api import discreteness_report
 
-survivors = 3  # how many candidates you plan to gate at Stage B
-rows = 12  # paired rows on the train split
-print(min_discordant_rows(rows, DEFAULT_ALPHA / survivors))
+# survivors: how many candidates you plan to gate at Stage B. rows: paired rows on the train split.
+print(discreteness_report(rows=12, survivors=3))
 ```
 
 | survivors gated `S` | Holm threshold | discordant rows needed at 8 paired rows | at 20 |
@@ -1360,24 +1358,26 @@ A suite average hides the shape of a result. Two candidates at the same mean can
 *disjoint* rows — which is a merge opportunity — or one can beat the other everywhere, which is a
 discard. Only the per-row vectors tell them apart, so print them:
 
+**`criterion_index` here and in the cost block below:** pass the criterion's position on the
+activation track, and **omit it on the execution track** — left out, both blocks read each row's
+`weighted_score`, which is what that track's gate compares.
+
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.fronts import arm_row_scores, instance_best_front, pareto_front
-from coder_eval.reports_optimize import render_row_matrix
+from coder_eval.optimize.api import row_matrix_report
 
-arms = arm_row_scores(
-    run_dirs=[Path("<runs>/round1-triage")],
+print(row_matrix_report(
+    run_dirs=[Path("<runs>/round1-triage")], suite_id="<the suite's task_id>", criterion_index=0,
     variant_ids=["incumbent", "cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
-    suite_id="<the suite's task_id>",
-    criterion_index=0,  # omit on the execution track to read each row's weighted_score
-)
-print(render_row_matrix(arms, pareto_front(arms), instance_best=instance_best_front(arms), n_replicates=1))
+))
 ```
 
-**`n_replicates` is not decoration — Stage A is a ranking device, not a measurement.** Pass the
-number of replicates each cell averages (Stage A is one pass, so `1`), and at one the block says
-so in the output rather than leaving it to be remembered. Measured on a real round: a
+**`n_replicates` is not decoration — Stage A is a ranking device, not a measurement.** It defaults
+to `1`, because that is what Stage A costs, and at one the block says so in the output rather than
+leaving it to be remembered. **Pass the real number if you re-print this block over a replicated
+round** — a matrix over three replicates is a different kind of claim, and the block will not say so
+unless you tell it. Measured on a real round: a
 single-replicate matrix reported **+0.0392 against a 0.0255 floor** and pushed the incumbent off
 the Pareto front, while the replicated gate over the same rows returned **0.000, p = 0.9977**. The
 matrix was not wrong to rank as it did; it was read as if it had measured something.
@@ -1460,16 +1460,12 @@ reason that is an artefact of the procedure.
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.fronts import cost_quality_front, cost_quality_points
-from coder_eval.reports_optimize import render_cost_quality
+from coder_eval.optimize.api import cost_quality_report
 
-points = cost_quality_points(
-    run_dirs=[Path("<runs>/round1-triage")],
+print(cost_quality_report(
+    run_dirs=[Path("<runs>/round1-triage")], suite_id="<the suite's task_id>", criterion_index=0,
     variant_ids=["incumbent", "cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
-    suite_id="<the suite's task_id>",
-    criterion_index=0,  # omit on the execution track to read each row's weighted_score
-)
-print(render_cost_quality(points, cost_quality_front(points)))
+))
 ```
 
 **This front is advisory, and that word is load-bearing.** Promotion is unchanged: the primary

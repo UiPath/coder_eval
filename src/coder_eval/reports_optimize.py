@@ -874,3 +874,42 @@ def render_noise_floor(
         + "small to see it. More rows, not more rounds."
     )
     return "\n\n".join(lines)
+
+
+def render_discreteness(needed: int | None, *, rows: int, survivors: int, threshold: float) -> str:
+    """How many rows the two arms must DISAGREE on before any candidate can promote.
+
+    The other thing a suite fails on, beside the noise floor, and the one a reader is most likely to
+    answer with the wrong lever. It is not a row count: holding the discordant count fixed and
+    ADDING rows makes the requirement worse, so "buy more rows" is advice that can leave a user
+    strictly further from a promotion.
+
+    ``needed is None`` means no discordant count clears the threshold at this size — which is a
+    statement about the family and the draw count, never about the rows. The remedy is a smaller
+    family or more resamples, and the block says so rather than leaving a reader to infer it from a
+    missing number.
+    """
+    if needed is None:
+        return "\n".join(
+            [
+                f"**No candidate can promote at this size.** Over {rows} paired row(s), gating "
+                + f"{survivors} candidate(s) against a Holm threshold of {threshold:.5f}, there is no "
+                + "discordant-row count whose discreteness floor clears it.",
+                "",
+                "That is a statement about the FAMILY and the draw count, not about the rows: at "
+                + "full discordance the floor collapses to the estimator's own resolution. Shrink "
+                + "the family or raise `n_resamples` — buying rows cannot fix this one.",
+            ]
+        )
+    return "\n".join(
+        [
+            f"**{needed} of {rows} row(s) must come out DIFFERENTLY between the two arms** for any "
+            + f"candidate to promote, gating {survivors} of them against a Holm threshold of "
+            + f"{threshold:.5f}.",
+            "",
+            "That is the requirement to hand back, and it is not a row count. Adding rows the arms "
+            + "AGREE on makes the floor worse, not better — so a candidate that changes the verdict "
+            + "on two or three rows cannot promote at any suite size. Buying rows helps only when "
+            + "the new rows are ones the candidate is expected to change.",
+        ]
+    )

@@ -1,0 +1,3 @@
+**4 of 12 row(s) must come out DIFFERENTLY between the two arms** for any candidate to promote, gating 3 of them against a Holm threshold of 0.01667.
+
+That is the requirement to hand back, and it is not a row count. Adding rows the arms AGREE on makes the floor worse, not better — so a candidate that changes the verdict on two or three rows cannot promote at any suite size. Buying rows helps only when the new rows are ones the candidate is expected to change.

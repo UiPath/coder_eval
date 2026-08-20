@@ -14,11 +14,26 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import ACTIVATION_FLOOR_METRIC, EXECUTION_FLOOR_METRIC, NoiseFloor
-from coder_eval.optimize.activation import noise_floor_mde
-from coder_eval.optimize.api import activation_floor_report, execution_floor_report
+from coder_eval.optimize.activation import min_discordant_rows, noise_floor_mde
+from coder_eval.optimize.api import (
+    activation_floor_report,
+    cost_quality_report,
+    discreteness_report,
+    execution_floor_report,
+    row_matrix_report,
+)
 from coder_eval.optimize.execution import measure_execution_noise_floor
 from coder_eval.optimize.store import UNRESOLVED_MODEL
-from tests.optimize_fixtures import SUITE, eval_result, weighted_arm, write_row
+from coder_eval.reports_optimize import SINGLE_REPLICATE_CAVEAT
+from coder_eval.reports_stats import DEFAULT_ALPHA
+from tests.optimize_fixtures import (
+    SUITE,
+    assert_matches_render_pin,
+    cost_quality_arm,
+    eval_result,
+    weighted_arm,
+    write_row,
+)
 
 
 def _sidecar(tmp_path: Path) -> Path:
@@ -181,9 +196,23 @@ def _execution_call(run_dirs) -> str:
     )
 
 
-# Both entry points, so the guard is asserted on the SURFACE rather than on the private helper the
-# two share: a composite that forgot to call it is exactly the regression this catches.
-_ENTRY_POINTS = [pytest.param(_activation_call, id="activation"), pytest.param(_execution_call, id="execution")]
+def _row_matrix_call(run_dirs) -> str:
+    return row_matrix_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
+
+
+def _cost_quality_call(run_dirs) -> str:
+    return cost_quality_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
+
+
+# EVERY composite taking `run_dirs`, so the guard is asserted on the SURFACE rather than on the
+# private helper they share: a composite that forgot to call it is exactly the regression this
+# catches, and it is invisible to any test of the helper itself. Grows with each phase.
+_ENTRY_POINTS = [
+    pytest.param(_activation_call, id="activation-floor"),
+    pytest.param(_execution_call, id="execution-floor"),
+    pytest.param(_row_matrix_call, id="row-matrix"),
+    pytest.param(_cost_quality_call, id="cost-quality"),
+]
 
 
 @pytest.mark.parametrize("call", _ENTRY_POINTS)
@@ -208,3 +237,113 @@ class TestRunDirsAreRejectedAtTheBoundary:
         # named here, so there is no suite to report a reading about.
         with pytest.raises(ValueError, match="run_dirs is empty"):
             call([])
+
+
+class TestDiscretenessReport:
+    def test_the_block_states_the_count_the_estimator_computed(self) -> None:
+        block = discreteness_report(rows=12, survivors=3)
+
+        expected = min_discordant_rows(12, DEFAULT_ALPHA / 3)
+        assert expected is not None
+        assert f"**{expected} of 12 row(s)" in block
+        # The threshold the composite divided, not a restated alpha.
+        assert f"{DEFAULT_ALPHA / 3:.5f}" in block
+
+    def test_no_survivors_is_a_caller_error(self) -> None:
+        # `DEFAULT_ALPHA / 0` is a ZeroDivisionError today. A Stage B with no candidates has no
+        # threshold to state — it is not an easier test.
+        with pytest.raises(ValueError, match="survivors must be at least 1"):
+            discreteness_report(rows=12, survivors=0)
+
+    def test_an_empty_suite_is_a_caller_error_rather_than_an_unachievable_size(self) -> None:
+        """The two causes of a `None` from `min_discordant_rows`, kept apart.
+
+        An empty suite also returns `None`, and the block's remedy — shrink the family, raise the
+        draw count — is wrong for it. Rejecting it here is what lets the rendered `None` name one
+        cause honestly.
+        """
+        assert min_discordant_rows(0, DEFAULT_ALPHA) is None, "the other cause of a None"
+        with pytest.raises(ValueError, match="rows must be at least 1"):
+            discreteness_report(rows=0, survivors=3)
+
+    def test_an_unachievable_threshold_says_so_and_names_the_lever(self) -> None:
+        # A family so large that its Holm threshold drops below the estimator's own p floor, so no
+        # discordant count clears it. The remedy is the family or the draw count — never rows, which
+        # is the whole point of the reading.
+        block = discreteness_report(rows=8, survivors=1_000)
+
+        assert min_discordant_rows(8, DEFAULT_ALPHA / 1_000) is None, "the fixture must be unachievable"
+        assert "No candidate can promote at this size" in block
+        assert "buying rows cannot fix this one" in block
+
+
+class TestRowMatrixReport:
+    def test_the_matrix_is_pinned(self, tmp_path: Path) -> None:
+        # Both arms into the SAME run dir, as a real experiment produces them — so the second
+        # builder's return value is the same list and is deliberately discarded. The two arms win
+        # opposite rows, which is the disjoint-winners shape the block exists to make visible.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.4], "r2": [0.9]})
+        weighted_arm(tmp_path, "cand-a", {"r1": [0.9], "r2": [0.4]})
+
+        block = row_matrix_report(run_dirs=run_dirs, variant_ids=["incumbent", "cand-a"], suite_id=SUITE)
+
+        assert_matches_render_pin(block, "row_matrix_report")
+
+    def test_criterion_index_none_reads_the_rows_weighted_score(self, tmp_path: Path) -> None:
+        # `weighted_arm` sets `weighted_score` and no classification result, so a block carrying
+        # these numbers proves the None path rather than the criterion path.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.375], "r2": [0.625]})
+
+        block = row_matrix_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
+
+        assert "0.375" in block and "0.625" in block
+
+    def test_a_variant_absent_from_the_run_dirs_is_named_rather_than_omitted(self, tmp_path: Path) -> None:
+        # Silently rendering a short table is how a wrong suite_id or variant reads as a result.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.4], "r2": [0.9]})
+
+        block = row_matrix_report(run_dirs=run_dirs, variant_ids=["incumbent", "ghost"], suite_id=SUITE)
+
+        assert "scored no rows at all" in block
+        assert "ghost" in block
+
+    def test_a_single_replicate_round_carries_the_ranking_caveat(self, tmp_path: Path) -> None:
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.4], "r2": [0.9]})
+
+        block = row_matrix_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
+
+        assert SINGLE_REPLICATE_CAVEAT in block
+
+    def test_a_replicated_round_does_not(self, tmp_path: Path) -> None:
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.4, 0.5], "r2": [0.9, 0.8]})
+
+        block = row_matrix_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE, n_replicates=2)
+
+        assert SINGLE_REPLICATE_CAVEAT not in block
+        assert "mean of 2 replicate(s)" in block
+
+
+class TestCostQualityReport:
+    def test_a_costless_arm_is_named_as_excluded(self, tmp_path: Path) -> None:
+        """ "Correct rather than a bug", in the fence's own words — so it is pinned as behaviour.
+
+        An unmeasured cost is not a free one, so the arm is excluded from the front and named.
+        """
+        cost_quality_arm(tmp_path, "incumbent", {"r1": (0.90, 1.00), "r2": (0.90, 1.00)})
+        cost_quality_arm(tmp_path, "cand-free", {"r1": (0.95, None), "r2": (0.95, None)})
+
+        block = cost_quality_report(
+            run_dirs=[tmp_path / "run-0"], variant_ids=["incumbent", "cand-free"], suite_id=SUITE
+        )
+
+        assert "NOT on the front: cand-free" in block
+
+    def test_a_variant_absent_from_the_run_dirs_is_named_as_off_the_front(self, tmp_path: Path) -> None:
+        # `"ghost" in block` would pass on the table row alone (`| ghost | 0 | — | — |`), which is
+        # what a wrong suite_id looks like when it reads as a result. The NAMING clause is the guard.
+        cost_quality_arm(tmp_path, "incumbent", {"r1": (0.90, 1.00)})
+
+        block = cost_quality_report(run_dirs=[tmp_path / "run-0"], variant_ids=["incumbent", "ghost"], suite_id=SUITE)
+
+        assert "missing a coordinate and therefore NOT on the front" in block
+        assert "ghost" in block
