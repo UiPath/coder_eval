@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from coder_eval.models import (
+    ACTIVATION_FLOOR_METRIC,
     TARGET_LABEL,
     ActivationGateVerdict,
     ClassificationCriterionResult,
@@ -82,7 +83,10 @@ NEAR_FLOOR_MULTIPLE = 5.0
 
 
 def _f1_yes(pairs: list[tuple[str, str]]) -> float:
-    return classification_metric(pairs, f"f1.{TARGET_LABEL}")
+    # The metric NAME is the one this track's floor is declared on, not a second spelling of it:
+    # `classification_metric` dispatches on the string, so a drift between the statistic computed
+    # here and the label recorded on the floor below would be invisible.
+    return classification_metric(pairs, ACTIVATION_FLOOR_METRIC)
 
 
 def _discreteness_floor(n_rows: int, n_discordant: int, n_resamples: int) -> float:
@@ -273,7 +277,7 @@ def measure_noise_floor(
         suite_id=suite_id,
         variant_id=variant_id,
         model=model,
-        metric=f"f1.{TARGET_LABEL}",
+        metric=ACTIVATION_FLOOR_METRIC,
         criterion_index=criterion_index,
         n_rows=len(scored),
         n_invocations=len(run_dirs),

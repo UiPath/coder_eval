@@ -21,6 +21,14 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 # cycle. Same cycle-free-leaf role `models/judge_defaults.py` plays for `DEFAULT_JUDGE_MODEL`.
 TARGET_LABEL = "yes"
 
+# The two values `NoiseFloor.metric` takes — one per track, and both declared here for the same
+# cycle-free-leaf reason `TARGET_LABEL` is. They are DIFFERENT numbers on the same suite, so the
+# names are what keep one track's lookup from being served the other's measurement; a surface that
+# renders a floor names the metric beside it, and a second spelling of either string could disagree
+# with the record it describes.
+ACTIVATION_FLOOR_METRIC = f"f1.{TARGET_LABEL}"
+EXECUTION_FLOOR_METRIC = "weighted_score"
+
 
 class GuardrailCheck(BaseModel):
     """One non-primary quantity that may veto a promotion.
@@ -627,7 +635,7 @@ class NoiseFloor(BaseModel):
         min_length=1, description="Model the rows ran under. Sourced ONLY from optimize.execution.resolve_model."
     )
     metric: str = Field(
-        default=f"f1.{TARGET_LABEL}",
+        default=ACTIVATION_FLOOR_METRIC,
         min_length=1,
         description=(
             "What the floor is a floor ON. 'f1.yes' for the activation track, 'weighted_score' for "

@@ -37,8 +37,13 @@ the wrong place to put one. Stated rather than glossed, because this rule's fail
 **The boundary, stated so a green ``make lint`` is not mistaken for a proof.**
 
 - It matches call NAMES in the same function body. A reader that reaches the tree through a NEW
-  helper is invisible to it, and so is a reconcile performed by the caller — which is why the two
-  legitimate cases in the tree carry a reasoned ``# noqa: CE053`` rather than a second call.
+  helper is invisible to it, and so is a reconcile performed by the caller — which is why the three
+  legitimate cases in the tree carry a reasoned ``# noqa: CE053`` rather than a second call. Two of
+  them name the caller that reconciles for them (``load_and_pair``, ``cost_quality_points``); the
+  third, ``resolve_arm_model``, argues instead that the value it returns cannot be corrupted into a
+  WRONG answer — only into the ``UNRESOLVED_MODEL`` sentinel, which bars the cache. That is a
+  different kind of reason and the suppression says so, because a reader who assumed the first kind
+  would trust the id from a caller that never reconciled.
 - It checks that the sweep is CALLED, never that its result is acted on. ``stale, _ =
   reconcile_arms(...)`` with the ``if stale:`` branch dropped passes — which is the likeliest
   future regression, since copying the call is easy and copying the branch is a second step.

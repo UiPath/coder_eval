@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from coder_eval.models import (
+    EXECUTION_FLOOR_METRIC,
     TARGET_LABEL,
     ConfirmVerdict,
     EvaluationResult,
@@ -86,6 +87,28 @@ def resolve_model(rows: dict[str, list[EvaluationResult]]) -> str | None:
     """
     models = {result.model_used for results in rows.values() for result in results if result.model_used}
     return models.pop() if len(models) == 1 else None
+
+
+def resolve_arm_model(run_dirs: Sequence[Path], variant_id: str, suite_id: str) -> str | None:
+    """The model id one arm ran under, read straight from its run tree.
+
+    :func:`load_arm_rows` composed with :func:`resolve_model`, which every floor and every ledger
+    entry needs before it can key a :class:`~coder_eval.models.NoiseFloor`. Declared once so that
+    the reasoning about why this particular read does not reconcile lives in ONE place rather than
+    beside every caller that wants a model id.
+
+    Placed beside :func:`resolve_model` rather than on rank 0, where a shared reader would otherwise
+    live: that is where the name already is, and CE059 makes a name siblings share public. See the
+    plan's Open Questions for why moving both to ``load`` is a separate change.
+    """
+    # CE053: **the reconcile belongs to the caller, and every caller has one.** A stale tree CAN
+    # change what this returns — a re-used `--run-dir` whose earlier invocation ran a different model
+    # leaves rows disagreeing, so the result flips from the id to `None` — but it flips toward
+    # `UNRESOLVED_MODEL`, which bars the cache rather than borrowing another model's floor, and every
+    # consumer's own `floor_preflight` refuses the contaminated tree before measuring anything at
+    # all. Reconciling here as well would read every run.json twice per arm for one fault. A future
+    # caller that does NOT reconcile may not trust this id.
+    return resolve_model(load_arm_rows(run_dirs, variant_id, suite_id))  # noqa: CE053
 
 
 def measure_execution_noise_floor(
@@ -167,7 +190,7 @@ def measure_execution_noise_floor(
         suite_id=suite_id,
         variant_id=variant_id,
         model=model,
-        metric="weighted_score",
+        metric=EXECUTION_FLOOR_METRIC,
         criterion_index=None,
         n_rows=len(replicated),
         n_invocations=len(run_dirs),

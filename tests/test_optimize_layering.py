@@ -324,9 +324,9 @@ _PACKAGE_MODULES = {
 # is named separately because it belongs to the REPORTS family by design, and the assertion that no
 # family module imports it is precisely that boundary. Every layering test iterates this.
 _OPTIMIZE_MODULES = (*sorted(_PACKAGE_MODULES), "reports_optimize")
-# The DECISION layer's six modules, at their ranks. An import may only point at a STRICTLY lower
-# rank: `activation -> execution` is acyclic and still wrong, because the two tracks are meant to
-# be independently readable.
+# Every module in the family at its rank: the DECISION layer's six, plus the one composite rank
+# above them. An import may only point at a STRICTLY lower rank: `activation -> execution` is
+# acyclic and still wrong, because the two tracks are meant to be independently readable.
 #
 # DECLARED, never derived, and a future author will reasonably propose deriving it — do not. Compute
 # each rank as its longest path in the import DAG and `activation -> execution` simply makes
@@ -339,6 +339,9 @@ _OPTIMIZE_RANKS = {
     "optimize.execution": 2,
     "optimize.fronts": 3,
     "optimize.search": 3,
+    # Rank 4, and the one member that COMPOSES rather than decides: it is what `SKILL.md` imports,
+    # so it sits above every decision rank and is the only module allowed to import the renderer.
+    "optimize.api": 4,
 }
 # `store` is the sidecar every rank imports and is deliberately outside the ladder — the ONE
 # documented exception, for the same reason `reports_optimize` is the one tail above.
@@ -347,6 +350,22 @@ _LADDER_EXEMPT = frozenset({"optimize.store"})
 # rank check, the store-edge assertion AND `test_the_store_module_imports_only_models` — all three
 # name `store` specifically — so the count is the only thing standing in its way.
 assert len(_LADDER_EXEMPT) == 1, f"a second ladder exemption needs its own reason and its own checks: {_LADDER_EXEMPT}"
+# The one rank allowed to import `reports_optimize`. That prohibition exists to stop a module that
+# DECIDES from also owning its presentation; rank 4 decides nothing, and returning a rendered block
+# is its entire contract. Asserted to be exactly one for the same reason `_LADDER_EXEMPT` is: a
+# second name here would put a decision module outside the only check that covers it.
+_RENDERER_CONSUMERS = frozenset({"optimize.api"})
+assert len(_RENDERER_CONSUMERS) == 1, f"a second renderer consumer needs its own reason: {_RENDERER_CONSUMERS}"
+
+
+def _renderer_prohibited(ranks: dict[str, int]) -> list[str]:
+    """The modules the renderer prohibition covers: every ranked module except the composite layer.
+
+    A FUNCTION for the reason `_rank_coverage_gap` is one — the test that proves the narrowing can
+    still fail runs the same selection the assertion does, rather than re-deriving it and therefore
+    being unable to disagree with it.
+    """
+    return sorted(set(ranks) - _RENDERER_CONSUMERS)
 
 
 def _rank_coverage_gap(package_modules: set[str]) -> tuple[list[str], list[str]]:
@@ -559,7 +578,7 @@ def test_the_derived_package_module_set_is_the_family_and_every_file_exists() ->
     directory cannot read as a clean tree.
     """
     assert set(_OPTIMIZE_RANKS) | set(_LADDER_EXEMPT) == _PACKAGE_MODULES, sorted(_PACKAGE_MODULES)
-    assert len(_PACKAGE_MODULES) == 7, sorted(_PACKAGE_MODULES)
+    assert len(_PACKAGE_MODULES) == 8, sorted(_PACKAGE_MODULES)
     for name in _PACKAGE_MODULES:
         assert module_path(name).is_file(), name
 
@@ -597,11 +616,38 @@ def test_the_store_edge_is_sentinels_and_one_lookup() -> None:
         "optimize.execution": {"UNRESOLVED_MODEL"},
         "optimize.fronts": set(),
         "optimize.search": set(),
+        "optimize.api": {"UNRESOLVED_MODEL", "load_measurements"},
     }, edge
-    # And nothing in the family imports the RENDERER: a decision layer depending on its own
-    # presentation is what would make that split cosmetic too.
-    for module in _OPTIMIZE_RANKS:
+    # And nothing in the DECISION layer imports the RENDERER: a layer that decides and also owns its
+    # own presentation is what would make that split cosmetic too. Rank 4 is exempt because it
+    # decides nothing — its whole job is to return the block a renderer produced, which is the one
+    # shape this prohibition was never about.
+    for module in _renderer_prohibited(_OPTIMIZE_RANKS):
         assert "coder_eval.reports_optimize" not in _coder_eval_imports(module), module
+
+
+def test_the_renderer_exemption_is_one_module_and_covers_every_decision_rank() -> None:
+    """The narrowing above, exercised through the same selection it uses.
+
+    Without this the prohibition could be narrowed to nothing — an exemption naming every module
+    reports zero violations, which is byte-identical to a clean tree. Both directions matter: the
+    exemption is exactly the composite layer, and a NEW decision module is covered by default rather
+    than by anyone remembering to add it.
+    """
+    assert set(_RENDERER_CONSUMERS) == {"optimize.api"}, sorted(_RENDERER_CONSUMERS)
+    unranked = sorted(_RENDERER_CONSUMERS - set(_OPTIMIZE_RANKS))
+    assert not unranked, f"the renderer exemption names a module with no rank: {unranked}"
+    assert _OPTIMIZE_RANKS["optimize.api"] == max(_OPTIMIZE_RANKS.values()), (
+        "the exempt module must sit ABOVE every decision rank — an exemption in the middle of the "
+        "ladder would let a decision module reach the renderer through it"
+    )
+
+    prohibited = _renderer_prohibited(_OPTIMIZE_RANKS)
+    assert "optimize.api" not in prohibited
+    assert prohibited == sorted(set(_OPTIMIZE_RANKS) - {"optimize.api"})
+    assert "optimize.newcomer" in _renderer_prohibited({**_OPTIMIZE_RANKS, "optimize.newcomer": 3}), (
+        "a new decision module must be covered without being named here"
+    )
 
 
 def test_module_imports_no_cli_machinery() -> None:

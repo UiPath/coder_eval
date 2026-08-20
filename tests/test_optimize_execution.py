@@ -45,6 +45,7 @@ from coder_eval.optimize.execution import (
     execution_gate,
     holm_promote_execution,
     measure_execution_noise_floor,
+    resolve_arm_model,
     resolve_model,
 )
 from coder_eval.optimize.gate import FLOOR_RESOLUTION, GATE_RESAMPLES, MATERIALITY_FLOOR
@@ -87,6 +88,35 @@ class TestResolveModel:
 
     def test_returns_none_when_unset(self) -> None:
         assert resolve_model({"r0": [eval_result("r0", [("yes", "yes")])]}) is None
+
+
+class TestResolveArmModel:
+    """The `resolve_model(load_arm_rows(...))` idiom, given one declaration and one suppression.
+
+    Its contract is `resolve_model`'s, over a tree rather than a rows map — so the three cases are
+    the same three, and an empty tree joins them because a read that matches no rows is the likeliest
+    of the three in practice (a mistyped variant id, suite id or run dir).
+    """
+
+    def _arm(self, tmp_path: Path, per_row: dict[str, str]) -> Path:
+        run_dir = tmp_path / "run-0"
+        for row_id, model in per_row.items():
+            result = eval_result(row_id, [("yes", "yes")])
+            write_row(run_dir, "incumbent", row_id, copy_with(result, model_used=model))
+        return run_dir
+
+    def test_returns_the_agreed_model_id(self, tmp_path: Path) -> None:
+        run_dir = self._arm(tmp_path, {"r0": "claude-haiku-4-5", "r1": "claude-haiku-4-5"})
+        assert resolve_arm_model([run_dir], "incumbent", SUITE) == "claude-haiku-4-5"
+
+    def test_returns_none_when_the_rows_disagree(self, tmp_path: Path) -> None:
+        run_dir = self._arm(tmp_path, {"r0": "claude-haiku-4-5", "r1": "claude-sonnet-5"})
+        assert resolve_arm_model([run_dir], "incumbent", SUITE) is None
+
+    def test_returns_none_on_an_empty_tree(self, tmp_path: Path) -> None:
+        # A mistyped variant id reads as "no model", never as another arm's model.
+        run_dir = self._arm(tmp_path, {"r0": "claude-haiku-4-5"})
+        assert resolve_arm_model([run_dir], "no-such-variant", SUITE) is None
 
 
 _MDE_ADVISORY_FRAGMENTS = (

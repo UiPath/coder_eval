@@ -795,3 +795,82 @@ def render_cost_quality(points: list[CostQualityPoint], front: list[str]) -> str
     lines.append("")
     lines.append(COST_FRONT_ADVISORY)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# The noise floor — the preflight both tracks open with
+# ---------------------------------------------------------------------------
+
+
+def render_noise_floor(
+    mde: float | None,
+    *,
+    metric: str,
+    reason: str | None = None,
+    n_rows: int | None = None,
+    n_replicates: int | None = None,
+) -> str:
+    """The suite's minimum detectable effect, or why no floor could be measured.
+
+    ``mde is None`` is the whole reason this renders rather than printing a number: a bare ``None``
+    beside a floor of ``0.000`` is indistinguishable to anyone not reading the source, and the two
+    say opposite things — a deterministic suite that measures no noise, against a sample that could
+    not support the measurement at all. ``reason`` is the precondition that failed, threaded from
+    the estimator's own sink so the block names the ACTUAL cause; without it a reader is sent to buy
+    rows for a mistyped ``criterion_index``.
+
+    ``metric`` is stated rather than assumed because the two tracks measure different quantities on
+    the same suite (:data:`~coder_eval.models.ACTIVATION_FLOOR_METRIC` against
+    :data:`~coder_eval.models.EXECUTION_FLOOR_METRIC`), and a floor read against the wrong one is a
+    confidently meaningless number.
+
+    **A floor of exactly 0.000 gets its own sentence**, because the number alone reads as "this
+    suite can resolve anything" and there are three ways to produce it — a deterministic instrument
+    whose replicates agree, a suite every row scores identically, and a criterion index pointing at
+    something that is 1.0 everywhere. The last is the one that has actually happened, on the bundled
+    outcome template, and it is what a reader has to rule out before quoting the number.
+
+    ``n_rows`` and ``n_replicates`` are the sample the floor was measured over, rendered when the
+    caller has them. ``n_replicates`` is the expensive one: a floor over two replicates per row and
+    a floor over three are different measurements, and the caller cannot check which they are
+    holding if the block does not say.
+    """
+    if mde is None:
+        return "\n\n".join(
+            [
+                f"**No noise floor on `{metric}`.** The sample could not support the null comparison, "
+                + "so this suite's resolution is unknown — which is NOT the same as a floor of zero.",
+                f"Precondition that failed: {reason}" if reason else "No cause was recorded.",
+                "Do not read the round as priced. Either fix the precondition or say the suite "
+                + "cannot see the effect yet.",
+            ]
+        )
+
+    lines = [
+        f"**Noise floor on `{metric}`: {mde:.4f}.** The smallest difference this suite at this size "
+        + "can resolve — a candidate gain below it is indistinguishable from run-to-run noise "
+        + "however small its p."
+    ]
+    if mde == 0.0:
+        lines.append(
+            "**A floor of exactly zero is a real answer, not a missing one — and it is the one to "
+            + "double-check.** It means the two halves of the null split agreed exactly: a "
+            + "deterministic instrument, a suite where every row scores alike, or a criterion index "
+            + "pointing at something that is already perfect on every row. Rule the last one out "
+            + "before quoting this as the suite's resolution."
+        )
+    sample = [
+        f"{n_rows} row(s) scored in both halves" if n_rows is not None else "",
+        f"{n_replicates} replicate(s) per row after balancing" if n_replicates is not None else "",
+    ]
+    measured = [part for part in sample if part]
+    if measured:
+        lines.append(
+            f"Measured over {', '.join(measured)}. Two floors over different sample shapes are "
+            + "different measurements, so quote this beside the number."
+        )
+    lines.append(
+        "If the gain you are hoping for is smaller than this, hand back and say the suite is too "
+        + "small to see it. More rows, not more rounds."
+    )
+    return "\n\n".join(lines)

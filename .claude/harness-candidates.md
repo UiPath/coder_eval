@@ -829,10 +829,13 @@ with the two `action.yml` items above — one considered change to the action's 
       `no_floor` channel, and `arm_row_scores` logs a WARNING and returns its vector, because
       `ArmRowScores` has no field a refusal could live in. A shared `_refuse_or_warn` helper was
       considered and rejected — it would take a mode flag, which is two functions in a trench coat.
-      Two readers deliberately do NOT reconcile and carry a reasoned `# noqa: CE053` naming who
+      Three readers deliberately do NOT reconcile and carry a reasoned `# noqa: CE053`. Two name who
       reconciles for them: `load_and_pair` (its only caller `activation_gate` sweeps both arms
       first) and `cost_quality_points` (it reaches the tree through `arm_row_scores`, so a second
-      sweep would read every `run.json` twice per arm and warn twice about one fault). The
+      sweep would read every `run.json` twice per arm and warn twice about one fault). The third,
+      `resolve_arm_model`, argues from its RETURN VALUE instead: contamination can only flip a model
+      id to `None`, which bars the cache rather than borrowing another model's floor, and every
+      consumer's own `floor_preflight` refuses the tree first. The
       correction the entry itself needed: the four readers are `measure_noise_floor`,
       **`measure_execution_noise_floor`**, `arm_row_scores` and `cost_quality_points` —
       `noise_floor_mde` reaches the tree only through `measure_noise_floor`. **CE053** is the

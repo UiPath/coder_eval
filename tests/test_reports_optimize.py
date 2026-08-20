@@ -13,6 +13,8 @@ from typing import ClassVar
 import pytest
 
 from coder_eval.models import (
+    ACTIVATION_FLOOR_METRIC,
+    EXECUTION_FLOOR_METRIC,
     ActivationGateVerdict,
     ArmRowScores,
     ConfirmVerdict,
@@ -43,6 +45,7 @@ from coder_eval.reports_optimize import (
     render_execution_markdown,
     render_headroom_ceilings,
     render_markdown,
+    render_noise_floor,
     render_row_matrix,
     render_row_replicates,
     render_search_comparison,
@@ -1258,3 +1261,48 @@ class TestPromotionIsNotOverstated:
         )
         text = render_markdown(holm_promote([self._verdict(guardrails=[passing])])[0])
         assert headline_line(text) == "PROMOTED"
+
+
+class TestRenderNoiseFloor:
+    """The preflight both tracks open with, and the one block whose ABSENCE is the message.
+
+    A bare `None` beside a floor of `0.000` is indistinguishable to anyone not reading the source,
+    and the two say opposite things — a deterministic suite that measures no noise, against a
+    sample that could not support the measurement. Both are pinned whole.
+    """
+
+    def test_a_measured_floor_is_pinned(self) -> None:
+        _assert_matches_render_pin(render_noise_floor(0.0255, metric=ACTIVATION_FLOOR_METRIC), "noise_floor")
+
+    def test_an_unavailable_floor_names_the_precondition_and_is_pinned(self) -> None:
+        block = render_noise_floor(
+            None,
+            metric=EXECUTION_FLOOR_METRIC,
+            reason="only 1 of 4 row(s) carry 2+ replicates with a weighted_score",
+        )
+        _assert_matches_render_pin(block, "noise_floor_unavailable")
+
+    def test_a_sampled_floor_states_the_shape_it_was_measured_over_and_is_pinned(self) -> None:
+        block = render_noise_floor(0.0500, metric=EXECUTION_FLOOR_METRIC, n_rows=4, n_replicates=2)
+        _assert_matches_render_pin(block, "noise_floor_sampled")
+
+    def test_a_zero_floor_is_a_reading_rather_than_an_absence(self) -> None:
+        # A deterministic instrument whose replicates agree measures no noise. It must NOT read like
+        # the absence block — but "0.0000" alone reads as "this suite can resolve anything", and one
+        # of the three ways to produce it (a criterion index pointing at something already perfect)
+        # has actually happened on the bundled outcome template. So the zero gets its own sentence.
+        block = render_noise_floor(0.0, metric=EXECUTION_FLOOR_METRIC)
+        assert "0.0000" in block
+        assert "No noise floor" not in block
+        assert "A floor of exactly zero is a real answer" in block
+        assert "already perfect on every row" in block
+
+    def test_a_non_zero_floor_carries_no_zero_caveat(self) -> None:
+        # The caveat must not fire on every block, or it stops being read.
+        assert "exactly zero" not in render_noise_floor(0.0255, metric=EXECUTION_FLOOR_METRIC)
+
+    def test_an_unavailable_floor_with_no_recorded_cause_says_so(self) -> None:
+        # The execution estimator threads no `reasons` sink, so this path is reachable in the tree.
+        # "No cause was recorded" is honest; an empty line where the cause goes is not.
+        block = render_noise_floor(None, metric=EXECUTION_FLOOR_METRIC)
+        assert "No cause was recorded." in block

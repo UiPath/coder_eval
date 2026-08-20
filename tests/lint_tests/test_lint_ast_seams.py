@@ -744,7 +744,7 @@ class TestCE053RunTreeReadersReconcile:
         assert sorted(found) == wrappers, f"a name CE053 accepts is not defined in the package: {found}"
         assert all(found.values()), f"an accepted reconciler never calls {primitive}: {found}"
 
-    def test_the_live_suppression_set_is_exactly_the_two_documented_ones(self) -> None:
+    def test_the_live_suppression_set_is_exactly_the_three_documented_ones(self) -> None:
         """Anti-vacuity, and the acceptance criterion in test form.
 
         The rule is satisfied by suppressions as easily as by reconciles, so the live set is
@@ -760,7 +760,11 @@ class TestCE053RunTreeReadersReconcile:
                     range(node.lineno, (node.end_lineno or node.lineno) + 1)
                 ):
                     suppressed.append(node.name)
-        assert sorted(suppressed) == ["cost_quality_points", "load_and_pair"], suppressed
+        # `resolve_arm_model` is the third, and the only one whose read is not reconciled by a
+        # caller: it resolves a MODEL ID, which a stale row cannot change, and every measurement
+        # built on that id reconciles the arms it actually reads. One declaration of the idiom is
+        # what keeps this at three rather than one suppression per call site.
+        assert sorted(suppressed) == ["cost_quality_points", "load_and_pair", "resolve_arm_model"], suppressed
         # And every one of them is genuinely suppressed rather than merely absent from `make lint`.
         assert check_paths([SRC], [RunTreeReadersReconcile]) == []
 

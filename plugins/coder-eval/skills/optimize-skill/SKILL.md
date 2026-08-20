@@ -540,40 +540,28 @@ Compute it and report it *before* proposing anything:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.load import load_arm_rows
-from coder_eval.optimize.activation import noise_floor_mde
-from coder_eval.optimize.execution import resolve_model
-from coder_eval.optimize.store import load_measurements
+from coder_eval.optimize.api import activation_floor_report
 
-baseline_dirs = [Path("<runs>/baseline-1"), Path("<runs>/baseline-2")]
-sidecar = Path(".optimize-skill/<skill>/measurements.json")
-suite_id = "<the suite's task_id>"
-
-print(noise_floor_mde(
-    run_dirs=baseline_dirs,
-    variant_id="default",
-    suite_id=suite_id,
-    criterion_index=0,
-    # Reuse an earlier round's floor when every key field still matches. This is the moment the
-    # cache exists for — reading it only after the round is over saves nothing.
-    measurements=load_measurements(sidecar),
-    model=resolve_model(load_arm_rows(baseline_dirs, "default", suite_id)),
+print(activation_floor_report(
+    run_dirs=[Path("<runs>/baseline-1"), Path("<runs>/baseline-2")], suite_id="<the suite's task_id>",
+    criterion_index=0, sidecar=Path(".optimize-skill/<skill>/measurements.json"),
 ))
 ```
 
-**Run directories are `Path` objects, not strings** — every one of these functions joins them
-with `/`, so a bare string raises after you have already paid for the runs.
+**Run directories are `Path` objects, not strings** — the composite rejects a string at the
+boundary, before it reads anything, so a typo costs you an error message rather than a number
+measured over one directory per letter.
 
-`variant_id` is `default` for a plain `coder-eval run` with no experiment. `criterion_index` is
-the criterion's **position** in the suite's `success_criteria:` list — 0-based, counting from the
-top of the YAML — so open the suite and count rather than assuming the engagement criterion is
-first. Unlike the gate, this function renders no note *into a verdict block* — a wrong index comes
-back as `None` with a WARNING on stderr naming the precondition that failed, so read the warning
-rather than the return value alone.
+`variant_id` defaults to `default`, which is right for a plain `coder-eval run` with no experiment.
+`criterion_index` is the criterion's **position** in the suite's `success_criteria:` list — 0-based,
+counting from the top of the YAML — so open the suite and count rather than assuming the engagement
+criterion is first. The block reads the floor cache before it computes anything, so a round whose
+key fields have not moved pays no bootstrap.
 
-A `None` result means the sample could not support a floor — either fewer than two invocations,
-or fewer than two rows scored in both halves — say that, rather than proceeding as if the round were
-priced.
+The block says either what this suite can resolve, or that the sample could not support a floor
+**and which precondition failed** — a wrong `criterion_index` and a suite that is genuinely too
+small read differently, and only one of them is fixed by buying rows. Print it into the ledger
+either way.
 
 Then apply it: **if the gain you are hoping for is smaller than the MDE, hand back and say the
 suite is too small to see it.** More rows, not more rounds. This is the cheapest stage there is
@@ -1044,26 +1032,12 @@ floor** free — it is arithmetic over a run directory that already exists. Read
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.load import load_arm_rows
-from coder_eval.optimize.execution import (
-    measure_execution_noise_floor,
-    resolve_model,
-)
-from coder_eval.optimize.store import (
-    UNRESOLVED_MODEL,
-    load_measurements,
-)
+from coder_eval.optimize.api import execution_floor_report
 
-control_dirs = [Path("<runs>/control")]   # the run dir from the control-arm command above
-sidecar = Path(".optimize-skill/<skill>/measurements.json")
-suite_id = "<the suite's task_id>"
-
-rows = load_arm_rows(control_dirs, "incumbent", suite_id)
-floor = measure_execution_noise_floor(
-    run_dirs=control_dirs, variant_id="incumbent", suite_id=suite_id,
-    model=resolve_model(rows) or UNRESOLVED_MODEL, measurements=load_measurements(sidecar),
-)
-print(None if floor is None else floor.mde)
+print(execution_floor_report(
+    run_dirs=[Path("<runs>/control")], variant_id="incumbent",   # the control-arm run dir above
+    suite_id="<the suite's task_id>", sidecar=Path(".optimize-skill/<skill>/measurements.json"),
+))
 ```
 
 **Be honest about what this can and cannot claim.** It is read *after* the control arm, so it
@@ -1072,9 +1046,11 @@ stages that multiply by candidate count. The hand-back rule is the activation tr
 gain you are hypothesising is smaller than the floor, this suite cannot see it — more rows, not
 more rounds.**
 
-It measures `weighted_score`, not `f1.yes`, because that is what this track's gate compares. A
-`None` means fewer than two rows carried two or more replicates; the function logs which
-precondition failed, so read the warning rather than treating `None` as a floor of zero.
+It measures `weighted_score`, not `f1.yes`, because that is what this track's gate compares. When
+the block says **no floor**, the sample could not support the null comparison — most often fewer
+than two rows carrying two or more replicates — and that is not the same as a floor of zero. This
+track's estimator logs its cause rather than returning it, so the block cannot name the failed
+precondition the way the activation one does: check `stderr` for the WARNING before acting.
 
 **The fallback, priced.** A user who skipped the control arm has no run directory with two or more
 replicates per row, so the floor costs one more single-replicate baseline — `+M_train` runs, not
@@ -1086,8 +1062,9 @@ one more reason to run the control arm first.
 **But a two-replicate floor is CONSERVATIVE, and not comparable to a three-replicate one.** With
 two replicates the null split is forced to 1-v-1, which is the noisiest split available, so the
 floor it returns overstates the true one. Measured on one suite, same rows and same model:
-**0.0607 at two replicates against 0.0414 at three — a 47% overestimate.** `NoiseFloor` carries
-`n_replicates` precisely so you can see which you are holding; read it before quoting the number.
+**0.0607 at two replicates against 0.0414 at three — a 47% overestimate.** The block states the
+replicate count it measured over precisely so you can see which one you are holding; read that line
+before quoting the number.
 
 Two consequences, and the second is the expensive one. A conservative floor makes you *under*-claim,
 which is the safe direction — but it will also tell you a real effect is invisible and send you to
