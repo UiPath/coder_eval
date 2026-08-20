@@ -30,7 +30,7 @@ are.** For a referenced step id:
 
 Like CE026-CE031 this is deliberately NOT a ``BaseRule`` in ``tests/lint/runner.py``:
 that runner is AST-only over ``.py`` files, whereas this rule reasons over workflow YAML
-plus embedded shell. It is wired as ``tests/test_custom_lint.py::TestCE035WorkflowOutputParity``.
+plus embedded shell. It is wired as ``tests/lint_tests/test_lint_harness_meta.py::TestCE035WorkflowOutputParity``.
 """
 
 from __future__ import annotations

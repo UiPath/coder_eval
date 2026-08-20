@@ -36,10 +36,16 @@ PROSE_SURFACES = [*sorted((SRC / "coder_eval" / "optimize").glob("*.py")), SRC /
 FIELD_SURFACE = SRC / "coder_eval" / "models" / "optimize.py"
 
 DOCSTRING_LINE_LIMIT = 25
-MAX_LONG_DOCSTRINGS = 8
+# 25 before the registers were split, 8 after. The ceiling sits ABOVE the current count on purpose:
+# `.claude/decisions/README.md` tells an author to keep a long docstring when its lines are really
+# contract, and a ceiling equal to the count makes that advice redden the build. It is not
+# hypothetical — the first pass of this phase trimmed three `optimize/` functions past their
+# specification and had to put it back.
+MAX_LONG_DOCSTRINGS = 10
 
 FIELD_DESCRIPTION_LINE_LIMIT = 8
-MAX_LONG_FIELD_DESCRIPTIONS = 4
+# 9 before, 4 after; one slot of slack, for the reason above.
+MAX_LONG_FIELD_DESCRIPTIONS = 5
 
 
 def _long_docstrings(path: Path) -> list[tuple[int, str]]:

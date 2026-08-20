@@ -1,10 +1,12 @@
 """Verbatim-leak detection: is a substantive string from one place present in another?
 
-One declaration, two consumers pointing in opposite directions. CE036 asks whether a dataset
+One declaration, THREE consumers pointing in different directions. CE036 asks whether a dataset
 row's PROMPT contains a value a criterion grades it on. :func:`coder_eval.optimize.search.
 candidate_leaks` asks whether a candidate ``SKILL.md`` newly contains train-row content it should
-have generalized. Same primitive; a second copy would agree on ordinary input and diverge exactly
-where either one was written for.
+have generalized. CE057 asks CE036's question one indirection over, of an outcome row against
+its ``expectations/<row id>.json``. Same primitive; a second copy would agree on ordinary input
+and diverge exactly where either one was written for — so widening `graded_strings` or
+`string_leaves` means auditing all THREE call sites.
 
 Its own module rather than three names on ``optimize.gate``: CE036 is a rule about *task files*
 and ``optimize.gate`` is the optimize loop's library, so a task-lint test importing from the

@@ -26,7 +26,7 @@ Design choices, each load-bearing:
 
 Like CE027/CE029, this is intentionally NOT a ``BaseRule`` registered in
 ``tests/lint/runner.py`` (that runner is AST-only over ``.py`` files); it reasons
-over Markdown and is wired as ``tests/test_custom_lint.py::TestCE030DocSchemaParity``.
+over Markdown and is wired as ``tests/lint_tests/test_lint_doc_surfaces.py::TestCE030DocSchemaParity``.
 """
 
 from __future__ import annotations

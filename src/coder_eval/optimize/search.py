@@ -116,14 +116,19 @@ def candidate_leaks(
     baseline_text: str,
     rows: Sequence[TaskDefinition],
 ) -> list[str]:
-    """Train-row content a candidate skill DIRECTORY newly contains. The anti-memorization preflight.
+    """Train-row content a candidate skill newly contains. The anti-memorization preflight.
 
     Returns one entry per leak: the row it came from, the field, and the offending span. Empty means
     nothing was found — which is not the same as nothing being there, see the boundary below.
 
-    **It reads the whole DIRECTORY, not ``SKILL.md``.** A skill is a directory, and reading one file
-    lets a candidate move train-row content into a reference file beside it and pass a preflight whose
-    entire purpose is catching exactly that.
+    **It compares TEXT, and the caller owns what that text covers.** Hand it
+    :func:`skill_text(skill_dir) <skill_text>`, never one file's contents: a skill is a DIRECTORY,
+    and a candidate that bundles train-row content into ``scripts/`` or a reference file is then
+    invisible — the result comes back CLEAN, byte-identical to a genuinely clean candidate, which is
+    the worst shape a preflight can have.
+
+    ``baseline_text`` is what makes it NEWLY: content the incumbent already had is not a leak the
+    candidate introduced.
 
     Shares its primitive with CE036 rather than reimplementing it: ``LEAK_LOCATOR_FIELDS``,
     ``LEAK_MIN_CHARS``, ``string_leaves`` and ``graded_strings`` live in

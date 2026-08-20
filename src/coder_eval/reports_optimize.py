@@ -92,8 +92,12 @@ def _headline(
 ) -> str:
     """The ONE headline ladder, for both Stage B tracks.
 
-    Typed on :class:`~coder_eval.models.GateVerdictBase`, and honestly so: every field the chain
-    reads is declared there.
+    Typed on :class:`~coder_eval.models.GateVerdictBase`, where every field the chain reads is
+    declared — with one boundary the annotation cannot express: ``failed_vetoes`` resolves through
+    the base's ``_own_vetoes``, which only a subclass implements. So the real requirement is a
+    CONCRETE verdict, and a bare ``GateVerdictBase`` type-checks here and raises
+    ``NotImplementedError``. No production path can construct one; a test that wants to should
+    expect the raise.
 
     Five rungs, and the ORDER is the whole contract: a refusal outranks ``BLOCKED``, and
     ``UNDECIDED`` outranks the refusal, because a verdict Holm never saw has no decision to refuse.

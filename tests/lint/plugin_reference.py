@@ -38,7 +38,7 @@ Two rendering rules keep this small and are load-bearing:
 
 Like CE026-CE031 this is not a ``BaseRule`` in the AST runner; it reasons over
 Markdown and pydantic metadata, and is wired as
-``tests/test_custom_lint.py::TestCE033PluginReferenceParity``.
+``tests/lint_tests/test_lint_onboarding_surfaces.py::TestCE033PluginReferenceParity``.
 """
 
 from __future__ import annotations

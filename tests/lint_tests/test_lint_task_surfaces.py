@@ -1,5 +1,6 @@
 """Lint tests: task surfaces."""
 
+import ast
 from pathlib import Path
 from typing import ClassVar
 
@@ -7,6 +8,19 @@ import pytest
 
 from tests.lint.task_yaml_discovery import all_yaml, task_yamls
 from tests.lint_tests.shared import REPO_ROOT, TESTS_ROOT, _dataset_task, _normalized
+
+
+# The repo's own task files, discovered ONCE and through the shared reader.
+#
+# `task_yamls` parses for a top-level `task_id:` and globs BOTH extensions, which is why it exists:
+# these three rules hand-rolled `rglob("*.yaml")`, so a `.yml` task was invisible to every one of
+# them — measured, a `tasks/probe.yml` whose prompt leaked a graded value produced zero CE036 cases
+# and a green `make lint`. CLAUDE.md calls this reader "the ONE answer to which YAML files under this
+# tree are tasks" for exactly that reason.
+_REPO_TASKS = sorted(task_yamls(REPO_ROOT / "tasks"))
+# A path break must FAIL rather than silently collect nothing — the CE044/CE045 lesson, and the
+# reason CE052 one directory over carries the same assert.
+assert _REPO_TASKS, "no task YAML found under tasks/ — these three rules would check nothing"
 
 
 @pytest.mark.lint
@@ -57,7 +71,7 @@ class TestCE034ArmedPositiveRequiresSuccess:
 
     @pytest.mark.parametrize(
         "path",
-        sorted(p for p in (REPO_ROOT / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        _REPO_TASKS,
         ids=lambda p: p.relative_to(REPO_ROOT).as_posix(),
     )
     def test_repo_tasks_arm_only_success_requiring_positives(self, path: Path):
@@ -189,7 +203,7 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
 
     @pytest.mark.parametrize(
         "path",
-        sorted(p for p in (REPO_ROOT / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        _REPO_TASKS,
         ids=lambda p: p.relative_to(REPO_ROOT).as_posix(),
     )
     def test_repo_task_prompts_do_not_contain_the_graded_string(self, path: Path):
@@ -306,7 +320,12 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
         text = _normalized(REPO_ROOT / "CLAUDE.md")
         sentence = next((s for s in text.split(". ") if "Location fields" in s), None)
         assert sentence is not None, "CLAUDE.md no longer states CE036's exemption list"
-        backticked = set(re.findall(r"`([a-z_]+)`", sentence))
+        # The PARENTHESISED list only. Reading every backticked name in the whole sentence let a
+        # field the sentence ALSO mentions in its trailing clause — `skill_name` does — be deleted
+        # from the exemption list with this still passing (measured).
+        listed = re.search(r"Location fields \(([^)]*)\)", sentence)
+        assert listed is not None, "CLAUDE.md's CE036 sentence no longer parenthesises the list"
+        backticked = set(re.findall(r"`([a-z_]+)`", listed.group(1)))
         assert set(LEAK_LOCATOR_FIELDS) <= backticked, (
             f"CLAUDE.md's CE036 sentence omits {sorted(set(LEAK_LOCATOR_FIELDS) - backticked)}"
         )
@@ -642,6 +661,18 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
         # And nothing under `tests/lint/rules/` is named for it either, which is how a `BaseRule`
         # would arrive.
         assert not list((TESTS_ROOT / "lint" / "rules").glob(f"{rule_id.lower()}_*.py")), why
+        # And no `TestCE<NNN>` class claims it — the CLASS-WIRED half, which is the case the
+        # docstring above names and which neither check can see. `ALL_RULES` never holds a
+        # class-wired rule, and the cross-surface uniqueness test fails only on DUPLICATES, so a
+        # SINGLE class claiming a reserved or retired number passed every check in the suite
+        # (measured: appending `class TestCE044…` to a lint_tests module left it green).
+        claimants = sorted(
+            f"{path.name}::{node.name}"
+            for path in sorted((TESTS_ROOT / "lint_tests").glob("*.py"))
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.ClassDef) and node.name.startswith(f"Test{rule_id}")
+        )
+        assert not claimants, f"{rule_id} is {why}, but {claimants} claims it"
 
 
 @pytest.mark.lint
@@ -684,7 +715,7 @@ class TestCE060SplitLabelsAllOrNothing:
 
     @pytest.mark.parametrize(
         "path",
-        sorted(p for p in (REPO_ROOT / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        _REPO_TASKS,
         ids=lambda p: p.relative_to(REPO_ROOT).as_posix(),
     )
     def test_repo_tasks_are_fully_labelled_or_not_at_all(self, path: Path):

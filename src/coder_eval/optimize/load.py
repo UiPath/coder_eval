@@ -819,6 +819,12 @@ def _rules_verdicts(result: EvaluationResult, criterion_index: int) -> dict[str,
 
     A malformed or absent line costs no score: the float on line 1 is the measurement and this
     attribution is optional by construction.
+
+    **The scan window is ``[first "Stdout:", first "Stderr:" after it)``, and the FIRST is
+    load-bearing.** ``run_command`` appends a ``Stderr:`` section after stdout, and a traceback there
+    can quote artifact text — which is untrusted agent output. Ending the window at the LAST
+    ``Stderr:`` marker is therefore defeated by that text containing a second one, which would pull
+    a forged attribution line into the window.
     See .claude/decisions/2026-08-20-tree-reconciliation.md.
     """
     if criterion_index >= len(result.success_criteria_results):

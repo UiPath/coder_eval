@@ -36,7 +36,7 @@ row count between the merge base and the working copy is what makes it a real ga
 
 **This check cannot run in ``make verify``** — it is diff-based, and a working tree has no base
 ref. It runs as the ``pull_request``-only ``estimator-protocol`` job. Everything above
-``__main__`` is pure and unit-tested (``tests/test_custom_lint.py::TestEstimatorLedger``); only
+``__main__`` is pure and unit-tested (``tests/lint_tests/test_lint_computed_claims.py::TestEstimatorLedger``); only
 the ``_git`` helpers and ``main`` touch git, and ``main`` is covered by a real fixture repository.
 
 **Stdlib only.** The CI job installs nothing, so this module and everything it imports must load

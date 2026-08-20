@@ -852,9 +852,10 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         # neighbour inlines the idiom, the bug propagates. This forbids the raw form.
         #
         # Over the WHOLE split suite, not `__file__`: the sensors this polices used to share one
-        # module and now sit in thirteen, so reading this file alone would police one of them and
-        # report a clean bill of health for the other twelve. That narrowing is the standing hazard
-        # of splitting a monolith, and it is silent by construction.
+        # module and now sit across the package, so reading this file alone would police one of them
+        # and report a clean bill of health for all the others. That narrowing is the standing
+        # hazard of splitting a monolith, and it is silent by construction — which is why the count
+        # below is derived from disk rather than written down.
         sources = [*sorted(pathlib.Path(__file__).parent.glob("*.py")), TESTS_ROOT / "test_custom_lint.py"]
         assert len(sources) > 10, "GAP: the split suite is not where this scan expects it"
         offenders = [

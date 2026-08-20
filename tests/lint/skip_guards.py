@@ -53,7 +53,7 @@ unconditionally, and to leave ``# noqa: CE045`` plus a comment on the guard that
 remains. That suppression is the rule working: it forces the author to answer *"is anything
 load-bearing behind this skip?"* every time one is written.
 
-Wired as ``tests/test_custom_lint.py::TestCE045SkipOnIgnoredPath`` rather than as a ``BaseRule``,
+Wired as ``tests/lint_tests/test_lint_harness_meta.py::TestCE045SkipOnIgnoredPath`` rather than as a ``BaseRule``,
 because its subject is ``tests/`` and the ``ALL_RULES`` sweep runs over ``src/`` only.
 """
 

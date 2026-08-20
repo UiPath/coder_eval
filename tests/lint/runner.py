@@ -1,4 +1,4 @@
-"""Shared runner used by tests/test_custom_lint.py.
+"""Shared runner, driven from tests/test_custom_lint.py and tests/lint_tests/.
 
 Parses each file once, runs every registered rule, and filters violations
 that are suppressed by an inline `# noqa: CE<id>` or bare `# noqa` comment.

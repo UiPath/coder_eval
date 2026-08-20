@@ -39,8 +39,7 @@ unit-tested, and a rule routed through it cannot be half-right.
 * A rule matching on the imported NAMES (``node.names``) rather than the module is out of scope —
   it has no module string to get wrong.
 * It reports a GAP rather than passing vacuously: if no rule file defines ``visit_ImportFrom`` at
-  all, that is a renamed or restructured harness and is flagged, mirroring CE044's treatment of a
-  renamed ``_ALLOWED_OPS``.
+  all, that is a renamed or restructured harness and is flagged rather than passing vacuously.
 * Lambdas are collected alongside ``def``s: a matcher written as
   ``visit_ImportFrom = lambda self, node: … node.module …`` used to drop out of scope entirely,
   and because the reader set was then empty the anti-vacuity GAP did not fire either — a silent
@@ -61,8 +60,8 @@ unit-tested, and a rule routed through it cannot be half-right.
 * The SECOND check is scoped to ``tests/lint/rules/`` and exempts ``base.py``, which is the one
   file that must define ``visit_ImportFrom``. It is anchored against vacuity on ``base.py`` itself:
   checking that file asserts it defines BOTH ``visit_ImportFrom`` and ``check_import``, so renaming
-  or deleting the hook is reported there rather than quietly making the whole check a no-op
-  (CE044's lesson). It says nothing about whether an overriding ``check_import`` is CORRECT.
+  or deleting the hook is reported there rather than quietly making the whole check a no-op. It
+  says nothing about whether an overriding ``check_import`` is CORRECT.
 * It scans all of ``tests/`` — not just ``tests/lint/rules/``. The class is not confined to
   numbered rules: ``tests/test_optimize_layering.py``'s ``_coder_eval_imports`` had exactly the
   same blindness, and it is the helper behind the ``optimize/`` / ``reports_optimize``

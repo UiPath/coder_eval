@@ -20,7 +20,7 @@ generated** — generating it would need a second per-page field).
 
 Like CE027/CE029/CE030 this is not a ``BaseRule`` in the AST runner; it reasons
 over Markdown/YAML and is wired as
-``tests/test_custom_lint.py::TestCE028DocIndexParity``.
+``tests/lint_tests/test_lint_doc_surfaces.py::TestCE028DocIndexParity``.
 """
 
 from __future__ import annotations

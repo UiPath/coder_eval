@@ -27,7 +27,7 @@ legitimately consumed only via serialization, with a reason.
 Like CE027 through CE030, this is not a ``BaseRule`` in the AST runner (that runner walks
 one file at a time and reports line-level violations; this rule reasons over the
 *whole* ``src/`` tree at once). It is wired as
-``tests/test_custom_lint.py::TestCE031DeadConfigFields``.
+``tests/lint_tests/test_lint_doc_surfaces.py::TestCE031DeadConfigFields``.
 """
 
 from __future__ import annotations

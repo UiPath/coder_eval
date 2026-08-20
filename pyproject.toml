@@ -213,23 +213,25 @@ max-branches = 25
 # `isolation/docker_runner.py::_build_argv` 29, `reports_experiment.py::generate_variant_report` 24,
 # `orchestrator.py::_simulation_dialog_loop` 22, `agents/claude_code_agent.py::communicate` and
 # `agents/antigravity_agent.py::communicate` 21, `orchestration/experiment.py::resolve_all_tasks`
-# and `sandbox.py::_setup_skills` 19 — everything else is under 19. `optimize/execution.py::execution_gate`
+# and `agents/codex_agent.py::_setup_skills` 19 — everything else is under 19. `optimize/execution.py::execution_gate`
 # used to sit third on this list at 23 and is now 10; the whole `optimize/` family tops out at 10
 # (`execution_gate`, `load/reconcile_tree_against_run_json`), so nothing in it constrains the ceiling.
 #
 # No per-file-ignore exists because the CEILING is 30, and nothing else. The old flat
 # `optimize_gate.py` — the file the plan that introduced this expected to exempt — never needed one,
 # and the split has landed into the `optimize/` package: that module is eight (`optimize/execution.py`
-# 1706, `optimize/activation.py` 1304, `optimize/gate.py` 968, `optimize/load.py` 958,
-# `optimize/fronts.py` 415, `optimize/search.py` 335, `optimize/store.py` 265, `optimize/__init__.py`
-# 26), down from one file of 3,664 lines (3,291 before that plan's earlier phases added to it).
+# 1611, `optimize/activation.py` 1262, `optimize/gate.py` 928, `optimize/load.py` 911,
+# `optimize/fronts.py` 357, `optimize/search.py` 285, `optimize/store.py` 265, `optimize/__init__.py`
+# 26 — 5,645 in total), down from one file of 3,664 lines (3,291 before that plan's earlier phases
+# added to it). A LINE COUNT is the one figure here that moves without any code changing: six of
+# these eight were invalidated by a later docstring trim in the same plan, so re-measure them
+# together with the grades rather than trusting the date below.
 #
 # What `radon cc` reports, re-measured rather than carried forward: across `src/` there are 3
 # F-grades and 7 E-grades, and NONE of them is in `optimize/` any more. That family's worst is
 # `optimize/gate.py::cost_latency_guardrails` D(29), then `activation.py::activation_gate` and
-# `activation.py::_sibling_checks` at D(23). The three E-grades it used to carry —
-# `execution_gate` E(34), `_execution_diagnostics` E(31), `_dead_weight` D(29) — decomposed to 14, 8
-# and 8. An earlier version of this comment claimed no E-grade at all and seven D-grades; it was
+# `activation.py::_sibling_checks` at D(23). The two E-grades it used to carry — `execution_gate`
+# E(34) and `_execution_diagnostics` E(31) — decomposed to 14 and 8, and `_dead_weight` D(29) to 8. An earlier version of this comment claimed no E-grade at all and seven D-grades; it was
 # stale before the package move, and the move did not re-measure it, which is why every figure here
 # is dated to a commit.
 #

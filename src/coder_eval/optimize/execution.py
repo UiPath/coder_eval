@@ -899,7 +899,8 @@ def execution_gate(
     the verdict out of the Holm family: membership is ``p_value is not None`` and nothing else, so a
     refusal that still MEASURED a p stays in and keeps ``m`` honest for its siblings. The causes are
     recorded MOST-SPECIFIC-FIRST, and the ORDER the stage functions are called in below IS that
-    precedence — no comparison to make, a stale tree, an experiment that resolves nothing, an arm
+    precedence — no comparison to make, a stale tree, an experiment that resolves nothing, a
+    predeclared primary selecting no usable row, an
     with no rows, too few rows paired, zero variance, and a confident claim below the suite's own
     MDE. See .claude/decisions/2026-08-20-the-execution-gate-refusals.md for what each cost and why
     the below-MDE cause is two-sided.

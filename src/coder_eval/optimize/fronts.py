@@ -205,14 +205,26 @@ def headroom_ceiling(
     rows: Collection[str] | None = None,
     max_score: float = 1.0,
 ) -> RuleCeiling:
-    """The most a further round could still win on this suite. The one number that can say STOP.
+    """The most ONE arm could still win on this suite. The one number that can say STOP.
 
-    Computed over the rows every arm already gets right plus the rows none of them do: the first
-    group has nothing left to win and the second is what is still on the table. Read as a SCORE it is
+    ``headroom`` is the total score left on the table — ``max_score - value`` summed over the
+    selected rows this arm scored finitely. ``ceiling`` is that headroom expressed per row, and
+    **the denominator is the arm's FULL finite row count, never the selected subset.** That is the
+    whole point: a rule that fails 3 rows of 15 has a ceiling of 0.1, not 0.5, and dividing by the
+    subset overstates it 5x — which makes every rule look promotable. Read as a SCORE it is
     meaningless; read as a CEILING it bounds what another round can buy.
 
-    ``None`` when it cannot be computed rather than 0.0, which would claim there is no headroom.
-    A hole is absent, never zero.
+    Takes ONE arm's ``row_scores``. It cannot see other arms, so it says nothing about what a FIELD
+    of candidates has left; a caller wanting that computes it per arm.
+
+    **``rows=None`` and ``rows=set()`` are different questions, and the trap is real.** ``None``
+    means every row this arm scored; an empty collection is a real, empty selection and yields a
+    zero headroom. It matters because ``rule_row_map`` OMITS a rule that failed nowhere — so passing
+    a missing entry as ``None`` reports the whole suite's ceiling under that rule's name (measured:
+    0.1 where the answer is 0.0).
+
+    Always returns a :class:`RuleCeiling`, never ``None``: a suite with nothing finite has a real
+    ceiling of 0.0. A non-finite score is dropped rather than folded to zero.
     See .claude/decisions/2026-08-20-the-advisory-fronts.md.
     """
     finite = {row_id: value for row_id, value in row_scores.items() if math.isfinite(value)}
@@ -298,14 +310,26 @@ def cost_quality_points(
 
 
 def cost_quality_front(points: list[CostQualityPoint]) -> list[str]:
-    """Rank arms by quality per unit cost. **ADVISORY ONLY — never a shortlist.**
+    """The arms nothing dominates on BOTH quality and cost. **ADVISORY ONLY — never a shortlist.**
 
-    A ratio has no defensible threshold, which is exactly why this may not narrow a field. Presenting
-    it as a shortlist invites promoting the cheapest arm that happens to score, and reading it as the
-    Pareto front (a DISCARD rule) or the instance-best front (a MERGE shortlist) is the reading error
+    A 2-D Pareto filter, not a ratio ranking: an arm survives unless some other arm is at least as
+    good on score AND at least as cheap, with at least one of the two strictly better. Returns the
+    survivors in INPUT order — there is no ordering within the front, and inventing one (by ratio,
+    say) is what would turn an advisory into a shortlist. Reading it as the Pareto front over
+    OUTCOMES (a DISCARD rule) or the instance-best front (a MERGE shortlist) is the reading error
     this separation exists to prevent.
 
-    A hole is absent, never zero.
+    **Domination is gated on row-set COVERAGE** (``row_ids <= other_ids``), and that conjunct is
+    load-bearing. Without it an arm measured on a subset can dominate one measured on more rows:
+    measured, an arm that crashed 5 of 6 rows and scored 1.0 on the sixth knocked the incumbent off
+    the front. A count cannot express this — two arms on four disjoint rows each would both look
+    entitled to dominate.
+
+    **A hole is absent, never zero, and the filter IS the exclusion rule.** An arm whose score or
+    cost is ``None``, or non-finite, is dropped before the comparison rather than folded to 0.0 —
+    which would rank an arm that failed to produce a number above one that produced a bad one.
+    ``is not None`` rather than truthiness, because a free model is legitimately the cheapest arm and
+    ``0.0`` is a real cost.
     See .claude/decisions/2026-08-20-the-advisory-fronts.md.
     """
     # Narrowed to plain floats up front rather than suppressing the comparison's type error: the

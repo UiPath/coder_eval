@@ -174,10 +174,13 @@ def noise_floor_mde(
     noise actually is. A candidate difference under it is indistinguishable from that noise however
     small its p.
 
-    ``None`` — never a fabricated number — for any of five causes, and ``reasons`` is how a caller
-    finds out WHICH: fewer than 2 invocations, fewer than 2 rows scored in both halves, a stale
-    tree, nothing loaded, or a split mismatch. At most one is recorded, since every refusal here is
-    a ``return``.
+    ``None`` — never a fabricated number — for any of SIX causes, and ``reasons`` is how a caller
+    finds out WHICH: fewer than 2 invocations, a stale tree, nothing loaded, a split mismatch, fewer
+    than 2 rows scored in both halves, or the bootstrap declining on the clusters that remained. At
+    most one is recorded, since every refusal is a ``return``. The count matters because a note
+    downstream used to name the FIRST cause unconditionally, which is false for five of the six —
+    reproduced on an incumbent with two invocations where one row scored in both halves, rendering
+    "needs at least two invocations" beside `len(incumbent_run_dirs) == 2`.
 
     ``reasons`` is an out-parameter SINK rather than a widened return type: this function is public
     and imported by the skill's inline snippets, so changing its ``float | None`` would break a
@@ -230,7 +233,7 @@ def measure_noise_floor(
 
     Pass ``reasons`` — a fresh list — to find out WHY a ``None`` came back; at most one reason is
     recorded, since every refusal here is a ``return``. See :func:`noise_floor_mde`, which forwards
-    it, for the five causes and for why this is a sink rather than a widened return type.
+    it, for the six causes and for why this is a sink rather than a widened return type.
     """
     require_valid_criterion_index(criterion_index)
     if len(run_dirs) < 2:

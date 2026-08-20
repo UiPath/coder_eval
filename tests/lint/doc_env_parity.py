@@ -24,7 +24,7 @@ one users actually copy into a workflow, so it carries the real risk.
 It is intentionally NOT a ``BaseRule`` registered in ``tests/lint/runner.py``:
 that runner is AST-only and walks ``.py`` files, whereas this rule reasons over
 Markdown/YAML doc surfaces. It is wired as a dedicated test in
-``tests/test_custom_lint.py::TestCE027DocEnvVarParity``.
+``tests/lint_tests/test_lint_doc_surfaces.py::TestCE027DocEnvVarParity``.
 """
 
 from __future__ import annotations

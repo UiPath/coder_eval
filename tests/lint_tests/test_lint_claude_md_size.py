@@ -1,7 +1,7 @@
 """`CLAUDE.md` is loaded into every session's context, so its size is a real cost.
 
 Not a style preference: the file is prepended to the context of every request in every session, so a
-paragraph nobody reads is paid for on every call, forever. It reached 89,090 characters, of which ONE
+paragraph nobody reads is paid for on every call, forever. It reached 90,204 characters, of which ONE
 line was 33,247 — 37% of the file — restating 35 rule docstrings that already existed in
 `tests/lint/rules/`. Duplicated prose is worse than absent prose here, because the copy drifts and
 the reader cannot tell which one is current.
@@ -25,7 +25,9 @@ from tests.lint_tests.shared import REPO_ROOT
 
 pytestmark = pytest.mark.lint
 
-# 89,090 before the prose registers were split out; 44,908 after. The ceiling leaves room for the
+# 90,204 characters before the prose registers were split out; 44,908 after. Both measured with
+# `len(text)`, which is what this sensor uses — the file's BYTE count differs, and quoting one
+# against the other is how a baseline stops matching any commit. The ceiling leaves room for the
 # tree to grow a module or two without a negotiation, and not for another essay.
 MAX_CHARS = 46_000
 

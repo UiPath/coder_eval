@@ -12,7 +12,7 @@ file was 9,680 lines and 52 classes; a third of it was one class. Splitting it c
 plugin's surfaces.
 
 Run just these tests:
-    uv run pytest tests/test_custom_lint.py tests/lint_tests/ -v
+    uv run pytest -m lint -v      # what `make lint` runs: the marker, never a path
     make lint
 """
 

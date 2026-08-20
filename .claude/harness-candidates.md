@@ -493,7 +493,7 @@ with the two `action.yml` items above — one considered change to the action's 
       `test_optimize_skill_snippet_names_the_public_gate_api` checks a claim against the code, and
       each such sensor is bespoke — there is no general form. — caught in the optimize-skill gate
       corrections review, 2026-08-13.~~ **CLOSED 2026-08-14 by CE039** (`tests/lint/computed_claims.py`
-      + `tests/test_custom_lint.py::TestCE039ComputedClaims`). The general form is a `ComputedClaim`
+      + `tests/lint_tests/test_lint_computed_claims.py::TestCE039ComputedClaims`). The general form is a `ComputedClaim`
       registry whose entries *compute* the claim, plus the coverage rule that makes it a class
       rather than N bespoke sensors: an arithmetic-bearing table in the two optimize surfaces that
       no registered claim names **fails**. Three claims shipped with it — `cost-table` (asserts
@@ -841,7 +841,7 @@ with the two `action.yml` items above — one considered change to the action's 
       reader — or adding a module — cannot take it out of reach.
 
 - [ ] **A dotted `coder_eval.<module>.<name>` reference in PROSE is unchecked.** The snippet
-      sensor (`tests/test_custom_lint.py::_snippet_binding_failures`) resolves imports inside
+      sensor (`tests/lint_tests/shared.py::_snippet_binding_failures`) resolves imports inside
       ` ```python ` fences only. The six-module split (Plan B+C Phase 7) left **fourteen** files
       naming a moved symbol by its old dotted path — including
       `plugins/coder-eval/reference/proposal-prompt.md`, which told the proposer to call
@@ -1129,7 +1129,7 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       plan, Phase 3 quality review.
 
 - [ ] **The `optimize-skill` snippet binder is structurally blind to an ATTRIBUTE read, which is 13
-      of the skill's live bindings.** `tests/test_custom_lint.py::_snippet_binding_failures` resolves
+      of the skill's live bindings.** `tests/lint_tests/shared.py::_snippet_binding_failures` resolves
       the skill's `import` lines and binds keyword arguments, so a renamed FUNCTION or PARAMETER is
       caught. It never resolves an attribute read off a returned object, and the skill has thirteen:
       `floor.mde`, `attribution.failed` / `.unattributed`, `arm.row_scores` / `.variant_id`,
@@ -1176,7 +1176,7 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       `7 % 2` and `2 ** 3` must raise naming the operator, every admitted operator must compute
       correctly, and the two tables are pinned non-empty and disjoint by arity, which is the
       anti-vacuity guard for the other two. `tests/lint/evaluator_dispatch.py` (144 lines) is deleted.
-      **The id stays reserved**: `tests/test_custom_lint.py::test_a_reserved_or_retired_id_is_not_live`
+      **The id stays reserved**: `tests/lint_tests/test_lint_task_surfaces.py::test_a_reserved_or_retired_id_is_not_live`
       parametrizes over CE044 and CE056 together, because `runner.py`'s uniqueness assert covers
       `ALL_RULES` only and a class-wired rule could claim either number with nothing failing.
       Re-using CE044 would make `make lint` report findings under a number whose documented meaning

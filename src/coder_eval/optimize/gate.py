@@ -13,7 +13,7 @@ answer to "what does this gate promote on".
 The two gates themselves live one rank up, in :mod:`coder_eval.optimize.activation` and
 :mod:`coder_eval.optimize.execution`. The split is BY TRACK because the activation/execution pair
 is this feature's dominant organising principle — almost every concept in it is a two-track pair —
-and because the module it was carved out of had grown to 3,500 lines with an E-grade function.
+and because the module it was carved out of had grown to 3,664 lines with a D-grade function.
 
 **A library, not a CLI**, like every module in the family: no typer, no rich, no reach into the
 CLI package. The skill drives these functions from a short inline ``python`` snippet.
@@ -298,10 +298,11 @@ def no_floor(reason: str, *, reasons: list[str] | None = None) -> None:
     ACTUAL cause instead of guessing at one.
 
     **Only the ACTIVATION floor threads it today**, and that is stated rather than left to be
-    discovered: :func:`measure_execution_noise_floor` calls this function four times and passes
-    nothing, so ``_execution_diagnostics``' "the floor came back unavailable" advisory still names
-    no cause — the same defect on the other track, recorded in ``.claude/harness-candidates.md``
-    rather than half-fixed here.
+    discovered: :func:`measure_execution_noise_floor` passes nothing, so
+    ``_execution_diagnostics``' "the floor came back unavailable" advisory still names no cause —
+    the same defect on the other track, recorded in ``.claude/harness-candidates.md`` rather than
+    half-fixed here. (It called this function four times until :func:`floor_preflight` collapsed
+    three of them; the remaining one is the too-few-replicates case.)
 
     Both floor functions return ``None`` for several distinct reasons, and the caller is an agent
     about to decide whether to spend money. A silent ``None`` is indistinguishable from a floor of

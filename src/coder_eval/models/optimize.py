@@ -410,8 +410,9 @@ class ExecutionGateVerdict(GateVerdictBase):
         default=None,
         description=(
             "Why this block is NOT a decision, or None when it is one. Set by execution_gate, "
-            "MOST-SPECIFIC-FIRST, for any of seven causes: no comparison to make, a stale tree, an "
-            "experiment that resolves nothing, an arm that loaded ZERO rows, too few rows paired, "
+            "MOST-SPECIFIC-FIRST, for any of EIGHT causes: no comparison to make, a stale tree, an "
+            "experiment that resolves nothing, a predeclared primary selecting no usable row, an "
+            "arm that loaded ZERO rows, too few rows paired, "
             "zero-variance paired differences, or a difference below the suite's own MDE whose "
             "interval STILL excludes zero. One field for all of them because they answer the same "
             "question with the same consequence; the message names which cause and its remedy. It "
@@ -495,7 +496,7 @@ _FIELD_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("ci_high", "optional here"),
     ("p_value", "optional here, and an analytic paired t rather than a bootstrap draw"),
     ("n_resamples", "the draws pay for the MDE and the guardrails, NOT for the primary statistic"),
-    ("gate_refusal", "four kinds of cause, all detected inside execution_gate rather than at Holm"),
+    ("gate_refusal", "eight causes, all detected inside execution_gate rather than at Holm"),
 )
 
 

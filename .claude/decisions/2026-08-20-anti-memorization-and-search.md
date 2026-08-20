@@ -3,10 +3,13 @@
 Subject: `optimize/search.py::candidate_leaks`, `skill_text`, `search_compare`,
 `leak_detection.py`.
 
-## Why the leak preflight reads a DIRECTORY, not a file
+## Why the leak preflight must be handed a DIRECTORY, not a file
 
-A skill is a directory. Reading `SKILL.md` alone lets a candidate move train-row content into a
-reference file beside it and pass a preflight whose whole purpose is catching exactly that.
+`candidate_leaks` compares TEXT; `skill_text(skill_dir)` is the reader, and the CALLER owns which
+of the two it passes. That split is why the obligation has to be stated rather than assumed: a skill
+is a directory, and handed `SKILL.md` alone the preflight comes back CLEAN for a candidate that
+bundled train-row content into `scripts/` or a reference file — byte-identical to a genuinely clean
+result, which is the worst shape a preflight can have.
 
 ## Why it shares its primitive with CE036 rather than reimplementing it
 

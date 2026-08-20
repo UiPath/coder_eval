@@ -221,7 +221,7 @@ Notes:
   single source of truth for "is this criterion type live-observable" —
   `validate_early_stop`/`EarlyStopWatcher` check `isinstance(c,
   LiveSuccessCriterion)` directly, no separate checker-side flag. A lint rule
-  (`tests/test_custom_lint.py::TestCE025LiveVerdictConsistency`) keeps the
+  (`tests/lint_tests/test_lint_ast_rules.py::TestCE025LiveVerdictConsistency`) keeps the
   model subclassing and the checker's `live_verdict` override paired.
 - Your `live_verdict` must be **deterministic** (a pure function of the
   `turn_records` prefix — no wall-clock, randomness, or hidden instance state)

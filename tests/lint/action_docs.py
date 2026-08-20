@@ -31,7 +31,7 @@ Four clauses, all mechanical:
 
 Like CE027-CE031 this is deliberately NOT a ``BaseRule`` in ``tests/lint/runner.py``:
 that runner is AST-only over ``.py`` files, whereas this rule reasons over Markdown and
-YAML. It is wired as ``tests/test_custom_lint.py::TestCE026ActionDocSurfaces``.
+YAML. It is wired as ``tests/lint_tests/test_lint_onboarding_surfaces.py::TestCE026ActionDocSurfaces``.
 """
 
 from __future__ import annotations

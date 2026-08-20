@@ -49,7 +49,7 @@ between those halves and is RETIRED, because there is no longer a parity to keep
 
 Like CE026-CE031 and CE033-CE038 this is **not** a ``BaseRule`` in ``tests/lint/runner.py`` (that
 runner is an AST walk over ``src/**/*.py``); it reasons over Markdown and is wired as
-``tests/test_custom_lint.py::TestCE039ComputedClaims``.
+``tests/lint_tests/test_lint_computed_claims.py::TestCE039ComputedClaims``.
 """
 
 from __future__ import annotations

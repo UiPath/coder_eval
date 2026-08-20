@@ -26,9 +26,11 @@ def parse_markdown_tables(text: str) -> list[MarkdownTable]:
     """Every pipe table in ``text``, skipping separator rows and anything inside a ``` fence.
 
     Reads RAW text rather than ``_normalized`` text, deliberately: a table is a line structure and
-    collapsing whitespace destroys it. That is legal because
-    ``test_no_sensor_inlines_the_normalization_idiom`` is scoped to ``tests/test_custom_lint.py``
-    by its own ``Path(__file__)`` — do not "fix" this to use ``_normalized``.
+    collapsing whitespace destroys it — do not "fix" this to use ``_normalized``. That is legal
+    because ``test_no_sensor_inlines_the_normalization_idiom`` scans the lint-test SUITE
+    (``tests/lint_tests/`` plus the runner) and this module sits in ``tests/lint/``, outside it. The
+    reason used to be that the sensor read only its own file; the split widened it, and the
+    conclusion survived by luck rather than by design, so the real boundary is stated here now.
     """
     tables: list[MarkdownTable] = []
     header: list[str] | None = None

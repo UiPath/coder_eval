@@ -127,7 +127,12 @@ def test_every_test_class_carries_the_lint_marker() -> None:
     one: a new module or class here is covered the moment it is marked, wherever the file sits.
     """
     unmarked: list[str] = []
-    for path in [*_suite_modules(), SUITE / "plugin_base.py"]:
+    # Every module in the package, not just the `test_lint_*` ones: an unmarked `Test*` class in
+    # `shared.py` or `plugin_base.py` is dead rather than silently skipped today, but this check
+    # exists to close exactly that class of hole and leaving two files out of it IS the hole.
+    for path in sorted(SUITE.glob("*.py")):
+        if path.name == Path(__file__).name:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         if any(
             isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "pytestmark" for t in n.targets)
