@@ -7294,6 +7294,48 @@ class TestCE039ComputedClaims:
         got = evaluate_expression(expr, {"N": 4.0, "M_train": 12.0})
         assert got == 66.0
 
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [("2 + 3", 5.0), ("7 - 2", 5.0), ("3 * 4", 12.0), ("9 / 2", 4.5), ("-5", -5.0), ("-(2 + 1)", -3.0)],
+    )
+    def test_evaluate_expression_computes_every_operator_it_admits(self, expr: str, expected: float) -> None:
+        """The whitelist IS the dispatch, so every admitted operator must have a working function.
+
+        Both halves are covered — the four binary operators and the one unary — because a dict
+        keyed on a type cannot be partially implemented but CAN be mis-mapped: `ast.Sub` pointing at
+        `operator.add` would type-check and pass every other test in this file.
+        """
+        from tests.lint.computed_claims import evaluate_expression
+
+        assert evaluate_expression(expr, {}) == expected
+
+    def test_evaluate_expression_rejects_an_operator_it_does_not_implement(self) -> None:
+        """The case CE044 existed for, now proven by BEHAVIOUR rather than by a parity scan.
+
+        CE044 compared the whitelist tuple against the `match` arms and reported a drift. There is
+        no drift to report now — admitting `ast.Mod` means adding it to `_BINARY_OPS` with a
+        function — so what needs asserting is that an unadmitted operator RAISES and names itself,
+        which is what tells prose drift apart from a parser bug.
+        """
+        from tests.lint.computed_claims import evaluate_expression
+
+        with pytest.raises(ValueError, match="disallowed operator Mod"):
+            evaluate_expression("7 % 2", {})
+        with pytest.raises(ValueError, match="disallowed operator Pow"):
+            evaluate_expression("2 ** 3", {})
+
+    def test_the_dispatch_tables_are_the_whitelist(self) -> None:
+        """One declaration, asserted as one: nothing else may enumerate the allowed operators.
+
+        The anti-vacuity guard for the two tests above — if either table were emptied they would
+        still pass by raising, so this pins that the tables are non-empty and disjoint by arity.
+        """
+        from tests.lint.computed_claims import _BINARY_OPS, _UNARY_OPS
+
+        assert set(_BINARY_OPS) == {ast.Add, ast.Sub, ast.Mult, ast.Div}
+        assert set(_UNARY_OPS) == {ast.USub}
+        assert not set(_BINARY_OPS) & set(_UNARY_OPS), "an operator cannot be both arities"
+
     def test_the_execution_sign_claim_is_registered(self):
         # Deleting the claim would otherwise reduce coverage silently — `covers=()` means the
         # table-coverage rule cannot notice its absence, because it checks a SENTENCE.
@@ -7357,123 +7399,6 @@ class TestCE039ComputedClaims:
         text = "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```\n| x | y |\n| --- | --- |\n| 3 | 4 |\n```\n"
         tables = parse_markdown_tables(text)
         assert [t.header for t in tables] == [["a", "b"]]
-
-
-@pytest.mark.lint
-class TestCE044EvaluatorDispatch:
-    """CE044 — the restricted evaluator's operator whitelist and its dispatch must agree.
-
-    `computed_claims.evaluate_expression` shipped with `case _: return lhs / rhs`, so widening
-    `_ALLOWED_OPS` by one line would have made it compute a cost-table cell with DIVISION and
-    report the result as true — in the one sensor class whose entire purpose is catching
-    arithmetic that lies.
-
-    The scanner lives in `tests/lint/evaluator_dispatch.py`; its boundary is stated there. Wired
-    as a test class rather than a `BaseRule` because its subject is a file under `tests/`, and the
-    `ALL_RULES` sweep runs over `src/` only.
-    """
-
-    CLAIMS_MODULE: ClassVar[Path] = Path(__file__).parent / "lint" / "computed_claims.py"
-
-    def test_the_real_evaluator_has_no_dispatch_gap(self) -> None:
-        from tests.lint.evaluator_dispatch import dispatch_gaps
-
-        gaps = dispatch_gaps(self.CLAIMS_MODULE)
-        assert not gaps, "the whitelist and the dispatch have drifted:\n  " + "\n  ".join(gaps)
-
-    def test_it_reads_the_real_whitelist(self) -> None:
-        # Anti-vacuity: the rule reads `_ALLOWED_OPS` and `evaluate_expression` BY NAME, so a
-        # rename would leave it checking an empty set against an empty set.
-        from tests.lint.evaluator_dispatch import whitelisted_ops
-
-        allowed = whitelisted_ops(ast.parse(self.CLAIMS_MODULE.read_text(encoding="utf-8")))
-        assert "Div" in allowed and len(allowed) >= 4, allowed
-
-    def test_it_reports_a_renamed_whitelist_rather_than_passing(self, tmp_path: Path) -> None:
-        # The vacuous-sensor failure mode: a rename must FAIL, never quietly check nothing.
-        module = tmp_path / "renamed.py"
-        module.write_text(
-            textwrap.dedent(
-                """
-                import ast
-
-                _OPERATORS = (ast.Add,)
-
-                def evaluate_expression(src, env):
-                    match src:
-                        case ast.Add():
-                            return 1.0
-                    raise ValueError(src)
-                """
-            ),
-            encoding="utf-8",
-        )
-        from tests.lint.evaluator_dispatch import dispatch_gaps
-
-        gaps = dispatch_gaps(module)
-        assert gaps and any("_ALLOWED_OPS" in g for g in gaps), gaps
-
-    def test_catches_a_whitelisted_operator_with_no_case(self, tmp_path: Path) -> None:
-        module = tmp_path / "widened.py"
-        module.write_text(
-            textwrap.dedent(
-                """
-                import ast
-
-                _ALLOWED_OPS = (ast.Add, ast.Mod)
-
-                def evaluate_expression(src, env):
-                    match src:
-                        case ast.Add():
-                            return 1.0
-                        case _:
-                            raise ValueError(src)
-                """
-            ),
-            encoding="utf-8",
-        )
-        from tests.lint.evaluator_dispatch import dispatch_gaps
-
-        gaps = dispatch_gaps(module)
-        assert len(gaps) == 1 and "Mod" in gaps[0], gaps
-
-    def test_catches_a_returning_wildcard(self, tmp_path: Path) -> None:
-        # The shipped defect, reproduced: a wildcard that RETURNS silently computes an unhandled
-        # operator as division.
-        module = tmp_path / "wildcard.py"
-        module.write_text(
-            textwrap.dedent(
-                """
-                import ast
-
-                _ALLOWED_OPS = (ast.Add,)
-
-                def evaluate_expression(src, env):
-                    match src:
-                        case ast.Add():
-                            return 1.0
-                        case _:
-                            return 2.0
-                """
-            ),
-            encoding="utf-8",
-        )
-        from tests.lint.evaluator_dispatch import dispatch_gaps
-
-        gaps = dispatch_gaps(module)
-        assert len(gaps) == 1 and "case _" in gaps[0], gaps
-
-    def test_an_operator_matched_only_by_an_outer_pattern_is_not_a_gap(self) -> None:
-        """`USub` is matched by `case ast.UnaryOp(op=ast.USub(), ...)`, never by the inner dispatch.
-
-        A scanner scoped to the operator `match` would report a false gap on it from day one, so
-        patterns are collected across every nested `match` in the function.
-        """
-        from tests.lint.evaluator_dispatch import _evaluator, handled_ops
-
-        fn = _evaluator(ast.parse(self.CLAIMS_MODULE.read_text(encoding="utf-8")))
-        assert fn is not None
-        assert "USub" in handled_ops(fn)
 
 
 @pytest.mark.lint
@@ -8841,12 +8766,32 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
         assert not (Path(__file__).parent / "lint" / "rules" / "ce057_outcome_prompt_leak.py").exists()
         assert not any(getattr(rule, "id", None) == "CE057" for rule in ALL_RULES)
 
-    def test_ce056_is_still_reserved_and_unimplemented(self):
-        # CE057 was chosen because CE056 is RESERVED with a promotion trigger that has not fired.
-        # Renumbering onto it would silently retire that reservation.
+    @pytest.mark.parametrize(
+        ("rule_id", "why"),
+        [
+            # RESERVED: a promotion trigger that has not fired. CE057 was chosen over it precisely
+            # so renumbering could not silently retire the reservation.
+            ("CE056", "reserved — the tree-walking fixture check, which today would pass vacuously"),
+            # RETIRED: the evaluator's whitelist and its dispatch became one declaration
+            # (`_BINARY_OPS` / `_UNARY_OPS`), so there is no parity left for a rule to pin. The
+            # rationale lives in `.claude/harness-candidates.md`, beside CE056's reservation.
+            ("CE044", "retired — the two halves it pinned are now one dict dispatch"),
+        ],
+    )
+    def test_a_reserved_or_retired_id_is_not_live(self, rule_id: str, why: str) -> None:
+        """A number that is not a live rule must not become one by accident.
+
+        Both directions of the register: reusing a RESERVED id drops the reservation, and reusing a
+        RETIRED one makes `make lint` report findings under a number whose documented meaning is
+        something else. `runner.py`'s uniqueness assert covers `ALL_RULES` only, so neither is
+        caught by it — a class-wired rule can claim either id and nothing fails.
+        """
         from tests.lint.runner import ALL_RULES
 
-        assert not any(getattr(rule, "id", None) == "CE056" for rule in ALL_RULES)
+        assert not any(getattr(rule, "id", None) == rule_id for rule in ALL_RULES), why
+        # And nothing under `tests/lint/rules/` is named for it either, which is how a `BaseRule`
+        # would arrive.
+        assert not list((Path(__file__).parent / "lint" / "rules").glob(f"{rule_id.lower()}_*.py")), why
 
 
 @pytest.mark.lint

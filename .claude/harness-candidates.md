@@ -1164,3 +1164,20 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       cheap as a lint rule: it is a property of a DIFF across a file boundary, not of one file's AST,
       so it belongs with `estimator_ledger.py`'s diff-based protocol rather than under
       `tests/lint/rules/`. — caught in the same review.
+
+- [ ] **CE044 (RETIRED): the restricted evaluator's whitelist and its dispatch can no longer drift.**
+      The rule pinned parity between `computed_claims.py`'s `_ALLOWED_OPS` tuple and the `match` arms
+      of `_compute`, because a wildcard arm returning a value would have computed an unhandled
+      operator as something else — `ast.Mod` in the whitelist reported as *division*, by the one
+      sensor class whose whole purpose is catching arithmetic that lies. It was retired by **designing
+      the parity out** rather than by dropping the check: the whitelist IS the dispatch now
+      (`_BINARY_OPS` / `_UNARY_OPS` map an operator type to the function that computes it), so
+      admitting an operator and implementing it are a single edit. What replaced it is behavioural —
+      `7 % 2` and `2 ** 3` must raise naming the operator, every admitted operator must compute
+      correctly, and the two tables are pinned non-empty and disjoint by arity, which is the
+      anti-vacuity guard for the other two. `tests/lint/evaluator_dispatch.py` (144 lines) is deleted.
+      **The id stays reserved**: `tests/test_custom_lint.py::test_a_reserved_or_retired_id_is_not_live`
+      parametrizes over CE044 and CE056 together, because `runner.py`'s uniqueness assert covers
+      `ALL_RULES` only and a class-wired rule could claim either number with nothing failing.
+      Re-using CE044 would make `make lint` report findings under a number whose documented meaning
+      is something else.

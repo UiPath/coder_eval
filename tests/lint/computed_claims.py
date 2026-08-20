@@ -38,12 +38,14 @@ three commits and ~50 token sensors, and was found by a human reading it: it del
 no presence sensor could see it, and it carries no arithmetic, so this rule could not either. CE039
 checks that a table's numbers are TRUE; nothing here checks that the prose parses as English.
 
-``_ALLOWED_OPS`` and ``_compute``'s operator dispatch are **two halves of one decision** and must be
-widened together. The whitelist admits an operator; the dispatch is what actually computes it, and a
-wildcard arm returning a value would silently compute an unhandled operator as something else —
+The evaluator's whitelist **is** its dispatch: :data:`_BINARY_OPS` and :data:`_UNARY_OPS` map an
+operator type to the function that computes it, so admitting an operator and implementing it are one
+edit and cannot disagree. They used to be two — a tuple of allowed types plus a ``match`` — and a
+wildcard arm returning a value would then have computed an unhandled operator as something else,
 which is how ``ast.Mod`` in the whitelist would have been reported as *division* by the one sensor
-class whose entire purpose is catching arithmetic that lies. The wildcard therefore raises, and
-**CE044** (``tests/lint/evaluator_dispatch.py``) pins the parity between the two halves.
+class whose entire purpose is catching arithmetic that lies. **CE044** existed to pin the parity
+between those halves and is RETIRED, because there is no longer a parity to keep: see
+``.claude/harness-candidates.md``.
 
 Like CE026-CE031 and CE033-CE038 this is **not** a ``BaseRule`` in ``tests/lint/runner.py`` (that
 runner is an AST walk over ``src/**/*.py``); it reasons over Markdown and is wired as
@@ -54,6 +56,7 @@ from __future__ import annotations
 
 import ast
 import math
+import operator
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -133,7 +136,20 @@ def arithmetic_tables(text: str) -> list[MarkdownTable]:
 # --- the restricted expression evaluator -------------------------------------
 
 _ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Call, ast.Load)
-_ALLOWED_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub)
+
+# The whitelist AND the dispatch, in one declaration each. An operator is allowed exactly because
+# there is a function here to compute it, so widening is one edit and the two cannot drift.
+#
+# TWO dicts rather than one, because `ast.USub` is a `unaryop` and the rest are `operator`s: a single
+# dict keyed on both would need an arity tag beside each entry, which is the second declaration
+# returning under another name.
+_BINARY_OPS: dict[type[ast.operator], Callable[[float, float], float]] = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+}
+_UNARY_OPS: dict[type[ast.unaryop], Callable[[float], float]] = {ast.USub: operator.neg}
 
 
 def evaluate_expression(src: str, env: dict[str, float]) -> float:
@@ -147,8 +163,9 @@ def evaluate_expression(src: str, env: dict[str, float]) -> float:
     for node in ast.walk(tree):
         if isinstance(node, ast.operator | ast.unaryop):
             # `ast.walk` yields the operator as its own node, so the whitelist has to admit the
-            # allowed ones here rather than only via their parent BinOp/UnaryOp.
-            if not isinstance(node, _ALLOWED_OPS):
+            # allowed ones here rather than only via their parent BinOp/UnaryOp. Membership in the
+            # dispatch tables IS the whitelist — there is nothing else to keep in step with them.
+            if type(node) not in _BINARY_OPS and type(node) not in _UNARY_OPS:
                 raise ValueError(f"{src!r} uses the disallowed operator {type(node).__name__}")
             continue
         if isinstance(node, ast.Call):
@@ -168,26 +185,14 @@ def evaluate_expression(src: str, env: dict[str, float]) -> float:
                 if name not in env:
                     raise ValueError(f"{src!r} references {name!r}, which is not one of {sorted(env)}")
                 return env[name]
-            case ast.UnaryOp(op=ast.USub(), operand=operand):
-                return -_compute(operand)
+            case ast.UnaryOp(op=op, operand=operand):
+                return _UNARY_OPS[type(op)](_compute(operand))
             case ast.Call(args=[arg]):
                 return float(math.ceil(_compute(arg)))
             case ast.BinOp(left=left, op=op, right=right):
-                lhs, rhs = _compute(left), _compute(right)
-                match op:
-                    case ast.Add():
-                        return lhs + rhs
-                    case ast.Sub():
-                        return lhs - rhs
-                    case ast.Mult():
-                        return lhs * rhs
-                    case ast.Div():
-                        return lhs / rhs
-                    case _:  # pragma: no cover - unreachable while _ALLOWED_OPS and this dispatch agree
-                        raise ValueError(
-                            f"{src!r} uses {type(op).__name__}, which the whitelist admits but this "
-                            "dispatch does not handle — widen both together (CE044)"
-                        )
+                # The lookup cannot miss: the walk above admitted this operator BECAUSE it is a key
+                # here. That is the whole point of collapsing the two halves.
+                return _BINARY_OPS[type(op)](_compute(left), _compute(right))
         raise ValueError(f"{src!r} contains an unevaluatable {type(node).__name__} node")
 
     return _compute(tree)
