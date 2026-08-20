@@ -384,6 +384,19 @@ def _ledger_control_dirs_call(run_dirs) -> str:
     )
 
 
+def _ledger_execution_run_dirs_call(run_dirs) -> str:
+    return record_round_execution(
+        sidecar=Path(_MISSING) / "measurements.json",
+        round_number=1,
+        run_dirs=run_dirs,
+        variant_ids=["incumbent"],
+        suite_id=EXEC_SUITE,
+        control_dirs=[Path(_MISSING)],
+        control_variant_id="incumbent",
+        suite_file=Path(_MISSING) / "suite.yaml",
+    )
+
+
 def _corpus_call(run_dirs) -> str:
     return corpus_report(
         run_dirs=run_dirs,
@@ -406,42 +419,84 @@ _REPORTERS = ["row-matrix", "cost-quality", "corpus", "headroom", "replicates", 
 # the confirm composites take TWO run-dir sequences each, and a message saying "run_dirs" would name
 # neither of them.
 _ENTRY_POINTS = [
-    pytest.param(_activation_call, "run_dirs", id="activation-floor"),
-    pytest.param(_execution_call, "run_dirs", id="execution-floor"),
-    pytest.param(_row_matrix_call, "run_dirs", id="row-matrix"),
-    pytest.param(_cost_quality_call, "run_dirs", id="cost-quality"),
-    pytest.param(_headroom_call, "run_dirs", id="headroom"),
-    pytest.param(_corpus_call, "run_dirs", id="corpus"),
-    pytest.param(_replicates_call, "run_dirs", id="replicates"),
-    pytest.param(_search_call, "run_dirs", id="search"),
-    pytest.param(_activation_gate_call, "gate_dirs", id="activation-gate"),
-    pytest.param(_seed_stability_call, "gate_dirs", id="seed-stability"),
-    pytest.param(_confirm_gate_dirs_call, "gate_dirs", id="confirm-gate-dirs"),
-    pytest.param(_confirm_confirm_dirs_call, "confirm_dirs", id="confirm-confirm-dirs"),
-    pytest.param(_ledger_run_dirs_call, "run_dirs", id="ledger-run-dirs"),
-    pytest.param(_ledger_baseline_dirs_call, "baseline_dirs", id="ledger-baseline-dirs"),
-    pytest.param(_ledger_control_dirs_call, "control_dirs", id="ledger-control-dirs"),
+    pytest.param(_activation_call, "activation_floor_report", "run_dirs", id="activation-floor"),
+    pytest.param(_execution_call, "execution_floor_report", "run_dirs", id="execution-floor"),
+    pytest.param(_row_matrix_call, "row_matrix_report", "run_dirs", id="row-matrix"),
+    pytest.param(_cost_quality_call, "cost_quality_report", "run_dirs", id="cost-quality"),
+    pytest.param(_headroom_call, "headroom_report", "run_dirs", id="headroom"),
+    pytest.param(_corpus_call, "corpus_report", "run_dirs", id="corpus"),
+    pytest.param(_replicates_call, "replicates_report", "run_dirs", id="replicates"),
+    pytest.param(_search_call, "search_report", "run_dirs", id="search"),
+    pytest.param(_activation_gate_call, "activation_gate_report", "gate_dirs", id="activation-gate"),
+    pytest.param(_seed_stability_call, "seed_stability_report", "gate_dirs", id="seed-stability"),
+    pytest.param(_confirm_gate_dirs_call, "confirm_report_activation", "gate_dirs", id="confirm-gate-dirs"),
+    pytest.param(_confirm_confirm_dirs_call, "confirm_report_activation", "confirm_dirs", id="confirm-confirm-dirs"),
+    pytest.param(_ledger_run_dirs_call, "record_round_activation", "run_dirs", id="ledger-run-dirs"),
+    pytest.param(_ledger_baseline_dirs_call, "record_round_activation", "baseline_dirs", id="ledger-baseline-dirs"),
+    pytest.param(_ledger_control_dirs_call, "record_round_execution", "control_dirs", id="ledger-control-dirs"),
+    pytest.param(_ledger_execution_run_dirs_call, "record_round_execution", "run_dirs", id="ledger-execution-run-dirs"),
 ]
 
 
-@pytest.mark.parametrize(("call", "argument"), _ENTRY_POINTS)
+def _run_dir_parameters() -> set[tuple[str, str]]:
+    """Every (composite, parameter) pair in `optimize.api` that takes a run-dir sequence.
+
+    DERIVED from the module, because the list above was hand-maintained and silently fell behind
+    TWICE — once when the confirm composites landed, once when the ledger writers did. The second
+    time was the very phase whose comment justified widening `_require_run_dirs` by pointing at
+    those writers' two sequences.
+    """
+    import inspect
+
+    import coder_eval.optimize.api as api
+
+    pairs: set[tuple[str, str]] = set()
+    for name, value in vars(api).items():
+        if name.startswith("_") or getattr(value, "__module__", None) != api.__name__ or not callable(value):
+            continue
+        for pname, param in inspect.signature(value).parameters.items():
+            if "Sequence[Path]" in str(param.annotation):
+                pairs.add((name, pname))
+    return pairs
+
+
+def test_every_run_dir_parameter_has_a_boundary_entry() -> None:
+    """`_ENTRY_POINTS` is complete with respect to the MODULE, not to anyone's memory.
+
+    A composite whose run-dir argument is not exercised there has no test that it rejects a string, a
+    bare `Path` or an empty list at the boundary — and `api.py`'s own docstring promises every entry
+    point does. The failure is silent: the parametrization simply runs one case fewer.
+    """
+    covered = {(case.values[1], case.values[2]) for case in _ENTRY_POINTS}
+    derived = _run_dir_parameters()
+    assert derived, "the derivation found nothing, so it would pass over any gap"
+    missing = sorted(f"{composite}({parameter})" for composite, parameter in derived - covered)
+    assert not missing, (
+        "these run-dir parameters have no entry in _ENTRY_POINTS, so nothing tests that they are "
+        "rejected at the boundary:\n  " + "\n  ".join(missing)
+    )
+    stale = sorted(f"{composite}({parameter})" for composite, parameter in covered - derived)
+    assert not stale, f"_ENTRY_POINTS names parameters the module no longer has: {stale}"
+
+
+@pytest.mark.parametrize(("call", "composite", "argument"), _ENTRY_POINTS)
 class TestRunDirsAreRejectedAtTheBoundary:
-    def test_a_bare_string_raises_type_error_naming_the_argument(self, call, argument) -> None:
+    def test_a_bare_string_raises_type_error_naming_the_argument(self, call, composite, argument) -> None:
         with pytest.raises(TypeError, match=f"{argument} must be a sequence of pathlib"):
             call(_MISSING)
 
-    def test_a_list_of_strings_raises_type_error(self, call, argument) -> None:
+    def test_a_list_of_strings_raises_type_error(self, call, composite, argument) -> None:
         with pytest.raises(TypeError, match="string"):
             call([_MISSING])
 
-    def test_a_bare_path_names_the_argument_rather_than_failing_downstream(self, call, argument) -> None:
+    def test_a_bare_path_names_the_argument_rather_than_failing_downstream(self, call, composite, argument) -> None:
         # The likeliest of the three: every composite takes a LIST where the gate below it takes one
         # directory. Without the guard this raises "'PosixPath' object is not iterable" from
         # whichever comprehension reaches it first, naming neither the argument nor the fix.
         with pytest.raises(TypeError, match=r"pass \[dir\], not dir"):
             call(Path(_MISSING))
 
-    def test_an_empty_sequence_is_a_caller_error_not_a_measurement(self, call, argument) -> None:
+    def test_an_empty_sequence_is_a_caller_error_not_a_measurement(self, call, composite, argument) -> None:
         # Distinct from "dirs given, no rows found", which renders as a no-floor block: nothing was
         # named here, so there is no suite to report a reading about.
         with pytest.raises(ValueError, match=f"{argument} is empty"):

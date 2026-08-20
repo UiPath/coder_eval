@@ -1256,10 +1256,13 @@ CE067** (CE049, CE055, CE056 and CE061-CE065 remain reserved below; CE044 is ret
       behaviour change rather than a refactor — `arm_row_scores` renders an explained empty matrix
       where the new primitive raises on an out-of-range index — so what is wanted is a sensor of the
       shape `test_the_trim_is_declared_once`, not a rewrite. — caught in review.
-- [ ] **`_ENTRY_POINTS` in `tests/test_optimize_api.py` is hand-maintained.** It claims to cover every
-      composite taking a run-dir sequence and to grow each phase, and it silently failed to twice.
-      A derived sensor — every public composite in `optimize/api.py` whose signature has a
-      `Sequence[Path]` parameter appears in that list — would close it. — caught in review, twice.
+- [x] **CLOSED.** `_ENTRY_POINTS` in `tests/test_optimize_api.py` was hand-maintained, claimed to
+      cover every composite taking a run-dir sequence, and silently fell behind TWICE — the second
+      time in the very phase whose comment justified widening `_require_run_dirs` by pointing at the
+      ledger writers' two sequences. `test_every_run_dir_parameter_has_a_boundary_entry` now derives
+      the set from the module by inspecting for a `Sequence[Path]` annotation, and checks it BOTH
+      ways (a missing entry and a stale one). It found one real gap on its first run —
+      `record_round_execution(run_dirs)` — and names the exact pair when mutated.
 - [ ] **`measure_execution_noise_floor` threads no `reasons` sink**, so the execution track's no-floor
       block cannot name which of its four preconditions failed while the activation track's can. This
       entry already existed above for `_execution_diagnostics`; the composite surface makes it
