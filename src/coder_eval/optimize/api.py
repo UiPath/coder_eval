@@ -37,7 +37,14 @@ from coder_eval.optimize.fronts import (
     instance_best_front,
     pareto_front,
 )
-from coder_eval.optimize.load import load_arm_rows, reconcile_arms, rule_row_map, stale_tree_reason
+from coder_eval.optimize.load import (
+    load_arm_rows,
+    reconcile_arms,
+    row_replicate_scores,
+    rule_row_map,
+    stale_tree_reason,
+    wrong_path_reason,
+)
 from coder_eval.optimize.search import regression_check
 from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
 from coder_eval.reports_optimize import (
@@ -48,6 +55,7 @@ from coder_eval.reports_optimize import (
     render_headroom_ceilings,
     render_noise_floor,
     render_row_matrix,
+    render_row_replicates,
     render_staleness_note,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
@@ -378,5 +386,52 @@ def corpus_report(
                 threshold=threshold,
                 corpus_size=len(corpus),
             ),
+        ]
+    )
+
+
+def replicates_report(
+    *,
+    run_dirs: Sequence[Path],
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    criterion_index: int | None = None,
+) -> str:
+    """Per-row replicate values for both arms — the two readings a suite mean cannot give.
+
+    A row with zero variance on BOTH arms and a non-zero delta is a REPRODUCIBLE behavioural change,
+    and the most informative row in a run: measured, two of them with opposite signs cancelled to a
+    suite delta of +0.0001, where "the difference is noise" is the opposite of what happened. A row
+    whose mean delta is exactly 0.0 is dead for the comparison, and a suite of dead rows resolves
+    nothing however many rows it has.
+
+    Read it BESIDE the verdict, never instead of it: the verdict block has no channel for either.
+    """
+    _require_run_dirs(run_dirs)
+    if incumbent_variant == candidate_variant:
+        # An arm against itself renders every delta as 0.000 and every row as dead, which reads as
+        # "this candidate changes nothing" — a result, for what is a typo. `execution_gate` refuses
+        # the same comparison for the same reason; a report has no less need of the guard.
+        raise ValueError(
+            f"incumbent_variant and candidate_variant are both {incumbent_variant!r} — an arm compared "
+            + "against itself renders every row dead, which is not a reading of a candidate"
+        )
+    # ONE sweep over both arms rather than two. `fronts.py`'s own comment gives the reason: a dir
+    # carrying both arms reports one warning naming both, rather than one per arm for what is a
+    # single re-used `--run-dir`. The block gets the same treatment, for the same reason.
+    stale, _unknown = reconcile_arms([(incumbent_variant, run_dirs), (candidate_variant, run_dirs)], suite_id)
+    incumbent = row_replicate_scores(load_arm_rows(run_dirs, incumbent_variant, suite_id), criterion_index)
+    candidate = row_replicate_scores(load_arm_rows(run_dirs, candidate_variant, suite_id), criterion_index)
+    # An arm that scored NOTHING renders as a full column of `— (hole)`, and the block's own prose
+    # then tells the reader that means "present on one arm only" — a reading, for a mistyped variant
+    # or run dir. Every sibling makes this loud (`headroom_report` raises, `render_row_matrix` names
+    # the arm), so this one does too, and rank 0 owns the wording.
+    empty = [v for v, scores in ((incumbent_variant, incumbent), (candidate_variant, candidate)) if not scores]
+    return "\n".join(
+        [
+            *_staleness_note(stale),
+            *([wrong_path_reason(v, suite_id, run_dirs) for v in empty] + [""] if empty else []),
+            render_row_replicates(incumbent, candidate),
         ]
     )

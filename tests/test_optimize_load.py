@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.models import ActivationGateVerdict, EvaluationResult, RoundScores
+from coder_eval.models import (
+    ActivationGateVerdict,
+    CriterionResult,
+    EvaluationResult,
+    RoundScores,
+    copy_with,
+)
 from coder_eval.optimize.activation import activation_gate, holm_promote, measure_noise_floor, noise_floor_mde
 from coder_eval.optimize.fronts import arm_row_scores, cost_quality_points, headroom_ceiling
 from coder_eval.optimize.gate import cost_latency_guardrails
@@ -33,9 +39,11 @@ from coder_eval.optimize.load import (
     read_split_provenance,
     row_cost_levels,
     row_costs,
+    row_replicate_scores,
     rule_row_map,
 )
 from coder_eval.optimize.store import UNRECORDED_SPLIT, grader_changed
+from coder_eval.reports_optimize import render_row_replicates
 from coder_eval.reports_stats import median_or_none
 from tests.optimize_fixtures import (
     FAST_RESAMPLES,
@@ -49,6 +57,7 @@ from tests.optimize_fixtures import (
     exec_gate,
     exec_run_dir,
     grader_result,
+    scored_result,
     set_split,
     shared_dirs,
     write_arm,
@@ -935,3 +944,77 @@ class TestRowsExcludedComposesBothCauses:
         assert paired.rows_excluded == 3
         assert any("only-cand, only-inc" in n for n in paired.notes)
         assert any("scored on only one arm" in n and "hollow" in n for n in paired.notes)
+
+
+def _two_criteria(row_id: str, first: float, second: float) -> EvaluationResult:
+    """A row carrying TWO criteria, so an index past the first is a real selection rather than a hole."""
+    base = grader_result(row_id, first, None)
+    return copy_with(
+        base,
+        success_criteria_results=[
+            *base.success_criteria_results,
+            CriterionResult(criterion_type="file_check", description=f"second for {row_id}", score=second),
+        ],
+    )
+
+
+class TestRowReplicateScores:
+    """`row_score` reduced over a whole arm without averaging — the reproducibility reading."""
+
+    def _rows(self, per_row: dict[str, list[float]]) -> dict[str, list[EvaluationResult]]:
+        return {row_id: [scored_result(row_id, s) for s in scores] for row_id, scores in per_row.items()}
+
+    def test_an_index_reads_that_criterion_across_replicates_sorted_by_row(self) -> None:
+        rows = {
+            "r2": [grader_result("r2", 0.5, None), grader_result("r2", 0.75, None)],
+            "r1": [grader_result("r1", 1.0, None)],
+        }
+        result = row_replicate_scores(rows, 0)
+        assert result == {"r1": [1.0], "r2": [0.5, 0.75]}
+        # Dict equality ignores order, so the "sorted by row id" half of the contract needs its own
+        # assertion — the input is deliberately given out of order.
+        assert list(result) == ["r1", "r2"]
+
+    def test_none_reads_the_rows_weighted_score(self) -> None:
+        assert row_replicate_scores(self._rows({"r1": [0.25, 0.75]})) == {"r1": [0.25, 0.75]}
+
+    def test_an_index_past_every_row_raises_naming_the_real_count(self) -> None:
+        # An empty map would read as "no rows scored" — a measurement result for an authoring error,
+        # and one discovered only after the runs are paid for.
+        rows = {"r1": [grader_result("r1", 1.0, None)]}
+        with pytest.raises(ValueError, match="past every row's criteria list") as excinfo:
+            row_replicate_scores(rows, 7)
+
+        assert "carries 1" in str(excinfo.value)
+        assert not isinstance(excinfo.value, IndexError)
+
+    def test_a_replicate_missing_the_criterion_is_dropped_and_the_row_survives(self) -> None:
+        # A crashed replicate is a hole, not a reason to refuse the other fourteen rows. `r2`'s
+        # second replicate carries only one criterion, so index 1 is absent for it alone.
+        rows = {
+            "r1": [_two_criteria("r1", 1.0, 0.5), _two_criteria("r1", 1.0, 0.5)],
+            "r2": [_two_criteria("r2", 1.0, 0.25), grader_result("r2", 1.0, None)],
+        }
+        assert row_replicate_scores(rows, 1) == {"r1": [0.5, 0.5], "r2": [0.25]}
+
+    def test_a_row_with_no_usable_replicate_is_absent_rather_than_empty(self) -> None:
+        rows = {"r1": [_two_criteria("r1", 1.0, 0.5)], "r2": [grader_result("r2", 1.0, None)]}
+        assert row_replicate_scores(rows, 1) == {"r1": [0.5]}
+
+    def test_an_arm_whose_every_replicate_scored_nothing_does_not_raise(self) -> None:
+        """The documented exemption: the raise needs a width to measure against.
+
+        With no scored criterion anywhere, a bad index and a wholly-crashed arm are the same input.
+        Naming the arm is the CALLER's job, and `replicates_report` is what does it.
+        """
+        rows = {"r1": [copy_with(grader_result("r1", 1.0, None), success_criteria_results=[])]}
+        assert row_replicate_scores(rows, 7) == {}
+
+    def test_an_empty_rows_map_is_an_empty_dict_rather_than_a_raise(self) -> None:
+        # Round 1 with a mistyped variant reaches this, and the renderer handles an empty map.
+        assert row_replicate_scores({}, 0) == {}
+        assert render_row_replicates({}, {}) == "_No rows to compare._"
+
+    def test_a_negative_index_is_rejected_at_the_boundary(self) -> None:
+        with pytest.raises(ValueError, match="criterion_index must be >= 0"):
+            row_replicate_scores({"r1": [grader_result("r1", 1.0, None)]}, -1)

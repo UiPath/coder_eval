@@ -1467,24 +1467,12 @@ either. Print the per-row replicate values beside it:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.load import load_arm_rows
-from coder_eval.reports_optimize import render_row_replicates
+from coder_eval.optimize.api import replicates_report
 
-suite_id = "<the suite's task_id>"
-gate_dirs = [Path(f"<runs>/round1-gate-{n}") for n in (1, 2, 3)]
-grader_index = 2  # the criterion whose score you are comparing; omit the index to read weighted_score
-
-
-def replicates(variant: str) -> dict[str, list[float]]:
-    """Row id -> that arm's per-replicate scores. The CALLER chooses the criterion."""
-    rows = load_arm_rows(gate_dirs, variant, suite_id)
-    return {
-        row_id: [r.success_criteria_results[grader_index].score for r in results]
-        for row_id, results in sorted(rows.items())
-    }
-
-
-print(render_row_replicates(replicates("incumbent"), replicates("<the candidate>")))
+print(replicates_report(
+    run_dirs=[Path("<runs>/round1-gate-a")], suite_id="<the suite's task_id>",
+    incumbent_variant="incumbent", candidate_variant="<the candidate>",
+))
 ```
 
 Two readings the mean cannot give you:
@@ -1501,6 +1489,16 @@ Two readings the mean cannot give you:
 Rows present on one arm only render as holes and never as zeros, and arms carrying different
 replicate counts on a row are named rather than silently paired — a row weighted 3-v-2 has
 reweighted the comparison on its own.
+
+**One run dir, and no `criterion_index`** — both match this track. The execution gate runs one
+invocation of exactly two variants at `--repeats 3`, so `round1-gate-a` is the whole comparison; and
+omitting the index reads each row's `weighted_score`, which is what that gate compares, so the deltas
+here reconcile with the verdict's. Pass an index only to read a single criterion, and know that the
+deltas then answer a different question from the gate's.
+
+An index past every row's criteria list raises rather than returning an empty table, so a mistyped
+position is loud — **unless the arm scored nothing at all**, where there is no width to be past. That
+case is named instead: the block says which variant, suite id or run directory found no rows.
 
 ### Stage B, activation track — run the gate, do not do the arithmetic
 

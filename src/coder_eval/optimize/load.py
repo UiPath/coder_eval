@@ -4,8 +4,9 @@ Rank 0 of the optimize family: it imports nothing from its siblings and everythi
 from it. What lives here is every question answered by READING a finalized run directory —
 walking ``<run>/<variant>/<suite_id>/<row_id>/NN/task.json``, pooling replicates, pairing two arms,
 reading ``run.json``'s row-selection provenance, and reconciling a tree against what its own
-``run.json`` says it ran — plus the row primitives (:func:`row_score`, :func:`row_costs`,
-:func:`row_cost_levels`, :func:`label_pairs`) that more than one track reduces rows with.
+``run.json`` says it ran — plus the row primitives (:func:`row_score`, :func:`row_replicate_scores`,
+:func:`row_costs`, :func:`row_cost_levels`, :func:`label_pairs`) that more than one track reduces
+rows with.
 
 **Nothing here decides anything.** No promotion, no refusal, no statistic: a caller gets rows,
 counts and notes, and the two gates decide on them. That is what makes the rank boundary real
@@ -777,6 +778,51 @@ def row_score(result: EvaluationResult, criterion_index: int | None) -> float | 
     if criterion_index >= len(result.success_criteria_results):
         return None
     return result.success_criteria_results[criterion_index].score
+
+
+def row_replicate_scores(
+    rows: dict[str, list[EvaluationResult]], criterion_index: int | None = None
+) -> dict[str, list[float]]:
+    """Row id -> that arm's per-replicate scores, sorted by row id.
+
+    :func:`row_score` reduced over a whole arm without averaging: the per-replicate vector is what
+    says whether a row's difference is REPRODUCIBLE, which is the one reading a mean cannot give.
+
+    ``criterion_index=None`` reads each replicate's ``weighted_score``; an index reads that
+    criterion's score — the family's convention everywhere, and the reason a negative index is
+    rejected rather than silently selecting from the end.
+
+    **A hole is absent, never zero**, at both grains. A replicate that produced no score for the
+    criterion is dropped from its row's vector, and a row left with nothing is dropped from the map
+    — rather than raising for the whole arm, because a single crashed replicate is not a reason to
+    refuse a reading of the other fourteen rows.
+
+    **An out-of-range index raises**, though, and that asymmetry is the point: a row whose criteria
+    list is SHORTER than the suite's is a crashed row, while an index past every row's list is an
+    authoring error that would otherwise return an empty map and read as "no rows scored".
+
+    **The raise needs a width to measure against.** With nothing scored anywhere, a bad index and a
+    wholly-crashed arm are the same input: both return ``{}``, and naming the arm is the caller's
+    job, since only it knows what it asked for (:func:`wrong_path_reason`).
+    """
+    # NOT shared with `arm_row_scores`, which spells the same walrus comprehension: that one
+    # averages, and it renders an explained empty matrix where this raises. Converging them would
+    # change what a Stage A block does on a bad index, which is a decision rather than a refactor.
+    require_valid_criterion_index(criterion_index)
+    if criterion_index is not None:
+        widest = max((len(r.success_criteria_results) for results in rows.values() for r in results), default=0)
+        if widest and criterion_index >= widest:
+            raise ValueError(
+                f"criterion_index {criterion_index} is past every row's criteria list — the widest of "
+                + f"{len(rows)} row(s) carries {widest} criterion(s). Selection is positional "
+                + "(success_criteria[i]), so count from the top of the suite YAML rather than assuming."
+            )
+    scores: dict[str, list[float]] = {}
+    for row_id, results in sorted(rows.items()):
+        values = [v for r in results if (v := row_score(r, criterion_index)) is not None]
+        if values:
+            scores[row_id] = values
+    return scores
 
 
 def criterion_weights(results: Sequence[EvaluationResult]) -> list[float | None]:

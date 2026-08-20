@@ -27,6 +27,7 @@ from coder_eval.optimize.api import (
     discreteness_report,
     execution_floor_report,
     headroom_report,
+    replicates_report,
     row_matrix_report,
 )
 from coder_eval.optimize.execution import measure_execution_noise_floor
@@ -223,6 +224,12 @@ def _headroom_call(run_dirs) -> str:
     )
 
 
+def _replicates_call(run_dirs) -> str:
+    return replicates_report(
+        run_dirs=run_dirs, incumbent_variant="incumbent", candidate_variant="candidate", suite_id=SUITE
+    )
+
+
 def _corpus_call(run_dirs) -> str:
     return corpus_report(
         run_dirs=run_dirs,
@@ -235,7 +242,7 @@ def _corpus_call(run_dirs) -> str:
 
 # Every composite that computes a reported number from rows it READ, and therefore owes its block a
 # staleness note. Declared once so the two directions below cannot cover different sets.
-_REPORTERS = ["row-matrix", "cost-quality", "corpus", "headroom"]
+_REPORTERS = ["row-matrix", "cost-quality", "corpus", "headroom", "replicates"]
 
 
 # EVERY composite taking `run_dirs`, so the guard is asserted on the SURFACE rather than on the
@@ -248,6 +255,7 @@ _ENTRY_POINTS = [
     pytest.param(_cost_quality_call, id="cost-quality"),
     pytest.param(_headroom_call, id="headroom"),
     pytest.param(_corpus_call, id="corpus"),
+    pytest.param(_replicates_call, id="replicates"),
 ]
 
 
@@ -620,6 +628,10 @@ class TestEveryReportingCompositeNamesAContaminatedTree:
                 criterion_index=None,
                 sidecar=self._corpus_sidecar(tmp_path),
             )
+        if name == "replicates":
+            return replicates_report(
+                run_dirs=run_dirs, incumbent_variant="incumbent", candidate_variant="candidate", suite_id=SUITE
+            )
         if name == "headroom":
             return headroom_report(
                 run_dirs=run_dirs,
@@ -643,3 +655,122 @@ class TestEveryReportingCompositeNamesAContaminatedTree:
     @pytest.mark.parametrize("name", _REPORTERS)
     def test_a_clean_tree_carries_no_note(self, tmp_path: Path, name: str) -> None:
         assert self.STALE not in self._call(name, tmp_path, self._clean(tmp_path))
+
+
+class TestReplicatesReport:
+    def test_a_reproducible_row_beside_a_cancelling_one_is_surfaced(self, tmp_path: Path) -> None:
+        """The fence's own prose calls this "the most informative row in the run", so it is pinned.
+
+        Two zero-variance rows with opposite signs are what an aggregate hides: on the round this
+        fixture is taken from they cancelled to a suite delta of +0.0001. The verdict block has no
+        channel for either row, which is why this block exists.
+        """
+        # The two rows from the round the skill's prose cites. On a 15-row suite they cancelled to a
+        # suite delta of +0.0001; here they are the whole suite, so the point is that the BLOCK shows
+        # both individually where no aggregate could.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.76, 0.76, 0.76], "r2": [0.86, 0.86, 0.86]})
+        weighted_arm(tmp_path, "candidate", {"r1": [1.0, 1.0, 1.0], "r2": [0.59, 0.59, 0.59]})
+
+        block = replicates_report(
+            run_dirs=run_dirs, incumbent_variant="incumbent", candidate_variant="candidate", suite_id=SUITE
+        )
+
+        assert "Zero variance on BOTH arms" in block
+        assert "r1" in block and "r2" in block
+        # Not estimator constants: these are the fixture's own arithmetic (1.00-0.76, 0.59-0.86),
+        # and the fixture reproduces the exact round the skill's prose cites — so the block, the
+        # prose and the renderer's docstring cannot drift apart in pairs.
+        assert "+0.240" in block and "-0.270" in block
+
+    def test_both_arms_are_rendered(self, tmp_path: Path) -> None:
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.5, 0.5]})
+        weighted_arm(tmp_path, "candidate", {"r1": [0.9, 0.9]})
+
+        block = replicates_report(
+            run_dirs=run_dirs, incumbent_variant="incumbent", candidate_variant="candidate", suite_id=SUITE
+        )
+
+        assert "| incumbent | candidate |" in block
+        assert "0.500" in block and "0.900" in block
+
+    def test_a_contaminated_tree_is_named_once_for_both_arms(self, tmp_path: Path) -> None:
+        """The second half of the CE053 correctness fix, and the one-sweep contract.
+
+        A dir carrying both arms is a single re-used `--run-dir`, so it is one fault and gets one
+        sentence naming both locations — not one per arm.
+        """
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.5, 0.5]})
+        weighted_arm(tmp_path, "candidate", {"r1": [0.9, 0.9]})
+        write_row(run_dirs[0], "incumbent", "leftover", scored_result("leftover", 0.0), record=False)
+        write_row(run_dirs[0], "candidate", "leftover", scored_result("leftover", 1.0), record=False)
+
+        block = replicates_report(
+            run_dirs=run_dirs, incumbent_variant="incumbent", candidate_variant="candidate", suite_id=SUITE
+        )
+
+        assert block.count("may be over a contaminated tree") == 1, "one fault, one sentence"
+        assert "/incumbent" in block and "/candidate" in block, "and it names both arms"
+
+    def test_the_criterion_index_reaches_both_arms(self, tmp_path: Path) -> None:
+        """Threaded at two call sites, so dropping it from one is a silent wrong delta.
+
+        `scored_result` records a `weighted_score` of the given value while criterion 0 is the
+        classification match — 1.0 at or above 0.5, else 0.0. So the two readings are visibly
+        different tables over the same tree, and an arm left on the wrong one produces a delta
+        between two different quantities with nothing raised.
+        """
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.5]})
+        weighted_arm(tmp_path, "candidate", {"r1": [0.25]})
+        call = {
+            "run_dirs": run_dirs,
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "candidate",
+            "suite_id": SUITE,
+        }
+
+        weighted = replicates_report(**call)
+        assert "| r1 | 0.500 | 0.250 | -0.250 |" in weighted
+
+        # The SAME tree read at criterion 0: 0.5 classifies as a match (1.0), 0.25 does not (0.0).
+        # An arm left on `weighted_score` would render one column from each quantity — a delta of
+        # 1.000-0.250 or 0.500-0.000, neither of which is this row.
+        by_criterion = replicates_report(**call, criterion_index=0)
+        assert "| r1 | 1.000 | 0.000 | -1.000 |" in by_criterion
+
+    def test_an_arm_that_scored_nothing_is_named_rather_than_rendered_as_holes(self, tmp_path: Path) -> None:
+        # A full column of `— (hole)` reads as "present on one arm only", which the block's own prose
+        # says — a reading, for a mistyped variant. Every sibling composite makes this loud.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.5, 0.5]})
+
+        block = replicates_report(
+            run_dirs=run_dirs, incumbent_variant="incumbent", candidate_variant="ghost", suite_id=SUITE
+        )
+
+        assert "wrong variant id, a wrong suite id or a wrong run directory" in block
+        assert "ghost" in block
+
+    def test_an_out_of_range_criterion_index_raises_before_rendering(self, tmp_path: Path) -> None:
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.5, 0.5]})
+        weighted_arm(tmp_path, "candidate", {"r1": [0.9, 0.9]})
+
+        with pytest.raises(ValueError, match="past every row's criteria list"):
+            replicates_report(
+                run_dirs=run_dirs,
+                incumbent_variant="incumbent",
+                candidate_variant="candidate",
+                suite_id=SUITE,
+                criterion_index=7,
+            )
+
+    def test_an_arm_compared_against_itself_is_a_caller_error(self, tmp_path: Path) -> None:
+        # Every delta 0.000 and every row dead reads as "this candidate changes nothing" — a result,
+        # for what is a typo. `execution_gate` refuses the same comparison.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.5, 0.5]})
+
+        with pytest.raises(ValueError, match="an arm compared against itself"):
+            replicates_report(
+                run_dirs=run_dirs,
+                incumbent_variant="incumbent",
+                candidate_variant="incumbent",
+                suite_id=SUITE,
+            )
