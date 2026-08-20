@@ -35,7 +35,8 @@ from coder_eval.optimize.gate import (
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
     NOTE_CI_CONTAINS_ZERO,
-    NOTE_OUTSIDE_FAMILY,
+    FamilyFacts,
+    TrackDecision,
     build_confirm_verdict,
     classification_metric,
     confirm_one_candidate,
@@ -43,14 +44,11 @@ from coder_eval.optimize.gate import (
     confirm_train_note,
     confirm_train_refusal,
     cost_latency_guardrails,
+    decide_family,
     floor_from_clusters,
-    holm_family,
     no_floor,
     note_check_failed,
-    note_holm_family,
     note_ordinary_negative,
-    note_resolution_degraded,
-    resamples_for_family,
 )
 from coder_eval.optimize.load import (
     criterion_weights,
@@ -1297,18 +1295,79 @@ def confirm_gate_execution(
     )
 
 
+def _execution_notes(
+    verdict: ExecutionGateVerdict,
+    *,
+    p_value: float,
+    rejected: bool,
+    refusal: str | None,
+    family_size: int,
+    alpha: float,
+) -> list[str]:
+    """Every note :func:`holm_promote_execution` adds to a MEASURED verdict, in rendered order.
+
+    The twin of :func:`~coder_eval.optimize.activation._activation_notes`, and a pure function of
+    one verdict plus the family facts: nothing here decides anything, and ``promoted`` is not read.
+
+    ``p_value`` is passed rather than read off the verdict, making the contract explicit — this
+    ladder runs on the MEASURED branch only, so it needs no coercion that would quietly render
+    ``p = 0.0000`` for a verdict that never had a p.
+
+    ``refusal`` is the message rather than a bool, mirroring ``_activation_notes`` exactly. Neither
+    ladder RENDERS it — both use it as a presence check — and the two taking the same parameter is
+    what lets a reader carry one habit between the tracks. This track's refusal happens to be read
+    off the verdict rather than computed, which is the hook's business and not the ladder's.
+
+    Every rung here is a NEGATIVE-RESULT claim and every one is suppressed under a refusal: a
+    refusal says the comparison decided nothing, and a claim beneath it is a second, contradictory
+    one. The two trailing notes are not such claims and belong to ``decide_family``, which appends
+    them for both tracks. The activation ladder draws the line in the same place.
+    """
+    notes: list[str] = []
+    # Kept on the two COMPONENTS rather than on `separated`, so a candidate that merely lost still
+    # reads "the paired difference favours the incumbent" instead of the blunter "did not separate"
+    # — which of the two failed is the whole content of the note.
+    favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
+    excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
+    if refusal is None:
+        if rejected and not favours_candidate:
+            notes.append(
+                "not promoted: the paired difference favours the incumbent. (The sign is already "
+                + "resolved as candidate - incumbent, so this reads the way it looks.)"
+            )
+        elif rejected and not excludes_zero:
+            notes.append(NOTE_CI_CONTAINS_ZERO)
+        elif not rejected:
+            notes.append(note_ordinary_negative(p_value, family_size, alpha))
+        # Guarded on exactly what makes the sentence true — the three conjuncts the BLOCKED
+        # headline is keyed on, and the same guard the activation twin applies. Under a refusal the
+        # headline is NOT A RESULT; on a candidate that merely LOST the check forced nothing, since
+        # `promoted` was already False without it. Both states used to print a note claiming a veto
+        # and citing a headline the block does not carry. The failed check is still visible in the
+        # rendered Integrity checks / Guardrails lists on every path — only the CLAIM is withheld.
+        if rejected and verdict.separated:
+            notes += [note_check_failed(name) for name in verdict.failed_vetoes]
+    return notes
+
+
 def holm_promote_execution(
     verdicts: list[ExecutionGateVerdict], alpha: float = DEFAULT_ALPHA
 ) -> list[ExecutionGateVerdict]:
     """Decide a whole execution-track family at once — the second, and only other, Holm call site.
 
+    A thin wrapper over :func:`~coder_eval.optimize.gate.decide_family`, which owns the Holm loop,
+    the ``promoted`` conjunction and the two trailing notes for BOTH tracks. What is left here is
+    this track's note ladder and the fact that its refusal is READ rather than computed.
+
     Gating candidates one at a time against the same incumbent on the same train rows IS a family,
     even though each gate is its own two-variant run directory. So the correction is applied once,
     across every verdict a round predeclared it would gate, exactly as :func:`holm_promote` does on
-    the other track. Correcting per candidate would degenerate to an uncorrected ``p <= alpha``.
+    the other track — literally the same loop now. Correcting per candidate would degenerate to an
+    uncorrected ``p <= alpha``.
 
     **``promoted`` is Holm rejecting AND ``verdict.separated`` AND no refusal AND no failed
-    integrity check or guardrail.** The veto lives in the DECISION, not only in the render: a
+    integrity check or guardrail** — one expression in ``decide_family``, applied to both tracks.
+    The veto lives in the DECISION, not only in the render: a
     caller reading ``promoted`` must not be able to promote a candidate whose rendered block says
     BLOCKED. Folding it in is only safe because the STATISTICAL half has its own name —
     ``ExecutionGateVerdict.separated``, the property :func:`render_execution_markdown` keys its
@@ -1345,73 +1404,25 @@ def holm_promote_execution(
     genuine candidate reading NOT PROMOTED because a sibling's sample was degenerate — which is the
     multiplicity that was actually incurred, and the conservative direction.
     """
-    family, rejected_at = holm_family(verdicts, alpha)
-    family_resamples = resamples_for_family(verdicts, family)
 
-    decided: list[ExecutionGateVerdict] = []
-    for i, verdict in enumerate(verdicts):
-        notes = list(verdict.notes)
-        if verdict.p_value is None:
-            # Guarded like the rungs below, and reachable: every "there was no comparison to make"
-            # cause lands here carrying a refusal, so an unguarded note would print an ordinary
-            # negative result directly under a refusal headline.
-            if verdict.gate_refusal is None:
-                notes.append(NOTE_OUTSIDE_FAMILY)
-            # Outside the family, so nothing was rejected — False rather than None, which would
-            # read as "Holm has not run" on a verdict it has.
-            decided.append(copy_with(verdict, promoted=False, holm_rejected=False, holm_alpha=alpha, notes=notes))
-            continue
-
+    def decide(verdict: ExecutionGateVerdict, facts: FamilyFacts) -> TrackDecision:
+        # `p_value` is not None on this branch — `decide_family` returns before calling the hook
+        # otherwise — and the ladder depends on that, so it is narrowed here rather than coerced
+        # inside a ladder that would render `p = 0.0000` for a verdict that never had a p at all.
+        assert verdict.p_value is not None, "decide_family calls the hook on the measured branch only"
         # READ, never re-derived: `execution_gate` sets this where each condition is already
         # computed. It is LOAD-BEARING rather than belt-and-braces — a zero-variance verdict has
         # p = 0.0000 and a zero-width interval, so `separated` holds on it too.
-        refused = verdict.gate_refusal is not None
-        # A failed integrity check or guardrail VETOES the promotion; it is not merely reported.
-        # `separated` (on the model) stays the statistical half, so the renderer can still tell a
-        # blocked winner from an ordinary loss — folding the veto in here without that split is
-        # what would silently retire the BLOCKED headline.
-        #
-        # SYMMETRIC with `holm_promote` now: every check list on either track vetoes, and each
-        # track's `failed_vetoes` is the ONE declaration of which lists those are. The activation
-        # track folds in its `sibling_checks` and the same cost/latency `guardrails`; what it does
-        # not have is `integrity_checks`, which are engagement/completion-rate reads and a concept
-        # of this track alone.
-        rejected = i in rejected_at
-        promoted = rejected and verdict.separated and not refused and not verdict.failed_vetoes
+        return TrackDecision(
+            verdict.gate_refusal,
+            _execution_notes(
+                verdict,
+                p_value=verdict.p_value,
+                rejected=facts.rejected,
+                refusal=verdict.gate_refusal,
+                family_size=facts.family_size,
+                alpha=facts.alpha,
+            ),
+        )
 
-        # Every negative-result rung is guarded, this ladder and the `p_value is None` one above:
-        # a refused verdict whose difference happens to favour the incumbent would otherwise print
-        # an ordinary negative-result note directly under a refusal headline — two contradictory
-        # claims in one block.
-        #
-        # Kept on the two COMPONENTS rather than on `separated`, so a candidate that merely lost
-        # still reads "the paired difference favours the incumbent" instead of the blunter
-        # "did not separate" — which of the two failed is the whole content of the note.
-        favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
-        excludes_zero = verdict.ci_low is not None and verdict.ci_low > 0.0
-        if not refused:
-            if rejected and not favours_candidate:
-                notes.append(
-                    "not promoted: the paired difference favours the incumbent. (The sign is already "
-                    + "resolved as candidate - incumbent, so this reads the way it looks.)"
-                )
-            elif rejected and not excludes_zero:
-                notes.append(NOTE_CI_CONTAINS_ZERO)
-            elif not rejected:
-                notes.append(note_ordinary_negative(verdict.p_value, len(family), alpha))
-        # Guarded on exactly what makes the sentence true — the three conjuncts the BLOCKED
-        # headline is keyed on, and the same guard the activation twin applies. Under a refusal the
-        # headline is NOT A RESULT; on a candidate that merely LOST the check forced nothing, since
-        # `promoted` was already False without it. Both states used to print a note claiming a veto
-        # and citing a headline the block does not carry. The failed check is still visible in the
-        # rendered Integrity checks / Guardrails lists on every path — only the CLAIM is withheld.
-        if not refused and rejected and verdict.separated:
-            notes += [note_check_failed(name) for name in verdict.failed_vetoes]
-        notes.append(note_holm_family(len(family), alpha))
-        # Not a negative-result claim, so it sits OUTSIDE the refusal guard beside the family note:
-        # it is a statement about the draw count, which stays true whatever the refusal says. The
-        # family's SMALLEST draw count is what bounds its resolution.
-        if (degraded := note_resolution_degraded(len(family), family_resamples, alpha)) is not None:
-            notes.append(degraded)
-        decided.append(copy_with(verdict, promoted=promoted, holm_rejected=rejected, holm_alpha=alpha, notes=notes))
-    return decided
+    return decide_family(verdicts, alpha, decide=decide)

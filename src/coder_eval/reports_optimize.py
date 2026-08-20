@@ -37,6 +37,7 @@ from coder_eval.models import (
     ArmRowScores,
     ConfirmVerdict,
     ExecutionGateVerdict,
+    GateVerdictBase,
     GuardrailCheck,
 )
 from coder_eval.reports_stats import bootstrap_p_floor
@@ -83,13 +84,18 @@ def _render_checks(title: str, checks: list[GuardrailCheck]) -> list[str]:
 
 
 def _headline(
-    verdict: ActivationGateVerdict | ExecutionGateVerdict,
+    verdict: GateVerdictBase,
     *,
     promote_fn: str,
     comparison: str,
     refusal_label: str,
 ) -> str:
     """The ONE headline ladder, for both Stage B tracks.
+
+    Typed on :class:`~coder_eval.models.GateVerdictBase`, and honestly so: every field the chain
+    reads — ``promoted``, ``gate_refusal``, ``p_value``, ``holm_rejected``, ``separated``,
+    ``failed_vetoes`` — is declared there. It took the two-class union while the two verdicts had no
+    common base and each spelled those fields itself.
 
     Five rungs, and the ORDER is the whole contract: a refusal outranks ``BLOCKED``, and
     ``UNDECIDED`` outranks the refusal, because a verdict Holm never saw has no decision to refuse.

@@ -29,13 +29,13 @@ from coder_eval.models import (
     GuardrailCheck,
     NoiseFloor,
     OptimizeMeasurements,
-    copy_with,
 )
 from coder_eval.optimize.gate import (
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
     NOTE_CI_CONTAINS_ZERO,
-    NOTE_OUTSIDE_FAMILY,
+    FamilyFacts,
+    TrackDecision,
     build_confirm_verdict,
     classification_metric,
     confirm_one_candidate,
@@ -43,14 +43,11 @@ from coder_eval.optimize.gate import (
     confirm_train_note,
     confirm_train_refusal,
     cost_latency_guardrails,
+    decide_family,
     floor_from_clusters,
-    holm_family,
     no_floor,
     note_check_failed,
-    note_holm_family,
     note_ordinary_negative,
-    note_resolution_degraded,
-    resamples_for_family,
 )
 from coder_eval.optimize.load import (
     balance_pair,
@@ -991,7 +988,6 @@ def _activation_notes(
     siblings_hold: bool,
     threshold: float,
     family_size: int,
-    family_resamples: int,
     alpha: float,
 ) -> list[str]:
     """Every note :func:`holm_promote` adds to a MEASURED verdict, in rendered order.
@@ -1010,10 +1006,14 @@ def _activation_notes(
     **Two tiers, and the split is the contract.** The first four rungs are NEGATIVE-RESULT claims —
     sentences about a candidate that lost — and every one is suppressed under a refusal, because a
     refusal says the comparison decided nothing and a claim beneath it is a second, contradictory
-    one. Three of the four used to fire regardless. The last two are NOT negative-result claims:
-    the resolution-floor warning is a statement about the draw count and the family note about the
-    family, and both stay true under a refusal, so both sit outside the guard. The execution track
-    draws the line in exactly the same place.
+    one. Three of the four used to fire regardless. The resolution-floor warning is NOT such a
+    claim — it is a statement about the draw count, which stays true under a refusal — so it sits
+    outside the guard. The execution track draws the line in exactly the same place.
+
+    The two TRAILING notes are deliberately absent: :func:`~coder_eval.optimize.gate.decide_family`
+    appends :func:`~coder_eval.optimize.gate.note_holm_family` and
+    :func:`~coder_eval.optimize.gate.note_resolution_degraded` for both tracks. Appending either
+    here prints it twice.
     """
     notes: list[str] = []
     favours_candidate = verdict.mean_diff is not None and verdict.mean_diff > 0.0
@@ -1059,11 +1059,6 @@ def _activation_notes(
             + "n_resamples before believing either answer. A small suite has its own coarser floor: with "
             + "few positive rows the smallest achievable p is bounded well above the estimator's."
         )
-    notes.append(note_holm_family(family_size, alpha))
-    # The second rung outside the refusal guard, for the same reason as the resolution-floor note
-    # above it: a statement about the draw count rather than about this candidate.
-    if (degraded := note_resolution_degraded(family_size, family_resamples, alpha)) is not None:
-        notes.append(degraded)
     return notes
 
 
@@ -1256,28 +1251,34 @@ def confirm_gate(
 def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_ALPHA) -> list[ActivationGateVerdict]:
     """Decide the whole survivor family at once, and record the decision on each verdict.
 
+    A thin wrapper over :func:`~coder_eval.optimize.gate.decide_family`, which owns the Holm loop,
+    the ``promoted`` conjunction and the two trailing notes for BOTH tracks. What is left here is
+    what only this track knows: the rank-dependent threshold, the discreteness refusal computed
+    from it, and the note ladder.
+
     With ``S`` survivors gated against the same incumbent on the same rows, the family-wise error
-    rate inflates. Holm's step-down corrects it — and it is a property of the FAMILY, so this
-    calls :func:`coder_eval.reports_stats.holm_rejections` **once** across the whole p-value
-    vector. Calling it per candidate would degenerate to an uncorrected ``p <= alpha``; dividing
-    alpha by the survivor count at each gate would be plain Bonferroni, which is not Holm.
+    rate inflates. Holm's step-down corrects it — and it is a property of the FAMILY, so
+    ``decide_family`` calls :func:`coder_eval.reports_stats.holm_rejections` **once** across the
+    whole p-value vector. Calling it per candidate would degenerate to an uncorrected ``p <= alpha``;
+    dividing alpha by the survivor count at each gate would be plain Bonferroni, which is not Holm.
 
     A verdict whose ``p_value`` is ``None`` (too few paired rows) is not part of the family: it is
     excluded from the vector so it cannot tighten the correction for the others, and comes back
     ``promoted=False``.
 
     **``promoted`` is Holm rejecting AND ``verdict.separated`` AND no refusal AND no failed sibling
-    check or guardrail** — the same contract :func:`holm_promote_execution` applies, so a reader
-    can carry one habit between the two gates. The cost/latency guardrails used to gate in the
-    skill's prose rather than in this field, which meant a candidate that materially raised what a
-    row costs read ``promoted=True``; the veto now lives in the DECISION. What still differs between
-    the tracks is only which lists each HAS: there are no ``integrity_checks`` on this one.
+    check or guardrail** — and it is now literally the same expression
+    :func:`holm_promote_execution` applies, because both go through ``decide_family``. The
+    cost/latency guardrails used to gate in the skill's prose rather than in this field, which meant
+    a candidate that materially raised what a row costs read ``promoted=True``; the veto lives in
+    the DECISION. What still differs between the tracks is only which lists each HAS: there are no
+    ``integrity_checks`` on this one.
 
     Folding the veto in is only safe because the STATISTICAL half has its own name —
-    :attr:`~coder_eval.models.ActivationGateVerdict.separated`, the property
-    ``render_markdown`` keys its BLOCKED headline on together with ``holm_rejected``. Read
-    ``promoted`` there instead and that headline becomes unreachable the moment this fold lands,
-    silently degrading a blocked winner to the ordinary NOT PROMOTED rung.
+    :attr:`~coder_eval.models.GateVerdictBase.separated`, the property ``render_markdown`` keys its
+    BLOCKED headline on together with ``holm_rejected``. Read ``promoted`` there instead and that
+    headline becomes unreachable the moment this fold lands, silently degrading a blocked winner to
+    the ordinary NOT PROMOTED rung.
 
     **A suite whose discreteness floor exceeds its Holm threshold is REFUSED, not rejected.** The
     corrected threshold can sit below what the suite's own row count can express, and then no
@@ -1285,82 +1286,42 @@ def holm_promote(verdicts: list[ActivationGateVerdict], alpha: float = DEFAULT_A
     claim about the candidates that the data cannot support. Such a verdict comes back with
     ``gate_refusal`` set and ``promoted=False``, and renders as its own headline.
 
-    **There are now TWO `gate_refusal` setters on this track and THREE causes**, and they differ in
-    where they run and in what they carry. The discreteness refusal is set HERE, because it needs
-    the family's rank-dependent threshold. The other two are both set in :func:`activation_gate`'s
-    row-selection preflight — the arms recorded different ``--split`` values, or a run directory
-    holds results its own ``run.json`` never wrote (a re-used ``--run-dir``). Neither needs
-    anything outside a single verdict, and both always arrive with ``p_value is None``  — so it takes
-    the branch below and ``_refusal_message`` never sees it, which is what stops the two refusals
-    overwriting each other. The membership rule for the family is ``p_value is not None`` and
-    nothing else: a refused verdict is outside it, so ``m`` (and therefore every sibling's
-    ``alpha/m``) is unchanged by its presence.
+    **There are TWO `gate_refusal` setters on this track and THREE causes**, and they differ in
+    where they run and in what they carry. The discreteness refusal is computed by the hook below,
+    because it needs the family's rank-dependent threshold. The other two are both set in
+    :func:`activation_gate`'s row-selection preflight — the arms recorded different ``--split``
+    values, or a run directory holds results its own ``run.json`` never wrote (a re-used
+    ``--run-dir``). Neither needs anything outside a single verdict, and both always arrive with
+    ``p_value is None`` — so ``decide_family`` returns before the hook runs, which is what stops the
+    two refusals overwriting each other. The membership rule for the family is
+    ``p_value is not None`` and nothing else: a refused verdict is outside it, so ``m`` (and
+    therefore every sibling's ``alpha/m``) is unchanged by its presence.
     """
-    family, rejected_at = holm_family(verdicts, alpha)
-    family_resamples = resamples_for_family(verdicts, family)
 
-    decided: list[ActivationGateVerdict] = []
-    for i, verdict in enumerate(verdicts):
-        notes = list(verdict.notes)
-        if verdict.p_value is None:
-            # Guarded exactly as `holm_promote_execution` guards its twin, and now reachable for
-            # the same reason: the cross-split preflight is a SECOND `gate_refusal` setter on this
-            # track, and its verdicts always arrive with `p_value is None`. Unguarded, a refused
-            # block would print an ordinary negative-result note directly under a refusal headline.
-            if verdict.gate_refusal is None:
-                notes.append(NOTE_OUTSIDE_FAMILY)
-            # Outside the family, so nothing was rejected — False rather than None, which would
-            # read as "Holm has not run" on a verdict it has. The execution twin says the same.
-            decided.append(copy_with(verdict, promoted=False, holm_rejected=False, holm_alpha=alpha, notes=notes))
-            continue
-
-        threshold = _holm_threshold([p for _i, p in family], verdict.p_value, alpha)
-        refusal = _refusal_message(verdict, threshold=threshold, family_size=len(family), alpha=alpha)
-
-        # A failed check VETOES the promotion; it is not merely reported. The veto lives in the
-        # DECISION so a caller reading `promoted` cannot ship a candidate the rendered block says is
-        # BLOCKED — the same rule `holm_promote_execution` applies, whose only remaining asymmetry
-        # is that it also has `integrity_checks` to fold in. `failed_vetoes` is the ONE declaration
-        # of which lists those are, on both tracks.
-        #
-        # `siblings_hold` survives the collapse because it is NOT only a `promoted` conjunct: the
-        # note ladder needs to tell a sibling regression apart from a guardrail failure, and it gets
-        # that from this binding alone. Delete it as redundant with `failed_vetoes` and both causes
-        # print the generic guardrail note instead.
+    def decide(verdict: ActivationGateVerdict, facts: FamilyFacts) -> TrackDecision:
+        # `p_value` is not None on this branch — `decide_family` returns before calling the hook
+        # otherwise — and the ladder below depends on that, so it is asserted by the narrowing
+        # rather than by a coercion that would render `p = 0.0000` for a verdict that never had one.
+        assert verdict.p_value is not None, "decide_family calls the hook on the measured branch only"
+        threshold = _holm_threshold(facts.family_p_values, verdict.p_value, facts.alpha)
+        refusal = _refusal_message(verdict, threshold=threshold, family_size=facts.family_size, alpha=facts.alpha)
+        # `siblings_hold` is NOT merely a `promoted` conjunct — `failed_vetoes` covers that half.
+        # The note ladder needs to tell a sibling regression apart from a guardrail failure, and it
+        # gets that from this binding alone. Delete it as redundant and both causes print the
+        # generic guardrail note instead.
         siblings_hold = all(check.passed for check in verdict.sibling_checks)
-        rejected = i in rejected_at
-        # `verdict.separated` is the two statistical conjuncts as ONE named property. The note
-        # ladder needs them apart, to say WHICH failed — it splits them itself, where the sentences
-        # that depend on the distinction live.
-        #
-        # `refusal is None` is LOAD-BEARING, not belt-and-braces. `p_floor` bounds the p's
-        # EXPECTATION, so a realized p dips below it on roughly half of all seeds (measured: 16 of
-        # 30 on the 6-row fixture at 20,000 draws). Without this conjunction an unpromotable suite
-        # promotes on a coin-flip AND carries a refusal — two contradictory claims in one block,
-        # and the defect this whole field exists to fix, reborn.
-        promoted = rejected and verdict.separated and not verdict.failed_vetoes and refusal is None
-        notes += _activation_notes(
-            verdict,
-            p_value=verdict.p_value,
-            rejected=rejected,
-            refusal=refusal,
-            siblings_hold=siblings_hold,
-            threshold=threshold,
-            family_size=len(family),
-            family_resamples=family_resamples,
-            alpha=alpha,
-        )
-        # The refusal lives on `gate_refusal` and NOT in `notes`: notes is the "everything the
-        # reader needs to distrust the numbers" channel, a refusal is a headline, and duplicating
-        # it would print the same sentence twice in one block.
-        decided.append(
-            copy_with(
+        return TrackDecision(
+            refusal,
+            _activation_notes(
                 verdict,
-                promoted=promoted,
-                holm_rejected=rejected,
-                holm_alpha=alpha,
-                gate_refusal=refusal,
-                notes=notes,
-            )
+                p_value=verdict.p_value,
+                rejected=facts.rejected,
+                refusal=refusal,
+                siblings_hold=siblings_hold,
+                threshold=threshold,
+                family_size=facts.family_size,
+                alpha=facts.alpha,
+            ),
         )
-    return decided
+
+    return decide_family(verdicts, alpha, decide=decide)

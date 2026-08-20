@@ -41,9 +41,11 @@ from coder_eval.optimize.gate import (
     GATE_MAX_FAMILY,
     GATE_P_PRECISION,
     GATE_RESAMPLES,
+    NOTE_OUTSIDE_FAMILY,
     build_confirm_verdict,
     classify_confirm,
     confirm_split_check,
+    decide_family,
     holm_family,
     note_holm_family,
     note_ordinary_negative,
@@ -1331,13 +1333,14 @@ class TestTheClassifierIsShared:
 
         assert classify_confirm.__module__ == gate.__name__
         assert build_confirm_verdict.__module__ == gate.__name__
+        assert decide_family.__module__ == gate.__name__
 
     @pytest.mark.parametrize("module", ["optimize.activation", "optimize.execution"])
     def test_neither_track_module_defines_its_own(self, module: str) -> None:
         # A SOURCE scan, not an attribute check: both modules IMPORT these names, so `hasattr` passes
         # either way and only the source says whether a second implementation was written.
         source = module_source(module)
-        for name in ("classify_confirm", "build_confirm_verdict"):
+        for name in ("classify_confirm", "build_confirm_verdict", "decide_family"):
             assert f"def {name}(" not in source, (
                 f"{module} defines its own {name} — the two track modules may not import each "
                 "other, so a per-track copy is two copies of promotion-relevant arithmetic"
@@ -1398,6 +1401,169 @@ class TestConstructionIsBehaviourPreserving:
         # parameter, and it is `None` on every healthy verdict — so a pin that never refuses cannot
         # see it dropped.
         _assert_matches_pin(exec_gate(exec_run_dir(tmp_path, **uniform_shift(4))), "execution_gate_refused")
+
+
+class TestTheHolmLoopIsOneLoop:
+    """`decide_family` is the single promotion loop, and these are the properties it now owns alone.
+
+    The loop was written twice, 700 lines apart. Every assertion here used to be true of two
+    implementations that happened to agree; it is now true of one, and the parametrization over both
+    tracks is what proves the collapse did not quietly change either track's answer.
+    """
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_two_trailing_notes_appear_exactly_once(self, gate, build) -> None:
+        """The double-append trap.
+
+        `_activation_notes` appended `note_holm_family` / `note_resolution_degraded` itself while
+        the execution wrapper did it inline. `decide_family` owns both for both tracks now, so a
+        ladder that kept its own append prints the sentence twice — and every reader of the rendered
+        block sees the family described to it twice, which reads as two families.
+        """
+        decided = gate([build()])[0]
+        family_note = note_holm_family(1, DEFAULT_ALPHA)
+        assert decided.notes.count(family_note) == 1, decided.notes
+        # And nothing else in the block starts the same way, which is what a duplicate would.
+        assert sum(note.startswith("Holm applied across a family") for note in decided.notes) == 1
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_the_resolution_note_appears_exactly_once_too(self, tmp_path: Path, track: str) -> None:
+        # The conditional trailing note, on a family past the size the gate is sized for — the only
+        # state in which it is emitted at all, so a duplicate is invisible below it.
+        family = GATE_MAX_FAMILY + 3
+        if track == "activation":
+            incumbent, candidate = tiny_suite(6, 6)
+            run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+            decided = holm_promote([activation_verdict(run_dirs) for _ in range(family)])
+        else:
+            verdicts = [exec_gate(exec_run_dir(tmp_path / f"g{i}", **WINNER)) for i in range(family)]
+            decided = holm_promote_execution(verdicts)
+        for verdict in decided:
+            assert sum(note.startswith("resolution:") for note in verdict.notes) == 1, verdict.notes
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_threshold_is_per_rank_and_not_recomputed_per_verdict(self, gate, build) -> None:
+        """Two candidates at the same p must get the same answer, and it must be Holm's.
+
+        A family of two at p = 0.03 with alpha = 0.05: the strictest rank's threshold is
+        alpha/2 = 0.025, which 0.03 does not clear, so Holm's step-down stops and NEITHER is
+        rejected. A loop that compared each p against a bare `alpha` would reject both — the
+        uncorrected degeneration this correction exists to prevent, and the two answers differ.
+        """
+        decided = gate([build(p_value=0.03), build(p_value=0.03)])
+        assert [v.holm_rejected for v in decided] == [False, False]
+        assert [v.promoted for v in decided] == [False, False]
+        assert all(v.holm_alpha == DEFAULT_ALPHA for v in decided)
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_a_refused_verdict_with_a_real_p_stays_in_the_family(self, gate, build) -> None:
+        """Membership is `p_value is not None` and nothing else, on both tracks.
+
+        Dropping a refused-but-measured verdict would shrink `m` and LOOSEN `alpha/m` for its
+        siblings — the uncorrected-`p <= alpha` degeneration approached from the other side. The
+        family SIZE in the shared note is the observable, so this asserts on it rather than on an
+        internal.
+        """
+        healthy = build(p_value=0.001)
+        refused = (
+            build(p_value=0.001, p_floor=0.9, n_discordant=1)
+            if build is parity_activation
+            else build(p_value=0.001, gate_refusal="the two arms differed by an identical amount on every row")
+        )
+        decided = gate([healthy, refused])
+        assert decided[1].gate_refusal is not None, "the fixture must actually refuse"
+        # Both members see a family of TWO — the refused one was tested, so it counts.
+        for verdict in decided:
+            assert note_holm_family(2, DEFAULT_ALPHA) in verdict.notes
+
+    def test_the_execution_refusal_is_read_back_byte_for_byte(self) -> None:
+        """`decide_family` writes `gate_refusal` on every measured path, so a no-op write must be one.
+
+        The unified loop writes the hook's returned refusal where the execution wrapper used to omit
+        the key entirely. The hook returns `verdict.gate_refusal` unchanged, so the write is a
+        no-op — and "is a no-op" is a claim about a field a user reads to decide whether a block is
+        a decision at all, which makes it a claim that needs a witness.
+        """
+        message = (
+            "there is no experiment file at /nowhere/experiment.json, so the paired statistic could not be computed"
+        )
+        decided = holm_promote_execution([parity_execution(p_value=0.001, gate_refusal=message)])[0]
+        assert decided.gate_refusal == message
+        assert decided.promoted is False
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_an_unmeasured_verdict_is_outside_the_family_and_says_so(self, gate, build) -> None:
+        decided = gate([build(p_value=None, mean_diff=None, ci_low=None, ci_high=None)])[0]
+        assert decided.promoted is False
+        assert decided.holm_rejected is False, "None would read as 'Holm has not run' on a verdict it has"
+        assert decided.holm_alpha == DEFAULT_ALPHA
+        assert NOTE_OUTSIDE_FAMILY in decided.notes
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_an_unmeasured_refused_verdict_withholds_the_outside_family_note(self, gate, build) -> None:
+        """The `gate_refusal is None` guard on the unmeasured branch, asserted on both tracks.
+
+        Reachable on each: the activation track's cross-split preflight and every execution-track
+        "there was no comparison to make" cause set the field with no p. Unguarded, the block prints
+        an ordinary negative-result note directly under a refusal headline.
+        """
+        decided = gate(
+            [build(p_value=None, mean_diff=None, ci_low=None, ci_high=None, gate_refusal="no comparison was made")]
+        )[0]
+        assert decided.gate_refusal == "no comparison was made"
+        assert NOTE_OUTSIDE_FAMILY not in decided.notes
+        assert decided.promoted is False
+        assert decided.holm_rejected is False
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_family_size_is_the_measured_count(self, gate, build) -> None:
+        """`len(family)`, never `len(verdicts)` — and the two differ exactly when it matters.
+
+        Every other case in this class uses a family whose members are all measured, where the two
+        counts coincide; a mutation to `len(verdicts)` passes the entire suite. So this is the one
+        state that separates them: one member with no p, which the membership rule
+        (`p_value is not None`) excludes.
+
+        The observable is that BOTH sentences naming the family derive from the same number. The
+        ladder's rung and the trailing note compute it independently, so under the mutation one
+        block reports two different family sizes — and a reader checking "is alpha/m the bar it
+        says it is" cannot tell which one to believe.
+        """
+        unmeasured = build(p_value=None, mean_diff=None, ci_low=None, ci_high=None)
+        measured = build(p_value=0.5)
+        decided = gate([unmeasured, measured])[1]
+        assert note_holm_family(1, DEFAULT_ALPHA) in decided.notes
+        # The ladder's own sentence, computed from `facts.family_size` rather than from the note.
+        assert any("in a family of 1 " in note for note in decided.notes), decided.notes
+        assert not any("family of 2" in note for note in decided.notes), decided.notes
+
+    def test_the_activation_refusal_names_the_measured_family_size_too(self) -> None:
+        """The second reader of `facts.family_size`: the discreteness refusal's own sentence.
+
+        It is a separate code path from the ladder — computed in `_refusal_message` from the same
+        fact — so a mutation that survived the ladder assertion above would still be reporting a
+        bar the family does not have.
+        """
+        unmeasured = parity_activation(p_value=None, mean_diff=None, ci_low=None, ci_high=None)
+        refused = parity_activation(p_value=0.001, p_floor=0.9, n_discordant=1)
+        decided = holm_promote([unmeasured, refused])[1]
+        assert decided.gate_refusal is not None
+        assert "in a family of 1 " in decided.gate_refusal, decided.gate_refusal
+
+    @pytest.mark.parametrize(("gate", "build"), _TRACKS)
+    def test_the_note_order_is_the_rendered_order(self, gate, build) -> None:
+        """Carried notes first, then the ladder, then the two trailing notes — in that order.
+
+        The rendered pins are the real detector, but they only cover the states the fixtures reach.
+        This states the rule: whatever a track's ladder says, the family note is LAST among the
+        notes the loop adds, because it is a statement about the family rather than the candidate.
+        """
+        carried = "a note the gate already wrote"
+        decided = gate([build(p_value=0.9, notes=[carried])])[0]
+        assert decided.notes[0] == carried
+        assert decided.notes[-1] == note_holm_family(1, DEFAULT_ALPHA)
+        # And the ladder's ordinary-negative rung sits between them.
+        assert any("did not clear the Holm threshold" in note for note in decided.notes[1:-1])
 
 
 class TestTheSharedFieldsAreDeclaredOnce:

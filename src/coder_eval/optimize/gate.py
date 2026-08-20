@@ -4,8 +4,10 @@ Rank 1 of the optimize family: it imports from :mod:`coder_eval.optimize.load` a
 else in the family, and both track modules import from it. What lives here is what is neither
 track's alone — the gate-wide constants, the notes both Holm wrappers emit verbatim, the
 noise-floor refusal channel and the cluster half both floors share, the cost/latency guardrails
-both gates run, and :func:`holm_family`, the ONE
-:func:`~coder_eval.reports_stats.holm_rejections` call site.
+both gates run, :func:`holm_family`, the ONE
+:func:`~coder_eval.reports_stats.holm_rejections` call site, and :func:`decide_family`, the ONE
+promotion loop — which is where the single ``promoted`` conjunction lives, and therefore the single
+answer to "what does this gate promote on".
 
 The two gates themselves live one rank up, in :mod:`coder_eval.optimize.activation` and
 :mod:`coder_eval.optimize.execution`. The split is BY TRACK because the activation/execution pair
@@ -42,6 +44,7 @@ from coder_eval.models import (
     ConfirmVerdict,
     EvaluationResult,
     ExecutionGateVerdict,
+    GateVerdictBase,
     GuardrailCheck,
     NoiseFloor,
     OptimizeMeasurements,
@@ -345,9 +348,11 @@ def floor_from_clusters[T](
     return copy_with(probe, mde=(ci_high - ci_low) / 2.0)
 
 
-# The four notes both Holm wrappers emit verbatim. They were byte-identical copies in two functions
-# 600 lines apart; a wording fix applied to one of them would have left the two tracks describing
-# the same decision differently in a ledger read back weeks later.
+# The four notes both tracks emit verbatim. They were byte-identical copies in two functions 600
+# lines apart; a wording fix applied to one of them would have left the two tracks describing the
+# same decision differently in a ledger read back weeks later. Two of them — `note_holm_family` and
+# `note_resolution_degraded` — are now emitted by `decide_family` rather than by either track, so
+# they have one call site as well as one declaration.
 #
 # Deliberately NOT collapsed with them: the zero-row and below-MDE notes. Those diverged on purpose
 # — the execution track's zero-row case became a `gate_refusal` with different text, and its MDE
@@ -383,9 +388,10 @@ def note_resolution_degraded(family_size: int, n_resamples: int, alpha: float) -
     that moment.
 
     **``str | None``, unlike :func:`note_holm_family` beside it, which is unconditional.** Returning
-    ``None`` below the threshold puts the condition in ONE place. The alternative — a ``str`` return
-    plus an ``if`` duplicated at the two call sites — is exactly the shape that lets the two tracks
-    drift, which is the whole reason these notes are shared.
+    ``None`` below the threshold puts the condition in ONE place. It was written when the two tracks
+    each called this themselves and a ``str`` return would have duplicated the ``if`` — the shape
+    that lets two tracks drift. :func:`decide_family` is the single call site now, so the shape
+    earns its keep for a smaller reason: the caller appends what it gets and never asks whether to.
 
     ``n_resamples`` is the family's SMALLEST, not the constant: a caller may pass a custom count, and
     the coarsest member is what bounds the family's resolution. It is not a refusal — the gate still
@@ -671,7 +677,7 @@ class _HolmFamily(NamedTuple):
     rejected_at: set[int]
 
 
-def holm_family(verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict], alpha: float) -> _HolmFamily:
+def holm_family(verdicts: Sequence[GateVerdictBase], alpha: float) -> _HolmFamily:
     """The one place :func:`~coder_eval.reports_stats.holm_rejections` is called.
 
     Both wrappers spelled these three lines identically, 700 lines apart. Holm corrects a FAMILY,
@@ -684,26 +690,27 @@ def holm_family(verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict]
     shrink ``m`` and loosen ``alpha/m`` for its siblings — the uncorrected-``p <= alpha``
     degeneration approached from the other side.
 
-    Structurally typed over the two verdict models rather than behind a ``Protocol``: both expose
-    ``p_value``, the union is two concrete classes this module already imports, and a protocol here
-    would be a third declaration of "has a p_value" for no reader's benefit.
+    Typed on :class:`~coder_eval.models.GateVerdictBase`, never a ``Protocol``. It used to take the
+    two-class union with the note that a protocol would be a third declaration of "has a
+    ``p_value``" — and the base IS that one declaration now, so the union became the redundant
+    spelling. The retype is not cosmetic: :func:`decide_family` is generic over the base, and
+    passing its ``Sequence[V]`` into a two-class union parameter does not type.
     """
     members = [(i, v.p_value) for i, v in enumerate(verdicts) if v.p_value is not None]
     rejections = holm_rejections([p for _i, p in members], alpha)
     return _HolmFamily(members, {i for (i, _p), reject in zip(members, rejections, strict=True) if reject})
 
 
-def resamples_for_family(
-    verdicts: Sequence[ActivationGateVerdict | ExecutionGateVerdict], family: list[tuple[int, float]]
-) -> int:
+def resamples_for_family(verdicts: Sequence[GateVerdictBase], family: list[tuple[int, float]]) -> int:
     """The COARSEST draw count among the family's members — what bounds the family's resolution.
 
     Read off the verdicts rather than from :data:`GATE_RESAMPLES`, since a caller may pass a custom
     count, and over family MEMBERS only: a verdict with no p was not tested at any resolution.
 
     Shared because the line was byte-identical in both Holm wrappers, which is the duplication
-    :func:`note_resolution_degraded` was put at this rank to avoid — and :func:`holm_family` already
-    accepts both verdict types, so there was nothing structural keeping it apart.
+    :func:`note_resolution_degraded` was put at this rank to avoid. Both wrappers have since
+    collapsed into :func:`decide_family`, its one remaining caller — so what this now buys is a
+    name for the rule ("the coarsest, over members only") rather than a second copy avoided.
     """
     return min((verdicts[i].n_resamples for i, _p in family), default=GATE_RESAMPLES)
 
@@ -731,3 +738,136 @@ def note_check_failed(check_name: str) -> str:
         + "rendered headline reports it as BLOCKED BY A GUARDRAIL, which `separated` is what keeps "
         + "distinguishable from an ordinary loss."
     )
+
+
+class FamilyFacts(NamedTuple):
+    """What :func:`decide_family` knows about the family, handed to a per-track hook.
+
+    FAMILY facts only. ``rejected``, ``family_size`` and ``alpha`` are things no single verdict can
+    see, which is exactly why the loop that sees the whole family computes them once. Track-local
+    quantities — the activation track's rank threshold, the sibling binding its note ladder needs —
+    are NOT here: they are derived inside the hook that wants them, from ``family_p_values``.
+
+    **Carries no ``family_resamples``, deliberately.** The family's coarsest draw count is what
+    bounds :func:`note_resolution_degraded`, and ``decide_family`` emits that note itself, so no
+    hook has ever read the number. A field written on every iteration and read by nobody is the
+    same speculative field this tuple already refuses a ``threshold`` for: it advertises a fact to
+    hook authors that they must not use, and the ladder that looks like it wants one actually reads
+    ``verdict.n_resamples``, a different number.
+    """
+
+    rejected: bool
+    family_size: int
+    alpha: float
+    family_p_values: list[float]
+
+
+class TrackDecision(NamedTuple):
+    """What a per-track hook answers with: this verdict's refusal, and its notes in rendered order.
+
+    ``refusal`` is RETURNED rather than read off the verdict because the two tracks disagree about
+    where it comes from and agree about what it means. The activation track COMPUTES it from the
+    family's rank-dependent threshold, which nothing outside the family can do; the execution track
+    READS the one ``execution_gate`` already set. Returning it from both makes the ``promoted``
+    conjunction one expression instead of two spellings of the same conjunction.
+    """
+
+    refusal: str | None
+    notes: list[str]
+
+
+def decide_family[V: GateVerdictBase](
+    verdicts: Sequence[V], alpha: float, *, decide: Callable[[V, FamilyFacts], TrackDecision]
+) -> list[V]:
+    """Apply the Holm correction to a whole family and record the decision on each verdict.
+
+    The ONE promotion loop for both tracks. It was written twice, 700 lines apart, and the two
+    copies had already drifted in spelling: the refusal conjunct read ``refusal is None`` on one
+    side and ``not refused`` on the other, and the two trailing notes were appended from different
+    places.
+
+    What it owns, and what a hook may therefore not re-do:
+
+    - the :func:`holm_family` / :func:`resamples_for_family` calls;
+    - the ``p_value is None`` branch — outside the family, ``promoted=False`` and
+      ``holm_rejected=False`` (never ``None``, which would read as "Holm has not run" on a verdict
+      it has), with :data:`NOTE_OUTSIDE_FAMILY` added only where there is no refusal to contradict;
+    - the ONE ``promoted`` conjunction: Holm rejected AND ``separated`` AND no refusal AND no
+      failed veto. ``failed_vetoes`` is the single declaration of which lists veto, so a failed
+      guardrail FORCES False and the field alone is safe to ship on;
+    - the two TRAILING notes, :func:`note_holm_family` and :func:`note_resolution_degraded`, for
+      both tracks. A hook that appends either prints it twice;
+    - both ``copy_with`` calls.
+
+    It owns **no note text**. Every sentence about one candidate is the hook's, because which of
+    the two statistical conjuncts failed — and what the remedy is — differs between a bootstrap
+    over labels and an analytic paired *t*.
+
+    The hook runs on the MEASURED branch only: the activation track's refusal needs the family's
+    rank-dependent threshold, so calling it on a ``p_value is None`` verdict would hand a
+    discreteness refusal to a verdict that cannot have one.
+
+    Generic over ``V`` rather than typed to the union, so ``copy_with`` returns the caller's own
+    verdict class and a track keeps its concrete type end to end.
+
+    **One measurable difference from the two loops it replaces, stated because "no-op" was the
+    claim.** The execution wrapper omitted ``gate_refusal`` from its ``copy_with``; this writes it on
+    every measured path, from the hook, which returns the verdict's own value. The VALUE is
+    therefore unchanged — verified over a 10,982-state differential against both old loops — but the
+    key now enters ``__pydantic_fields_set__``, so ``model_dump(exclude_unset=True)`` includes it on
+    an execution verdict built without it. Nothing reads a gate verdict that way today; the full
+    ``model_dump()`` and every pinned fixture are byte-identical.
+    """
+    family, rejected_at = holm_family(verdicts, alpha)
+    family_resamples = resamples_for_family(verdicts, family)
+    family_p_values = [p for _i, p in family]
+
+    decided: list[V] = []
+    for i, verdict in enumerate(verdicts):
+        notes = list(verdict.notes)
+        if verdict.p_value is None:
+            # Reachable on BOTH tracks with a refusal already set — the activation track's
+            # cross-split preflight and every execution-track "there was no comparison to make"
+            # cause land here. Unguarded, a refused block prints an ordinary negative-result note
+            # directly under a refusal headline.
+            if verdict.gate_refusal is None:
+                notes.append(NOTE_OUTSIDE_FAMILY)
+            decided.append(copy_with(verdict, promoted=False, holm_rejected=False, holm_alpha=alpha, notes=notes))
+            continue
+
+        rejected = i in rejected_at
+        refusal, track_notes = decide(
+            verdict,
+            FamilyFacts(
+                rejected=rejected,
+                family_size=len(family),
+                alpha=alpha,
+                family_p_values=family_p_values,
+            ),
+        )
+        # `refusal is None` is LOAD-BEARING on both tracks, not belt-and-braces. On activation,
+        # `p_floor` bounds the p's EXPECTATION, so a realized p dips below it on roughly half of
+        # all seeds; on execution, a zero-variance verdict has p = 0.0000 and a zero-width
+        # interval, so `separated` holds on it too. Without this conjunct an undecidable
+        # comparison promotes AND carries a refusal — two contradictory claims in one block.
+        promoted = rejected and verdict.separated and refusal is None and not verdict.failed_vetoes
+        notes += track_notes
+        notes.append(note_holm_family(len(family), alpha))
+        # Not a negative-result claim, so it sits outside every refusal guard: it is a statement
+        # about the draw count, which stays true whatever the refusal says.
+        if (degraded := note_resolution_degraded(len(family), family_resamples, alpha)) is not None:
+            notes.append(degraded)
+        # The refusal lives on `gate_refusal` and NOT in `notes`: notes is the "everything the
+        # reader needs to distrust the numbers" channel, a refusal is a headline, and duplicating
+        # it would print the same sentence twice in one block.
+        decided.append(
+            copy_with(
+                verdict,
+                promoted=promoted,
+                holm_rejected=rejected,
+                holm_alpha=alpha,
+                gate_refusal=refusal,
+                notes=notes,
+            )
+        )
+    return decided
