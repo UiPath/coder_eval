@@ -36,6 +36,7 @@ from coder_eval.optimize.gate import (
     MATERIALITY_FLOOR,
     NOTE_CI_CONTAINS_ZERO,
     FamilyFacts,
+    FirstCause,
     TrackDecision,
     build_confirm_verdict,
     classification_metric,
@@ -46,6 +47,7 @@ from coder_eval.optimize.gate import (
     cost_latency_guardrails,
     decide_family,
     floor_from_clusters,
+    floor_preflight,
     no_floor,
     note_check_failed,
     note_ordinary_negative,
@@ -54,18 +56,13 @@ from coder_eval.optimize.load import (
     criterion_weights,
     label_pairs,
     load_arm_rows,
-    load_suite_rows,
     observed_result_types,
     pool_replicates,
     read_split_provenance,
-    reconcile_arms,
     reconcile_tree_against_run_json,
     require_valid_criterion_index,
     row_score,
-    split_mismatch_reason,
-    stale_tree_reason,
     task_json_pattern,
-    wrong_path_reason,
 )
 from coder_eval.optimize.store import UNRESOLVED_MODEL
 from coder_eval.reports_stats import (
@@ -132,27 +129,19 @@ def measure_execution_noise_floor(
     that is worth checking rather than treating as a green light — it is what a suite whose rows
     are deterministic looks like, and also what one whose rows all failed identically looks like.
     """
-    # The activation floor's preflight, on this track's split axis and for a sharper reason: the
-    # replicate half of the reconciliation keys on `<NN>`, and a re-used `--run-dir` with a smaller
-    # `--repeats` leaves exactly the stale replicates this splits into halves. See its twin above.
-    stale, _unknown_dirs = reconcile_arms([(variant_id, run_dirs)], suite_id)
-    if stale:
-        return no_floor(stale_tree_reason(stale))
-
-    rows = pool_replicates([load_suite_rows(d, variant_id, suite_id) for d in run_dirs])
-    # A mistyped variant, suite or run directory is the documented SILENT-ZERO failure mode, and
-    # "no row carries 2+ replicates" would send the reader off to check --repeats instead of the
-    # path. Distinguished here for the same reason `activation_gate` distinguishes it.
-    if not rows:
-        return no_floor(wrong_path_reason(variant_id, suite_id, run_dirs))
-
-    # Same refusal as the activation floor, and for the same reason: a null comparison pooled
-    # over run directories that selected different row sets is not a floor for any of them.
-    # Reachable here even though the execution GATE takes one run_dir — this function takes a
-    # sequence, and Stage B may hand it several.
-    provenance = read_split_provenance(run_dirs)
-    if provenance.mismatched:
-        return no_floor(split_mismatch_reason("the replicate split", provenance, run_dirs))
+    # The same three guards, on this track's split axis and with a sharper reason for the first:
+    # the replicate half of the reconciliation keys on `<NN>`, so a re-used `--run-dir` with a
+    # smaller `--repeats` leaves exactly the stale replicates this splits into halves. The split
+    # refusal is reachable even though the execution GATE takes one run_dir — this takes a sequence.
+    preflight = floor_preflight(
+        run_dirs=run_dirs, variant_id=variant_id, suite_id=suite_id, split_label="the replicate split"
+    )
+    if preflight is None:
+        return None
+    per_dir, provenance = preflight
+    # Pooled HERE rather than in the preflight: this track splits each row's replicates, so it wants
+    # one map, while the activation twin keeps the per-invocation maps in order to halve them.
+    rows = pool_replicates(per_dir)
 
     # `criterion_index=None` is already the "read the row's weighted_score" mode, so this reuses
     # the existing extractor rather than adding a second definition of what a row scored.
@@ -607,29 +596,19 @@ def execution_gate(
             f"both arms ran under --split {run_provenance.value!r} (one run directory, so " + "they cannot disagree)."
         )
 
-    # Read by `_verdict`'s construction at CALL time, so EVERY return path reports it.
-    gate_refusal: str | None = None
-
-    def _refuse(reason: str) -> None:
-        """Record the FIRST cause that makes this block not a decision, and keep it.
-
-        Every cause answers the same question — *is this a result?* — with the same consequence, so
-        they share one field, one headline and one prose token. They differ in REMEDY, and the
-        earliest cause is the one whose remedy comes first: if there is no comparison to make, the
-        rows are moot; if the rows never loaded, whether their differences vary is moot. Program
-        order IS the precedence, and routing every setter through here says so once instead of
-        leaving 11 `if gate_refusal is None` guards to be kept in agreement.
-        """
-        nonlocal gate_refusal
-        if gate_refusal is None:
-            gate_refusal = reason
+    # Read by `_verdict`'s construction at CALL time, so EVERY return path reports it. An attribute
+    # rather than a `nonlocal` for exactly that reason — see `FirstCause`, which owns the
+    # precedence rule and the four sites' shared rationale. Here the order reads: if there is no
+    # comparison to make, the rows are moot; if the rows never loaded, whether their differences
+    # vary is moot.
+    cause = FirstCause()
 
     if incumbent_variant == candidate_variant:
         # Otherwise the sign resolves off the candidate, matches vid_a, and the block reports
         # `vid_a - vid_b` labelled `candidate - incumbent` with both labels reading the same name
         # — a confident, significant, sign-flipped verdict comparing an arm to the other arm while
         # claiming to compare it to itself. Measured before this guard existed.
-        _refuse(
+        cause.record(
             f"incumbent_variant and candidate_variant are both {incumbent_variant!r}, so there is no "
             + "comparison to make and no sign to resolve. Name the two arms you meant to compare."
         )
@@ -645,7 +624,7 @@ def execution_gate(
         reconciliation = reconcile_tree_against_run_json(run_dir, variant, suite_id)
         if reconciliation.unrecorded:
             examples = ", ".join(f"{row}/{rep}" for row, rep in sorted(reconciliation.unrecorded)[:3])
-            _refuse(
+            cause.record(
                 f"{run_dir}/{variant} holds {len(reconciliation.unrecorded)} result(s) that its "
                 + f"run.json never wrote (e.g. {examples}). run.json is written per INVOCATION "
                 + "while the tree is APPEND-ONLY, so a re-used --run-dir leaves an earlier call's "
@@ -732,7 +711,7 @@ def execution_gate(
             p_value=p_value,
             # Read from the enclosing scope at CALL time, so a return path that runs after a
             # refusal was set carries it without every call site repeating the keyword.
-            gate_refusal=gate_refusal,
+            gate_refusal=cause.reason,
             mde=mde,
             dead_weight=dead_weight,
             primary_criterion_index=primary_criterion_index,
@@ -762,7 +741,7 @@ def execution_gate(
 
     experiment_json = run_dir / "experiment.json"
     if not experiment_json.is_file():
-        _refuse(
+        cause.record(
             f"there is no experiment file at {experiment_json}, so the paired statistic could not be "
             + "computed at all. A plain `coder-eval run` without `-e <experiment>` writes none, and "
             + "this track's gate is a two-variant experiment. Re-run the gate with its "
@@ -776,7 +755,7 @@ def execution_gate(
         # unreadable file (permissions, or one that vanished between the is_file() and the read) is
         # exactly as much a wiring fault as a malformed one — with the same right answer.
         logger.warning("Failed to load %s for the execution gate", experiment_json, exc_info=True)
-        _refuse(
+        cause.record(
             f"the experiment file at {experiment_json} could not be read or parsed, so no statistic "
             + "was computed. Check the file is present, readable and complete — a run killed while "
             + "writing it leaves a truncated one."
@@ -799,7 +778,7 @@ def execution_gate(
         # `variant_ids` is deliberately NOT narrowed to force a comparison out of an N-variant
         # file: that would compute a Stage B verdict from Stage A data — one replicate per row,
         # arms chosen on those same rows — which is precisely what the method forbids.
-        _refuse(
+        cause.record(
             f"no paired comparison: {experiment_json} declares {len(result.variant_ids)} variant(s) "
             + f"({', '.join(result.variant_ids) or 'none'}) and no row of {suite_id!r} scored on both, "
             + "or the file predates per-replicate scores. Check the suite id first — the one above is "
@@ -814,7 +793,7 @@ def execution_gate(
     elif candidate_variant == comparison.vid_b:
         sign = -1.0
     else:
-        _refuse(
+        cause.record(
             f"candidate_variant={candidate_variant!r} is not one of the two variants the experiment "
             + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}), so no sign could be resolved and "
             + "no statistic is reported. Check the variant id against the experiment file."
@@ -824,7 +803,7 @@ def execution_gate(
         # Fails CLOSED, like its candidate-side sibling above. It used to annotate and fall
         # through, which reported a real, significant difference against whichever arm the file
         # happened to carry — under a header naming the arm the caller asked for.
-        _refuse(
+        cause.record(
             f"incumbent_variant={incumbent_variant!r} is not one of the two variants the experiment "
             + f"compared ({comparison.vid_a!r}, {comparison.vid_b!r}), so the difference could not be "
             + "resolved against the arm you named and no statistic is reported. Check the variant id "
@@ -902,7 +881,7 @@ def execution_gate(
             # than raise. That is the wrong answer HERE: an over-long primary index makes `row_score`
             # return None on every row, so the vector is EMPTY and indistinguishable from a suite of
             # rows that all errored on that criterion.
-            _refuse(
+            cause.record(
                 f"primary_criterion_index={primary_criterion_index} selected no usable row on either "
                 + f"arm across {len(check_row_ids)} paired row(s), so no primary effect could be "
                 + "reported. The index is the criterion's POSITION in the suite's success_criteria "
@@ -929,10 +908,10 @@ def execution_gate(
         effect_size=effect_size,
         mde=mde,
         bounds=bounds,
-        refused_already=gate_refusal is not None,
+        refused_already=cause.reason is not None,
     )
     if refusal is not None:
-        _refuse(refusal)
+        cause.record(refusal)
     notes.extend(diagnostics)
 
     return _verdict(
@@ -969,11 +948,11 @@ def _execution_diagnostics(
     already computed, none of them can return early, and together they were most of what took
     :func:`execution_gate` to F(50).
 
-    Returns the FIRST refusal cause rather than calling ``_refuse`` itself, so the caller's
-    first-cause-wins ordering stays in one place: every cause here ranks below every cause the gate
-    found before the statistic, which is the precedence the zero-row comment states. Two setters
-    for one field is exactly the state ``_refuse`` collapsed, and a helper reaching back into that
-    closure could not be tested without building a gate around it.
+    Returns the FIRST refusal cause rather than writing the caller's own :class:`FirstCause`, so
+    the gate's first-cause-wins ordering stays in one place: every cause here ranks below every
+    cause the gate found before the statistic, which is the precedence the zero-row comment states.
+    Two setters for one field is exactly the state ``FirstCause`` collapsed, and a helper writing
+    into the caller's sink could not be tested without building a gate around it.
 
     ``refused_already`` is what the two advisory notes suppress on — a note explaining a number
     printed under a refusal headline contradicts it. It is OR-ed with a cause found here, because
@@ -981,8 +960,8 @@ def _execution_diagnostics(
 
     **It is reachable as ``True`` today, and the way it used to claim otherwise was a trap.** This
     docstring said "False at the only call site" — but the TREE-RECONCILIATION cause does not
-    return: it calls ``_refuse`` and then ``break``s out of its variant loop, so control reaches
-    the call site with ``gate_refusal`` already set and ``refused_already=True``. A reader who
+    return: it records a cause and then ``break``s out of its variant loop, so control reaches the
+    call site with the gate's ``FirstCause`` already set and ``refused_already=True``. A reader who
     believed the old sentence would delete the two ``not refused_already`` guards below as dead
     code, and a contaminated run would immediately print the MDE and tighter-than-floor advisories
     under a ``NOT A RESULT`` headline — the exact contradiction those guards exist to prevent.
@@ -992,13 +971,8 @@ def _execution_diagnostics(
     fact about the caller rather than an assumption baked in here.
     """
     notes: list[str] = []
-    refusal: str | None = None
-
-    def _refuse(reason: str) -> None:
-        """First cause wins, mirroring the gate's own setter."""
-        nonlocal refusal
-        if refusal is None:
-            refusal = reason
+    # First cause wins — see `FirstCause`, which owns the rule.
+    cause = FirstCause()
 
     # The statistic comes from `experiment.json` while every check comes from the on-disk row tree,
     # so the two can disagree — and a valid experiment file beside a mistyped variant, suite or run
@@ -1007,7 +981,7 @@ def _execution_diagnostics(
     # and silent on the other.
     #
     # Refused HERE, after the experiment-file and variant-id causes above, even though the rows
-    # were loaded at the top. `_refuse` keeps the first cause recorded, so the call order IS the
+    # were loaded at the top. `FirstCause` keeps the first cause recorded, so the call order IS the
     # precedence — and a mistyped variant id makes that arm load zero rows as a CONSEQUENCE, so
     # refusing on the consequence first would replace a message naming the two ids the experiment
     # actually carries with one that can only say "a wrong variant id, suite id or run directory".
@@ -1025,7 +999,7 @@ def _execution_diagnostics(
         # ONE refusal naming every empty arm, not one message per arm: the loop this replaces
         # appended twice when both arms were empty, saying the same thing about a single fault.
         named = " and ".join(f"the {arm} arm ({variant_id!r})" for arm, variant_id in empty_arms)
-        _refuse(
+        cause.record(
             f"{named} loaded ZERO rows: nothing matched "
             # `<variant>` literally: this one message names BOTH arms, so it cannot spell either id.
             + f"{task_json_pattern('<variant>', suite_id)} under {run_dir}. That is a wrong variant "
@@ -1042,7 +1016,7 @@ def _execution_diagnostics(
         # that never happened. The row count is still carried on the verdict, so an eroded sample
         # (say 3 incumbent rows against 1 candidate row) is visible as `paired 1 · excluded 2`
         # rather than being flattened into the message.
-        _refuse(
+        cause.record(
             f"only {comparison.task_count} row(s) of {suite_id!r} scored on both arms — fewer than the 2 a "
             + "paired interval needs, so every statistic is unavailable rather than fabricated. Check "
             + "why the rows did not pair before reading anything below; an asymmetric sample is the "
@@ -1054,7 +1028,7 @@ def _execution_diagnostics(
     # JSON validator REJECTS `NaN` / `Infinity`, so such a file never parses and is already reported
     # by the read's own note above. A guard here would be an unreachable branch claiming otherwise.
 
-    # No `refused_already` guard: `_refuse` keeps the first cause, and every cause above this
+    # No `refused_already` guard: the sink keeps the first cause, and every cause above this
     # one outranks it. If the rows never loaded, whether their differences vary is moot.
     if mean_diff is not None and effect_size is None:
         # Cohen's d is undefined exactly when stddev(diffs) == 0 — two arms differing by an
@@ -1070,7 +1044,7 @@ def _execution_diagnostics(
         # can change — and `paired_t_test` reports p = 1.0 there rather than the 0.0 a non-zero
         # constant shift gives, so a single message would state a p the block below it contradicts.
         if mean_diff == 0.0:
-            _refuse(
+            cause.record(
                 "the two arms produced an identical per-row score on every one of the "
                 + f"{comparison.task_count} paired row(s), so there is nothing for any test to "
                 + "separate — the paired difference is exactly zero with zero variance, and the "
@@ -1080,7 +1054,7 @@ def _execution_diagnostics(
                 + "to the snapshots you think they were."
             )
         else:
-            _refuse(
+            cause.record(
                 f"the two arms differed by exactly {mean_diff:.3f} on every one of the "
                 + f"{comparison.task_count} paired row(s), so the paired differences carry zero "
                 + "variance. A paired t on a constant non-zero difference reports p = 0.0000 and a "
@@ -1113,7 +1087,7 @@ def _execution_diagnostics(
     excludes_zero_either_way = len(bounds) == 2 and (bounds[0] > 0.0 or bounds[1] < 0.0)
     if mde is not None and mde >= FLOOR_RESOLUTION and mean_diff is not None and abs(mean_diff) < mde:
         if excludes_zero_either_way:
-            _refuse(
+            cause.record(
                 f"the observed difference ({mean_diff:.3f}) is smaller than this suite's minimum "
                 + f"detectable effect ({mde:.3f}) on weighted_score — the half-width of a null "
                 + "comparison that split the incumbent's own replicates, where the true difference is "
@@ -1122,7 +1096,7 @@ def _execution_diagnostics(
                 + "Lower the floor with more replicates or more rows, or find rows where the "
                 + "candidate's effect is larger."
             )
-        elif not refused_already and refusal is None:
+        elif not refused_already and cause.reason is None:
             # Below the floor AND consistent with zero: the ordinary "it did not help" outcome.
             #
             # Guarded like the two advisories below it, and it was the ONE note in this ladder that
@@ -1150,7 +1124,12 @@ def _execution_diagnostics(
     # Suppressed on `refused_already` OR a cause found above: inside this ladder "nothing has
     # refused yet" has to include what the zero-variance branch decided three lines up, or a
     # zero-variance verdict starts printing a floor note under its own refusal headline.
-    if not refused_already and refusal is None and mean_diff is not None and (mde is None or mde < FLOOR_RESOLUTION):
+    if (
+        not refused_already
+        and cause.reason is None
+        and mean_diff is not None
+        and (mde is None or mde < FLOOR_RESOLUTION)
+    ):
         notes.append(
             "this suite's minimum detectable effect came back "
             + (f"{mde:.3f}" if mde is not None else "unavailable")
@@ -1174,7 +1153,7 @@ def _execution_diagnostics(
         and mde >= FLOOR_RESOLUTION
         and half_width < mde
         and not refused_already
-        and refusal is None
+        and cause.reason is None
     ):
         notes.append(
             "the paired interval is tighter than this suite's own noise floor: a half-width of "
@@ -1187,7 +1166,7 @@ def _execution_diagnostics(
             + "extra confidence."
         )
 
-    return refusal, notes
+    return cause.reason, notes
 
 
 def confirm_gate_execution(
@@ -1242,24 +1221,19 @@ def confirm_gate_execution(
     confirm_one_candidate(candidate_variant)
 
     notes: list[str] = []
-    confirm_refusal: str | None = None
-
-    def _refuse(reason: str) -> None:
-        """The FIRST cause that makes this not a comparison, mirroring ``execution_gate._refuse``."""
-        nonlocal confirm_refusal
-        if confirm_refusal is None:
-            confirm_refusal = reason
+    # The FIRST cause that makes this not a comparison — see `FirstCause`.
+    cause = FirstCause()
 
     if (train_note := confirm_train_note(train_verdict.promoted)) is not None:
         notes.append(train_note)
     if (train_refusal := confirm_train_refusal(train_verdict.gate_refusal)) is not None:
-        _refuse(train_refusal)
+        cause.record(train_refusal)
 
     split_refusal, split_note = confirm_split_check(read_split_provenance([confirm_run_dir]), [confirm_run_dir])
     if split_note is not None:
         notes.append(split_note)
     if split_refusal is not None:
-        _refuse(split_refusal)
+        cause.record(split_refusal)
 
     test_verdict = holm_promote_execution(
         [
@@ -1278,7 +1252,7 @@ def confirm_gate_execution(
         ]
     )[0]
     if test_verdict.gate_refusal is not None:
-        _refuse(f"the confirm gate is not a result: {test_verdict.gate_refusal}")
+        cause.record(f"the confirm gate is not a result: {test_verdict.gate_refusal}")
 
     return build_confirm_verdict(
         incumbent_variant=incumbent_variant,
@@ -1290,7 +1264,7 @@ def confirm_gate_execution(
         test_effect=test_verdict.mean_diff,
         test_mde=test_verdict.mde,
         test_verdict=test_verdict,
-        confirm_refusal=confirm_refusal,
+        confirm_refusal=cause.reason,
         notes=notes,
     )
 

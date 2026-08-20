@@ -18,13 +18,16 @@ from coder_eval.optimize.gate import (
     GATE_P_PRECISION,
     GATE_RESAMPLES,
     MATERIALITY_FLOOR,
+    FirstCause,
     classify_confirm,
     cost_latency_guardrails,
+    floor_preflight,
     note_resolution_degraded,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
 from tests.optimize_fixtures import (
     EXEC_SUITE,
+    SUITE,
     activation_verdict,
     cost_check,
     cost_rows,
@@ -33,7 +36,9 @@ from tests.optimize_fixtures import (
     exec_gate,
     expected_resolution_note,
     experiment_json,
+    set_split,
     shared_dirs,
+    write_arm,
     write_row,
 )
 
@@ -452,3 +457,152 @@ class TestGuardrailsNeverRaiseOnACallerSuppliedRow:
         # unfanned scores also produce: an arm with no rows at all is the more specific fault.
         assert verdict.gate_refusal is not None and "loaded ZERO rows" in verdict.gate_refusal
         assert [c.passed for c in verdict.guardrails] == [True, True]
+
+
+class TestFirstCause:
+    """One declaration of "the first reason wins", where four closures used to say it."""
+
+    def test_it_starts_with_no_reason(self) -> None:
+        assert FirstCause().reason is None
+
+    def test_the_first_record_wins_and_later_ones_are_dropped(self) -> None:
+        cause = FirstCause()
+        cause.record("no comparison to make")
+        cause.record("zero variance")
+        cause.record("below the MDE")
+        assert cause.reason == "no comparison to make"
+
+    def test_two_sinks_do_not_share_state(self) -> None:
+        """A class, not a module-level value: four call sites hold one each, in one process."""
+        first, second = FirstCause(), FirstCause()
+        first.record("a")
+        assert second.reason is None
+        second.record("b")
+        assert (first.reason, second.reason) == ("a", "b")
+
+    def test_the_reason_is_readable_at_a_distance(self) -> None:
+        """The property the closures did not have, and why this is a class.
+
+        Three of the four sites read the value long after the last `record`, from inside a verdict
+        builder. An attribute survives being passed; a captured `nonlocal` cell does not.
+        """
+        cause = FirstCause()
+
+        def build() -> str | None:
+            return cause.reason
+
+        assert build() is None
+        cause.record("recorded after the reader was defined")
+        assert build() == "recorded after the reader was defined"
+
+
+_FLOOR_ROWS = {"r1": [("yes", "yes")], "r2": [("yes", "no")], "r3": [("no", "no")]}
+
+
+class TestFloorPreflight:
+    """The three guards both noise floors open with, and the ORDER that makes them one function."""
+
+    def test_a_healthy_tree_returns_the_per_invocation_maps_and_the_provenance(self, tmp_path: Path) -> None:
+        run_dirs = write_arm(tmp_path, "incumbent", _FLOOR_ROWS, invocations=2)
+        result = floor_preflight(
+            run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, split_label="the null split"
+        )
+        assert result is not None
+        per_dir, provenance = result
+        # PER-INVOCATION, not pooled: the activation floor halves these.
+        assert len(per_dir) == 2
+        assert all(set(rows) == {"r1", "r2", "r3"} for rows in per_dir)
+        # The provenance is RETURNED, not merely checked — `NoiseFloor.split` keys the floor cache
+        # off it, so a preflight that swallowed it would serve a train floor to a test lookup. A
+        # recorded value, not just an object: `None` here is the legitimate "no --split was passed",
+        # which cannot tell a returned provenance from a discarded one.
+        for run_dir in run_dirs:
+            set_split(run_dir, "test")
+        second = floor_preflight(
+            run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, split_label="the null split"
+        )
+        assert second is not None and second[1].value == "test"
+        assert not provenance.mismatched
+
+    def test_a_wrong_path_is_refused_and_blames_the_path(self, tmp_path: Path) -> None:
+        run_dirs = write_arm(tmp_path, "incumbent", _FLOOR_ROWS, invocations=2)
+        reasons: list[str] = []
+        assert (
+            floor_preflight(
+                run_dirs=run_dirs,
+                variant_id="typo",
+                suite_id=SUITE,
+                split_label="the null split",
+                reasons=reasons,
+            )
+            is None
+        )
+        assert len(reasons) == 1
+        assert "wrong variant id, a wrong suite id or a wrong run directory" in reasons[0]
+
+    def test_a_split_mismatch_is_refused_and_the_label_is_rendered(self, tmp_path: Path) -> None:
+        run_dirs = write_arm(tmp_path, "incumbent", _FLOOR_ROWS, invocations=2)
+        set_split(run_dirs[0], "train")
+        set_split(run_dirs[1], "test")
+        reasons: list[str] = []
+        assert (
+            floor_preflight(
+                run_dirs=run_dirs,
+                variant_id="incumbent",
+                suite_id=SUITE,
+                split_label="the replicate split",
+                reasons=reasons,
+            )
+            is None
+        )
+        # The one argument that differs between the two callers, and it reaches the message.
+        assert "the replicate split" in reasons[0]
+
+    def test_a_stale_tree_is_refused(self, tmp_path: Path) -> None:
+        run_dirs = write_arm(tmp_path, "incumbent", _FLOOR_ROWS, invocations=2)
+        # A result on disk that this dir's own `run.json` never recorded — a re-used `--run-dir`.
+        write_row(run_dirs[0], "incumbent", "ghost", eval_result("ghost", [("yes", "yes")]), record=False)
+        reasons: list[str] = []
+        assert (
+            floor_preflight(
+                run_dirs=run_dirs,
+                variant_id="incumbent",
+                suite_id=SUITE,
+                split_label="the null split",
+                reasons=reasons,
+            )
+            is None
+        )
+        assert len(reasons) == 1
+        assert "no recorded invocation wrote" in reasons[0]
+
+    def test_the_reconcile_runs_before_the_load(self, tmp_path: Path) -> None:
+        """The ORDER, which is the reason this is ONE function and not three guards.
+
+        A run dir that is BOTH wrong-path and stale must report the STALE cause: reversing the two
+        makes a mistyped variant id report a contaminated tree, sending the reader to check
+        `--repeats` instead of the path they mistyped. Only a single function can hold that.
+        """
+        run_dirs = write_arm(tmp_path, "incumbent", _FLOOR_ROWS, invocations=2)
+        write_row(run_dirs[0], "incumbent", "ghost", eval_result("ghost", [("yes", "yes")]), record=False)
+        reasons: list[str] = []
+        assert (
+            floor_preflight(
+                run_dirs=run_dirs,
+                variant_id="incumbent",
+                suite_id=SUITE,
+                split_label="the null split",
+                reasons=reasons,
+            )
+            is None
+        )
+        assert "no recorded invocation wrote" in reasons[0]
+        assert "wrong variant id" not in reasons[0]
+
+    def test_reasons_is_optional(self, tmp_path: Path) -> None:
+        """The execution caller passes none — `no_floor` already handles `None`."""
+        run_dirs = write_arm(tmp_path, "incumbent", _FLOOR_ROWS, invocations=2)
+        assert (
+            floor_preflight(run_dirs=run_dirs, variant_id="typo", suite_id=SUITE, split_label="the replicate split")
+            is None
+        )

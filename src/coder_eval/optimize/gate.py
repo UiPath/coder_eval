@@ -3,7 +3,8 @@
 Rank 1 of the optimize family: it imports from :mod:`coder_eval.optimize.load` and from nothing
 else in the family, and both track modules import from it. What lives here is what is neither
 track's alone — the gate-wide constants, the notes both Holm wrappers emit verbatim, the
-noise-floor refusal channel and the cluster half both floors share, the cost/latency guardrails
+noise-floor refusal channel, the preflight and the cluster half both floors share, the first-cause
+refusal sink every gate records into, the cost/latency guardrails
 both gates run, :func:`holm_family`, the ONE
 :func:`~coder_eval.reports_stats.holm_rejections` call site, and :func:`decide_family`, the ONE
 promotion loop — which is where the single ``promoted`` conjunction lives, and therefore the single
@@ -50,7 +51,18 @@ from coder_eval.models import (
     OptimizeMeasurements,
     copy_with,
 )
-from coder_eval.optimize.load import SplitProvenance, balance_pair, row_cost_levels, row_costs
+from coder_eval.optimize.load import (
+    SplitProvenance,
+    balance_pair,
+    load_suite_rows,
+    read_split_provenance,
+    reconcile_arms,
+    row_cost_levels,
+    row_costs,
+    split_mismatch_reason,
+    stale_tree_reason,
+    wrong_path_reason,
+)
 from coder_eval.optimize.store import UNRESOLVED_MODEL, lookup_noise_floor
 from coder_eval.reports_stats import (
     DEFAULT_ALPHA,
@@ -304,6 +316,89 @@ def no_floor(reason: str, *, reasons: list[str] | None = None) -> None:
         reasons.append(reason)
     logger.warning("No noise floor could be computed: %s", reason)
     return None
+
+
+def floor_preflight(
+    *,
+    run_dirs: Sequence[Path],
+    variant_id: str,
+    suite_id: str,
+    split_label: str,
+    reasons: list[str] | None = None,
+) -> tuple[list[dict[str, list[EvaluationResult]]], SplitProvenance] | None:
+    """The three guards both noise floors open with, in the ONE order that is correct.
+
+    Returns the per-invocation row maps and the split provenance, or ``None`` having already
+    recorded the refusal through :func:`no_floor` — so both callers keep their
+    ``return no_floor(...)`` shape as a plain ``return None``.
+
+    **The ORDER is load-bearing and is why this is one function rather than three.** The reconcile
+    runs BEFORE the load, so a contaminated tree costs no parse; and a WRONG path leaves nothing on
+    disk to be unrecorded, so the wrong-path message still wins its own case. Reversing the two
+    makes a mistyped variant id report a stale tree, sending the reader to check ``--repeats``
+    instead of the path they mistyped.
+
+    The three causes:
+
+    1. **A stale tree** (CE053). A re-used ``--run-dir`` leaves an earlier invocation's results on
+       disk while ``row_selection`` is rewritten to describe only the latest one, so the halves a
+       floor splits are pooled over a row set no invocation ran. An ``unknown`` dir is a NOTE, never
+       a refusal — the module's settled missing-provenance stance, so old run dirs stay measurable;
+       ``reconcile_arms`` logs it and neither floor has a ``notes`` channel to surface it in.
+    2. **Nothing loaded.** A mistyped variant, suite or run directory is the documented SILENT-ZERO
+       failure mode. Without this the reader is told the row count was too small and goes off to
+       check the criterion index or ``--repeats`` instead of the path.
+    3. **A split mismatch.** A null comparison assumes both halves measure the same thing; pooling a
+       train invocation with a test one breaks that before any arithmetic happens.
+
+    ``split_label`` is RENDERED — ``"the null split"`` on the activation track, ``"the replicate
+    split"`` on the execution one — so it is the one required argument that differs between them.
+
+    Returns the PER-INVOCATION list, not a pooled map: the activation floor splits the invocations
+    into halves and needs them apart, and the execution caller pools them itself. The emptiness test
+    is ``not any(...)`` over that list, which is equivalent to the pooled ``not rows`` its caller
+    used to apply — pooling cannot invent a row.
+    """
+    stale, _unknown_dirs = reconcile_arms([(variant_id, run_dirs)], suite_id)
+    if stale:
+        return no_floor(stale_tree_reason(stale), reasons=reasons)
+
+    per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
+    if not any(per_dir):
+        return no_floor(wrong_path_reason(variant_id, suite_id, run_dirs), reasons=reasons)
+
+    provenance = read_split_provenance(run_dirs)
+    if provenance.mismatched:
+        return no_floor(split_mismatch_reason(split_label, provenance, run_dirs), reasons=reasons)
+
+    return per_dir, provenance
+
+
+class FirstCause:
+    """The first reason recorded wins; later ones are dropped. Program order IS the precedence.
+
+    Every cause a gate records answers the same question — *is this a result?* — with the same
+    consequence, so they share one field, one headline and one prose token. They differ in REMEDY,
+    and the earliest cause is the one whose remedy comes first: there is no point telling a reader
+    to add rows when the run they are reading compared an arm against itself. Routing every setter
+    through here says that once, instead of leaving eleven ``if reason is None`` guards to be kept
+    in agreement.
+
+    It was spelled four times — once in :func:`~coder_eval.optimize.execution.execution_gate`, once
+    in each of the two confirm gates, once in ``_execution_diagnostics`` — and three of the four
+    docstrings said they mirrored another, which is a tree asking for one declaration.
+
+    A tiny class rather than a closure factory, because three of the four sites read the value at a
+    DISTANCE: a verdict builder closes over it and reads it when called, long after the last
+    ``record``. An attribute is visible where a captured cell is not.
+    """
+
+    def __init__(self) -> None:
+        self.reason: str | None = None
+
+    def record(self, reason: str) -> None:
+        if self.reason is None:
+            self.reason = reason
 
 
 def floor_from_clusters[T](

@@ -35,6 +35,7 @@ from coder_eval.optimize.gate import (
     MATERIALITY_FLOOR,
     NOTE_CI_CONTAINS_ZERO,
     FamilyFacts,
+    FirstCause,
     TrackDecision,
     build_confirm_verdict,
     classification_metric,
@@ -45,6 +46,7 @@ from coder_eval.optimize.gate import (
     cost_latency_guardrails,
     decide_family,
     floor_from_clusters,
+    floor_preflight,
     no_floor,
     note_check_failed,
     note_ordinary_negative,
@@ -54,15 +56,12 @@ from coder_eval.optimize.load import (
     format_splits,
     label_pairs,
     load_and_pair,
-    load_suite_rows,
     pool_replicates,
     read_split_provenance,
     reconcile_arms,
     require_valid_criterion_index,
     split_mismatch_reason,
     stale_locations,
-    stale_tree_reason,
-    wrong_path_reason,
 )
 from coder_eval.optimize.store import UNRESOLVED_MODEL
 from coder_eval.reports_stats import (
@@ -258,38 +257,19 @@ def measure_noise_floor(
             f"the null split needs at least 2 invocations of {variant_id!r}, got {len(run_dirs)}", reasons=reasons
         )
 
-    # The same preflight both gates run, and for the same reason (CE053): a re-used `--run-dir`
-    # leaves an earlier invocation's results on disk while `row_selection` is rewritten to describe
-    # only the latest one, so the halves this splits are pooled over a row set no invocation ran.
-    # Measured on dirs `activation_gate` correctly refuses, this returned a floor computed over an
-    # extra pooled row — and the floor decides whether a round runs at all.
-    #
-    # BEFORE the load, so a contaminated tree costs no parse; a WRONG path leaves nothing on disk
-    # to be unrecorded, so the wrong-path message below still wins its own case.
-    # An `unknown` dir is a NOTE, never a refusal — the module's settled missing-provenance stance,
-    # so old run dirs stay measurable. `reconcile_arms` logs it; this function has no `notes`
-    # channel to surface it in, so the count is deliberately unused here.
-    stale, _unknown_dirs = reconcile_arms([(variant_id, run_dirs)], suite_id)
-    if stale:
-        return no_floor(stale_tree_reason(stale), reasons=reasons)
-
-    per_dir = [load_suite_rows(d, variant_id, suite_id) for d in run_dirs]
-    # The same wrong-path guard `measure_execution_noise_floor` carries, and for the same reason: a
-    # mistyped variant, suite or run directory is the documented SILENT-ZERO failure mode, and
-    # without it the reader is told "only 0 row(s) scored a classification result at criterion N"
-    # and goes off to check the criterion index instead of the path.
-    #
-    # `not any(per_dir)` rather than the twin's `not rows`: that one pools once, this one keeps the
-    # per-invocation maps because it splits them into halves.
-    if not any(per_dir):
-        return no_floor(wrong_path_reason(variant_id, suite_id, run_dirs), reasons=reasons)
-
-    # The null split assumes both halves measure the SAME thing. Pooling a train invocation with
-    # a test one breaks that assumption before any arithmetic happens, so refuse rather than
-    # report a floor for a row set that does not exist.
-    provenance = read_split_provenance(run_dirs)
-    if provenance.mismatched:
-        return no_floor(split_mismatch_reason("the null split", provenance, run_dirs), reasons=reasons)
+    # The three guards both floors open with, in the one order that is correct — `floor_preflight`
+    # owns the order and the messages. The two guards ABOVE it are this track's own:
+    # `require_valid_criterion_index`, and the invocation count that makes a null split possible.
+    preflight = floor_preflight(
+        run_dirs=run_dirs,
+        variant_id=variant_id,
+        suite_id=suite_id,
+        split_label="the null split",
+        reasons=reasons,
+    )
+    if preflight is None:
+        return None
+    per_dir, provenance = preflight
 
     midpoint = (len(per_dir) + 1) // 2
     first, second = pool_replicates(per_dir[:midpoint]), pool_replicates(per_dir[midpoint:])
@@ -668,7 +648,8 @@ def activation_gate(
         message: twenty identical keywords copied per cause is how two blocks drift, and how
         adding a field to ``ActivationGateVerdict`` becomes three coordinated edits. Literal
         keywords, never a splat, so CE041/CE048 still see the construction — the same shape
-        ``execution_gate._refuse`` already has on the other track.
+        ``execution_gate``'s :class:`~coder_eval.optimize.gate.FirstCause` already has on the
+        other track.
 
         The loaded counts ARE echoed: the block still says what it read, even though it refuses
         to compare it. Everything derived from the comparison is ``None``, and there is no
@@ -1185,17 +1166,13 @@ def confirm_gate(
     confirm_one_candidate(candidate_variant)
 
     notes: list[str] = []
-    confirm_refusal: str | None = None
-
-    def _refuse(reason: str) -> None:
-        nonlocal confirm_refusal
-        if confirm_refusal is None:
-            confirm_refusal = reason
+    # The FIRST cause that makes this not a comparison — see `FirstCause`.
+    cause = FirstCause()
 
     if (train_note := confirm_train_note(train_verdict.promoted)) is not None:
         notes.append(train_note)
     if (train_refusal := confirm_train_refusal(train_verdict.gate_refusal)) is not None:
-        _refuse(train_refusal)
+        cause.record(train_refusal)
 
     # De-duplicated, preserving order: this track's normal shape — and the shipped snippet — passes
     # the SAME run dirs for both arms, since one invocation writes both variants. Concatenating them
@@ -1206,14 +1183,14 @@ def confirm_gate(
     if split_note is not None:
         notes.append(split_note)
     if split_refusal is not None:
-        _refuse(split_refusal)
+        cause.record(split_refusal)
     elif provenance.mismatched:
         # This track pools several dirs per arm, so its confirm can be internally inconsistent in a
         # way the execution twin cannot. `activation_gate` refuses it underneath too, but a Stage C
         # block reporting UNDECIDED with no reason would send the reader to the gate's notes to find
         # out why. Below the split check: a mismatch that INCLUDES a non-test split is the more
         # specific fault, and `confirm_split_check` names every off-split value it saw.
-        _refuse(split_mismatch_reason("the confirm run's", provenance, confirm_dirs))
+        cause.record(split_mismatch_reason("the confirm run's", provenance, confirm_dirs))
 
     test_verdict = holm_promote(
         [
@@ -1233,7 +1210,7 @@ def confirm_gate(
         ]
     )[0]
     if test_verdict.gate_refusal is not None:
-        _refuse(f"the confirm gate is not a result: {test_verdict.gate_refusal}")
+        cause.record(f"the confirm gate is not a result: {test_verdict.gate_refusal}")
 
     return build_confirm_verdict(
         incumbent_variant=incumbent_variant,
@@ -1243,7 +1220,7 @@ def confirm_gate(
         test_effect=test_verdict.mean_diff,
         test_mde=test_verdict.mde,
         test_verdict=test_verdict,
-        confirm_refusal=confirm_refusal,
+        confirm_refusal=cause.reason,
         notes=notes,
     )
 

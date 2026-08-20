@@ -977,7 +977,7 @@ class TestExecutionGateRefusesAReusedRunDir:
         """The test whose absence let `_execution_diagnostics`'s docstring call two guards dead.
 
         That docstring said `refused_already` is "False at the only call site today". It is not:
-        the tree-reconciliation cause calls `_refuse` and then `break`s rather than returning, so
+        the tree-reconciliation cause records a cause and then `break`s rather than returning, so
         control reaches the diagnostics ladder with `gate_refusal` already set. A reader who
         believed the docstring would delete the two `not refused_already` guards as unreachable,
         and this contaminated run would immediately print the MDE and tighter-than-floor advisories
@@ -1582,10 +1582,12 @@ class TestExecutionDiagnostics:
         assert not any("came back unavailable" in n for n in notes)
 
     def test_it_neither_refuses_nor_builds_a_verdict_itself(self) -> None:
-        """Two setters for one field is the state `_refuse` collapsed.
+        """Two setters for one field is the state `FirstCause` collapsed.
 
-        A helper that reached back into the gate's closure could not be tested without building a
-        gate around it, so this pins that it does neither.
+        It RETURNS its first cause and lets the gate rank it, rather than writing the gate's own
+        sink. A helper that wrote into the caller's sink could not be tested without building a gate
+        around it, so this pins that it does neither: no `_verdict(` call, and no mention of the
+        field name the gate assigns.
 
         Scanned over the CODE with the docstring removed, not over the raw source. The naive form
         punished the one thing it should reward: explaining, in this function's own docstring, what
@@ -1599,8 +1601,11 @@ class TestExecutionDiagnostics:
         code = "\n".join(ast.unparse(node) for node in body)
         assert "_verdict(" not in code
         assert "gate_refusal" not in code
-        # Anti-vacuity: the scan must still SEE the body it is checking.
-        assert "_refuse(" in code
+        # Anti-vacuity: the scan must still SEE the body it is checking. Keyed on this function's
+        # OWN sink, which is a `FirstCause` of its own — it is module-level, not nested in
+        # `execution_gate`, so there is no closure here to reach into in the first place.
+        assert "cause.record(" in code
+        assert "return (cause.reason, notes)" in code
 
 
 class TestExecutionGateCannotBeQuietlyMisread:
