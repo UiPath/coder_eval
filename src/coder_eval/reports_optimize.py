@@ -352,7 +352,17 @@ def render_seed_stability(stability: SeedStability) -> str:
     """
     total = len(stability.seeds)
     agreed = stability.promote_agreement
-    if stability.unanimous:
+    if all(p is None for p in stability.p_values):
+        # NOT a stability reading. Every seed's gate refused — a cross-split pair, a contaminated
+        # tree, a sample too small — so no seed produced a statistic to be stable about. Without this
+        # branch the block reads "STABLE — would promote at none of N seeds", which is a maximally
+        # confident negative about a comparison that was never made.
+        verdict = (
+            f"NOT A STABILITY READING — no seed produced a statistic at all, so all {total} of them "
+            "agreeing means nothing. The gate refused on every one; read its own block for the "
+            "refusal and fix that first."
+        )
+    elif stability.unanimous:
         verdict = (
             f"STABLE — would promote at {agreed}/{total} seeds"
             if agreed

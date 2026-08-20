@@ -1478,31 +1478,27 @@ in Step 1:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.activation import activation_gate, holm_promote
-from coder_eval.reports_optimize import render_markdown
+from coder_eval.optimize.api import activation_gate_report
 
-# The three --run-dir paths from the three invocations above, as Path objects.
-gate_dirs = [Path(f"<runs>/round1-gate-{i}") for i in (1, 2, 3)]
-
-verdicts = [
-    activation_gate(
-        incumbent_run_dirs=gate_dirs, candidate_run_dirs=gate_dirs,
-        incumbent_variant="incumbent", candidate_variant=slug,
-        suite_id="<the suite's task_id>", criterion_index=0,
-    )
-    for slug in ("cand-a-widen-vocabulary", "cand-b-name-the-symptom")
-]
-for v in holm_promote(verdicts):
-    print(render_markdown(v))
+print(activation_gate_report(
+    gate_dirs=[Path(f"<runs>/round1-gate-{i}") for i in (1, 2, 3)], criterion_index=0,
+    incumbent_variant="incumbent", suite_id="<the suite's task_id>",
+    candidate_variants=["cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
+))
 ```
 
-**Gate every survivor first, then correct once.** The loop builds all the verdicts before
-`holm_promote` sees any of them, and that ordering is the test. The correction is over the
-*family* of survivors, so promoting one candidate at a time — calling `holm_promote` on a single
-verdict each time round — is a different, weaker test that silently reverts to an uncorrected
-alpha. `activation_gate` on its own never promotes anything; it leaves the verdict undecided, and
-`render_markdown` prints **UNDECIDED** if you forget the correction rather than letting a
-forgotten call read as an honest negative result. (One exception, and it is not a promotion: a
+**Gate every survivor first, then correct once — and `candidate_variants` is a LIST because that
+ordering is the test.** Every verdict is built before `holm_promote` sees any of them, and the
+correction runs once over the whole family. Gating one candidate at a time is a different, weaker
+test that silently reverts to an uncorrected alpha, and passing a list is what makes that shape
+unavailable rather than merely discouraged. `activation_gate` on its own never promotes anything;
+it leaves the verdict undecided, and `render_markdown` prints **UNDECIDED** for a verdict the
+correction never saw — which this block cannot produce, because it always corrects.
+
+**The family is the candidates, and not the incumbent.** Stage A's `variant_ids` starts with the
+incumbent; a Stage B family does not. Including it gates an arm against itself and adds a candidate
+to the correction, so every real candidate is then decided against a tighter threshold — which is
+why it is a hard error rather than a wasted gate. (One exception, and it is not a promotion: a
 sample too small to support any statistic comes back NOT PROMOTED outright, because there is no
 p-value for a family decision to correct. A cross-split refusal also has no p, but it does NOT
 come back that way — it keeps `promoted=None` until `holm_promote` forces it to `False`, so the
@@ -1510,24 +1506,19 @@ refusal reaches you whether or not you remembered the correction.)
 
 **Check whether the decision survives the seed, and it costs nothing.** The bootstrap is seeded, so
 a p near the Holm threshold can land on either side of it depending on the draw — and one verdict
-cannot say whether that happened. `gate_seed_stability` gates at three seeds and reports the
-agreement:
+cannot say whether that happened. This gates at three seeds and reports the agreement — three
+bootstraps over rows already on disk, so it is CPU only and buys **zero** extra runs. It takes the
+same arms and criterion the gate above does, and `seeds=` if you want more than the default three:
 
 ```python
-from coder_eval.optimize.activation import gate_seed_stability
-from coder_eval.reports_optimize import render_seed_stability
+from pathlib import Path
 
-# The SAME keywords `activation_gate` takes, minus `seed` — the seeds are the axis being varied, so
-# passing one raises. Three bootstraps over rows already loaded: CPU only, and ZERO extra runs.
-print(
-    render_seed_stability(
-        gate_seed_stability(
-            incumbent_run_dirs=gate_dirs, candidate_run_dirs=gate_dirs,
-            incumbent_variant="incumbent", candidate_variant="cand-a-widen-vocabulary",
-            suite_id="<the suite's task_id>", criterion_index=0,
-        )
-    )
-)
+from coder_eval.optimize.api import seed_stability_report
+
+print(seed_stability_report(
+    gate_dirs=[Path(f"<runs>/round1-gate-{i}") for i in (1, 2, 3)], incumbent_variant="incumbent",
+    candidate_variant="cand-a-widen-vocabulary", suite_id="<the suite's task_id>", criterion_index=0,
+))
 ```
 
 **Seeds that disagree are the FINDING, not an error.** Never take the majority's verdict and report

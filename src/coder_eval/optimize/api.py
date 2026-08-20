@@ -23,11 +23,18 @@ was meant to read have been paid for. Every entry point rejects one at the bound
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
 from coder_eval.models import ACTIVATION_FLOOR_METRIC, EXECUTION_FLOOR_METRIC
-from coder_eval.optimize.activation import min_discordant_rows, noise_floor_mde
+from coder_eval.optimize.activation import (
+    activation_gate,
+    gate_seed_stability,
+    holm_promote,
+    min_discordant_rows,
+    noise_floor_mde,
+)
 from coder_eval.optimize.execution import measure_execution_noise_floor, resolve_arm_model
 from coder_eval.optimize.fronts import (
     arm_row_scores,
@@ -61,10 +68,12 @@ from coder_eval.reports_optimize import (
     render_discreteness,
     render_headroom_ceilings,
     render_leak_scan,
+    render_markdown,
     render_noise_floor,
     render_row_matrix,
     render_row_replicates,
     render_search_comparison,
+    render_seed_stability,
     render_staleness_note,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
@@ -543,4 +552,151 @@ def search_report(
             # empty one is normal early, so branching here would only be a second way to say that.
             render_search_comparison(search_compare(head, arms[0], corpus=measurements.regression_corpus)),
         ]
+    )
+
+
+def _resolve_family(candidate_variants: Sequence[str], incumbent_variant: str) -> list[str]:
+    """The Stage B family, MATERIALIZED and validated. Every rejection is one Holm family size.
+
+    It returns the list rather than only checking, because validating a one-shot iterable and then
+    iterating it again is how a guard passes and the loop below it yields nothing: the block comes
+    back empty, which is the exact "reads as nothing promoted" outcome the empty check exists for.
+
+    Three rejections, and all three end the same way — Holm dividing the alpha by a family larger
+    than the one actually gated, which makes the test stricter for every REAL candidate in it:
+
+    * A ``str`` is a ``Sequence[str]``, so ``"cand-a"`` would be one candidate per letter. The same
+      hole :func:`_require_run_dirs` closes on the other argument.
+    * A DUPLICATE counts one candidate twice.
+    * The INCUMBENT in the candidate list gates an arm against itself. That block reads ``CANNOT
+      SEPARATE`` on its own, and nothing connects it to the tightened threshold on its siblings —
+      and it is one copy-paste away, because Stage A's ``variant_ids`` legitimately starts with the
+      incumbent.
+    """
+    if isinstance(candidate_variants, str):
+        raise TypeError(
+            f"candidate_variants must be a sequence of variant ids, not a string ({candidate_variants!r}) — "
+            + "a string would be read as one candidate per character"
+        )
+    family = list(candidate_variants)
+    if not family:
+        raise ValueError("candidate_variants is empty — an empty block reads as 'nothing promoted'")
+    duplicates = sorted(name for name, count in Counter(family).items() if count > 1)
+    if duplicates:
+        raise ValueError(
+            f"candidate_variants repeats {duplicates} — a duplicate inflates the Holm family size, "
+            + "which makes the test stricter for every candidate in it, including the real ones"
+        )
+    if incumbent_variant in family:
+        raise ValueError(
+            f"candidate_variants contains the incumbent {incumbent_variant!r} — that gates an arm "
+            + "against itself and inflates the Holm family, tightening the threshold for the real "
+            + "candidates. Stage A's variant_ids includes the incumbent; a Stage B family does not."
+        )
+    return family
+
+
+def activation_gate_report(
+    *,
+    gate_dirs: Sequence[Path],
+    incumbent_variant: str,
+    candidate_variants: Sequence[str],
+    suite_id: str,
+    criterion_index: int,
+    sibling_indices: Sequence[int] | None = None,
+) -> str:
+    """Stage B on the activation track: gate every candidate, then correct ONCE over the family.
+
+    **The ordering is the test, and here it is structural rather than remembered.**
+    ``candidate_variants`` is a SEQUENCE, so there is no single-candidate call shape to get wrong:
+    every verdict is built before :func:`holm_promote` sees any of them, and the correction runs once
+    across the whole p-value vector. Gating one candidate at a time — calling the correction per
+    verdict — is a different, weaker test that silently reverts to an uncorrected alpha, and it was
+    the shipped fence's most available mistake.
+
+    A family of ONE is legal and is not special-cased: Holm at ``m = 1`` is the uncorrected alpha by
+    construction, which is the right answer for a round that gated one candidate.
+
+    ``seed``, ``n_resamples``, ``confidence`` and ``materiality`` are deliberately NOT exposed. No
+    shipped fence varies them, and every exposed knob is a way to produce a number that is not
+    comparable with the floor recorded beside it.
+
+    ``sibling_indices`` IS exposed, and the default is the safe state rather than the convenient one:
+    ``None`` DERIVES every other classification position and checks it, ``()`` checks nothing, and an
+    explicit sequence checks exactly those. So omitting it arms the veto — the parameter exists to let
+    a caller turn the check off deliberately, which is the only reason it is reachable at all.
+    """
+    _require_run_dirs(gate_dirs)
+    family = _resolve_family(candidate_variants, incumbent_variant)
+    # NO `_staleness_note` here, alone among the reporting composites, and the reason is the return
+    # type: `activation_gate` runs the sweep in its own preflight and REFUSES on a contaminated tree,
+    # so the doubt arrives as the verdict's own `NOT A RESULT` headline rather than as a note beside a
+    # number. Adding the sweep here would read every run.json twice to say the same thing later.
+    verdicts = [
+        activation_gate(
+            incumbent_run_dirs=gate_dirs,
+            candidate_run_dirs=gate_dirs,
+            incumbent_variant=incumbent_variant,
+            candidate_variant=candidate,
+            suite_id=suite_id,
+            criterion_index=criterion_index,
+            sibling_indices=sibling_indices,
+        )
+        for candidate in family
+    ]
+    # ONE call, over the whole family. `decide_family` inside it is what runs `holm_rejections` once
+    # across the p-value vector, and a refusal that left `promoted=None` is forced to False here — so
+    # the block a reader acts on is never an undecided verdict.
+    return "\n\n".join(render_markdown(verdict) for verdict in holm_promote(verdicts))
+
+
+def seed_stability_report(
+    *,
+    gate_dirs: Sequence[Path],
+    incumbent_variant: str,
+    candidate_variant: str,
+    suite_id: str,
+    criterion_index: int,
+    sibling_indices: Sequence[int] | None = None,
+    seeds: Sequence[int] = (0, 1, 2),
+) -> str:
+    """Whether one candidate's decision survives the bootstrap seed. Costs no runs at all.
+
+    Three bootstraps over rows already on disk, so it is CPU and nothing else. Disagreeing seeds are
+    the FINDING, not an error: a 2/3 split means the decision is being made by the draw count rather
+    than by the data, and the block presents no single verdict to mistake for the answer.
+
+    Every keyword is spelled out rather than forwarded as a bag. :func:`gate_seed_stability` takes
+    ``**gate_kwargs`` and that stays the internal seam, but an untyped bag on this surface is exactly
+    what a declared API is not — pyright cannot check it, and the skill's snippet binder cannot
+    either.
+    """
+    _require_run_dirs(gate_dirs)
+    if incumbent_variant == candidate_variant:
+        # `SeedStability` has no refusal channel, so a self-comparison renders as
+        # "STABLE — would promote at none of 3 seeds": a maximally confident negative for what is a
+        # typo. `replicates_report` refuses the same comparison for the same reason.
+        raise ValueError(
+            f"incumbent_variant and candidate_variant are both {incumbent_variant!r} — an arm gated "
+            + "against itself reads as a stable negative rather than as the wiring fault it is"
+        )
+    duplicate_seeds = sorted(seed for seed, count in Counter(seeds).items() if count > 1)
+    if duplicate_seeds:
+        # Re-running ONE draw three times reports 3/3 agreement at a spread of 0.0000 — the most
+        # confident stability claim available, from a single bootstrap. The seeds ARE the axis.
+        raise ValueError(
+            f"seeds repeats {duplicate_seeds} — re-running one draw reports perfect agreement at zero "
+            + "spread, which is a confident claim with no evidence behind it"
+        )
+    return render_seed_stability(
+        gate_seed_stability(
+            seeds=seeds,
+            incumbent_run_dirs=gate_dirs,
+            candidate_run_dirs=gate_dirs,
+            incumbent_variant=incumbent_variant,
+            candidate_variant=candidate_variant,
+            suite_id=suite_id,
+            criterion_index=criterion_index,
+            sibling_indices=sibling_indices,
+        )
     )

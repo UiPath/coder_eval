@@ -11,6 +11,7 @@ A `NoiseFloor` is deliberately never compared by `model_dump()`: `computed_at` i
 
 import inspect
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -22,9 +23,17 @@ from coder_eval.models import (
     RegressionRow,
     RoundScores,
 )
-from coder_eval.optimize.activation import min_discordant_rows, noise_floor_mde
+from coder_eval.optimize.activation import (
+    SeedStability,
+    activation_gate,
+    gate_seed_stability,
+    holm_promote,
+    min_discordant_rows,
+    noise_floor_mde,
+)
 from coder_eval.optimize.api import (
     activation_floor_report,
+    activation_gate_report,
     corpus_report,
     cost_quality_report,
     discreteness_report,
@@ -34,6 +43,7 @@ from coder_eval.optimize.api import (
     replicates_report,
     row_matrix_report,
     search_report,
+    seed_stability_report,
 )
 from coder_eval.optimize.execution import measure_execution_noise_floor
 from coder_eval.optimize.store import (
@@ -42,16 +52,26 @@ from coder_eval.optimize.store import (
     load_measurements,
     record_round_scores,
 )
-from coder_eval.reports_optimize import LEAK_SCAN_BOUNDARY, SINGLE_REPLICATE_CAVEAT
+from coder_eval.reports_optimize import (
+    LEAK_SCAN_BOUNDARY,
+    SINGLE_REPLICATE_CAVEAT,
+    render_markdown,
+    render_seed_stability,
+)
 from coder_eval.reports_stats import DEFAULT_ALPHA
 from tests.optimize_fixtures import (
     SUITE,
     arm_row_scores_for,
     assert_matches_render_pin,
     cost_quality_arm,
+    costed_result,
     eval_result,
     grader_result,
+    headline_line,
     scored_result,
+    shared_dirs,
+    split_labelled_arms,
+    tiny_suite,
     weighted_arm,
     write_row,
 )
@@ -250,6 +270,26 @@ def _search_call(run_dirs) -> str:
     )
 
 
+def _activation_gate_call(run_dirs) -> str:
+    return activation_gate_report(
+        gate_dirs=run_dirs,
+        incumbent_variant="incumbent",
+        candidate_variants=["cand-a"],
+        suite_id=SUITE,
+        criterion_index=0,
+    )
+
+
+def _seed_stability_call(run_dirs) -> str:
+    return seed_stability_report(
+        gate_dirs=run_dirs,
+        incumbent_variant="incumbent",
+        candidate_variant="cand-a",
+        suite_id=SUITE,
+        criterion_index=0,
+    )
+
+
 def _corpus_call(run_dirs) -> str:
     return corpus_report(
         run_dirs=run_dirs,
@@ -277,6 +317,8 @@ _ENTRY_POINTS = [
     pytest.param(_corpus_call, id="corpus"),
     pytest.param(_replicates_call, id="replicates"),
     pytest.param(_search_call, id="search"),
+    pytest.param(_activation_gate_call, id="activation-gate"),
+    pytest.param(_seed_stability_call, id="seed-stability"),
 ]
 
 
@@ -1053,3 +1095,424 @@ class TestSearchReport:
         assert "ACCEPT into the lineage" in search_report(
             run_dirs=run_dirs, variant_id="explored", suite_id=SUITE, sidecar=sidecar
         )
+
+
+class TestActivationGateReport:
+    """Stage B's ordering, made structural: a sequence in, one correction out."""
+
+    def _arms(self, tmp_path: Path, candidates: dict[str, dict[str, list[tuple[str, str]]]]) -> list[Path]:
+        incumbent = {"p1": [("yes", "no")], "p2": [("yes", "no")], "p3": [("yes", "yes")]}
+        run_dirs: list[Path] = []
+        for i in range(3):
+            run_dir = tmp_path / f"run-{i}"
+            for row_id, labels in incumbent.items():
+                write_row(run_dir, "incumbent", row_id, eval_result(row_id, labels))
+            for variant, rows in candidates.items():
+                for row_id, labels in rows.items():
+                    write_row(run_dir, variant, row_id, eval_result(row_id, labels))
+            run_dirs.append(run_dir)
+        return run_dirs
+
+    _WINNER: ClassVar[dict[str, list[tuple[str, str]]]] = {
+        "p1": [("yes", "yes")],
+        "p2": [("yes", "yes")],
+        "p3": [("yes", "yes")],
+    }
+
+    def test_both_verdicts_match_a_direct_gate_plus_one_holm_call(self, tmp_path: Path) -> None:
+        """SSOT against the library, never a literal: the composite's job is the ORDER.
+
+        Every number here comes from calling the same functions in the same order by hand, so the
+        test cannot pass while the composite corrects per candidate.
+        """
+        run_dirs = self._arms(tmp_path, {"cand-a": self._WINNER, "cand-b": self._WINNER})
+
+        block = activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a", "cand-b"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        expected = holm_promote(
+            [
+                activation_gate(
+                    incumbent_run_dirs=run_dirs,
+                    candidate_run_dirs=run_dirs,
+                    incumbent_variant="incumbent",
+                    candidate_variant=slug,
+                    suite_id=SUITE,
+                    criterion_index=0,
+                )
+                for slug in ("cand-a", "cand-b")
+            ]
+        )
+        assert block == "\n\n".join(render_markdown(v) for v in expected)
+        assert len(expected) == 2
+
+    def test_the_family_is_joined_as_one_block_per_candidate_in_order(self, tmp_path: Path) -> None:
+        """The JOIN, asserted independently of the expression that produces it.
+
+        `test_both_verdicts_match_a_direct_gate_plus_one_holm_call` derives its expectation with the
+        same `"\n\n".join(...)` the implementation uses, so it cannot see the separator change —
+        exactly the "reorders a line without changing a number" class `assert_matches_render_pin`
+        exists for. A whole-block pin would work but would run the full bootstrap and be repinned by
+        any watched-constant move, so the structure is asserted directly instead.
+        """
+        run_dirs = self._arms(tmp_path, {"cand-a": self._WINNER, "cand-b": self._WINNER})
+
+        block = activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a", "cand-b"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        headings = [line for line in block.splitlines() if line.startswith("### Activation gate")]
+        assert len(headings) == 2, headings
+        # Family ORDER, not sorted order: the caller's list is the family, and a ledger entry that
+        # reordered it would not line up with the round's own proposal list.
+        assert "`cand-a`" in headings[0] and "`cand-b`" in headings[1]
+        # Exactly one blank line between the two verdict blocks, and none trailing.
+        assert block.count("\n\n### Activation gate") == 1
+        assert not block.endswith("\n")
+
+    def test_holm_promote_is_called_exactly_once_over_the_whole_family(self, tmp_path: Path, monkeypatch) -> None:
+        # Asserted by counting CALLS, not by reading the code: correcting per candidate leaves every
+        # token in place, every test of a single verdict green, and silently reverts to an
+        # uncorrected alpha. That is the failure this composite exists to make unrepresentable.
+        run_dirs = self._arms(tmp_path, {"cand-a": self._WINNER, "cand-b": self._WINNER})
+        calls: list[int] = []
+        real = holm_promote
+
+        def counting(verdicts, *args, **kwargs):
+            calls.append(len(verdicts))
+            return real(verdicts, *args, **kwargs)
+
+        monkeypatch.setattr("coder_eval.optimize.api.holm_promote", counting)
+        activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a", "cand-b"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        assert calls == [2], "one call, over both candidates"
+
+    def test_a_family_of_one_renders_and_is_not_special_cased(self, tmp_path: Path) -> None:
+        # Holm at m = 1 IS the uncorrected alpha, by construction — the right answer for a round that
+        # gated one candidate, and not a case to branch on.
+        run_dirs = self._arms(tmp_path, {"cand-a": self._WINNER})
+
+        block = activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+        direct = holm_promote(
+            [
+                activation_gate(
+                    incumbent_run_dirs=run_dirs,
+                    candidate_run_dirs=run_dirs,
+                    incumbent_variant="incumbent",
+                    candidate_variant="cand-a",
+                    suite_id=SUITE,
+                    criterion_index=0,
+                )
+            ]
+        )[0]
+        assert block == render_markdown(direct)
+        assert direct.holm_alpha == DEFAULT_ALPHA
+
+    def test_an_empty_family_is_a_caller_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="candidate_variants is empty"):
+            activation_gate_report(
+                gate_dirs=self._arms(tmp_path, {}),
+                incumbent_variant="incumbent",
+                candidate_variants=[],
+                suite_id=SUITE,
+                criterion_index=0,
+            )
+
+    def test_a_duplicated_candidate_is_a_caller_error(self, tmp_path: Path) -> None:
+        # It inflates m, so Holm divides the alpha by a family larger than the one gated — making the
+        # test stricter for every candidate in it, including the real ones.
+        with pytest.raises(ValueError, match="repeats"):
+            activation_gate_report(
+                gate_dirs=self._arms(tmp_path, {"cand-a": self._WINNER}),
+                incumbent_variant="incumbent",
+                candidate_variants=["cand-a", "cand-a"],
+                suite_id=SUITE,
+                criterion_index=0,
+            )
+
+    def test_a_cross_split_refusal_reaches_the_block_and_forces_promoted_false(self, tmp_path: Path) -> None:
+        # A refusal keeps `promoted=None` until the correction forces False, so the composite's
+        # always-correct shape is what puts it in front of a reader either way.
+        incumbent, candidate = split_labelled_arms(tmp_path, "train", "test")
+
+        block = activation_gate_report(
+            gate_dirs=incumbent + candidate,
+            incumbent_variant="incumbent",
+            candidate_variants=["candidate"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        assert "NOT A RESULT" in block
+        # One literal: `activation.py` emits only the un-backticked form, so a disjunction over both
+        # spellings has a branch that can never match and would survive the message changing.
+        assert "DIFFERENT --split values" in block
+
+    def test_sibling_indices_reach_the_gate_unchanged(self, tmp_path: Path, monkeypatch) -> None:
+        # The sibling checks VETO, and `None` (the default) DERIVES and checks every one. So the
+        # parameter's job is to let a caller turn the check off deliberately — which means an
+        # explicit sequence has to arrive unchanged, or the veto is over the wrong criteria.
+        run_dirs = self._arms(tmp_path, {"cand-a": self._WINNER})
+        seen: list[object] = []
+        real = activation_gate
+
+        def spy(**kwargs):
+            seen.append(kwargs["sibling_indices"])
+            return real(**kwargs)
+
+        monkeypatch.setattr("coder_eval.optimize.api.activation_gate", spy)
+        activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+            sibling_indices=[1, 2],
+        )
+
+        assert seen == [[1, 2]]
+
+    def test_a_failing_guardrail_reads_blocked_and_does_not_promote(self, tmp_path: Path) -> None:
+        """A candidate that separates on F1 and doubles what a row costs must not read PROMOTED.
+
+        Built as a real tree rather than a hand-made verdict, because the whole point of the
+        composite is that the guardrail reaches the block through the SAME single correction the
+        p-values go through — `failed_vetoes` is what forces `promoted` False, and a block that said
+        PROMOTED here would be shippable.
+        """
+        run_dirs: list[Path] = []
+        for i in range(3):
+            run_dir = tmp_path / f"run-{i}"
+            for row_id in (f"p{n}" for n in range(12)):
+                write_row(run_dir, "incumbent", row_id, costed_result(row_id, [("yes", "no")], cost=1.0, duration=10.0))
+                write_row(run_dir, "cand-a", row_id, costed_result(row_id, [("yes", "yes")], cost=4.0, duration=10.0))
+            run_dirs.append(run_dir)
+
+        block = activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        # The headline, not a substring search: `BLOCKED BY A GUARDRAIL` is its own rung, and the
+        # only thing a reader acts on. `failed_vetoes` is what forced it, over the same single
+        # correction the p-value went through.
+        assert headline_line(block).startswith("BLOCKED BY A GUARDRAIL")
+        assert "cost (USD/row)" in block
+
+    def test_a_sample_too_small_for_a_statistic_reads_not_promoted_not_undecided(self, tmp_path: Path) -> None:
+        # The two are different states with different remedies: NOT PROMOTED outright means there was
+        # no p for the family to correct, while UNDECIDED means the correction never ran. The
+        # composite always corrects, so UNDECIDED must be unreachable through it.
+        run_dirs: list[Path] = []
+        for i in range(3):
+            run_dir = tmp_path / f"run-{i}"
+            write_row(run_dir, "incumbent", "p0", eval_result("p0", [("yes", "no")]))
+            write_row(run_dir, "cand-a", "p0", eval_result("p0", [("yes", "yes")]))
+            run_dirs.append(run_dir)
+
+        block = activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        # Measured: a one-row suite produces no p, so the verdict comes back NOT PROMOTED outright.
+        # The disjunction this replaced could not fail.
+        assert headline_line(block) == "NOT PROMOTED"
+        assert "UNDECIDED" not in block, "the composite always corrects, so this rung is unreachable"
+
+    def test_a_string_family_is_a_caller_error(self) -> None:
+        # `"cand-a"` is a `Sequence[str]`: without the guard it gates one candidate per LETTER and
+        # Holm corrects over a family of six, making the test stricter for a candidate that does not
+        # exist. The same hole `_require_run_dirs` closes on the other argument.
+        with pytest.raises(TypeError, match="must be a sequence of variant ids, not a string"):
+            activation_gate_report(
+                gate_dirs=[Path("/nonexistent")],
+                incumbent_variant="incumbent",
+                candidate_variants="cand-a",  # type: ignore[arg-type]
+                suite_id=SUITE,
+                criterion_index=0,
+            )
+
+    def test_the_incumbent_in_the_candidate_list_is_a_caller_error(self, tmp_path: Path) -> None:
+        """One copy-paste away: Stage A's `variant_ids` legitimately starts with the incumbent.
+
+        Gating an arm against itself adds a candidate to the Holm family, so every REAL candidate is
+        decided against a tighter threshold — and the self-comparison's own block reads CANNOT
+        SEPARATE, with nothing connecting the two.
+        """
+        with pytest.raises(ValueError, match="contains the incumbent"):
+            activation_gate_report(
+                gate_dirs=self._arms(tmp_path, {"cand-a": self._WINNER}),
+                incumbent_variant="incumbent",
+                candidate_variants=["incumbent", "cand-a"],
+                suite_id=SUITE,
+                criterion_index=0,
+            )
+
+    def test_a_one_shot_iterable_is_materialized_rather_than_exhausted(self, tmp_path: Path) -> None:
+        # A generator passes every guard and then yields nothing to the gate loop, so the block comes
+        # back EMPTY — the exact outcome the empty-family check exists to prevent.
+        run_dirs = self._arms(tmp_path, {"cand-a": self._WINNER})
+
+        block = activation_gate_report(
+            gate_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variants=(v for v in ("cand-a",)),  # type: ignore[arg-type]
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        assert block, "a one-shot iterable must not render an empty block"
+        assert "cand-a" in block
+
+    def test_no_estimator_knob_is_exposed(self) -> None:
+        # Every exposed knob is a way to produce a number that is not comparable with the floor
+        # recorded beside it, and no shipped fence varies any of these.
+        params = inspect.signature(activation_gate_report).parameters
+        assert not {"seed", "n_resamples", "confidence", "materiality"} & set(params)
+
+
+class TestSeedStabilityReport:
+    """Disagreeing seeds are the FINDING, and the block must not collapse them into an answer."""
+
+    def _arms(self, tmp_path: Path) -> list[Path]:
+        incumbent, candidate = tiny_suite(3, 1)
+        return shared_dirs(tmp_path, incumbent, candidate)
+
+    def test_the_block_matches_a_direct_gate_seed_stability_call(self, tmp_path: Path) -> None:
+        run_dirs = self._arms(tmp_path)
+        call = {
+            "incumbent_variant": "incumbent",
+            "candidate_variant": "candidate",
+            "suite_id": SUITE,
+            "criterion_index": 0,
+        }
+
+        block = seed_stability_report(gate_dirs=run_dirs, **call)
+
+        direct = gate_seed_stability(
+            incumbent_run_dirs=run_dirs, candidate_run_dirs=run_dirs, sibling_indices=None, **call
+        )
+        assert block == render_seed_stability(direct)
+
+    def test_no_single_verdict_is_presented(self, tmp_path: Path) -> None:
+        # Whatever the seeds did, the block states an agreement COUNT at a family of one — never a
+        # `promoted` a reader could quote as the round's decision.
+        block = seed_stability_report(
+            gate_dirs=self._arms(tmp_path),
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        assert "would promote at" in block
+        assert "family of ONE" in block
+        assert "zero** extra agent runs" in block
+
+    def test_an_unstable_split_is_named_a_coin_flip(self) -> None:
+        # Rendered directly: a tree that lands 2/3 depends on the estimator, and pinning one here
+        # would pin the estimator rather than the composite. The renderer's contract is the claim.
+        unstable = SeedStability(seeds=(0, 1, 2), promote_agreement=2, p_values=(0.01, 0.02, 0.06), p_spread=0.05)
+        block = render_seed_stability(unstable)
+
+        assert "UNSTABLE" in block
+        assert "coin flip, not a result" in block
+        assert "Do not report the majority's verdict as the verdict" in block
+
+    def test_an_arm_gated_against_itself_is_a_caller_error(self, tmp_path: Path) -> None:
+        # `SeedStability` has no refusal channel, so this renders "STABLE — would promote at none of
+        # 3 seeds": a maximally confident negative for a typo.
+        with pytest.raises(ValueError, match="an arm gated against itself"):
+            seed_stability_report(
+                gate_dirs=self._arms(tmp_path),
+                incumbent_variant="incumbent",
+                candidate_variant="incumbent",
+                suite_id=SUITE,
+                criterion_index=0,
+            )
+
+    def test_duplicate_seeds_are_a_caller_error(self, tmp_path: Path) -> None:
+        # Re-running ONE draw three times reports 3/3 at a spread of 0.0000 — the most confident
+        # stability claim available, off a single bootstrap. The seeds are the axis being varied.
+        with pytest.raises(ValueError, match="seeds repeats"):
+            seed_stability_report(
+                gate_dirs=self._arms(tmp_path),
+                incumbent_variant="incumbent",
+                candidate_variant="candidate",
+                suite_id=SUITE,
+                criterion_index=0,
+                seeds=(0, 0, 0),
+            )
+
+    def test_no_seeds_at_all_raises_from_the_estimator(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="at least one seed"):
+            seed_stability_report(
+                gate_dirs=self._arms(tmp_path),
+                incumbent_variant="incumbent",
+                candidate_variant="candidate",
+                suite_id=SUITE,
+                criterion_index=0,
+                seeds=(),
+            )
+
+    def test_a_refused_gate_is_not_rendered_as_a_stable_negative(self, tmp_path: Path) -> None:
+        """The failure this phase's whole thesis is about: a refusal that reads as a result.
+
+        Every seed's gate refuses on a cross-split pair, so no seed produces a statistic — and
+        "STABLE — would promote at none of 3 seeds" is a confident negative about a comparison that
+        was never made.
+        """
+        incumbent, candidate = split_labelled_arms(tmp_path, "train", "test")
+
+        block = seed_stability_report(
+            gate_dirs=incumbent + candidate,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        assert "NOT A STABILITY READING" in block
+        assert "STABLE —" not in block
+        assert "read its own block for the refusal" in block
+
+    def test_every_keyword_is_declared_rather_than_forwarded_as_a_bag(self) -> None:
+        params = inspect.signature(seed_stability_report).parameters
+        assert all(p.kind is not p.VAR_KEYWORD for p in params.values()), "no **kwargs on this surface"
+        assert {
+            "gate_dirs",
+            "incumbent_variant",
+            "candidate_variant",
+            "suite_id",
+            "criterion_index",
+            "sibling_indices",
+            "seeds",
+        } == set(params)
