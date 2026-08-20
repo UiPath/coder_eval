@@ -28,7 +28,7 @@ check:  ## Run linting checks
 	uv run ruff check $(LINT_PATHS)
 
 lint:  ## Run custom architectural lint rules (CE001+)
-	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+	uv run pytest -m lint -v --tb=short --no-header -p no:warnings
 
 docs-indexes:  ## Regenerate README/docs indexes from the mkdocs nav (SSOT)
 	uv run python -m tests.lint.doc_indexes
@@ -63,7 +63,7 @@ verify:  ## Run all verification steps (CI equivalent)
 	uv run ruff format --check $(LINT_PATHS)
 	uv run ruff check $(LINT_PATHS)
 	uv run pyright
-	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+	uv run pytest -m lint -v --tb=short --no-header -p no:warnings
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r src/ -ll --format json -o bandit-report.json
 	uv run pytest tests/ -n auto -m "not live and not lint" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80

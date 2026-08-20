@@ -90,7 +90,7 @@ jobs:
         run: .venv/bin/ruff check src/ tests/
 
       - name: Custom architectural lint (CE001+)
-        run: .venv/bin/pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+        run: .venv/bin/pytest -m lint -v --tb=short --no-header -p no:warnings
 
       # PHASE 2: Type checking
       - name: Type check with pyright
