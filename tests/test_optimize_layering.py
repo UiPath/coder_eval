@@ -25,7 +25,15 @@ import pytest
 from pydantic import ValidationError
 
 import coder_eval.optimize
-from coder_eval.models import ActivationGateVerdict, ConfirmVerdict, ExecutionGateVerdict, GuardrailCheck, copy_with
+from coder_eval.models import (
+    ActivationGateVerdict,
+    ConfirmVerdict,
+    ExecutionGateVerdict,
+    GateVerdictBase,
+    GuardrailCheck,
+    copy_with,
+)
+from coder_eval.models.optimize import _FIELD_OVERRIDES
 from coder_eval.optimize.activation import activation_gate, confirm_gate, holm_promote, measure_noise_floor
 from coder_eval.optimize.execution import holm_promote_execution, measure_execution_noise_floor
 from coder_eval.optimize.fronts import arm_row_scores, cost_quality_points
@@ -1392,6 +1400,149 @@ class TestConstructionIsBehaviourPreserving:
         _assert_matches_pin(exec_gate(exec_run_dir(tmp_path, **uniform_shift(4))), "execution_gate_refused")
 
 
+class TestTheSharedFieldsAreDeclaredOnce:
+    """The 18 fields both tracks carry live on :class:`GateVerdictBase` and nowhere else.
+
+    They used to be declared twice, in hand-maintained parity, and the parity was already broken:
+    14 of the 18 carried different `description` text and four differed in required-ness. A
+    re-declaration is now a licensed exception recorded in `_FIELD_OVERRIDES`, and this class
+    asserts BOTH directions of that licence — an unrecorded override fails, and a recorded one that
+    no longer differs from the base fails too. That second half is the CE038 `EXEMPT` pattern: a
+    stale licence must not outlive the trade it recorded.
+    """
+
+    # The four statistic fields differ in DEFAULT, so they are the entries the whole Shape-B design
+    # turns on; the other two differ in description alone and are the judgement calls.
+    _STATISTIC_FIELDS = ("mean_diff", "ci_low", "ci_high", "p_value")
+
+    @staticmethod
+    def _declared_here(model: type[GateVerdictBase]) -> set[str]:
+        """The field names the class body itself declares, inherited ones excluded.
+
+        `model_fields` cannot answer this — it merges the base's fields in, so every base field
+        reads as "declared" on both subclasses. `__annotations__` on the class object is
+        class-local, which is exactly the question.
+        """
+        return set(getattr(model, "__annotations__", {}))
+
+    def test_the_base_holds_the_eighteen_shared_fields(self) -> None:
+        shared = set(ActivationGateVerdict.model_fields) & set(ExecutionGateVerdict.model_fields)
+        assert set(GateVerdictBase.model_fields) == shared
+        assert len(GateVerdictBase.model_fields) == 18
+
+    def test_the_activation_verdict_overrides_nothing(self) -> None:
+        overridden = self._declared_here(ActivationGateVerdict) & set(GateVerdictBase.model_fields)
+        assert overridden == set(), f"{sorted(overridden)} is declared twice for no recorded reason"
+
+    def test_every_override_is_recorded(self) -> None:
+        licensed = {name for name, _reason in _FIELD_OVERRIDES}
+        for model in (ActivationGateVerdict, ExecutionGateVerdict):
+            overridden = self._declared_here(model) & set(GateVerdictBase.model_fields)
+            unrecorded = overridden - licensed
+            assert not unrecorded, (
+                f"{model.__name__} re-declares {sorted(unrecorded)} without an entry in "
+                "_FIELD_OVERRIDES — a base field spelled twice is the parity this base removed"
+            )
+
+    def test_the_recorded_overrides_are_exactly_the_known_set(self) -> None:
+        # Pinned as a LIST, so a seventh licence — or a reordering that would move a base field —
+        # is a visible decision rather than a quiet widening. Six is the agreed ceiling.
+        assert [name for name, _reason in _FIELD_OVERRIDES] == [
+            *self._STATISTIC_FIELDS,
+            "n_resamples",
+            "gate_refusal",
+        ]
+
+    @pytest.mark.parametrize(("name", "reason"), _FIELD_OVERRIDES, ids=[n for n, _r in _FIELD_OVERRIDES])
+    def test_a_recorded_override_really_differs(self, name: str, reason: str) -> None:
+        assert reason.strip(), "an entry records WHY, so a reader can judge whether it still applies"
+        base = GateVerdictBase.model_fields[name]
+        # The subclass that declares it — asserted rather than assumed, so a licence for a field
+        # nobody overrides any more fails here instead of sitting unread.
+        declaring = [
+            model for model in (ActivationGateVerdict, ExecutionGateVerdict) if name in self._declared_here(model)
+        ]
+        assert declaring, f"_FIELD_OVERRIDES licenses {name}, which no subclass re-declares"
+        for model in declaring:
+            field = model.model_fields[name]
+            differs = field.is_required() != base.is_required() or field.description != base.description
+            assert differs, (
+                f"{model.__name__}.{name} re-declares the base field identically — delete the "
+                "override and the entry, or the licence outlives the trade"
+            )
+
+    @pytest.mark.parametrize(("name", "_reason"), _FIELD_OVERRIDES, ids=[n for n, _r in _FIELD_OVERRIDES])
+    def test_an_override_keeps_its_base_position(self, name: str, _reason: str) -> None:
+        """Pinned because `model_dump()` order follows it, and a pydantic release could change it.
+
+        Over every licensed override rather than the four statistic ones: the property is about
+        re-declaration itself, and a description-only override moves a key just as far.
+        """
+        expected = list(GateVerdictBase.model_fields).index(name)
+        for model in (ActivationGateVerdict, ExecutionGateVerdict):
+            if name in self._declared_here(model):
+                assert list(model.model_fields).index(name) == expected
+
+    @pytest.mark.parametrize("name", _STATISTIC_FIELDS)
+    def test_the_statistic_fields_keep_their_per_track_required_ness(self, name: str) -> None:
+        """The property the whole Shape-B design turns on, so it gets a test rather than a note."""
+        activation = full_activation_verdict().model_dump()
+        del activation[name]
+        with pytest.raises(ValidationError) as raised:
+            ActivationGateVerdict(**activation)
+        assert [error["loc"] for error in raised.value.errors()] == [(name,)]
+
+        execution = full_execution_verdict().model_dump()
+        del execution[name]
+        assert getattr(ExecutionGateVerdict(**execution), name) is None
+
+    def test_an_override_restates_its_description(self) -> None:
+        """A re-declaration replaces the whole `FieldInfo`, so a dropped `description=` is silent.
+
+        Asked of the DECLARING class rather than of `ExecutionGateVerdict` by name: a licence taken
+        up on the other track would resolve through inheritance to the base's own non-empty
+        description and pass while saying nothing.
+        """
+        for name, _reason in _FIELD_OVERRIDES:
+            declaring = [
+                model for model in (ActivationGateVerdict, ExecutionGateVerdict) if name in self._declared_here(model)
+            ]
+            assert declaring, name
+            for model in declaring:
+                assert model.model_fields[name].description, f"{model.__name__}.{name}"
+
+    def test_the_base_veto_list_is_not_implemented(self) -> None:
+        bare = GateVerdictBase(
+            incumbent_variant="incumbent",
+            candidate_variant="cand",
+            suite_id=SUITE,
+            confidence=0.9,
+            n_resamples=99,
+            rows_paired=8,
+            rows_excluded=2,
+            mean_diff=0.4,
+            ci_low=0.1,
+            ci_high=0.7,
+            p_value=0.01,
+        )
+        with pytest.raises(NotImplementedError):
+            _ = bare._own_vetoes
+        with pytest.raises(NotImplementedError):
+            _ = bare.failed_vetoes
+        # `separated` needs no subclass, so it answers on the base.
+        assert bare.separated is True
+
+    def test_the_base_is_importable_from_coder_eval_models(self) -> None:
+        import coder_eval.models as models
+
+        assert models.GateVerdictBase is GateVerdictBase
+        assert "GateVerdictBase" in models.__all__
+
+    def test_extra_forbid_reaches_both_subclasses(self) -> None:
+        for model in (ActivationGateVerdict, ExecutionGateVerdict):
+            assert model.model_config.get("extra") == "forbid"
+
+
 class TestFailedVetoes:
     """The ONE declaration of what vetoes a promotion, on both tracks.
 
@@ -1441,6 +1592,22 @@ class TestFailedVetoes:
         assert clean.failed_vetoes == []
         # `not []` is True, which is the polarity every `promoted` conjunct depends on.
         assert not clean.failed_vetoes
+
+    @pytest.mark.parametrize("track", ["activation", "execution"])
+    def test_both_properties_resolve_through_the_base(self, track: str) -> None:
+        """One declaration means the attribute a track resolves IS the base's, not a twin of it.
+
+        Asserted on the descriptor rather than on the answers: two identical copies agree on every
+        input this class feeds them, which is exactly why the parity was maintainable by hand for so
+        long and exactly why it drifted anyway.
+        """
+        verdict = self._built(track, own=[self._check("own", passed=False)], guardrails=[])
+        model = type(verdict)
+        assert model.failed_vetoes is GateVerdictBase.failed_vetoes
+        assert model.separated is GateVerdictBase.separated
+        # And the track's own list is what the base's union reaches for.
+        assert verdict._own_vetoes == [self._check("own", passed=False)]
+        assert verdict.failed_vetoes == ["own"]
 
     @pytest.mark.parametrize("track", ["activation", "execution"])
     def test_an_unevaluable_check_is_absent_rather_than_a_third_state(self, track: str) -> None:

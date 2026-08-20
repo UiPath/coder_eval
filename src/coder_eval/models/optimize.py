@@ -89,18 +89,36 @@ def _failed_names(*check_lists: Sequence[GuardrailCheck]) -> list[str]:
     return [check.name for checks in check_lists for check in checks if not check.passed]
 
 
-class ActivationGateVerdict(BaseModel):
-    """The activation track's Stage B verdict for ONE candidate against the incumbent.
+class GateVerdictBase(BaseModel):
+    """Everything both tracks' Stage B verdicts say, declared once.
+
+    A BASE CLASS, not a track-discriminated union. The distinction matters and the union argument
+    below still holds: each subclass declares only its OWN extras, so no field arrives as
+    permanently-``None`` noise on the track it does not belong to, and a reader never has to know
+    which half applies. What the base removes is the second declaration of each shared field — the
+    two tracks spelled all 18 twice, in hand-maintained parity that had already drifted in 14 of
+    them — and with it the second expression of ``separated``, ``failed_vetoes`` and their order.
+
+    The four statistic fields (``mean_diff``, ``ci_low``, ``ci_high``, ``p_value``) are declared
+    **required** here, matching the activation track, and :class:`ExecutionGateVerdict`
+    re-declares them with ``default=None``. A subclass re-declaration is the language-level way to
+    say "same field, different default on this track": it keeps the difference in the class that
+    has it. Which fields either subclass may re-declare, and why, is recorded ONCE — in
+    :data:`_FIELD_OVERRIDES` at the foot of this module. Do not restate the set here or anywhere
+    else; a second copy of a licence list is a licence that outlives its trade.
+
+    **What is stable about ``model_dump()`` order, exactly:** an overridden field keeps its BASE
+    position, so re-declaring one does not move it. Subclass-declared fields DO sit after every
+    base field now, where several of them used to be interleaved — so both models' dump order
+    changed when this base landed. Nothing reads a verdict positionally (the pins in
+    ``tests/_fixtures/optimize_verdicts/`` are compared as PARSED JSON, ``reports_optimize`` reads
+    by name, and no verdict is persisted), which is why those pins were deliberately NOT
+    re-serialized: touching them would owe an estimator-ledger row for a change that moved no
+    number.
 
     Statistics are ``None`` rather than fabricated when the sample cannot support them (mirroring
     ``PairedComparison``), and ``rows_excluded`` is first-class so a silently narrowed sample is
     visible.
-
-    ``promoted`` is deliberately ``bool | None``: a single gate cannot decide a family, so
-    :func:`coder_eval.optimize.activation.activation_gate` leaves it ``None`` and only
-    :func:`coder_eval.optimize.activation.holm_promote` — which sees every survivor at once — sets it.
-    Rendering a ``None`` as a non-promotion would let a forgotten Holm pass look like an honest
-    negative result.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -108,34 +126,37 @@ class ActivationGateVerdict(BaseModel):
     incumbent_variant: str = Field(description="Variant id of the incumbent arm.")
     candidate_variant: str = Field(description="Variant id of the candidate arm under test.")
     suite_id: str = Field(description="Suite id (the pre-fan-out task_id) both arms ran.")
-    criterion_index: int = Field(
-        ge=0, description="Position of the gated criterion in the suite's success_criteria list (0-based)."
-    )
     # Required, not defaulted: the gate always knows both, and a default here would be a second
-    # declaration of values `activation_gate` already owns — which is how a report ends up
-    # labelling a 90% interval as 95%.
+    # declaration of values the gate already owns — which is how a report ends up labelling a 90%
+    # interval as 95%.
     confidence: float = Field(
-        gt=0.0, lt=1.0, description="Interval width the bootstrap used, so the report cannot mislabel it."
+        gt=0.0, lt=1.0, description="Interval width the estimator used, so the report cannot mislabel it."
     )
     n_resamples: int = Field(
         gt=0,
         description=(
             "Bootstrap draws. The estimator's own floor is 2/(n+1) — see reports_stats."
             "bootstrap_p_floor — so a p AT that floor is a resolution statement, not a measurement. "
-            "This suite's own discreteness floor sits above it; p_floor is the one that decides."
+            "A suite may have its own coarser floor above it, and where it does that one decides."
         ),
     )
-    rows_paired: int = Field(description="Rows scored on BOTH arms — the clusters the bootstrap resampled.")
+    rows_paired: int = Field(
+        description=(
+            "Rows scored on BOTH arms — the paired sample the statistic was computed on, carried "
+            "through from the pairing rather than recomputed here."
+        )
+    )
     rows_excluded: int = Field(
         description=(
             "Rows seen in at least one arm but left out of the pairing: present on one side only, or "
-            "present on both and scored on only one (an errored or timed-out row produces no criterion result)."
+            "present on both and scored on only one (an errored or timed-out row produces no "
+            "criterion result). Carried through from the pairing rather than recomputed here."
         )
     )
-    incumbent_f1: float | None = Field(description="Incumbent's f1.yes pooled over the paired rows.")
-    candidate_f1: float | None = Field(description="Candidate's f1.yes pooled over the paired rows.")
-    mean_diff: float | None = Field(description="candidate_f1 - incumbent_f1, the bootstrap's point estimate.")
-    ci_low: float | None = Field(description="Lower bound of the paired cluster-bootstrap interval on the difference.")
+    mean_diff: float | None = Field(
+        description="The paired point estimate of the difference, ALWAYS candidate - incumbent."
+    )
+    ci_low: float | None = Field(description="Lower bound of the interval on that difference.")
     ci_high: float | None = Field(
         description=(
             "Upper bound of that interval. Promotion requires the interval to exclude zero (ci_low > 0) "
@@ -151,6 +172,151 @@ class ActivationGateVerdict(BaseModel):
             "(p_floor). None when unpaired."
         )
     )
+    gate_refusal: str | None = Field(
+        default=None,
+        description=(
+            "Why this block is not a decision, or None when it is one. Renders as its own headline: "
+            "a refusal is not a negative result, and reporting it as one is the defect this field "
+            "fixes. The causes and their setters are per-track — see each subclass — but they all "
+            "answer the same question with the same consequence, and each track's Holm pass forces "
+            "`promoted=False` whenever it is set."
+        ),
+    )
+    holm_alpha: float | None = Field(
+        default=None, description="The family-wise alpha the track's Holm pass applied. None until it has run."
+    )
+    holm_rejected: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the Holm step-down rejected THIS verdict's null at its rank in the family. "
+            "None until the track's Holm pass has run. Deliberately NOT derivable from the fields "
+            "beside it: `holm_alpha` records the family-wide alpha and never the rank-dependent "
+            "threshold, so a reader holding `p_value` and `holm_alpha` cannot tell a rejection "
+            "from a near miss — the family SIZE is what decides, and only the function that saw "
+            "the whole family knows it. It is recorded because `promoted` alone conflates three "
+            "different negatives (lost, underpowered, vetoed) and the rendered block has to tell "
+            "them apart: BLOCKED BY A GUARDRAIL means `holm_rejected and separated` with a check "
+            "failing, and without this field that headline also fires on a candidate the family "
+            "correction simply never rejected — sending the reader to fix cost when the real "
+            "problem is power."
+        ),
+    )
+    promoted: bool | None = Field(
+        default=None,
+        description=(
+            "None means gated but undecided — the track's Holm pass has not been applied. "
+            "Otherwise it is the WHOLE decision: `holm_rejected` AND `separated` (the difference "
+            "favours the candidate and the interval excludes zero) AND `gate_refusal` unset AND "
+            "every veto list in `failed_vetoes` empty. A failed check FORCES False, so this field "
+            "alone is safe to ship on. What it cannot tell you is WHY: lost, underpowered and "
+            "vetoed all read False, and `holm_rejected` / `separated` are what tell those apart. "
+            "The two tracks mean the SAME thing by it; what differs is only which lists each one "
+            "HAS to check."
+        ),
+    )
+    mde: float | None = Field(
+        default=None,
+        description=(
+            "Minimum detectable effect for this suite at this size, in the track's own metric, from "
+            "its null split. None when it could not be computed; 0.0 is a real answer meaning the "
+            "null split's arms agreed exactly."
+        ),
+    )
+    guardrails: list[GuardrailCheck] = Field(
+        default_factory=list,
+        description=(
+            "Cost / latency guardrails. A failure forces `promoted = False` in the track's Holm "
+            "pass and is named in the rendered block's BLOCKED headline."
+        ),
+    )
+    notes: list[str] = Field(
+        default_factory=list, description="Everything the reader needs to distrust or qualify the numbers above."
+    )
+
+    @property
+    def _own_vetoes(self) -> list[GuardrailCheck]:
+        """The track's OWN veto list — `sibling_checks` on activation, `integrity_checks` on execution.
+
+        A plain property raising rather than an ``abc.abstractmethod``: pydantic's metaclass and
+        ``ABCMeta`` do not compose, and the two subclasses here are the only implementors the tree
+        will ever have.
+        """
+        raise NotImplementedError(
+            "GateVerdictBase is not constructed directly — ActivationGateVerdict and "
+            + "ExecutionGateVerdict each name their own veto list"
+        )
+
+    @property
+    def separated(self) -> bool:
+        """True when the paired comparison itself separated, guardrails aside.
+
+        The ONE declaration of "the statistic came out in the candidate's favour and its interval
+        excludes zero", for both tracks. Each track's Holm pass needs it to decide ``promoted``;
+        ``reports_optimize`` needs it to tell a candidate that LOST from one that WON AND WAS
+        BLOCKED. The renderer read ``promoted`` for that second question until the guardrail was
+        folded in, at which point the BLOCKED rung became unsatisfiable and a blocked candidate
+        degraded silently to the ordinary ``NOT PROMOTED`` headline — the one thing a reader must
+        not confuse it with.
+
+        Note what it deliberately does NOT include: the Holm rejection. Holm is a property of the
+        FAMILY and this is a property of one verdict, so folding ``i in rejected_at`` in here would
+        put a family decision on a model that cannot see the family. :attr:`holm_rejected` carries
+        that half, stored, because it cannot be derived here.
+
+        A property rather than a stored field on purpose: nothing new is serialized, so no
+        construction site can set it inconsistently with the numbers it derives from — the same
+        reason ``SearchComparison.accepted`` is a property over ``beats`` / ``blocker``.
+        """
+        return self.mean_diff is not None and self.mean_diff > 0.0 and self.ci_low is not None and self.ci_low > 0.0
+
+    @property
+    def failed_vetoes(self) -> list[str]:
+        """Every check that vetoed this candidate — the track's own list first, then cost/latency.
+
+        BOTH veto lists, and that is the whole point. A candidate on this list **won its comparison
+        and was vetoed**, which is a different outcome from losing and calls for the opposite next
+        action: a loss says try a different idea, a veto says this idea works and costs too much or
+        broke something else. Reading ``guardrails`` alone is not a narrower version of that
+        question, it is a wrong answer to it — a failing sibling check rendered as the ordinary
+        ``NOT PROMOTED`` headline until that was found.
+
+        The ONE declaration of the set and of its ORDER, so ``promoted`` and the rendered
+        ``BLOCKED BY A GUARDRAIL`` rung cannot disagree about what vetoes. Order is preserved
+        because the renderer joins it into a sentence; a name appearing in both lists appears twice.
+
+        A property rather than a ``computed_field``, for :attr:`separated`'s reason and one more: a
+        computed field would enter ``model_dump()``, and every pinned ``optimize_verdicts/*.json``
+        would gain a key for a value that measures nothing new.
+        """
+        return _failed_names(self._own_vetoes, self.guardrails)
+
+
+class ActivationGateVerdict(GateVerdictBase):
+    """The activation track's Stage B verdict for ONE candidate against the incumbent.
+
+    Declares only its own seven fields; the other 18 come from :class:`GateVerdictBase` and it
+    overrides none of them.
+
+    ``promoted`` is deliberately ``bool | None``: a single gate cannot decide a family, so
+    :func:`coder_eval.optimize.activation.activation_gate` leaves it ``None`` and only
+    :func:`coder_eval.optimize.activation.holm_promote` — which sees every survivor at once — sets it.
+    Rendering a ``None`` as a non-promotion would let a forgotten Holm pass look like an honest
+    negative result.
+
+    ``gate_refusal`` has TWO setters on this track, told apart by ``p_value`` rather than by a
+    second field. (1) ``holm_promote`` sets it when the suite's discreteness floor exceeds this
+    candidate's Holm threshold — the gate structurally cannot separate at this size; that one
+    always carries a p, because it is only reachable inside the ``p_value is not None`` branch, and
+    renders as CANNOT SEPARATE AT THIS SIZE. (2) ``activation_gate``'s row-selection preflight sets
+    it when the two arms recorded different ``--split`` values — they never scored the same rows,
+    so no comparison was made; that one always has ``p_value is None`` and renders as NOT A RESULT.
+    """
+
+    criterion_index: int = Field(
+        ge=0, description="Position of the gated criterion in the suite's success_criteria list (0-based)."
+    )
+    incumbent_f1: float | None = Field(description="Incumbent's f1.yes pooled over the paired rows.")
+    candidate_f1: float | None = Field(description="Candidate's f1.yes pooled over the paired rows.")
     p_floor: float | None = Field(
         default=None,
         ge=0.0,
@@ -178,57 +344,6 @@ class ActivationGateVerdict(BaseModel):
             "rows the arms agree on — at a fixed R that RAISES the floor."
         ),
     )
-    gate_refusal: str | None = Field(
-        default=None,
-        description=(
-            "Why this block is not a decision. Renders as its own headline: a refusal is not a "
-            "negative result, and reporting it as one is the defect this field fixes. TWO setters, "
-            "told apart by `p_value` rather than by a second field. (1) holm_promote sets it when "
-            "the suite's discreteness floor exceeds this candidate's Holm threshold — the gate "
-            "structurally cannot separate at this size; that one always carries a p, because it is "
-            "only reachable inside the `p_value is not None` branch, and renders as CANNOT SEPARATE "
-            "AT THIS SIZE. (2) activation_gate's row-selection preflight sets it when the two arms "
-            "recorded different `--split` values — they never scored the same rows, so no comparison "
-            "was made; that one always has `p_value is None` and renders as NOT A RESULT."
-        ),
-    )
-    holm_alpha: float | None = Field(
-        default=None, description="The family-wise alpha holm_promote applied. None until it has run."
-    )
-    holm_rejected: bool | None = Field(
-        default=None,
-        description=(
-            "Whether the Holm step-down rejected THIS verdict's null at its rank in the family. "
-            "None until holm_promote has run. The exact twin of "
-            "ExecutionGateVerdict.holm_rejected, and stored for the same reason: it is NOT "
-            "derivable from the fields beside it, because `holm_alpha` records the family-wide "
-            "alpha and never the rank-dependent threshold — a reader holding `p_value` and "
-            "`holm_alpha` cannot tell a rejection from a near miss, since the family SIZE is what "
-            "decides and only the function that saw the whole family knows it. It is recorded "
-            "because `promoted` alone conflates three different negatives (lost, underpowered, "
-            "vetoed) and the rendered block has to tell them apart: BLOCKED BY A GUARDRAIL means "
-            "`holm_rejected and separated` with a check failing, and without this field that "
-            "headline also fires on a candidate the family correction simply never rejected — "
-            "sending the reader to fix cost when the real problem is power."
-        ),
-    )
-    promoted: bool | None = Field(
-        default=None,
-        description=(
-            "None means gated but undecided — holm_promote has not been applied. Otherwise it is "
-            "the WHOLE decision: `holm_rejected` AND `separated` (the difference favours the "
-            "candidate and the interval excludes zero) AND every SIBLING check passing AND every "
-            "cost/latency GUARDRAIL passing AND `gate_refusal` unset. A failed check FORCES False, "
-            "so this field alone is safe to ship on. What it cannot tell you is WHY: lost, "
-            "underpowered and vetoed all read False, and `holm_rejected` / `separated` are what "
-            "tell those apart. The two tracks now AGREE about what `promoted` means — the "
-            "cost/latency guardrails used to gate in the skill's prose rather than in this field, "
-            "so a candidate that materially raised what a row costs read True. What still differs is "
-            "only what each track HAS to check: there are no `integrity_checks` on this track "
-            "(engagement and completion rate are execution-track concepts), and no `p_floor` on "
-            "that one."
-        ),
-    )
     range_non_overlap: bool = Field(
         default=False,
         description=(
@@ -236,83 +351,29 @@ class ActivationGateVerdict(BaseModel):
             "as a reported observation and never consulted in the promotion decision."
         ),
     )
-    mde: float | None = Field(
-        default=None,
-        description="Minimum detectable effect for this suite at this size. None when it could not be computed.",
-    )
     sibling_checks: list[GuardrailCheck] = Field(
         default_factory=list, description="Per-sibling recall.yes regression checks. A failure blocks promotion."
     )
-    guardrails: list[GuardrailCheck] = Field(
-        default_factory=list,
-        description=(
-            "Cost / latency guardrails. A failure forces `promoted = False` in `holm_promote` and "
-            "is named in the rendered block's BLOCKED headline — the same standing they have on "
-            "the execution track."
-        ),
-    )
-    notes: list[str] = Field(
-        default_factory=list, description="Everything the reader needs to distrust or qualify the numbers above."
-    )
 
     @property
-    def separated(self) -> bool:
-        """True when the paired comparison itself separated, guardrails aside.
-
-        The ONE declaration of "the statistic came out in the candidate's favour and its interval
-        excludes zero", and the exact twin of :attr:`ExecutionGateVerdict.separated` — same
-        expression, same rationale. :func:`~coder_eval.optimize.activation.holm_promote` needs it to
-        decide ``promoted``; ``reports_optimize.render_markdown`` needs it to tell a candidate that
-        LOST from one that WON AND WAS BLOCKED. The renderer read ``promoted`` for that second
-        question until the guardrail was folded in, at which point the BLOCKED rung became
-        unsatisfiable and a blocked candidate degraded silently to the ordinary ``NOT PROMOTED``
-        headline — the one thing a reader must not confuse it with.
-
-        Note what it deliberately does NOT include: the Holm rejection. Holm is a property of the
-        FAMILY and this is a property of one verdict, so folding ``i in rejected_at`` in here would
-        put a family decision on a model that cannot see the family. :attr:`holm_rejected` carries
-        that half, stored, because it cannot be derived here.
-
-        A property rather than a stored field on purpose: nothing new is serialized, so no
-        construction site can set it inconsistently with the numbers it derives from — the same
-        reason ``SearchComparison.accepted`` is a property over ``beats`` / ``blocker``.
-        """
-        return self.mean_diff is not None and self.mean_diff > 0.0 and self.ci_low is not None and self.ci_low > 0.0
-
-    @property
-    def failed_vetoes(self) -> list[str]:
-        """Every check that vetoed this candidate — sibling checks first, then cost/latency.
-
-        BOTH veto lists, and that is the whole point. A candidate on this list **won its comparison
-        and was vetoed**, which is a different outcome from losing and calls for the opposite next
-        action: a loss says try a different idea, a veto says this idea works and costs too much or
-        broke a sibling. Reading ``guardrails`` alone is not a narrower version of that question, it
-        is a wrong answer to it — a failing sibling check rendered as the ordinary ``NOT PROMOTED``
-        headline until that was found, so the reader could not tell the two apart at all.
-
-        The ONE declaration of the set, so ``promoted`` and the rendered ``BLOCKED BY A GUARDRAIL``
-        rung cannot disagree about what vetoes. Order is preserved because the renderer joins it into
-        a sentence; a name appearing in both lists appears twice, as it did before this existed.
-
-        A property rather than a ``computed_field``, for :attr:`separated`'s reason and one more: a
-        computed field would enter ``model_dump()``, and every pinned ``optimize_verdicts/*.json``
-        would gain a key for a value that measures nothing new.
-        """
-        return _failed_names(self.sibling_checks, self.guardrails)
+    def _own_vetoes(self) -> list[GuardrailCheck]:
+        return self.sibling_checks
 
 
-class ExecutionGateVerdict(BaseModel):
+class ExecutionGateVerdict(GateVerdictBase):
     """The execution track's Stage B verdict for ONE candidate against the incumbent.
 
-    Mirrors :class:`ActivationGateVerdict`'s conventions deliberately — statistics are ``None``
-    rather than fabricated, ``notes`` is the distrust-the-numbers channel, and ``promoted`` is
-    ``None`` until :func:`coder_eval.optimize.execution.holm_promote_execution` has seen the whole
-    family — but it is a separate flat model rather than a track-discriminated union with it. A
-    union would carry ``p_floor`` / ``n_discordant`` / ``criterion_index`` as permanently-``None``
-    noise on one side and ``effect_size`` on the other, and every reader would have to know which
-    half applied. (``gate_refusal`` is deliberately NOT in that list: both tracks refuse, so it
-    carries the same name and the same meaning here — a different condition, set by a different
-    function, for reasons its own description gives.)
+    Declares its own five fields, plus the re-declarations :data:`_FIELD_OVERRIDES` licenses —
+    every one of them is on this class. The statistic fields among them carry ``default=None``
+    because this track's gate can return before any statistic exists, while the activation gate
+    always computes them or refuses; the rest are re-declared for a description this track needs to
+    say differently. The set itself is recorded only in ``_FIELD_OVERRIDES``, never restated here.
+
+    Sharing a base with :class:`ActivationGateVerdict` is deliberately NOT the same as being one
+    track-discriminated union with it. A union would carry ``p_floor`` / ``n_discordant`` /
+    ``criterion_index`` as permanently-``None`` noise on one side and ``effect_size`` on the other,
+    and every reader would have to know which half applied; a base class carries only what both
+    tracks really have, and each subclass declares its own extras.
 
     **``mean_diff`` is ALWAYS candidate - incumbent.** The reporter's own ``## Paired Comparison``
     block subtracts in variant *declaration* order, so with the incumbent declared first a
@@ -332,14 +393,6 @@ class ExecutionGateVerdict(BaseModel):
     wiring fault beside it), and ``promoted`` is False whenever it is set.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
-    incumbent_variant: str = Field(description="Variant id of the incumbent arm.")
-    candidate_variant: str = Field(description="Variant id of the candidate arm under test.")
-    suite_id: str = Field(description="Suite id (the pre-fan-out task_id) both arms ran.")
-    confidence: float = Field(
-        gt=0.0, lt=1.0, description="Interval width the paired t used, so the report cannot mislabel it."
-    )
     n_resamples: int = Field(
         gt=0,
         description=(
@@ -349,26 +402,12 @@ class ExecutionGateVerdict(BaseModel):
             "two very different resolutions and read identically."
         ),
     )
-    rows_paired: int = Field(description="Rows scored by BOTH arms — PairedComparison.task_count.")
-    rows_excluded: int = Field(
-        description=(
-            "Rows seen for at least one arm but not paired, carried through from "
-            "PairedComparison.excluded_count rather than recomputed."
-        )
-    )
     mean_diff: float | None = Field(
         default=None,
         description="Paired mean difference in per-row weighted_score, ALWAYS candidate - incumbent.",
     )
     ci_low: float | None = Field(default=None, description="Lower bound of the paired-t interval on that difference.")
     ci_high: float | None = Field(default=None, description="Upper bound of that interval.")
-    effect_size: float | None = Field(
-        default=None,
-        description=(
-            "Cohen's d for the paired difference. None does NOT mean the comparison failed — d is "
-            "undefined at zero variance, which two arms agreeing exactly on every row produce."
-        ),
-    )
     p_value: float | None = Field(default=None, description="Paired t-test p. None when fewer than 2 rows paired.")
     gate_refusal: str | None = Field(
         default=None,
@@ -393,55 +432,18 @@ class ExecutionGateVerdict(BaseModel):
             "but does NOT drop the verdict from the Holm family — membership is p_value-based, "
             "since a measured candidate was tested however degenerate its sample was, and "
             "excluding it would loosen alpha/m for its siblings. Note the "
-            "DIFFERENT setters from ActivationGateVerdict.gate_refusal, which is set either by "
-            "holm_promote (a discreteness refusal needs the family's rank-dependent threshold) or "
-            "by that gate's row-selection preflight; every cause here needs nothing outside a "
-            "single verdict, so each is detected where it is already computed. Note this track has "
-            "NO cross-split refusal: it takes one run_dir holding both arms, so they share one "
-            "run.json and one split by construction and a mismatch is unrepresentable."
+            "DIFFERENT setters from ActivationGateVerdict.gate_refusal; every cause here needs "
+            "nothing outside a single verdict, so each is detected where it is already computed. "
+            "Note this track has NO cross-split refusal: it takes one run_dir holding both arms, so "
+            "they share one run.json and one split by construction and a mismatch is "
+            "unrepresentable."
         ),
     )
-    holm_alpha: float | None = Field(
-        default=None, description="The family-wise alpha holm_promote_execution applied. None until it has run."
-    )
-    holm_rejected: bool | None = Field(
+    effect_size: float | None = Field(
         default=None,
         description=(
-            "Whether the Holm step-down rejected THIS verdict's null at its rank in the family. "
-            "None until holm_promote_execution has run. The exact twin of "
-            "ActivationGateVerdict.holm_rejected. Deliberately NOT derivable from the fields "
-            "beside it: `holm_alpha` records the family-wide alpha, never the rank-dependent "
-            "threshold, so a reader holding `p_value` and `holm_alpha` cannot tell a rejection "
-            "from a near miss — the family SIZE is what decides, and only the function that saw "
-            "the whole family knows it. It is recorded because `promoted` alone conflates three "
-            "different negatives (lost, underpowered, vetoed) and the rendered block has to tell "
-            "them apart: BLOCKED BY A GUARDRAIL means `holm_rejected and separated` with a check "
-            "failing, and without this field that headline also fires on a candidate the family "
-            "correction simply never rejected — sending the reader to fix cost when the real "
-            "problem is power."
-        ),
-    )
-    promoted: bool | None = Field(
-        default=None,
-        description=(
-            "None means gated but undecided — holm_promote_execution has not been applied. "
-            "Otherwise it is the WHOLE decision: `holm_rejected` AND `separated` (the difference "
-            "favours the candidate and the interval excludes zero) AND `gate_refusal` unset — "
-            "which is not a fourth criterion so much as the statement that the others mean "
-            "anything at all — AND every integrity check and guardrail passing. A failed check "
-            "FORCES False, so this field alone is safe to ship on. What it cannot tell you is "
-            "WHY: lost, underpowered and vetoed all read False, and `holm_rejected` / `separated` "
-            "are what tell those apart. ActivationGateVerdict.promoted now means the SAME thing; "
-            "what differs between the two is only which lists each track has — there are no "
-            "`integrity_checks` over there, since engagement and completion rate are concepts of "
-            "this track."
-        ),
-    )
-    mde: float | None = Field(
-        default=None,
-        description=(
-            "Minimum detectable effect on weighted_score, from the replicate null split. None when "
-            "it could not be computed; 0.0 is a real answer meaning the replicates agreed exactly."
+            "Cohen's d for the paired difference. None does NOT mean the comparison failed — d is "
+            "undefined at zero variance, which two arms agreeing exactly on every row produce."
         ),
     )
     primary_criterion_index: int | None = Field(
@@ -521,54 +523,26 @@ class ExecutionGateVerdict(BaseModel):
             "helper as sibling_checks on the other track."
         ),
     )
-    guardrails: list[GuardrailCheck] = Field(
-        default_factory=list,
-        description=(
-            "Cost / latency guardrails. A failure forces `promoted = False` in "
-            "`holm_promote_execution` and is named in the rendered block's BLOCKED headline."
-        ),
-    )
-    notes: list[str] = Field(
-        default_factory=list, description="Everything the reader needs to distrust or qualify the numbers above."
-    )
 
     @property
-    def separated(self) -> bool:
-        """True when the paired comparison itself separated, guardrails aside.
+    def _own_vetoes(self) -> list[GuardrailCheck]:
+        return self.integrity_checks
 
-        The ONE declaration of "the statistic came out in the candidate's favour and its interval
-        excludes zero" on this track, and the exact twin of
-        :attr:`ActivationGateVerdict.separated`. ``holm_promote_execution`` needs it to decide
-        ``promoted``; ``reports_optimize.render_execution_markdown`` needs it to tell a candidate
-        that LOST from one that WON AND WAS BLOCKED. Before this existed the renderer read
-        ``promoted`` for the second question, which stopped working the moment the guardrail was
-        folded in — a blocked candidate would have silently degraded to the ordinary
-        ``NOT PROMOTED`` headline, which is the one thing a reader must not confuse it with.
 
-        Note what it deliberately does NOT include: the Holm rejection. Holm is a property of the
-        FAMILY and this is a property of one verdict, so folding ``i in rejected_at`` in here would
-        put a family decision on a model that cannot see the family.
-
-        A property rather than a stored field on purpose: nothing new is serialized, so no
-        construction site can set it inconsistently with the numbers it derives from — the same
-        reason ``SearchComparison.accepted`` is a property over ``beats`` / ``blocker``.
-        """
-        return self.mean_diff is not None and self.mean_diff > 0.0 and self.ci_low is not None and self.ci_low > 0.0
-
-    @property
-    def failed_vetoes(self) -> list[str]:
-        """Every check that vetoed this candidate — integrity checks first, then cost/latency.
-
-        The twin of :attr:`ActivationGateVerdict.failed_vetoes` over this track's own list, and it
-        answers the same question: a candidate here **won its paired comparison and was vetoed**,
-        which is not the same outcome as losing and calls for a different next action. Both bodies
-        route through :func:`_failed_names`, so the ``not check.passed`` polarity is declared once.
-
-        The ONE declaration of the set, so ``promoted`` and the rendered ``BLOCKED BY A GUARDRAIL``
-        rung cannot disagree about what vetoes. A property, never a ``computed_field``: it must stay
-        out of ``model_dump()`` or every pinned fixture gains a key measuring nothing new.
-        """
-        return _failed_names(self.integrity_checks, self.guardrails)
+# The fields :class:`ExecutionGateVerdict` re-declares from :class:`GateVerdictBase`, and why.
+#
+# Read by `tests/test_optimize_layering.py`, which asserts BOTH directions: no subclass may
+# re-declare a base field absent from here, and every entry here must genuinely differ from the
+# base — in default, in description, or both. That second half is the CE038 `EXEMPT` pattern: a
+# stale licence must not outlive the trade it recorded.
+_FIELD_OVERRIDES: tuple[tuple[str, str], ...] = (
+    ("mean_diff", "optional here: the execution gate can return before any statistic exists"),
+    ("ci_low", "optional here, with the paired-t interval named"),
+    ("ci_high", "optional here"),
+    ("p_value", "optional here, and an analytic paired t rather than a bootstrap draw"),
+    ("n_resamples", "the draws pay for the MDE and the guardrails, NOT for the primary statistic"),
+    ("gate_refusal", "four kinds of cause, all detected inside execution_gate rather than at Holm"),
+)
 
 
 class ConfirmVerdict(BaseModel):
