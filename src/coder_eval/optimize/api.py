@@ -45,7 +45,13 @@ from coder_eval.optimize.load import (
     stale_tree_reason,
     wrong_path_reason,
 )
-from coder_eval.optimize.search import candidate_leaks, regression_check, skill_text
+from coder_eval.optimize.search import (
+    candidate_leaks,
+    lineage_head_scores,
+    regression_check,
+    search_compare,
+    skill_text,
+)
 from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
 from coder_eval.orchestration.task_loader import expand_dataset, load_task
 from coder_eval.reports_optimize import (
@@ -58,6 +64,7 @@ from coder_eval.reports_optimize import (
     render_noise_floor,
     render_row_matrix,
     render_row_replicates,
+    render_search_comparison,
     render_staleness_note,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
@@ -299,6 +306,9 @@ def headroom_report(
     # recorded in `.claude/harness-candidates.md` rather than smuggled in here.
     stale, _unknown = reconcile_arms([(variant_id, run_dirs)], suite_id)
     arms = arm_row_scores(run_dirs=run_dirs, variant_ids=[variant_id], suite_id=suite_id)
+    # `[0]` cannot raise — `arm_row_scores` returns one arm per variant id and this passes one. The
+    # real failure is an arm that scored NOTHING, which comes back as a present arm with an empty
+    # vector; that is what the fence's `SystemExit` was for and what this raises on.
     if not arms[0].row_scores:
         raise ValueError(
             f"{variant_id!r} scored no rows of {suite_id!r} under {', '.join(str(d) for d in run_dirs)} — "
@@ -487,3 +497,50 @@ def leak_report(*, suite: Path, skill_name: str, root: Path, round_tag: str, bas
             continue
         findings[arm.name] = candidate_leaks(skill_text(skill_dir), baseline, train)
     return render_leak_scan(findings, skipped=skipped, unscannable=unscannable)
+
+
+def search_report(
+    *,
+    run_dirs: Sequence[Path],
+    variant_id: str,
+    suite_id: str,
+    sidecar: Path,
+    criterion_index: int | None = None,
+) -> str:
+    """The search loop's accept-or-revert reading for one round's single explored arm.
+
+    **Emphatically not a gate.** It compares one arm against the recorded lineage head, where the
+    alternative is reverting a step rather than shipping a skill, and it corrects for no
+    multiplicity. The gates are Stage B's, and both go through Holm.
+
+    ``search_compare`` applies four guards that are easy to leave out and silent when they are — an
+    empty head, no shared rows, a hole the head scored, and a corpus row the candidate re-loses — so
+    the block is the whole answer. Print it and act on what it says.
+    """
+    _require_run_dirs(run_dirs)
+    measurements = load_measurements(sidecar)
+    head = lineage_head_scores(measurements)
+    if head is None:
+        raise ValueError(
+            "no recorded lineage — run a multi-arm Stage A round first. The search loop advances a "
+            + "head, so there has to be one to advance."
+        )
+    stale, _unknown = reconcile_arms([(variant_id, run_dirs)], suite_id)
+    arms = arm_row_scores(
+        run_dirs=run_dirs, variant_ids=[variant_id], suite_id=suite_id, criterion_index=criterion_index
+    )
+    if not arms[0].row_scores:
+        # Same shape as `headroom_report`: one variant in, one arm out, so the index is safe and the
+        # empty VECTOR is the fault. The shipped fence did not crash on it either — it handed the
+        # empty arm to `search_compare`, which refused with "the two rounds share no rows … a wiring
+        # fault", sending a reader to check sampling seeds and snapshot mounts for what is a mistyped
+        # slug. Naming the variant, the suite and the dirs is the difference.
+        raise ValueError(wrong_path_reason(variant_id, suite_id, run_dirs))
+    return "\n".join(
+        [
+            *_staleness_note(stale),
+            # The corpus is passed as it is, empty or not: `search_compare` takes `corpus=()` and an
+            # empty one is normal early, so branching here would only be a second way to say that.
+            render_search_comparison(search_compare(head, arms[0], corpus=measurements.regression_corpus)),
+        ]
+    )

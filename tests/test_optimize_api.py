@@ -20,6 +20,7 @@ from coder_eval.models import (
     EXECUTION_FLOOR_METRIC,
     NoiseFloor,
     RegressionRow,
+    RoundScores,
 )
 from coder_eval.optimize.activation import min_discordant_rows, noise_floor_mde
 from coder_eval.optimize.api import (
@@ -32,13 +33,20 @@ from coder_eval.optimize.api import (
     leak_report,
     replicates_report,
     row_matrix_report,
+    search_report,
 )
 from coder_eval.optimize.execution import measure_execution_noise_floor
-from coder_eval.optimize.store import UNRESOLVED_MODEL, append_regression_rows
+from coder_eval.optimize.store import (
+    UNRESOLVED_MODEL,
+    append_regression_rows,
+    load_measurements,
+    record_round_scores,
+)
 from coder_eval.reports_optimize import LEAK_SCAN_BOUNDARY, SINGLE_REPLICATE_CAVEAT
 from coder_eval.reports_stats import DEFAULT_ALPHA
 from tests.optimize_fixtures import (
     SUITE,
+    arm_row_scores_for,
     assert_matches_render_pin,
     cost_quality_arm,
     eval_result,
@@ -233,6 +241,15 @@ def _replicates_call(run_dirs) -> str:
     )
 
 
+def _search_call(run_dirs) -> str:
+    return search_report(
+        run_dirs=run_dirs,
+        variant_id="incumbent",
+        suite_id=SUITE,
+        sidecar=Path(_MISSING) / "measurements.json",
+    )
+
+
 def _corpus_call(run_dirs) -> str:
     return corpus_report(
         run_dirs=run_dirs,
@@ -245,7 +262,7 @@ def _corpus_call(run_dirs) -> str:
 
 # Every composite that computes a reported number from rows it READ, and therefore owes its block a
 # staleness note. Declared once so the two directions below cannot cover different sets.
-_REPORTERS = ["row-matrix", "cost-quality", "corpus", "headroom", "replicates"]
+_REPORTERS = ["row-matrix", "cost-quality", "corpus", "headroom", "replicates", "search"]
 
 
 # EVERY composite taking `run_dirs`, so the guard is asserted on the SURFACE rather than on the
@@ -259,6 +276,7 @@ _ENTRY_POINTS = [
     pytest.param(_headroom_call, id="headroom"),
     pytest.param(_corpus_call, id="corpus"),
     pytest.param(_replicates_call, id="replicates"),
+    pytest.param(_search_call, id="search"),
 ]
 
 
@@ -635,6 +653,18 @@ class TestEveryReportingCompositeNamesAContaminatedTree:
             return replicates_report(
                 run_dirs=run_dirs, incumbent_variant="incumbent", candidate_variant="candidate", suite_id=SUITE
             )
+        if name == "search":
+            sidecar = _sidecar(tmp_path)
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            record_round_scores(
+                sidecar,
+                RoundScores(
+                    round=1,
+                    arm_row_scores=[arm_row_scores_for("head-arm", {"r1": 0.5, "r2": 0.5})],
+                    lineage_head="head-arm",
+                ),
+            )
+            return search_report(run_dirs=run_dirs, variant_id="incumbent", suite_id=SUITE, sidecar=sidecar)
         if name == "headroom":
             return headroom_report(
                 run_dirs=run_dirs,
@@ -946,3 +976,80 @@ class TestLeakReport:
         # Scanning the whole suite flags content a candidate is entitled to be fitted to; scanning
         # test rows reports on a split the proposer cannot see. Neither is a knob worth having.
         assert "split" not in inspect.signature(leak_report).parameters
+
+
+class TestSearchReport:
+    """One arm against the recorded lineage head — a step to revert, never a promotion."""
+
+    def _sidecar_with_head(self, tmp_path: Path, scores: dict[str, float], *, head: str = "head-arm") -> Path:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        record_round_scores(
+            sidecar,
+            RoundScores(
+                round=1,
+                arm_row_scores=[arm_row_scores_for(head, scores)],
+                lineage_head=head,
+            ),
+        )
+        return sidecar
+
+    def test_a_better_explored_arm_reads_accept(self, tmp_path: Path) -> None:
+        sidecar = self._sidecar_with_head(tmp_path, {"r1": 0.5, "r2": 0.5})
+        run_dirs = weighted_arm(tmp_path, "explored", {"r1": [0.9], "r2": [0.9]})
+
+        block = search_report(run_dirs=run_dirs, variant_id="explored", suite_id=SUITE, sidecar=sidecar)
+
+        assert "ACCEPT into the lineage" in block
+
+    def test_a_worse_explored_arm_reads_revert(self, tmp_path: Path) -> None:
+        sidecar = self._sidecar_with_head(tmp_path, {"r1": 0.9, "r2": 0.9})
+        run_dirs = weighted_arm(tmp_path, "explored", {"r1": [0.5], "r2": [0.5]})
+
+        block = search_report(run_dirs=run_dirs, variant_id="explored", suite_id=SUITE, sidecar=sidecar)
+
+        assert "REVERT — the head stands" in block
+
+    def test_no_recorded_lineage_raises_with_the_actionable_sentence(self, tmp_path: Path) -> None:
+        # `SystemExit` in the shipped fence. From a library that kills an interpreter with other work.
+        run_dirs = weighted_arm(tmp_path, "explored", {"r1": [0.9]})
+
+        with pytest.raises(ValueError, match="run a multi-arm Stage A round first"):
+            search_report(run_dirs=run_dirs, variant_id="explored", suite_id=SUITE, sidecar=_sidecar(tmp_path))
+
+    def test_a_wrong_variant_id_names_the_variant_and_the_dirs(self, tmp_path: Path) -> None:
+        # `arms[0].row_scores` empty, reachable from a single mistyped slug. The shipped fence did
+        # not crash: it printed `search_compare`'s "the two rounds share no rows … a wiring fault"
+        # refusal, which points at sampling seeds and snapshot mounts rather than at the typo.
+        sidecar = self._sidecar_with_head(tmp_path, {"r1": 0.5})
+        run_dirs = weighted_arm(tmp_path, "explored", {"r1": [0.9]})
+
+        with pytest.raises(ValueError, match="wrong variant id, a wrong suite id or a wrong run directory") as exc:
+            search_report(run_dirs=run_dirs, variant_id="ghost", suite_id=SUITE, sidecar=sidecar)
+
+        assert "ghost" in str(exc.value)
+        assert str(run_dirs[0]) in str(exc.value)
+
+    def test_a_corpus_row_the_explored_arm_re_loses_is_surfaced(self, tmp_path: Path) -> None:
+        # A search accept advances the LINEAGE, so accepting a regression carries it forward until a
+        # multi-arm round notices. `search_compare` blocks on it; the block has to say so.
+        sidecar = self._sidecar_with_head(tmp_path, {"r1": 0.5, "r2": 0.5})
+        append_regression_rows(sidecar, [RegressionRow(row_id="r1", promoted_in_round=1, reason="promoted on it")])
+        run_dirs = weighted_arm(tmp_path, "explored", {"r1": [0.6], "r2": [1.0]})
+
+        block = search_report(run_dirs=run_dirs, variant_id="explored", suite_id=SUITE, sidecar=sidecar)
+
+        assert "re-loses" in block
+        assert "r1" in block
+        assert "ACCEPT into the lineage" not in block
+
+    def test_an_empty_corpus_is_passed_through_rather_than_branched_on(self, tmp_path: Path) -> None:
+        # Normal early, and `search_compare` takes `corpus=()`. A branch here would be a second way
+        # to say the same thing, and a second place to get it wrong.
+        sidecar = self._sidecar_with_head(tmp_path, {"r1": 0.5})
+        assert load_measurements(sidecar).regression_corpus == []
+        run_dirs = weighted_arm(tmp_path, "explored", {"r1": [0.9]})
+
+        assert "ACCEPT into the lineage" in search_report(
+            run_dirs=run_dirs, variant_id="explored", suite_id=SUITE, sidecar=sidecar
+        )

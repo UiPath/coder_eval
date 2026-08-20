@@ -1181,40 +1181,22 @@ mechanical:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.fronts import arm_row_scores
-from coder_eval.optimize.search import (
-    lineage_head_scores,
-    search_compare,
-)
-from coder_eval.optimize.store import (
-    load_measurements,
-)
-from coder_eval.reports_optimize import (
-    render_search_comparison,
-)
+from coder_eval.optimize.api import search_report
 
-sidecar = Path(".optimize-skill/<skill>/measurements.json")
-measurements = load_measurements(sidecar)
-
-head = lineage_head_scores(measurements)
-if head is None:
-    raise SystemExit("no recorded lineage — run a multi-arm Stage A round first")
-
-explored = arm_row_scores(
-    run_dirs=[Path("<runs>/round<N>-explore")],
-    variant_ids=["<the round's one candidate>"],
-    suite_id="<the suite's task_id>",
-    criterion_index=0,  # omit on the execution track to read each row's weighted_score
-)[0]
-
-print(render_search_comparison(
-    search_compare(head, explored, corpus=measurements.regression_corpus)
+print(search_report(
+    run_dirs=[Path("<runs>/round<N>-explore")], variant_id="<the round's one candidate>",
+    suite_id="<the suite's task_id>", sidecar=Path(".optimize-skill/<skill>/measurements.json"),
 ))
 ```
 
-**Print that block verbatim into the ledger, and act on `.accepted`.** Do not re-derive the
-comparison by hand: `search_compare` applies four guards that are easy to leave out and silent
-when they are, and it is tested where a snippet you adapt is not.
+**Print that block verbatim into the ledger, and act on what it says.** The block states ACCEPT or
+REVERT in words — there is no field to read and no arithmetic to redo. Under it, `search_compare`
+applies four guards that are easy to leave out and silent when they are, and it is tested where a
+snippet you adapt is not.
+
+`criterion_index` is omitted here, which reads each row's `weighted_score`; pass the criterion's
+position on an activation suite. The lineage head comes from `measurements.json`, so a round with no
+recorded head raises rather than comparing against nothing — run a multi-arm Stage A round first.
 
 - **It compares over the rows BOTH arms scored, and nothing else.** The head's vector was recorded
   in an earlier round and the candidate's comes from the run you just paid for, so nothing
