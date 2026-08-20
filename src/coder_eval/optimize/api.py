@@ -27,6 +27,7 @@ was meant to read have been paid for. Every entry point rejects one at the bound
 
 from __future__ import annotations
 
+import math
 import re
 import shlex
 import subprocess
@@ -122,6 +123,23 @@ from coder_eval.reports_optimize import (
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
 from coder_eval.suite_fingerprint import suite_fingerprint
+
+
+def _require_variant_ids(variant_ids: Sequence[str]) -> None:
+    """Reject a bare string and an empty list of arms.
+
+    The same hole `_resolve_family` closes on the Stage B family, on the argument every Stage A and
+    ledger composite takes instead: a ``str`` IS a ``Sequence[str]``, so ``variant_ids="incumbent"``
+    renders one arm per LETTER — measured, a matrix with ten single-character columns. An empty list
+    renders "_No arms to compare._", which is honest but is a caller error rather than a reading.
+    """
+    if isinstance(variant_ids, str):
+        raise TypeError(
+            f"variant_ids must be a sequence of variant ids, not a string ({variant_ids!r}) — a "
+            + "string would be read as one arm per character"
+        )
+    if not variant_ids:
+        raise ValueError("variant_ids is empty — no arm was named, so there is nothing to compare")
 
 
 def _require_run_dirs(run_dirs: Sequence[Path], argument: str = "run_dirs") -> None:
@@ -281,6 +299,7 @@ def row_matrix_report(
     because that is what Stage A costs.
     """
     _require_run_dirs(run_dirs)
+    _require_variant_ids(variant_ids)
     stale, _unknown = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
     arms = arm_row_scores(
         run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
@@ -310,6 +329,7 @@ def cost_quality_report(
     ``criterion_index`` means what it means on :func:`row_matrix_report`.
     """
     _require_run_dirs(run_dirs)
+    _require_variant_ids(variant_ids)
     stale, _unknown = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
     points = cost_quality_points(
         run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
@@ -368,10 +388,10 @@ def headroom_report(
     # real failure is an arm that scored NOTHING, which comes back as a present arm with an empty
     # vector; that is what the fence exited the interpreter over, and what this raises on.
     if not arms[0].row_scores:
-        raise ValueError(
-            f"{variant_id!r} scored no rows of {suite_id!r} under {', '.join(str(d) for d in run_dirs)} — "
-            + "a wrong suite_id, variant id or run dir, not a result. There is no headroom to size."
-        )
+        # `wrong_path_reason` rather than a paraphrase: rank 0 owns this sentence and it carries the
+        # `task_json_pattern` glob, which is the actionable half. Two copies of it had already
+        # diverged once, which is why that function exists.
+        raise ValueError(wrong_path_reason(variant_id, suite_id, run_dirs))
     rows = load_arm_rows(run_dirs, variant_id, suite_id)
     attribution = rule_row_map(rows, grader_index)
     floor = measure_execution_noise_floor(
@@ -436,6 +456,13 @@ def corpus_report(
     ``TypeError``, which is the intended answer to "which metric?" being left unanswered.
     """
     _require_run_dirs(run_dirs)
+    # BEFORE the empty-corpus early return: a shape error is a caller error whether or not there is
+    # a corpus to check against, and the early return would otherwise swallow it on round 1.
+    _require_variant_ids(variant_ids)
+    if not math.isfinite(threshold):
+        # `score < threshold` is uniformly False against a NaN, so every arm would read "clears the
+        # corpus" — a silent all-clear on the one check whose job is to catch what an aggregate hides.
+        raise ValueError(f"threshold must be a finite number, got {threshold!r}")
     corpus = load_measurements(sidecar).regression_corpus
     if not corpus:
         # No sweep and no load: this path computes no number from rows, so there is nothing to doubt
@@ -706,10 +733,11 @@ def activation_gate_report(
     """
     _require_run_dirs(gate_dirs, "gate_dirs")
     family = _resolve_family(candidate_variants, incumbent_variant)
-    # NO `_staleness_note` here, alone among the reporting composites, and the reason is the return
-    # type: `activation_gate` runs the sweep in its own preflight and REFUSES on a contaminated tree,
-    # so the doubt arrives as the verdict's own `NOT A RESULT` headline rather than as a note beside a
-    # number. Adding the sweep here would read every run.json twice to say the same thing later.
+    # NO `_staleness_note` here, and the reason is the return type rather than an oversight:
+    # `activation_gate` runs the sweep in its own preflight and REFUSES on a contaminated tree, so the
+    # doubt arrives as the verdict's own `NOT A RESULT` headline — strictly stronger than a note beside
+    # a number. Both gate composites, both floors and `seed_stability_report` omit it for that same
+    # reason; every composite that RENDERS a number over rows it read carries it.
     verdicts = [
         activation_gate(
             incumbent_run_dirs=gate_dirs,
@@ -784,10 +812,12 @@ def seed_stability_report(
 def _require_gates(gates: Mapping[str, Path]) -> None:
     """Reject a mapping that is not one, and values that are not ``Path``, before any read.
 
-    The execution track's family is a MAPPING, so two of the three shape mistakes
-    :func:`_require_run_dirs` catches are unrepresentable here — a duplicate key cannot exist and
-    there is no one-shot iterable to exhaust. What remains is the container itself (a ``str`` or a
-    list has no ``.items()``) and the values (a ``str`` where a ``Path`` belongs). Neither is silent
+    The execution track's family is a MAPPING, so one of the three shape mistakes
+    :func:`_require_run_dirs` catches is unrepresentable here: a duplicate key cannot exist, and
+    there is no one-shot iterable to exhaust. The EMPTY check lives here rather than at the two call
+    sites, where it had been spelled twice with two different messages. What remains is the container
+    itself (a ``str`` or a list has no ``.items()``) and the values (a ``str`` where a ``Path``
+    belongs). Neither is silent
     today, but both surface as an ``AttributeError`` from whichever line reaches them first, naming
     neither the argument nor the fix — and the module's own contract says every entry point rejects a
     bad path AT the boundary.
@@ -797,6 +827,8 @@ def _require_gates(gates: Mapping[str, Path]) -> None:
             f"gates must be a mapping of candidate id -> run directory, not {type(gates).__name__} — "
             + "this track gates one candidate per two-variant run dir, so the mapping IS the family"
         )
+    if not gates:
+        raise ValueError("gates is empty — no candidate was named, so there is no family to gate")
     wrong = sorted(f"{candidate}={value!r}" for candidate, value in gates.items() if not isinstance(value, Path))
     if wrong:
         raise TypeError("gates values must be pathlib.Path run directories: " + "; ".join(wrong))
@@ -856,8 +888,6 @@ def execution_gate_report(
     # `_refuse_stale_tree` and REFUSES, so a contaminated tree arrives as the verdict's own
     # `NOT A RESULT` headline rather than as a note beside a number.
     _require_gates(gates)
-    if not gates:
-        raise ValueError("gates is empty — an empty block reads as 'nothing promoted'")
     _reject_incumbent_as_candidate(list(gates), incumbent_variant, argument="gates")
     _require_gate_dirs_exist(gates)
     verdicts = [
@@ -987,6 +1017,7 @@ def confirm_report_activation(
             for candidate in family
         ]
     )
+    shrunk = _family_shrink_note(decided, len(family))
     confirm = confirm_gate(
         train_verdict=_select_stage_b_winner(decided, candidate_variant),
         incumbent_run_dirs=confirm_dirs,
@@ -999,6 +1030,7 @@ def confirm_report_activation(
     )
     return "\n\n".join(
         [
+            *shrunk,
             render_confirm_family(family_size=len(family)),
             render_confirm_markdown(confirm),
             render_markdown(_track_verdict(confirm.test_verdict, ActivationGateVerdict, "activation")),
@@ -1024,15 +1056,15 @@ def confirm_report_execution(
     """
     confirm_one_candidate(candidate_variant)
     _require_gates(gates)
-    if not gates:
-        raise ValueError("gates is empty — Stage C recomputes the Stage B family, so there has to be one")
     _reject_incumbent_as_candidate(list(gates), incumbent_variant, argument="gates")
-    _require_gate_dirs_exist(gates)
+    # Shape BEFORE any filesystem access, which is what the module's contract says: a bad
+    # `confirm_run_dir` must not be discovered after the gate dirs have already been stat'd.
     if not isinstance(confirm_run_dir, Path):
         raise TypeError(
             f"confirm_run_dir must be a pathlib.Path, not {type(confirm_run_dir).__name__} — it is "
             + "joined with `/` to reach the confirm run's rows"
         )
+    _require_gate_dirs_exist(gates)
     decided = holm_promote_execution(
         [
             execution_gate(
@@ -1115,6 +1147,9 @@ def _scored_row_tasks(suite_file: Path, arms: Sequence[ArmRowScores]) -> tuple[T
 # absolute path that differs per machine.
 _FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
+# Hashing one script and its expectation files is milliseconds; this is a hang guard, not a budget.
+_FINGERPRINT_TIMEOUT_SECONDS = 60
+
 
 def _grader_fingerprint(suite_file: Path, task: TaskDefinition) -> str:
     """The execution grader's own fingerprint, resolved from the SUITE rather than a typed path.
@@ -1160,6 +1195,10 @@ def _grader_fingerprint(suite_file: Path, task: TaskDefinition) -> str:
         # differently on a Windows checkout and read as "the grader changed".
         encoding="utf-8",
         check=True,
+        # A timeout, as every other external-tool `subprocess.run` in `src/` has. The subject is a
+        # user-authored template script, and this runs before any measurement — so a hang blocks the
+        # skill session indefinitely and salvages nothing.
+        timeout=_FINGERPRINT_TIMEOUT_SECONDS,
     )
     digest = completed.stdout.strip()
     if not _FINGERPRINT_PATTERN.match(digest):
@@ -1205,12 +1244,23 @@ def record_round_activation(
     """
     _require_run_dirs(run_dirs)
     _require_run_dirs(baseline_dirs, "baseline_dirs")
+    # CE053 cannot see this — these reach the tree through `arm_row_scores`, not `load_arm_rows` — and
+    # it is the WORST place for the fault: a leftover row lands in the persisted vectors, in both
+    # fronts, in the lineage head and in the suite digest, so the NEXT round reports "The SUITE
+    # CHANGED" for a suite nobody touched. A reporting composite at least hands a reader a block to
+    # doubt; a written round is doubted by nobody.
+    _require_variant_ids(variant_ids)
+    stale, _unknown = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
     # ONE load, and `previous` comes off THIS snapshot — before the write. See `_previous_round`.
     measurements = load_measurements(sidecar)
     previous = _previous_round(measurements, round_number)
     arms = arm_row_scores(
         run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
     )
+    # BEFORE the bootstrap, matching the twin: a mistyped variant id is decidable from the arms
+    # alone, and paying for a floor and then discarding it is the order this module rejects.
+    _require_scored_arms(arms, variant_ids, suite_id)
+    task, rows = _scored_row_tasks(suite_file, arms)
     floor = measure_noise_floor(
         run_dirs=baseline_dirs,
         variant_id=baseline_variant_id,
@@ -1219,8 +1269,6 @@ def record_round_activation(
         model=resolve_arm_model(baseline_dirs, baseline_variant_id, suite_id) or UNRESOLVED_MODEL,
         measurements=measurements,
     )
-    _require_scored_arms(arms, variant_ids, suite_id)
-    task, rows = _scored_row_tasks(suite_file, arms)
     this_round = RoundScores(
         round=round_number,
         arm_row_scores=arms,
@@ -1233,11 +1281,16 @@ def record_round_activation(
     if floor is not None:
         record_noise_floor(sidecar, floor)
     record_round_scores(sidecar, this_round)
-    return render_comparability(
-        grader=grader_changed(previous, this_round),
-        suite=suite_changed(previous, this_round),
-        has_grader=False,
-        has_previous=previous is not None,
+    return "\n\n".join(
+        [
+            *_staleness_note(stale),
+            render_comparability(
+                grader=grader_changed(previous, this_round),
+                suite=suite_changed(previous, this_round),
+                has_grader=False,
+                has_previous=previous is not None,
+            ),
+        ]
     )
 
 
@@ -1262,6 +1315,10 @@ def record_round_execution(
     """
     _require_run_dirs(run_dirs)
     _require_run_dirs(control_dirs, "control_dirs")
+    # See the activation twin: a written round carries the contamination forward into the next
+    # round's comparability, and nothing downstream can tell.
+    _require_variant_ids(variant_ids)
+    stale, _unknown = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
     measurements = load_measurements(sidecar)
     previous = _previous_round(measurements, round_number)
     arms = arm_row_scores(
@@ -1292,11 +1349,16 @@ def record_round_execution(
     if floor is not None:
         record_noise_floor(sidecar, floor)
     record_round_scores(sidecar, this_round)
-    return render_comparability(
-        grader=grader_changed(previous, this_round),
-        suite=suite_changed(previous, this_round),
-        has_grader=True,
-        has_previous=previous is not None,
+    return "\n\n".join(
+        [
+            *_staleness_note(stale),
+            render_comparability(
+                grader=grader_changed(previous, this_round),
+                suite=suite_changed(previous, this_round),
+                has_grader=True,
+                has_previous=previous is not None,
+            ),
+        ]
     )
 
 

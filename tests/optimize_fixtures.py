@@ -78,11 +78,11 @@ def assert_matches_render_pin(block: str, name: str, *, tmp_path: Path | None = 
     pinned whole rather than sampled by substring — the pin still covers every other character,
     including the headline and the order of the lines around it.
 
-    Here rather than module-private in one test file because two now need it: the renderers' own
-    suite and the composites', which pin the SAME blocks reached through a different caller. Adding a
-    pin file is free; EDITING one is an estimator-protocol event (``tests/lint/estimator_ledger.py``
-    matches ``--diff-filter=M`` over this directory), so a second copy of this helper would be a
-    second place a pin could be quietly regenerated from.
+    Here rather than module-private in one test file because two need it: the renderers' own suite,
+    and the composites' suite where ``row_matrix_report``'s block is pinned through the composite
+    rather than through the renderer. Adding a pin file is free; EDITING one is an estimator-protocol
+    event (``tests/lint/estimator_ledger.py`` matches ``--diff-filter=M`` over this directory), so a
+    second copy of this helper would be a second place a pin could be quietly regenerated from.
     """
     if tmp_path is not None:
         block = block.replace(str(tmp_path), "<TMP>")

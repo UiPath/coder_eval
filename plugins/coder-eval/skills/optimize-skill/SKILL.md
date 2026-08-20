@@ -544,7 +544,8 @@ from coder_eval.optimize.api import activation_floor_report
 
 print(activation_floor_report(
     run_dirs=[Path("<runs>/baseline-1"), Path("<runs>/baseline-2")], suite_id="<the suite's task_id>",
-    criterion_index=0, sidecar=Path(".optimize-skill/<skill>/measurements.json"),
+    criterion_index=0,  # ACTIVATION track. On the execution track: criterion_index=None
+    sidecar=Path(".optimize-skill/<skill>/measurements.json"),
 ))
 ```
 
@@ -748,7 +749,7 @@ from pathlib import Path
 from coder_eval.optimize.api import headroom_report
 
 print(headroom_report(
-    run_dirs=[Path("<runs>/baseline-1")], variant_id="incumbent", suite_id="<the suite's task_id>",
+    run_dirs=[Path("<runs>/baseline-1")], variant_id="default", suite_id="<the suite's task_id>",
     grader_index=2, sidecar=Path(".optimize-skill/<skill>/measurements.json"),
 ))
 ```
@@ -760,6 +761,11 @@ its name — so open the suite and count.
 so the block renders the ceilings with no verdict column — a ranking of which rule has the most
 room, without the one thing that says whether that room clears the noise. **Re-print this block once
 the control arm (Step 8) has given the suite a second replicate**, and the verdicts appear.
+
+**`variant_id` differs between the two prints, and getting it wrong is a hard error rather than a
+wrong number.** `baseline-1` comes from a plain `coder-eval run` with no `-e`, so its arm is
+`default`; the control run comes from an experiment, so its arm is `incumbent`. Re-printing over the
+control means `run_dirs=[Path("<runs>/control")], variant_id="incumbent"`.
 
 **If the block says attribution was unavailable**, no grader emitted a `RULES` line at
 `grader_index` — an older grader, or an index pointing at a different criterion. It falls back to the
@@ -1066,8 +1072,9 @@ arm set between stages is to **author another file**. Write three per round, bes
 snapshots:
 
 - `round<N>-triage.yaml` — incumbent + every candidate (Stage A).
-- `round<N>-gate.yaml` — incumbent + the survivors; on the execution track that means
-  **exactly two** variants (Stage B).
+- `round<N>-gate.yaml` — incumbent + the survivors (Stage B). **On the execution track this is one
+  file PER CANDIDATE**, `round<N>-gate-<slug>.yaml`, each with **exactly two** variants: the paired
+  statistic fires only for two, so the Holm family lives across those runs rather than inside one.
 - `round<N>-confirm.yaml` — the same **exactly two** variants (Stage C).
 
 A fourth appears only if you halve Stage A: `round<N>-triage-survivors.yaml`, the arms that
@@ -1146,7 +1153,7 @@ file's cost table; the experiment files are the ones Step 9 named, one per stage
 | Search (rounds 2+) | `round<N>-explore.yaml` | one invocation, **one variant**, `--split train` |
 | A — triage | `round<N>-triage.yaml` | **two invocations** when halving (below), else one, all candidates + incumbent, `--split train` |
 | B — gate, activation track | `round<N>-gate.yaml` | **three separate invocations**, `--split train`, distinct `--run-dir` each |
-| B — gate, execution track | `round<N>-gate.yaml` | one invocation, exactly two variants, `--split train --repeats 3` |
+| B — gate, execution track | `round<N>-gate-<slug>.yaml`, **one per candidate** | **one invocation per candidate**, exactly two variants each, `--split train --repeats 3`, distinct `--run-dir` each |
 | C — confirm | `round<N>-confirm.yaml` | exactly two variants, `--split test --repeats 3` |
 
 **The first row is not one of the three stages** — it is listed here because it is a thing you run
@@ -1368,9 +1375,14 @@ The regression corpus is the list of rows an earlier promotion was built on (Ste
 Read it here, against the same arms you just printed — **a candidate that re-loses one of those rows
 is a regression however good its aggregate looks**, and an aggregate is exactly what cannot show it.
 Pass the same `run_dirs`, `variant_ids` and `criterion_index` the matrix used — this block re-reads
-the arms rather than inheriting them, so it stands on its own whichever track you are on. **On the
-execution track pass `criterion_index=None` explicitly**; unlike the blocks above it has no default,
-because on this reading the metric decides what "lost" MEANS:
+the arms rather than inheriting them, so it stands on its own whichever track you are on.
+
+**`criterion_index` has no default here, and the execution value is `None`.** On this reading the
+metric decides what "lost" MEANS, and the wrong one fails OPEN rather than loudly: on the bundled
+outcome suite position 0 is the engagement criterion, which this skill requires to be 1.0 on every
+row — so `criterion_index=0` on the execution track gives a corpus check no row can fail, a silent
+all-clear on the one reading whose job is to catch what an aggregate hides. The fence below shows the
+ACTIVATION value:
 
 ```python
 from pathlib import Path
@@ -1617,6 +1629,11 @@ print(execution_gate_report(
 ))
 ```
 
+**Budget this as one invocation PER CANDIDATE.** The paired statistic fires only for exactly two
+variants, so a round gating three candidates is three two-variant runs — three
+`round<N>-gate-<slug>.yaml` files and three `--run-dir`s, not one pass with `S = 3`. That is what the
+mapping below assembles, and `reference/optimize-method.md` states the same arithmetic.
+
 **Gate every survivor first, then correct once** — the identical failure mode as on the activation
 track, and here the MAPPING is what makes the shape unavailable: every verdict is built before
 `holm_promote_execution` sees any of it, and the correction runs once. A round that gates a single
@@ -1751,8 +1768,25 @@ print(confirm_report_execution(
 ```
 
 **On the activation track, `confirm_report_activation` is the twin**, taking that track's run-dir
-lists instead of a mapping — `gate_dirs` plus `candidate_variants` for the Stage B family,
-`confirm_dirs` for the confirm run, and `criterion_index`.
+lists instead of a mapping. It needs SIX arguments and two of them are easy to confuse:
+
+```python
+from pathlib import Path
+
+from coder_eval.optimize.api import confirm_report_activation
+
+print(confirm_report_activation(
+    gate_dirs=[Path(f"<runs>/round1-gate-{i}") for i in (1, 2, 3)], criterion_index=0,
+    candidate_variants=["cand-a-widen-vocabulary", "cand-b-name-the-symptom"],  # the Stage B FAMILY
+    candidate_variant="cand-a-widen-vocabulary",  # the ONE arm being confirmed
+    incumbent_variant="incumbent", confirm_dirs=[Path("<runs>/round1-confirm")],
+    suite_id="<the suite's task_id>",
+))
+```
+
+`candidate_variants` is the family to recompute; `candidate_variant` is the winner to confirm. Passing
+a list to the singular one raises before anything is gated, which is the guard rather than an
+inconvenience.
 
 **ONE candidate, and the guard is not a formality.** Confirming a shortlist spends the held-out split
 on SELECTION, which is exactly what the "never re-rolled" rule exists to prevent — passing a list
@@ -1857,7 +1891,10 @@ rather than inheriting them.
 
 **On the execution track, call `record_round_execution` instead**, with `control_dirs` and
 `control_variant_id` in place of `baseline_dirs`, and `criterion_index=None` to read each row's
-`weighted_score`. The second call below is **on promotion only**: `(row_id, reason)` pairs, and the
+`weighted_score`. **`control_variant_id` is `"incumbent"`, not `"control"`** — it names the ARM inside
+the control run, which is the same arm Step 8's preflight measured. The parameter name says which run;
+the value says which arm. Get it wrong and `NoiseFloor` is keyed on a variant that never matches Step
+8's lookup, so every later round recomputes and the two numbers describe different arms. The second call below is **on promotion only**: `(row_id, reason)` pairs, and the
 round number supplies `promoted_in_round`, so nothing here imports a model.
 
 **Two `baseline_dirs` are what a floor needs** — the null split halves the invocations, so one

@@ -560,7 +560,7 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         # An EXACT count, measured against the real file. A floor was right while there were fifteen
         # multi-line fences to disagree about; after the migration each fence is one call, so a floor
         # of 5 is unfailable in practice and would not notice ten of them going quiet.
-        assert len(failures) == 13, failures
+        assert len(failures) == 14, failures
         assert all("suite_i" in f for f in failures), failures
 
     def test_the_snippet_binder_catches_a_bogus_keyword(self):
@@ -633,7 +633,7 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         assert mutated != raw, "the anchor moved — re-derive it from the skill's snippets"
         failures = _snippet_binding_failures(mutated)
         # Exact, for the reason the sibling above gives: one import line per fence now.
-        assert len(failures) == 16, failures
+        assert len(failures) == 17, failures
         assert all("does not import" in f for f in failures), failures
 
     def test_a_real_non_callable_import_stays_silent(self):

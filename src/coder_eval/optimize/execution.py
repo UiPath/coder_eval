@@ -99,7 +99,7 @@ def resolve_arm_model(run_dirs: Sequence[Path], variant_id: str, suite_id: str) 
 
     Placed beside :func:`resolve_model` rather than on rank 0, where a shared reader would otherwise
     live: that is where the name already is, and CE059 makes a name siblings share public. See the
-    plan's Open Questions for why moving both to ``load`` is a separate change.
+    entry in ``.claude/harness-candidates.md`` for why moving both to ``load`` is a separate change.
     """
     # CE053: **the reconcile belongs to the caller, and every caller has one.** A stale tree CAN
     # change what this returns — a re-used `--run-dir` whose earlier invocation ran a different model

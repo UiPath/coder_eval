@@ -14,8 +14,10 @@ than argued: **two fences computed a reported number from a run tree they never 
 ceilings table and the per-row replicates. CE053 exists to force exactly that reconcile and could not
 see them, because the rule reads `.py` files. `grep -c reconcile SKILL.md` was `0`.
 
-`optimize/api.py` is rank 4 of the family: 18 composites over those fifteen fences, each returning the
-markdown block the skill prints. Fence lines went **427 → 126**.
+`optimize/api.py` is rank 4 of the family: 18 composites over those fences, each returning the markdown
+block the skill prints. Fence lines went **427 → 138**, and the fence count went 15 → 16 — Stage C's
+activation twin gained one, because a composite shown only in prose is one a reader has to reconstruct
+from a sentence.
 
 ## Why composites and not a facade
 

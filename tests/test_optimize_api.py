@@ -10,6 +10,7 @@ A `NoiseFloor` is deliberately never compared by `model_dump()`: `computed_at` i
 """
 
 import inspect
+import math
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -701,7 +702,7 @@ class TestHeadroomReport:
 
         # `pytest.raises(ValueError)` IS the "not SystemExit" assertion — `SystemExit` derives from
         # `BaseException`, so it would propagate through and fail the test rather than satisfy it.
-        with pytest.raises(ValueError, match="scored no rows") as excinfo:
+        with pytest.raises(ValueError, match="nothing matched") as excinfo:
             headroom_report(
                 run_dirs=run_dirs,
                 variant_id="ghost",
@@ -710,7 +711,9 @@ class TestHeadroomReport:
                 sidecar=_sidecar(tmp_path),
             )
 
-        assert "wrong suite_id, variant id or run dir" in str(excinfo.value)
+        # Rank 0's wording, which carries the glob a reader acts on — not a paraphrase of it.
+        assert "wrong variant id, a wrong suite id or a wrong run directory" in str(excinfo.value)
+        assert "task.json" in str(excinfo.value), "the actionable half is the path pattern"
 
     def test_a_single_replicate_round_renders_with_no_floor_rather_than_a_zero_one(self, tmp_path: Path) -> None:
         # Round 1 by construction: one replicate cannot split against itself. A substituted 0.0
@@ -2728,3 +2731,162 @@ class TestRecordRoundExecution:
         block = self._call(tmp_path, sidecar, 2, suite=_outcome_suite(tmp_path / "moved", grader="moved"))
 
         assert "The GRADER CHANGED" in block
+
+
+_VARIANT_ID_CALLS = [
+    pytest.param(
+        lambda vids: row_matrix_report(run_dirs=[Path(_MISSING)], variant_ids=vids, suite_id=SUITE),
+        id="row-matrix",
+    ),
+    pytest.param(
+        lambda vids: cost_quality_report(run_dirs=[Path(_MISSING)], variant_ids=vids, suite_id=SUITE),
+        id="cost-quality",
+    ),
+    pytest.param(
+        lambda vids: corpus_report(
+            run_dirs=[Path(_MISSING)],
+            variant_ids=vids,
+            suite_id=SUITE,
+            criterion_index=None,
+            sidecar=Path(_MISSING) / "measurements.json",
+        ),
+        id="corpus",
+    ),
+    pytest.param(
+        lambda vids: record_round_activation(
+            sidecar=Path(_MISSING) / "measurements.json",
+            round_number=1,
+            run_dirs=[Path(_MISSING)],
+            variant_ids=vids,
+            suite_id=SUITE,
+            criterion_index=0,
+            baseline_dirs=[Path(_MISSING)],
+            suite_file=Path(_MISSING) / "suite.yaml",
+        ),
+        id="ledger-activation",
+    ),
+    pytest.param(
+        lambda vids: record_round_execution(
+            sidecar=Path(_MISSING) / "measurements.json",
+            round_number=1,
+            run_dirs=[Path(_MISSING)],
+            variant_ids=vids,
+            suite_id=EXEC_SUITE,
+            control_dirs=[Path(_MISSING)],
+            control_variant_id="incumbent",
+            suite_file=Path(_MISSING) / "suite.yaml",
+        ),
+        id="ledger-execution",
+    ),
+]
+
+
+@pytest.mark.parametrize("call", _VARIANT_ID_CALLS)
+class TestVariantIdsAreRejectedAtTheBoundary:
+    """The same hole `_resolve_family` closes on the Stage B family, on the other arm argument.
+
+    Measured before the guard: `variant_ids="incumbent"` rendered a row matrix with ten
+    single-character columns — a confident table about ten arms that do not exist.
+    """
+
+    def test_a_bare_string_is_not_one_arm_per_letter(self, call) -> None:
+        with pytest.raises(TypeError, match="variant_ids must be a sequence of variant ids"):
+            call("incumbent")
+
+    def test_an_empty_list_is_a_caller_error(self, call) -> None:
+        with pytest.raises(ValueError, match="variant_ids is empty"):
+            call([])
+
+
+def test_a_non_finite_corpus_threshold_is_rejected(tmp_path: Path) -> None:
+    # `score < nan` is uniformly False, so every arm would read "clears the corpus" — a silent
+    # all-clear on the one reading whose job is to catch what an aggregate hides (rubric item 15).
+    with pytest.raises(ValueError, match="threshold must be a finite number"):
+        corpus_report(
+            run_dirs=[tmp_path],
+            variant_ids=["incumbent"],
+            suite_id=SUITE,
+            criterion_index=None,
+            sidecar=_sidecar(tmp_path),
+            threshold=math.nan,
+        )
+
+
+class TestTheShrinkNoteIsOnAllFourStageBAndCSurfaces:
+    """The claim three docstrings make, asserted over all four rather than over the two that had it.
+
+    The activation track had NO shrink test on either surface, and that is exactly why
+    `confirm_report_activation` shipped without the note while `render_family_shrunk`'s docstring,
+    `_family_shrink_note`'s docstring and the decision doc all said "all four".
+    """
+
+    def _gate_arms(self, tmp_path: Path) -> list[Path]:
+        incumbent = {f"r{i}": [("yes", "no")] for i in range(6)}
+        winner = {f"r{i}": [("yes", "yes")] for i in range(6)}
+        run_dirs: list[Path] = []
+        for i in range(3):
+            run_dir = tmp_path / f"gate-{i}"
+            for row_id, labels in incumbent.items():
+                write_row(run_dir, "incumbent", row_id, eval_result(row_id, labels))
+            for row_id, labels in winner.items():
+                write_row(run_dir, "cand-a", row_id, eval_result(row_id, labels))
+            run_dirs.append(run_dir)
+        return run_dirs
+
+    def _confirm_arms(self, tmp_path: Path) -> list[Path]:
+        incumbent = {f"r{i}": [("yes", "no")] for i in range(6)}
+        winner = {f"r{i}": [("yes", "yes")] for i in range(6)}
+        run_dirs: list[Path] = []
+        for i in range(3):
+            run_dir = tmp_path / f"confirm-{i}"
+            for row_id, labels in incumbent.items():
+                write_row(run_dir, "incumbent", row_id, eval_result(row_id, labels))
+            for row_id, labels in winner.items():
+                write_row(run_dir, "cand-a", row_id, eval_result(row_id, labels))
+            set_split(run_dir, "test")
+            run_dirs.append(run_dir)
+        return run_dirs
+
+    # `ghost` scored nothing, so its gate yields no p-value and it leaves the family — the exact
+    # fail-open the note exists for, reached without any contamination.
+    FAMILY: ClassVar[list[str]] = ["cand-a", "ghost"]
+
+    def test_stage_b_activation_names_the_shrink(self, tmp_path: Path) -> None:
+        block = activation_gate_report(
+            gate_dirs=self._gate_arms(tmp_path),
+            incumbent_variant="incumbent",
+            candidate_variants=self.FAMILY,
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+        assert "The Holm correction saw 1 of 2 predeclared candidate(s)" in block
+
+    def test_stage_c_activation_names_the_shrink_beside_the_family_size_it_printed(self, tmp_path: Path) -> None:
+        """The worse of the two, and the one that shipped without it.
+
+        This surface PRINTS the family size it recomputed against, so a silent shrink makes that line
+        a false claim about the threshold the winner cleared — two contradictory numbers, no warning.
+        """
+        block = confirm_report_activation(
+            gate_dirs=self._gate_arms(tmp_path),
+            confirm_dirs=self._confirm_arms(tmp_path),
+            incumbent_variant="incumbent",
+            candidate_variants=self.FAMILY,
+            candidate_variant="cand-a",
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+
+        assert "The Holm correction saw 1 of 2 predeclared candidate(s)" in block
+        assert "recomputed over a family of 2" in block, "and both numbers are visible together"
+
+    def test_a_whole_activation_family_carries_no_note(self, tmp_path: Path) -> None:
+        # It must not fire on every block, or it stops being read.
+        block = activation_gate_report(
+            gate_dirs=self._gate_arms(tmp_path),
+            incumbent_variant="incumbent",
+            candidate_variants=["cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+        assert "predeclared candidate(s)" not in block

@@ -1245,6 +1245,21 @@ CE067** (CE049, CE055, CE056 and CE061-CE065 remain reserved below; CE044 is ret
       sentence, then Stage C's family-size line. An AST check for a string literal containing `**`,
       `###`, `| ` or a leading `_` in that one module is the cheap shape; the hard part is exempting
       docstrings, which is why it is not a five-minute job. — caught in review, twice.
+- [ ] **A ledger writer that PERSISTS numbers derived from a run tree needs the CE053 discipline, and
+      CE053 cannot see it.** The rule keys on `load_suite_rows`/`load_arm_rows`; `record_round_*` reach
+      the tree through `arm_row_scores`, so they were outside it. A leftover row then lands in the
+      persisted vectors, both fronts, the lineage head AND the suite digest — after which a later
+      CLEAN round reports "The SUITE CHANGED" for a suite nobody touched. Fixed by hand in both
+      writers; what has no guard is the CLASS. Widening CE053's `_TREE_READERS` to include
+      `arm_row_scores` would cover it, at the cost of firing on every current caller (each of which
+      does reconcile, so each would need routing or a suppression) — which is why it is a candidate
+      rather than a one-line change. — caught in the final cross-phase review.
+
+- [ ] **`_REPORTERS` in `tests/test_optimize_api.py` is still hand-maintained** with a hardcoded
+      `if name == ...` dispatch ladder, where its sibling `_ENTRY_POINTS` now derives its completeness
+      from the module. The derivable property is "every composite that calls `_staleness_note` appears
+      here", which needs an AST walk of `api.py` rather than `inspect`. — caught in the final review.
+
 - [ ] **No `SKILL.md` python fence may reference a name no fence binds.** The snippet binder checks
       that imports RESOLVE and that keywords BIND; neither sees a free variable. That is how Step 11's
       fence came to use an `arms` binding Stage A had stopped providing — a `NameError` after the round
