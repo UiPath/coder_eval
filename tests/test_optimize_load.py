@@ -4,18 +4,16 @@ Loading, pairing, run-tree provenance, reconciliation, the row primitives and ru
 It decides nothing, so nothing here asserts a promotion.
 """
 
-import json
 import logging
 import shutil
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.models import ActivationGateVerdict, CriterionResult, EvaluationResult, FinalStatus, RoundScores
+from coder_eval.models import ActivationGateVerdict, EvaluationResult, RoundScores
 from coder_eval.optimize.activation import activation_gate, holm_promote, measure_noise_floor, noise_floor_mde
 from coder_eval.optimize.fronts import arm_row_scores, cost_quality_points, headroom_ceiling
 from coder_eval.optimize.gate import cost_latency_guardrails
@@ -50,6 +48,7 @@ from tests.optimize_fixtures import (
     eval_result,
     exec_gate,
     exec_run_dir,
+    grader_result,
     set_split,
     shared_dirs,
     write_arm,
@@ -522,38 +521,12 @@ class TestGraderFingerprint:
         assert grader_changed(None, RoundScores(round=1, grader_fingerprint="abc")) is None
 
 
-def _grader_result(row_id: str, score: float, rules: dict[str, str] | None, *, line: str | None = None):
-    """One replicate whose grader criterion carries a `RULES` line, wrapped as `run_command` does.
-
-    The details block mirrors `criteria/run_command.py::_build_exec_details`: the grader's stdout
-    is embedded and a `Stderr:` section follows it, so the `RULES` line is NOT the details' last
-    line. A reader that took `splitlines()[-1]` would find nothing on a real run directory.
-    """
-    if line is None:
-        line = "RULES " + json.dumps(rules or {}, sort_keys=True, separators=(",", ":"))
-    stdout = f"{score:.4f}\n1/1 applicable checks passed\n{line}" if line else f"{score:.4f}\n"
-    details = f"Score: {score:.3f}\nCommand: verify.py\nExit code: 0 (expected: 0)\nStdout:\n{stdout}\nStderr: (empty)"
-    return EvaluationResult(
-        task_id=f"{SUITE}/{row_id}",
-        task_description="row",
-        agent_type="claude-code",
-        started_at=datetime(2026, 8, 17, 12, 0, 0),
-        final_status=FinalStatus.SUCCESS,
-        iteration_count=1,
-        success_criteria_results=[
-            CriterionResult(
-                criterion_type="run_command", description=f"grader for {row_id}", score=score, details=details
-            )
-        ],
-    )
-
-
 class TestRuleRowMap:
     def test_rule_row_map_inverts_the_rules_line(self) -> None:
         rows = {
-            "r1": [_grader_result("r1", 0.5, {"R1": "fail", "R2": "pass"})],
-            "r2": [_grader_result("r2", 1.0, {"R1": "pass", "R2": "pass"})],
-            "r3": [_grader_result("r3", 0.0, {"R2": "fail", "R3": "na"})],
+            "r1": [grader_result("r1", 0.5, {"R1": "fail", "R2": "pass"})],
+            "r2": [grader_result("r2", 1.0, {"R1": "pass", "R2": "pass"})],
+            "r3": [grader_result("r3", 0.0, {"R2": "fail", "R3": "na"})],
         }
         assert rule_row_map(rows, 0).failed == {"R1": {"r1"}, "R2": {"r3"}, "R3": set()}
 
@@ -562,9 +535,9 @@ class TestRuleRowMap:
         # the MOST rows as failing, which is what makes the ceiling an upper bound.
         rows = {
             "r1": [
-                _grader_result("r1", 1.0, {"R1": "pass"}),
-                _grader_result("r1", 0.5, {"R1": "fail"}),
-                _grader_result("r1", 1.0, {"R1": "pass"}),
+                grader_result("r1", 1.0, {"R1": "pass"}),
+                grader_result("r1", 0.5, {"R1": "fail"}),
+                grader_result("r1", 1.0, {"R1": "pass"}),
             ]
         }
         assert rule_row_map(rows, 0).failed == {"R1": {"r1"}}
@@ -577,7 +550,7 @@ class TestRuleRowMap:
         the map and R5 was not in it. It also removes the `rows=None` vs `rows=set()` trap: the
         key is always present, so a caller cannot reach for `.get()` and get the whole suite.
         """
-        rows = {"r1": [_grader_result("r1", 1.0, {"R5": "pass", "R6": "na"})]}
+        rows = {"r1": [grader_result("r1", 1.0, {"R5": "pass", "R6": "na"})]}
         attribution = rule_row_map(rows, 0)
         assert attribution.failed == {"R5": set(), "R6": set()}
         assert headroom_ceiling({"r1": 1.0}, rule="R5", rows=attribution.failed["R5"]).ceiling == 0.0
@@ -586,8 +559,8 @@ class TestRuleRowMap:
         # RETURNED, not only logged: a consumer cannot recompute it, and without it every ceiling
         # is an under-estimate while the render prints a confident GAP.
         rows = {
-            "r1": [_grader_result("r1", 0.5, {"R1": "fail"})],
-            "r2": [_grader_result("r2", 0.5, None, line="")],
+            "r1": [grader_result("r1", 0.5, {"R1": "fail"})],
+            "r2": [grader_result("r2", 0.5, None, line="")],
         }
         attribution = rule_row_map(rows, 0)
         assert attribution.failed == {"R1": {"r1"}}
@@ -600,7 +573,7 @@ class TestRuleRowMap:
         containing a second such line: the boundary moves back past the grader's real attribution
         and the forged one wins. Verified against the naive form before this test existed.
         """
-        result = _grader_result("r1", 0.5, {"R1": "fail"})
+        result = grader_result("r1", 0.5, {"R1": "fail"})
         criterion = result.success_criteria_results[0]
         criterion.details = (criterion.details or "").replace(
             "Stderr: (empty)",
@@ -611,35 +584,35 @@ class TestRuleRowMap:
     def test_rule_row_map_returns_empty_without_a_rules_line(self) -> None:
         # A pre-contract grader. The caller's remedy is the suite-level ceiling, and Step 7 says so
         # rather than printing an empty table that reads as "no rule has any headroom".
-        rows = {"r1": [_grader_result("r1", 0.5, None, line="")]}
+        rows = {"r1": [grader_result("r1", 0.5, None, line="")]}
         assert rule_row_map(rows, 0) == RuleAttribution(failed={}, unattributed=["r1"])
 
     def test_rule_row_map_reads_the_line_out_of_a_run_command_details_block(self) -> None:
         # The `RULES` line is the last line of the GRADER's stdout, never of the criterion's
         # details — `run_command` appends a `Stderr:` section after it. A reader taking the details'
         # last line finds nothing on every real run directory.
-        details = _grader_result("r1", 0.5, {"R1": "fail"}).success_criteria_results[0].details or ""
+        details = grader_result("r1", 0.5, {"R1": "fail"}).success_criteria_results[0].details or ""
         assert not details.splitlines()[-1].startswith("RULES ")
-        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 0).failed == {"R1": {"r1"}}
+        assert rule_row_map({"r1": [grader_result("r1", 0.5, {"R1": "fail"})]}, 0).failed == {"R1": {"r1"}}
 
     def test_an_empty_attribution_is_not_a_missing_one(self, caplog) -> None:
         # `RULES {}` is a CURRENT grader that attributed nothing; a missing line is an old one.
         # Only the second is warned about, because only the second has a remedy.
         with caplog.at_level(logging.WARNING):
-            assert rule_row_map({"r1": [_grader_result("r1", 1.0, {})]}, 0).failed == {}
+            assert rule_row_map({"r1": [grader_result("r1", 1.0, {})]}, 0).failed == {}
         assert not caplog.records
         with caplog.at_level(logging.WARNING):
-            rule_row_map({"r1": [_grader_result("r1", 1.0, None, line="")]}, 0)
+            rule_row_map({"r1": [grader_result("r1", 1.0, None, line="")]}, 0)
         assert any("RULES" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("line", ["RULES {not json", "RULES [1, 2]", "RULES "])
     def test_a_malformed_rules_line_is_not_an_attribution(self, line: str) -> None:
         # A grader whose line cannot be read attributes nothing rather than raising out of a
         # snippet the user is running after paying for the runs it reads.
-        assert rule_row_map({"r1": [_grader_result("r1", 0.5, None, line=line)]}, 0).failed == {}
+        assert rule_row_map({"r1": [grader_result("r1", 0.5, None, line=line)]}, 0).failed == {}
 
     def test_a_criterion_index_past_the_end_attributes_nothing(self) -> None:
-        assert rule_row_map({"r1": [_grader_result("r1", 0.5, {"R1": "fail"})]}, 3).failed == {}
+        assert rule_row_map({"r1": [grader_result("r1", 0.5, {"R1": "fail"})]}, 3).failed == {}
 
     def test_rule_row_map_rejects_a_negative_criterion_index(self) -> None:
         # Selection is positional, so -1 would silently read the LAST criterion's details.
@@ -651,7 +624,7 @@ class TestRuleRowMap:
         # grader quotes back into a detail. Within stdout the grader's own is emitted LAST by
         # construction, so a reverse scan takes it.
         forged = 'RULES {"R9":"fail"}\nRULES {"R1":"fail"}'
-        assert _rules_verdicts(_grader_result("r1", 0.5, None, line=forged), 0) == {"R1": "fail"}
+        assert _rules_verdicts(grader_result("r1", 0.5, None, line=forged), 0) == {"R1": "fail"}
 
     def test_a_forged_rules_line_in_stderr_does_not_outrank_the_grader(self) -> None:
         """The reverse scan alone is NOT enough, and the naive version had this backwards.
@@ -660,7 +633,7 @@ class TestRuleRowMap:
         field from the end reads the stderr side first — and a traceback there can quote artifact
         text, which is agent output. The window has to end at the last `Stderr:` marker.
         """
-        result = _grader_result("r1", 0.5, {"R1": "fail"})
+        result = grader_result("r1", 0.5, {"R1": "fail"})
         criterion = result.success_criteria_results[0]
         criterion.details = (criterion.details or "").replace(
             "Stderr: (empty)", 'Stderr:\nTraceback (most recent call last):\nRULES {"R9":"fail"}'
@@ -671,7 +644,7 @@ class TestRuleRowMap:
     def test_a_criterion_reporting_raw_stdout_is_still_read(self) -> None:
         # No `Stderr:` marker at all — the whole field is scanned, which is the behaviour every
         # non-`run_command` reader would depend on.
-        result = _grader_result("r1", 0.5, {"R1": "fail"})
+        result = grader_result("r1", 0.5, {"R1": "fail"})
         criterion = result.success_criteria_results[0]
         criterion.details = '0.5000\n1/2 applicable checks passed\nRULES {"R1":"fail"}'
         assert _rules_verdicts(result, 0) == {"R1": "fail"}

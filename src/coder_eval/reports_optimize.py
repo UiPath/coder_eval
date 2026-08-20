@@ -30,6 +30,7 @@ naming the banned module here would trip a sensor on its own documentation.)
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from coder_eval.models import (
@@ -39,6 +40,7 @@ from coder_eval.models import (
     ExecutionGateVerdict,
     GateVerdictBase,
     GuardrailCheck,
+    RegressionRow,
 )
 from coder_eval.reports_stats import bootstrap_p_floor
 
@@ -912,4 +914,125 @@ def render_discreteness(needed: int | None, *, rows: int, survivors: int, thresh
             + "on two or three rows cannot promote at any suite size. Buying rows helps only when "
             + "the new rows are ones the candidate is expected to change.",
         ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# The regression corpus — the rows an earlier promotion was built on
+# ---------------------------------------------------------------------------
+
+
+def _one_line(text: str) -> str:
+    """Author-supplied free text, collapsed to a single line.
+
+    ``RegressionRow.reason`` is written by hand into a committed sidecar and carries no length or
+    shape constraint. Interpolated raw into a nested list item, a newline in it — or a leading ``-``
+    or ``|`` — silently breaks the structure of every bullet after it, so the block a reader relies
+    on stops being readable at the first sloppy entry. Collapsing whitespace at the render seam is
+    the one place that cannot be forgotten per call site.
+    """
+    return " ".join(text.split())
+
+
+def render_corpus_check(
+    findings: Mapping[str, Sequence[tuple[RegressionRow, float | None]]],
+    *,
+    threshold: float,
+    corpus_size: int,
+) -> str:
+    """Which arms re-lose a row an earlier promotion was built on, and which never measured it.
+
+    Rendered in the mapping's own order, which is the caller's arm order — the incumbent first, as
+    the shortlist is read.
+
+    **A missing score is a HOLE, not a loss**, and the two are named apart because the remedy is
+    different and the corpus cannot tell them apart on its own: the row errored in this run, or it
+    belongs to this skill's OTHER suite (the corpus is per skill, and a skill may have both an
+    activation and an outcome suite). Calling a hole a regression sends a reader to fix a candidate
+    that never had the chance to fail.
+
+    ``threshold`` is rendered because it changes what "lost" means: 1.0 treats any partial score as
+    a loss, which is right for a binary activation criterion and not for a fractional execution one.
+
+    ``corpus_size`` distinguishes the two empty cases, which mean opposite things and are both
+    normal: an empty CORPUS is every skill's first round and there is nothing to check against, while
+    no ARMS is a caller that named none. Collapsing them would make the commonest reading in the
+    tool look like a mistake.
+    """
+    if corpus_size == 0:
+        return (
+            "_No regression corpus yet — nothing to check._ It is written on promotion (Step 11), so "
+            "the first round of a skill always reads this."
+        )
+    if not findings:
+        return "_No arms to check against the corpus._"
+
+    lines = [
+        f"**Regression corpus check** — a row scoring below {threshold:.3f} is a row an earlier "
+        + "promotion was built on and this arm gives back.",
+        "",
+    ]
+    for variant_id, lost in findings.items():
+        if not lost:
+            lines.append(f"- `{variant_id}` — clears the corpus.")
+            continue
+        measured = [(row, score) for row, score in lost if score is not None]
+        holes = [row for row, score in lost if score is None]
+        lines.append(f"- `{variant_id}` — {len(measured)} measured loss(es), {len(holes)} hole(s):")
+        for row, score in measured:
+            lines.append(
+                f"    - **lost** `{row.row_id}` at {score:.3f} (promoted in round {row.promoted_in_round}"
+                + f"; {_one_line(row.reason)})"
+            )
+        for row in holes:
+            lines.append(
+                f"    - **hole** `{row.row_id}` — this arm has NO score for it (promoted in round "
+                + f"{row.promoted_in_round}; {_one_line(row.reason)})"
+            )
+
+    if any(score is None for lost in findings.values() for _row, score in lost):
+        lines.append("")
+        lines.append(
+            "A **hole** is not a loss and not a pass. Two causes the corpus cannot distinguish: the "
+            + "row errored in this run, or it belongs to this skill's OTHER suite — the corpus is "
+            + "per skill, and a skill may carry both an activation and an outcome suite. Check "
+            + "which before reporting it, and do not count it as a regression until you have."
+        )
+    lines.append("")
+    lines.append(
+        "A measured loss is a regression however good the arm's aggregate looks, which is exactly "
+        + "what an aggregate cannot show. Shortlist against this, not around it."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Run-tree doubt, and the one reading that has to survive an absent instrument
+# ---------------------------------------------------------------------------
+
+
+def render_staleness_note(reason: str) -> str:
+    """A contaminated run tree, said in the block rather than logged.
+
+    Every primitive that detects this can only ``logger.warning``, because the vectors and floors
+    they return have nowhere to put a refusal — and a skill session never sees a warning. A composite
+    returns markdown, which has somewhere to put it, so the doubt reaches the ledger the number
+    reaches. ``reason`` is :func:`~coder_eval.optimize.load.stale_tree_reason`'s wording, so the
+    block and the log say the same thing.
+    """
+    return f"**The numbers below may be over a contaminated tree.** {reason}"
+
+
+def render_attribution_unavailable(grader_index: int) -> str:
+    """Why a headroom table has one whole-suite row instead of one row per rule.
+
+    An empty table reads as "no rule has any headroom" when it means "nobody asked", so the fallback
+    is stated rather than left to be inferred from a short table. All three causes are named because
+    they land in the same place and want different fixes.
+    """
+    return (
+        "**Rule attribution was unavailable, so the row below is the WHOLE SUITE's ceiling.** No "
+        + f"usable `RULES` line was found at criterion {grader_index}: the grader predates that "
+        + "contract, `grader_index` points at a different criterion, or the line it emitted did not "
+        + "parse (that one is logged). Fix it before reading any per-rule verdict — there is none here."
     )

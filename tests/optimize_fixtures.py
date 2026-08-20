@@ -123,6 +123,40 @@ def eval_result(row_id: str, labels: list[tuple[str, str]], *, extra_basic: bool
 RUN_SELECTION_KEY = next(name for name in RunSummary.model_fields if name == "row_selection")
 
 
+def grader_result(
+    row_id: str, score: float, rules: dict[str, str] | None, *, line: str | None = None
+) -> EvaluationResult:
+    """One replicate whose grader criterion carries a ``RULES`` line, wrapped as `run_command` does.
+
+    The details block mirrors ``criteria/run_command.py::_build_exec_details``: the grader's stdout
+    is embedded and a ``Stderr:`` section follows it, so the ``RULES`` line is NOT the details' last
+    line. A reader that took ``splitlines()[-1]`` would find nothing on a real run directory.
+
+    ``weighted_score`` is set to the grader's score, because it is a plain ``float | None`` field the
+    orchestrator populates — and the headroom composite reads the row through
+    ``arm_row_scores(criterion_index=None)``, which is exactly that field. A fixture that left it
+    unset would give every arm an empty vector, and the composite would raise "scored no rows".
+    """
+    if line is None:
+        line = "RULES " + json.dumps(rules or {}, sort_keys=True, separators=(",", ":"))
+    stdout = f"{score:.4f}\n1/1 applicable checks passed\n{line}" if line else f"{score:.4f}\n"
+    details = f"Score: {score:.3f}\nCommand: verify.py\nExit code: 0 (expected: 0)\nStdout:\n{stdout}\nStderr: (empty)"
+    return EvaluationResult(
+        task_id=f"{SUITE}/{row_id}",
+        task_description="row",
+        agent_type="claude-code",
+        started_at=datetime(2026, 8, 17, 12, 0, 0),
+        final_status=FinalStatus.SUCCESS,
+        iteration_count=1,
+        weighted_score=score,
+        success_criteria_results=[
+            CriterionResult(
+                criterion_type="run_command", description=f"grader for {row_id}", score=score, details=details
+            )
+        ],
+    )
+
+
 def write_run_provenance(run_dir: Path, split: str | None = None) -> None:
     """Stamp a minimal ``run.json`` carrying the run's row selection.
 

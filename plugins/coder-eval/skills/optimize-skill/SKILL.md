@@ -745,54 +745,31 @@ worst possible suite shape and why `/coder-eval:task` tells an author to write d
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.execution import measure_execution_noise_floor, resolve_model
-from coder_eval.optimize.fronts import arm_row_scores, headroom_ceiling
-from coder_eval.optimize.load import load_arm_rows, rule_row_map
-from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
-from coder_eval.reports_optimize import render_headroom_ceilings
+from coder_eval.optimize.api import headroom_report
 
-run_dirs = [Path("<runs>/baseline-1")]
-suite_id = "<the suite's task_id>"
-grader_index = 2  # the grader's POSITION in the suite's success_criteria, not its name
-
-arms = arm_row_scores(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=suite_id)
-if not arms[0].row_scores:
-    raise SystemExit("the incumbent scored NO rows — a wrong suite_id or run dir, not a result")
-rows = load_arm_rows(run_dirs, "incumbent", suite_id)
-attribution = rule_row_map(rows, grader_index)
-
-# `None` at the first round is expected — one replicate cannot split against itself. Re-print this
-# block once the control arm has given the suite a second replicate.
-floor = measure_execution_noise_floor(
-    run_dirs=run_dirs, variant_id="incumbent", suite_id=suite_id,
-    model=resolve_model(rows) or UNRESOLVED_MODEL,
-    measurements=load_measurements(Path(".optimize-skill/<skill>/measurements.json")),
-)
-# EVERY rule the graders mentioned, not only the ones that failed: a rule this suite always passes
-# has a real ceiling of 0.0 — "no candidate for it can show anything here" — and leaving it out of
-# the table is the difference between an answer and a missing row.
-ceilings = [
-    headroom_ceiling(arms[0].row_scores, rule=rule, rows=attribution.failed[rule])
-    for rule in sorted(attribution.failed)
-]
-# No attribution at all: fall back to the SUITE-level ceiling rather than printing an empty table,
-# which reads as "no rule has any headroom" when it means "nobody asked".
-ceilings = ceilings or [headroom_ceiling(arms[0].row_scores)]
-print(
-    render_headroom_ceilings(
-        ceilings, None if floor is None else floor.mde, unattributed=len(attribution.unattributed)
-    )
-)
+print(headroom_report(
+    run_dirs=[Path("<runs>/baseline-1")], variant_id="incumbent", suite_id="<the suite's task_id>",
+    grader_index=2, sidecar=Path(".optimize-skill/<skill>/measurements.json"),
+))
 ```
 
-**If `attribution.failed` comes back empty, attribution is unavailable** — an older grader, or a
-`grader_index` pointing at a different criterion. The snippet falls back to the suite-level ceiling
-itself and the block then reports one row for the whole suite. Rule attribution comes from the
-grader's `RULES` line; `/coder-eval:task` writes it from the Step 2.5 rule inventory.
+`grader_index` is the grader's **position** in the suite's `success_criteria:` list — 0-based, not
+its name — so open the suite and count.
 
-**`attribution.unattributed` is not a detail.** A row whose grader output carried no `RULES` line
+**No floor at the first round is expected, not a fault.** One replicate cannot split against itself,
+so the block renders the ceilings with no verdict column — a ranking of which rule has the most
+room, without the one thing that says whether that room clears the noise. **Re-print this block once
+the control arm (Step 8) has given the suite a second replicate**, and the verdicts appear.
+
+**If the block says attribution was unavailable**, no grader emitted a `RULES` line at
+`grader_index` — an older grader, or an index pointing at a different criterion. It falls back to the
+suite-level ceiling and reports one row for the whole suite, rather than an empty table that would
+read as "no rule has any headroom". Rule attribution comes from the grader's `RULES` line;
+`/coder-eval:task` writes it from the Step 2.5 rule inventory.
+
+**An unattributed row is not a detail.** A row whose grader output carried no `RULES` line
 is in no rule's failing set, so its headroom is counted nowhere and **every ceiling in the table is
-an under-estimate**. Pass the count in, as above, and the block says so — otherwise a `GAP` verdict,
+an under-estimate**. The block counts them and says so — otherwise a `GAP` verdict,
 which tells you to stop working on a rule, can be produced by a stdout the criterion truncated at
 4000 characters rather than by a rule with no room.
 
@@ -1418,33 +1395,31 @@ at which rows a discarded candidate actually won.
 #### Check the corpus before shortlisting
 
 The regression corpus is the list of rows an earlier promotion was built on (Step 11 writes it).
-Read it here, against the same `arms` you just printed — **a candidate that re-loses one of those
-rows is a regression however good its aggregate looks**, and an aggregate is exactly what cannot
-show it:
+Read it here, against the same arms you just printed — **a candidate that re-loses one of those rows
+is a regression however good its aggregate looks**, and an aggregate is exactly what cannot show it.
+Pass the same `run_dirs`, `variant_ids` and `criterion_index` the matrix used — this block re-reads
+the arms rather than inheriting them, so it stands on its own whichever track you are on. **On the
+execution track pass `criterion_index=None` explicitly**; unlike the blocks above it has no default,
+because on this reading the metric decides what "lost" MEANS:
 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.search import regression_check
-from coder_eval.optimize.store import load_measurements
+from coder_eval.optimize.api import corpus_report
 
-# Defined here rather than reused from Step 6: that snippet is activation-only, so on the
-# execution track the name does not exist in this session.
-sidecar = Path(".optimize-skill/<skill>/measurements.json")
-
-corpus = load_measurements(sidecar).regression_corpus
-if not corpus:
-    print("no regression corpus yet — nothing to check")
-for arm in arms:
-    lost = regression_check(corpus, arm)
-    print(arm.variant_id, "clears the corpus" if not lost else
-          [(row.row_id, row.reason, score) for row, score in lost])
+print(corpus_report(
+    run_dirs=[Path("<runs>/round1-triage")], sidecar=Path(".optimize-skill/<skill>/measurements.json"),
+    variant_ids=["incumbent", "cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
+    suite_id="<the suite's task_id>", criterion_index=0,
+))
 ```
 
-A `None` score is a **hole**, not a loss: the arm has no score for that row. Two causes, and the
-corpus cannot tell them apart — the row errored in this run, or it belongs to this skill's *other*
-suite, since the corpus is per skill. Check which before reporting it. A row scored below 1.0 is a
-measured loss; on a fractional execution suite pass `threshold=` to say what counts as one.
+The block separates a **hole** from a **loss**, and the distinction is the reason to read it rather
+than the numbers: a hole means the arm has no score for that row at all, from one of two causes the
+corpus cannot tell apart — the row errored in this run, or it belongs to this skill's *other* suite,
+since the corpus is per skill. Check which before reporting it as a regression. A row scored below
+the threshold is a measured loss; on a fractional execution suite pass `threshold=` to say what
+counts as one, and the block states whichever bar it used.
 
 This does not veto anything on its own. It tells you which shortlisted arm to look at first, and
 what to say about it at Step 12 if you promote it anyway.
@@ -1914,10 +1889,11 @@ field: `measurements.json` is `extra="forbid"` and has nowhere to put it. It mat
 reused floor is an *earlier round's* measurement, so two rounds quoting the same MDE may be one
 number rather than two agreeing ones.
 
-One call each. **This snippet continues the interpreter session the earlier steps used** — it
-reads `suite_id` and `arms` from Stage A's snippet, and `baseline_dirs` from Step 6's. Run it in a
-fresh interpreter and it fails with `NameError` on the first of them, after the round has already
-been paid for. **Which floor you record depends on the track**, so take the matching half:
+One call each. **This snippet binds everything it needs**, so it runs in a fresh interpreter — it
+re-reads the Stage A vectors rather than expecting them to still be in scope, which is what a block
+that only PRINTS leaves behind. Replace every `<placeholder>` before running it, and use the same
+run dir, variant list and `criterion_index` Step 10 read. **Which floor you record depends on the
+track**, so take the matching half:
 
 ```python
 import subprocess
@@ -1933,6 +1909,7 @@ from coder_eval.optimize.execution import (
     resolve_model,
 )
 from coder_eval.optimize.fronts import (
+    arm_row_scores,
     instance_best_front,
     pareto_front,
 )
@@ -1949,6 +1926,15 @@ from coder_eval.suite_fingerprint import suite_fingerprint
 
 sidecar = Path(".optimize-skill/<skill>/measurements.json")
 measurements = load_measurements(sidecar)
+
+# The Stage A vectors, re-read here rather than carried over: Stage A prints a block, so nothing
+# from it is in scope. Same run dir, same variant list, same criterion_index as Step 10 used.
+suite_id = "<the suite's task_id>"
+arms = arm_row_scores(
+    run_dirs=[Path("<runs>/round1-triage")], suite_id=suite_id, criterion_index=0,
+    variant_ids=["incumbent", "cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
+)
+baseline_dirs = [Path("<runs>/baseline-1"), Path("<runs>/baseline-2")]
 
 # ACTIVATION TRACK — the f1.yes floor, from Step 6's two baseline invocations.
 rows = load_arm_rows(baseline_dirs, "default", suite_id)

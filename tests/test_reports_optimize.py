@@ -40,7 +40,9 @@ from coder_eval.reports_optimize import (
     CEILING_MARGIN,
     SINGLE_REPLICATE_CAVEAT,
     _front_summary,
+    render_attribution_unavailable,
     render_confirm_markdown,
+    render_corpus_check,
     render_cost_quality,
     render_discreteness,
     render_execution_markdown,
@@ -51,6 +53,7 @@ from coder_eval.reports_optimize import (
     render_row_replicates,
     render_search_comparison,
     render_seed_stability,
+    render_staleness_note,
 )
 from coder_eval.reports_stats import BOOTSTRAP_RESAMPLES
 from tests.optimize_fixtures import (
@@ -1307,3 +1310,74 @@ class TestRenderDiscreteness:
         assert "not a row count" in achievable
         assert "AGREE on makes the floor worse" in achievable
         assert "buying rows cannot fix this one" in unachievable
+
+
+class TestRenderCorpusCheck:
+    """A hole and a loss, kept apart — the distinction the shipped fence left to the reader."""
+
+    def _row(self, row_id: str, round_number: int = 1) -> RegressionRow:
+        return RegressionRow(row_id=row_id, promoted_in_round=round_number, reason="promoted on it")
+
+    def test_a_mixed_result_is_pinned(self) -> None:
+        block = render_corpus_check(
+            {
+                "incumbent": [],
+                "cand-a": [(self._row("pos-3"), 0.667), (self._row("pos-7", 2), None)],
+            },
+            threshold=1.0,
+            corpus_size=2,
+        )
+        assert_matches_render_pin(block, "corpus_check")
+
+    def test_no_arms_says_so_rather_than_rendering_an_empty_table(self) -> None:
+        assert render_corpus_check({}, threshold=1.0, corpus_size=2) == "_No arms to check against the corpus._"
+
+    def test_an_empty_corpus_is_a_different_answer_from_no_arms(self) -> None:
+        # Both are normal and they mean opposite things: an empty corpus is every skill's first
+        # round, no arms is a caller that named none. Collapsing them makes the commonest reading in
+        # the tool look like a mistake.
+        empty = render_corpus_check({"incumbent": []}, threshold=1.0, corpus_size=0)
+        assert "No regression corpus yet" in empty
+        assert "No arms" not in empty
+
+    def test_a_clean_arm_says_it_clears_and_carries_no_hole_paragraph(self) -> None:
+        block = render_corpus_check({"incumbent": []}, threshold=1.0, corpus_size=2)
+        assert "clears the corpus" in block
+        # The hole paragraph is the expensive sentence in this block; firing it on a clean run is
+        # how a reader stops reading it.
+        assert "A **hole** is not a loss" not in block
+
+    def test_the_threshold_is_rendered_because_it_changes_what_lost_means(self) -> None:
+        assert "below 0.500 is a row" in render_corpus_check({"a": []}, threshold=0.5, corpus_size=1)
+        assert "below 1.000 is a row" in render_corpus_check({"a": []}, threshold=1.0, corpus_size=1)
+
+    def test_a_multiline_reason_cannot_break_the_bullet_nesting(self) -> None:
+        # `RegressionRow.reason` is hand-written into a committed sidecar with no shape constraint.
+        # A newline in it silently breaks every bullet after it, so the block a reader relies on
+        # stops being readable at the first sloppy entry.
+        row = RegressionRow(row_id="pos-3", promoted_in_round=1, reason="first line\n- forged bullet")
+        block = render_corpus_check({"cand": [(row, 0.5)]}, threshold=1.0, corpus_size=1)
+
+        bullets = [line for line in block.splitlines() if line.strip().startswith("-")]
+        assert len(bullets) == 2, bullets
+        assert "first line - forged bullet" in block
+
+
+class TestRenderStalenessNote:
+    def test_it_carries_the_primitive_s_own_wording(self) -> None:
+        # The block and the log must say the same thing, or a reader who saw one and then the other
+        # has to work out whether they are the same fault.
+        note = render_staleness_note("the run directory tree holds results that nothing wrote")
+        assert "may be over a contaminated tree" in note
+        assert "the run directory tree holds results that nothing wrote" in note
+
+
+class TestRenderAttributionUnavailable:
+    def test_all_three_causes_are_named(self) -> None:
+        # They land in the same branch and want different fixes: `rule_row_map` returns an empty
+        # `failed` for an absent line, a wrong index, AND an unparseable line.
+        text = render_attribution_unavailable(2)
+        assert "criterion 2" in text
+        assert "predates that contract" in text
+        assert "points at a different criterion" in text
+        assert "did not parse" in text

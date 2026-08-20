@@ -33,15 +33,22 @@ from coder_eval.optimize.fronts import (
     arm_row_scores,
     cost_quality_front,
     cost_quality_points,
+    headroom_ceiling,
     instance_best_front,
     pareto_front,
 )
+from coder_eval.optimize.load import load_arm_rows, reconcile_arms, rule_row_map, stale_tree_reason
+from coder_eval.optimize.search import regression_check
 from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
 from coder_eval.reports_optimize import (
+    render_attribution_unavailable,
+    render_corpus_check,
     render_cost_quality,
     render_discreteness,
+    render_headroom_ceilings,
     render_noise_floor,
     render_row_matrix,
+    render_staleness_note,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
 
@@ -199,14 +206,20 @@ def row_matrix_report(
     because that is what Stage A costs.
     """
     _require_run_dirs(run_dirs)
+    stale, _unknown = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
     arms = arm_row_scores(
         run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
     )
-    return render_row_matrix(
-        arms,
-        pareto_front(arms),
-        instance_best=instance_best_front(arms),
-        n_replicates=n_replicates,
+    return "\n".join(
+        [
+            *_staleness_note(stale),
+            render_row_matrix(
+                arms,
+                pareto_front(arms),
+                instance_best=instance_best_front(arms),
+                n_replicates=n_replicates,
+            ),
+        ]
     )
 
 
@@ -222,7 +235,148 @@ def cost_quality_report(
     ``criterion_index`` means what it means on :func:`row_matrix_report`.
     """
     _require_run_dirs(run_dirs)
+    stale, _unknown = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
     points = cost_quality_points(
         run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
     )
-    return render_cost_quality(points, cost_quality_front(points))
+    return "\n".join([*_staleness_note(stale), render_cost_quality(points, cost_quality_front(points))])
+
+
+def _staleness_note(stale: dict[str, frozenset[tuple[str, str]]]) -> list[str]:
+    """The contamination warning, as block lines rather than a log record.
+
+    :func:`arm_row_scores` can only ``logger.warning`` this, because ``ArmRowScores`` has nowhere to
+    put a refusal — and a skill session never sees a warning. A composite returns markdown, which
+    HAS somewhere to put it, so the staleness reaches the ledger a reader keeps instead of a stderr
+    line nobody read.
+
+    **Every composite that computes a reported number from rows it read owes the block this**, which
+    is why the sweep runs here rather than being left to whichever primitive happens to do one. It
+    costs one extra ``run.json`` parse per (arm, dir) — the readers below sweep again for their own
+    logging — and that is the price of the note being in the ledger instead of on stderr.
+    """
+    if not stale:
+        return []
+    return [render_staleness_note(stale_tree_reason(stale)), ""]
+
+
+def headroom_report(
+    *, run_dirs: Sequence[Path], variant_id: str, suite_id: str, grader_index: int, sidecar: Path
+) -> str:
+    """What each grader rule could move the suite mean by at MOST, against the floor to be cleared.
+
+    The one block that can say STOP before a candidate is written: a rule whose ceiling is below the
+    suite's noise floor is a **suite gap, not a hypothesis**, and no wording of a candidate fixes it.
+    Measured on a real round, three of four rules were unpromotable by arithmetic and roughly $40 was
+    spent gating candidates for them — off inputs already paid for.
+
+    ``grader_index`` is the POSITION of the grader's ``run_command`` criterion in the suite's
+    ``success_criteria``, which is where the ``RULES`` lines come from. Get it wrong and attribution
+    comes back empty; the block says so rather than rendering an empty table, because an empty table
+    reads as "no rule has any headroom" when it means "nobody asked".
+
+    Advisory, always — the attribution is AUTHORED, so a mistyped rule id moves rows between rules.
+    """
+    _require_run_dirs(run_dirs)
+    # CE053, and the reason this is here rather than left to `arm_row_scores`: that function warns
+    # and continues, because its return type has nowhere to put a refusal. The ceilings table IS a
+    # reported number, so the contamination has to reach the block.
+    #
+    # **It is not free.** This function reads the tree THREE times — here, inside `arm_row_scores`,
+    # and inside `measure_execution_noise_floor`'s own preflight — and each read globs every row dir
+    # and re-validates every `task.json`. Loading once and threading the rows into the readers below
+    # would remove two of the three, but that is a signature change on a rank-3 primitive; it is
+    # recorded in `.claude/harness-candidates.md` rather than smuggled in here.
+    stale, _unknown = reconcile_arms([(variant_id, run_dirs)], suite_id)
+    arms = arm_row_scores(run_dirs=run_dirs, variant_ids=[variant_id], suite_id=suite_id)
+    if not arms[0].row_scores:
+        raise ValueError(
+            f"{variant_id!r} scored no rows of {suite_id!r} under {', '.join(str(d) for d in run_dirs)} — "
+            + "a wrong suite_id, variant id or run dir, not a result. There is no headroom to size."
+        )
+    rows = load_arm_rows(run_dirs, variant_id, suite_id)
+    attribution = rule_row_map(rows, grader_index)
+    floor = measure_execution_noise_floor(
+        run_dirs=run_dirs,
+        variant_id=variant_id,
+        suite_id=suite_id,
+        model=resolve_arm_model(run_dirs, variant_id, suite_id) or UNRESOLVED_MODEL,
+        measurements=load_measurements(sidecar),
+    )
+    # EVERY rule the graders mentioned, not only the ones that failed: a rule this suite always
+    # passes has a real ceiling of 0.0 — "no candidate for it can show anything here" — and leaving
+    # it out of the table is the difference between an answer and a missing row.
+    ceilings = [
+        headroom_ceiling(arms[0].row_scores, rule=rule, rows=attribution.failed[rule])
+        for rule in sorted(attribution.failed)
+    ]
+    unavailable: list[str] = []
+    if not ceilings:
+        # No attribution at all: the SUITE-level ceiling rather than an empty table. Both causes are
+        # named because they have different remedies and the block cannot tell them apart.
+        ceilings = [headroom_ceiling(arms[0].row_scores)]
+        unavailable = [render_attribution_unavailable(grader_index), ""]
+    # `floor is None` is passed through, never substituted with 0.0: a fabricated floor turns every
+    # ceiling into a verdict, and round 1 has no floor by construction (one replicate cannot split
+    # against itself).
+    return "\n".join(
+        [
+            *_staleness_note(stale),
+            *unavailable,
+            render_headroom_ceilings(
+                ceilings,
+                None if floor is None else floor.mde,
+                unattributed=len(attribution.unattributed),
+            ),
+        ]
+    )
+
+
+def corpus_report(
+    *,
+    run_dirs: Sequence[Path],
+    variant_ids: Sequence[str],
+    suite_id: str,
+    criterion_index: int | None,
+    sidecar: Path,
+    threshold: float = 1.0,
+) -> str:
+    """Which shortlisted arms re-lose a row an earlier promotion was built on.
+
+    Read against the same arms the row matrix printed, and before shortlisting: a candidate that
+    gives back a corpus row is a regression however good its aggregate looks, and an aggregate is
+    exactly what cannot show it.
+
+    ``threshold`` is surfaced rather than fixed at 1.0 because a fractional execution suite needs a
+    different bar — at 1.0 any partial score is a loss, which is right for a binary activation
+    criterion and wrong for a graded one.
+
+    **``criterion_index`` is REQUIRED here**, alone among these composites, and the asymmetry is the
+    point: it decides what "lost" MEANS. Defaulted to ``None`` it would silently read
+    ``weighted_score`` on an activation suite and report rows the arm actually passed as corpus
+    losses. On the execution track pass ``criterion_index=None`` explicitly — omitting it is a
+    ``TypeError``, which is the intended answer to "which metric?" being left unanswered.
+    """
+    _require_run_dirs(run_dirs)
+    corpus = load_measurements(sidecar).regression_corpus
+    if not corpus:
+        # No sweep and no load: this path computes no number from rows, so there is nothing to doubt
+        # and nothing to pay for. The renderer owns the wording, beside the no-ARMS case it is not.
+        return render_corpus_check({}, threshold=threshold, corpus_size=0)
+    stale, _unknown = reconcile_arms([(vid, run_dirs) for vid in variant_ids], suite_id)
+    arms = arm_row_scores(
+        run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
+    )
+    # Built in `variant_ids` order, which is the render order: the incumbent first, as the shortlist
+    # is read. `regression_check` reports a hole as `(row, None)` rather than skipping it — not
+    # measuring a row is not passing it — and the renderer is what keeps that apart from a loss.
+    return "\n".join(
+        [
+            *_staleness_note(stale),
+            render_corpus_check(
+                {arm.variant_id: regression_check(corpus, arm, threshold=threshold) for arm in arms},
+                threshold=threshold,
+                corpus_size=len(corpus),
+            ),
+        ]
+    )

@@ -13,17 +13,24 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.models import ACTIVATION_FLOOR_METRIC, EXECUTION_FLOOR_METRIC, NoiseFloor
+from coder_eval.models import (
+    ACTIVATION_FLOOR_METRIC,
+    EXECUTION_FLOOR_METRIC,
+    NoiseFloor,
+    RegressionRow,
+)
 from coder_eval.optimize.activation import min_discordant_rows, noise_floor_mde
 from coder_eval.optimize.api import (
     activation_floor_report,
+    corpus_report,
     cost_quality_report,
     discreteness_report,
     execution_floor_report,
+    headroom_report,
     row_matrix_report,
 )
 from coder_eval.optimize.execution import measure_execution_noise_floor
-from coder_eval.optimize.store import UNRESOLVED_MODEL
+from coder_eval.optimize.store import UNRESOLVED_MODEL, append_regression_rows
 from coder_eval.reports_optimize import SINGLE_REPLICATE_CAVEAT
 from coder_eval.reports_stats import DEFAULT_ALPHA
 from tests.optimize_fixtures import (
@@ -31,6 +38,8 @@ from tests.optimize_fixtures import (
     assert_matches_render_pin,
     cost_quality_arm,
     eval_result,
+    grader_result,
+    scored_result,
     weighted_arm,
     write_row,
 )
@@ -204,6 +213,31 @@ def _cost_quality_call(run_dirs) -> str:
     return cost_quality_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
 
 
+def _headroom_call(run_dirs) -> str:
+    return headroom_report(
+        run_dirs=run_dirs,
+        variant_id="incumbent",
+        suite_id=SUITE,
+        grader_index=0,
+        sidecar=Path(_MISSING) / "measurements.json",
+    )
+
+
+def _corpus_call(run_dirs) -> str:
+    return corpus_report(
+        run_dirs=run_dirs,
+        variant_ids=["incumbent"],
+        suite_id=SUITE,
+        criterion_index=None,
+        sidecar=Path(_MISSING) / "measurements.json",
+    )
+
+
+# Every composite that computes a reported number from rows it READ, and therefore owes its block a
+# staleness note. Declared once so the two directions below cannot cover different sets.
+_REPORTERS = ["row-matrix", "cost-quality", "corpus", "headroom"]
+
+
 # EVERY composite taking `run_dirs`, so the guard is asserted on the SURFACE rather than on the
 # private helper they share: a composite that forgot to call it is exactly the regression this
 # catches, and it is invisible to any test of the helper itself. Grows with each phase.
@@ -212,6 +246,8 @@ _ENTRY_POINTS = [
     pytest.param(_execution_call, id="execution-floor"),
     pytest.param(_row_matrix_call, id="row-matrix"),
     pytest.param(_cost_quality_call, id="cost-quality"),
+    pytest.param(_headroom_call, id="headroom"),
+    pytest.param(_corpus_call, id="corpus"),
 ]
 
 
@@ -347,3 +383,263 @@ class TestCostQualityReport:
 
         assert "missing a coordinate and therefore NOT on the front" in block
         assert "ghost" in block
+
+
+def _graded_arm(
+    tmp_path: Path, per_row: dict[str, tuple[float, dict[str, str] | None]], *, variant: str = "incumbent"
+) -> list[Path]:
+    """One arm of grader-scored rows, each carrying its own `RULES` attribution (or none)."""
+    run_dir = tmp_path / "run-0"
+    for row_id, (score, rules) in per_row.items():
+        write_row(run_dir, variant, row_id, grader_result(row_id, score, rules))
+    return [run_dir]
+
+
+class TestHeadroomReport:
+    """The one block that can say STOP before a candidate is written."""
+
+    def test_every_rule_the_grader_mentioned_gets_a_row_including_one_that_never_fails(self, tmp_path: Path) -> None:
+        # `R2` passes on every row, so its ceiling is a real 0.0 — "no candidate for it can show
+        # anything here". Leaving it out is the difference between an answer and a missing row.
+        run_dirs = _graded_arm(
+            tmp_path,
+            {
+                "r1": (0.5, {"R1": "fail", "R2": "pass"}),
+                "r2": (1.0, {"R1": "pass", "R2": "pass"}),
+                "r3": (0.8, {"R1": "fail", "R2": "pass"}),
+            },
+        )
+
+        block = headroom_report(
+            run_dirs=run_dirs,
+            variant_id="incumbent",
+            suite_id=SUITE,
+            grader_index=0,
+            sidecar=_sidecar(tmp_path),
+        )
+
+        assert "`R1`" in block
+        assert "`R2`" in block, "a rule the suite always passes has a real ceiling of 0.0"
+
+    def test_a_stale_row_is_named_in_the_returned_block(self, tmp_path: Path) -> None:
+        """The regression test for the bug the shipped fence has: a ceilings table over a dirty tree.
+
+        Asserted on the BLOCK, not on caplog. `arm_row_scores` already logs this, and a warning the
+        skill session never sees is precisely the failure mode being fixed — the number reaches the
+        ledger, so the doubt has to reach it too.
+        """
+        run_dirs = _graded_arm(tmp_path, {"r1": (0.5, {"R1": "fail"}), "r2": (1.0, {"R1": "pass"})})
+        # A row left behind by an earlier invocation of a re-used `--run-dir`: on disk, absent from
+        # `run.json`. It loads, parses and is pooled into the ceilings, silently.
+        write_row(run_dirs[0], "incumbent", "leftover", grader_result("leftover", 0.0, {"R1": "fail"}), record=False)
+
+        block = headroom_report(
+            run_dirs=run_dirs,
+            variant_id="incumbent",
+            suite_id=SUITE,
+            grader_index=0,
+            sidecar=_sidecar(tmp_path),
+        )
+
+        assert "may be over a contaminated tree" in block
+        assert "leftover" in block
+        assert "Re-run into a fresh --run-dir" in block
+
+    def test_absent_attribution_falls_back_to_the_suite_ceiling_and_names_both_causes(self, tmp_path: Path) -> None:
+        # No `RULES` line at all — an older grader, or a `grader_index` pointing elsewhere. An empty
+        # table would read as "no rule has any headroom" when it means "nobody asked".
+        run_dirs = _graded_arm(tmp_path, {"r1": (0.5, None), "r2": (0.8, None)})
+
+        block = headroom_report(
+            run_dirs=run_dirs,
+            variant_id="incumbent",
+            suite_id=SUITE,
+            grader_index=0,
+            sidecar=_sidecar(tmp_path),
+        )
+
+        assert "Rule attribution was unavailable" in block
+        assert "whole suite" in block
+        # All THREE causes: `rule_row_map` returns an empty `failed` for an absent line, a wrong
+        # index AND an unparseable line, and they land in this one branch together.
+        assert "predates that contract" in block
+        assert "points at a different criterion" in block
+        assert "did not parse" in block
+
+    def test_no_rows_for_the_incumbent_raises_rather_than_exiting_the_interpreter(self, tmp_path: Path) -> None:
+        # `SystemExit` from a library kills an interpreter that had other work to do — and the
+        # skill's session is exactly that interpreter.
+        run_dirs = _graded_arm(tmp_path, {"r1": (0.5, {"R1": "fail"})})
+
+        # `pytest.raises(ValueError)` IS the "not SystemExit" assertion — `SystemExit` derives from
+        # `BaseException`, so it would propagate through and fail the test rather than satisfy it.
+        with pytest.raises(ValueError, match="scored no rows") as excinfo:
+            headroom_report(
+                run_dirs=run_dirs,
+                variant_id="ghost",
+                suite_id=SUITE,
+                grader_index=0,
+                sidecar=_sidecar(tmp_path),
+            )
+
+        assert "wrong suite_id, variant id or run dir" in str(excinfo.value)
+
+    def test_a_single_replicate_round_renders_with_no_floor_rather_than_a_zero_one(self, tmp_path: Path) -> None:
+        # Round 1 by construction: one replicate cannot split against itself. A substituted 0.0
+        # would turn every ceiling into a verdict.
+        run_dirs = _graded_arm(tmp_path, {"r1": (0.5, {"R1": "fail"}), "r2": (1.0, {"R1": "pass"})})
+
+        block = headroom_report(
+            run_dirs=run_dirs,
+            variant_id="incumbent",
+            suite_id=SUITE,
+            grader_index=0,
+            sidecar=_sidecar(tmp_path),
+        )
+
+        assert "No noise floor was measured, so no verdict is rendered" in block
+        assert "x floor" not in block, "no floor means no ratio column"
+
+
+class TestCorpusReport:
+    def _sidecar_with_corpus(self, tmp_path: Path, rows: list[tuple[str, str]]) -> Path:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        append_regression_rows(
+            sidecar,
+            [RegressionRow(row_id=row_id, promoted_in_round=1, reason=reason) for row_id, reason in rows],
+        )
+        return sidecar
+
+    def test_an_empty_corpus_says_there_is_nothing_to_check(self, tmp_path: Path) -> None:
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [1.0]})
+
+        block = corpus_report(
+            run_dirs=run_dirs,
+            variant_ids=["incumbent"],
+            suite_id=SUITE,
+            criterion_index=None,
+            sidecar=_sidecar(tmp_path),
+        )
+
+        assert "No regression corpus yet" in block
+
+    def test_a_missing_score_is_a_hole_with_both_causes_named(self, tmp_path: Path) -> None:
+        # Not a loss: the row errored in this run, or it belongs to this skill's OTHER suite. The
+        # corpus cannot tell them apart, so the block must not pick one.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [1.0]})
+        sidecar = self._sidecar_with_corpus(tmp_path, [("other-suite-row", "promoted on it")])
+
+        block = corpus_report(
+            run_dirs=run_dirs,
+            variant_ids=["incumbent"],
+            suite_id=SUITE,
+            criterion_index=None,
+            sidecar=sidecar,
+        )
+
+        assert "**hole** `other-suite-row`" in block
+        assert "errored in this run" in block and "OTHER suite" in block
+        assert "**lost**" not in block, "a hole is not a loss — the two have different remedies"
+        assert "0 measured loss(es), 1 hole(s)" in block
+
+    def test_a_sub_threshold_score_is_a_measured_loss_and_the_threshold_moves_it(self, tmp_path: Path) -> None:
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [0.6]})
+        sidecar = self._sidecar_with_corpus(tmp_path, [("r1", "promoted on it")])
+        call = {
+            "run_dirs": run_dirs,
+            "variant_ids": ["incumbent"],
+            "suite_id": SUITE,
+            "criterion_index": None,
+            "sidecar": sidecar,
+        }
+
+        strict = corpus_report(**call)
+        assert "**lost** `r1` at 0.600" in strict
+
+        # The same row at a bar a fractional execution suite would set: no longer a loss.
+        lenient = corpus_report(**call, threshold=0.5)
+        assert "clears the corpus" in lenient
+        assert "**lost**" not in lenient
+
+    def test_the_threshold_is_stated_in_the_block(self, tmp_path: Path) -> None:
+        # It changes what "lost" MEANS, so a ledger entry that omitted it would not be readable.
+        run_dirs = weighted_arm(tmp_path, "incumbent", {"r1": [1.0]})
+        sidecar = self._sidecar_with_corpus(tmp_path, [("r1", "promoted on it")])
+
+        block = corpus_report(
+            run_dirs=run_dirs,
+            variant_ids=["incumbent"],
+            suite_id=SUITE,
+            criterion_index=None,
+            sidecar=sidecar,
+            threshold=0.5,
+        )
+
+        assert "below 0.500 is a row" in block
+
+
+class TestEveryReportingCompositeNamesAContaminatedTree:
+    """The rule the whole module follows, asserted on the SURFACE rather than on `_staleness_note`.
+
+    A stale tree loads, parses and returns a confident number — there is nothing to notice. The
+    primitives below already detect it, and every one of them can only `logger.warning`, which a
+    skill session never sees. These composites return markdown, which HAS somewhere to put it, so a
+    composite that forgot the note would ship the same silent wrong number the rule exists to stop.
+
+    **Both directions are parametrized over the same list.** A note that fired on every block would
+    stop being read, and it would have been baked into the committed matrix pin. A new reporting
+    composite is one entry in `_REPORTERS` and is then covered both ways at once.
+    """
+
+    STALE = "may be over a contaminated tree"
+
+    def _clean(self, tmp_path: Path) -> list[Path]:
+        return weighted_arm(tmp_path, "incumbent", {"r1": [1.0], "r2": [0.5]})
+
+    def _contaminate(self, run_dir: Path) -> None:
+        # On disk, absent from `run.json` — a row left behind by an earlier `--run-dir` re-use.
+        write_row(run_dir, "incumbent", "leftover", scored_result("leftover", 0.0), record=False)
+
+    def _corpus_sidecar(self, tmp_path: Path) -> Path:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        append_regression_rows(sidecar, [RegressionRow(row_id="r1", promoted_in_round=1, reason="promoted on it")])
+        return sidecar
+
+    def _call(self, name: str, tmp_path: Path, run_dirs: list[Path]) -> str:
+        if name == "row-matrix":
+            return row_matrix_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
+        if name == "cost-quality":
+            return cost_quality_report(run_dirs=run_dirs, variant_ids=["incumbent"], suite_id=SUITE)
+        if name == "corpus":
+            return corpus_report(
+                run_dirs=run_dirs,
+                variant_ids=["incumbent"],
+                suite_id=SUITE,
+                criterion_index=None,
+                sidecar=self._corpus_sidecar(tmp_path),
+            )
+        if name == "headroom":
+            return headroom_report(
+                run_dirs=run_dirs,
+                variant_id="incumbent",
+                suite_id=SUITE,
+                grader_index=0,
+                sidecar=_sidecar(tmp_path),
+            )
+        raise AssertionError(f"unknown reporter {name!r}")
+
+    @pytest.mark.parametrize("name", _REPORTERS)
+    def test_the_block_names_the_staleness(self, tmp_path: Path, name: str) -> None:
+        run_dirs = self._clean(tmp_path)
+        self._contaminate(run_dirs[0])
+
+        block = self._call(name, tmp_path, run_dirs)
+
+        assert self.STALE in block
+        assert "leftover" in block
+
+    @pytest.mark.parametrize("name", _REPORTERS)
+    def test_a_clean_tree_carries_no_note(self, tmp_path: Path, name: str) -> None:
+        assert self.STALE not in self._call(name, tmp_path, self._clean(tmp_path))
