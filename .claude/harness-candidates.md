@@ -1181,3 +1181,48 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       `ALL_RULES` only and a class-wired rule could claim either number with nothing failing.
       Re-using CE044 would make `make lint` report findings under a number whose documented meaning
       is something else.
+
+- [ ] **A `NamedTuple` field written at every construction site and read by nobody.** Two instances
+      in one plan — `FamilyFacts.family_resamples` and `_GateExperiment.rows` — and both were
+      invisible to `ruff` and `pyright`, because a written-never-read tuple field is
+      indistinguishable from a used one at the type level. **Measured why it is not cheap:** the
+      naive detector (collect a `NamedTuple`'s fields, grep `.field` across the package) reports 15
+      "unread" fields in `optimize/` against those 2 real historical hits. Every false positive is a
+      field read by TUPLE UNPACKING (`members, rejected_at = holm_family(...)`) or by a consumer
+      OUTSIDE the package — tests and the skill's inline snippets legitimately read
+      `SearchComparison.head_score`, `RuleCeiling.ceiling` and the rest. Getting it right needs
+      unpacking analysis plus a cross-package read set, which is a different order of work from an
+      AST shape match. — caught twice in the optimize-family architecture plan.
+
+- [ ] **One rendered fact derived TWICE in a block by independent expressions.** `facts.family_size`
+      in the note ladder and `len(family)` in the trailing note: making them disagree passed the
+      whole suite until a test was written for the one state where they differ (a family with an
+      unmeasured member). This is CE037/CE040's shape one level up — two DERIVATIONS of one number
+      rather than two spellings of one formula — and the hard part is that neither expression is
+      wrong in isolation. — caught in the same plan.
+
+- [ ] **A conditional-expression fallback arm that is unreachable.** `_dead_weight_notes` carried an
+      `else` on a ternary that could not fire; replacing it with a `raise` left every test green.
+      `coverage.py` does not treat a ternary as a branch, so branch coverage reads 100% over a dead
+      arm — which is how it shipped. Detecting it needs a reachability argument over the values, not
+      an AST shape. — caught in the same plan.
+
+- [ ] **A `See .claude/decisions/X.md` pointer whose target does not discuss the subject.** The
+      orphan and dangling-pointer directions are both guarded
+      (`tests/lint_tests/test_lint_decision_log.py`); what is not is whether the file a docstring
+      points AT actually covers what the docstring stopped saying. That is the judgement
+      `.claude/decisions/README.md` states outright no rule can make, and the plan's own regression —
+      three specifications replaced by descriptions written from the function names — is what a
+      heuristic here would have to catch. Left to review deliberately. — caught in the same plan.
+
+- [ ] **A scripted multi-file edit whose match count or end boundary is not asserted.** Four
+      instances in one plan, each of which silently edited something it was not aimed at: a
+      `str.replace` without a count hit two unrelated test classes; a class-span heuristic stopped at
+      a decorator and rewrote a helper into infinite recursion; a `description=(` end-marker search
+      overran a block ending `)\n    )` and DELETED two model fields; and `git checkout <file>` to
+      undo a temporary mutation discarded a whole phase's uncommitted work. Every one was caught by
+      the suite within seconds, so the harness already covers the OUTCOME — what has no guard is the
+      technique, which is a property of how an edit was made rather than of the tree. The cheap
+      discipline, recorded here because it is what actually works: assert the match count before
+      writing, prefer line-indexed edits over pattern matching, and restore a mutation from a `cp`
+      backup rather than from git. — caught in the same plan.
