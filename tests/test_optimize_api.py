@@ -38,6 +38,7 @@ from coder_eval.optimize.api import (
     cost_quality_report,
     discreteness_report,
     execution_floor_report,
+    execution_gate_report,
     headroom_report,
     leak_report,
     replicates_report,
@@ -45,7 +46,11 @@ from coder_eval.optimize.api import (
     search_report,
     seed_stability_report,
 )
-from coder_eval.optimize.execution import measure_execution_noise_floor
+from coder_eval.optimize.execution import (
+    execution_gate,
+    holm_promote_execution,
+    measure_execution_noise_floor,
+)
 from coder_eval.optimize.store import (
     UNRESOLVED_MODEL,
     append_regression_rows,
@@ -55,17 +60,21 @@ from coder_eval.optimize.store import (
 from coder_eval.reports_optimize import (
     LEAK_SCAN_BOUNDARY,
     SINGLE_REPLICATE_CAVEAT,
+    render_execution_markdown,
     render_markdown,
     render_seed_stability,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
 from tests.optimize_fixtures import (
+    EXEC_SUITE,
     SUITE,
+    WINNER,
     arm_row_scores_for,
     assert_matches_render_pin,
     cost_quality_arm,
     costed_result,
     eval_result,
+    exec_run_dir,
     grader_result,
     headline_line,
     scored_result,
@@ -1516,3 +1525,220 @@ class TestSeedStabilityReport:
             "sibling_indices",
             "seeds",
         } == set(params)
+
+
+class TestExecutionGateReport:
+    """The same promotion contract, on a track whose Holm family lives ACROSS run dirs."""
+
+    def _gates(self, tmp_path: Path, candidates: dict[str, dict[str, list[float]]]) -> dict[str, Path]:
+        return {
+            candidate: exec_run_dir(
+                tmp_path / candidate,
+                incumbent=WINNER["incumbent"],
+                candidate=rows,
+                candidate_variant=candidate,
+            )
+            for candidate, rows in candidates.items()
+        }
+
+    # `WINNER`, not a uniform shift. Measured: a candidate that beats the incumbent by exactly the
+    # same amount on every row is REFUSED for zero variance ("the two arms differed by exactly 0.500
+    # on every one of the 6 paired rows"), so a family built that way would exercise the refusal path
+    # in every test here — including the ones about promotion and ordering.
+    _WINS: ClassVar[dict[str, list[float]]] = WINNER["candidate"]
+
+    def test_both_verdicts_match_a_direct_gate_plus_one_holm_call(self, tmp_path: Path) -> None:
+        gates = self._gates(tmp_path, {"cand-a": self._WINS, "cand-b": self._WINS})
+
+        block = execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        expected = holm_promote_execution(
+            [
+                execution_gate(
+                    run_dir=gates[candidate],
+                    incumbent_variant="incumbent",
+                    candidate_variant=candidate,
+                    suite_id=EXEC_SUITE,
+                )
+                for candidate in sorted(gates)
+            ]
+        )
+        assert block == "\n\n".join(render_execution_markdown(v) for v in expected)
+
+    def test_holm_promote_execution_is_called_exactly_once(self, tmp_path: Path, monkeypatch) -> None:
+        gates = self._gates(tmp_path, {"cand-a": self._WINS, "cand-b": self._WINS})
+        calls: list[int] = []
+        real = holm_promote_execution
+
+        def counting(verdicts, *args, **kwargs):
+            calls.append(len(verdicts))
+            return real(verdicts, *args, **kwargs)
+
+        monkeypatch.setattr("coder_eval.optimize.api.holm_promote_execution", counting)
+        execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        assert calls == [2], "one call, over both candidates"
+
+    def test_block_order_is_by_candidate_id_regardless_of_insertion_order(self, tmp_path: Path) -> None:
+        # A dict-order change must not silently reorder a ledger entry a later round is compared
+        # against, so the order is a property of the ids rather than of how the dict was built.
+        gates = self._gates(tmp_path, {"cand-b": self._WINS, "cand-a": self._WINS})
+        assert list(gates) == ["cand-b", "cand-a"], "the fixture must insert out of order"
+
+        block = execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        headings = [line for line in block.splitlines() if line.startswith("### Execution gate")]
+        assert len(headings) == 2
+        assert "`cand-a`" in headings[0] and "`cand-b`" in headings[1]
+
+    def test_an_empty_mapping_is_a_caller_error(self) -> None:
+        with pytest.raises(ValueError, match="gates is empty"):
+            execution_gate_report(gates={}, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+    def test_the_incumbent_as_a_candidate_is_a_caller_error(self, tmp_path: Path) -> None:
+        gates = self._gates(tmp_path, {"cand-a": self._WINS})
+        gates["incumbent"] = gates["cand-a"]
+
+        with pytest.raises(ValueError, match="contains the incumbent"):
+            execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+    def test_a_missing_run_dir_names_the_candidate_it_belongs_to(self, tmp_path: Path) -> None:
+        # On this track each candidate has its OWN dir to get wrong, so a bare FileNotFoundError
+        # from inside the gate gives no clue which arm is mis-wired.
+        gates = self._gates(tmp_path, {"cand-a": self._WINS})
+        gates["cand-b"] = tmp_path / "never-ran"
+
+        with pytest.raises(ValueError, match="no gate run directory for") as excinfo:
+            execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        assert "cand-b" in str(excinfo.value)
+        assert "cand-a" not in str(excinfo.value), "only the mis-wired arm is named"
+
+    def test_a_three_variant_run_dir_refuses_and_the_refusal_reaches_the_block(self, tmp_path: Path) -> None:
+        """`paired_comparison` fires only for exactly two variants, so a third is not a comparison.
+
+        The refusal keeps `promoted=None` until the correction forces False, so the composite's
+        always-correct shape is what puts it in front of a reader either way.
+        """
+        run_dir = exec_run_dir(
+            tmp_path / "three",
+            incumbent=WINNER["incumbent"],
+            candidate=WINNER["candidate"],
+            candidate_variant="cand-a",
+            variant_ids=["incumbent", "cand-a", "cand-c"],
+        )
+
+        block = execution_gate_report(gates={"cand-a": run_dir}, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        assert "NOT A RESULT" in block
+
+    def test_primary_criterion_index_none_is_passed_through_untouched(self, tmp_path: Path, monkeypatch) -> None:
+        # The normal case, and it must stay a READING rather than becoming a decision here.
+        gates = self._gates(tmp_path, {"cand-a": self._WINS})
+        seen: list[object] = []
+        real = execution_gate
+
+        def spy(**kwargs):
+            seen.append((kwargs["primary_criterion_index"], kwargs["engagement_criterion_index"]))
+            return real(**kwargs)
+
+        monkeypatch.setattr("coder_eval.optimize.api.execution_gate", spy)
+        execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        assert seen == [(None, 0)]
+
+    def test_a_refused_arm_shrinking_the_family_is_named(self, tmp_path: Path) -> None:
+        """The one guard here that fails OPEN, so it has to be said rather than inferred.
+
+        A verdict with no p-value is not a family member, so a refused arm drops out and `m` falls —
+        and the surviving candidates were predeclared against the larger family but decided against
+        the smaller, LOOSER threshold. Measured: two keys onto one run dir promoted the good arm
+        "across a family of 1" while the round had predeclared two.
+        """
+        run_dir = self._gates(tmp_path, {"cand-a": self._WINS})["cand-a"]
+
+        block = execution_gate_report(
+            gates={"cand-a": run_dir, "cand-b": run_dir},
+            incumbent_variant="incumbent",
+            suite_id=EXEC_SUITE,
+        )
+
+        assert "The Holm correction saw 1 of 2 predeclared candidate(s)" in block
+        assert "LOOSER threshold" in block
+        assert "family of 1" in block, "and the misleading line it is warning about is still visible"
+
+    def test_a_whole_family_that_gates_cleanly_carries_no_shrink_notice(self, tmp_path: Path) -> None:
+        # It must not fire on every block, or it stops being read.
+        gates = self._gates(tmp_path, {"cand-a": self._WINS, "cand-b": self._WINS})
+
+        block = execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        assert "predeclared candidate(s)" not in block
+
+    def test_the_family_is_joined_as_one_block_per_candidate(self, tmp_path: Path) -> None:
+        # The SSOT test derives its expectation with the implementation's own `"\n\n".join(...)`, so
+        # it cannot see the separator change. The twin carries the same structural assertion.
+        gates = self._gates(tmp_path, {"cand-a": self._WINS, "cand-b": self._WINS})
+
+        block = execution_gate_report(gates=gates, incumbent_variant="incumbent", suite_id=EXEC_SUITE)
+
+        assert block.count("\n\n### Execution gate") == 1
+        assert not block.endswith("\n")
+        # The composite always corrects, so no verdict can reach a reader undecided.
+        assert "UNDECIDED" not in block
+
+    def test_a_non_default_criterion_index_reaches_the_gate(self, tmp_path: Path, monkeypatch) -> None:
+        """Both indices are threaded, and `engagement_criterion_index=None` DISARMS a veto.
+
+        Pinning only the defaults let the composite hardcode them with every test still green —
+        measured. The engagement reading feeds `integrity_checks`, and a failed one forces `promoted`
+        False, so a dropped argument silently removes the check.
+        """
+        gates = self._gates(tmp_path, {"cand-a": self._WINS})
+        seen: list[tuple[object, object]] = []
+        real = execution_gate
+
+        def spy(**kwargs):
+            seen.append((kwargs["engagement_criterion_index"], kwargs["primary_criterion_index"]))
+            return real(**kwargs)
+
+        monkeypatch.setattr("coder_eval.optimize.api.execution_gate", spy)
+        execution_gate_report(
+            gates=gates,
+            incumbent_variant="incumbent",
+            suite_id=EXEC_SUITE,
+            engagement_criterion_index=None,
+            primary_criterion_index=2,
+        )
+
+        assert seen == [(None, 2)]
+
+    def test_no_estimator_knob_is_exposed(self) -> None:
+        params = inspect.signature(execution_gate_report).parameters
+        assert not {"seed", "n_resamples", "confidence", "materiality"} & set(params)
+
+
+class TestGatesAreRejectedAtTheBoundary:
+    """`api.py` claims every entry point rejects a bad path AT the boundary. This one takes a mapping.
+
+    Two of `_require_run_dirs`' three checks are unrepresentable here — a duplicate key cannot exist
+    and there is no one-shot iterable — so this covers what remains: the container and the values.
+    """
+
+    def test_a_non_mapping_names_the_shape_it_wanted(self) -> None:
+        with pytest.raises(TypeError, match="gates must be a mapping of candidate id"):
+            execution_gate_report(
+                gates=["cand-a"],  # type: ignore[arg-type]
+                incumbent_variant="incumbent",
+                suite_id=EXEC_SUITE,
+            )
+
+    def test_a_string_value_is_rejected_before_any_read(self) -> None:
+        # The likeliest mistake from a hand-typed fence, and it used to surface as
+        # `AttributeError: 'str' object has no attribute 'is_dir'`.
+        with pytest.raises(TypeError, match="gates values must be pathlib"):
+            execution_gate_report(
+                gates={"cand-a": "runs/round1-gate-a"},  # type: ignore[dict-item]
+                incumbent_variant="incumbent",
+                suite_id=EXEC_SUITE,
+            )

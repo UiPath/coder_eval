@@ -507,6 +507,7 @@ def exec_run_dir(
     declare_incumbent_first: bool = True,
     extra_scores: dict[str, dict[str, list[float]]] | None = None,
     variant_ids: list[str] | None = None,
+    candidate_variant: str = "candidate",
 ) -> Path:
     """One Stage B gate run directory: both arms' rows on disk plus the experiment file.
 
@@ -516,24 +517,36 @@ def exec_run_dir(
     fixture against a clean control ran the control over the refused arm's leftover rows and moved
     its `mde` from 2.8e-17 to 0.030, with the assertion still green. Refusing to build twice is what
     turns that into a test error; the fix at a call site is a distinct `tmp_path / "<name>"`.
+
+    ``candidate_variant`` renames the candidate arm on disk AND in the declaration, defaulted so every
+    existing call is byte-identical. It exists because this track's Holm family lives ACROSS run dirs
+    — one two-variant round per candidate — so a multi-candidate fixture needs each dir to carry a
+    DISTINCTLY named candidate beside the shared incumbent.
     """
+    # The same silent-merge class the directory assert below refuses: naming the candidate arm
+    # `incumbent` writes both arms into one variant tree and declares `["incumbent", "incumbent"]`,
+    # which passes the gate's two-variant check and measures garbage.
+    assert candidate_variant != "incumbent", "the candidate arm cannot be named after the incumbent"
     run_dir = tmp_path / "round1-gate"
     assert not run_dir.exists(), (
         f"{run_dir} already exists — two exec_run_dir calls under one tmp_path merge silently. "
         "Give each fixture its own subdirectory, e.g. exec_run_dir(tmp_path / 'winner', ...)."
     )
-    for variant, per_row in (("incumbent", incumbent), ("candidate", candidate)):
+    arms = (("incumbent", incumbent), (candidate_variant, candidate))
+    for variant, per_row in arms:
         for row_id, scores in per_row.items():
             for replicate, score in enumerate(scores):
                 write_row(run_dir, variant, row_id, scored_result(row_id, score), replicate)
 
     per_replicate = {
         variant: {f"{EXEC_SUITE}/{row_id}": list(scores) for row_id, scores in per_row.items()}
-        for variant, per_row in (("incumbent", incumbent), ("candidate", candidate))
+        for variant, per_row in arms
     }
     for variant, extra in (extra_scores or {}).items():
         per_replicate.setdefault(variant, {}).update(extra)
-    declared = variant_ids or (["incumbent", "candidate"] if declare_incumbent_first else ["candidate", "incumbent"])
+    declared = variant_ids or (
+        ["incumbent", candidate_variant] if declare_incumbent_first else [candidate_variant, "incumbent"]
+    )
     experiment_json(run_dir, declared, per_replicate)
     return run_dir
 

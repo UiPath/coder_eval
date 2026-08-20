@@ -24,7 +24,7 @@ was meant to read have been paid for. Every entry point rejects one at the bound
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from coder_eval.models import ACTIVATION_FLOOR_METRIC, EXECUTION_FLOOR_METRIC
@@ -35,7 +35,12 @@ from coder_eval.optimize.activation import (
     min_discordant_rows,
     noise_floor_mde,
 )
-from coder_eval.optimize.execution import measure_execution_noise_floor, resolve_arm_model
+from coder_eval.optimize.execution import (
+    execution_gate,
+    holm_promote_execution,
+    measure_execution_noise_floor,
+    resolve_arm_model,
+)
 from coder_eval.optimize.fronts import (
     arm_row_scores,
     cost_quality_front,
@@ -66,6 +71,8 @@ from coder_eval.reports_optimize import (
     render_corpus_check,
     render_cost_quality,
     render_discreteness,
+    render_execution_markdown,
+    render_family_shrunk,
     render_headroom_ceilings,
     render_leak_scan,
     render_markdown,
@@ -555,6 +562,24 @@ def search_report(
     )
 
 
+def _reject_incumbent_as_candidate(family: Sequence[str], incumbent_variant: str, *, argument: str) -> None:
+    """The incumbent is not a member of its own Stage B family, on either track.
+
+    Shared because the CLAIM is identical and the tracks spell the family differently — a sequence of
+    candidate ids on one, a candidate-to-run-dir mapping on the other. It gates an arm against itself,
+    which each track reports in its own words and neither reports as a family problem, while adding a
+    member to the Holm family so every REAL candidate is decided against a tighter threshold. Nothing
+    in either block connects the two, and it is one copy-paste away: Stage A's ``variant_ids``
+    legitimately starts with the incumbent.
+    """
+    if incumbent_variant in family:
+        raise ValueError(
+            f"{argument} contains the incumbent {incumbent_variant!r} — that gates an arm against "
+            + "itself and inflates the Holm family, tightening the threshold for the real candidates. "
+            + "Stage A's variant_ids includes the incumbent; a Stage B family does not."
+        )
+
+
 def _resolve_family(candidate_variants: Sequence[str], incumbent_variant: str) -> list[str]:
     """The Stage B family, MATERIALIZED and validated. Every rejection is one Holm family size.
 
@@ -587,12 +612,7 @@ def _resolve_family(candidate_variants: Sequence[str], incumbent_variant: str) -
             f"candidate_variants repeats {duplicates} — a duplicate inflates the Holm family size, "
             + "which makes the test stricter for every candidate in it, including the real ones"
         )
-    if incumbent_variant in family:
-        raise ValueError(
-            f"candidate_variants contains the incumbent {incumbent_variant!r} — that gates an arm "
-            + "against itself and inflates the Holm family, tightening the threshold for the real "
-            + "candidates. Stage A's variant_ids includes the incumbent; a Stage B family does not."
-        )
+    _reject_incumbent_as_candidate(family, incumbent_variant, argument="candidate_variants")
     return family
 
 
@@ -700,3 +720,105 @@ def seed_stability_report(
             sibling_indices=sibling_indices,
         )
     )
+
+
+def _require_gates(gates: Mapping[str, Path]) -> None:
+    """Reject a mapping that is not one, and values that are not ``Path``, before any read.
+
+    The execution track's family is a MAPPING, so two of the three shape mistakes
+    :func:`_require_run_dirs` catches are unrepresentable here — a duplicate key cannot exist and
+    there is no one-shot iterable to exhaust. What remains is the container itself (a ``str`` or a
+    list has no ``.items()``) and the values (a ``str`` where a ``Path`` belongs). Neither is silent
+    today, but both surface as an ``AttributeError`` from whichever line reaches them first, naming
+    neither the argument nor the fix — and the module's own contract says every entry point rejects a
+    bad path AT the boundary.
+    """
+    if not isinstance(gates, Mapping):
+        raise TypeError(
+            f"gates must be a mapping of candidate id -> run directory, not {type(gates).__name__} — "
+            + "this track gates one candidate per two-variant run dir, so the mapping IS the family"
+        )
+    wrong = sorted(f"{candidate}={value!r}" for candidate, value in gates.items() if not isinstance(value, Path))
+    if wrong:
+        raise TypeError("gates values must be pathlib.Path run directories: " + "; ".join(wrong))
+
+
+def execution_gate_report(
+    *,
+    gates: Mapping[str, Path],
+    incumbent_variant: str,
+    suite_id: str,
+    engagement_criterion_index: int | None = 0,
+    primary_criterion_index: int | None = None,
+) -> str:
+    """Stage B on the execution track: gate every candidate, then correct ONCE over the family.
+
+    **The mapping IS the family**, and that is why this signature differs from the activation twin's.
+    ``paired_comparison`` fires only for exactly two variants, so each candidate is gated in its own
+    two-variant round, and the Holm family therefore lives ACROSS run dirs rather than inside one.
+    Candidate id to that candidate's gate run dir is the only shape that can express it.
+
+    The block order is by candidate id — see the comment at the sort for why this track differs from
+    the twin.
+
+    ``primary_criterion_index=None`` is the normal case and stays a READING rather than a decision —
+    it is passed through untouched.
+
+    ``engagement_criterion_index`` is the other kind of parameter entirely, and the default is the
+    safe state: ``0`` checks that the candidate still engages the skill, and ``None`` **disarms that
+    veto** (the engagement reading feeds ``integrity_checks``, and a failed one forces ``promoted``
+    False). It is exposed for a suite whose engagement criterion sits elsewhere — not as a knob, and
+    never as a way to quiet a failing check. Same shape as the activation twin's ``sibling_indices``.
+
+    No estimator knob is exposed, for the reason the activation twin gives.
+    """
+    # NO `_staleness_note`, for the twin's reason: `execution_gate`'s own preflight runs
+    # `_refuse_stale_tree` and REFUSES, so a contaminated tree arrives as the verdict's own
+    # `NOT A RESULT` headline rather than as a note beside a number.
+    _require_gates(gates)
+    if not gates:
+        raise ValueError("gates is empty — an empty block reads as 'nothing promoted'")
+    _reject_incumbent_as_candidate(list(gates), incumbent_variant, argument="gates")
+    missing = sorted(f"{candidate} -> {run_dir}" for candidate, run_dir in gates.items() if not run_dir.is_dir())
+    if missing:
+        # RAISES rather than letting the gate refuse per arm, which it would do perfectly well (its
+        # refusal names the missing `experiment.json`). The trade is deliberate: a run dir that does
+        # not exist is a wiring fault in the round's own plumbing, not a measurement, and the same
+        # choice `headroom_report` and `leak_report` make. The cost is that one bad dir aborts the
+        # whole block rather than reporting the other candidates' already-paid-for verdicts — which is
+        # the right way round here, because a partial family is exactly what shrinks `m` below.
+        raise ValueError(
+            "no gate run directory for "
+            + "; ".join(missing)
+            + " — each candidate is gated in its own two-variant round, so each has its own"
+            + " --run-dir to name"
+        )
+    verdicts = [
+        execution_gate(
+            run_dir=gates[candidate],
+            incumbent_variant=incumbent_variant,
+            candidate_variant=candidate,
+            suite_id=suite_id,
+            engagement_criterion_index=engagement_criterion_index,
+            primary_criterion_index=primary_criterion_index,
+        )
+        # Sorted, where the activation twin deliberately renders the caller's list in the order
+        # given. The difference is what the two containers mean: a LIST of candidates is authored
+        # once, in the round's proposal order, and reordering it would stop a ledger entry lining up
+        # with that list. A MAPPING is routinely rebuilt — a comprehension, a config, a JSON
+        # round-trip — so its insertion order is an artefact rather than a statement, and sorting is
+        # what makes two rounds' blocks comparable. It changes no number: the correction is
+        # order-independent.
+        for candidate in sorted(gates)
+    ]
+    # ONE call over the whole family, as on the other track — and a refusal from any single arm keeps
+    # `promoted=None` until this forces False, so it reaches the block either way.
+    decided = holm_promote_execution(verdicts)
+    # A refused arm carries no p-value and is therefore NOT a family member, so `m` falls and the
+    # surviving candidates are corrected against a looser threshold than the round predeclared. Every
+    # other guard here fails closed; this one fails open, and only a caller holding the predeclared
+    # count can see it. Measured: two keys pointing at one run dir promoted the good arm "across a
+    # family of 1".
+    in_family = sum(1 for verdict in decided if verdict.p_value is not None)
+    shrunk = [render_family_shrunk(predeclared=len(gates), corrected=in_family)] if in_family < len(gates) else []
+    return "\n\n".join([*shrunk, *(render_execution_markdown(verdict) for verdict in decided)])

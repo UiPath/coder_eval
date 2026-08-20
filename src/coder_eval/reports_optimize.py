@@ -1116,3 +1116,25 @@ def render_leak_scan(
     lines.append("")
     lines.append(LEAK_SCAN_BOUNDARY)
     return "\n".join(lines)
+
+
+def render_family_shrunk(*, predeclared: int, corrected: int) -> str:
+    """The round gated more candidates than the Holm correction saw.
+
+    A verdict with no p-value is not a family member — it has nothing for a correction to correct —
+    so an arm that REFUSED drops out and ``m`` falls. That is right for the refused arm and wrong for
+    its siblings: they were predeclared against a family of ``predeclared`` and are decided against a
+    threshold computed for ``corrected``, which is **looser**. Every other guard in this area fails
+    closed; this one fails open, which is why it has to be said out loud rather than inferred from a
+    family-size line a reader would have to count against their own proposal list.
+
+    Only a caller holding the predeclared count can notice, which is why the wording lives here and
+    the arithmetic lives with the composite that has the mapping.
+    """
+    return (
+        f"**The Holm correction saw {corrected} of {predeclared} predeclared candidate(s).** The "
+        + f"{predeclared - corrected} missing arm(s) refused, so they carry no p-value and are outside "
+        + "the family — and the ones that remain were therefore decided against a LOOSER threshold "
+        + "than the round predeclared. Read their refusals above, fix them, and gate the whole family "
+        + "again before acting on any promotion here."
+    )

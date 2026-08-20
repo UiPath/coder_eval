@@ -1597,34 +1597,39 @@ cost twice as much is a trade, and the user is the one who gets to decide whethe
 
 The primary instrument is the reporter's own paired statistic, and the gate calls it for you —
 along with the cost and latency guardrails, which are not in that block, and the two integrity
-readings the method's promote-only-when list requires and a human used to check by eye:
+readings the method's promote-only-when list requires and a human used to check by eye.
+
+**ONE run dir per candidate.** The paired statistic fires only for exactly two variants, so each
+candidate is gated in its own `round<N>-gate.yaml` — which means the Holm family lives ACROSS run
+dirs, and the mapping below *is* the family:
 
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.execution import execution_gate, holm_promote_execution
-from coder_eval.reports_optimize import render_execution_markdown
+from coder_eval.optimize.api import execution_gate_report
 
-# ONE run dir per candidate: the paired statistic fires only for exactly two variants, so each
-# candidate is gated in its own two-variant round<N>-gate.yaml. The family therefore lives ACROSS
-# run dirs, and this dict is what assembles it.
-gates = {"cand-a-name-the-action": Path("<runs>/round1-gate-a"),
-         "cand-b-forbid-invention": Path("<runs>/round1-gate-b")}
-
-verdicts = [
-    execution_gate(run_dir=d, incumbent_variant="incumbent", candidate_variant=c,
-                   suite_id="<the suite's task_id>")
-    for c, d in gates.items()
-]
-for v in holm_promote_execution(verdicts):
-    print(render_execution_markdown(v))
+print(execution_gate_report(
+    gates={"cand-a-name-the-action": Path("<runs>/round1-gate-a"),
+           "cand-b-forbid-invention": Path("<runs>/round1-gate-b")},
+    incumbent_variant="incumbent", suite_id="<the suite's task_id>",
+))
 ```
 
 **Gate every survivor first, then correct once** — the identical failure mode as on the activation
-track. The list is built before `holm_promote_execution` sees any of it; correcting one candidate
-at a time silently reverts to an uncorrected alpha. A round that gates a single candidate passes a
-family of one, which is the same call. `execution_gate` alone never promotes anything, and
-`render_execution_markdown` prints **UNDECIDED** if you forget the correction.
+track, and here the MAPPING is what makes the shape unavailable: every verdict is built before
+`holm_promote_execution` sees any of it, and the correction runs once. A round that gates a single
+candidate passes a family of one, which is the same call. Block order is by candidate id, so a
+differently-ordered dict cannot reorder a ledger entry a later round is compared against — and the
+incumbent must not appear as a key, since gating an arm against itself adds a candidate to the
+correction and tightens the threshold for the real ones.
+
+**If any arm REFUSES, the correction shrank and the block says so.** A verdict with no p-value is
+not a family member, so a refused arm drops out and the survivors are corrected against a *looser*
+threshold than the round predeclared — the one failure here that errs toward promoting. Fix the
+refusals and gate the whole family again before acting on a promotion beside one. (This is why
+`execution_gate` alone never promotes anything and `render_execution_markdown` prints **UNDECIDED**
+for a verdict no correction has seen: those are states the block above cannot produce, because it
+always corrects.)
 
 **There is a fourth headline here too, and it is not a negative result: `NOT A RESULT`.** It means
 the block decided nothing — do not report it as "not promoted", do not re-run hoping for a
