@@ -15,6 +15,15 @@ keys on "does this rule call ``resolved_module``" rather than on "does it mentio
 because that is the DRY rule and the correctness rule at the same time and cannot be satisfied by a
 stray mention.
 
+**The entry point is :meth:`tests.lint.rules.base.BaseRule.check_import`, not this function.** A
+rule overrides that hook and receives the already-resolved module, so the correct path is the
+default path and a rule cannot forget to resolve — which is what the five broken rules had done.
+:func:`resolved_module` is the primitive behind it, called in exactly two places: the base visitor,
+and CE051, whose subject is rule SOURCE rather than the tree's imports. Anything that is not a
+``BaseRule`` — ``tests/test_optimize_layering.py``'s ``_coder_eval_imports`` is the live example —
+still calls it directly, which is why CE051 keeps a tests-wide scope rather than a rules-directory
+one.
+
 Shared, non-numbered helper beside ``cli_flags.py`` and ``markdown_tables.py``, which set the
 precedent for a reader several rules depend on.
 """

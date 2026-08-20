@@ -19,7 +19,6 @@ Add ``# noqa: CE017`` for a deliberate exception.
 import ast
 import re
 
-from tests.lint.import_resolution import resolved_module
 from tests.lint.rules.base import BaseRule
 
 
@@ -34,12 +33,11 @@ class ModelsLazyAgentImports(BaseRule):
         super().__init__(filepath)
         self._in_models = bool(_MODELS_DIR.search(filepath))
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+    def check_import(self, node: ast.ImportFrom, module: str | None) -> None:
         # col_offset == 0 == an unconditional module-level statement. Function-local
         # and TYPE_CHECKING-guarded imports are indented (col_offset > 0) and allowed.
-        # Routed through `resolved_module` (CE051): `from ..agents import X` inside models/ read
-        # as the module `"agents"` and evaded the pattern entirely.
-        module = resolved_module(node, self.filepath)
+        # `module` arrives resolved (see `BaseRule.check_import`): before that,
+        # `from ..agents import X` inside models/ read as `"agents"` and evaded the pattern.
         if self._in_models and node.col_offset == 0 and module and _BANNED.match(module):
             self.violation(
                 node,

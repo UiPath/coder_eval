@@ -48,7 +48,6 @@ different question and cannot be enabled instead.
 
 import ast
 
-from tests.lint.import_resolution import resolved_module
 from tests.lint.rules.base import BaseRule
 
 
@@ -65,20 +64,20 @@ class NoSiblingPrivateImports(BaseRule):
         super().__init__(filepath)
         self._in_package = _PACKAGE_PATH in filepath.replace("\\", "/")
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+    def check_import(self, node: ast.ImportFrom, module: str | None) -> None:
         if not self._in_package:
             return
-        target = resolved_module(node, self.filepath)
-        if target is None or not target.startswith(f"{_PACKAGE}."):
+        # `module` arrives resolved (see `BaseRule.check_import`), which this rule cannot do
+        # without: inside the package almost every import is relative.
+        if module is None or not module.startswith(f"{_PACKAGE}."):
             return
         for alias in node.names:
             if alias.name.startswith("_"):
                 self.violation(
                     node,
-                    f"imports the private name {alias.name!r} from the sibling module {target!r}. "
+                    f"imports the private name {alias.name!r} from the sibling module {module!r}. "
                     "Inside coder_eval/optimize/ a name two modules share is PUBLIC — drop the "
                     "underscore. One underscore cannot mark both 'shared within the package' and "
                     "'local to this file', and spelling the first like the second tells a reader "
                     "the signature is safe to change when four modules depend on it.",
                 )
-        self.generic_visit(node)

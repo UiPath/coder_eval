@@ -17,7 +17,6 @@ Use `# noqa: CE023` for a deliberate backwards-compatibility reference.
 import ast
 import re
 
-from tests.lint.import_resolution import resolved_module
 from tests.lint.rules.base import BaseRule
 
 
@@ -31,9 +30,9 @@ class NoProxyShimImports(BaseRule):
         super().__init__(filepath)
         self._skip_file = bool(self._SKIP_PATH.search(filepath))
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # Routed through `resolved_module` (CE051): `from ..proxy import X` evaded the pattern.
-        module = resolved_module(node, self.filepath)
+    def check_import(self, node: ast.ImportFrom, module: str | None) -> None:
+        # `module` arrives resolved (see `BaseRule.check_import`): before that,
+        # `from ..proxy import X` evaded the pattern.
         if not self._skip_file and module and self._PROXY_IMPORT.match(module):
             names = ", ".join(a.name for a in node.names)
             self.violation(

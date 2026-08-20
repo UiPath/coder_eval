@@ -23,7 +23,6 @@ runtime introspection of a submodule's contents.
 import ast
 import re
 
-from tests.lint.import_resolution import resolved_module
 from tests.lint.rules.base import BaseRule
 
 
@@ -46,10 +45,9 @@ class NoSubmoduleModelImports(BaseRule):
         else:
             self.generic_visit(node)
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # Routed through `resolved_module` (CE051): matching `node.module` alone made
+    def check_import(self, node: ast.ImportFrom, module: str | None) -> None:
+        # `module` arrives resolved (see `BaseRule.check_import`): matching `node.module` alone made
         # `from ..models.tasks import X` invisible, and two such imports were live in the tree.
-        module = resolved_module(node, self.filepath)
         if not self._skip_file and not self._type_checking_depth and module and self._SUBMODULE_IMPORT.match(module):
             names = ", ".join(a.name for a in node.names)
             self.violation(

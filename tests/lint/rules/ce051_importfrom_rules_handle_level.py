@@ -1,4 +1,17 @@
-"""CE051: a lint rule that inspects ``ImportFrom.module`` must route through ``resolved_module``.
+"""CE051: an import-matching lint rule must route through ``resolved_module`` — and must not
+hand-roll its own ``visit_ImportFrom`` when :meth:`~tests.lint.rules.base.BaseRule.check_import`
+exists.
+
+**TWO checks, one id, and neither subsumes the other.** The hook makes the correct path the DEFAULT
+path — a rule overriding ``check_import`` receives an already-resolved module and cannot get the
+resolution wrong — so the second check is what stops a new rule from opting back out of it. The
+first check remains necessary because it is WIDER in two ways the hook cannot reach, both of which
+the boundary notes below already record: it scans all of ``tests/``, where the same blindness lives
+in ``test_optimize_layering.py``'s ``_coder_eval_imports`` (not a ``BaseRule``, so it can never use
+the hook), and it catches shapes that are not a ``visit_ImportFrom`` at all — a lambda, or a
+``node.module`` read inside an ``ast.walk``, which exists in the tree today
+(``ce020_no_sdk_typed_base_agent_fields.py``). Narrowing CE051 to the rules directory, or to
+"defines ``visit_ImportFrom``", would have dropped every one of those.
 
 **The failure class this polices, with four confirmed members.** Five rules under
 ``tests/lint/rules/`` match on an import's module string, and every one of them read
@@ -45,6 +58,11 @@ unit-tested, and a rule routed through it cannot be half-right.
 * Scope is decided by the rule's own string CONSTANTS, so a rule that builds its pattern from an
   f-string, or imports it from another module, has no first-party constant of its own and drops
   out of scope entirely. Both are real evasion routes and neither is detected.
+* The SECOND check is scoped to ``tests/lint/rules/`` and exempts ``base.py``, which is the one
+  file that must define ``visit_ImportFrom``. It is anchored against vacuity on ``base.py`` itself:
+  checking that file asserts it defines BOTH ``visit_ImportFrom`` and ``check_import``, so renaming
+  or deleting the hook is reported there rather than quietly making the whole check a no-op
+  (CE044's lesson). It says nothing about whether an overriding ``check_import`` is CORRECT.
 * It scans all of ``tests/`` — not just ``tests/lint/rules/``. The class is not confined to
   numbered rules: ``tests/test_optimize_layering.py``'s ``_coder_eval_imports`` had exactly the
   same blindness, and it is the helper behind the ``optimize/`` / ``reports_optimize``
@@ -59,8 +77,12 @@ from tests.lint.violation import Violation
 
 
 _TEST_TREE = "tests/"
+_RULES_DIR = "tests/lint/rules/"
+_BASE_MODULE = "tests/lint/rules/base.py"
 _RESOLVER = "resolved_module"
 _RESOLVER_MODULE_MARKER = "_package_chain"
+_VISITOR = "visit_ImportFrom"
+_HOOK = "check_import"
 
 _FIX = (
     "this `visit_ImportFrom` reads `node.module` without routing through "
@@ -74,6 +96,20 @@ _GAP = (
     "no `visit_ImportFrom` method found in this rule file, but it reads `node.module` — CE051 "
     "cannot verify the resolver is used. If the rule was restructured, teach CE051 the new shape "
     "rather than leaving it to pass vacuously."
+)
+
+_HAND_ROLLED = (
+    "this rule defines its own `visit_ImportFrom`. Override `BaseRule.check_import(node, module)` "
+    "instead: it hands you the ABSOLUTE module with `node.level` already resolved, which makes the "
+    "correct path the default one. A rule that resolves for itself can forget to — five did at "
+    "once, and the failure is silent, because an import rule that never matches reports zero "
+    "violations exactly like a clean tree."
+)
+
+_HOOK_GAP = (
+    f"`BaseRule` no longer defines both `{_VISITOR}` and `{_HOOK}`, so CE051's second check has "
+    "nothing to route rules TO and would pass vacuously on every rule file. If the hook was "
+    "renamed, rename it here too."
 )
 
 
@@ -139,14 +175,23 @@ class ImportFromRulesHandleLevel(BaseRule):
         ``__init__`` runs with only a path — and the vacuity guard needs to know whether any
         ``visit_ImportFrom`` was seen at all, which is a fact about the whole file.
         """
-        if not self._in_tests or not _matches_first_party(tree):
+        if not self._in_tests:
             return []
+
+        # Checked BEFORE the first-party scope test, and deliberately: a rule that hand-rolls
+        # `visit_ImportFrom` is opting out of the resolved-module hook whatever it happens to match
+        # on, so gating this on the rule's own constants would exempt exactly the rules that have
+        # not started matching a first-party module YET.
+        self._check_hook_is_used(tree)
+
+        if not _matches_first_party(tree):
+            return self.violations
         # The resolver itself reads `node.module` and cannot call itself. Detected by what it
         # DEFINES rather than by its path, so moving the file does not silently re-exempt or
         # re-flag it.
         defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)}
         if _RESOLVER in defined and _RESOLVER_MODULE_MARKER in defined:
-            return []
+            return self.violations
 
         functions: list[ast.AST] = [
             n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
@@ -171,3 +216,24 @@ class ImportFromRulesHandleLevel(BaseRule):
             anchor = getattr(tree, "body", None)
             self.violation(anchor[0] if anchor else tree, _GAP)
         return self.violations
+
+    def _check_hook_is_used(self, tree: ast.AST) -> None:
+        """No rule under ``tests/lint/rules/`` may define ``visit_ImportFrom``. ``base.py`` must.
+
+        Both halves matter. Without the first, the hook is available and ignorable. Without the
+        second — the anti-vacuity anchor — renaming ``check_import`` would leave a check that
+        forbids the only shape there is, and every rule file would pass because none of them
+        defines the visitor any more.
+        """
+        path = self.filepath.replace("\\", "/")
+        if _RULES_DIR not in path:
+            return
+        methods = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
+        if path.endswith(_BASE_MODULE):
+            if not {_VISITOR, _HOOK} <= methods:
+                anchor = getattr(tree, "body", None)
+                self.violation(anchor[0] if anchor else tree, _HOOK_GAP)
+            return
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == _VISITOR:
+                self.violation(node, _HAND_ROLLED)

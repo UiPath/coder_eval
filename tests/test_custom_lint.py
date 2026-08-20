@@ -27,7 +27,11 @@ from tests.lint.rules.ce041_no_model_dict_splat import NoModelDictSplat
 from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
-from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRulesHandleLevel
+from tests.lint.rules.ce051_importfrom_rules_handle_level import (
+    _HAND_ROLLED,
+    _HOOK_GAP,
+    ImportFromRulesHandleLevel,
+)
 from tests.lint.rules.ce053_run_tree_readers_reconcile import _RECONCILE, RunTreeReadersReconcile
 from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
 from tests.lint.rules.ce059_no_sibling_private_imports import NoSiblingPrivateImports
@@ -9582,17 +9586,27 @@ class R(BaseRule):
 
 
 class TestCE051ImportFromRulesHandleLevel:
-    """CE051 — the meta-rule. It polices a class with four CONFIRMED members, not a hypothetical."""
+    """CE051 — the meta-rule. It polices a class with four CONFIRMED members, not a hypothetical.
+
+    It reports TWO independent findings, so the tests separate them: `_resolver_check` filters to
+    the "route through the resolver" half, and `_check` returns everything. A test about one half
+    must not be perturbed by the other — every fixture below is a rule that hand-rolls
+    `visit_ImportFrom`, which is now itself a finding, so an unfiltered assertion on a resolver
+    fixture would be counting the wrong thing.
+    """
 
     def _check(self, source: str, path: str = "tests/lint/rules/ce999_example.py"):
         return ImportFromRulesHandleLevel(path).check(ast.parse(textwrap.dedent(source)))
 
+    def _resolver_check(self, source: str, path: str = "tests/lint/rules/ce999_example.py"):
+        return [v for v in self._check(source, path) if v.message not in {_HAND_ROLLED, _HOOK_GAP}]
+
     def test_it_fires_on_a_rule_reading_node_module_without_the_resolver(self) -> None:
-        violations = self._check(_CE051_UNRESOLVED)
+        violations = self._resolver_check(_CE051_UNRESOLVED)
         assert len(violations) == 1 and violations[0].rule_id == "CE051"
 
     def test_it_is_silent_once_the_rule_routes_through_the_resolver(self) -> None:
-        assert self._check(_CE051_RESOLVED) == []
+        assert self._resolver_check(_CE051_RESOLVED) == []
 
     def test_a_third_party_matcher_is_exempt_by_construction(self) -> None:
         # A relative import can never resolve to a package outside the importing one, so CE020's
@@ -9606,7 +9620,7 @@ class R(BaseRule):
         if node.module and node.module.startswith(_SDK):
             self.violation(node, "nope")
 """
-        assert self._check(source) == []
+        assert self._resolver_check(source) == []
 
     def test_a_docstring_mentioning_coder_eval_does_not_drag_a_rule_into_scope(self) -> None:
         """The branch the "exempt by construction" claim rests on, and it was broken.
@@ -9626,7 +9640,7 @@ class R(BaseRule):
                     if node.module and node.module.startswith(_SDK):
                         self.violation(node, "nope")
         '''
-        assert self._check(source) == []
+        assert self._resolver_check(source) == []
 
     def test_a_docstring_alone_cannot_make_a_third_party_rule_report_a_gap(self) -> None:
         # The second symptom of the same bug, and the nastier one: the GAP violation was anchored
@@ -9641,7 +9655,7 @@ class R(BaseRule):
                     if node.module and node.module.startswith(_SDK):
                         yield node
         '''
-        assert self._check(source) == []
+        assert self._resolver_check(source) == []
 
     def test_the_gap_violation_is_anchored_on_a_real_line(self) -> None:
         # An unsuppressible violation is a wall, not a guard: the runner matches a `noqa` comment
@@ -9704,9 +9718,102 @@ class R(BaseRule):
         if _imports_models(node):
             self.violation(node, "nope")
 """
-        violations = self._check(source)
+        violations = self._resolver_check(source)
         assert len(violations) == 1
         assert violations[0].line == 4, "the violation must point at the helper, not the visitor"
+
+    def test_a_rule_that_hand_rolls_the_visitor_is_reported(self) -> None:
+        """The second check: the hook exists, so opting out of it must not be silent."""
+        source = """
+_MODELS = "coder_eval.models"
+
+class R(BaseRule):
+    def visit_ImportFrom(self, node):
+        module = resolved_module(node, self.filepath)
+        if module == _MODELS:
+            self.violation(node, "nope")
+"""
+        violations = self._check(source)
+        assert [v.message for v in violations] == [_HAND_ROLLED]
+        # It routes through the resolver, so the FIRST check is satisfied — the two are independent.
+        assert self._resolver_check(source) == []
+
+    def test_a_rule_using_the_hook_is_not_reported(self) -> None:
+        source = """
+_MODELS = "coder_eval.models"
+
+class R(BaseRule):
+    def check_import(self, node, module):
+        if module == _MODELS:
+            self.violation(node, "nope")
+"""
+        assert self._check(source) == []
+
+    def test_the_base_class_itself_is_exempt(self) -> None:
+        source = """
+class BaseRule:
+    def visit_ImportFrom(self, node):
+        self.check_import(node, resolved_module(node, self.filepath))
+        self.generic_visit(node)
+
+    def check_import(self, node, module):
+        pass
+"""
+        assert self._check(source, path="tests/lint/rules/base.py") == []
+
+    @pytest.mark.parametrize("missing", ["visit_ImportFrom", "check_import"])
+    def test_the_base_class_reports_a_gap_if_either_half_of_the_hook_goes(self, missing: str) -> None:
+        """CE044's lesson: a check whose target was renamed must not pass by matching nothing.
+
+        With `check_import` gone there is nothing to route rules TO, and with `visit_ImportFrom`
+        gone nothing resolves the module — either way the second check would then be satisfied by
+        every rule file in the tree, silently.
+        """
+        source = """
+class BaseRule:
+    def visit_ImportFrom(self, node):
+        self.check_import(node, resolved_module(node, self.filepath))
+
+    def check_import(self, node, module):
+        pass
+"""
+        broken = source.replace(f"def {missing}(", "def renamed_away(")
+        violations = self._check(broken, path="tests/lint/rules/base.py")
+        assert [v.message for v in violations] == [_HOOK_GAP]
+
+    def test_a_rule_outside_the_rules_directory_may_define_the_visitor(self) -> None:
+        """The second check is scoped; the first is not.
+
+        `tests/test_optimize_layering.py::_coder_eval_imports` is not a `BaseRule` and can never use
+        the hook, which is exactly why CE051 keeps its tests-wide scope for the resolver half.
+        """
+        source = """
+_MODELS = "coder_eval.models"
+
+class NotARule:
+    def visit_ImportFrom(self, node):
+        module = resolved_module(node, self.filepath)
+        if module == _MODELS:
+            pass
+"""
+        assert self._check(source, path="tests/test_something_else.py") == []
+
+    def test_the_rules_directory_defines_the_visitor_exactly_once(self) -> None:
+        """The live acceptance criterion, asserted rather than left to the whole-tree scan.
+
+        A zero here would mean the hook was deleted outright; anything above one means a rule
+        reintroduced its own visitor. Both are the states this check exists to prevent, and the
+        whole-tree scan reports the second but not the first.
+        """
+        definers = sorted(
+            path.name
+            for path in (Path(__file__).parent / "lint" / "rules").glob("*.py")
+            if any(
+                isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "visit_ImportFrom"
+                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            )
+        )
+        assert definers == ["base.py"]
 
     def test_the_id_is_unique_across_every_wired_rule(self) -> None:
         assert [r.id for r in ALL_RULES].count("CE051") == 1

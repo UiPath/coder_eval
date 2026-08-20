@@ -14,7 +14,6 @@ that catches the one mistake we have actually seen.
 import ast
 import re
 
-from tests.lint.import_resolution import resolved_module
 from tests.lint.rules.base import BaseRule
 
 
@@ -31,17 +30,16 @@ class NoCliImportsInCore(BaseRule):
         super().__init__(filepath)
         self._in_core = bool(_CORE_DIRS.search(filepath))
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # Routed through `resolved_module` (CE051). CE004 was the one rule whose exposure was
-        # inconclusive in the spike, and it IS affected: a core module reaching sideways with
-        # `from ..cli.console import console` read as `"cli.console"` and never matched.
-        module = resolved_module(node, self.filepath)
+    def check_import(self, node: ast.ImportFrom, module: str | None) -> None:
+        # `module` arrives with `node.level` already resolved (see `BaseRule.check_import`). CE004
+        # was the one rule whose exposure was inconclusive in the spike, and it IS affected: a core
+        # module reaching sideways with `from ..cli.console import console` read as `"cli.console"`
+        # and never matched.
         if self._in_core and module and _BANNED.match(module):
             self.violation(
                 node,
                 f"architectural violation: '{module}' (cli layer) imported from core layer",
             )
-        self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
         if self._in_core:
