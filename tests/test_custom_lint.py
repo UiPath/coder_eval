@@ -28,7 +28,7 @@ from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
 from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRulesHandleLevel
-from tests.lint.rules.ce053_run_tree_readers_reconcile import RunTreeReadersReconcile
+from tests.lint.rules.ce053_run_tree_readers_reconcile import _RECONCILE, RunTreeReadersReconcile
 from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
 from tests.lint.rules.ce059_no_sibling_private_imports import NoSiblingPrivateImports
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -8326,6 +8326,33 @@ class TestCE053RunTreeReadersReconcile:
         assert len(violations) == 1
         # Line 4 of the dedented source (1 = `def`), the nested read — not the flat one on line 5.
         assert violations[0].line == 4  # type: ignore[attr-defined]
+
+    def test_every_accepted_reconciler_really_reconciles(self) -> None:
+        """The rule accepts a NAME, so each accepted name must earn it — checked, not assumed.
+
+        `_RECONCILE` holds `reconcile_tree_against_run_json` (the primitive), `reconcile_arms` (the
+        whole-arm sweep) and `_refuse_stale_tree` (the execution gate's reconciliation, extracted as
+        a named stage). The last two are wrappers, so the rule is satisfied for every reader in the
+        package by a call to them — and it would stay satisfied if either quietly stopped calling
+        the primitive. That is the trade CE053's docstring records; this is the assertion that keeps
+        the trade honest, and it is why adding a name to that set is cheap rather than dangerous.
+        """
+        primitive = "reconcile_tree_against_run_json"
+        wrappers = sorted(_RECONCILE - {primitive})
+        assert wrappers, "the set collapsed to the primitive — this test would then check nothing"
+
+        found: dict[str, bool] = {}
+        for path in sorted((SRC / "coder_eval" / "optimize").glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in wrappers:
+                    calls = {
+                        call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+                        for call in ast.walk(node)
+                        if isinstance(call, ast.Call)
+                    }
+                    found[node.name] = primitive in calls
+        assert sorted(found) == wrappers, f"a name CE053 accepts is not defined in the package: {found}"
+        assert all(found.values()), f"an accepted reconciler never calls {primitive}: {found}"
 
     def test_the_live_suppression_set_is_exactly_the_two_documented_ones(self) -> None:
         """Anti-vacuity, and the acceptance criterion in test form.

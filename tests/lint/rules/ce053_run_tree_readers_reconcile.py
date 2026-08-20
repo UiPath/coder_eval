@@ -46,8 +46,14 @@ the wrong place to put one. Stated rather than glossed, because this rule's fail
   ``tests/test_optimize_layering.py::TestStageAReadersReconcileTheTree`` are what cover it.
 - It does not check that the reconciliation is over the SAME run dirs and variant the read uses.
   Both are usually the function's own parameters, but a mismatched pair would pass.
-- Nested functions are folded into their enclosing top-level one: ``execution_gate`` reconciles in
-  its own body and loads there too, and a closure that only reads is not a separate reader.
+- Nested functions are folded into their enclosing top-level one, so a closure that only reads is
+  not a separate reader.
+- The accepted names are a LIST, not a shape. ``_refuse_stale_tree`` is on it because it is
+  ``execution_gate``'s reconciliation, extracted as a named stage — the same relation
+  ``reconcile_arms`` has to ``reconcile_tree_against_run_json``, which is already why the rule
+  accepts both. The cost is that the list is matched by BARE NAME, so a same-named function
+  elsewhere in the family would satisfy the rule without reconciling anything. That was already
+  true of the other two and is the trade this rule makes to stay an AST check.
 """
 
 import ast
@@ -72,8 +78,10 @@ from tests.lint.rules.base import BaseRule
 _OPTIMIZE_MODULES = re.compile(r"/coder_eval/optimize/(?:[\w]+/)*[\w]+\.py$")
 
 _TREE_READERS = frozenset({"load_suite_rows", "load_arm_rows"})
-# The primitive and the whole-arm sweep that wraps it. See the module docstring for why both.
-_RECONCILE = frozenset({"reconcile_tree_against_run_json", "reconcile_arms"})
+# The primitive, the whole-arm sweep that wraps it, and the gate stage that wraps THAT. See the
+# module docstring for why all three: every one of them is a NAMED declaration of "this tree was
+# reconciled", so a reader routed through any of them is satisfied rather than suppressed.
+_RECONCILE = frozenset({"reconcile_tree_against_run_json", "reconcile_arms", "_refuse_stale_tree"})
 
 # The primitive itself: `load_arm_rows` IS a `load_suite_rows` caller, and reconciling inside it
 # would run the sweep once per composing gate rather than once per gate.

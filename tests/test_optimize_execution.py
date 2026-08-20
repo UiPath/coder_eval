@@ -28,8 +28,19 @@ from coder_eval.models import (
 from coder_eval.optimize import execution as optimize_execution
 from coder_eval.optimize.activation import measure_noise_floor
 from coder_eval.optimize.execution import (
+    _below_mde_findings,
     _dead_weight,
     _execution_diagnostics,
+    _note_tight_interval,
+    _note_unpriced_floor,
+    _paired_row_ids,
+    _primary_reading,
+    _provenance_notes,
+    _refuse_no_comparison,
+    _refuse_stale_tree,
+    _refuse_unusable_sample,
+    _refuse_zero_variance,
+    _signed_statistic,
     confirm_gate_execution,
     execution_gate,
     holm_promote_execution,
@@ -1752,3 +1763,419 @@ class TestExecutionGateSplitNote:
         verdict = exec_gate(run_dir)
         assert any("provenance is missing" in note for note in verdict.notes)
         assert verdict.gate_refusal is None, "provenance is never a refusal on this track"
+
+
+class TestTheGateStagesAreCalledInPrecedenceOrder:
+    """`execution_gate` is an orchestration function now, and the ORDER of its calls IS the rule.
+
+    Each stage returns its message and the gate's `FirstCause` keeps the first, so nothing else in
+    the tree declares the precedence. These are the unit tests for the stages plus one test per
+    ADJACENT pair in the cascade — a later cause is usually an earlier one's consequence, so a
+    reordering reports a symptom and sends the reader to the wrong remedy.
+    """
+
+    def test_the_same_variant_stage_refuses_only_on_a_match(self) -> None:
+        assert _refuse_no_comparison("a", "b") is None
+        refusal = _refuse_no_comparison("only-arm", "only-arm")
+        assert refusal is not None
+        assert "both 'only-arm'" in refusal and "no sign to resolve" in refusal
+
+    def test_the_stale_tree_stage_names_the_first_contaminated_arm(self, tmp_path: Path) -> None:
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        assert _refuse_stale_tree(run_dir=run_dir, variants=("incumbent", "candidate"), suite_id=EXEC_SUITE) is None
+        write_row(run_dir, "candidate", "ghost", scored_result("ghost", 1.0), record=False)
+        refusal = _refuse_stale_tree(run_dir=run_dir, variants=("incumbent", "candidate"), suite_id=EXEC_SUITE)
+        assert refusal is not None
+        assert "run.json never wrote" in refusal and "candidate" in refusal
+        # ONE fault, named once: the loop stops at the first arm rather than reporting both.
+        assert refusal.count("run.json never wrote") == 1
+
+    def test_the_same_variant_cause_outranks_the_stale_tree(self, tmp_path: Path) -> None:
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        write_row(run_dir, "incumbent", "ghost", scored_result("ghost", 1.0), record=False)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="incumbent",
+            suite_id=EXEC_SUITE,
+            n_resamples=FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None
+        assert "no sign to resolve" in verdict.gate_refusal
+        assert "run.json never wrote" not in verdict.gate_refusal
+
+    def test_the_stale_tree_cause_outranks_the_missing_experiment_file(self, tmp_path: Path) -> None:
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        (run_dir / "experiment.json").unlink()
+        write_row(run_dir, "incumbent", "ghost", scored_result("ghost", 1.0), record=False)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            n_resamples=FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None
+        assert "run.json never wrote" in verdict.gate_refusal
+        assert "there is no experiment file" not in verdict.gate_refusal
+
+    def test_the_experiment_cause_outranks_the_zero_row_cause(self, tmp_path: Path) -> None:
+        """A mistyped variant id makes that arm load zero rows as a CONSEQUENCE.
+
+        Refusing on the consequence would replace a message naming the two ids the experiment
+        actually carries with one that can only say "a wrong variant id, suite id or run directory".
+        """
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="typo",
+            suite_id=EXEC_SUITE,
+            n_resamples=FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None
+        assert "is not one of the two variants" in verdict.gate_refusal
+        assert "loaded ZERO rows" not in verdict.gate_refusal
+
+
+class TestTheDiagnosticStages:
+    """Each post-statistic stage, unit-tested for every cause it owns."""
+
+    @staticmethod
+    def _comparison(task_count: int = 4) -> PairedComparison:
+        return PairedComparison(
+            vid_a="candidate",
+            vid_b="incumbent",
+            task_count=task_count,
+            excluded_count=0,
+            mean_diff=0.2,
+            ci_low=0.1,
+            ci_high=0.3,
+            effect_size=1.0,
+            p_value=0.01,
+        )
+
+    def test_an_empty_arm_outranks_a_short_pairing(self, tmp_path: Path) -> None:
+        """An arm that loaded nothing is WHY the pairing is short, so it must be named first."""
+        refusal = _refuse_unusable_sample(
+            incumbent_rows={},
+            candidate_rows={},
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            run_dir=tmp_path,
+            comparison=self._comparison(task_count=1),
+        )
+        assert refusal is not None
+        assert "loaded ZERO rows" in refusal
+        assert "fewer than the 2 a paired interval needs" not in refusal
+        # ONE message naming BOTH empty arms, not one per arm.
+        assert refusal.count("loaded ZERO rows") == 1
+        assert "the incumbent arm ('incumbent') and the candidate arm ('candidate')" in refusal
+
+    def test_a_short_pairing_refuses_once_both_arms_loaded(self, tmp_path: Path) -> None:
+        rows = {"r1": [scored_result("r1", 1.0)]}
+        refusal = _refuse_unusable_sample(
+            incumbent_rows=rows,
+            candidate_rows=rows,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            run_dir=tmp_path,
+            comparison=self._comparison(task_count=1),
+        )
+        assert refusal is not None and "fewer than the 2 a paired interval needs" in refusal
+
+    def test_a_healthy_sample_refuses_nothing_here(self, tmp_path: Path) -> None:
+        rows = {"r1": [scored_result("r1", 1.0)]}
+        assert (
+            _refuse_unusable_sample(
+                incumbent_rows=rows,
+                candidate_rows=rows,
+                incumbent_variant="incumbent",
+                candidate_variant="candidate",
+                suite_id=EXEC_SUITE,
+                run_dir=tmp_path,
+                comparison=self._comparison(),
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        ("mean_diff", "expected"),
+        [
+            # The split `holm_promote`'s discreteness refusal makes, for the same reason: at a
+            # constant difference of ZERO the arms behaved identically, and the paired t reports
+            # p = 1.0 there rather than the 0.0 a non-zero constant shift gives.
+            (0.0, "identical per-row score"),
+            (0.4, "differed by exactly 0.400"),
+        ],
+    )
+    def test_zero_variance_splits_its_message_on_the_difference(self, mean_diff, expected) -> None:
+        refusal = _refuse_zero_variance(mean_diff=mean_diff, effect_size=None, task_count=5)
+        assert refusal is not None and expected in refusal
+
+    def test_zero_variance_is_silent_when_d_is_defined_or_there_is_no_difference(self) -> None:
+        assert _refuse_zero_variance(mean_diff=0.4, effect_size=1.2, task_count=5) is None
+        assert _refuse_zero_variance(mean_diff=None, effect_size=None, task_count=5) is None
+
+    def test_the_below_mde_continuum_refuses_only_when_the_interval_excludes_zero(self) -> None:
+        """The conjunct that keeps the commonest honest outcome from becoming a refusal.
+
+        Under the null a candidate's difference is small, so `abs(mean_diff) < mde` is true for
+        nearly every candidate that simply does not work. An interval CONTAINING zero is the data
+        agreeing it is null — an ordinary negative result, which stays one.
+        """
+        refusal, note = _below_mde_findings(mean_diff=0.01, mde=0.05, bounds=[0.005, 0.015])
+        assert refusal is not None and "yet the interval excludes zero" in refusal
+        assert note is None
+
+        refusal, note = _below_mde_findings(mean_diff=0.01, mde=0.05, bounds=[-0.02, 0.04])
+        assert refusal is None
+        assert note is not None and "ordinary negative result" in note
+
+    def test_the_below_mde_continuum_is_inert_without_a_usable_floor(self) -> None:
+        assert _below_mde_findings(mean_diff=0.01, mde=None, bounds=[0.005, 0.015]) == (None, None)
+        assert _below_mde_findings(mean_diff=0.01, mde=0.0, bounds=[0.005, 0.015]) == (None, None)
+        assert _below_mde_findings(mean_diff=None, mde=0.05, bounds=[0.005, 0.015]) == (None, None)
+        # At or above the floor there is nothing to say.
+        assert _below_mde_findings(mean_diff=0.05, mde=0.05, bounds=[0.04, 0.06]) == (None, None)
+
+    def test_the_unpriced_floor_advisory_fires_on_both_of_its_causes(self) -> None:
+        """A floor of exactly 0.000 and an unmeasurable one are the same finding, worded apart."""
+        unavailable = _note_unpriced_floor(mean_diff=0.2, mde=None)
+        assert unavailable is not None and "came back unavailable" in unavailable
+        zero = _note_unpriced_floor(mean_diff=0.2, mde=0.0)
+        assert zero is not None and "came back 0.000" in zero
+        assert _note_unpriced_floor(mean_diff=0.2, mde=0.5) is None
+        assert _note_unpriced_floor(mean_diff=None, mde=None) is None
+
+    def test_the_tight_interval_caveat_is_a_note_and_needs_a_real_floor(self) -> None:
+        note = _note_tight_interval(bounds=[0.29, 0.31], mde=0.1)
+        assert note is not None and "tighter than this suite's own noise floor" in note
+        # Wider than the floor, no floor at all, or no interval: nothing to say.
+        assert _note_tight_interval(bounds=[0.0, 0.5], mde=0.1) is None
+        assert _note_tight_interval(bounds=[0.29, 0.31], mde=None) is None
+        assert _note_tight_interval(bounds=[], mde=0.1) is None
+
+
+class TestTheGateReadingStages:
+    """The stages that produce a READING rather than a refusal."""
+
+    def test_the_provenance_note_says_which_split_or_that_it_is_unrecorded(self, tmp_path: Path) -> None:
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        set_split(run_dir, "train")
+        notes = _provenance_notes(run_dir)
+        assert len(notes) == 1 and "--split 'train'" in notes[0]
+
+        (run_dir / "run.json").unlink()
+        unrecorded = _provenance_notes(run_dir)
+        assert len(unrecorded) == 1 and "provenance is missing" in unrecorded[0]
+
+    def test_the_paired_row_ids_stage_strips_the_suite_prefix_and_drops_empty_scores(self) -> None:
+        scoped = {
+            "candidate": {f"{EXEC_SUITE}/r1": [1.0], f"{EXEC_SUITE}/r2": [1.0], f"{EXEC_SUITE}/r3": []},
+            "incumbent": {f"{EXEC_SUITE}/r1": [0.5], f"{EXEC_SUITE}/r3": [0.5]},
+        }
+        comparison = PairedComparison(
+            vid_a="candidate",
+            vid_b="incumbent",
+            task_count=1,
+            excluded_count=2,
+            mean_diff=0.5,
+            ci_low=0.4,
+            ci_high=0.6,
+            effect_size=1.0,
+            p_value=0.01,
+        )
+        row_ids, note = _paired_row_ids(scoped_scores=scoped, comparison=comparison, suite_id=EXEC_SUITE)
+        # r2 is candidate-only; r3 carries an empty score list on the candidate side.
+        assert row_ids == ["r1"]
+        assert note is not None and "2 row(s) scored for one arm only" in note
+
+    def test_the_paired_row_ids_stage_is_silent_with_nothing_excluded(self) -> None:
+        scoped = {"candidate": {f"{EXEC_SUITE}/r1": [1.0]}, "incumbent": {f"{EXEC_SUITE}/r1": [0.5]}}
+        comparison = PairedComparison(
+            vid_a="candidate",
+            vid_b="incumbent",
+            task_count=1,
+            excluded_count=0,
+            mean_diff=0.5,
+            ci_low=0.4,
+            ci_high=0.6,
+            effect_size=1.0,
+            p_value=0.01,
+        )
+        assert _paired_row_ids(scoped_scores=scoped, comparison=comparison, suite_id=EXEC_SUITE) == (["r1"], None)
+
+    @pytest.mark.parametrize("sign", [1.0, -1.0])
+    def test_the_signed_statistic_reverses_the_interval_rather_than_inverting_it(self, sign) -> None:
+        """Negating an interval reverses it, so a naive sign leaves a "low" above its "high"."""
+        comparison = PairedComparison(
+            vid_a="candidate",
+            vid_b="incumbent",
+            task_count=4,
+            excluded_count=0,
+            mean_diff=0.2,
+            ci_low=0.1,
+            ci_high=0.3,
+            effect_size=1.1,
+            p_value=0.01,
+        )
+        signed = _signed_statistic(comparison, sign)
+        assert signed.mean_diff == pytest.approx(sign * 0.2)
+        assert signed.effect_size == pytest.approx(sign * 1.1)
+        assert signed.bounds == sorted(signed.bounds), "ci_low <= ci_high must hold on both signs"
+        assert signed.bounds == pytest.approx(sorted([sign * 0.1, sign * 0.3]))
+
+    def test_a_missing_statistic_signs_to_nothing_rather_than_to_zero(self) -> None:
+        comparison = PairedComparison(
+            vid_a="candidate",
+            vid_b="incumbent",
+            task_count=1,
+            excluded_count=0,
+            mean_diff=None,
+            ci_low=None,
+            ci_high=None,
+            effect_size=None,
+            p_value=None,
+        )
+        signed = _signed_statistic(comparison, -1.0)
+        assert (signed.mean_diff, signed.effect_size, signed.bounds) == (None, None, [])
+
+    def test_the_primary_reading_reports_nothing_when_none_was_predeclared(self) -> None:
+        assert _primary_reading(
+            incumbent_rows={}, candidate_rows={}, check_row_ids=["r1"], primary_criterion_index=None
+        ) == (None, None, None)
+
+    def test_the_primary_reading_refuses_an_index_that_selects_no_row(self) -> None:
+        rows = {"r1": [scored_result("r1", 1.0)]}
+        reading = _primary_reading(
+            incumbent_rows=rows, candidate_rows=rows, check_row_ids=["r1"], primary_criterion_index=7
+        )
+        assert reading.mean_diff is None
+        assert reading.refusal is not None and "selected no usable row" in reading.refusal
+
+    def test_the_primary_reading_does_not_refuse_with_no_paired_rows_to_read(self) -> None:
+        """Nothing paired is a cause the sample stages own; this one must not restate it."""
+        reading = _primary_reading(incumbent_rows={}, candidate_rows={}, check_row_ids=[], primary_criterion_index=7)
+        assert reading.refusal is None
+
+    def test_a_variant_id_refusal_still_reports_the_row_counts(self, tmp_path: Path) -> None:
+        """`_GateExperiment.rows` exists so a refusal cannot hide an eroded sample.
+
+        Two of the five causes know the paired and excluded counts — the ones where a comparison WAS
+        computed and only the sign could not be resolved — and three cannot. Dropping the field left
+        the whole suite green, so the claim its docstring makes was unasserted.
+        """
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="typo",
+            suite_id=EXEC_SUITE,
+            n_resamples=FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None and "is not one of the two variants" in verdict.gate_refusal
+        assert verdict.rows_paired == len(WINNER["incumbent"]), "the pairing happened; only the sign failed"
+        assert verdict.rows_excluded == 0
+
+    def test_a_cause_with_no_comparison_at_all_reports_no_counts(self, tmp_path: Path) -> None:
+        """The other side of the same field: nothing was paired, so nothing may be claimed."""
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        (run_dir / "experiment.json").unlink()
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            n_resamples=FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None and "there is no experiment file" in verdict.gate_refusal
+        assert (verdict.rows_paired, verdict.rows_excluded) == (0, 0)
+
+    def test_zero_variance_outranks_the_below_mde_refusal(self) -> None:
+        """The adjacency both stages can reach at once, which no other test covers.
+
+        A constant NON-ZERO difference collapses the interval to a point, so if that difference also
+        sits under the floor the below-MDE refusal fires too — its "interval excludes zero" conjunct
+        holds on a zero-width interval away from zero. Zero variance is the more specific finding and
+        its remedy is different (add rows the arms disagree on, not lower the floor), so it must win.
+        """
+        rows = {"r1": [scored_result("r1", 1.0)]}
+        refusal, notes = _execution_diagnostics(
+            incumbent_rows=rows,
+            candidate_rows=rows,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            run_dir=Path("unused"),
+            comparison=PairedComparison(
+                vid_a="candidate",
+                vid_b="incumbent",
+                task_count=4,
+                excluded_count=0,
+                mean_diff=0.01,
+                ci_low=0.01,
+                ci_high=0.01,
+                effect_size=None,
+                p_value=0.0,
+            ),
+            mean_diff=0.01,
+            effect_size=None,
+            mde=0.05,
+            bounds=[0.01, 0.01],
+            refused_already=False,
+        )
+        assert refusal is not None
+        assert "carry zero variance" in refusal
+        assert "minimum detectable effect" not in refusal
+        # And every note is withheld, because something refused.
+        assert notes == []
+
+    def test_a_primary_index_refusal_outranks_every_diagnostic(self, tmp_path: Path) -> None:
+        """The adjacency the gate's own comment calls load-bearing, driven through the real gate.
+
+        The primary-index cause is recorded BEFORE `_execution_diagnostics` runs, and it is that
+        function's `refused_already=True` argument which suppresses the notes. Recorded after, it
+        produced a `NOT A RESULT` headline above notes reading "this is an ordinary negative result
+        and not a measurement problem" — measured.
+        """
+        run_dir = exec_run_dir(tmp_path, **uniform_shift(4))
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            primary_criterion_index=7,
+            n_resamples=FAST_RESAMPLES,
+        )
+        assert verdict.gate_refusal is not None
+        assert "selected no usable row" in verdict.gate_refusal
+        assert not any("ordinary negative result" in note for note in verdict.notes), verdict.notes
+        assert not any("tighter than this suite's own noise floor" in note for note in verdict.notes)
+
+    def test_a_note_a_stage_produced_reaches_the_verdict(self, tmp_path: Path) -> None:
+        """The pydantic-copy trap, asserted end to end after the decomposition.
+
+        `_verdict` passes `notes` to the model, which COPIES the list — so a stage whose note is
+        appended after construction is silently discarded. Every stage therefore RETURNS its notes
+        and the gate extends the list before building.
+
+        Two notes from OPPOSITE ends of the cascade, which is what makes this more than one
+        sample: the provenance note is written before the refusal sink even exists, and the
+        unpriced-floor advisory is the LAST thing any stage produces, after the statistic. A
+        fixture producing only one of them cannot tell "the list was passed" from "the list was
+        still being filled".
+        """
+        run_dir = exec_run_dir(tmp_path, **WINNER)
+        set_split(run_dir, "train")
+        verdict = execution_gate(
+            run_dir=run_dir,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=EXEC_SUITE,
+            n_resamples=FAST_RESAMPLES,
+        )
+        assert any("--split 'train'" in note for note in verdict.notes), verdict.notes
+        assert any("came back 0.000" in note for note in verdict.notes), verdict.notes
