@@ -901,44 +901,30 @@ rather than after a stage:
 ```python
 from pathlib import Path
 
-from coder_eval.optimize.search import candidate_leaks, skill_text
-from coder_eval.orchestration.task_loader import expand_dataset, load_task
+from coder_eval.optimize.api import leak_report
 
-suite = Path("<the suite yaml>")
-task, _ = load_task(suite)
-train = expand_dataset(task, suite.parent, split="train")
-
-root = Path(".optimize-skill/<skill>")
-
-
-# The WHOLE skill directory, not just SKILL.md. A candidate is free to edit `scripts/` and reference
-# files (see reference/proposal-prompt.md), and a graded string bundled into one of those is
-# invisible to a one-file read — which returns **clean**, byte-identical to a genuinely clean
-# candidate. `skill_text` concatenates every text file under the directory, each preceded by its
-# relative path, so a finding stays locatable and two files cannot merge into a phantom match.
-def body(arm: Path) -> str:
-    return skill_text(arm / "skills" / "<skill>")
-
-
-# The BASELINE is whatever these candidates were edited FROM. On a multi-arm round that is this
-# round's `<round>-incumbent/`; on a search round it is the LINEAGE HEAD's snapshot, which lives
-# under the round that produced it — so name that directory here rather than assuming this one.
-baseline_dir = root / "<round>-incumbent"
-baseline = body(baseline_dir)
-
-skip = {baseline_dir.name, "<round>-control"}
-for arm in sorted(p for p in root.glob("<round>-*") if p.is_dir() and p.name not in skip):
-    print(arm.name, candidate_leaks(body(arm), baseline, train) or "clean")
+print(leak_report(
+    suite=Path("<the suite yaml>"), skill_name="<skill>", round_tag="<round>",
+    root=Path(".optimize-skill/<skill>"), baseline_dir=Path(".optimize-skill/<skill>/<round>-incumbent"),
+))
 ```
 
-`expand_dataset` takes `split=` natively — pass the **train** split and only the train split.
-Scanning the whole suite would flag content drawn from rows the candidate is entitled to be fitted
-to, and scanning the test rows would tell you about a split the proposer is blinded to.
+**It scans the train split, and there is no argument to change that.** Scanning the whole suite
+would flag content drawn from rows the candidate is entitled to be fitted to, and scanning the test
+rows would tell you about a split the proposer is blinded to. Neither is a knob worth having, so the
+composite exposes none.
 
-**Diff against what the candidate was DERIVED from, which is not always the incumbent.** From
-round 2 a search-loop candidate is built on the **lineage head** (Step 10), and diffing that
-against the incumbent re-reports every span the head added since the last promotion, on every
-round — exactly the wolf-crying the diff exists to prevent. Pass the arm you actually edited.
+**`baseline_dir` is what the candidate was DERIVED from, which is not always the incumbent.** From
+round 2 a search-loop candidate is built on the **lineage head** (Step 10), whose snapshot lives
+under the round that produced it — so name that directory rather than assuming this round's. Diffing
+against the incumbent instead re-reports every span the head added since the last promotion, on
+every round, which is exactly the wolf-crying the diff exists to prevent.
+
+Each arm's **whole skill directory** is read, not just its `SKILL.md`: a candidate may edit
+`scripts/` and reference files, and a graded string bundled into one of those is invisible to a
+one-file read — which returns *clean*, byte-identical to a genuinely clean candidate. The baseline
+snapshot and `<round>-control` are skipped by name, and the block says so, so a short arm count is
+explained rather than mysterious.
 
 **Whatever the baseline says is not something this candidate memorized.** Measured on this repo's
 own shipped `ci` skill, an absolute scan flags five strings on the train split that are simply the

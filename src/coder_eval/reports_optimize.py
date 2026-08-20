@@ -1036,3 +1036,73 @@ def render_attribution_unavailable(grader_index: int) -> str:
         + "contract, `grader_index` points at a different criterion, or the line it emitted did not "
         + "parse (that one is logged). Fix it before reading any per-rule verdict — there is none here."
     )
+
+
+# ---------------------------------------------------------------------------
+# The anti-memorization preflight — verbatim only, and it says so
+# ---------------------------------------------------------------------------
+
+
+# What a clean leak scan does and does not prove, in one place. Rendered by `render_leak_scan` and
+# stated in the skill's prose beside it — the shape `COST_FRONT_ADVISORY` and
+# `SINGLE_REPLICATE_CAVEAT` already have, so the claim cannot exist in two files at two vintages.
+LEAK_SCAN_BOUNDARY = (
+    "**Verbatim only, so clean is not a proof.** This finds a train row's graded string reproduced "
+    "character for character in a candidate's own files, diffed against the baseline it was edited "
+    "from. A candidate that PARAPHRASES a train row, or encodes an answer structurally, is invisible "
+    "here — that is a semantic leak and it still needs reading. A hit is a reason to rewrite the "
+    "span, not to abandon the candidate: replace it with a placeholder, or generalize it to the "
+    "category of request it belongs to."
+)
+
+
+def render_leak_scan(
+    findings: Mapping[str, list[str]], *, skipped: Sequence[str], unscannable: Mapping[str, str] | None = None
+) -> str:
+    """Per-arm verbatim train-row leaks, and the boundary on what a clean result means.
+
+    An EMPTY mapping is the dangerous case and gets its own sentence: no arm matched, which reads as
+    "all clean" and is the worst false negative available in a preflight. A caller that filtered
+    every arm out by a wrong round tag has to be told that, not congratulated.
+
+    ``skipped`` names what was deliberately not scanned — the baseline itself and the round's control
+    arm — because a reader counting arms against the round's proposal list needs to know why the
+    count is short. ``unscannable`` is the opposite: arms that SHOULD have been scanned and could not
+    be, with the reason. They are a separate channel rather than an entry in ``findings`` because a
+    wiring fault is not a leak span, and rendering it as one would report a mis-snapshotted arm as a
+    candidate that memorized something.
+    """
+    if not findings and not unscannable:
+        lines = [
+            "**No candidate arms matched, so nothing was scanned.** That is not a clean result: it "
+            + "means the round tag or the snapshot root found no arm directories at all.",
+        ]
+    elif not findings:
+        # Every arm mis-snapshotted: a real state, and not the same as the round tag matching
+        # nothing. The header would otherwise sit above an empty list and claim a scan happened.
+        lines = ["**Nothing could be scanned.**"]
+    else:
+        lines = ["**Verbatim train-leak scan.**", ""]
+        for arm, spans in findings.items():
+            if not spans:
+                lines.append(f"- `{arm}` — clean.")
+                continue
+            lines.append(f"- `{arm}` — {len(spans)} span(s) the baseline does not have:")
+            lines.extend(f"    - {span}" for span in spans)
+
+    if unscannable:
+        lines.append("")
+        lines.append(
+            "**Arms that could not be scanned at all — a wiring fault, not a clean result:** "
+            + "; ".join(f"`{arm}` ({why})" for arm, why in unscannable.items())
+            + ". Fix the snapshot and re-read this block before trusting any verdict above it."
+        )
+    if skipped:
+        lines.append("")
+        lines.append(
+            f"Not scanned, by design: {', '.join(f'`{name}`' for name in skipped)}. The baseline is "
+            + "what every candidate is diffed AGAINST, and the control arm is not a candidate."
+        )
+    lines.append("")
+    lines.append(LEAK_SCAN_BOUNDARY)
+    return "\n".join(lines)

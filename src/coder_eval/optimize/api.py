@@ -45,14 +45,16 @@ from coder_eval.optimize.load import (
     stale_tree_reason,
     wrong_path_reason,
 )
-from coder_eval.optimize.search import regression_check
+from coder_eval.optimize.search import candidate_leaks, regression_check, skill_text
 from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
+from coder_eval.orchestration.task_loader import expand_dataset, load_task
 from coder_eval.reports_optimize import (
     render_attribution_unavailable,
     render_corpus_check,
     render_cost_quality,
     render_discreteness,
     render_headroom_ceilings,
+    render_leak_scan,
     render_noise_floor,
     render_row_matrix,
     render_row_replicates,
@@ -435,3 +437,53 @@ def replicates_report(
             render_row_replicates(incumbent, candidate),
         ]
     )
+
+
+def leak_report(*, suite: Path, skill_name: str, root: Path, round_tag: str, baseline_dir: Path) -> str:
+    """Train-row content a round's candidates newly reproduce verbatim — before Stage A is paid for.
+
+    A candidate that reproduces a train row's graded content scores well on that row whether or not
+    the behaviour under test happened, and it teaches the skill nothing. Static: no runs, so it costs
+    nothing and belongs before the first stage rather than after one.
+
+    **There is no ``split`` parameter, and that is deliberate.** It scans the TRAIN rows and only
+    those. Scanning the whole suite flags content a candidate is entitled to be fitted to; scanning
+    the test rows reports on a split the proposer is blinded to. Neither is a knob worth having.
+
+    ``baseline_dir`` stays explicit because a candidate is diffed against **what it was edited
+    from**, which is not always this round's incumbent: from round 2 a search-loop candidate is built
+    on the lineage head, whose snapshot lives under the round that produced it. Defaulting this would
+    re-report every span the head added, on every round — the wolf-crying the diff exists to prevent.
+
+    Each arm's WHOLE skill directory is read, never one file: a graded string bundled into
+    ``scripts/`` or a reference file is invisible to a one-file read, which comes back clean.
+    """
+    task, _raw = load_task(suite)
+    train = expand_dataset(task, suite.parent, split="train")
+    baseline_skill = baseline_dir / "skills" / skill_name
+    if not baseline_skill.is_dir():
+        # RAISES, where a missing CANDIDATE dir is only named. The asymmetry is the point: a missing
+        # baseline makes `skill_text` return "", which degrades the diff into an ABSOLUTE scan — every
+        # graded string in every arm reported as newly added. That is the wolf-crying the diff exists
+        # to prevent, and it is silent, so it cannot be a rendered note.
+        raise ValueError(
+            f"no baseline skill directory at {baseline_skill} — without it every candidate is diffed "
+            + "against an empty string, which reports every graded string as newly added. Name the "
+            + "snapshot the candidates were edited FROM (on a search round, the lineage head's)."
+        )
+    baseline = skill_text(baseline_skill)
+    # By NAME, as the fence does: the baseline is what everything is diffed against, and the control
+    # arm is not a candidate. Named in the block so a reader counting arms knows why the count is short.
+    skipped = sorted({baseline_dir.name, f"{round_tag}-control"})
+    findings: dict[str, list[str]] = {}
+    unscannable: dict[str, str] = {}
+    for arm in sorted(p for p in root.glob(f"{round_tag}-*") if p.is_dir() and p.name not in skipped):
+        skill_dir = arm / "skills" / skill_name
+        if not skill_dir.is_dir():
+            # Named and continued rather than raised: one mis-snapshotted arm must not hide what the
+            # others are carrying, which is the whole output of this preflight. It goes in its own
+            # channel, because a wiring fault reported as a leak SPAN reads as memorization.
+            unscannable[arm.name] = f"no skill directory at {skill_dir}"
+            continue
+        findings[arm.name] = candidate_leaks(skill_text(skill_dir), baseline, train)
+    return render_leak_scan(findings, skipped=skipped, unscannable=unscannable)

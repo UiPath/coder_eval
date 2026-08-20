@@ -9,9 +9,11 @@ A `NoiseFloor` is deliberately never compared by `model_dump()`: `computed_at` i
 `datetime.now(UTC)`, so the dump moves between two calls over the same tree.
 """
 
+import inspect
 from pathlib import Path
 
 import pytest
+import yaml
 
 from coder_eval.models import (
     ACTIVATION_FLOOR_METRIC,
@@ -27,12 +29,13 @@ from coder_eval.optimize.api import (
     discreteness_report,
     execution_floor_report,
     headroom_report,
+    leak_report,
     replicates_report,
     row_matrix_report,
 )
 from coder_eval.optimize.execution import measure_execution_noise_floor
 from coder_eval.optimize.store import UNRESOLVED_MODEL, append_regression_rows
-from coder_eval.reports_optimize import SINGLE_REPLICATE_CAVEAT
+from coder_eval.reports_optimize import LEAK_SCAN_BOUNDARY, SINGLE_REPLICATE_CAVEAT
 from coder_eval.reports_stats import DEFAULT_ALPHA
 from tests.optimize_fixtures import (
     SUITE,
@@ -774,3 +777,172 @@ class TestReplicatesReport:
                 candidate_variant="incumbent",
                 suite_id=SUITE,
             )
+
+
+_LEAK_GRADED = "minimum-task-score"
+
+
+def _leak_suite(tmp_path: Path) -> Path:
+    """A dataset-backed suite with one TRAIN row and one TEST row, both graded on a string.
+
+    Both splits carry a graded string so the test half is a real trap: a scan that widened past
+    `split="train"` would flag content the proposer is blinded to.
+    """
+    suite = tmp_path / "suite.yaml"
+    suite.write_text(
+        yaml.safe_dump(
+            {
+                "task_id": SUITE,
+                "description": "leak preflight fixture",
+                "initial_prompt": "do the thing for ${row.id}",
+                "dataset": {
+                    "rows": [
+                        {"id": "r1", "split": "train", "graded": _LEAK_GRADED},
+                        {"id": "r2", "split": "test", "graded": "test-only-secret-value"},
+                    ]
+                },
+                "success_criteria": [
+                    {
+                        "type": "file_check",
+                        "description": "grades the row",
+                        "path": "out.yml",
+                        "includes": ["${row.graded}"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return suite
+
+
+def _leak_arm(root: Path, name: str, skill_name: str, *, body: str = "# skill\n", script: str | None = None) -> Path:
+    arm = root / name
+    skill = arm / "skills" / skill_name
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(body, encoding="utf-8")
+    if script is not None:
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "helper.py").write_text(script, encoding="utf-8")
+    return arm
+
+
+class TestLeakReport:
+    SKILL_NAME = "my-skill"
+
+    def _call(self, tmp_path: Path, root: Path, *, round_tag: str = "1") -> str:
+        return leak_report(
+            suite=_leak_suite(tmp_path),
+            skill_name=self.SKILL_NAME,
+            root=root,
+            round_tag=round_tag,
+            baseline_dir=root / "1-incumbent",
+        )
+
+    def test_one_arm_reproducing_a_train_row_is_flagged_and_the_other_is_clean(self, tmp_path: Path) -> None:
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME)
+        _leak_arm(root, "1-a-leaks", self.SKILL_NAME, body=f"# skill\nAlways write {_LEAK_GRADED}\n")
+        _leak_arm(root, "1-b-clean", self.SKILL_NAME, body="# skill\nName the action.\n")
+
+        block = self._call(tmp_path, root)
+
+        assert "`1-a-leaks` — 1 span(s)" in block
+        assert _LEAK_GRADED in block
+        assert "`1-b-clean` — clean." in block
+
+    def test_a_test_split_string_is_not_scanned(self, tmp_path: Path) -> None:
+        # The proposer is blinded to the test split, so reporting on it is reporting on nothing the
+        # candidate could have seen — and there is no `split` parameter to widen this by mistake.
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME)
+        _leak_arm(root, "1-a", self.SKILL_NAME, body="# skill\nWrite test-only-secret-value\n")
+
+        block = self._call(tmp_path, root)
+
+        assert "`1-a` — clean." in block
+        assert "test-only-secret-value" not in block
+
+    def test_a_span_the_baseline_already_has_is_not_flagged(self, tmp_path: Path) -> None:
+        # The DIFF, not an absolute scan. Measured on this repo's own `ci` skill, an absolute scan
+        # flags five strings that are simply the output contract its suite grades.
+        root = tmp_path / "snapshots"
+        body = f"# skill\nAlways write {_LEAK_GRADED}\n"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME, body=body)
+        _leak_arm(root, "1-a", self.SKILL_NAME, body=body)
+
+        assert "`1-a` — clean." in self._call(tmp_path, root)
+
+    def test_a_graded_string_in_a_script_is_flagged(self, tmp_path: Path) -> None:
+        # `skill_text` reads the WHOLE directory. A one-file read comes back clean here, which is
+        # byte-identical to a genuinely clean candidate — the worst shape a preflight can have.
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME)
+        _leak_arm(root, "1-a", self.SKILL_NAME, script=f"THRESHOLD = {_LEAK_GRADED!r}\n")
+
+        block = self._call(tmp_path, root)
+
+        assert "`1-a` — 1 span(s)" in block
+
+    def test_the_baseline_and_the_control_arm_are_skipped_and_named(self, tmp_path: Path) -> None:
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME, body=f"# skill\n{_LEAK_GRADED}\n")
+        _leak_arm(root, "1-control", self.SKILL_NAME, body=f"# skill\n{_LEAK_GRADED}\n")
+        _leak_arm(root, "1-a", self.SKILL_NAME)
+
+        block = self._call(tmp_path, root)
+
+        assert "1-incumbent" not in block.split("Not scanned, by design:")[0]
+        assert "Not scanned, by design: `1-control`, `1-incumbent`" in block
+
+    def test_a_wrong_round_tag_says_nothing_matched_rather_than_reading_as_clean(self, tmp_path: Path) -> None:
+        # An empty block is the worst false negative available here.
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME)
+        _leak_arm(root, "1-a", self.SKILL_NAME)
+
+        block = self._call(tmp_path, root, round_tag="7")
+
+        assert "No candidate arms matched" in block
+        assert "That is not a clean result" in block
+
+    def test_an_arm_with_no_skill_directory_is_named_and_the_others_still_report(self, tmp_path: Path) -> None:
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME)
+        (root / "1-a-broken").mkdir(parents=True)
+        _leak_arm(root, "1-b", self.SKILL_NAME, body=f"# skill\n{_LEAK_GRADED}\n")
+
+        block = self._call(tmp_path, root)
+
+        assert "could not be scanned at all — a wiring fault, not a clean result" in block
+        assert "1-a-broken" in block
+        assert "no skill directory at" in block
+        # And it is NOT reported as a leak span: a wiring fault rendered as memorization sends a
+        # reader to rewrite a candidate that was never scanned.
+        assert "1-a-broken` — 1 span(s)" not in block
+        assert "`1-b` — 1 span(s)" in block, "one mis-snapshotted arm must not hide the others"
+
+    def test_a_missing_baseline_directory_raises_rather_than_scanning_absolutely(self, tmp_path: Path) -> None:
+        """The asymmetric half, and the more dangerous one.
+
+        A missing CANDIDATE dir is named and skipped; a missing BASELINE makes `skill_text` return
+        `""`, so every graded string in every arm reports as newly added — the wolf-crying the diff
+        exists to prevent, and silent.
+        """
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-a", self.SKILL_NAME, body=f"# skill\n{_LEAK_GRADED}\n")
+
+        with pytest.raises(ValueError, match="no baseline skill directory"):
+            self._call(tmp_path, root)
+
+    def test_the_block_states_the_verbatim_only_boundary(self, tmp_path: Path) -> None:
+        root = tmp_path / "snapshots"
+        _leak_arm(root, "1-incumbent", self.SKILL_NAME)
+        _leak_arm(root, "1-a", self.SKILL_NAME)
+
+        assert LEAK_SCAN_BOUNDARY in self._call(tmp_path, root)
+
+    def test_api_exposes_no_split_parameter(self) -> None:
+        # Scanning the whole suite flags content a candidate is entitled to be fitted to; scanning
+        # test rows reports on a split the proposer cannot see. Neither is a knob worth having.
+        assert "split" not in inspect.signature(leak_report).parameters

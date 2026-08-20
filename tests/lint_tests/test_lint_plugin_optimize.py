@@ -495,7 +495,10 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         # The ones the procedure must NAME, even if a future snippet stops importing them inline.
         # This hardcoded list is the REAL guard: the derived half above only asserts that whatever
         # the skill imports exists, so deleting a whole snippet leaves it green on the others.
-        for name in ("activation_gate", "holm_promote", "render_markdown", "candidate_leaks", "search_compare"):
+        # `candidate_leaks` was here until the leak preflight became a composite: the procedure no
+        # longer names the primitive, it names `leak_report`, which is what a reader has to run. The
+        # other four survive in PROSE and keep their guard for that reason.
+        for name in ("activation_gate", "holm_promote", "render_markdown", "leak_report", "search_compare"):
             assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
 
     def test_optimize_skill_snippets_parse_and_bind(self):
@@ -789,6 +792,24 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         # `_normalized` collapses the file's hard wrapping, so the phrase is matched unwrapped.
         assert "budget in candidates" in stop_rule, (
             "Step 13 must say the patience is a budget in candidates rather than in rounds"
+        )
+
+    def test_the_skill_states_the_leak_scans_verbatim_boundary(self):
+        # The other half of the `COST_FRONT_ADVISORY` precedent the constant's own comment cites: a
+        # shared constant stops the RENDERED block drifting, and this stops the PROSE beside it
+        # drifting. Without both, "the claim cannot exist in two files at two vintages" is a wish.
+        #
+        # A clean scan is the moment a reader is most likely to over-read it, so the skill must say
+        # what clean does not prove — in its own words, hence an anchor rather than the sentence.
+        from coder_eval.reports_optimize import LEAK_SCAN_BOUNDARY
+
+        anchor = "verbatim"
+        assert anchor in LEAK_SCAN_BOUNDARY.lower(), "the boundary constant no longer contains its own anchor"
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        assert anchor in skill.lower(), (
+            "optimize-skill's SKILL.md no longer says the leak scan catches the VERBATIM form only. "
+            "A clean result is not a proof of generalization, and prose that loses that turns a "
+            "preflight into a licence."
         )
 
     def test_optimize_surfaces_call_the_cost_front_advisory(self):

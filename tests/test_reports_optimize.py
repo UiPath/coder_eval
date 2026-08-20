@@ -38,6 +38,7 @@ from coder_eval.optimize.gate import GATE_MAX_FAMILY, MATERIALITY_FLOOR, build_c
 from coder_eval.optimize.search import SearchComparison, search_compare
 from coder_eval.reports_optimize import (
     CEILING_MARGIN,
+    LEAK_SCAN_BOUNDARY,
     SINGLE_REPLICATE_CAVEAT,
     _front_summary,
     render_attribution_unavailable,
@@ -47,6 +48,7 @@ from coder_eval.reports_optimize import (
     render_discreteness,
     render_execution_markdown,
     render_headroom_ceilings,
+    render_leak_scan,
     render_markdown,
     render_noise_floor,
     render_row_matrix,
@@ -1381,3 +1383,45 @@ class TestRenderAttributionUnavailable:
         assert "predates that contract" in text
         assert "points at a different criterion" in text
         assert "did not parse" in text
+
+
+class TestRenderLeakScan:
+    """A preflight whose empty output reads as "all clean" is the worst shape one can have."""
+
+    def test_a_mixed_scan_is_pinned(self) -> None:
+        block = render_leak_scan(
+            {
+                "1-a-widen-vocabulary": ["my-suite/r1: candidate adds 'minimum-task-score' (file_check)"],
+                "1-b-name-the-symptom": [],
+            },
+            skipped=["1-control", "1-incumbent"],
+        )
+        assert_matches_render_pin(block, "leak_scan")
+
+    def test_no_arms_matched_is_not_reported_as_clean(self) -> None:
+        block = render_leak_scan({}, skipped=["1-incumbent"])
+        assert "No candidate arms matched" in block
+        assert "That is not a clean result" in block
+        assert "clean." not in block
+
+    def test_the_boundary_is_stated_on_every_block(self) -> None:
+        # Including a fully clean one: that is exactly when a reader is most likely to over-read it.
+        for findings in ({}, {"1-a": []}, {"1-a": ["x"]}):
+            assert LEAK_SCAN_BOUNDARY in render_leak_scan(findings, skipped=[])
+
+    def test_the_skipped_line_is_absent_when_nothing_was_skipped(self) -> None:
+        assert "Not scanned, by design" not in render_leak_scan({"1-a": []}, skipped=[])
+
+    def test_an_unscannable_arm_is_a_wiring_fault_not_a_leak_span(self) -> None:
+        block = render_leak_scan({"1-b": []}, skipped=[], unscannable={"1-a": "no skill directory at /x"})
+        assert "could not be scanned at all — a wiring fault" in block
+        assert "`1-a` (no skill directory at /x)" in block
+        assert "span(s)" not in block, "a missing directory is not a span the baseline does not have"
+
+    def test_only_unscannable_arms_is_still_not_read_as_no_arms_matched(self) -> None:
+        # Every arm mis-snapshotted is a real state, and it is not the same as the round tag matching
+        # nothing — one is a broken snapshot, the other a wrong tag.
+        block = render_leak_scan({}, skipped=[], unscannable={"1-a": "no skill directory at /x"})
+        assert "No candidate arms matched" not in block
+        assert "Nothing could be scanned" in block
+        assert "wiring fault" in block
