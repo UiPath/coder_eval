@@ -116,60 +116,25 @@ def candidate_leaks(
     baseline_text: str,
     rows: Sequence[TaskDefinition],
 ) -> list[str]:
-    """Train-row content a candidate reproduces verbatim AND its baseline does not.
+    """Train-row content a candidate skill DIRECTORY newly contains. The anti-memorization preflight.
 
-    A preflight, not part of any verdict: it needs no runs, so it is read at proposal time, before
-    Stage A is paid for. Distinct from ``regression_check`` beside it, which asks whether an arm
-    *re-lost a measured row* and therefore cannot be answered without run results.
+    Returns one entry per leak: the row it came from, the field, and the offending span. Empty means
+    nothing was found — which is not the same as nothing being there, see the boundary below.
 
-    **A DIFF, not an absolute scan, and the difference is what makes it usable.** Measured against
-    this repo's own ``tasks/skills/ci-outcome.yaml`` on its TRAIN split, an absolute scan flags the
-    shipped ``ci`` skill on five strings — ``minimum-task-score``, ``persist-credentials: false``
-    and three more — none of which is memorization: that body legitimately documents the output
-    contract its suite grades. A checker that fires on the shipped skill on its first run is one
-    users learn to ignore. What is worth flagging is what a candidate NEWLY absorbs.
+    **It reads the whole DIRECTORY, not ``SKILL.md``.** A skill is a directory, and reading one file
+    lets a candidate move train-row content into a reference file beside it and pass a preflight whose
+    entire purpose is catching exactly that.
 
-    ``baseline_text`` is **the text this candidate was derived from**, which is not always the
-    incumbent: from round 2 a search-loop candidate is built on the *lineage head*, and diffing
-    that against the incumbent would re-report every span the head added, every round. Pass the
-    arm the candidate was actually edited from.
+    Shares its primitive with CE036 rather than reimplementing it: ``LEAK_LOCATOR_FIELDS``,
+    ``LEAK_MIN_CHARS``, ``string_leaves`` and ``graded_strings`` live in
+    :mod:`coder_eval.leak_detection`. The one behavioural difference is a parameter, not a fork —
+    ``graded_strings(drop_type=True)`` here, because a skill BODY discussing eval criteria names
+    types legitimately, while a row PROMPT saying "skill_triggered" is worth flagging.
 
-    **Five boundaries, stated so an empty result is not mistaken for a proof:**
-
-    - It catches the VERBATIM form, as CE036 states of its own. A candidate that describes a train
-      row's content in other words is a semantic leak and needs a reader. (Matching is
-      case-insensitive on both sides, so casing alone does not evade it.)
-    - Containment is a **substring** test in both directions, so a graded value can be masked by an
-      unrelated baseline substring that happens to contain it, and flagged for a subword
-      occurrence. The :data:`~coder_eval.leak_detection.LEAK_MIN_CHARS` floor makes both unlikely
-      rather than impossible.
-    - **A span already in the baseline is invisible from here on.** That is right while the
-      baseline is the user's shipped skill, which is the measured case above — but from round 2 the
-      baseline is itself a former candidate, so a memorized span that rode into a promotion
-      alongside a genuine improvement is never flagged again. The proposer-side rule in
-      ``reference/proposal-prompt.md`` is what covers that; this function cannot.
-    - **The gold solution is out of reach.** Only ``row.success_criteria`` is scanned.
-      ``TaskDefinition.reference`` — the reference solution ``reference_comparison`` / ``llm_judge``
-      / ``agent_judge`` score against — is a task-level field, and it may name a file or a whole
-      directory rather than carry its text, so scanning it would mean reading the filesystem from
-      what is otherwise a pure function. That matters more than it looks: ``proposal-prompt.md``
-      tells the proposer to *study* the reference, and calls copying it "especially tempting"
-      because the content is known-correct. This checker cannot see that copy. A reader has to.
-    - **The caller decides what text is scanned, and this function cannot tell how much of the
-      candidate it saw.** Handed one file's contents it checks one file, and a candidate that bundles
-      train-row content into ``scripts/`` or a reference file comes back CLEAN — byte-identical to a
-      genuinely clean one, which is the worst shape a preflight can have. :func:`skill_text` above is
-      what a caller should pass, and it is a separate function precisely so this one stays pure:
-      widening the scan is an IO decision, and pushing it in here would make the checker read the
-      filesystem.
-
-    ``rows`` are the EXPANDED row-tasks of the TRAIN split only — passing the whole suite would
-    flag content drawn from rows the candidate is entitled to be fitted to. (The five-string
-    figure above is the train split's; the whole suite gives seven.)
-
-    Findings are de-duplicated, preserving order. A suite may assert the same string twice on a
-    row — this repo's own does — and repeating the line says nothing the first one did not, in a
-    check whose entire design rationale is not firing more than it has to.
+    **Boundary:** verbatim spans of at least ``LEAK_MIN_CHARS``. A candidate that PARAPHRASES a train
+    row is invisible to this, and so is one that encodes an answer structurally. It bounds the crudest
+    failure and is not a proof of generalization.
+    See .claude/decisions/2026-08-20-anti-memorization-and-search.md.
     """
     candidate = candidate_text.lower()
     baseline = baseline_text.lower()
@@ -243,39 +208,19 @@ def search_compare(
     corpus: Sequence[RegressionRow] = (),
     threshold: float = 1.0,
 ) -> SearchComparison:
-    """Whether the search loop should carry ``candidate`` forward in place of ``head``.
+    """Accept or revert ONE search step. Emphatically NOT a gate.
 
-    **Not a gate.** The two means come from different invocations, unpaired, unreplicated and
-    uncorrected — the arithmetic the promotion gate exists to distrust. A ``True`` here is a
-    hypothesis to gate, never a result, and nothing in this function promotes anything.
+    Returns a :class:`SearchComparison` whose ``accepted`` is a property over ``beats`` and
+    ``blocker``, so no construction site can set it inconsistently with the numbers it derives from.
 
-    It exists as a function rather than as arithmetic in the skill's prose because each guard
-    below only works if it is applied, and the previous home for them was a markdown block an
-    agent copies and adapts:
+    **It does not correct for multiplicity and must never be read as a promotion.** It compares one
+    arm at a time inside a search, where the alternative is reverting a step rather than shipping a
+    skill. The gates are :func:`~coder_eval.optimize.activation.activation_gate` and
+    :func:`~coder_eval.optimize.execution.execution_gate`, and both go through Holm.
 
-    - **The comparison runs over the rows BOTH arms scored, and nothing else.** ``head``'s vector
-      was recorded in an earlier round and ``candidate``'s comes from the run just paid for, so
-      nothing guarantees they cover the same rows — and every way they diverge favours the
-      candidate.
-    - **No overlap at all is reported before holes are**, because it is a *wiring* fault (an
-      unpinned ``dataset.sample_seed`` draws a different sample across invocations) and calling it
-      a hole sends the reader hunting a flaky row.
-    - **A hole refuses rather than averaging around it.** A candidate that errored on the hardest
-      rows scores a higher mean over the survivors; that is the rule :func:`_dominates` already
-      applies to the row matrix. A refused comparison reports ``None`` for both scores rather than
-      a number nobody should read.
-    - **A corpus regression blocks an otherwise-winning candidate.** A search accept advances the
-      lineage, so a row an earlier promotion was built on would be re-lost and carried forward
-      until the next multi-arm round noticed. An aggregate cannot show that — the whole premise of
-      the corpus — and the check is free here because ``regression_check`` takes exactly the arm
-      this function already has.
-
-    A tie does not win: ``beats`` requires strictly greater. Advancing the head on a tie moves the
-    bar every later round is judged against, on an accident.
-
-    ``corpus`` and ``threshold`` are forwarded to :func:`regression_check`; the default of 1.0
-    treats any partial score as a loss, which is right for the binary activation criterion the
-    corpus is usually written from.
+    A hole is ABSENT, never zero: an arm with no measurement on a row is missing there, and folding
+    it to 0.0 would rank an arm that failed to produce a number below one that produced a bad one.
+    See .claude/decisions/2026-08-20-anti-memorization-and-search.md.
     """
     shared = tuple(sorted(set(head.row_scores) & set(candidate.row_scores)))
     holes = tuple(sorted(set(head.row_scores) - set(candidate.row_scores)))

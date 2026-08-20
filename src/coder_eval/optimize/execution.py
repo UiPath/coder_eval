@@ -104,8 +104,8 @@ def measure_execution_noise_floor(
     The activation floor splits *invocations*, because Stage B there is three separate
     ``coder-eval run`` commands. The execution track has no such axis — it runs one invocation at
     ``--repeats 3`` — so the null comparison splits each row's **replicates** instead, the larger
-    half first: at three replicates per row, two against one. The true difference is zero by
-    construction either way, and the interval's half-width is the floor.
+    half first. The true difference is zero by construction either way, and the interval's half-width
+    is the floor.
 
     Replicates are pooled across ``run_dirs`` before splitting, so the halves are ordered by run
     directory first and replicate number second. Which is which does not matter — replicates of one
@@ -113,22 +113,15 @@ def measure_execution_noise_floor(
     which is what makes the floor reproducible for a seed.
 
     The statistic is the mean per-row ``weighted_score``, which is what the execution gate's
-    ``## Paired Comparison`` block actually compares. It is deliberately NOT ``f1.yes``: computing
-    an F1 floor for a gate that never reads F1 is the bug this function exists to replace, and on
-    the bundled outcome template it returns a confidently meaningless 0.000.
+    ``## Paired Comparison`` block actually compares — deliberately NOT ``f1.yes``.
 
-    **+0 runs.** It reads the control-arm run directory, which the method already requires once
-    per suite at ``--repeats 3`` — so the preflight costs arithmetic, not money.
+    **+0 runs.** It reads the control-arm run directory, which the method already requires once per
+    suite at ``--repeats 3``, so the preflight costs arithmetic rather than money.
 
-    Returns ``None`` — never a fabricated number — when nothing loaded (a mistyped path) or when
-    fewer than 2 rows carry at least 2 replicates; the two are distinguished in the logged reason.
-    An odd replicate count splits unevenly (3 -> 2/1), which widens the interval and therefore
-    reports a CONSERVATIVE floor: the safe direction, exactly as on the activation side.
-
-    A floor of exactly **0.000** is a real answer, not a missing one: it means every row's
-    replicates agreed exactly, so the suite showed no run-to-run noise at all. On a real agent run
-    that is worth checking rather than treating as a green light — it is what a suite whose rows
-    are deterministic looks like, and also what one whose rows all failed identically looks like.
+    Returns ``None`` — never a fabricated number — when nothing loaded or when fewer than 2 rows
+    carry at least 2 replicates; the two are distinguished in the logged reason. A floor of exactly
+    **0.000** is a real answer, not a missing one.
+    See .claude/decisions/2026-08-20-the-noise-floor.md for what each of those cost.
     """
     # The same three guards, on this track's split axis and with a sharper reason for the first:
     # the replicate half of the reconciliation keys on `<NN>`, so a re-used `--run-dir` with a
@@ -405,37 +398,23 @@ def _dead_weight(
 ) -> tuple[float | None, list[str]]:
     """The share of total criterion weight held by criteria whose paired difference is always zero.
 
-    ``weighted_score`` — this gate's primary statistic — is a weighted mean over every criterion,
-    so a criterion that scores identically on both arms on every row contributes its whole weight to
-    the DENOMINATOR of that mean and nothing to the difference. The shipped outcome template is the
-    worked case, and it is worth being precise about how much of it is BY DESIGN. Its engagement
-    criterion saturates by design — that is what its ``recall.yes: 1.0`` threshold demands — and it
-    carries a deliberately small weight for exactly this reason, so the by-design dead weight is that
-    one criterion's share of the suite's 2.05 total: about 2.4%. The template's ``file_check`` is a
-    GRADED outcome check with its own ``mean`` threshold and does NOT saturate by design; when it
-    happens to saturate anyway — every arm produced the artifact — the share reaches 1.05 of 2.05 and
-    an effect confined to the grader then arrives at roughly half its size. That second case is the
-    one worth reporting, and it is a property of the RUN rather than of the template, which is why
-    this is measured per verdict rather than assumed. (The engagement weight is deliberately not
-    quoted as a literal: the sensor keeping ``DEFAULT_ALPHA`` the single spelling of its own value
-    matches that number everywhere in this family.)
-
-    **A READING, never a veto**, and the measurement behind that is in the field's own description:
-    a constant criterion scales the paired difference vector without changing its shape, so it
-    scales the mean and the standard deviation by the same factor and the paired *t* is identical to
-    1e-12. Every conjunct of ``promoted`` is invariant to it. The one degenerate case that does
-    invalidate a comparison — every criterion constant — is already the zero-variance refusal.
+    ``weighted_score`` — this gate's primary statistic — is a weighted mean over every criterion, so
+    a criterion that scores identically on both arms on every row contributes its whole weight to the
+    DENOMINATOR of that mean and nothing to the difference. Reported so a reader can convert
+    ``mean_diff`` back into the grader's own unit.
 
     ``None`` — never ``0.0`` — whenever the share cannot be computed, with a note naming why. "No
     dead weight" and "we cannot tell" are the two states this exists to separate.
 
     **Replicates collapse by MEAN, per row, per arm, before pairing**, which is the same reduction
-    :func:`~coder_eval.reports_stats.paired_comparison` applies to ``weighted_score`` and
-    :func:`~coder_eval.optimize.fronts.arm_row_scores` applies to its vectors — so the three
-    surfaces agree about what a row scored. A mean over identical floats is still that float
-    exactly, so the ``== 0.0`` test below survives the reduction: the comparison is on the raw
-    subtraction and deliberately carries no tolerance, since a criterion that is genuinely constant
-    produces exact zeros while a tolerance would classify a small real effect as dead.
+    ``paired_comparison`` applies to ``weighted_score`` and ``arm_row_scores`` applies to its
+    vectors, so the three surfaces agree about what a row scored. A mean over identical floats is
+    still that float exactly, so the ``== 0.0`` test survives the reduction — and it carries no
+    tolerance, since a genuinely constant criterion produces exact zeros while a tolerance would
+    classify a small real effect as dead.
+
+    **A READING, never a veto.** See .claude/decisions/2026-08-20-the-execution-gate-refusals.md for
+    the measurement behind that, and for the shipped template's by-design share.
     """
     if len(row_ids) < 2:
         return None, [
@@ -912,43 +891,26 @@ def execution_gate(
 
     **The gate resolves the sign.** ``paired_comparison`` subtracts in variant *declaration* order,
     so with the incumbent declared first a candidate win comes back negative. This function knows
-    which arm is the incumbent, so ``mean_diff`` here is ALWAYS ``candidate - incumbent`` and the
-    interval bounds are swapped along with it. The method file warns twice that a reversed reading
-    promotes the arm that lost; this is that warning, implemented.
+    which arm is the incumbent, so ``mean_diff`` here is ALWAYS ``candidate - incumbent``, with the
+    interval bounds swapped along with it.
 
     **Every state that is not a decision sets** ``gate_refusal``, which forces ``promoted=False``
-    and takes the headline. Never an exception, and never a silent zero. It does NOT by itself
-    drop the verdict out of the Holm family: membership is ``p_value is not None`` and nothing
-    else, so a refusal that still MEASURED a p stays in and keeps ``m`` honest for its siblings
-    (see :func:`holm_promote_execution`). The causes meaning there was no comparison at all
-    already carry no p, so those leave by the ordinary rule rather than by a second one. Four
-    kinds of cause, recorded MOST-SPECIFIC-FIRST because a later one is often the earlier one's
-    consequence:
-
-    - **No comparison to make** — both arms named the same variant; a missing, unreadable or
-      malformed ``experiment.json``; an experiment declaring other than exactly two variants;
-      either variant id absent from it. Each returns statistics that are all ``None``.
-    - **An arm loaded ZERO rows** — the statistic comes from ``experiment.json``, so it computes
-      perfectly well over rows that are not on disk while every check reads green over nothing.
-    - **Fewer than two rows paired** — no interval exists, so there is nothing to weigh.
-    - **Zero-variance paired differences** — the statistic computes, and every promotion conjunct
-      then holds at once on a sample that separated nothing.
-    - **A difference below this suite's own MDE *while the interval excludes zero*** — a confident
-      claim about an effect the instrument cannot see. The second half of that condition is what
-      keeps the commonest honest outcome intact: a candidate that simply does not help also has a
-      difference below the floor, but its interval CONTAINS zero, and that is an ordinary negative
-      result which stays one.
+    and takes the headline. Never an exception, and never a silent zero. It does NOT by itself drop
+    the verdict out of the Holm family: membership is ``p_value is not None`` and nothing else, so a
+    refusal that still MEASURED a p stays in and keeps ``m`` honest for its siblings. The causes are
+    recorded MOST-SPECIFIC-FIRST, and the ORDER the stage functions are called in below IS that
+    precedence — no comparison to make, a stale tree, an experiment that resolves nothing, an arm
+    with no rows, too few rows paired, zero variance, and a confident claim below the suite's own
+    MDE. See .claude/decisions/2026-08-20-the-execution-gate-refusals.md for what each cost and why
+    the below-MDE cause is two-sided.
 
     **Two criterion indices, and they do different jobs.** ``engagement_criterion_index`` is an
     integrity CHECK's subject — which criterion says the skill engaged, a reading that can VETO a
     promotion. ``primary_criterion_index`` is the PREDECLARED primary, and the VALUE it reports is a
-    reading: it adds ``primary_mean_diff`` so the effect is legible in the grader's own unit beside the
-    blended one, and that number never touches ``promoted``. Setting the parameter can still refuse —
-    an index selecting no usable row is a wiring fault, and a refusal forces ``promoted=False`` —
-    stated here because a reader would otherwise take "a reading" to mean "safe to pass".
-    (A third exists on the other track —
-    ``ActivationGateVerdict.criterion_index``, that gate's metric SOURCE — which is why each of
-    these says which kind it is.)
+    reading that never touches ``promoted``; setting it can still REFUSE, because an index selecting
+    no usable row is a wiring fault. Stated because a reader would otherwise take "a reading" to
+    mean "safe to pass". (A third exists on the other track —
+    ``ActivationGateVerdict.criterion_index``, that gate's metric SOURCE.)
 
     Leaves ``promoted=None``: one gate knows nothing about its family.
     """
@@ -1392,38 +1354,19 @@ def _execution_diagnostics(
     bounds: list[float],
     refused_already: bool,
 ) -> tuple[str | None, list[str]]:
-    """Every check that runs AFTER the paired statistic is signed: (refusal cause, notes).
+    """Every check that runs AFTER the paired statistic is signed: ``(refusal cause, notes)``.
 
-    Five independent findings in a linear ladder — an arm with no rows on disk, zero-variance
-    paired differences, a difference under the suite's own noise floor, a floor that could not be
-    priced, and an interval tighter than that floor. Each is a pure function of values the gate has
-    already computed, none of them can return early, and together they were most of what took
-    :func:`execution_gate` to F(50).
+    Five independent findings, each its own pure function of values the gate has already computed;
+    this one calls them in PRECEDENCE order and keeps the first cause. Returns that cause rather than
+    writing the caller's own :class:`~coder_eval.optimize.gate.FirstCause`, so the gate's ordering
+    stays in one place — every cause here ranks below every cause the gate found before the
+    statistic.
 
-    Returns the FIRST refusal cause rather than writing the caller's own :class:`FirstCause`, so
-    the gate's first-cause-wins ordering stays in one place: every cause here ranks below every
-    cause the gate found before the statistic, which is the precedence the zero-row comment states.
-    Two setters for one field is exactly the state ``FirstCause`` collapsed, and a helper writing
-    into the caller's sink could not be tested without building a gate around it.
-
-    ``refused_already`` is what the two advisory notes suppress on — a note explaining a number
-    printed under a refusal headline contradicts it. It is OR-ed with a cause found here, because
-    "nothing has refused yet" has to include what this function itself decided three lines up.
-
-    **It is reachable as ``True`` today, and the way it used to claim otherwise was a trap.** This
-    docstring said "False at the only call site" — but the TREE-RECONCILIATION cause does not
-    return. :func:`_refuse_stale_tree` reports it, the gate RECORDS the message and carries on, so
-    control reaches the call site with the gate's ``FirstCause`` already set and
-    ``refused_already=True``. A reader who
-    believed the old sentence would delete the two ``not refused_already`` guards below as dead
-    code, and a contaminated run would immediately print the MDE and tighter-than-floor advisories
-    under a ``NOT A RESULT`` headline — the exact contradiction those guards exist to prevent.
-
-    TWO paths arrive here already refused, and neither returns early: the stale-tree cause, and the
-    primary-index cause recorded immediately above the call. Every other cause the gate finds before
-    the statistic does return, so it never reaches this function at all. The parameter keeps all of
-    that a fact about the caller rather than an assumption baked in here — which is the point, since
-    the count has changed once already.
+    ``refused_already`` is what the notes suppress on, OR-ed with a cause found here, because
+    "nothing has refused yet" has to include what this function itself decided three lines up. It IS
+    reachable as ``True``: two paths arrive already refused without returning — the stale-tree cause
+    and the primary-index cause — so the ``not refused_already`` guards are live rather than dead.
+    See .claude/decisions/2026-08-20-the-execution-gate-refusals.md for what each cost.
     """
     notes: list[str] = []
     # First cause wins — see `FirstCause`, which owns the rule. The stages below are called in
@@ -1489,38 +1432,21 @@ def confirm_gate_execution(
 ) -> ConfirmVerdict:
     """Stage C on the execution track: did the Stage B effect REPRODUCE on the held-out split?
 
-    Runs this track's own gate on the confirm run directory and classifies the train -> test delta
-    through :func:`~coder_eval.optimize.gate.classify_confirm`, the shared four-way rule. Stage C used
-    to be prose — "report that block verbatim alongside the test numbers" — which left the reader to
-    eyeball two intervals and decide whether one reproduced the other.
+    Returns a :class:`~coder_eval.models.ConfirmVerdict`. Never raises — like both gates, every
+    wiring fault becomes a refusal.
 
-    **Exactly ONE candidate.** Confirming two would spend the held-out split on SELECTION, which is
-    the failure the "never re-rolled" integrity rule exists to prevent, so a sequence raises rather
-    than being iterated. State it in the signature and it is still worth the guard: a caller with a
-    shortlist in hand will try.
+    The train effect is READ off the Stage B verdict rather than recomputed, so the two numbers this
+    block compares cannot disagree with the blocks they were reported in. ``test_mde`` likewise comes
+    off the confirm gate's own verdict: :func:`execution_gate` measures the replicate floor
+    unconditionally, so a second measurement would be a duplicate estimator.
 
-    **A family of ONE, and that is correct rather than an oversight.** Only the Stage B winner is
-    confirmed, so there is no multiplicity to correct — Holm is applied at ``m = 1`` purely so the
-    carried block is a DECIDED one rather than rendering as ``UNDECIDED``.
+    **The confirm run must have recorded ``--split test``.** A recorded ``train`` is a REFUSAL — that
+    is Stage C silently re-running the train rows, at full price, with no error anywhere — while an
+    UNRECORDED split is a note. Both go through :func:`~coder_eval.optimize.gate.confirm_split_check`,
+    shared with the activation track.
 
-    **The confirm run must have recorded ``--split test``.** Read through
-    :func:`~coder_eval.optimize.load.read_split_provenance`, the existing reader — a second reader of
-    ``run.json``'s ``row_selection.split`` is the duplication this repo removes on sight. The two
-    non-``test`` cases differ and are treated differently: an UNRECORDED split is a NOTE (a run
-    predating the field), while a recorded ``train`` is a REFUSAL — that is Stage C silently
-    re-running the train rows, at full price, with no error anywhere.
-
-    **``test_mde`` costs nothing here.** :func:`execution_gate` already measures the replicate noise
-    floor unconditionally on whatever run dir it is handed, so the confirm split's own resolution is
-    simply ``test_verdict.mde``. A second measurement would be a duplicate estimator — the
-    CE037/CE040 defect class — and would double every confirm's bootstrap cost.
-
-    **The margin is the confirm split's own MDE on the metric this track gates**, which is what makes
-    it per-track without a second rule: the activation twin passes ITS gate's floor on ``f1.yes`` to
-    the same classifier. Picking a different multiple on one track would be a second declaration of
-    "how much shrinkage is real".
-
-    Never raises on a wiring fault — like both gates, every such state becomes a refusal.
+    A family of ONE, so Holm is applied at ``m = 1`` purely to make the carried block a DECIDED one.
+    See .claude/decisions/2026-08-20-stage-c-confirmation.md.
     """
     confirm_one_candidate(candidate_variant)
 
@@ -1644,43 +1570,22 @@ def holm_promote_execution(
     uncorrected ``p <= alpha``.
 
     **``promoted`` is Holm rejecting AND ``verdict.separated`` AND no refusal AND no failed
-    integrity check or guardrail** — one expression in ``decide_family``, applied to both tracks.
-    The veto lives in the DECISION, not only in the render: a
-    caller reading ``promoted`` must not be able to promote a candidate whose rendered block says
-    BLOCKED. Folding it in is only safe because the STATISTICAL half has its own name —
-    ``ExecutionGateVerdict.separated``, the property :func:`render_execution_markdown` keys its
-    BLOCKED headline on. Read ``promoted`` there instead and that headline becomes unreachable the
-    moment this fold lands, silently degrading a blocked winner to the ordinary NOT PROMOTED rung.
+    integrity check or guardrail** — one expression in ``decide_family``, applied to both tracks, so
+    the two mean the same thing by it. What differs is only which lists each track HAS:
+    ``integrity_checks`` are engagement / completion-rate reads and exist only here, because a
+    promotion cannot be correct in spite of a sample that did not engage the thing under test.
 
-    **Both tracks now mean the same thing by ``promoted``**, and every check list on either one
-    vetoes: :func:`holm_promote` folds in its ``sibling_checks`` AND its cost/latency
-    ``guardrails``, this one folds in its ``integrity_checks`` AND the same ``guardrails``. The
-    only remaining difference is which lists each track HAS — ``integrity_checks`` are engagement /
-    completion-rate reads and exist only here, because a promotion cannot be correct in spite of a
-    sample that did not engage the thing under test. The refusal conjunct is not of either kind —
-    see below.
+    A verdict with no ``p_value`` is outside the family and comes back ``promoted=False``. A refused
+    verdict WITH a real p stays IN, since membership is ``p_value is not None`` and nothing else.
 
-    A verdict with no ``p_value`` is outside the family and comes back ``promoted=False``.
+    **This track's refusal is READ, not computed.** ``execution_gate`` detects each degenerate state
+    where it is already computed and sets ``gate_refusal``; the hook below hands it back unchanged,
+    which is what forces ``promoted=False`` and suppresses the negative-result notes. The activation
+    hook COMPUTES its own instead — same conjunct, different provenance, and returning it from both
+    is what makes the conjunction one expression.
 
-    **There is a refusal state, and it is a different condition from the activation track's.** The
-    paired *t* is continuous, so this track has no discreteness floor to refuse against — but it
-    does have several degenerate states — no comparison to make at all, an arm that loaded no rows,
-    too few rows paired, zero-variance paired differences, a confident claim about a difference
-    below the suite's own MDE. ``execution_gate``
-    detects each where it is already computed and sets ``gate_refusal``; this function only READS
-    it, forcing ``promoted=False`` and suppressing the negative-result notes, which would otherwise
-    contradict the refusal headline.
-
-    **A refused verdict with a real p STAYS in the family**, and the membership rule is
-    ``p_value is not None`` and nothing else. Holm corrects for the hypotheses actually tested, and
-    a candidate that was gated and measured was tested however degenerate its sample turned out to
-    be — dropping it shrinks ``m`` and LOOSENS ``alpha/m`` for its siblings, which is the
-    uncorrected-``p <= alpha`` degeneration from the other direction (measured: three gate runs
-    with two below-MDE refusals promoted a p = 0.027 sibling that a family of three rejects).
-    A refusal whose cause is that there was no comparison at ALL already has no p, so it is outside
-    the family by the same rule, without a second one. The cost of keeping the others in is a
-    genuine candidate reading NOT PROMOTED because a sibling's sample was degenerate — which is the
-    multiplicity that was actually incurred, and the conservative direction.
+    See .claude/decisions/2026-08-20-the-promotion-decision.md for what each conjunct cost and why a
+    refused-but-measured verdict stays in the family.
     """
 
     def decide(verdict: ExecutionGateVerdict, facts: FamilyFacts) -> TrackDecision:

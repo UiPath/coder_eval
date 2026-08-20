@@ -341,51 +341,21 @@ _REPLICATE_TASK_JSON_GLOB = TASK_JSON_GLOB.split("/", 1)[1]
 
 
 def reconcile_tree_against_run_json(run_dir: Path, variant_id: str, suite_id: str) -> TreeReconciliation:
-    """Does this ``run.json`` describe the arm's replicates sitting in this tree?
+    """What is on disk under one variant that this run dir's own ``run.json`` never recorded.
 
-    ``run.json`` is a per-INVOCATION artifact; the tree under it is APPEND-ONLY. Nothing removes a
-    prior invocation's results, so a reused ``--run-dir`` leaves stale ``<row>/<NN>/task.json``
-    behind while ``row_selection`` is rewritten to describe only the latest call. The recorded
-    provenance is then a true statement about an invocation and a FALSE one about the tree the
-    gate globs — and because both arms are subdirectories of the same run dir, the contamination
-    is SYMMETRIC: the stale results pair on both sides, so there is no ``rows_excluded`` bump and
-    no unpaired-rows note. The only trace is a ``rows_paired`` larger than the selected split, or
-    a replicate count larger than the ``--repeats`` asked for, and nothing else flags either.
+    Returns a :class:`TreeReconciliation` — ``unrecorded`` (results the ``run.json`` never wrote) and
+    ``unknown`` (a dir whose provenance cannot be read). THREE-valued, not boolean: the first is
+    contamination and callers refuse on it, the second is a run dir predating the field and callers
+    note it. Collapsing them would make every such run unmeasurable.
 
-    Matched by ``(row id, replicate dir)``, not by counting. A fanned row's ``task_id`` is
-    ``f"{suite_id}/{row_id}"`` (``task_loader.expand_dataset``) and ``path_utils.build_task_run_dir``
-    uses that same string as the path segment, so the tree's directory name and ``run.json``'s
-    ``task_id`` correspond by CONSTRUCTION rather than by coincidence. Counts would be blind to a
-    reused dir whose two invocations happened to run the same number of rows, and would need a
-    fixed glob depth the tree does not have — a dataset row sits at
-    ``<variant>/<suite>/<row>/<NN>/`` while a plain task sits at ``<variant>/<task>/<NN>/``, and
-    one run dir can hold both.
+    ``run.json`` is written per INVOCATION while the tree is APPEND-ONLY, so a re-used ``--run-dir``
+    leaves an earlier call's rows — or, with a smaller ``--repeats``, its extra replicates — on disk
+    while ``row_selection`` describes only the latest invocation. Everything then loads and pools
+    without error, over a row set no invocation ran.
 
-    **The REPLICATE half of the key is load-bearing, not thoroughness.** Row ids alone are blind to
-    a stale ``<NN>`` inside a row this run.json does record — the identical defect one level down,
-    triggered by something as mundane as re-using a run dir with a smaller ``--repeats``.
-    ``load_suite_rows`` pools every replicate it finds, ``balance_pair`` trims symmetrically and
-    therefore not at all, and the gate returns a confident interval over contaminated clusters.
-    ``task_results`` carries ``replicate_index``, so this costs nothing.
-
-    Reads directory NAMES only — no ``task.json`` is parsed — so the tree half costs a listing.
-
-    An entry whose ``variant_id`` is absent counts for EVERY variant, and one whose
-    ``replicate_index`` is absent counts for every replicate of its row. Both ambiguities are
-    resolved permissively on purpose: the harm here is a false refusal blocking a legitimate
-    promotion, not a missed detection, and an unattributable entry means "we cannot rule this one
-    in", not "this one is stale".
-
-    **What this cannot see, stated here rather than left to be discovered.** A ``run.json`` rebuilt
-    by ``coder-eval aggregate`` is rebuilt FROM the tree (``recover_task_results`` walks it), so it
-    describes everything on disk by construction and genuine contamination is laundered into a
-    clean reading. That is accepted: this is strictly better than the nothing it replaces, not a
-    proof. ``--resume`` is a different path and is NOT affected — ``partition_for_resume`` folds
-    ``prior_results`` for the resolved task set into the new summary, so a resume under the SAME
-    selector still describes its whole tree, and a resume under a DIFFERENT one genuinely has
-    contaminated the tree and is refused correctly. Nested sub-run dirs (a subdirectory carrying
-    its own ``run.json``) are not excluded here, unlike ``recover_task_results`` — ``load_suite_rows``
-    is blind to them the same way, so the gate already conflates them and this adds no new gap.
+    Globs through :data:`TASK_JSON_GLOB`, this module's single declaration, and
+    :func:`task_json_pattern` derives every wrong-path message from it.
+    See .claude/decisions/2026-08-20-tree-reconciliation.md for what this cost in four readers.
     """
     suite_dir = run_dir / variant_id / suite_id
     on_disk: set[tuple[str, str]] = set()
@@ -840,33 +810,16 @@ RULES_LINE_PREFIX = "RULES "
 
 
 def _rules_verdicts(result: EvaluationResult, criterion_index: int) -> dict[str, str] | None:
-    """One replicate's rule attribution, or ``None`` when it carried none.
+    """The grader's per-rule attribution for one row, or ``None`` when it published none.
 
-    Scans the criterion's ``details`` from the END for :data:`RULES_LINE_PREFIX`, **within the
-    stdout section only**. ``run_command`` wraps the grader's stdout in a details block and appends
-    a ``Stderr:`` section after it, so the grader's own last line is never the details' last line —
-    and a naive reverse scan reads the STDERR side first. That matters beyond tidiness: a
-    traceback there can quote artifact text, which is untrusted agent output, so a forged
-    ``RULES {...}`` line would outrank the grader's real one.
+    Reads the ``RULES `` line — the LAST line of the grader's stdout, compact JSON of rule id to
+    ``"pass" | "fail" | "na"``, whose prefix is declared once as :data:`RULES_LINE_PREFIX`. It is
+    what lets a reader see WHICH check moved, beside a ``weighted_score`` that only says the blend
+    moved.
 
-    The window is ``[first "Stdout:" ... first "Stderr:" after it)``, and **both must be the
-    FIRST** — an earlier draft ended it at the LAST ``Stderr:``, which the same untrusted text
-    defeats simply by containing a second such line, moving the boundary back past the grader's
-    real one. Everything before the wrapper's ``Stdout:`` is written by the criterion (``Score:``,
-    ``Command:``, ``Exit code:``), so the first marker is always its own.
-
-    With no ``Stdout:`` marker — a criterion reporting raw stdout — the whole field is scanned. A
-    grader printing its own ``Stderr:`` line truncates the window early and its row reads as
-    unattributed, which fails CLOSED: a missing attribution is warned about, a forged one is not.
-
-    ``None`` — no line, unparseable JSON, or a payload that is not an object — is deliberately not
-    distinguished from ``{}`` at this level. ``{}`` means a CURRENT grader that attributed nothing;
-    ``None`` means no attribution is available for this replicate at all, which is what
-    :func:`rule_row_map` counts.
-
-    **What it cannot see**, stated rather than left to be discovered: ``run_command`` truncates each
-    stream at 4000 characters, so a grader verbose enough to overflow that budget loses this line
-    and its row reads as unattributed.
+    A malformed or absent line costs no score: the float on line 1 is the measurement and this
+    attribution is optional by construction.
+    See .claude/decisions/2026-08-20-tree-reconciliation.md.
     """
     if criterion_index >= len(result.success_criteria_results):
         return None

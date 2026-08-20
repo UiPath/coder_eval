@@ -93,53 +93,26 @@ def _headline(
     """The ONE headline ladder, for both Stage B tracks.
 
     Typed on :class:`~coder_eval.models.GateVerdictBase`, and honestly so: every field the chain
-    reads — ``promoted``, ``gate_refusal``, ``p_value``, ``holm_rejected``, ``separated``,
-    ``failed_vetoes`` — is declared there. It took the two-class union while the two verdicts had no
-    common base and each spelled those fields itself.
+    reads is declared there.
 
     Five rungs, and the ORDER is the whole contract: a refusal outranks ``BLOCKED``, and
     ``UNDECIDED`` outranks the refusal, because a verdict Holm never saw has no decision to refuse.
     The two tracks differ by exactly three strings, which is why this is one chain taking three
-    arguments rather than a rung table plus an evaluator — a table would add indirection a reader
-    has to unwind to answer "what does this print?", for two call sites in one file.
-
-    It replaces two hand-written chains. They were kept in step by hand and drifted twice: the
-    activation ``BLOCKED`` rung once read ``guardrails`` alone while its twin unioned both lists, and
-    before that it keyed on ``promoted``, which the guardrail veto had made unsatisfiable.
+    arguments rather than a rung table plus an evaluator.
 
     The per-track arguments:
 
-    * ``promote_fn`` — which wrapper has not run yet, named in the ``UNDECIDED`` rung so the reader
-      knows what to call.
+    * ``promote_fn`` — which wrapper has not run yet, named in the ``UNDECIDED`` rung.
     * ``comparison`` — ``primary`` on the activation track, ``paired`` on the execution one.
     * ``refusal_label`` — the headline for a refusal that DID compute a p. On activation that is
       ``CANNOT SEPARATE AT THIS SIZE``, a statement about the suite's resolution; demoting it to
       ``NOT A RESULT`` would tell the user the run was mis-wired. The execution track passes
-      ``NOT A RESULT`` here, which is why its ladder reads as four rungs rather than five — it
-      reaches rung 3 with the same text rung 2 produces. That is a property of the argument, not a
-      special case in the chain.
+      ``NOT A RESULT`` here, which is why its ladder reads as four rungs rather than five.
 
-    **The BLOCKED rung's three conjuncts, each load-bearing.** This is the ONE place they are argued,
-    since there is now one chain to argue about:
-
-    * NEVER ``promoted``. Both Holm wrappers fold the veto into it, so a blocked candidate arrives
-      with ``promoted is False`` and keying on that field makes this rung unsatisfiable — dropping a
-      blocked winner silently into ``NOT PROMOTED``, the one rung it must never be confused with,
-      since "it lost" and "it won and was vetoed" call for opposite next actions.
-    * ``holm_rejected``, because ``separated`` alone is the trap on the other side. ``separated`` is a
-      property of ONE verdict and deliberately excludes the FAMILY decision, so at ``m > 1`` a p
-      between ``alpha/m`` and ``alpha`` leaves ``ci_low > 0`` while Holm rejects nothing. Measured:
-      two candidates at p = 0.03 in a family of two, identical in every statistic, rendered BLOCKED
-      and NOT PROMOTED purely because one carried a failing cost check — sending that reader to fix
-      cost when the real problem was power, with the note ladder printing the contradicting "did not
-      clear the Holm threshold" line directly underneath.
-    * ``failed_vetoes`` rather than ``guardrails``, which spans both of a track's veto lists. Reading
-      the list literally called "guardrails" sent a sibling regression to the ``NOT PROMOTED`` rung,
-      where it read as an ordinary loss. See the property's own docstring.
-
-    ``render_confirm_markdown`` keeps its own short ladder and is deliberately NOT folded in: its
-    ``REVERSED`` rung is Stage-C-specific, there is exactly one confirm renderer, and generalizing
-    for one caller is the speculation YAGNI forbids.
+    **The BLOCKED rung keys on ``holm_rejected`` AND ``separated`` AND ``failed_vetoes`` — never
+    ``promoted``**, which both Holm passes have already forced False, and never ``guardrails`` alone,
+    which is one of two veto lists.
+    See .claude/decisions/2026-08-20-the-rendered-verdict-block.md for what each conjunct cost.
     """
     if verdict.promoted is None:
         return f"UNDECIDED — {promote_fn} has not been applied, so this verdict decides nothing"
@@ -157,31 +130,15 @@ def _headline(
 
 
 def render_markdown(verdict: ActivationGateVerdict) -> str:
-    """The block the skill prints verbatim, numbers and all.
+    """The activation track's Stage B verdict as the markdown block the skill prints.
 
-    The headline comes from :func:`_headline`, which owns the ladder and its rungs' rationale for
-    both Stage B tracks. What is specific to THIS track, and therefore stated here:
+    Headline through :func:`_headline`, then this track's own field list. The two body renderers are
+    deliberately NOT merged: ``_headline`` is already shared and what remains is two genuinely
+    different field lists, so merging would need a field-order table — indirection for two call sites
+    in one file.
 
-    - The ``NOT A RESULT`` rung (a refusal with no p) is reached by the cross-split preflight: the
-      two arms scored different row sets, so their difference is not an effect. Deliberately the
-      vocabulary the execution renderer uses, because it is the same claim.
-    - The ``CANNOT SEPARATE AT THIS SIZE`` rung is this track's alone. The suite's discreteness floor
-      exceeds the Holm threshold, so no candidate could promote however good it is — a statement about
-      the SUITE, which is why it outranks ``NOT PROMOTED``, and why demoting it to the execution
-      track's ``NOT A RESULT`` would tell the reader the run was mis-wired instead.
-    - **What separates the two refusals is the p, not a second field.** A discreteness refusal is
-      only ever set inside :func:`holm_promote`'s ``p_value is not None`` branch, so it always carries
-      one; a wiring refusal says NO COMPARISON WAS MADE and never does. One boolean on a value the
-      model already carries, rather than a field two setters would have to agree about.
-    - The ``BLOCKED`` headline names a failing sibling check even though the note ladder adds no
-      ``FAILED — this forces`` line for one. That asymmetry is deliberate: the sibling rung already
-      writes a note saying the candidate "moved the failure rather than fixing it", which is more
-      than the generic sentence would say, and printing both would say it twice.
-
-    ``UNDECIDED`` outranking both refusals is right — a verdict Holm never saw has no decision to
-    refuse — but the refusal's TEXT must still reach the reader, so it is printed on its own line
-    whenever the headline could not carry it. Without that, a pre-Holm cross-split block renders a
-    confident ``UNDECIDED`` with the reason nowhere on the page.
+    Reads no disk and decides nothing, which a test pins.
+    See .claude/decisions/2026-08-20-the-rendered-verdict-block.md.
     """
     headline = _headline(
         verdict,
@@ -330,31 +287,15 @@ def render_execution_markdown(verdict: ExecutionGateVerdict) -> str:
 
 
 def render_confirm_markdown(verdict: ConfirmVerdict) -> str:
-    """The Stage C block the skill prints verbatim, on either track.
+    """Stage C's verdict as the markdown block the skill prints.
 
-    **Its headlines share NOTHING with the gate renderers, and that is worth stating plainly** because
-    an earlier draft of this docstring claimed they did: the four here are its own, only REVERSED
-    resembles anything on the gate ladders, and there is no PRECEDENCE to implement at all —
-    ``outcome`` is a mutually-exclusive ``Literal``, so this is one lookup plus one override. What IS
-    carried over from :func:`render_execution_markdown` is the two RULES that ladder exists to
-    enforce, and they are the whole reason this function is not a dict:
+    Keeps its own short headline ladder rather than routing through :func:`_headline`: its
+    ``REVERSED`` rung is Stage-C-specific, there is exactly one confirm renderer, and generalizing
+    for one caller is the speculation YAGNI forbids.
 
-    - **A refusal takes the headline and outranks every outcome.** ``confirm_refusal`` means the block
-      is not a comparison, so no classification beneath it means anything. It is printed ONCE, in the
-      headline and not also as a note — the rule ``holm_promote`` states for ``gate_refusal``, which
-      :func:`build_confirm_verdict` implements by leaving the note off a refused block.
-    - **REVERSED is a headline, not a footnote.** It says the effect the round was built on pointed
-      the other way on held-out rows, and a reader who skims past it promotes on a number that does
-      not hold. It reads "Do not promote" for that reason.
-
-    So this does NOT call :func:`_headline`, the two Stage B renderers' shared ladder, and that is the
-    KISS answer rather than an oversight: none of the five rungs there applies, there is exactly one
-    confirm renderer, and widening that helper to serve one caller with a disjoint rung set is the
-    generality YAGNI forbids.
-
-    The full confirm-gate block is NOT re-rendered here: this block reports the comparison and names
-    which renderer to print beside it, because the two verdict types have their own ladders and a
-    third copy of either is the drift a hand-written ladder produces.
+    An ``undecided`` outcome renders as such rather than as a number — a margin that could not be
+    priced is not a small effect.
+    See .claude/decisions/2026-08-20-stage-c-confirmation.md.
     """
     headline = {
         "reversed": "REVERSED — the effect points the other way on held-out rows. Do not promote.",

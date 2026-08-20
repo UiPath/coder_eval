@@ -329,35 +329,24 @@ def floor_preflight(
     """The three guards both noise floors open with, in the ONE order that is correct.
 
     Returns the per-invocation row maps and the split provenance, or ``None`` having already
-    recorded the refusal through :func:`no_floor` — so both callers keep their
-    ``return no_floor(...)`` shape as a plain ``return None``.
+    recorded the refusal through :func:`no_floor` — so both callers keep their ``return`` shape.
 
-    **The ORDER is load-bearing and is why this is one function rather than three.** The reconcile
-    runs BEFORE the load, so a contaminated tree costs no parse; and a WRONG path leaves nothing on
-    disk to be unrecorded, so the wrong-path message still wins its own case. Reversing the two
-    makes a mistyped variant id report a stale tree, sending the reader to check ``--repeats``
-    instead of the path they mistyped.
+    **The ORDER is load-bearing and is why this is one function rather than three guards.** The
+    reconcile runs BEFORE the load, so a contaminated tree costs no parse; and a WRONG path leaves
+    nothing on disk to be unrecorded, so the wrong-path message still wins its own case. Reversed, a
+    mistyped variant id reports a stale tree.
 
-    The three causes:
-
-    1. **A stale tree** (CE053). A re-used ``--run-dir`` leaves an earlier invocation's results on
-       disk while ``row_selection`` is rewritten to describe only the latest one, so the halves a
-       floor splits are pooled over a row set no invocation ran. An ``unknown`` dir is a NOTE, never
-       a refusal — the module's settled missing-provenance stance, so old run dirs stay measurable;
-       ``reconcile_arms`` logs it and neither floor has a ``notes`` channel to surface it in.
-    2. **Nothing loaded.** A mistyped variant, suite or run directory is the documented SILENT-ZERO
-       failure mode. Without this the reader is told the row count was too small and goes off to
-       check the criterion index or ``--repeats`` instead of the path.
-    3. **A split mismatch.** A null comparison assumes both halves measure the same thing; pooling a
-       train invocation with a test one breaks that before any arithmetic happens.
+    The three causes are a stale tree (CE053), nothing loaded, and a split mismatch. An ``unknown``
+    dir is a NOTE rather than a refusal — the family's settled missing-provenance stance.
 
     ``split_label`` is RENDERED — ``"the null split"`` on the activation track, ``"the replicate
     split"`` on the execution one — so it is the one required argument that differs between them.
 
     Returns the PER-INVOCATION list, not a pooled map: the activation floor splits the invocations
     into halves and needs them apart, and the execution caller pools them itself. The emptiness test
-    is ``not any(...)`` over that list, which is equivalent to the pooled ``not rows`` its caller
-    used to apply — pooling cannot invent a row.
+    is ``not any(...)`` over that list, equivalent to the pooled ``not rows`` its caller used to
+    apply, since pooling cannot invent a row.
+    See .claude/decisions/2026-08-20-the-noise-floor.md for what the order cost when it was reversed.
     """
     stale, _unknown_dirs = reconcile_arms([(variant_id, run_dirs)], suite_id)
     if stale:
@@ -519,40 +508,21 @@ _CONFIRM_UNDECIDED = "undecided"
 
 
 def classify_confirm(train_effect: float | None, test_effect: float | None, test_mde: float | None) -> tuple[str, str]:
-    """``(outcome, note)`` for a train -> test comparison. See :class:`ConfirmVerdict.outcome`.
+    """Stage C's four answers, and the sentence that goes with each. The ONE declaration, both tracks.
 
-    **Stage C confirms a WIN**, and the classifier says so rather than accepting any pair of signs.
-    A train effect that is zero or negative is not something a confirm can reproduce, and the
-    arithmetic silently produced actively misleading answers for those inputs — measured on the
-    shipped version: ``train=-0.08, test=-0.10`` read REPRODUCED (a candidate that lost on train and
-    lost harder), ``train=-0.08, test=-0.02`` read SHRANK (a LOSS reading like a diminished win), and
-    ``train=0.0, test=+0.06`` read REPRODUCED when nothing was reproduced — an effect APPEARED where
-    Stage B measured none. All four are UNDECIDED now, and with ``train_effect > 0`` guaranteed the
-    remaining sign test is the plain ``test_effect < 0`` rather than a product.
+    ``(outcome, note)`` where ``outcome`` is ``reversed`` / ``shrank`` / ``reproduced`` /
+    ``undecided``. The margin is ``test_mde`` — the confirm split's OWN minimum detectable effect —
+    which is what makes the rule per-track without a second declaration: each track passes its own
+    gate's floor, on its own metric.
 
-    The four answers and their precedence:
+    ``undecided`` whenever the margin is undefined: a ``test_mde`` of ``None`` or 0.0 means the floor
+    could not be PRICED, never that the suite can resolve anything, so classifying against it would
+    report SHRANK for a comparison that measured nothing.
 
-    - **UNDECIDED** — either effect is absent, the train effect is not a win, or the margin is
-      undefined. The margin is
-      ``test_mde``, and it is undefined for ``None`` and for anything below
-      :data:`FLOOR_RESOLUTION` — not just for exactly ``0.0``, which is the too-narrow test the
-      execution track already had to widen once: a null split over a constant per-row difference
-      returns something like 2.8e-17 rather than 0.0, so an ``== 0.0`` check goes silently inert on
-      exactly the degenerate suites it exists for (measured on this repo's own winning fixture).
-      ``execution_gate`` documents such a floor as "the floor was not checked", never "this suite can
-      resolve anything", and with a margin of zero every non-identical test effect would classify
-      SHRANK. Both pinned fixtures render ``Minimum detectable effect: 0.000``, so this is the common
-      case rather than a corner.
-    - **REVERSED** — the signs oppose. It outranks the two below because a reversal is a headline:
-      the effect the round was built on pointed the other way on held-out rows.
-    - **SHRANK** — same sign, and the test effect is below the train effect by MORE than the margin.
-      A test effect of exactly ``0.0`` lands here too: "same sign" is undefined at zero, and calling
-      it reproduced would report no effect as a reproduced one.
-    - **REPRODUCED** — same sign, within the margin.
-
-    A pure function of three floats, so it decides nothing about a run and can be read on its own.
-    The note is always non-empty: a bare outcome word in a ledger read back weeks later is not
-    enough to reconstruct which comparison produced it.
+    Here rather than on either track because both need it and the layering forbids the two rank-2
+    modules from importing each other — so per-track would mean two copies of promotion-relevant
+    arithmetic, which is the CE037/CE040 defect class exactly.
+    See .claude/decisions/2026-08-20-stage-c-confirmation.md for the rest.
     """
     if train_effect is None or test_effect is None:
         missing = "train" if train_effect is None else "test"
@@ -876,42 +846,31 @@ def decide_family[V: GateVerdictBase](
 ) -> list[V]:
     """Apply the Holm correction to a whole family and record the decision on each verdict.
 
-    The ONE promotion loop for both tracks. It was written twice, 700 lines apart, and the two
-    copies had already drifted in spelling: the refusal conjunct read ``refusal is None`` on one
-    side and ``not refused`` on the other, and the two trailing notes were appended from different
-    places.
-
-    What it owns, and what a hook may therefore not re-do:
+    The ONE promotion loop for both tracks. What it owns, and what a hook may therefore not re-do:
 
     - the :func:`holm_family` / :func:`resamples_for_family` calls;
     - the ``p_value is None`` branch — outside the family, ``promoted=False`` and
-      ``holm_rejected=False`` (never ``None``, which would read as "Holm has not run" on a verdict
-      it has), with :data:`NOTE_OUTSIDE_FAMILY` added only where there is no refusal to contradict;
-    - the ONE ``promoted`` conjunction: Holm rejected AND ``separated`` AND no refusal AND no
-      failed veto. ``failed_vetoes`` is the single declaration of which lists veto, so a failed
-      guardrail FORCES False and the field alone is safe to ship on;
-    - the two TRAILING notes, :func:`note_holm_family` and :func:`note_resolution_degraded`, for
-      both tracks. A hook that appends either prints it twice;
+      ``holm_rejected=False`` (never ``None``, which would read as "Holm has not run" on a verdict it
+      has), with :data:`NOTE_OUTSIDE_FAMILY` added only where there is no refusal to contradict;
+    - the ONE ``promoted`` conjunction: Holm rejected AND ``separated`` AND no refusal AND no failed
+      veto;
+    - the two TRAILING notes, :func:`note_holm_family` and :func:`note_resolution_degraded`, for both
+      tracks. A hook that appends either prints it twice;
     - both ``copy_with`` calls.
 
-    It owns **no note text**. Every sentence about one candidate is the hook's, because which of
-    the two statistical conjuncts failed — and what the remedy is — differs between a bootstrap
-    over labels and an analytic paired *t*.
+    It owns **no note text**. Every sentence about one candidate is the hook's, because which of the
+    two statistical conjuncts failed — and what the remedy is — differs between a bootstrap over
+    labels and an analytic paired *t*.
 
     The hook runs on the MEASURED branch only: the activation track's refusal needs the family's
-    rank-dependent threshold, so calling it on a ``p_value is None`` verdict would hand a
-    discreteness refusal to a verdict that cannot have one.
+    rank-dependent threshold, so calling it on a ``p_value is None`` verdict would hand a discreteness
+    refusal to a verdict that cannot have one.
 
     Generic over ``V`` rather than typed to the union, so ``copy_with`` returns the caller's own
     verdict class and a track keeps its concrete type end to end.
 
-    **One measurable difference from the two loops it replaces, stated because "no-op" was the
-    claim.** The execution wrapper omitted ``gate_refusal`` from its ``copy_with``; this writes it on
-    every measured path, from the hook, which returns the verdict's own value. The VALUE is
-    therefore unchanged — verified over a 10,982-state differential against both old loops — but the
-    key now enters ``__pydantic_fields_set__``, so ``model_dump(exclude_unset=True)`` includes it on
-    an execution verdict built without it. Nothing reads a gate verdict that way today; the full
-    ``model_dump()`` and every pinned fixture are byte-identical.
+    See .claude/decisions/2026-08-20-the-promotion-decision.md for what the two copies of this loop
+    cost, and for the one measurable difference from them (``model_fields_set``).
     """
     family, rejected_at = holm_family(verdicts, alpha)
     family_resamples = resamples_for_family(verdicts, family)

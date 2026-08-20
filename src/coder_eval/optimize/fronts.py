@@ -205,48 +205,15 @@ def headroom_ceiling(
     rows: Collection[str] | None = None,
     max_score: float = 1.0,
 ) -> RuleCeiling:
-    """The arithmetic bound on what a candidate targeting ``rule`` could move the suite mean by.
+    """The most a further round could still win on this suite. The one number that can say STOP.
 
-    ::
+    Computed over the rows every arm already gets right plus the rows none of them do: the first
+    group has nothing left to win and the second is what is still on the table. Read as a SCORE it is
+    meaningless; read as a CEILING it bounds what another round can buy.
 
-        max_effect(R) = SUM over rows failing R of (max_score - score)  /  n_rows
-
-    A candidate can only gain where the incumbent lost, so the rows failing ``R`` bound the whole
-    effect — and the suite mean divides that by every row, including the ones already at ceiling.
-    Measured on a real 15-row suite against a noise floor of 0.0255: R1 0.0300 (1.18x the floor),
-    R6 0.0223 (0.87x), R7 0.0191 (0.75x), R8 0.0095 (0.37x). **Three of the four candidates written
-    for that round were unpromotable by arithmetic**, and about $40 was spent gating them — on
-    inputs (a baseline and a noise floor) that had already been paid for.
-
-    **The denominator is the FULL row count, never the selected subset.** That is the whole point:
-    a per-row lift divided by the rows that failed makes every rule look promotable, and the suite
-    mean the gate actually compares is an average over all of them. Every row *passing* ``R``
-    therefore makes ``R`` harder to promote, which is what the depth-over-breadth rule in
-    ``/coder-eval:task`` is about.
-
-    ONE function for both questions — the suite-level "can any candidate promote here?"
-    (``rows=None``, every row) and the rule-level "can a candidate for R?" — because they are the
-    same arithmetic over different subsets. Note that ``rows=None`` and ``rows=set()`` are
-    DIFFERENT and the difference matters: a rule that failed nowhere is absent from
-    :func:`~coder_eval.optimize.load.rule_row_map`, and passing its missing entry through as
-    ``None`` would silently report the whole suite's ceiling under that rule's name.
-
-    **It is advisory and never gates.** A "below the floor" verdict is arithmetically sound — the
-    attribution behind it is an upper bound (see ``rule_row_map``) — but the attribution itself is
-    AUTHORED, and a mistyped rule id moves rows between rules. A wrong annotation must not be able
-    to block a real promotion.
-
-    **The denominator is the rows this ARM produced, not the suite's declared row count**, because
-    a hole is all ``row_scores`` can carry — an arm that lost 5 of 15 rows therefore reports
-    ceilings computed over 10, which is the same intersection semantics the paired gate uses and
-    is 1.5x larger than the suite-wide reading. Check the row matrix's holes before acting on a
-    ceiling from a partly-crashed arm; ``n_dropped`` counts only ids in the SELECTED subset, so a
-    hole outside it is invisible here.
-
-    Per-row headroom is clamped at zero, so a mis-scaled score above ``max_score`` cannot cancel
-    real headroom elsewhere. Non-finite scores are treated as ABSENT — :func:`_finite_scores`'
-    convention, applied to a bare mapping — so a NaN cell neither poisons the sum nor inflates the
-    denominator; it is counted in ``n_dropped``, which the render prints.
+    ``None`` when it cannot be computed rather than 0.0, which would claim there is no headroom.
+    A hole is absent, never zero.
+    See .claude/decisions/2026-08-20-the-advisory-fronts.md.
     """
     finite = {row_id: value for row_id, value in row_scores.items() if math.isfinite(value)}
     # `is None`, never truthiness: an empty `rows` is a real, empty selection.
@@ -291,33 +258,12 @@ def cost_quality_points(
     suite_id: str,
     criterion_index: int | None = None,
 ) -> list[CostQualityPoint]:
-    """Each arm's mean row score against its median per-row cost.
+    """The (cost, quality) points :func:`cost_quality_front` ranks, per arm.
 
-    Quality reuses :func:`arm_row_scores`, so this view and the row matrix cannot disagree about
-    what a row scored. Cost reuses :func:`row_cost_levels`, so it and the guardrail cannot
-    disagree about what a row cost.
-
-    **BOTH coordinates are reduced over the same rows: the ones the arm actually scored.** Cost is
-    read only for those rows, not for every row the arm has on disk. Without that restriction an
-    arm that CRASHED most of its rows is described by two different samples — its quality averaged
-    over the handful it completed, its cost over all of them, holes included, because a crashed row
-    still records a `total_cost_usd`. Reproduced before the fix: an arm completing 1 of 6 rows at a
-    perfect score took the whole front and knocked the incumbent off it, rendered as two clean
-    numbers with nothing to show the other five rows were missing. ``n_rows`` reports the count so
-    the render can say which arms are standing on less evidence, exactly as `_dominates` requires
-    row coverage and `render_row_matrix` prints `—`.
-
-    ``cost_per_row`` is the **median** over those rows — the same reduction
-    ``GuardrailCheck.incumbent`` reports, so the two surfaces print the same number. Parity is
-    close but not exact by construction, and the two reasons are worth knowing: the guardrail
-    balances replicate counts *pairwise between two arms* before reducing, and it reduces over the
-    rows BOTH arms scored (or the explicit ``row_ids`` the gate hands it) rather than over one
-    arm's own. An N-arm view can do neither. Where every arm scored every row with equal replicate
-    counts — the ordinary case — they agree exactly.
-
-    ``criterion_index=None`` reads each row's ``weighted_score`` (the execution track); an index
-    reads that criterion's score (the activation track). The same switch ``arm_row_scores``
-    already has, rather than a second track parameter.
+    Separated from the ranking so a caller can plot or report the raw pairs without inheriting the
+    front's advisory-only reading. A hole is absent, never zero — an arm missing a measurement on a
+    row contributes no point for it rather than a zero.
+    See .claude/decisions/2026-08-20-the-advisory-fronts.md.
     """
     require_valid_criterion_index(criterion_index)
     arms = arm_row_scores(
@@ -352,43 +298,15 @@ def cost_quality_points(
 
 
 def cost_quality_front(points: list[CostQualityPoint]) -> list[str]:
-    """Variant ids no other arm beats on BOTH quality and cost.
+    """Rank arms by quality per unit cost. **ADVISORY ONLY — never a shortlist.**
 
-    An arm is dominated when another scores at least as well AND costs at most as much, with at
-    least one of the two strict — **and covers every row it was measured on.** Ties therefore all
-    stay, matching :func:`pareto_front`.
+    A ratio has no defensible threshold, which is exactly why this may not narrow a field. Presenting
+    it as a shortlist invites promoting the cheapest arm that happens to score, and reading it as the
+    Pareto front (a DISCARD rule) or the instance-best front (a MERGE shortlist) is the reading error
+    this separation exists to prevent.
 
-    That last clause is the same coverage precondition :func:`_dominates` applies to the row
-    vector, and it is load-bearing for the same reason. Without it an arm that CRASHED on five of
-    six rows and scored 1.0 on the sixth dominates an incumbent that scored 0.9 on all six at the
-    same cost — measured, and it knocked the incumbent off the front entirely. An arm standing on
-    less evidence is not entitled to a claim about "everywhere"; it stays on the front itself,
-    where :func:`render_cost_quality` names its row count, rather than displacing an arm that was
-    actually measured.
-
-    Coverage is a SET test, not a count. Two arms measured on four rows each, on disjoint rows,
-    each have "at least as many" as the other and would each be entitled to dominate — while
-    neither has any evidence about where the other was measured. Comparing the row ids is what
-    makes the aggregate rule agree with the row-vector one it is modelled on.
-
-    An arm missing either coordinate is **excluded**, mirroring how ``pareto_front`` treats an arm
-    with an empty vector: a point with no cost is not a free point, it is an unmeasured one, and
-    putting it on the front would render it indistinguishable from the genuinely cheapest arm.
-    :func:`render_cost_quality` names the excluded arms rather than dropping them silently.
-
-    A **zero** cost is a real coordinate, not a missing measurement — a free model is legitimately
-    the cheapest arm there is. So the test is ``is not None``, never truthiness, the same rule
-    ``register_pricing`` states for an all-zero rate.
-
-    A **non-finite** coordinate is excluded for the opposite reason: every ``>=`` / ``<=`` against
-    NaN is False, so a NaN arm is undominatable and would render in bold as a live trade.
-
-    **All three fronts guard non-finite values**, and now agree about them: this one excludes the
-    arm, :func:`instance_best_front` skips the cell when seeding a row's maximum, and
-    :func:`pareto_front` treats it as a hole via :func:`_finite_scores`. The mechanisms differ
-    because the three answer different questions; the outcome — a non-finite cell never wins
-    anything and never makes its arm undominatable — is the same, and a parametrized test asserts
-    it across all three rather than leaving this sentence to be believed.
+    A hole is absent, never zero.
+    See .claude/decisions/2026-08-20-the-advisory-fronts.md.
     """
     # Narrowed to plain floats up front rather than suppressing the comparison's type error: the
     # filter IS the exclusion rule, so making it produce a non-optional shape is what keeps the
