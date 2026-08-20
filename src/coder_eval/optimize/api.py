@@ -16,6 +16,10 @@ and a reader of that ledger sees the same sentences the caller acted on.
 **A name beginning ``record_`` WRITES** — the ``measurements.json`` sidecar, the regression corpus.
 Everything named ``*_report`` reads and returns; nothing else here touches disk for writing.
 
+Why composites rather than a facade, why every one returns ``str``, why Stage C recomputes, and why
+the tracks get two functions instead of a ``track:`` literal:
+.claude/decisions/2026-08-20-the-skill-facing-api.md.
+
 **Run directories are ``Path``, and that is enforced rather than documented.** A bare string is a
 ``Sequence`` too, so it iterates into characters and fails somewhere downstream — after the runs it
 was meant to read have been paid for. Every entry point rejects one at the boundary.
@@ -362,7 +366,7 @@ def headroom_report(
     arms = arm_row_scores(run_dirs=run_dirs, variant_ids=[variant_id], suite_id=suite_id)
     # `[0]` cannot raise — `arm_row_scores` returns one arm per variant id and this passes one. The
     # real failure is an arm that scored NOTHING, which comes back as a present arm with an empty
-    # vector; that is what the fence's `SystemExit` was for and what this raises on.
+    # vector; that is what the fence exited the interpreter over, and what this raises on.
     if not arms[0].row_scores:
         raise ValueError(
             f"{variant_id!r} scored no rows of {suite_id!r} under {', '.join(str(d) for d in run_dirs)} — "

@@ -43,11 +43,14 @@ from coder_eval.reports_optimize import (
     _front_summary,
     render_attribution_unavailable,
     render_comparability,
+    render_confirm_family,
     render_confirm_markdown,
+    render_corpus_appended,
     render_corpus_check,
     render_cost_quality,
     render_discreteness,
     render_execution_markdown,
+    render_family_shrunk,
     render_headroom_ceilings,
     render_leak_scan,
     render_markdown,
@@ -1462,3 +1465,39 @@ class TestRenderComparability:
             assert "Same suite as the last round." in render_comparability(
                 grader=False, suite=False, has_grader=has_grader
             )
+
+
+class TestTheThreeLedgerAndFamilyNotes:
+    """The three notes whose whole job is to say a number the block beside them cannot.
+
+    Direct tests, because each was reachable only through a composite's substring assertion — and a
+    renderer covered only that way is a renderer whose exact claim nobody has read.
+    """
+
+    def test_render_family_shrunk_names_both_counts_and_the_direction(self) -> None:
+        # The ONE fail-open case in the gate area: the survivors were predeclared against the larger
+        # family and decided against the smaller, LOOSER threshold. The direction is the point.
+        note = render_family_shrunk(predeclared=3, corrected=1)
+        assert "saw 1 of 3 predeclared candidate(s)" in note
+        assert "2 missing arm(s) refused" in note
+        assert "LOOSER threshold" in note
+        assert "gate the whole family again" in note
+
+    def test_render_confirm_family_states_the_size_stage_c_recomputed_against(self) -> None:
+        # `promoted` is a property of the FAMILY, and nothing on disk records how many candidates
+        # Stage B gated — so a reader comparing this against their own round is the only check there is.
+        assert "family of 4" in render_confirm_family(family_size=4)
+
+    def test_render_corpus_appended_reports_what_landed_not_what_was_submitted(self) -> None:
+        # The corpus de-duplicates on `row_id`, so the submitted count is not what was recorded.
+        # Reporting it as "recorded" hid the whole reason the de-duplication exists.
+        deduped = render_corpus_appended(submitted=3, added=1, total=5)
+        assert "1 of 3 row(s) added" in deduped
+        assert "now holds 5" in deduped
+        assert "2 row(s) were already in the corpus" in deduped
+
+    def test_render_corpus_appended_stays_quiet_when_nothing_was_deduplicated(self) -> None:
+        # The extra sentence must not fire on every promotion, or it stops being read.
+        clean = render_corpus_appended(submitted=2, added=2, total=2)
+        assert "2 of 2 row(s) added" in clean
+        assert "already in the corpus" not in clean

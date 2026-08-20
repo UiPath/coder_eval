@@ -480,6 +480,10 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         # which was right while the snippets reached into five decision modules and became
         # unfailable the moment they stopped.
         family = {m for m in imported if m.startswith("coder_eval.optimize.")}
+        # KEPT alongside CE066 rather than replaced by it: this one reads the REAL shipped file as
+        # part of the surface suite, while CE066's reader is reusable and carries the synthetic
+        # positives. Neither subsumes the other, and a rule with no synthetic positive is a rule
+        # nobody has watched fail.
         assert family == {"coder_eval.optimize.api"}, (
             f"optimize-skill's SKILL.md imports from {sorted(family)} — the declared surface is "
             "`coder_eval.optimize.api` alone. A fence reaching past it is a fence not finished."
@@ -499,8 +503,27 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         # `candidate_leaks` was here until the leak preflight became a composite: the procedure no
         # longer names the primitive, it names `leak_report`, which is what a reader has to run. The
         # other four survive in PROSE and keep their guard for that reason.
-        for name in ("activation_gate", "holm_promote", "render_markdown", "leak_report", "search_compare"):
-            assert name in skill, f"optimize-skill's SKILL.md no longer names {name!r} in its gate snippet"
+        # EXTENDED, not replaced. The first four are library names the PROCEDURE must keep naming even
+        # though no fence imports them any more — the prose is where a reader learns what the composite
+        # is doing under the block. The rest are the composites the procedure has to name because they
+        # are what a reader runs; a step whose composite went unnamed would be a step nobody can find.
+        for name in (
+            "activation_gate",
+            "holm_promote",
+            "render_markdown",
+            "search_compare",
+            "activation_gate_report",
+            "confirm_report_activation",
+            "execution_gate_report",
+            "leak_report",
+            "record_round_execution",
+        ):
+            # WORD-BOUNDED, because four of these names are PREFIXES of composites in the same list:
+            # a plain `"activation_gate" in skill` is satisfied by `activation_gate_report` alone, so
+            # the library name could vanish from the prose while the sensor stayed green.
+            assert re.search(rf"\b{re.escape(name)}\b", skill), (
+                f"optimize-skill's SKILL.md no longer names {name!r} in its procedure"
+            )
 
     def test_optimize_skill_snippets_parse_and_bind(self):
         """The third half: a snippet's CALLS must still bind against the real signatures.
@@ -534,7 +557,11 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         assert mutated != raw, "the anchor moved — re-derive it from the skill's snippets"
 
         failures = _snippet_binding_failures(mutated)
-        assert len(failures) >= 5 and all("suite_i" in f for f in failures), failures
+        # An EXACT count, measured against the real file. A floor was right while there were fifteen
+        # multi-line fences to disagree about; after the migration each fence is one call, so a floor
+        # of 5 is unfailable in practice and would not notice ten of them going quiet.
+        assert len(failures) == 13, failures
+        assert all("suite_i" in f for f in failures), failures
 
     def test_the_snippet_binder_catches_a_bogus_keyword(self):
         # The self-test. Without it the binder could be reverted to a no-op with everything green.
@@ -605,7 +632,8 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         mutated = raw.replace("from coder_eval.optimize.", "from coder_eval.nowhere_optimize.")
         assert mutated != raw, "the anchor moved — re-derive it from the skill's snippets"
         failures = _snippet_binding_failures(mutated)
-        assert len(failures) >= 15, failures
+        # Exact, for the reason the sibling above gives: one import line per fence now.
+        assert len(failures) == 16, failures
         assert all("does not import" in f for f in failures), failures
 
     def test_a_real_non_callable_import_stays_silent(self):
@@ -943,3 +971,92 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
             "the handoff no longer asks for the discrimination gate's margin — the number that says "
             "whether the instrument measures anything at all"
         )
+
+
+@pytest.mark.lint
+class TestCE066SkillImportsOnlyTheApi:
+    """CE066 — the skill-facing surface is DECLARED, not derived from whatever the binder resolves.
+
+    Three parts, the shape `TestCE026ActionDocSurfaces` sets: the real check, an anti-vacuity check
+    that the reader reads something, and synthetic positives proving the check can fail.
+
+    See `tests/lint/skill_api_imports.py` for what this does and does not pin — in particular that it
+    says nothing about whether a composite is USED well, only about which module a fence reaches for.
+    """
+
+    SKILL = PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md"
+
+    def test_the_real_skill_imports_only_the_declared_surface(self):
+        from tests.lint.skill_api_imports import find_foreign_imports
+
+        findings = find_foreign_imports(self.SKILL)
+        assert not findings, (
+            "\noptimize-skill's SKILL.md reaches past `coder_eval.optimize.api`. Every guard, "
+            "fallback and track branch belongs in a composite where a test can reach it — a fence "
+            "that still needs a primitive is a fence not finished:\n\n" + "\n".join(f"  {f}" for f in findings)
+        )
+
+    def test_the_reader_reads_the_real_fences(self):
+        # Anti-vacuity: a reader that found no fences reports no offenders, which is byte-identical
+        # to a clean file. The skill has fifteen and every one of them imports the surface.
+        from tests.lint.skill_api_imports import DECLARED_SURFACE, coder_eval_imports, python_fences
+
+        fences = python_fences(self.SKILL.read_text(encoding="utf-8"))
+        assert len(fences) >= 10, f"the reader found only {len(fences)} python fences"
+        importing = [f for f in fences if coder_eval_imports(f) == {DECLARED_SURFACE}]
+        assert len(importing) == len(fences), (
+            f"only {len(importing)} of {len(fences)} fences import the declared surface — every one "
+            "should, since a fence that imports nothing from the library is not driving anything"
+        )
+
+    def test_a_foreign_import_is_reported_with_its_fence(self, tmp_path):
+        from tests.lint.skill_api_imports import find_foreign_imports
+
+        markdown = tmp_path / "s.md"
+        markdown.write_text(
+            "# skill\n\n```python\nfrom coder_eval.optimize.api import leak_report\n```\n\n"
+            "```python\nfrom coder_eval.optimize.load import load_arm_rows\n```\n",
+            encoding="utf-8",
+        )
+
+        findings = find_foreign_imports(markdown)
+        assert len(findings) == 1, findings
+        assert "coder_eval.optimize.load" in findings[0]
+        assert "fence 2" in findings[0], "a fifteen-fence file needs the position, not just the module"
+
+    def test_a_plain_import_form_is_caught_too(self, tmp_path):
+        # `import coder_eval.optimize.load` is the same reach with different syntax.
+        from tests.lint.skill_api_imports import find_foreign_imports
+
+        markdown = tmp_path / "s.md"
+        markdown.write_text("```python\nimport coder_eval.optimize.load\n```\n", encoding="utf-8")
+        assert len(find_foreign_imports(markdown)) == 1
+
+    @pytest.mark.parametrize(
+        ("body", "why"),
+        [
+            pytest.param("import pathlib\nimport subprocess\n", "stdlib is not in scope", id="stdlib"),
+            pytest.param("from coder_eval.optimize.api import leak_report\n", "the declared surface", id="declared"),
+            pytest.param("x = 1  # coder_eval.optimize.load\n", "a comment is not an import", id="comment"),
+            pytest.param("def f():\n    '''coder_eval.optimize.load'''\n", "nor a docstring", id="docstring"),
+            pytest.param("this is not python(", "an unparseable fence is the binder's fault", id="broken"),
+        ],
+    )
+    def test_what_it_deliberately_does_not_flag(self, tmp_path, body: str, why: str):
+        from tests.lint.skill_api_imports import find_foreign_imports
+
+        markdown = tmp_path / "s.md"
+        markdown.write_text(f"```python\n{body}```\n", encoding="utf-8")
+        assert find_foreign_imports(markdown) == [], why
+
+    def test_a_module_path_in_prose_outside_any_fence_is_not_an_import(self, tmp_path):
+        # The CE039 lesson: a substring scan over a heavily-prosed file reports the documentation.
+        from tests.lint.skill_api_imports import find_foreign_imports
+
+        markdown = tmp_path / "s.md"
+        markdown.write_text(
+            "Under the block, `coder_eval.optimize.load` supplies the rows.\n\n"
+            "```bash\npython -c 'import coder_eval.optimize.load'\n```\n",
+            encoding="utf-8",
+        )
+        assert find_foreign_imports(markdown) == []

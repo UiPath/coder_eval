@@ -1229,3 +1229,56 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       discipline, recorded here because it is what actually works: assert the match count before
       writing, prefer line-indexed edits over pattern matching, and restore a mutation from a `cp`
       backup rather than from git. — caught in the same plan.
+
+## From `c/2026-08-20-optimize-skill-api-surface.md` (the optimize family's declared API)
+
+**CE066 is TAKEN** by that plan: `optimize-skill`'s `SKILL.md` imports from `coder_eval.optimize.api`
+and nothing else. Reader at `tests/lint/skill_api_imports.py`, wired as
+`tests/lint_tests/test_lint_plugin_optimize.py::TestCE066SkillImportsOnlyTheApi`. **Next free id:
+CE067** (CE049, CE055, CE056 and CE061-CE065 remain reserved below; CE044 is retired).
+
+- [ ] **`optimize/api.py` must author NO markdown.** Every block it returns comes from a
+      `reports_optimize.render_*`, which is what keeps `CLAUDE.md`'s "every markdown block the skill
+      prints" true of that module. Nothing guards it — `tests/test_optimize_layering.py` pins only
+      WHICH module may import the renderer, not that the composites never format. The boundary was
+      broken TWICE during that plan and caught both times only by review: `_staleness_note`'s bolded
+      sentence, then Stage C's family-size line. An AST check for a string literal containing `**`,
+      `###`, `| ` or a leading `_` in that one module is the cheap shape; the hard part is exempting
+      docstrings, which is why it is not a five-minute job. — caught in review, twice.
+- [ ] **No `SKILL.md` python fence may reference a name no fence binds.** The snippet binder checks
+      that imports RESOLVE and that keywords BIND; neither sees a free variable. That is how Step 11's
+      fence came to use an `arms` binding Stage A had stopped providing — a `NameError` after the round
+      was paid for, which is the exact failure that fence's own paragraph warned about. An `ast`
+      free-variable audit over every fence is ~20 lines and found three such fences when run by hand
+      (two were already scheduled for repair, one was a live regression). — caught in review.
+- [ ] **A per-replicate score reduction is declared FOUR times**: `load.row_replicate_scores`,
+      `fronts.arm_row_scores`, and twice inside `optimize/execution.py`. Converging them is a
+      behaviour change rather than a refactor — `arm_row_scores` renders an explained empty matrix
+      where the new primitive raises on an out-of-range index — so what is wanted is a sensor of the
+      shape `test_the_trim_is_declared_once`, not a rewrite. — caught in review.
+- [ ] **`_ENTRY_POINTS` in `tests/test_optimize_api.py` is hand-maintained.** It claims to cover every
+      composite taking a run-dir sequence and to grow each phase, and it silently failed to twice.
+      A derived sensor — every public composite in `optimize/api.py` whose signature has a
+      `Sequence[Path]` parameter appears in that list — would close it. — caught in review, twice.
+- [ ] **`measure_execution_noise_floor` threads no `reasons` sink**, so the execution track's no-floor
+      block cannot name which of its four preconditions failed while the activation track's can. This
+      entry already existed above for `_execution_diagnostics`; the composite surface makes it
+      user-visible. — re-confirmed.
+- [ ] **`headroom_report` reads the run tree THREE times** (its own reconcile sweep, `arm_row_scores`',
+      and `floor_preflight`'s), re-validating every `task.json` each time — ~135 validations for 45
+      files on a 15-row, 3-replicate suite. Threading preloaded rows into `arm_row_scores` would remove
+      two, but that is a signature change on a rank-3 primitive. Performance, not correctness.
+- [ ] **`resolve_model` and `resolve_arm_model` live in `execution.py` but BOTH tracks need them.** The
+      activation composites import them across the track boundary, which `activation.py` itself
+      correctly does not. `load.py` (rank 0) is the cleaner home and would let `activation.py` use them
+      directly — but it is a rename across the family under
+      `test_a_moved_name_lives_in_exactly_one_module`, unrelated to that plan's goal. Recorded so the
+      next reader finds the reasoning instead of rediscovering the smell.
+- [ ] **`headroom_ceiling`'s docstring contradicts `rule_row_map`'s** about whether a never-failing
+      rule is a key: the first says `rule_row_map` "OMITS a rule that failed nowhere", the second says
+      "Every rule SEEN is a key". One is stale prose. Pre-existing, unrelated to that plan.
+- [ ] **Do not run a mutation-testing reviewer against a tree you are still editing.** A review agent
+      applied and reverted source mutations from its own snapshot while the implementer was writing to
+      the same file, and warned that its restore could have discarded concurrent edits. It did not,
+      verified by grep — but the technique and the concurrency are individually fine and jointly
+      dangerous, and nothing prevents them being combined. Process, not code. — caught in that plan.
