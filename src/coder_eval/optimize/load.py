@@ -559,6 +559,148 @@ class _PairedRows(NamedTuple):
     notes: list[str]
 
 
+def _wrong_path_notes(
+    arms: Sequence[tuple[str, str, dict[str, list[EvaluationResult]], Sequence[Path]]],
+    suite_id: str,
+) -> list[str]:
+    """One note per arm that loaded NOTHING, naming the glob it searched and where.
+
+    A mistyped variant or suite is the documented SILENT-ZERO failure mode, and its symptom — zero
+    rows — is indistinguishable from a genuinely tiny suite unless the verdict says which.
+    """
+    notes: list[str] = []
+    for arm, variant_id, rows, run_dirs in arms:
+        if not rows:
+            searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
+            notes.append(
+                f"the {arm} arm loaded ZERO rows: nothing matched "
+                + f"{task_json_pattern(variant_id, suite_id)} under {searched}. "
+                + "That is a wrong variant id, a wrong suite id or a wrong run directory — not a result. "
+                + "Fix the path before reading anything below."
+            )
+    return notes
+
+
+class _Pairing(NamedTuple):
+    """Which rows the two arms share, and which of those actually scored on both.
+
+    Three row sets, and the differences between them are what the sample notes report:
+    ``paired_row_ids`` exist on both arms, ``scored_row_ids`` also produced a criterion result on
+    both, and ``hollow`` is the difference — a row that errored or timed out is written with an
+    EMPTY ``success_criteria_results``, so its directory exists and it pairs while scoring on one
+    arm only.
+    """
+
+    paired_row_ids: list[str]
+    unpaired: list[str]
+    per_row: dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]]
+    hollow: list[str]
+    scored_row_ids: list[str]
+
+
+def _pair_rows(
+    *,
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    criterion_index: int,
+) -> _Pairing:
+    """Intersect the two arms' rows and split off the ones that scored on only one of them.
+
+    A row scored on only one arm is dropped from BOTH vectors and counted, mirroring the suite
+    rollup's exclude-then-report convention rather than being silently absorbed. Left in, the two
+    arms' F1s are computed over different row sets, and the bias runs toward the candidate: an edit
+    that makes the agent crash on exactly the rows it was failing would score a perfect F1 on what
+    is left.
+    """
+    paired_row_ids = sorted(set(incumbent_rows) & set(candidate_rows))
+    unpaired = sorted((set(incumbent_rows) | set(candidate_rows)) - set(paired_row_ids))
+    per_row = {
+        rid: (label_pairs(incumbent_rows[rid], criterion_index), label_pairs(candidate_rows[rid], criterion_index))
+        for rid in paired_row_ids
+    }
+    hollow = sorted(rid for rid, (inc, cand) in per_row.items() if bool(inc) != bool(cand))
+    scored_row_ids = [rid for rid in paired_row_ids if all(per_row[rid])]
+    return _Pairing(paired_row_ids, unpaired, per_row, hollow, scored_row_ids)
+
+
+class _BalancedClusters(NamedTuple):
+    """The two arms' per-row clusters after the replicate counts were equalized, and what it cost."""
+
+    incumbent_clusters: list[list[tuple[str, str]]]
+    candidate_clusters: list[list[tuple[str, str]]]
+    incumbent_pairs: list[tuple[str, str]]
+    candidate_pairs: list[tuple[str, str]]
+    unbalanced_rows: list[str]
+    dropped: int
+    n_discordant: int
+
+
+def _balance_clusters(
+    *,
+    per_row: dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]],
+    scored_row_ids: Sequence[str],
+) -> _BalancedClusters:
+    """Trim each row to ``min(n_incumbent, n_candidate)`` observations, then flatten and count.
+
+    A row's weight in an arm's ``f1.yes`` is its number of observations, so an arm that contributed
+    3 replicates for a row while the other contributed 2 has silently reweighted the comparison —
+    and the trigger is mundane: Stage B is three separate invocations, and one interrupted run
+    leaves a partial row set. Measured, two arms with BYTE-IDENTICAL labels on every row produced
+    f1 0.818 vs 0.750 with an interval excluding zero and ``rows_excluded == 0``. Truncating makes
+    every row weigh the same on both sides; the dropped observations are counted so the caller can
+    say so.
+
+    ``n_discordant`` is computed HERE, off the balanced clusters, because that is what it must
+    describe: a row is discordant when the arms' pooled pair multisets differ — ``sorted``, not
+    ``==``, so a row whose two arms carry the same pairs in a different replicate order counts as
+    concordant. Only discordant rows can move a resample's difference off exactly 0.0, which is
+    what makes the discreteness floor a valid bound on the smallest p this suite can express.
+    """
+    balanced: dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]] = {}
+    dropped = 0
+    for rid in scored_row_ids:
+        inc, cand = per_row[rid]
+        kept_inc, kept_cand = balance_pair(inc, cand)
+        dropped += len(inc) + len(cand) - len(kept_inc) - len(kept_cand)
+        balanced[rid] = (kept_inc, kept_cand)
+
+    incumbent_clusters = [balanced[rid][0] for rid in scored_row_ids]
+    candidate_clusters = [balanced[rid][1] for rid in scored_row_ids]
+    return _BalancedClusters(
+        incumbent_clusters=incumbent_clusters,
+        candidate_clusters=candidate_clusters,
+        incumbent_pairs=[p for cluster in incumbent_clusters for p in cluster],
+        candidate_pairs=[p for cluster in candidate_clusters for p in cluster],
+        unbalanced_rows=[rid for rid in scored_row_ids if len(per_row[rid][0]) != len(per_row[rid][1])],
+        dropped=dropped,
+        n_discordant=sum(1 for rid in scored_row_ids if sorted(balanced[rid][0]) != sorted(balanced[rid][1])),
+    )
+
+
+def _no_results_note(
+    *,
+    incumbent_rows: dict[str, list[EvaluationResult]],
+    candidate_rows: dict[str, list[EvaluationResult]],
+    criterion_index: int,
+) -> str:
+    """A wiring mistake, not a measurement: the index selected no classification result anywhere.
+
+    Names the result TYPES actually found at that position, because the remedy depends on them —
+    and says outright what this is not, since "the index is wrong" and "the skill never fired" look
+    identical in the numbers while calling for opposite next actions.
+    """
+    found = observed_result_types(incumbent_rows, criterion_index) | observed_result_types(
+        candidate_rows, criterion_index
+    )
+    return (
+        f"criterion_index={criterion_index} selected NO classification results on either arm "
+        + f"(result types found at that position: {sorted(found) or 'none — the index is past the end'}). "
+        + "This is a wiring mistake, not a measurement: the index is the criterion's POSITION in the "
+        + "suite's success_criteria list. It is NOT the same as the skill never firing, which yields "
+        + "pairs with observed='no'."
+    )
+
+
 def load_and_pair(
     *,
     incumbent_run_dirs: Sequence[Path],
@@ -586,116 +728,65 @@ def load_and_pair(
     incumbent_rows = pool_replicates(incumbent_by_dir)
     candidate_rows = pool_replicates(candidate_by_dir)
 
-    paired_row_ids = sorted(set(incumbent_rows) & set(candidate_rows))
-    unpaired = sorted((set(incumbent_rows) | set(candidate_rows)) - set(paired_row_ids))
+    # The notes are built in RENDERED order, and the order is the reading order of the sample's
+    # shrinking: which arm loaded nothing, which rows only one arm has, which paired rows scored on
+    # only one, which rows were reweighted, and — last, because it is a different KIND of fault — an
+    # index that selected nothing anywhere.
+    notes = _wrong_path_notes(
+        (
+            ("incumbent", incumbent_variant, incumbent_rows, incumbent_run_dirs),
+            ("candidate", candidate_variant, candidate_rows, candidate_run_dirs),
+        ),
+        suite_id,
+    )
 
-    notes: list[str] = []
-    # A mistyped variant or suite is the documented SILENT-ZERO failure mode, and its symptom —
-    # zero rows — is indistinguishable from a genuinely tiny suite unless the verdict says which.
-    for arm, variant_id, rows, run_dirs in (
-        ("incumbent", incumbent_variant, incumbent_rows, incumbent_run_dirs),
-        ("candidate", candidate_variant, candidate_rows, candidate_run_dirs),
-    ):
-        if not rows:
-            searched = ", ".join(str(d) for d in run_dirs) or "no run dirs were given"
-            notes.append(
-                f"the {arm} arm loaded ZERO rows: nothing matched "
-                + f"{task_json_pattern(variant_id, suite_id)} under {searched}. "
-                + "That is a wrong variant id, a wrong suite id or a wrong run directory — not a result. "
-                + "Fix the path before reading anything below."
-            )
-
-    if unpaired:
+    pairing = _pair_rows(incumbent_rows=incumbent_rows, candidate_rows=candidate_rows, criterion_index=criterion_index)
+    if pairing.unpaired:
         notes.append(
-            f"{len(unpaired)} row(s) present in only one arm and excluded from the pairing: {', '.join(unpaired)}. "
+            f"{len(pairing.unpaired)} row(s) present in only one arm and excluded from the pairing: "
+            + f"{', '.join(pairing.unpaired)}. "
             + "An asymmetric sample produces confident nonsense — find out why before reading the interval."
         )
-
-    per_row = {
-        rid: (label_pairs(incumbent_rows[rid], criterion_index), label_pairs(candidate_rows[rid], criterion_index))
-        for rid in paired_row_ids
-    }
-
-    # A row that errored or timed out is written with an EMPTY success_criteria_results — the row
-    # directory exists, so it pairs, but it scores on one arm only. Left in, the two arms' F1s are
-    # computed over different row sets, and the bias runs toward the candidate: an edit that makes
-    # the agent crash on exactly the rows it was failing would score a perfect F1 on what is left.
-    # So a row scored on only one arm is dropped from BOTH vectors and counted, mirroring the suite
-    # rollup's exclude-then-report convention rather than being silently absorbed.
-    hollow = sorted(rid for rid, (inc, cand) in per_row.items() if bool(inc) != bool(cand))
-    scored_row_ids = [rid for rid in paired_row_ids if all(per_row[rid])]
-    unscored_count = len(paired_row_ids) - len(scored_row_ids)
-
-    if hollow:
+    if pairing.hollow:
         notes.append(
-            f"{len(hollow)} row(s) scored on only one arm for criterion {criterion_index} and were "
-            + f"excluded from both: {', '.join(hollow)}. A row that errored or timed out produces no "
+            f"{len(pairing.hollow)} row(s) scored on only one arm for criterion {criterion_index} and were "
+            + f"excluded from both: {', '.join(pairing.hollow)}. A row that errored or timed out produces no "
             + "criterion result, and comparing arms over different row sets favours whichever arm "
             + "failed to produce one."
         )
 
-    # BALANCE the replicate counts per row before pooling. A row's weight in an arm's f1.yes is
-    # its number of observations, so an arm that contributed 3 replicates for a row while the other
-    # contributed 2 has silently reweighted the comparison — and the trigger is mundane: Stage B is
-    # three separate invocations, and one interrupted run leaves a partial row set. Measured, two
-    # arms with BYTE-IDENTICAL labels on every row produced f1 0.818 vs 0.750 with an interval
-    # excluding zero and rows_excluded == 0. Truncating each row to min(n_incumbent, n_candidate)
-    # makes every row weigh the same on both sides; the dropped observations are counted and noted.
-    balanced: dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]] = {}
-    dropped = 0
-    for rid in scored_row_ids:
-        inc, cand = per_row[rid]
-        kept_inc, kept_cand = balance_pair(inc, cand)
-        dropped += len(inc) + len(cand) - len(kept_inc) - len(kept_cand)
-        balanced[rid] = (kept_inc, kept_cand)
-    unbalanced_rows = [rid for rid in scored_row_ids if len(per_row[rid][0]) != len(per_row[rid][1])]
-    if unbalanced_rows:
+    clusters = _balance_clusters(per_row=pairing.per_row, scored_row_ids=pairing.scored_row_ids)
+    if clusters.unbalanced_rows:
         notes.append(
-            f"{len(unbalanced_rows)} row(s) had different replicate counts on the two arms and were "
-            + f"trimmed to the smaller count, dropping {dropped} observation(s): "
-            + f"{', '.join(unbalanced_rows)}. A row's weight in an arm's F1 is its observation count, "
+            f"{len(clusters.unbalanced_rows)} row(s) had different replicate counts on the two arms and were "
+            + f"trimmed to the smaller count, dropping {clusters.dropped} observation(s): "
+            + f"{', '.join(clusters.unbalanced_rows)}. A row's weight in an arm's F1 is its observation count, "
             + "so an unbalanced row shifts the comparison on its own — usually an interrupted "
             + "invocation. Re-run it rather than reading the interval below as an effect."
         )
 
-    incumbent_clusters = [balanced[rid][0] for rid in scored_row_ids]
-    candidate_clusters = [balanced[rid][1] for rid in scored_row_ids]
-
-    incumbent_pairs = [p for cluster in incumbent_clusters for p in cluster]
-    candidate_pairs = [p for cluster in candidate_clusters for p in cluster]
-
-    if paired_row_ids and not (incumbent_pairs or candidate_pairs):
-        found = observed_result_types(incumbent_rows, criterion_index) | observed_result_types(
-            candidate_rows, criterion_index
-        )
+    if pairing.paired_row_ids and not (clusters.incumbent_pairs or clusters.candidate_pairs):
         notes.append(
-            f"criterion_index={criterion_index} selected NO classification results on either arm "
-            + f"(result types found at that position: {sorted(found) or 'none — the index is past the end'}). "
-            + "This is a wiring mistake, not a measurement: the index is the criterion's POSITION in the "
-            + "suite's success_criteria list. It is NOT the same as the skill never firing, which yields "
-            + "pairs with observed='no'."
+            _no_results_note(
+                incumbent_rows=incumbent_rows, candidate_rows=candidate_rows, criterion_index=criterion_index
+            )
         )
-
-    # A row is DISCORDANT when the arms' pooled pair multisets differ — `sorted`, not `==`, so a
-    # row whose two arms carry the same pairs in a different replicate order counts as concordant.
-    # Only discordant rows can move a resample's difference off exactly 0.0, which is what makes
-    # `_discreteness_floor` a valid bound on the smallest p this suite can be expected to express.
-    n_discordant = sum(1 for rid in scored_row_ids if sorted(balanced[rid][0]) != sorted(balanced[rid][1]))
 
     return _PairedRows(
         incumbent_by_dir=incumbent_by_dir,
         candidate_by_dir=candidate_by_dir,
         incumbent_rows=incumbent_rows,
         candidate_rows=candidate_rows,
-        scored_row_ids=scored_row_ids,
-        incumbent_clusters=incumbent_clusters,
-        candidate_clusters=candidate_clusters,
-        incumbent_pairs=incumbent_pairs,
-        candidate_pairs=candidate_pairs,
-        # Computed once here rather than at each of the gate's two returns, which is where it used
-        # to be spelled twice.
-        rows_excluded=len(unpaired) + unscored_count,
-        n_discordant=n_discordant,
+        scored_row_ids=pairing.scored_row_ids,
+        incumbent_clusters=clusters.incumbent_clusters,
+        candidate_clusters=clusters.candidate_clusters,
+        incumbent_pairs=clusters.incumbent_pairs,
+        candidate_pairs=clusters.candidate_pairs,
+        # Computed once, HERE, at the end — it is the only place that knows both exclusion causes,
+        # and a stage boundary that recomputed either would be a second declaration of a number the
+        # verdict reports. It used to be spelled twice, at each of the gate's two returns.
+        rows_excluded=len(pairing.unpaired) + (len(pairing.paired_row_ids) - len(pairing.scored_row_ids)),
+        n_discordant=clusters.n_discordant,
         notes=notes,
     )
 

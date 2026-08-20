@@ -22,7 +22,11 @@ from coder_eval.optimize.gate import cost_latency_guardrails
 from coder_eval.optimize.load import (
     RuleAttribution,
     SplitProvenance,
+    _balance_clusters,
+    _no_results_note,
+    _pair_rows,
     _rules_verdicts,
+    _wrong_path_notes,
     balance_pair,
     label_pairs,
     load_and_pair,
@@ -820,3 +824,141 @@ class TestReadSplitProvenance:
             set_split(run_dir, "train")
         provenance = read_split_provenance([a, b])
         assert provenance.mismatched is False and provenance.value == "train"
+
+
+class TestLoadAndPairStages:
+    """The stages `load_and_pair` composes, unit-tested apart from the loading and the notes.
+
+    `load_and_pair` was radon cc 30 and interleaved five concerns; every one of its notes already
+    had an end-to-end test through the real run tree, which is what pins the RENDERED behaviour.
+    These are the arithmetic, driven directly, so a boundary can be moved without paying a run
+    directory to find out what it did.
+    """
+
+    @staticmethod
+    def _rows(spec: dict[str, list[list[tuple[str, str]]]]) -> dict[str, list[EvaluationResult]]:
+        """One arm as `{row id: [labels per replicate]}` — no disk, no run directory."""
+        return {rid: [eval_result(rid, labels) for labels in replicates] for rid, replicates in spec.items()}
+
+    def test_pairing_splits_the_three_row_sets(self) -> None:
+        incumbent = self._rows(
+            {
+                "shared": [[("yes", "yes")]],
+                "only-inc": [[("yes", "yes")]],
+                # Present on both arms but scored on neither side here — an errored row.
+                "hollow": [[]],
+            }
+        )
+        candidate = self._rows(
+            {"shared": [[("yes", "no")]], "only-cand": [[("yes", "yes")]], "hollow": [[("yes", "yes")]]}
+        )
+        pairing = _pair_rows(incumbent_rows=incumbent, candidate_rows=candidate, criterion_index=0)
+        assert pairing.paired_row_ids == ["hollow", "shared"]
+        assert pairing.unpaired == ["only-cand", "only-inc"]
+        # `hollow` PAIRS — its directory exists on both arms — and is then dropped for scoring on one.
+        assert pairing.hollow == ["hollow"]
+        assert pairing.scored_row_ids == ["shared"]
+
+    def test_a_row_scored_on_neither_arm_is_not_hollow(self) -> None:
+        """`hollow` is an ASYMMETRY, not an absence: `bool(inc) != bool(cand)`.
+
+        A row both arms failed to score is excluded from `scored_row_ids` all the same, but it
+        introduces no bias between the arms — so naming it in the one-arm-only note would send the
+        reader looking for a difference that is not there.
+        """
+        rows = self._rows({"r1": [[]]})
+        pairing = _pair_rows(incumbent_rows=rows, candidate_rows=rows, criterion_index=0)
+        assert pairing.paired_row_ids == ["r1"]
+        assert pairing.hollow == []
+        assert pairing.scored_row_ids == []
+
+    def test_balancing_trims_to_the_smaller_count_and_counts_the_drop(self) -> None:
+        per_row = {
+            "even": ([("yes", "yes")], [("yes", "yes")]),
+            "uneven": ([("yes", "yes")] * 3, [("yes", "yes")]),
+        }
+        clusters = _balance_clusters(per_row=per_row, scored_row_ids=["even", "uneven"])
+        assert clusters.unbalanced_rows == ["uneven"]
+        # 3 + 1 observations become 1 + 1, so two are dropped.
+        assert clusters.dropped == 2
+        assert len(clusters.incumbent_pairs) == len(clusters.candidate_pairs) == 2
+
+    def test_discordance_is_counted_on_the_balanced_clusters(self) -> None:
+        """The count that bounds the discreteness floor, and it must describe what was compared.
+
+        Computed on the raw clusters instead, a row trimmed from 3:1 could read as discordant on
+        observations the comparison never saw — which would report a floor for a sample that does
+        not exist.
+        """
+        per_row = {"trimmed": ([("yes", "yes"), ("yes", "no"), ("yes", "no")], [("yes", "yes")])}
+        clusters = _balance_clusters(per_row=per_row, scored_row_ids=["trimmed"])
+        # After the trim both arms hold exactly `("yes", "yes")`, so the row is CONCORDANT.
+        assert clusters.n_discordant == 0
+
+    def test_replicate_order_does_not_make_a_row_discordant(self) -> None:
+        # `sorted`, never `==`: the same pairs in a different replicate order is the same row.
+        per_row = {
+            "r1": (
+                [("yes", "yes"), ("yes", "no")],
+                [("yes", "no"), ("yes", "yes")],
+            )
+        }
+        assert _balance_clusters(per_row=per_row, scored_row_ids=["r1"]).n_discordant == 0
+
+    def test_a_genuinely_discordant_row_is_counted(self) -> None:
+        per_row = {"r1": ([("yes", "yes")], [("yes", "no")])}
+        assert _balance_clusters(per_row=per_row, scored_row_ids=["r1"]).n_discordant == 1
+
+    def test_the_wrong_path_note_names_only_the_empty_arm(self) -> None:
+        notes = _wrong_path_notes(
+            (
+                ("incumbent", "incumbent", {}, [Path("/runs/a")]),
+                ("candidate", "candidate", self._rows({"r1": [[("yes", "yes")]]}), [Path("/runs/a")]),
+            ),
+            SUITE,
+        )
+        assert len(notes) == 1
+        assert "the incumbent arm loaded ZERO rows" in notes[0]
+        assert "/runs/a" in notes[0] and SUITE in notes[0]
+
+    def test_the_wrong_path_note_says_so_when_there_were_no_run_dirs_at_all(self) -> None:
+        notes = _wrong_path_notes((("incumbent", "incumbent", {}, []),), SUITE)
+        assert len(notes) == 1 and "no run dirs were given" in notes[0]
+
+    def test_the_no_results_note_names_the_types_it_actually_found(self) -> None:
+        rows = self._rows({"r1": [[("yes", "yes")]]})
+        note = _no_results_note(incumbent_rows=rows, candidate_rows=rows, criterion_index=7)
+        assert "criterion_index=7" in note
+        assert "the index is past the end" in note
+        # And it says what it is NOT, because the two look identical in the numbers.
+        assert "NOT the same as the skill never firing" in note
+
+
+class TestRowsExcludedComposesBothCauses:
+    """`rows_excluded` is ONE number over TWO causes, and it is declared in exactly one place.
+
+    The existing tests cover each cause alone (2 unpaired, 1 hollow). Neither would notice a stage
+    boundary that recomputed the number from only the half it can see, which is why the plan's own
+    edge case says to compute it once, at the end.
+    """
+
+    def test_unpaired_and_hollow_rows_are_summed(self, tmp_path: Path) -> None:
+        incumbent = {"shared": [("yes", "yes")], "only-inc": [("yes", "yes")]}
+        candidate = {"shared": [("yes", "yes")], "only-cand": [("yes", "yes")]}
+        run_dirs = shared_dirs(tmp_path, incumbent, candidate)
+        for run_dir in run_dirs:
+            write_row(run_dir, "incumbent", "hollow", eval_result("hollow", [("yes", "yes")]))
+            write_row(run_dir, "candidate", "hollow", eval_result("hollow", []))
+        paired = load_and_pair(
+            incumbent_run_dirs=run_dirs,
+            candidate_run_dirs=run_dirs,
+            incumbent_variant="incumbent",
+            candidate_variant="candidate",
+            suite_id=SUITE,
+            criterion_index=0,
+        )
+        assert paired.scored_row_ids == ["shared"]
+        # two present in one arm only, plus one that paired and scored on one arm only
+        assert paired.rows_excluded == 3
+        assert any("only-cand, only-inc" in n for n in paired.notes)
+        assert any("scored on only one arm" in n and "hollow" in n for n in paired.notes)
