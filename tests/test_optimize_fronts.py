@@ -19,6 +19,7 @@ from coder_eval.optimize.fronts import (
     cost_quality_points,
     headroom_ceiling,
     instance_best_front,
+    lineage_head,
     pareto_front,
 )
 from coder_eval.reports_optimize import COST_FRONT_ADVISORY, render_cost_quality, render_row_matrix
@@ -27,6 +28,7 @@ from tests.optimize_fixtures import (
     HEADROOM_ROW_SCORES,
     HEADROOM_RULE_ROWS,
     SUITE,
+    arm_row_scores_for,
     cost_quality_arm,
     costed_result,
     eval_result,
@@ -589,3 +591,69 @@ class TestHeadroomCeiling:
     def test_max_score_scales_the_headroom(self) -> None:
         # A suite whose grader tops out below 1.0 has less room than its scores suggest.
         assert headroom_ceiling({"a": 0.5}, max_score=0.8).headroom == pytest.approx(0.3)
+
+
+class TestLineageHead:
+    """The arm the next round's search loop is measured against — a rule the skill stated in prose."""
+
+    def test_the_highest_mean_wins_not_the_top_row(self) -> None:
+        # `b` wins one row outright and loses the other two; `a` is best on the MEAN, which is the
+        # reduction `search_compare` applies. Ranking by anything else measures later rounds against
+        # a bar nothing computed.
+        arms = [
+            arm_row_scores_for("a", {"r1": 0.7, "r2": 0.7, "r3": 0.7}),
+            arm_row_scores_for("b", {"r1": 1.0, "r2": 0.2, "r3": 0.2}),
+        ]
+        assert lineage_head(arms) == "a"
+
+    def test_the_incumbent_is_eligible(self) -> None:
+        # A round where nothing beat the incumbent leaves the lineage where it was. That is what a
+        # quiet round means, and excluding the incumbent would advance the head on every round.
+        arms = [
+            arm_row_scores_for("incumbent", {"r1": 0.9, "r2": 0.9}),
+            arm_row_scores_for("cand-a", {"r1": 0.5, "r2": 0.5}),
+        ]
+        assert lineage_head(arms) == "incumbent"
+
+    def test_a_tie_resolves_by_variant_id(self) -> None:
+        # A ledger entry must not depend on the order the arms were listed in.
+        scores = {"r1": 0.5, "r2": 0.5}
+        forward = [arm_row_scores_for("zebra", scores), arm_row_scores_for("alpha", scores)]
+        assert lineage_head(forward) == "alpha"
+        assert lineage_head(list(reversed(forward))) == "alpha"
+
+    def test_an_arm_with_holes_is_compared_on_the_rows_it_has(self) -> None:
+        # A hole is absent, never zero. `thin` scored one row perfectly; padding it with zeros would
+        # rank it below `broad`, which is the family's rule pointed the wrong way.
+        arms = [
+            arm_row_scores_for("broad", {"r1": 0.6, "r2": 0.6, "r3": 0.6}),
+            arm_row_scores_for("thin", {"r1": 1.0}),
+        ]
+        assert lineage_head(arms) == "thin"
+
+    def test_an_arm_that_scored_nothing_is_not_eligible(self) -> None:
+        # A mean over no rows is not a score of zero, and a crashed arm must not become the head.
+        arms = [arm_row_scores_for("crashed", {}), arm_row_scores_for("real", {"r1": 0.1})]
+        assert lineage_head(arms) == "real"
+
+    def test_a_nan_cell_is_absent_rather_than_making_the_head_order_dependent(self) -> None:
+        """The tie-break above is worthless if a NaN can decide the winner by list position.
+
+        Every `<` and `>` against NaN is False, so a NaN mean wins or loses purely on where `min`
+        meets it. Measured before the fix: the same two arms returned different heads when reversed.
+        `_finite_scores` is the module's existing answer and this routes through it.
+        """
+        arms = [
+            arm_row_scores_for("nanarm", {"r1": math.nan}),
+            arm_row_scores_for("real", {"r1": 0.5}),
+        ]
+        assert lineage_head(arms) == "real"
+        assert lineage_head(list(reversed(arms))) == "real"
+
+    def test_an_arm_whose_only_scores_are_nan_is_not_eligible(self) -> None:
+        # Same rule as an arm that scored nothing: a mean over no FINITE rows is not a score of zero.
+        assert lineage_head([arm_row_scores_for("nanarm", {"r1": math.nan})]) is None
+
+    def test_no_arm_scoring_anything_is_none(self) -> None:
+        assert lineage_head([]) is None
+        assert lineage_head([arm_row_scores_for("crashed", {})]) is None

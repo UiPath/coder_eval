@@ -474,14 +474,15 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         for module, line in re.findall(r"from (coder_eval[\w.]*) import ([^(\n]+)", raw):
             imported.setdefault(module, set()).update(n.strip() for n in line.split(",") if n.strip())
 
-        # The DECISION layer is six modules since the split, and the snippets import from five of
-        # them. Asserting the family rather than one name keeps this from going blind the next time
-        # a name moves — which is exactly what it did when `optimize.gate` stopped exporting the
-        # gates themselves.
+        # ONE module now, and that is the claim rather than a floor: the skill's surface is
+        # `optimize.api` and nothing else, so every guard, fallback and track branch it used to
+        # spell in markdown is in code where a test can reach it. This replaced `len(family) >= 4`,
+        # which was right while the snippets reached into five decision modules and became
+        # unfailable the moment they stopped.
         family = {m for m in imported if m.startswith("coder_eval.optimize.")}
-        assert len(family) >= 4, (
-            f"optimize-skill's SKILL.md imports from only {sorted(family)} — either the snippets "
-            "are gone or the import line changed shape and this sensor is blind"
+        assert family == {"coder_eval.optimize.api"}, (
+            f"optimize-skill's SKILL.md imports from {sorted(family)} — the declared surface is "
+            "`coder_eval.optimize.api` alone. A fence reaching past it is a fence not finished."
         )
         for module, names in sorted(imported.items()):
             loaded = importlib.import_module(module)

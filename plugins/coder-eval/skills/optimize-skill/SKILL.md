@@ -1236,9 +1236,11 @@ for the user. This comparison is across invocations, unpaired, unreplicated and 
 hypothesis to gate, never a result. A round may accept here and promote nothing; the incumbent does
 not move when it does.
 
-**Which arm becomes the head on a round that ran no search loop.** After a multi-arm Stage A,
-record as `lineage_head` the arm with the highest **mean of `row_scores`** — **the incumbent
-included**, which is the right answer whenever no candidate beat it.
+**Which arm becomes the head on a round that ran no search loop.** After a multi-arm Stage A the
+ledger derives it: the arm with the highest **mean of `row_scores`**, **the incumbent included**,
+which is the right answer whenever no candidate beat it. That is `lineage_head_variant="auto"`, the
+default — **on a search round pass the head explicitly, or `None` if the round REVERTED**, because a
+search round has one arm and deriving would name the rejected candidate as the head.
 
 Say the metric out loud, because this is the one place two rankings diverge: Stage A ranks on
 `metrics["f1.yes"]`, and `to_beat` above is a mean of `row_scores` (accuracy). Record the
@@ -1814,7 +1816,7 @@ the regression corpus:
   `--repeats 2` floor is not a `--repeats 3` floor), `seed` and `n_resamples`. A floor measured on
   another model, under a renamed incumbent, or before the suite grew is not this suite's floor.
   The model comes from
-  `resolve_model` on the loaded rows and from nowhere else: it returns `None` for a mixed-model
+  `resolve_arm_model` on the loaded rows and from nowhere else: it returns `None` for a mixed-model
   suite, and a `None` model never caches and never matches, which is the intended behaviour
   rather than a failure.
 
@@ -1830,7 +1832,8 @@ the regression corpus:
   it is precisely the arms the coverage front discards.
 
   Record `lineage_head` on the same entry: the arm the search loop carries into the next round, or
-  `None` when the round accepted nothing. The **score to beat is derived** from that arm's
+  `None` when the round accepted nothing — which the ledger writers take as
+  `lineage_head_variant=None`, distinct from the `"auto"` that derives one. The **score to beat is derived** from that arm's
   `row_scores` right here — never stored a second time, and never read out of `history.json`. That
   is not a schema creeping into the ledger: it is a machine-read pointer, which is what
   `measurements.json` is for, and the narrative of *why* the round accepted or reverted still
@@ -1841,159 +1844,42 @@ field: `measurements.json` is `extra="forbid"` and has nowhere to put it. It mat
 reused floor is an *earlier round's* measurement, so two rounds quoting the same MDE may be one
 number rather than two agreeing ones.
 
-One call each. **This snippet binds everything it needs**, so it runs in a fresh interpreter — it
-re-reads the Stage A vectors rather than expecting them to still be in scope, which is what a block
-that only PRINTS leaves behind. Replace every `<placeholder>` before running it, and use the same
-run dir, variant list and `criterion_index` Step 10 read. **Which floor you record depends on the
-track**, so take the matching half:
+One call each, and **which one depends on the track** — the parameter lists differ because the
+instruments do. `record_round_activation` takes `baseline_dirs` and records the `f1.yes` floor;
+`record_round_execution` takes `control_dirs` and additionally fingerprints the script grader,
+resolved from the suite's own `run_command` criterion rather than a typed path. The activation
+composite has no grader parameter at all, which is what makes the impossible combination
+unrepresentable instead of asserted against.
+
+Everything is an argument, so this runs in a fresh interpreter. Replace every `<placeholder>`, and
+pass the same run dir, variant list and `criterion_index` Step 10 read — the block re-reads the arms
+rather than inheriting them.
+
+**On the execution track, call `record_round_execution` instead**, with `control_dirs` and
+`control_variant_id` in place of `baseline_dirs`, and `criterion_index=None` to read each row's
+`weighted_score`. The second call below is **on promotion only**: `(row_id, reason)` pairs, and the
+round number supplies `promoted_in_round`, so nothing here imports a model.
+
+**Two `baseline_dirs` are what a floor needs** — the null split halves the invocations, so one
+directory cannot split against itself. One is enough to record the ROUND; the floor is simply absent
+from `measurements.json` rather than invented, and the returned block is about the fingerprints
+either way. Read the floor itself from Step 6's block, not from this one:
 
 ```python
-import subprocess
-import sys
 from pathlib import Path
 
-from coder_eval.models import RegressionRow, RoundScores
-from coder_eval.orchestration.task_loader import expand_dataset, load_task
-from coder_eval.optimize.load import load_arm_rows
-from coder_eval.optimize.activation import measure_noise_floor
-from coder_eval.optimize.execution import (
-    measure_execution_noise_floor,
-    resolve_model,
-)
-from coder_eval.optimize.fronts import (
-    arm_row_scores,
-    instance_best_front,
-    pareto_front,
-)
-from coder_eval.optimize.store import (
-    UNRESOLVED_MODEL,
-    append_regression_rows,
-    grader_changed,
-    load_measurements,
-    record_noise_floor,
-    record_round_scores,
-    suite_changed,
-)
-from coder_eval.suite_fingerprint import suite_fingerprint
+from coder_eval.optimize.api import record_promotion, record_round_activation
 
-sidecar = Path(".optimize-skill/<skill>/measurements.json")
-measurements = load_measurements(sidecar)
-
-# The Stage A vectors, re-read here rather than carried over: Stage A prints a block, so nothing
-# from it is in scope. Same run dir, same variant list, same criterion_index as Step 10 used.
-suite_id = "<the suite's task_id>"
-arms = arm_row_scores(
-    run_dirs=[Path("<runs>/round1-triage")], suite_id=suite_id, criterion_index=0,
+print(record_round_activation(
+    sidecar=Path(".optimize-skill/<skill>/measurements.json"), round_number=1, criterion_index=0,
+    run_dirs=[Path("<runs>/round1-triage")], suite_id="<the suite's task_id>",
     variant_ids=["incumbent", "cand-a-widen-vocabulary", "cand-b-name-the-symptom"],
-)
-baseline_dirs = [Path("<runs>/baseline-1"), Path("<runs>/baseline-2")]
-
-# ACTIVATION TRACK — the f1.yes floor, from Step 6's two baseline invocations.
-rows = load_arm_rows(baseline_dirs, "default", suite_id)
-floor = measure_noise_floor(
-    run_dirs=baseline_dirs, variant_id="default", suite_id=suite_id, criterion_index=0,
-    model=resolve_model(rows) or UNRESOLVED_MODEL, measurements=measurements,
-)
-
-# EXECUTION TRACK — the weighted_score floor, from Step 8's control run. Use THIS one there:
-# the call above would record the `f1.yes` floor Step 6 calls confidently meaningless on an
-# outcome suite, and `baseline_dirs` does not exist on this track anyway.
-#
-# control_dirs = [Path("<runs>/control")]
-# rows = load_arm_rows(control_dirs, "incumbent", suite_id)
-# floor = measure_execution_noise_floor(
-#     run_dirs=control_dirs, variant_id="incumbent", suite_id=suite_id,
-#     model=resolve_model(rows) or UNRESOLVED_MODEL, measurements=measurements,
-# )
-
-if floor is not None:
-    record_noise_floor(sidecar, floor)
-
-# The PREVIOUS round, read from the snapshot loaded above and BEFORE this round is written.
-# Both halves matter: `record_round_scores` REPLACES the entry for a round number, so reading
-# after the write compares this round against itself and prints "same grader" forever; and
-# excluding `round` handles a re-run, where the stored entry is an earlier version of this same
-# round rather than the one before it.
-previous = max((r for r in measurements.round_scores if r.round < 1), key=lambda r: r.round, default=None)
-
-# The INSTRUMENT this round's scores were produced with. EXECUTION TRACK ONLY — the activation
-# track has no script grader, and `None` there is correct rather than missing. Take the matching
-# half, as with the floor above.
-fingerprint = None  # ACTIVATION TRACK.
-
-# EXECUTION TRACK — resolve the grader from the SUITE rather than typing a path: it is the
-# `run_command` criterion's own command, and `$TASK_DIR` in it is the suite file's directory.
-# `--fingerprint` hashes the script AND the expectations it loads, because the answer key is part
-# of the instrument, and it exits NON-ZERO on failure so `check=True` cannot record a broken hash.
-#
-# suite_file = Path("<path to the suite yaml>")
-# task, _ = load_task(suite_file)
-# command = next(c.command for c in task.success_criteria if c.type == "run_command")
-# grader = Path(command.split()[1].replace("$TASK_DIR", str(suite_file.parent)))
-# fingerprint = subprocess.run(
-#     [sys.executable, str(grader), "--fingerprint"], capture_output=True, text=True, check=True
-# ).stdout.strip()
-
-# The SUITE the scores were produced by, on BOTH tracks — no subprocess, and no track branch: the
-# criteria, the prompt, the rows and the run limits are an instrument wherever they are, and on the
-# activation track they are the WHOLE instrument (there is no script grader to fingerprint).
-#
-# REPLACE the path. TWO arguments, and they are different things: the UNEXPANDED suite task — what
-# `load_task` returns, BEFORE `expand_dataset` — and the EXPANDED row-tasks the round actually
-# scored. The rows are the half that matters most here: `activation.yaml` keeps every prompt and
-# every LABEL in its rows file, so a digest over row ids alone is blind to a rewritten prompt and a
-# flipped label.
-#
-# The scored ids are the UNION over arms, never `arms[0]`: a hole is absent rather than zero, so an
-# arm that crashed a row has a shorter vector and reading one arm makes the digest a function of
-# which arm happens to be first.
-suite_file = Path("<path to the suite yaml>")
-suite_task, _ = load_task(suite_file)
-scored_ids = sorted(set().union(*(arm.row_scores for arm in arms)))
-row_tasks = [r for r in expand_dataset(suite_task, suite_file.parent) if r.row_id in scored_ids]
-suite = suite_fingerprint(suite_task, row_tasks)
-
-this_round = RoundScores(
-    round=1, arm_row_scores=arms, grader_fingerprint=fingerprint, suite_fingerprint=suite,
-    pareto_front=pareto_front(arms), instance_best_front=instance_best_front(arms),
-    # The arm the next round's SEARCH LOOP is accepted or reverted against. On a multi-arm round
-    # like this one that is the arm with the highest MEAN of row_scores — not the top f1.yes arm,
-    # which is a different ranking (Step 10) — the incumbent included; on a search round it is the
-    # candidate if it beat the head and the head otherwise, and None if there is no lineage yet.
-    # Not a promotion — see Step 8's two pointers.
-    lineage_head="cand-a-widen-vocabulary",
-)
-record_round_scores(sidecar, this_round)
-
-# Say it OUT LOUD when either instrument moved. `None` is UNKNOWN, never "unchanged".
-#
-# The GRADER half is EXECUTION-TRACK ONLY, and the branch below is not decoration: `fingerprint` is
-# `None` on every activation round by design, so `grader_changed` returns `None` there every time and
-# the un-branched version printed "comparability unknown" forever — on a track where comparability is
-# not unknown, there is simply no script grader to move.
-moved = grader_changed(previous, this_round)
-TRACK = "activation"  # or "execution"
-print(
-    "this track has no script grader; instrument comparability is carried by the suite fingerprint"
-    if TRACK == "activation"
-    else "the grader CHANGED since the last round — these scores are not comparable to it"
-    if moved
-    else "same grader as the last round" if moved is False
-    else "no grader fingerprint on one of the two rounds — comparability unknown"
-)
-
-# The SUITE half is track-independent, so this one has no branch.
-suite_moved = suite_changed(previous, this_round)
-print(
-    "the SUITE CHANGED since the last round (a criterion parameter, a weight, the prompt, the row "
-    "set or a run cap) — these scores are not comparable to it"
-    if suite_moved
-    else "same suite as the last round" if suite_moved is False
-    else "no suite fingerprint on one of the two rounds — comparability unknown"
-)
-
-# On promotion only:
-append_regression_rows(sidecar, [RegressionRow(row_id="pos-3", promoted_in_round=1, reason="...")])
+    baseline_dirs=[Path("<runs>/baseline-1"), Path("<runs>/baseline-2")], suite_file=Path("<suite>"),
+))
+print(record_promotion(
+    sidecar=Path(".optimize-skill/<skill>/measurements.json"), round_number=1,
+    rows=[("pos-3", "the only row that showed the behaviour")],
+))
 ```
 
 **Two fingerprints, and they answer different questions.** The grader one covers the outcome

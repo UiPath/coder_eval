@@ -1150,3 +1150,70 @@ def render_confirm_family(*, family_size: int) -> str:
     round is the only check there is.
     """
     return f"_Stage B was recomputed over a family of {family_size} to recover the corrected verdict._"
+
+
+def render_comparability(
+    *, grader: bool | None, suite: bool | None, has_grader: bool, has_previous: bool = True
+) -> str:
+    """Whether this round's scores are comparable with the previous round's — both instruments.
+
+    Two questions, and the ``None`` of each means **UNKNOWN**, never "unchanged": one of the two
+    rounds carried no fingerprint, so nothing can be said. Collapsing that into "same" is how a
+    changed instrument reads as a stable measurement.
+
+    ``has_grader=False`` is the activation track, where ``grader`` is ``None`` **by construction** —
+    there is no script grader to move — and the un-branched wording printed "comparability unknown"
+    on every round of that track forever. On a track with no script grader, comparability is carried
+    by the suite fingerprint, and saying so is different from saying nothing is known.
+
+    ``has_previous=False`` is the FIRST round, and it needs its own sentence for the same reason: both
+    fingerprints were just recorded, so "no fingerprint on one of the two rounds" is false — there is
+    no other round. That is the commonest path there is, and it was the one printing the wrong thing.
+    """
+    if not has_previous:
+        return (
+            "**First recorded round — there is nothing to compare it with.** Both instrument "
+            "fingerprints are now on file, so the next round can say whether either moved."
+        )
+    if not has_grader:
+        grader_line = (
+            "This track has no script grader, so instrument comparability is carried by the suite fingerprint below."
+        )
+    elif grader:
+        grader_line = "**The GRADER CHANGED since the last round — these scores are not comparable to it.**"
+    elif grader is False:
+        grader_line = "Same grader as the last round."
+    else:
+        grader_line = "No grader fingerprint on one of the two rounds — comparability unknown."
+
+    if suite:
+        suite_line = (
+            "**The SUITE CHANGED since the last round** (a criterion parameter, a weight, the prompt, "
+            "the row set or a run cap) — these scores are not comparable to it."
+        )
+    elif suite is False:
+        suite_line = "Same suite as the last round."
+    else:
+        suite_line = "No suite fingerprint on one of the two rounds — comparability unknown."
+    return "\n".join([grader_line, suite_line])
+
+
+def render_corpus_appended(*, submitted: int, added: int, total: int) -> str:
+    """What a promotion just committed the next round to keeping.
+
+    Three numbers, because the corpus de-duplicates on ``row_id`` and ``submitted`` is therefore not
+    what landed. Reporting the submitted count as "recorded" is a small lie that hides the whole
+    reason the de-duplication exists: a row already in the corpus was already being checked, and a
+    caller re-submitting it has learned nothing new about it.
+    """
+    lines = [
+        f"**{added} of {submitted} row(s) added to the regression corpus, which now holds {total}.** "
+        + "Every later round checks its candidates against these: re-losing one is a regression "
+        + "however good the aggregate looks."
+    ]
+    if added < submitted:
+        lines.append(
+            f"{submitted - added} row(s) were already in the corpus and were not added again — they "
+            + "were already being checked, so nothing was lost."
+        )
+    return "\n\n".join(lines)

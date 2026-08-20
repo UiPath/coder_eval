@@ -10,6 +10,8 @@ A `NoiseFloor` is deliberately never compared by `model_dump()`: `computed_at` i
 """
 
 import inspect
+import shutil
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
@@ -26,6 +28,7 @@ from coder_eval.models import (
     NoiseFloor,
     RegressionRow,
     RoundScores,
+    copy_with,
 )
 from coder_eval.optimize.activation import (
     SeedStability,
@@ -48,6 +51,9 @@ from coder_eval.optimize.api import (
     execution_gate_report,
     headroom_report,
     leak_report,
+    record_promotion,
+    record_round_activation,
+    record_round_execution,
     replicates_report,
     row_matrix_report,
     search_report,
@@ -59,12 +65,14 @@ from coder_eval.optimize.execution import (
     holm_promote_execution,
     measure_execution_noise_floor,
 )
+from coder_eval.optimize.search import lineage_head_scores
 from coder_eval.optimize.store import (
     UNRESOLVED_MODEL,
     append_regression_rows,
     load_measurements,
     record_round_scores,
 )
+from coder_eval.orchestration.task_loader import expand_dataset, load_task
 from coder_eval.reports_optimize import (
     LEAK_SCAN_BOUNDARY,
     SINGLE_REPLICATE_CAVEAT,
@@ -73,6 +81,7 @@ from coder_eval.reports_optimize import (
     render_seed_stability,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
+from coder_eval.suite_fingerprint import suite_fingerprint
 from tests.optimize_fixtures import (
     EXEC_SUITE,
     SUITE,
@@ -93,6 +102,7 @@ from tests.optimize_fixtures import (
     split_labelled_arms,
     tiny_suite,
     weighted_arm,
+    write_arm,
     write_row,
 )
 
@@ -335,6 +345,45 @@ def _confirm_confirm_dirs_call(run_dirs) -> str:
     )
 
 
+def _ledger_run_dirs_call(run_dirs) -> str:
+    return record_round_activation(
+        sidecar=Path(_MISSING) / "measurements.json",
+        round_number=1,
+        run_dirs=run_dirs,
+        variant_ids=["incumbent"],
+        suite_id=SUITE,
+        criterion_index=0,
+        baseline_dirs=[Path(_MISSING)],
+        suite_file=Path(_MISSING) / "suite.yaml",
+    )
+
+
+def _ledger_baseline_dirs_call(run_dirs) -> str:
+    return record_round_activation(
+        sidecar=Path(_MISSING) / "measurements.json",
+        round_number=1,
+        run_dirs=[Path(_MISSING)],
+        variant_ids=["incumbent"],
+        suite_id=SUITE,
+        criterion_index=0,
+        baseline_dirs=run_dirs,
+        suite_file=Path(_MISSING) / "suite.yaml",
+    )
+
+
+def _ledger_control_dirs_call(run_dirs) -> str:
+    return record_round_execution(
+        sidecar=Path(_MISSING) / "measurements.json",
+        round_number=1,
+        run_dirs=[Path(_MISSING)],
+        variant_ids=["incumbent"],
+        suite_id=EXEC_SUITE,
+        control_dirs=run_dirs,
+        control_variant_id="incumbent",
+        suite_file=Path(_MISSING) / "suite.yaml",
+    )
+
+
 def _corpus_call(run_dirs) -> str:
     return corpus_report(
         run_dirs=run_dirs,
@@ -353,43 +402,49 @@ _REPORTERS = ["row-matrix", "cost-quality", "corpus", "headroom", "replicates", 
 # EVERY composite taking `run_dirs`, so the guard is asserted on the SURFACE rather than on the
 # private helper they share: a composite that forgot to call it is exactly the regression this
 # catches, and it is invisible to any test of the helper itself. Grows with each phase.
+# Each entry is (call, the argument its message must NAME). The name matters: the ledger writers and
+# the confirm composites take TWO run-dir sequences each, and a message saying "run_dirs" would name
+# neither of them.
 _ENTRY_POINTS = [
-    pytest.param(_activation_call, id="activation-floor"),
-    pytest.param(_execution_call, id="execution-floor"),
-    pytest.param(_row_matrix_call, id="row-matrix"),
-    pytest.param(_cost_quality_call, id="cost-quality"),
-    pytest.param(_headroom_call, id="headroom"),
-    pytest.param(_corpus_call, id="corpus"),
-    pytest.param(_replicates_call, id="replicates"),
-    pytest.param(_search_call, id="search"),
-    pytest.param(_activation_gate_call, id="activation-gate"),
-    pytest.param(_seed_stability_call, id="seed-stability"),
-    pytest.param(_confirm_gate_dirs_call, id="confirm-gate-dirs"),
-    pytest.param(_confirm_confirm_dirs_call, id="confirm-confirm-dirs"),
+    pytest.param(_activation_call, "run_dirs", id="activation-floor"),
+    pytest.param(_execution_call, "run_dirs", id="execution-floor"),
+    pytest.param(_row_matrix_call, "run_dirs", id="row-matrix"),
+    pytest.param(_cost_quality_call, "run_dirs", id="cost-quality"),
+    pytest.param(_headroom_call, "run_dirs", id="headroom"),
+    pytest.param(_corpus_call, "run_dirs", id="corpus"),
+    pytest.param(_replicates_call, "run_dirs", id="replicates"),
+    pytest.param(_search_call, "run_dirs", id="search"),
+    pytest.param(_activation_gate_call, "gate_dirs", id="activation-gate"),
+    pytest.param(_seed_stability_call, "gate_dirs", id="seed-stability"),
+    pytest.param(_confirm_gate_dirs_call, "gate_dirs", id="confirm-gate-dirs"),
+    pytest.param(_confirm_confirm_dirs_call, "confirm_dirs", id="confirm-confirm-dirs"),
+    pytest.param(_ledger_run_dirs_call, "run_dirs", id="ledger-run-dirs"),
+    pytest.param(_ledger_baseline_dirs_call, "baseline_dirs", id="ledger-baseline-dirs"),
+    pytest.param(_ledger_control_dirs_call, "control_dirs", id="ledger-control-dirs"),
 ]
 
 
-@pytest.mark.parametrize("call", _ENTRY_POINTS)
+@pytest.mark.parametrize(("call", "argument"), _ENTRY_POINTS)
 class TestRunDirsAreRejectedAtTheBoundary:
-    def test_a_bare_string_raises_type_error_naming_the_argument(self, call) -> None:
-        with pytest.raises(TypeError, match="run_dirs must be a sequence of pathlib"):
+    def test_a_bare_string_raises_type_error_naming_the_argument(self, call, argument) -> None:
+        with pytest.raises(TypeError, match=f"{argument} must be a sequence of pathlib"):
             call(_MISSING)
 
-    def test_a_list_of_strings_raises_type_error(self, call) -> None:
+    def test_a_list_of_strings_raises_type_error(self, call, argument) -> None:
         with pytest.raises(TypeError, match="string"):
             call([_MISSING])
 
-    def test_a_bare_path_names_the_argument_rather_than_failing_downstream(self, call) -> None:
+    def test_a_bare_path_names_the_argument_rather_than_failing_downstream(self, call, argument) -> None:
         # The likeliest of the three: every composite takes a LIST where the gate below it takes one
         # directory. Without the guard this raises "'PosixPath' object is not iterable" from
         # whichever comprehension reaches it first, naming neither the argument nor the fix.
         with pytest.raises(TypeError, match=r"pass \[dir\], not dir"):
             call(Path(_MISSING))
 
-    def test_an_empty_sequence_is_a_caller_error_not_a_measurement(self, call) -> None:
+    def test_an_empty_sequence_is_a_caller_error_not_a_measurement(self, call, argument) -> None:
         # Distinct from "dirs given, no rows found", which renders as a no-floor block: nothing was
         # named here, so there is no suite to report a reading about.
-        with pytest.raises(ValueError, match="run_dirs is empty"):
+        with pytest.raises(ValueError, match=f"{argument} is empty"):
             call([])
 
 
@@ -2159,3 +2214,462 @@ class TestConfirmReportExecution:
             assert not params & forbidden, f"{name.__name__} carries the other track's parameters"
         # And both are public names on the module, so neither is reachable only through the other.
         assert {"confirm_report_activation", "confirm_report_execution"} <= set(vars(coder_eval.optimize.api))
+
+
+def _activation_suite(tmp_path: Path, rows: list[str]) -> Path:
+    """A dataset-backed suite whose rows are the ones an arm scored, for the suite fingerprint."""
+    suite = tmp_path / "activation.yaml"
+    suite.write_text(
+        yaml.safe_dump(
+            {
+                "task_id": SUITE,
+                "description": "ledger fixture",
+                "initial_prompt": "${row.prompt}",
+                "dataset": {"rows": [{"id": r, "prompt": f"do {r}", "expected_skill": "my-skill"} for r in rows]},
+                "success_criteria": [
+                    {
+                        "type": "skill_triggered",
+                        "description": "engages",
+                        "skill_name": "my-skill",
+                        "expected_skill": "${row.expected_skill}",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return suite
+
+
+def _disagreeing_baseline(tmp_path: Path) -> list[Path]:
+    """A two-invocation baseline the floor cache will actually STORE.
+
+    Three things have to line up, and each was a silent no-op on its own:
+
+    * the halves must DISAGREE, or the null split measures exactly 0.000 — a real answer, but one no
+      wiring mistake can be told apart from;
+    * the rows must record a `model_used`, because `record_noise_floor` refuses to cache under
+      `UNRESOLVED_MODEL` — a mixed-model suite must not borrow another model's measurement;
+    * and a recorded split, which `write_row` stamps for free.
+    """
+    first = {f"r{i}": [("yes", "yes")] for i in range(5)}
+    flipped = {**first, "r0": [("yes", "no")], "r3": [("yes", "no")]}
+    run_dirs: list[Path] = []
+    for i, labels in enumerate((first, flipped)):
+        run_dir = tmp_path / f"floor-base-{i}"
+        for row_id, pairs in labels.items():
+            result = copy_with(eval_result(row_id, pairs), model_used="claude-haiku-4-5")
+            write_row(run_dir, "default", row_id, result)
+        run_dirs.append(run_dir)
+    return run_dirs
+
+
+class TestRecordRoundActivation:
+    def _arms(self, tmp_path: Path) -> tuple[list[Path], list[Path]]:
+        labels = {"r1": [("yes", "yes")], "r2": [("yes", "no")], "r3": [("no", "no")]}
+        run_dirs: list[Path] = []
+        for i in range(2):
+            run_dir = tmp_path / f"round-{i}"
+            for variant in ("incumbent", "cand-a"):
+                for row_id, pairs in labels.items():
+                    write_row(run_dir, variant, row_id, eval_result(row_id, pairs))
+            run_dirs.append(run_dir)
+        baseline = write_arm(tmp_path, "default", labels, invocations=2, prefix="base-")
+        return run_dirs, baseline
+
+    def _call(self, tmp_path: Path, sidecar: Path, round_number: int, **kwargs) -> str:
+        run_dirs, baseline = self._arms(tmp_path / f"r{round_number}-{len(kwargs)}")
+        kwargs.setdefault("suite_file", _activation_suite(tmp_path, ["r1", "r2", "r3"]))
+        kwargs.setdefault("variant_ids", ["incumbent", "cand-a"])
+        return record_round_activation(
+            sidecar=sidecar,
+            round_number=round_number,
+            run_dirs=run_dirs,
+            suite_id=SUITE,
+            criterion_index=0,
+            baseline_dirs=baseline,
+            **kwargs,
+        )
+
+    def test_it_writes_the_round_and_says_there_is_no_script_grader(self, tmp_path: Path) -> None:
+        # `grader_changed` is `None` on every activation round BY CONSTRUCTION, and the un-branched
+        # wording printed "comparability unknown" forever — on a track where comparability is not
+        # unknown, there is simply no script grader to move.
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        first = self._call(tmp_path, sidecar, 1)
+        # Round 1 has nothing to compare with, and BOTH fingerprints were just recorded — so the old
+        # "no fingerprint on one of the two rounds" was false on the commonest path there is.
+        assert "First recorded round" in first
+        assert "comparability unknown" not in first
+
+        block = self._call(tmp_path, sidecar, 2)
+        assert "no script grader" in block
+        assert "comparability unknown" not in block
+        recorded = load_measurements(sidecar).round_scores
+        assert [r.round for r in recorded] == [1, 2]
+        assert recorded[0].grader_fingerprint is None
+        assert recorded[0].suite_fingerprint is not None
+
+    def test_round_two_compares_against_round_one_and_a_re_run_still_does(self, tmp_path: Path) -> None:
+        """Read-before-write, and the re-run half — both were bugs in the fence this replaces.
+
+        Reading `previous` AFTER the write compares the round against itself and prints "same" for
+        ever; and `record_round_scores` REPLACES per round, so the stored entry for this round is an
+        earlier version of itself rather than the one before it.
+        """
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        # Round 1 on suite A, round 2 on suite B — so "compared against round 1" and "compared
+        # against my own earlier entry" render DIFFERENTLY. With the same suite for both, a `<=`
+        # filter is indistinguishable from `<` and this test cannot fail (measured).
+        other = tmp_path / "suite-b"
+        other.mkdir()
+        suite_b = _activation_suite(other, ["r1", "r2", "r3"])
+        suite_b.write_text(suite_b.read_text(encoding="utf-8").replace("do r1", "do r1 in suite B"), encoding="utf-8")
+
+        self._call(tmp_path, sidecar, 1)
+        second = self._call(tmp_path, sidecar, 2, suite_file=suite_b)
+        assert "The SUITE CHANGED" in second
+
+        # Re-running round 2 must still compare against ROUND 1 — so it must say CHANGED again. A
+        # `<=` filter would compare it against its own identical earlier entry and say "Same suite".
+        again = self._call(tmp_path, sidecar, 2, suite_file=suite_b)
+        assert "The SUITE CHANGED" in again
+        assert "Same suite" not in again
+        assert [r.round for r in load_measurements(sidecar).round_scores] == [1, 2]
+
+    def test_a_changed_suite_is_said_out_loud(self, tmp_path: Path) -> None:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        self._call(tmp_path, sidecar, 1)
+
+        # A rewritten row PROMPT is a different instrument, and the digest is over content — so a
+        # copy of the same suite at another path is deliberately NOT a change.
+        run_dirs, baseline = self._arms(tmp_path / "r2")
+        changed = tmp_path / "changed"
+        changed.mkdir()
+        suite = _activation_suite(changed, ["r1", "r2", "r3"])
+        suite.write_text(suite.read_text(encoding="utf-8").replace("do r1", "do r1 differently"), encoding="utf-8")
+
+        block = record_round_activation(
+            sidecar=sidecar,
+            round_number=2,
+            run_dirs=run_dirs,
+            variant_ids=["incumbent", "cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+            baseline_dirs=baseline,
+            suite_file=suite,
+        )
+
+        assert "The SUITE CHANGED" in block
+
+    def test_the_lineage_head_is_derived_and_an_explicit_one_overrides(self, tmp_path: Path) -> None:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        self._call(tmp_path, sidecar, 1)
+        derived = load_measurements(sidecar).round_scores[0].lineage_head
+        assert derived is not None, "a round that scored rows names a head"
+
+        self._call(tmp_path, sidecar, 2, lineage_head_variant="cand-a")
+        recorded = next(r for r in load_measurements(sidecar).round_scores if r.round == 2)
+        assert recorded.lineage_head == "cand-a"
+
+    def test_a_single_invocation_baseline_records_the_round_with_no_floor(self, tmp_path: Path) -> None:
+        # Round 1 by construction: one invocation cannot split against itself. The round still writes.
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        labels = {"r1": [("yes", "yes")], "r2": [("yes", "no")], "r3": [("no", "no")]}
+        run_dirs, _ = self._arms(tmp_path / "r1")
+
+        record_round_activation(
+            sidecar=sidecar,
+            round_number=1,
+            run_dirs=run_dirs,
+            variant_ids=["incumbent", "cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+            baseline_dirs=write_arm(tmp_path, "default", labels, invocations=1, prefix="one-"),
+            suite_file=_activation_suite(tmp_path, ["r1", "r2", "r3"]),
+        )
+
+        measurements = load_measurements(sidecar)
+        assert measurements.noise_floors == []
+        assert [r.round for r in measurements.round_scores] == [1]
+
+    def test_a_measurable_floor_is_written_to_the_sidecar(self, tmp_path: Path) -> None:
+        """The floor WRITE, asserted in the positive — the negative test alone is vacuous.
+
+        The 3-row fixture never yields a floor even at two invocations, so `noise_floors == []` was
+        true of every test here and deleting `record_noise_floor` left them all green. This baseline
+        DISAGREES between its halves, which is what a null split needs to measure anything.
+        """
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        run_dirs, _ = self._arms(tmp_path / "r1")
+        baseline = _disagreeing_baseline(tmp_path)
+
+        record_round_activation(
+            sidecar=sidecar,
+            round_number=1,
+            run_dirs=run_dirs,
+            variant_ids=["incumbent", "cand-a"],
+            suite_id=SUITE,
+            criterion_index=0,
+            baseline_dirs=baseline,
+            suite_file=_activation_suite(tmp_path, ["r1", "r2", "r3"]),
+        )
+
+        floors = load_measurements(sidecar).noise_floors
+        assert len(floors) == 1, "a measurable floor must be recorded, not only computed"
+        assert floors[0].metric == ACTIVATION_FLOOR_METRIC
+        assert floors[0].n_invocations == 2
+
+    def test_a_mistyped_variant_id_raises_rather_than_writing_a_poisoned_round(self, tmp_path: Path) -> None:
+        """`arm_row_scores` does not raise on a wrong id, and the ledger is where that outlives the call.
+
+        Writing it records empty fronts, no lineage head, and a suite digest over ZERO rows — after
+        which the NEXT round reports "The SUITE CHANGED" for a suite nobody touched.
+        """
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(ValueError, match="scored a row of") as excinfo:
+            self._call(tmp_path, sidecar, 1, variant_ids=["ghost"])
+
+        assert "not a round" in str(excinfo.value)
+        assert load_measurements(sidecar).round_scores == []
+
+    def test_a_reverted_search_round_can_record_no_head_at_all(self, tmp_path: Path) -> None:
+        """The third state, and the reason the parameter is not just `str | None`.
+
+        A search round has ONE arm, so deriving names the round's only candidate as the head — even
+        when `search_report` said REVERT. That advances the bar every later round is measured against,
+        on a step that was rejected. `None` records no head, and `lineage_head_scores` skips it.
+        """
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        self._call(tmp_path, sidecar, 1)
+        derived = load_measurements(sidecar).round_scores[0].lineage_head
+        assert derived is not None
+
+        self._call(tmp_path, sidecar, 2, lineage_head_variant=None)
+        quiet = next(r for r in load_measurements(sidecar).round_scores if r.round == 2)
+        assert quiet.lineage_head is None
+        # And the lineage still points at round 1's head — a quiet round leaves it where it was.
+        assert lineage_head_scores(load_measurements(sidecar)).variant_id == derived
+
+    def test_the_suite_digest_is_independent_of_arm_order(self, tmp_path: Path) -> None:
+        """The scored ids are the UNION across arms, never `arms[0]`.
+
+        A hole is absent rather than zero, so an arm that crashed a row has a shorter vector — and
+        reading one arm would make the digest a function of which arm happens to be first.
+        """
+        suite = _activation_suite(tmp_path, ["r1", "r2", "r3"])
+        digests = []
+        for order in (["incumbent", "cand-a"], ["cand-a", "incumbent"]):
+            sidecar = tmp_path / f"skill-{order[0]}" / "measurements.json"
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            run_dirs, baseline = self._arms(tmp_path / f"order-{order[0]}")
+            # Always puncture the SAME arm, and vary only the order it is listed in. Puncturing
+            # `order[0]` instead would puncture whichever arm IS `arms[0]`, so an `arms[0]`
+            # implementation would digest the same rows both ways and this could not fail (measured).
+            for run_dir in run_dirs:
+                shutil.rmtree(run_dir / "incumbent" / SUITE / "r3")
+            record_round_activation(
+                sidecar=sidecar,
+                round_number=1,
+                run_dirs=run_dirs,
+                variant_ids=order,
+                suite_id=SUITE,
+                criterion_index=0,
+                baseline_dirs=baseline,
+                suite_file=suite,
+            )
+            digests.append(load_measurements(sidecar).round_scores[0].suite_fingerprint)
+        assert digests[0] == digests[1]
+
+        # And it is the digest a direct call produces over the same two arguments — which is what
+        # catches them being swapped or mixed. `suite_fingerprint`'s own docstring says the signature
+        # exists to prevent exactly that.
+        task, _raw = load_task(suite)
+        # The UNION: `incumbent` lost r3, `cand-a` kept it, so the round scored all three.
+        rows = [r for r in expand_dataset(task, suite.parent) if r.row_id in {"r1", "r2", "r3"}]
+        assert digests[0] == suite_fingerprint(task, rows)
+
+
+class TestRecordPromotion:
+    def test_it_appends_with_the_round_number_and_reports_the_total(self, tmp_path: Path) -> None:
+        # `(row_id, reason)` pairs, so the fence needs no `RegressionRow` import.
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        block = record_promotion(sidecar=sidecar, round_number=3, rows=[("pos-3", "the only row that showed it")])
+
+        assert "1 of 1 row(s) added" in block and "now holds 1" in block
+        corpus = load_measurements(sidecar).regression_corpus
+        assert [(r.row_id, r.promoted_in_round) for r in corpus] == [("pos-3", 3)]
+
+    def test_a_duplicate_row_is_de_duplicated_and_the_counts_show_it(self, tmp_path: Path) -> None:
+        # The corpus de-duplicates on `row_id` alone, so `total` is not `added` plus the old total.
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        record_promotion(sidecar=sidecar, round_number=1, rows=[("pos-3", "first")])
+
+        block = record_promotion(sidecar=sidecar, round_number=2, rows=[("pos-3", "again")])
+
+        # `added` is what LANDED, not what was submitted. Reporting the submitted count as
+        # "recorded" hid the whole reason the de-duplication exists.
+        assert "0 of 1 row(s) added" in block and "now holds 1" in block
+        assert "were already in the corpus and were not added again" in block
+
+    def test_no_rows_is_a_caller_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="rows is empty"):
+            record_promotion(sidecar=_sidecar(tmp_path), round_number=1, rows=[])
+
+
+def _outcome_suite(tmp_path: Path, *, grader: str | None = "ok", rows: list[str] | None = None) -> Path:
+    """An execution suite whose `run_command` grader answers `--fingerprint`.
+
+    ``grader=None`` writes a suite with NO `run_command` criterion — the case the fence hit as a bare
+    `StopIteration` from `next(...)`. A non-"ok" value makes the script exit non-zero.
+    """
+    suite_dir = tmp_path / "suite"
+    suite_dir.mkdir(parents=True, exist_ok=True)
+    criteria: list[dict] = [{"type": "file_exists", "description": "wrote it", "path": "out.txt"}]
+    if grader is not None:
+        script = suite_dir / "verify.py"
+        # Checks `argv`, so the composite passing `--fingerprint` at all is pinned — the one contract
+        # the real instrument enforces. And it prints a real SHA-256-shaped digest, because the
+        # composite now rejects anything else: a grader predating the flag reads `--fingerprint` as a
+        # row id and prints a SCORE line, which would become the round's instrument identity.
+        digest = {"ok": "a" * 64, "moved": "b" * 64}.get(grader)
+        body = (
+            "import sys\n"
+            "if sys.argv[1:] != ['--fingerprint']:\n"
+            "    sys.exit('this grader only answers --fingerprint')\n"
+            f"print({digest!r})\n"
+            if digest
+            else "import sys\nsys.exit(3)\n"
+        )
+        script.write_text(body, encoding="utf-8")
+        criteria.append(
+            {
+                "type": "run_command",
+                "description": "grades the row",
+                "command": f"python $TASK_DIR/{script.name} --row ${{row.id}}",
+            }
+        )
+    suite = suite_dir / "outcome.yaml"
+    suite.write_text(
+        yaml.safe_dump(
+            {
+                "task_id": EXEC_SUITE,
+                "description": "ledger fixture",
+                "initial_prompt": "do ${row.id}",
+                "dataset": {"rows": [{"id": r} for r in (rows or ["r0", "r1", "r2", "r3"])]},
+                "success_criteria": criteria,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return suite
+
+
+class TestRecordRoundExecution:
+    def _call(self, tmp_path: Path, sidecar: Path, round_number: int, *, suite: Path, **kwargs) -> str:
+        run_dir = exec_run_dir(
+            tmp_path / f"round-{round_number}",
+            incumbent=WINNER["incumbent"],
+            candidate=WINNER["candidate"],
+        )
+        return record_round_execution(
+            sidecar=sidecar,
+            round_number=round_number,
+            run_dirs=[run_dir],
+            variant_ids=["incumbent", "candidate"],
+            suite_id=EXEC_SUITE,
+            control_dirs=[run_dir],
+            control_variant_id="incumbent",
+            suite_file=suite,
+            **kwargs,
+        )
+
+    def test_it_records_the_grader_fingerprint_and_reports_comparability(self, tmp_path: Path) -> None:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        block = self._call(tmp_path, sidecar, 1, suite=_outcome_suite(tmp_path))
+
+        recorded = load_measurements(sidecar).round_scores[0]
+        assert recorded.grader_fingerprint == "a" * 64
+        assert recorded.suite_fingerprint is not None
+        # This track HAS a grader, so the activation wording must not appear.
+        assert "no script grader" not in block
+
+    def test_a_grader_exiting_non_zero_raises_and_records_nothing(self, tmp_path: Path) -> None:
+        # `check=True` on an argument list: recording a hash from a broken run would date this
+        # round's scores to an instrument that never ran.
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            self._call(tmp_path, sidecar, 1, suite=_outcome_suite(tmp_path, grader="boom"))
+
+        assert load_measurements(sidecar).round_scores == []
+
+    def test_a_suite_with_no_run_command_criterion_names_the_suite(self, tmp_path: Path) -> None:
+        # `StopIteration` from `next(...)` in the fence. And it names the right remedy: on the
+        # activation track there IS no script grader, so the other composite is the answer.
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        suite = _outcome_suite(tmp_path, grader=None)
+
+        with pytest.raises(ValueError, match="declares no `run_command` criterion") as excinfo:
+            self._call(tmp_path, sidecar, 1, suite=suite)
+
+        assert str(suite) in str(excinfo.value)
+        assert "record_round_activation" in str(excinfo.value)
+
+    def test_the_grader_is_found_by_its_task_dir_token_not_by_position(self, tmp_path: Path) -> None:
+        """`uv run python $TASK_DIR/verify.py` puts `run` at position 1, which is not a script.
+
+        The fence relied on the bundled template happening to put the script second. Deriving it from
+        the `$TASK_DIR` placeholder makes the criterion's own convention the contract.
+        """
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        suite = _outcome_suite(tmp_path)
+        suite.write_text(
+            suite.read_text(encoding="utf-8").replace("python $TASK_DIR", "uv run python $TASK_DIR"),
+            encoding="utf-8",
+        )
+
+        self._call(tmp_path, sidecar, 1, suite=suite)
+
+        assert load_measurements(sidecar).round_scores[0].grader_fingerprint == "a" * 64
+
+    def test_a_command_naming_no_task_dir_token_is_a_clear_error(self, tmp_path: Path) -> None:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        suite = _outcome_suite(tmp_path)
+        suite.write_text(
+            suite.read_text(encoding="utf-8").replace("$TASK_DIR/verify.py", "verify.py"), encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError, match="`\\$TASK_DIR` token"):
+            self._call(tmp_path, sidecar, 1, suite=suite)
+
+    def test_a_changed_grader_is_said_out_loud(self, tmp_path: Path) -> None:
+        sidecar = _sidecar(tmp_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        self._call(tmp_path, sidecar, 1, suite=_outcome_suite(tmp_path))
+
+        block = self._call(tmp_path, sidecar, 2, suite=_outcome_suite(tmp_path / "moved", grader="moved"))
+
+        assert "The GRADER CHANGED" in block

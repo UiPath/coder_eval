@@ -616,7 +616,20 @@ def test_the_store_edge_is_sentinels_and_one_lookup() -> None:
         "optimize.execution": {"UNRESOLVED_MODEL"},
         "optimize.fronts": set(),
         "optimize.search": set(),
-        "optimize.api": {"UNRESOLVED_MODEL", "load_measurements"},
+        # Rank 4 is the WIDEST edge to the store, and deliberately so: it is the only rank that
+        # WRITES. The three writers here (`record_noise_floor`, `record_round_scores`,
+        # `append_regression_rows`) are what the `record_*` naming rule in `api.py`'s docstring
+        # promises are the only ones, and the two `*_changed` predicates are read to say what this
+        # round is comparable with.
+        "optimize.api": {
+            "UNRESOLVED_MODEL",
+            "append_regression_rows",
+            "grader_changed",
+            "load_measurements",
+            "record_noise_floor",
+            "record_round_scores",
+            "suite_changed",
+        },
     }, edge
     # And nothing in the DECISION layer imports the RENDERER: a layer that decides and also owns its
     # own presentation is what would make that split cosmetic too. Rank 4 is exempt because it

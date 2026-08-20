@@ -23,22 +23,33 @@ was meant to read have been paid for. Every entry point rejects one at the bound
 
 from __future__ import annotations
 
+import re
+import shlex
+import subprocess
+import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Literal
 
 from coder_eval.models import (
     ACTIVATION_FLOOR_METRIC,
     EXECUTION_FLOOR_METRIC,
     ActivationGateVerdict,
+    ArmRowScores,
     ExecutionGateVerdict,
     GateVerdictBase,
+    OptimizeMeasurements,
+    RegressionRow,
+    RoundScores,
+    TaskDefinition,
 )
 from coder_eval.optimize.activation import (
     activation_gate,
     confirm_gate,
     gate_seed_stability,
     holm_promote,
+    measure_noise_floor,
     min_discordant_rows,
     noise_floor_mde,
 )
@@ -55,6 +66,7 @@ from coder_eval.optimize.fronts import (
     cost_quality_points,
     headroom_ceiling,
     instance_best_front,
+    lineage_head,
     pareto_front,
 )
 from coder_eval.optimize.gate import confirm_one_candidate
@@ -73,12 +85,22 @@ from coder_eval.optimize.search import (
     search_compare,
     skill_text,
 )
-from coder_eval.optimize.store import UNRESOLVED_MODEL, load_measurements
+from coder_eval.optimize.store import (
+    UNRESOLVED_MODEL,
+    append_regression_rows,
+    grader_changed,
+    load_measurements,
+    record_noise_floor,
+    record_round_scores,
+    suite_changed,
+)
 from coder_eval.orchestration.task_loader import expand_dataset, load_task
 from coder_eval.reports_optimize import (
     render_attribution_unavailable,
+    render_comparability,
     render_confirm_family,
     render_confirm_markdown,
+    render_corpus_appended,
     render_corpus_check,
     render_cost_quality,
     render_discreteness,
@@ -95,9 +117,10 @@ from coder_eval.reports_optimize import (
     render_staleness_note,
 )
 from coder_eval.reports_stats import DEFAULT_ALPHA
+from coder_eval.suite_fingerprint import suite_fingerprint
 
 
-def _require_run_dirs(run_dirs: Sequence[Path]) -> None:
+def _require_run_dirs(run_dirs: Sequence[Path], argument: str = "run_dirs") -> None:
     """Reject a non-sequence, a string and an empty sequence, BEFORE any filesystem access.
 
     Three shape mistakes, and keeping them apart is the point, because two of the three otherwise
@@ -113,18 +136,22 @@ def _require_run_dirs(run_dirs: Sequence[Path]) -> None:
 
     All three raise, and none renders, because a rendered block is a reading of a suite — and none
     of these got as far as reading one.
+
+    ``argument`` names the parameter in the message. It is not decoration: the ledger writers and the
+    confirm composites take TWO run-dir sequences each (a round's arms and its baseline, a gate run
+    and a confirm run), and "run_dirs must be a sequence" would name neither of them.
     """
     if isinstance(run_dirs, str | bytes | Path):
         raise TypeError(
-            f"run_dirs must be a sequence of pathlib.Path, not {type(run_dirs).__name__} — pass "
+            f"{argument} must be a sequence of pathlib.Path, not {type(run_dirs).__name__} — pass "
             + "[dir], not dir (a string would be read as one run directory per letter)"
         )
     if not run_dirs:
-        raise ValueError("run_dirs is empty — no run directory was named, so there is nothing to measure")
+        raise ValueError(f"{argument} is empty — no run directory was named, so there is nothing to measure")
     wrong = [d for d in run_dirs if isinstance(d, str | bytes)]
     if wrong:
         raise TypeError(
-            f"run_dirs holds {len(wrong)} string(s) rather than pathlib.Path ({wrong[0]!r}) — these are "
+            f"{argument} holds {len(wrong)} string(s) rather than pathlib.Path ({wrong[0]!r}) — these are "
             + "joined with `/`, which a string does not support"
         )
 
@@ -673,7 +700,7 @@ def activation_gate_report(
     explicit sequence checks exactly those. So omitting it arms the veto — the parameter exists to let
     a caller turn the check off deliberately, which is the only reason it is reachable at all.
     """
-    _require_run_dirs(gate_dirs)
+    _require_run_dirs(gate_dirs, "gate_dirs")
     family = _resolve_family(candidate_variants, incumbent_variant)
     # NO `_staleness_note` here, alone among the reporting composites, and the reason is the return
     # type: `activation_gate` runs the sweep in its own preflight and REFUSES on a contaminated tree,
@@ -719,7 +746,7 @@ def seed_stability_report(
     what a declared API is not — pyright cannot check it, and the skill's snippet binder cannot
     either.
     """
-    _require_run_dirs(gate_dirs)
+    _require_run_dirs(gate_dirs, "gate_dirs")
     if incumbent_variant == candidate_variant:
         # `SeedStability` has no refusal channel, so a self-comparison renders as
         # "STABLE — would promote at none of 3 seeds": a maximally confident negative for what is a
@@ -937,8 +964,8 @@ def confirm_report_activation(
     # would otherwise die on an unhashable dict key after the whole family had been re-gated. Rank 1
     # owns the sentence, and `SKILL.md` advertises this guard by name.
     confirm_one_candidate(candidate_variant)
-    _require_run_dirs(gate_dirs)
-    _require_run_dirs(confirm_dirs)
+    _require_run_dirs(gate_dirs, "gate_dirs")
+    _require_run_dirs(confirm_dirs, "confirm_dirs")
     family = _resolve_family(candidate_variants, incumbent_variant)
     # Recomputed, not persisted — see the docstring. Seeded, so this is the same verdict Stage B
     # rendered, and the family size goes into the block because nothing on disk records it.
@@ -1033,3 +1060,260 @@ def confirm_report_execution(
             render_execution_markdown(_track_verdict(confirm.test_verdict, ExecutionGateVerdict, "execution")),
         ]
     )
+
+
+def _previous_round(measurements: OptimizeMeasurements, round_number: int) -> RoundScores | None:
+    """The round before this one, from a snapshot taken BEFORE the write.
+
+    Two halves, and both were bugs in the fence this replaces. Reading AFTER the write compares the
+    round against itself and prints "same grader" forever. And excluding the CURRENT round number is
+    what handles a re-run: ``record_round_scores`` replaces per round, so the stored entry for this
+    round is an earlier version of itself rather than the one before it.
+    """
+    earlier = [r for r in measurements.round_scores if r.round < round_number]
+    return max(earlier, key=lambda r: r.round, default=None)
+
+
+def _require_scored_arms(arms: Sequence[ArmRowScores], variant_ids: Sequence[str], suite_id: str) -> None:
+    """No arm scored anything — a mistyped id, not a round.
+
+    Writing it anyway records empty fronts, no lineage head, and a suite digest over ZERO rows — and
+    the NEXT round then reports "The SUITE CHANGED" for a suite nobody touched. Every sibling raises
+    on this input; the ledger is the one place where the consequence outlives the call.
+    """
+    if not any(arm.row_scores for arm in arms):
+        raise ValueError(
+            f"none of {list(variant_ids)} scored a row of {suite_id!r} — a wrong suite id, variant id "
+            + "or run dir, not a round. Recording it would write a suite digest over zero rows, and "
+            + "the next round would report the suite as CHANGED."
+        )
+
+
+def _scored_row_tasks(suite_file: Path, arms: Sequence[ArmRowScores]) -> tuple[TaskDefinition, list[TaskDefinition]]:
+    """The unexpanded suite task and the expanded rows the round actually scored.
+
+    The two are different things and :func:`~coder_eval.suite_fingerprint.suite_fingerprint` takes
+    them separately for that reason. The scored ids are the **union** across arms, never ``arms[0]``:
+    a hole is absent rather than zero, so an arm that crashed a row has a shorter vector and reading
+    one arm would make the digest a function of which arm happens to be first.
+    """
+    task, _raw = load_task(suite_file)
+    scored = {row_id for arm in arms for row_id in arm.row_scores}
+    rows = [r for r in expand_dataset(task, suite_file.parent) if r.row_id in scored]
+    return task, rows
+
+
+# What the bundled grader's `--fingerprint` mode emits: a SHA-256 hexdigest. Validated rather than
+# trusted, and the instrument's own docstring is why — "there is no score here, and a score-shaped
+# line would be recorded by a caller as the fingerprint itself". A grader predating the flag treats
+# `--fingerprint` as a row id, prints a score line and exits 0, so `check=True` catches nothing: the
+# recorded identity becomes a string that is constant while the real grader moves, and carries an
+# absolute path that differs per machine.
+_FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _grader_fingerprint(suite_file: Path, task: TaskDefinition) -> str:
+    """The execution grader's own fingerprint, resolved from the SUITE rather than a typed path.
+
+    It is the ``run_command`` criterion's own command, with ``$TASK_DIR`` standing for the suite
+    file's directory — so a suite whose grader moved cannot leave this pointing at the old script.
+    ``--fingerprint`` hashes the script AND the expectations it loads, because the answer key is part
+    of the instrument.
+
+    ``check=True`` with an argument list, never a shell string, and the output is checked against the
+    digest SHAPE: the grader exits non-zero only in this mode, so an exit code alone does not
+    distinguish a fingerprint from a score line.
+    """
+    commands = [c.command for c in task.success_criteria if c.type == "run_command"]
+    if not commands:
+        raise ValueError(
+            f"{suite_file} declares no `run_command` criterion, so there is no script grader to "
+            + "fingerprint. On the activation track that is expected — use record_round_activation."
+        )
+    if len(commands) > 1:
+        # The grader's POSITION is not discoverable — `headroom_report` takes an explicit
+        # `grader_index` for the same suite — so picking the first silently fingerprints a build step.
+        raise ValueError(
+            f"{suite_file} declares {len(commands)} `run_command` criteria, so which one is the "
+            + "grader is ambiguous. The fingerprint identifies ONE instrument; split the others out."
+        )
+    # `shlex.split`, because the real runner honours quoting and a parser that does not would read
+    # `"$TASK_DIR/my grader/verify.py"` as a path ending at the space.
+    tokens = [t for t in shlex.split(commands[0]) if "$TASK_DIR" in t]
+    if len(tokens) != 1:
+        raise ValueError(
+            f"{suite_file}'s grader command names {len(tokens)} `$TASK_DIR` token(s) in "
+            + f"{commands[0]!r} — the grader script is the one path the fingerprint hashes, so "
+            + "exactly one is expected"
+        )
+    grader = Path(tokens[0].replace("$TASK_DIR", str(suite_file.parent)))
+    completed = subprocess.run(
+        [sys.executable, str(grader), "--fingerprint"],
+        capture_output=True,
+        text=True,
+        # CE010, and it matters more here than usual: this string becomes the round's recorded
+        # instrument identity, so a locale-dependent decode would make the SAME grader fingerprint
+        # differently on a Windows checkout and read as "the grader changed".
+        encoding="utf-8",
+        check=True,
+    )
+    digest = completed.stdout.strip()
+    if not _FINGERPRINT_PATTERN.match(digest):
+        raise ValueError(
+            f"{grader} --fingerprint printed {digest[:80]!r}, which is not a SHA-256 digest. A grader "
+            + "predating that flag reads it as a row id and prints a SCORE line, which would be "
+            + "recorded as this round's instrument identity — constant while the grader moves, and "
+            + "different on every machine."
+        )
+    return digest
+
+
+def record_round_activation(
+    *,
+    sidecar: Path,
+    round_number: int,
+    run_dirs: Sequence[Path],
+    variant_ids: Sequence[str],
+    suite_id: str,
+    criterion_index: int,
+    baseline_dirs: Sequence[Path],
+    suite_file: Path,
+    baseline_variant_id: str = "default",
+    lineage_head_variant: str | None | Literal["auto"] = "auto",
+) -> str:
+    """Write this round's activation-track measurements, and report what they are comparable with.
+
+    A ``record_*`` name, so it WRITES: the round's row vectors and fronts, and the ``f1.yes`` noise
+    floor when one could be measured.
+
+    **There is no grader-fingerprint parameter here, and that is the point.** The activation track has
+    no script grader, so the combination is unrepresentable rather than asserted against — which is
+    also why the comparability sentence says "no script grader" instead of "comparability unknown", a
+    wording the un-branched fence printed on every round of this track forever.
+
+    ``lineage_head_variant`` has THREE states, and the third is why it is not just ``str | None``.
+    ``"auto"`` (the default) derives the head from this round's arms via
+    :func:`~coder_eval.optimize.fronts.lineage_head`, which is right for a multi-arm round. A variant
+    id records that arm. And **``None`` records NO head**, which is what a REVERTED search round
+    needs: a search round has one arm, so deriving would name the rejected candidate as the head and
+    advance the bar every later round is measured against. ``None`` leaves the lineage where it was —
+    :func:`~coder_eval.optimize.search.lineage_head_scores` skips a round that named none.
+    """
+    _require_run_dirs(run_dirs)
+    _require_run_dirs(baseline_dirs, "baseline_dirs")
+    # ONE load, and `previous` comes off THIS snapshot — before the write. See `_previous_round`.
+    measurements = load_measurements(sidecar)
+    previous = _previous_round(measurements, round_number)
+    arms = arm_row_scores(
+        run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
+    )
+    floor = measure_noise_floor(
+        run_dirs=baseline_dirs,
+        variant_id=baseline_variant_id,
+        suite_id=suite_id,
+        criterion_index=criterion_index,
+        model=resolve_arm_model(baseline_dirs, baseline_variant_id, suite_id) or UNRESOLVED_MODEL,
+        measurements=measurements,
+    )
+    _require_scored_arms(arms, variant_ids, suite_id)
+    task, rows = _scored_row_tasks(suite_file, arms)
+    this_round = RoundScores(
+        round=round_number,
+        arm_row_scores=arms,
+        grader_fingerprint=None,
+        suite_fingerprint=suite_fingerprint(task, rows),
+        pareto_front=pareto_front(arms),
+        instance_best_front=instance_best_front(arms),
+        lineage_head=lineage_head(arms) if lineage_head_variant == "auto" else lineage_head_variant,
+    )
+    if floor is not None:
+        record_noise_floor(sidecar, floor)
+    record_round_scores(sidecar, this_round)
+    return render_comparability(
+        grader=grader_changed(previous, this_round),
+        suite=suite_changed(previous, this_round),
+        has_grader=False,
+        has_previous=previous is not None,
+    )
+
+
+def record_round_execution(
+    *,
+    sidecar: Path,
+    round_number: int,
+    run_dirs: Sequence[Path],
+    variant_ids: Sequence[str],
+    suite_id: str,
+    control_dirs: Sequence[Path],
+    control_variant_id: str,
+    suite_file: Path,
+    criterion_index: int | None = None,
+    lineage_head_variant: str | None | Literal["auto"] = "auto",
+) -> str:
+    """Write this round's execution-track measurements, and report what they are comparable with.
+
+    The twin of :func:`record_round_activation`, on this track's floor (``weighted_score``, split over
+    REPLICATES from the control arm) and with the one thing that track does not have: the grader
+    fingerprint, resolved from the suite rather than a typed path.
+    """
+    _require_run_dirs(run_dirs)
+    _require_run_dirs(control_dirs, "control_dirs")
+    measurements = load_measurements(sidecar)
+    previous = _previous_round(measurements, round_number)
+    arms = arm_row_scores(
+        run_dirs=run_dirs, variant_ids=variant_ids, suite_id=suite_id, criterion_index=criterion_index
+    )
+    _require_scored_arms(arms, variant_ids, suite_id)
+    task, rows = _scored_row_tasks(suite_file, arms)
+    # BEFORE the bootstrap. Its three raise paths — no `run_command`, an ambiguous one, a
+    # non-fingerprint output — are all decidable from the suite file alone, and every one of them
+    # would otherwise discard a floor that had already been computed.
+    grader = _grader_fingerprint(suite_file, task)
+    floor = measure_execution_noise_floor(
+        run_dirs=control_dirs,
+        variant_id=control_variant_id,
+        suite_id=suite_id,
+        model=resolve_arm_model(control_dirs, control_variant_id, suite_id) or UNRESOLVED_MODEL,
+        measurements=measurements,
+    )
+    this_round = RoundScores(
+        round=round_number,
+        arm_row_scores=arms,
+        grader_fingerprint=grader,
+        suite_fingerprint=suite_fingerprint(task, rows),
+        pareto_front=pareto_front(arms),
+        instance_best_front=instance_best_front(arms),
+        lineage_head=lineage_head(arms) if lineage_head_variant == "auto" else lineage_head_variant,
+    )
+    if floor is not None:
+        record_noise_floor(sidecar, floor)
+    record_round_scores(sidecar, this_round)
+    return render_comparability(
+        grader=grader_changed(previous, this_round),
+        suite=suite_changed(previous, this_round),
+        has_grader=True,
+        has_previous=previous is not None,
+    )
+
+
+def record_promotion(*, sidecar: Path, round_number: int, rows: Sequence[tuple[str, str]]) -> str:
+    """Append the rows a promotion was built on to the regression corpus. Append-only.
+
+    ``rows`` are ``(row_id, reason)`` pairs, and ``promoted_in_round`` comes from ``round_number`` —
+    so a caller needs no :class:`~coder_eval.models.RegressionRow` import, which is what keeps the
+    skill's fence free of one.
+
+    A later round reads this through :func:`corpus_report`: a candidate that re-loses one of these
+    rows is a regression however good its aggregate looks.
+    """
+    if not rows:
+        raise ValueError("rows is empty — a promotion with no supporting rows records nothing to check later")
+    # The BEFORE count, so the block can report what actually landed. `append_regression_rows`
+    # de-duplicates on `row_id`, so `len(rows)` is what was submitted, not what was added.
+    before = len(load_measurements(sidecar).regression_corpus)
+    appended = append_regression_rows(
+        sidecar,
+        [RegressionRow(row_id=row_id, promoted_in_round=round_number, reason=reason) for row_id, reason in rows],
+    )
+    total = len(appended.regression_corpus)
+    return render_corpus_appended(submitted=len(rows), added=total - before, total=total)

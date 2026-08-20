@@ -123,6 +123,35 @@ def _dominates(a: ArmRowScores, b: ArmRowScores) -> bool:
     return all(a_scores[r] >= b_scores[r] for r in scored_by_b) and any(a_scores[r] > b_scores[r] for r in scored_by_b)
 
 
+def lineage_head(arms: Sequence[ArmRowScores]) -> str | None:
+    """The arm the next round's SEARCH LOOP is accepted or reverted against — the highest MEAN.
+
+    **Not the top-scoring arm on the gate's metric**, and the difference is the reason this is code
+    rather than prose: the search loop compares per-row MEANS through
+    :func:`~coder_eval.optimize.search.search_compare`, so the head has to be the arm that is best by
+    that same reduction. Picking the top ``f1.yes`` arm instead ranks by a different quantity, and the
+    accept/revert decision of every later round is then made against a bar nothing measured.
+
+    The incumbent is a candidate for the head like any other arm: a round where nothing beat it
+    leaves the lineage where it was, which is what "a quiet round" means.
+
+    Ties resolve by variant id, so a ledger entry cannot depend on the order the arms were listed in.
+    An arm with holes is compared on the rows it HAS — the family's rule everywhere — and an arm that
+    scored nothing is not eligible at all, since a mean over no rows is not a score of zero.
+    ``None`` when no arm scored anything.
+
+    Routed through :func:`_finite_scores`, so a NaN cell is ABSENT rather than compared. Without it a
+    NaN mean makes every ``<`` and ``>`` against it False and the winner becomes whichever arm the
+    caller happened to list first — which is precisely the order dependence the tie-break above exists
+    to remove. Measured: the same two arms returned different heads when reversed.
+    """
+    scored = [(mean(list(finite.values())), arm.variant_id) for arm in arms if (finite := _finite_scores(arm))]
+    if not scored:
+        return None
+    # `-value` then the id: highest mean first, and the id ASCENDING within a tie.
+    return min(scored, key=lambda pair: (-pair[0], pair[1]))[1]
+
+
 def pareto_front(arms: list[ArmRowScores]) -> list[str]:
     """Variant ids no other arm dominates on the row vector.
 

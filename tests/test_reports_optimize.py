@@ -42,6 +42,7 @@ from coder_eval.reports_optimize import (
     SINGLE_REPLICATE_CAVEAT,
     _front_summary,
     render_attribution_unavailable,
+    render_comparability,
     render_confirm_markdown,
     render_corpus_check,
     render_cost_quality,
@@ -1425,3 +1426,39 @@ class TestRenderLeakScan:
         assert "No candidate arms matched" not in block
         assert "Nothing could be scanned" in block
         assert "wiring fault" in block
+
+
+class TestRenderComparability:
+    """Two instruments, three states each, and `None` means UNKNOWN — never "unchanged"."""
+
+    def test_the_activation_track_says_there_is_no_script_grader(self) -> None:
+        # `grader_changed` returns `None` on every activation round BY CONSTRUCTION, so the
+        # un-branched wording printed "comparability unknown" for ever — on a track where
+        # comparability is not unknown, there is simply no script grader to move.
+        block = render_comparability(grader=None, suite=False, has_grader=False)
+        assert "no script grader" in block
+        assert "comparability unknown" not in block
+
+    def test_an_execution_round_with_no_previous_fingerprint_is_unknown_not_unchanged(self) -> None:
+        block = render_comparability(grader=None, suite=None, has_grader=True)
+        assert block.count("comparability unknown") == 2
+        assert "Same grader" not in block and "Same suite" not in block
+
+    @pytest.mark.parametrize(
+        ("grader", "suite", "expected"),
+        [
+            pytest.param(True, False, "The GRADER CHANGED", id="grader-moved"),
+            pytest.param(False, True, "The SUITE CHANGED", id="suite-moved"),
+            pytest.param(False, False, "Same grader as the last round.", id="both-held"),
+        ],
+    )
+    def test_each_state_is_stated(self, grader: bool, suite: bool, expected: str) -> None:
+        assert expected in render_comparability(grader=grader, suite=suite, has_grader=True)
+
+    def test_the_suite_half_has_no_track_branch(self) -> None:
+        # The suite fingerprint is track-independent: the criteria, the prompt, the rows and the run
+        # caps are an instrument wherever they are.
+        for has_grader in (True, False):
+            assert "Same suite as the last round." in render_comparability(
+                grader=False, suite=False, has_grader=has_grader
+            )
