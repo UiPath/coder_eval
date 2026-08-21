@@ -90,13 +90,13 @@ async def test_invoke_anthropic_judge_passes_temperature_and_max_tokens() -> Non
 
 
 async def test_invoke_anthropic_judge_wraps_api_error() -> None:
-    import httpx
+    import httpx2
     from anthropic import APIConnectionError
 
     from coder_eval.errors import JudgeInfrastructureError
 
     client = _make_client()
-    sdk_error = APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    sdk_error = APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.com"))
     client.messages.create.side_effect = sdk_error
     with (
         patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client),

@@ -34,7 +34,11 @@ dependencies = [
     "click>=8.3.3",
     "rich>=14.3.3",
     "python-dotenv>=1.2.2",
-    "anthropic>=0.86.0",
+    "anthropic>=1.0.0,<2.0.0",
+    # anthropic>=1.0.0 migrated its HTTP layer from httpx to httpx2 (its own
+    # exceptions, e.g. APIConnectionError, now carry an httpx2.Request). Declared
+    # explicitly since our code/tests construct httpx2 types directly.
+    "httpx2>=2.12.0",
     "claude-agent-sdk>=0.2.124",
     "anyio>=4.13.0",
     "radon>=6.0.1",

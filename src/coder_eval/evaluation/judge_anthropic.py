@@ -40,7 +40,7 @@ async def invoke_anthropic_judge_async(
     Returns the SDK response converted to a dict via ``model_dump`` so the
     caller can reuse ``extract_verdict_from_anthropic_response`` — Anthropic's
     native shape (content blocks with ``type: tool_use``) is identical
-    between this SDK call and the Bedrock httpx-direct call.
+    between this SDK call and the Bedrock httpx2-direct call.
     """
     alias = to_anthropic_alias(model)
     client = AsyncAnthropic(timeout=timeout_seconds)
