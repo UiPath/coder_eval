@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from anthropic.resources.messages import AsyncMessages
 
 from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge_async
 from coder_eval.evaluation.verdict_tool import SUBMIT_VERDICT_ANTHROPIC_TOOL
@@ -29,10 +30,23 @@ def _make_response(*, score: float = 0.5, rationale: str = "ok") -> MagicMock:
 
 def _make_client(response: MagicMock | None = None) -> MagicMock:
     client = MagicMock()
-    client.messages.create = AsyncMock(return_value=response if response is not None else _make_response())
+    # spec-bound to the real ``AsyncMessages.create`` signature so a kwarg the
+    # installed SDK no longer accepts (e.g. a removed ``temperature``) fails
+    # here instead of silently passing against an unconstrained MagicMock.
+    client.messages = MagicMock(spec=AsyncMessages)
+    client.messages.create = AsyncMock(
+        wraps=lambda **kwargs: _bind_and_return(response if response is not None else _make_response(), **kwargs)
+    )
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=None)
     return client
+
+
+def _bind_and_return(response: MagicMock, **kwargs: Any) -> MagicMock:
+    import inspect
+
+    inspect.signature(AsyncMessages.create).bind(MagicMock(), **kwargs)
+    return response
 
 
 async def _invoke(**overrides):
@@ -79,24 +93,43 @@ async def test_invoke_anthropic_judge_raises_on_empty_model() -> None:
 
 
 async def test_invoke_anthropic_judge_passes_temperature_and_max_tokens() -> None:
+    """``temperature`` travels via ``extra_body`` — anthropic 1.0.0 dropped it as a
+    top-level ``messages.create`` kwarg, but the Messages API still accepts it in
+    the raw JSON body (the same body shape the Bedrock path sends it in)."""
     client = _make_client()
     with patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client):
         await _invoke(temperature=0.7, max_tokens=321, system="sys", user="usr")
     kwargs: dict[str, Any] = client.messages.create.call_args.kwargs
-    assert kwargs["temperature"] == 0.7
+    assert "temperature" not in kwargs
+    assert kwargs["extra_body"] == {"temperature": 0.7}
     assert kwargs["max_tokens"] == 321
     assert kwargs["system"] == "sys"
     assert kwargs["messages"] == [{"role": "user", "content": "usr"}]
 
 
+async def test_invoke_anthropic_judge_escalates_on_signature_break() -> None:
+    """A kwarg the installed SDK no longer accepts must escalate as infra, not
+    silently score the row 0.0 (see judge_bedrock.py's parallel retry/escalation
+    contract and CLAUDE.md's CE039 rationale)."""
+    from coder_eval.errors import JudgeInfrastructureError
+
+    client = _make_client()
+    client.messages.create.side_effect = TypeError("create() got an unexpected keyword argument 'temperature'")
+    with (
+        patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client),
+        pytest.raises(JudgeInfrastructureError, match="Anthropic judge call failed"),
+    ):
+        await _invoke()
+
+
 async def test_invoke_anthropic_judge_wraps_api_error() -> None:
-    import httpx
+    import httpx2
     from anthropic import APIConnectionError
 
     from coder_eval.errors import JudgeInfrastructureError
 
     client = _make_client()
-    sdk_error = APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    sdk_error = APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.com"))
     client.messages.create.side_effect = sdk_error
     with (
         patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client),
