@@ -290,9 +290,19 @@ def _validate_extra_mount(spec: str) -> str:
 
     Defends against typos that would silently expose the host fs to the
     container, and against mount specs that shadow framework-owned mounts.
-    Normalizes the source side by expanding ``~`` and ``$VAR`` so authors
-    can write portable specs. Returns the (possibly rewritten) spec to
-    feed back into argv.
+    Normalizes BOTH sides by expanding ``~`` and ``$VAR`` so authors can
+    write portable specs. Returns the (possibly rewritten) spec to feed
+    back into argv.
+
+    The destination is expanded for the same reason the source is, and it
+    matters more than it looks: ``env_passthrough`` forwards ``HOME`` with
+    the HOST value on purpose, so a container-side path that must line up
+    with ``$HOME`` (``$HOME/.uipath`` for the uip CLI's login state, say)
+    has a different literal value on every host. Without expansion the only
+    way to write that mount is to hardcode one host's home directory, which
+    then silently mounts to the wrong place everywhere else -- and a login
+    state the CLI cannot see reads as a capability failure, not a config
+    error.
 
     Notes:
       - Mode is REQUIRED. Forgetting ``:ro`` is the single most common way
@@ -312,26 +322,36 @@ def _validate_extra_mount(spec: str) -> str:
     parts = body.split(":")
     if len(parts) < 2 or len(parts) > 3:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: expected `src:dst[:ro|rw]`.")
-    src, dst = head + parts[0], parts[1]
+    src, raw_dst = head + parts[0], parts[1]
     # Default to read-only when mode is omitted. Mounting host paths RW
     # by default is the wrong sandbox stance: the few RW use-cases are
     # better stated explicitly than implied by silence.
     mode = parts[2] if len(parts) == 3 else "ro"
     if not src:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: empty source path.")
-    if not dst:
+    if not raw_dst:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: empty destination path.")
+    # Expand ~ and $VAR on BOTH sides so authors can write portable specs.
+    # Destination expansion happens BEFORE the absolute-path check, since the
+    # whole point is to let `$HOME/...` resolve to an absolute path.
+    expanded_src = os.path.expandvars(os.path.expanduser(src))
+    dst = os.path.expandvars(os.path.expanduser(raw_dst))
     if not dst.startswith("/"):
-        raise ValueError(f"Invalid extra_mounts entry {spec!r}: destination must be an absolute path.")
+        # An unset variable is left verbatim by expandvars, so a typo'd name
+        # lands here. Show both forms or the message is a puzzle.
+        detail = f"{raw_dst!r}" if dst == raw_dst else f"{raw_dst!r} (expanded to {dst!r})"
+        raise ValueError(
+            f"Invalid extra_mounts entry {spec!r}: destination must be an absolute path, got {detail}."
+        )
     if mode not in ("ro", "rw"):
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: mode must be 'ro' or 'rw'.")
-    # Expand ~ and $VAR in the source so authors can write portable specs.
-    expanded_src = os.path.expandvars(os.path.expanduser(src))
     if not Path(expanded_src).exists():
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: source path does not exist on host.")
     # Reject destinations that shadow framework-owned mounts inside the
     # container. ``/work`` substrings are caught too -- /work/foo would
     # land underneath our staging dir and shadow the input/output tree.
+    # Checked on the EXPANDED destination: `$HOME` could itself expand to a
+    # reserved path, and the raw form would sail past this gate.
     dst_norm = dst.rstrip("/") or "/"
     if dst_norm in _RESERVED_MOUNT_DESTS or dst_norm.startswith(CONTAINER_WORK_DIR + "/"):
         raise ValueError(
