@@ -297,6 +297,17 @@ def run_command(
         ),
         min=1,
     ),
+    split: str | None = typer.Option(
+        None,
+        "--split",
+        help=(
+            "For dataset-backed tasks, keep only rows whose dataset.split_field value "
+            "(default field: split) matches this name — e.g. --split tune / --split holdout. "
+            "Applied BEFORE --sample / --sample-per-stratum, so a sampled split keeps a "
+            "predictable size. Tasks whose rows are all unlabelled are unaffected; a "
+            "labelled task with no row in this split is reported in skipped_tasks."
+        ),
+    ),
     repeats: int | None = typer.Option(
         None,
         "--repeats",
@@ -409,6 +420,7 @@ def run_command(
                 experiment_path=resolved_experiment,
                 max_rows=sample,
                 sample_per_stratum=sample_per_stratum,
+                split=split,
                 repeats=repeats,
                 verbose=verbose,
                 resume=resume,
@@ -434,6 +446,7 @@ async def _run_all_tasks(
     experiment_path: Path | None = None,
     max_rows: int | None = None,
     sample_per_stratum: int | None = None,
+    split: str | None = None,
     repeats: int | None = None,
     verbose: bool = False,
     resume: bool = False,
@@ -457,6 +470,9 @@ async def _run_all_tasks(
             from -D/--set and the bespoke flag aliases
         stream_mode: Optional stream mode ('full' or 'minimal') for real-time output
         experiment_path: Optional path to experiment YAML (default: experiments/default.yaml)
+        split: Optional dataset row filter (--split): keep only rows whose
+            dataset.split_field value matches. Applied before max_rows /
+            sample_per_stratum; tasks whose rows carry no split label are unaffected.
         junit_xml: Optional path to write a JUnit XML report to, after the run
             summary is persisted and before the failure exit-code gate.
     """
@@ -481,6 +497,7 @@ async def _run_all_tasks(
         overrides=overrides or {},
         max_rows=max_rows,
         sample_per_stratum=sample_per_stratum,
+        split=split,
         repeats=repeats,
         verbose=verbose,
         include_skipped=include_skipped,

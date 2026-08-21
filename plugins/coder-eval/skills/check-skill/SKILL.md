@@ -1,5 +1,5 @@
 ---
-description: Generate and run a coder-eval activation suite for a Claude Code skill — does the agent actually engage it when it should, and leave it alone when it shouldn't? Use when the user asks whether a skill triggers, wants to test skill activation, or worries a skill has silently stopped firing.
+description: Generate and run a coder-eval activation suite for a Claude Code skill. Use when the user asks whether a skill triggers, wants to test skill activation, or worries a skill has silently stopped firing.
 allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 ---
 
@@ -156,6 +156,17 @@ relative to the task file):
 - each positive row's `expected_skill` → the same bare name; distractor rows keep `""`;
   a sibling-owned row's `expected_skill` → that **sibling's** bare name
 - every row's `prompt` → the requests designed in step 4, one JSON object per line
+- **every row's `split`** → `tune` or `holdout`, keeping both polarities on both sides
+
+**Label every row, including any you add.** The template ships `split` on all six rows and
+`dataset.split_field` on the task, which lets `coder-eval run --split tune` select a subset
+and `/coder-eval:optimize-skill` develop against one half while confirming on the other.
+
+A **partly** labelled dataset is the one state to avoid: `--split` keeps the matching rows
+and silently **drops the unlabelled ones**, so the suite shrinks and the aggregate metrics
+your `suite_thresholds` gate on are computed over fewer rows than you think. Either label
+every row or label none — never some. (With no labels anywhere, `--split` leaves the task
+untouched, which is safe.)
 
 **Then make the skill reachable, which is the step that decides whether the suite measures
 anything.** The task runs in a fresh sandbox that contains none of the user's files, so the
@@ -164,12 +175,17 @@ block in the template — and it is the template's job only **when nothing alrea
 skill**: if step 3 found an experiment supplying that block, inherit it and delete the
 template's copy rather than writing a second declaration.
 
-Otherwise, fill it in: `path` is the directory **containing** the skill's own directory —
-for `.claude/skills/pdf-forms/SKILL.md` that is `.claude/skills`. Tell the user to export it
-before running, and to use the same variable in CI:
+Otherwise, fill it in. **`path` must be a plugin root: a directory holding a `skills/`
+subdirectory**, so that the skill sits at `<path>/skills/<skill-name>/SKILL.md`. A
+`.claude-plugin/plugin.json` is optional — without one the namespace defaults to the
+directory's own name.
+
+For `.claude/skills/pdf-forms/SKILL.md` that root is **`.claude`**, not `.claude/skills`.
+Pointing at a bare directory of skill directories loads nothing at all. Tell the user to
+export it before running, and to use the same variable in CI:
 
 ```bash
-export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
+export SKILL_SOURCE_PATH="$(pwd)/.claude"
 ```
 
 Keep it an environment variable rather than baking an absolute path into the YAML — the
@@ -181,6 +197,14 @@ never triggers, so confirm it is set before reporting any low-recall finding.
 invoked as `plugin:skill` — the checker strips the namespace before comparing. A
 namespaced value here silently scores zero recall on every row, which reads exactly
 like a broken skill.
+
+**Because matching is by bare name, it cannot survive a name collision.** Two skills called
+`init` — one from a plugin, one built in — are the same string to the criterion, so it will
+credit whichever fires as though it were the one under test. Check the name is unique across
+everything installed before trusting a result (`/context` and `/doctor` list the active set).
+A collision does not error; it measures the wrong skill. If one exists, say so rather than
+reporting the number — renaming the skill, or measuring where the collision is absent, are
+the only honest fixes.
 
 For criterion fields beyond this template, read
 `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md`.

@@ -5,7 +5,7 @@ Code — including whether your own Claude Code skills actually trigger.
 
 Coder Eval runs a real coding agent in a sandbox against declarative YAML tasks and scores
 the files and commands it actually produced. This plugin puts the authoring, running, and
-analysis loop behind six slash commands.
+analysis loop behind seven slash commands.
 
 ## Install
 
@@ -34,18 +34,20 @@ Running a suite also needs credentials for whichever agent the tasks use (e.g.
 `ANTHROPIC_API_KEY` for the default `claude-code` agent). `lint-tasks` needs neither the CLI
 nor credentials — it only reads files.
 
-## The six skills
+## The seven skills
 
 | Command | What it does |
 | --- | --- |
 | `/coder-eval:init` | Scans the repo for what is worth evaluating (skills, an MCP server, a CLI), then scaffolds a task directory with one real task. |
 | `/coder-eval:check-skill` | Generates and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
+| `/coder-eval:optimize-skill` | Turns that suite's confusion matrix into candidate description rewrites, A/B tests them as experiment variants, and promotes only what survives a held-out split. |
 | `/coder-eval:task` | Turns a natural-language description into a task YAML with the right success criteria. |
 | `/coder-eval:lint-tasks` | Reviews task YAML you already have and reports criteria that cannot fail, prompts that give away the answer, and fixtures with no cleanup. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and reports systemic failure patterns, per-task findings, and concrete fixes. |
 | `/coder-eval:ci` | Emits a GitHub Actions workflow that runs your suite as a CI gate (or on a schedule, to catch skill drift). |
 
-`init` and `ci` are explicit-invocation only. `check-skill`, `task`, `lint-tasks`, and
+`init`, `ci` and `optimize-skill` are explicit-invocation only — the last because it spends
+real money across several rounds of runs. `check-skill`, `task`, `lint-tasks`, and
 `analyze` can also be reached by the agent on its own when a request clearly calls for them.
 
 ## Bundled reference

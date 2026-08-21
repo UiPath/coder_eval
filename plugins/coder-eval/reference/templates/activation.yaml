@@ -4,20 +4,40 @@
 #
 # One row per prompt; each row is scored on whether the agent engaged the skill.
 # Positive rows set expected_skill to the skill's name, distractor rows set "".
+#
+# Rows also carry a `split` — `tune` or `holdout`. `/coder-eval:optimize-skill`
+# proposes description rewrites against `tune` and confirms the winner on `holdout`,
+# so an improvement has to survive rows it was not fitted to. Select one with
+# `coder-eval run <this file> --split tune`; with no --split every row runs.
+#
+# A split HALVES each side, so it multiplies the sizing rule: a suite you intend to
+# optimize wants 16-24 of each polarity, not the 8-12 a one-shot check aims for.
+# The six rows below are the illustrative minimum, not a target — split 4/2 they are
+# too small to gate an optimization round on, and optimize-skill will say so.
 task_id: "my-skill-activation"
 description: "Does the agent engage `my-skill` when it should, and leave it alone when it shouldn't?"
 tags: [activation]
 
 # REPLACE: the skill under test must be REACHABLE by the sandboxed agent, or every
 # positive row scores 0 and the suite reports recall 0.0 — which reads exactly like a
-# broken skill. `path` is the directory CONTAINING the skill's directory (for
-# `.claude/skills/my-skill/SKILL.md` that is `.claude/skills`), supplied through an
-# environment variable so the committed suite stays portable across machines and CI:
+# broken skill.
 #
-#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills
+# `path` must be a PLUGIN ROOT: a directory holding a `skills/` subdirectory, i.e.
+# `<path>/skills/<skill-name>/SKILL.md`. A `.claude-plugin/plugin.json` is optional —
+# without one the namespace defaults to the directory's own name.
 #
-# An unset variable is logged as a warning and leaves the skill unreachable, so check
-# the first run's recall before trusting a low score.
+# So for `.claude/skills/my-skill/SKILL.md` the path is `.claude` — NOT `.claude/skills`.
+# Pointing at a bare directory of skill directories loads NOTHING, silently, and produces
+# exactly the recall 0.0 this comment warns about.
+#
+#   export SKILL_SOURCE_PATH=/abs/path/to/.claude
+#
+# Supplied through an environment variable so the committed suite stays portable across
+# machines and CI. An unset or wrong path is only a warning, so confirm the first run's
+# recall is non-zero before trusting a low score.
+#
+# `skill_name` below stays the BARE name even when a plugin namespaces the skill as
+# `plugin:skill` — the checker strips the namespace before comparing.
 agent:
   plugins:
     - type: "local"
@@ -26,6 +46,9 @@ agent:
 dataset:
   paths:
     - "activation-rows.jsonl"
+  # Row field naming each row's split. `coder-eval run --split tune` keeps only
+  # matching rows, and filters before any sampling so the selection is predictable.
+  split_field: "split"
 
 initial_prompt: |
   ${row.prompt}

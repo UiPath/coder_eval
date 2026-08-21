@@ -1,6 +1,6 @@
 ---
 description: >-
-  Install the Coder Eval plugin for Claude Code — six slash commands to scaffold,
+  Install the Coder Eval plugin for Claude Code — seven slash commands to scaffold,
   author, review, run and analyze evaluation suites, including an activation suite
   that measures whether your own Claude Code skills actually trigger.
 ---
@@ -43,19 +43,21 @@ yourself.
 Running a suite additionally needs credentials for whichever agent the tasks use —
 `ANTHROPIC_API_KEY` for the default `claude-code` agent.
 
-## The six skills
+## The seven skills
 
 | Command | What it does |
 | --- | --- |
 | `/coder-eval:init` | Scans the repository for what is worth evaluating (Claude Code skills, an MCP server, a CLI), reports the findings, then scaffolds a task directory with one real task. |
 | `/coder-eval:check-skill` | Builds and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
+| `/coder-eval:optimize-skill` | Takes an activation suite's confusion matrix and proposes description rewrites, A/B tests them as experiment variants, and promotes only what beats run-to-run noise and survives a held-out split. |
 | `/coder-eval:task` | Turns a natural-language description into task YAML with criteria that check output *content*, validated through `coder-eval plan`. |
 | `/coder-eval:lint-tasks` | Reviews task YAML that already exists and reports, per task, criteria that cannot fail, prompts that leak the answer, fixtures with no cleanup and near-duplicates — each with a severity and a fix. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and writes `analysis.md`: systemic failure patterns, per-task findings, and concrete fixes. |
 | `/coder-eval:ci` | Emits a GitHub Actions workflow that runs the suite as a gate, or on a schedule to catch skill drift. |
 
-`init` and `ci` are explicit-invocation only — scaffolding a directory or writing
-a workflow is never something to do unprompted. The other four can also be
+`init`, `ci` and `optimize-skill` are explicit-invocation only — scaffolding a
+directory, writing a workflow, or starting rounds of paid A/B runs is never
+something to do unprompted. The other four can also be
 reached by the agent on its own when a request clearly calls for them.
 
 `task` and `lint-tasks` are two halves of the same concern and share one bundled
@@ -106,10 +108,13 @@ It then:
 One prerequisite the suite cannot infer: the evaluated agent runs in a fresh
 sandbox holding none of your files, so it is offered no skills unless the task
 says where they live. The template reads that location from an environment
-variable — point it at the directory *containing* the skill's own directory:
+variable, and it must point at a **plugin root** — a directory holding a `skills/`
+subdirectory, so the skill sits at `<path>/skills/<name>/SKILL.md`. For
+`.claude/skills/pdf-forms/SKILL.md` that root is `.claude`, **not** `.claude/skills`;
+pointing one level too deep loads nothing:
 
 ```bash
-export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
+export SKILL_SOURCE_PATH="$(pwd)/.claude"
 ```
 
 Leave it unset and the skill is simply absent, every positive row scores 0, and

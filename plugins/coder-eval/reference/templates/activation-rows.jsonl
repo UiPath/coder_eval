@@ -1,6 +1,6 @@
-{"id": "pos-1", "expected_skill": "my-skill", "prompt": "REPLACE: the most obvious request my-skill exists to handle, in a user's own words. Paraphrase the skill's description — never quote it."}
-{"id": "pos-2", "expected_skill": "my-skill", "prompt": "REPLACE: the same need phrased with different vocabulary from the description, so a pass proves activation rather than string overlap."}
-{"id": "pos-3", "expected_skill": "my-skill", "prompt": "REPLACE: an oblique in-scope request — the user describes their problem, not the operation the skill performs."}
-{"id": "neg-1", "expected_skill": "", "prompt": "REPLACE: an adjacent request that shares vocabulary with the description but is out of scope for my-skill."}
-{"id": "neg-2", "expected_skill": "", "prompt": "REPLACE: a request in the same domain that a different tool or skill should handle."}
-{"id": "neg-3", "expected_skill": "", "prompt": "REPLACE: an everyday request with no relationship to my-skill at all, so a misfire here means the description over-claims badly."}
+{"id": "pos-1", "expected_skill": "my-skill", "split": "tune", "prompt": "REPLACE: the most obvious request my-skill exists to handle, in a user's own words. Paraphrase the skill's description — never quote it."}
+{"id": "pos-2", "expected_skill": "my-skill", "split": "tune", "prompt": "REPLACE: the same need phrased with different vocabulary from the description, so a pass proves activation rather than string overlap."}
+{"id": "pos-3", "expected_skill": "my-skill", "split": "holdout", "prompt": "REPLACE: an oblique in-scope request — the user describes their problem, not the operation the skill performs."}
+{"id": "neg-1", "expected_skill": "", "split": "tune", "prompt": "REPLACE: an adjacent request that shares vocabulary with the description but is out of scope for my-skill."}
+{"id": "neg-2", "expected_skill": "", "split": "tune", "prompt": "REPLACE: a request in the same domain that a different tool or skill should handle."}
+{"id": "neg-3", "expected_skill": "", "split": "holdout", "prompt": "REPLACE: an everyday request with no relationship to my-skill at all, so a misfire here means the description over-claims badly."}

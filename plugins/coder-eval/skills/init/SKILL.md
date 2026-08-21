@@ -1,5 +1,5 @@
 ---
-description: Set up coder-eval in this repository — scan for what is worth evaluating (Claude Code skills, an MCP server, a CLI), then scaffold a task directory with one real, passing-or-failing task and the exact command to run it.
+description: Set up coder-eval in this repository — scan for what is worth evaluating (Claude Code skills, an MCP server, a CLI), then scaffold a task directory with one real task and the command to run it.
 disable-model-invocation: true
 allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 ---

@@ -14,6 +14,53 @@ runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json, task.log, artifacts/}
 - `task.json.malformed` — present only on the docker degrade path: when an existing `task.json` fails to parse (schema skew from a stale `:latest` image, or a truncated/torn write), the docker runner moves the unparseable original aside to this sidecar and writes a synthetic `final_status=ERROR` `task.json` in its place. Diagnostic-only; `rglob("task.json")` consumers do not match it.
 - `task.log` — the human-readable task log; `artifacts/` — files the agent produced.
 
+## Suite rollups (dataset-backed tasks only)
+
+A task carrying `dataset:` fans out into one row-task per row and additionally writes a
+per-suite rollup:
+
+```
+runs/<run_id>/<variant_id>/<suite_id>/{suite.json, suite.md}
+```
+
+`<suite_id>` is the original (pre-fan-out) `task_id`. Nothing is written for a task
+without `dataset:`.
+
+`suite.json` carries the suite's pass counts plus `criterion_aggregates[]` — one entry per
+criterion that opted into across-row aggregation, each with:
+
+- `criterion_type`, and `description` (set when a task stacks several criteria of the same
+  type, e.g. one `skill_triggered` per skill — that is what distinguishes them);
+- `rows_total` and `rows_excluded` — the denominator and what was dropped from it. A row
+  that errored before criteria ran (a timeout, say) is **excluded** rather than scored, so
+  metrics are computed over `rows_total - rows_excluded`;
+- `metrics` — a **flat** name → float map. Classification-style criteria emit
+  `accuracy`, `macro_f1`, and per-label `precision.<label>` / `recall.<label>` /
+  `f1.<label>` (for `skill_triggered` the labels are `yes` / `no`). It also carries
+  `completion_rate` — the surviving fraction of the denominator above — which is an
+  ordinary metric, so `suite_thresholds: {completion_rate: 1.0}` gates a run whose sample
+  eroded;
+- `details` — `labels`, `per_label`, `confusion`, `total_pairs`;
+- `threshold_checks` + `passed`, from the criterion's `suite_thresholds`.
+
+Alongside the aggregates, `failed_samples[]` lists failed/errored rows **by `row_id`** with
+their failure reasons, capped at a fixed limit. It is the only place in `suite.json` that
+carries row identity — `metrics` and `details` are counts only — so a consumer that needs
+to know *which* rows failed reads `failed_samples`, then falls back to the per-row
+`<variant_id>/<suite_id>/<row_id>/<NN>/task.json` for anything past the cap.
+
+**Read `metrics`; never recompute a metric from `details.confusion`.** The criterion layer
+owns that arithmetic, including its division-by-zero convention, and a consumer that
+re-derives F1 will disagree with the gate the run already applied.
+
+**Rollups pool replicates.** The grouping key is `(variant_id, suite_id)` — the replicate
+index is *not* part of it. So `--repeats N` over an M-row suite writes **one** `suite.json`
+per variant, with `rows_total: N × M` and a single pooled confusion matrix. There is no
+per-replicate metric in that file. A consumer that needs replicate-to-replicate spread must
+invoke the run N times and read N run directories; `--repeats` cannot serve that purpose.
+(Contrast `experiment.md`'s `## Paired Comparison` block, which averages replicates per row
+before pairing — there `--repeats` is exactly the right tool.)
+
 **Scope-marker files** (used to detect what a given path represents):
 
 - `run.json` at the run root → **run scope**. If `experiment.json` (+ `experiment.md`) is also present → multi-variant experiment.

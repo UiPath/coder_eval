@@ -35,6 +35,12 @@ dependencies = [
     "rich>=14.3.3",
     "python-dotenv>=1.2.2",
     "anthropic>=0.86.0",
+    # Imported directly by evaluation/judge_bedrock.py. Declared explicitly rather than
+    # leaned on transitively: it arrived via `anthropic` until 1.0.0 moved to `httpx2`,
+    # at which point a FRESH resolve (what `uv tool install` / `pip install coder-eval`
+    # does — a wheel carries no lockfile) dropped it, `criteria/llm_judge.py` failed to
+    # import, and `llm_judge` silently vanished from the registry. `uv.lock` hid it.
+    "httpx>=0.28.1",
     "claude-agent-sdk>=0.2.124",
     "anyio>=4.13.0",
     "radon>=6.0.1",

@@ -83,6 +83,7 @@ dataset:
   sample_per_stratum: 5                # optional: keep up to N rows per stratum
   stratify_field: "expected_skill"     # which row field defines the stratum
   sample_seed: 1234                    # optional: pin the stratified draw
+  split_field: "split"                 # which row field names the row's split (CLI --split)
 ```
 
 | Field | Default | Description |
@@ -93,6 +94,7 @@ dataset:
 | `sample_per_stratum` | `null` | Stratified random sample: keep up to N rows per stratum. Overridden by CLI `--sample`. |
 | `stratify_field` | `"expected_skill"` | Row field whose value defines the stratum for `sample_per_stratum`. |
 | `sample_seed` | `null` | Seed for the stratified draw. Unset means the sample is **re-drawn every run**; set an integer to pin it. CLI `--sample` is separately fixed-seed and always reproducible. |
+| `split_field` | `"split"` | Row field naming the row's split (e.g. `tune` / `holdout`). CLI `--split <name>` keeps only rows whose value here matches, **before** any sampling. A task whose rows never set this field is unaffected by `--split`. Splits are open strings. |
 
 Full guide — row sources, substitution rules, sampling precedence, suite-level scoring, and worked
 examples: **[Bring Your Own Dataset](DATASETS.md)**.

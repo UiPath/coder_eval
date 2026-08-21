@@ -131,10 +131,12 @@ reaches for one at the right moment.
 
 **Export the skill location first** — the evaluated agent runs in a fresh sandbox
 holding none of your files, so it is offered no skills unless the task says where
-they live. Point at the directory *containing* the skill's own directory:
+they live. Point at a **plugin root** — a directory holding a `skills/` subdirectory, so the
+skill sits at `<path>/skills/<name>/SKILL.md`. For `.claude/skills/pdf-forms/SKILL.md` that
+root is `.claude`, **not** `.claude/skills`:
 
 ```bash
-export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
+export SKILL_SOURCE_PATH="$(pwd)/.claude"
 ```
 
 ```
@@ -158,7 +160,7 @@ covers telling them apart with `/doctor` and `/context`.
 | No `/coder-eval:` commands after installing | Check `/plugin`; re-run the install |
 | A skill offers to install the CLI, or Bash reports `command not found` | The CLI isn't installed or isn't on `PATH` — accept the offer, or install it yourself |
 | `coder-eval run` matches nothing | Wrong directory — use the path `init` reported in step 2 |
-| Every positive row in step 5 scores 0 | `SKILL_SOURCE_PATH` is unset, so the skill was never offered |
+| Every positive row in step 5 scores 0 | `SKILL_SOURCE_PATH` is unset **or one level too deep** — it must name a plugin root holding `skills/`, e.g. `.claude`, not `.claude/skills`. Either way the skill was never offered |
 
 To update after the marketplace moves, `/plugin marketplace update coder-eval`; to
 remove it, `/plugin uninstall`.

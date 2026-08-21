@@ -308,6 +308,18 @@ class Dataset(BaseModel):
         default="expected_skill",
         description="Row field whose value defines the stratum for 'sample_per_stratum' (default: 'expected_skill').",
     )
+    split_field: str = Field(
+        default="split",
+        description=(
+            "Row field naming the row's split (e.g. 'tune' / 'holdout' / 'holdback'). "
+            "CLI --split <name> keeps only rows whose value for this field matches, and "
+            "is applied BEFORE any sampling so a sampled split still has a predictable "
+            "size. A row is unlabelled when this field is absent, null, or ''; a task "
+            "whose rows are all unlabelled is unaffected by --split, while partial "
+            "labelling keeps only the matching rows and drops the unlabelled ones. "
+            "Splits are open strings; nothing here constrains the set of names."
+        ),
+    )
     sample_seed: int | None = Field(
         default=None,
         description=(

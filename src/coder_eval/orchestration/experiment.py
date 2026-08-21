@@ -628,6 +628,7 @@ def resolve_all_tasks(
                 task_file.parent,
                 max_rows=config.max_rows,
                 sample_per_stratum=config.sample_per_stratum,
+                split=config.split,
             )
         # Narrow set: real load failures only. We deliberately don't catch
         # AttributeError / TypeError / ImportError — those signal a regression
