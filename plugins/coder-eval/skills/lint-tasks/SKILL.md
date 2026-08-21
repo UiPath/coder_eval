@@ -65,12 +65,20 @@ a framework fixture.
 The rubric is the single declaration of those checks. Do not restate or count them here; read
 it at runtime, so a rubric that gains a section or a check reaches this skill with no edit.
 
-Then add the **one** axis that exists only at review time, because it needs neighbours:
+Then add the **two** axes that exist only at review time:
 
-- **Near-duplicate.** Name the most similar sibling and say what overlaps. Carve-out:
-  **scaffold reuse is not duplication.** Tasks sharing a YAML skeleton while exercising
-  materially distinct operations are good template reuse — that is what a template is for.
-  Raise this only when the *operation under test* overlaps, not when the boilerplate does.
+- **Near-duplicate.** Needs neighbours. Name the most similar sibling and say what overlaps.
+  Carve-out: **scaffold reuse is not duplication.** Tasks sharing a YAML skeleton while
+  exercising materially distinct operations are good template reuse — that is what a template
+  is for. Raise this only when the *operation under test* overlaps, not when the boilerplate
+  does.
+- **A partly labelled split dataset.** Needs the row file, which the rubric does not read. If a
+  dataset's `split_field` (default `split`) is set on *some* rows and absent, `null` or `""` on
+  others, flag it: `--split` keeps the matching rows and **silently drops the rest**, so the run
+  succeeds, the report renders, and every metric is computed over a smaller suite than the file
+  suggests. Label every row or none — and say which, since "or none" is a legitimate answer for
+  a suite that is never split. Two states that look similar are *fine* and must not be flagged:
+  every row labelled, and no row labelled.
 
 ### Do not flag an activation suite
 

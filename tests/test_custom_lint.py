@@ -1299,7 +1299,17 @@ SKILL_DISABLE_MODEL_INVOCATION = {
 
 # The surfaces that must name every shipped skill, so a new one cannot ship
 # undocumented. Adding a surface is one edit here.
-SKILL_DOC_SURFACES = ("plugins/coder-eval/README.md", "docs/PLUGIN.md", "README.md", "CLAUDE.md")
+SKILL_DOC_SURFACES = (
+    "plugins/coder-eval/README.md",
+    "docs/PLUGIN.md",
+    "README.md",
+    "CLAUDE.md",
+    # The tutorial enumerates the commands a reader will see after installing, so a skill
+    # missing here is a skill they are told does not exist. Added after it shipped a stale
+    # "six commands" list omitting `optimize-skill`: the count sensor below already existed,
+    # but this file was not one of the surfaces it read.
+    "docs/tutorials/07-plugin-in-claude-code.md",
+)
 
 # Claude Code loads a listing of every skill's name and description into context.
 # The listing's character budget scales at ~1% of the model's context window and is
@@ -1370,7 +1380,10 @@ def _wrong_skill_count_offenders(surfaces: dict[str, Path], *, count: int, auto:
         offenders += [
             f"{name}: '{word} {noun}'"
             for word in wrong_total
-            for noun in ("skills", "slash commands")
+            # "commands" is how the tutorial phrases it, and its absence here is exactly
+            # why a stale "six commands" survived: the count was guarded in three
+            # phrasings, and the surface used a fourth.
+            for noun in ("skills", "slash commands", "commands")
             if f"{word} {noun}" in text
         ]
         offenders += [f"{name}: 'The other {word}'" for word in wrong_subset if f"The other {word}" in text]
@@ -1648,11 +1661,39 @@ class TestPluginArtifacts:
                     f"{criterion.type!r} (available: {sorted(available)})"
                 )
 
+    def test_activation_template_caps_turns_and_isolates(self):
+        # The template preaches both of these and used to ship neither, so a user who copied
+        # it got the opposite of the advice they were reading.
+        #
+        # The cap is about SIGNAL, not only cost: activation is decided in the first
+        # assistant turn, and an uncapped row spends turns exploring a sandbox that
+        # deliberately holds no eval files. A row that times out is EXCLUDED from the
+        # confusion matrix rather than scored, so it never shows up as a bad number — only
+        # as a denominator that quietly shrank.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "activation.yaml")
+        limits = task.run_limits
+        assert limits is not None and limits.max_turns == 2, (
+            "the activation template must cap max_turns at 2, matching the worked example in "
+            "tasks/skills/lint-tasks-activation.yaml — activation is decided in the first "
+            "assistant turn, and an uncapped row erodes the confusion-matrix denominator"
+        )
+        assert limits.turn_timeout == 120 and limits.task_timeout == 300, (
+            "the activation template's timeouts must match the worked example key for key"
+        )
+        assert task.agent is not None and task.agent.setting_sources == [], (
+            "the activation template must set `agent.setting_sources: []`. This suite measures "
+            "the skill LISTING; inheriting the host project's CLAUDE.md injects a large project "
+            "guide into every call — expensive, and a confound on the thing being measured"
+        )
+
     def test_outcome_template_caps_cost(self):
-        # An outcome row is a FULL task run, so the template needs a per-row brake the
-        # activation template does not. An absolute floor, deliberately not a comparison
-        # against activation.yaml: that file ships no `run_limits:` block at all, so there
-        # is nothing to compare against.
+        # An outcome row is a FULL task run, so the template needs a per-row COST brake the
+        # activation template does not. Both templates now carry `run_limits:`, but they cap
+        # for opposite reasons — activation for signal (see the test above), outcome for
+        # spend — so this stays an ABSOLUTE floor rather than a comparison against the other
+        # file, which would encode a relationship that does not exist.
         from coder_eval.orchestration.task_loader import load_task
 
         task, _ = load_task(self.TEMPLATES / "outcome.yaml")
@@ -1728,6 +1769,30 @@ class TestPluginArtifacts:
             "the checked-in outcome sample scores nothing on disk — an outcome suite that "
             "asserts only engagement is an activation suite with a bigger bill"
         )
+
+        # Every row must supply every ${row.*} field the criteria reference. Criteria are
+        # copied to EVERY row, so a field only some rows carry raises KeyError mid-expansion
+        # — a failure that costs nothing here and a whole stage's setup at run time. This is
+        # also what makes a second `includes` slot safe to add: it is only optional-looking.
+        import json
+        import re
+
+        referenced = set(
+            re.findall(
+                r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}",
+                (self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml").read_text(),
+            )
+        )
+        rows = [
+            json.loads(line)
+            for line in (sample.parent / "ci-outcome-rows.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        for row in rows:
+            missing = referenced - set(row)
+            assert not missing, (
+                f"row {row.get('id')!r} is missing {sorted(missing)}, referenced as ${{row.*}} in the suite"
+            )
 
     def test_checked_in_outcome_fixture_lets_the_skill_act(self):
         # The fixture is load-bearing, and every way it can be wrong is SILENT at full cost.
@@ -1819,7 +1884,7 @@ class TestPluginArtifacts:
             "ci": PLUGIN_ROOT / "skills" / "ci" / "SKILL.md",
             "docs/PLUGIN.md": self.REPO_ROOT / "docs" / "PLUGIN.md",
             "tutorial 07": self.REPO_ROOT / "docs" / "tutorials" / "07-plugin-in-claude-code.md",
-            "tutorial 08": self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md",
+            "tutorial 08": self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill-description.md",
             "tutorial 09": self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md",
         }
         for name, path in surfaces.items():
@@ -2104,7 +2169,17 @@ class TestPluginArtifacts:
         # every one of these instructions is something a well-meaning edit would "simplify"
         # away, leaving a skill that still reads plausibly and measures nothing. Same
         # deletion-sensor shape as the lint-tasks read-only guard above.
-        text = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        # TWO surfaces, and which one a token belongs to is the reviewable part of the
+        # split. `SKILL.md` holds the PROCEDURE — which suite, which files, which commands,
+        # in what order — so a procedure token asserted anywhere else would mean the step
+        # that needs it no longer states it. `reference/optimize-method.md` holds the
+        # track-invariant METHOD — the cost table, what each stage bounds, why the two gates
+        # differ, the sign rule — which is identical on both tracks and is what has to be
+        # right for a verdict to mean anything. Tokens that may legitimately live in either
+        # are asserted against the concatenation.
+        skill = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
+        method = _normalized(PLUGIN_ROOT / "reference" / "optimize-method.md")
+        text = skill + " " + method
 
         # The single most important invariant. Suite rollups pool replicates, so --repeats
         # writes ONE pooled suite.json and the per-replicate F1 the Stage B gate reads would
@@ -2255,6 +2330,35 @@ class TestPluginArtifacts:
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
 
+        # The PROCEDURE half, asserted against `SKILL.md` alone. Moving any of these into
+        # the method file would leave the step that must act on it silently pointing
+        # elsewhere — which is the failure mode the extraction itself could introduce.
+        for token, why in (
+            ("route to the execution track", "Step 2's routing decision"),
+            ("Never run both tracks in one round", "Step 3's one-variable-per-round rule"),
+            ("ONE dataset-backed task", "Step 4's hard constraint on the suite's shape"),
+            ("Invoke the skill from the prompt", "Step 4's activation-held-constant rule"),
+            ("Use the slash form", "Step 4's only way to reach a disable-model-invocation skill"),
+            ("Hand over the template itself", "Step 4's handover to /coder-eval:task"),
+            ("copied unchanged", "Step 8's snapshot must carry the sibling skills"),
+            ("/coder-eval:check-skill", "the sibling this skill hands control back to"),
+            ("round<N>-triage.yaml", "Step 9's per-stage experiment file"),
+            ("round<N>-gate.yaml", "Step 9's per-stage experiment file"),
+            ("round<N>-confirm.yaml", "Step 9's per-stage experiment file"),
+        ):
+            assert token in skill, (
+                f"optimize-skill's SKILL.md lost {token!r} — {why}. This is PROCEDURE: it must stay "
+                f"in the skill, not move to reference/optimize-method.md"
+            )
+
+        # An extracted reference nothing points at is a deleted reference. Mirrors the
+        # reference/task-rubric.md pointer sensor.
+        assert "${CLAUDE_PLUGIN_ROOT}/reference/optimize-method.md" in skill, (
+            "optimize-skill's SKILL.md no longer points at reference/optimize-method.md, so the "
+            "cost table, the gate rules and the sign rule are unreachable from the procedure "
+            "that has to apply them"
+        )
+
         # The paired-diff sign rule has to appear in BOTH gates that read the block —
         # Stage B (execution) and Stage C — because each is a separate decision point and a
         # reader lands on one or the other. Counted rather than `in text`: a presence check
@@ -2263,10 +2367,15 @@ class TestPluginArtifacts:
         # variant_ids[0]/[1]), so with `incumbent` declared first a candidate win is NEGATIVE
         # — and a reversed reading promotes the arm that lost, with every later number in the
         # ledger corroborating it.
+        # Counted against the METHOD file, because both decision points moved there together
+        # (Stage B and Stage C are adjacent sections of it). The reason for TWO is unchanged
+        # by the move: each stage is a separate decision point a reader lands on
+        # independently, so a cross-reference from one to the other is not good enough.
         for phrase, expected in (("variant declaration order", 2), ("a candidate win reads negative", 2)):
-            assert text.count(phrase) >= expected, (
-                f"optimize-skill states {phrase!r} {text.count(phrase)} time(s); both the execution "
-                f"Stage B gate and Stage C must carry the paired-diff sign rule, so it needs {expected}"
+            assert method.count(phrase) >= expected, (
+                f"reference/optimize-method.md states {phrase!r} {method.count(phrase)} time(s); both "
+                f"the execution Stage B gate and Stage C must carry the paired-diff sign rule, so it "
+                f"needs {expected}"
             )
 
         # The cost table's symbols must match the prose that defines them. It shipped
@@ -2331,6 +2440,95 @@ class TestPluginArtifacts:
             if name not in (self.REPO_ROOT / surface).read_text(encoding="utf-8")
         ]
         assert not missing, f"{name} is not documented in {missing} — a shipped skill nobody can discover"
+
+    def test_tutorial_index_lists_every_tutorial(self):
+        # `docs/tutorials/README.md` is the index a reader lands on, and it is hand-written
+        # while the set of tutorials is a directory listing. mkdocs' nav is guarded by CE028,
+        # but nothing read this table — so a tutorial added without a row here is invisible
+        # to anyone who does not already know its filename.
+        tut_dir = self.REPO_ROOT / "docs" / "tutorials"
+        index = (tut_dir / "README.md").read_text(encoding="utf-8")
+        pages = sorted(p.name for p in tut_dir.glob("*.md") if p.name != "README.md")
+        missing = [name for name in pages if f"({name})" not in index]
+        assert not missing, (
+            f"docs/tutorials/README.md's table does not link {missing}. A tutorial nobody links "
+            f"is a tutorial nobody finds."
+        )
+
+    def test_tutorial_09_excerpts_match_the_committed_suite(self):
+        # Tutorial 09 quotes `tasks/skills/ci-outcome.yaml` and its rows file as excerpts.
+        # An excerpt is a derived surface: when the suite gained a second `includes` slot
+        # and an `expected_snippet_2` field, the page kept showing the old shape and a
+        # reader copying it would build a suite that raises at expansion. Compared against
+        # the real files rather than pinned, so the suite stays free to change.
+        import json
+        import re
+
+        page = (self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md").read_text(encoding="utf-8")
+        rows = [
+            json.loads(ln)
+            for ln in (self.REPO_ROOT / "tasks" / "skills" / "ci-outcome-rows.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if ln.strip()
+        ]
+        real_fields = set(rows[0])
+
+        # 1. The illustrative JSONL row must carry exactly the fields a real row does.
+        shown = [json.loads(m) for m in re.findall(r'^\{"id".*\}$', page, re.M)]
+        assert shown, "tutorial 09 no longer shows a sample dataset row; this sensor reads it"
+        for row in shown:
+            assert set(row) == real_fields, (
+                f"tutorial 09's sample row has fields {sorted(set(row))}, but a committed row has "
+                f"{sorted(real_fields)}. A reader copies that shape — a missing ${{row.*}} field "
+                f"raises at expansion."
+            )
+
+        # 2. Every ${row.*} the page's YAML excerpt references must exist on a real row.
+        referenced = set(re.findall(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}", page))
+        missing = referenced - real_fields
+        assert not missing, f"tutorial 09 references ${{row.{sorted(missing)}}}, which no committed row carries"
+
+        # 3. The excerpt must not UNDER-state the gated criterion: if the suite grades two
+        #    snippets, showing one teaches a shape that scores differently from the file.
+        suite = (self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml").read_text(encoding="utf-8")
+        for field in ("expected_snippet", "expected_snippet_2"):
+            if f"${{row.{field}}}" in suite:
+                assert f"${{row.{field}}}" in page, (
+                    f"the committed suite grades ${{row.{field}}} but tutorial 09's excerpt omits it"
+                )
+
+    def test_docs_state_the_right_criterion_type_count(self):
+        # Same drift class as the skill count below, one layer down: a hand-maintained
+        # number describing a set the registry derives. It had already rotted — three sites
+        # said 14 against a registry of 15 — and nothing noticed, because the only guarded
+        # surface was CLAUDE.md's heading, which happened to be right.
+        #
+        # Derived from the registry, never from a literal here: adding a criterion must not
+        # require editing this test, only the prose it points at.
+        import re
+
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+
+        init_criteria(validate=False)
+        count = len(CriterionRegistry.list_types())
+        # \b on the number, or "5 criterion types" matches inside a correct "15 criterion
+        # types" and the sensor reports a failure that is not there.
+        patterns = (r"\b(\d+) criterion types", r"\b(\d+) success criteria types", r"Success Criteria \((\d+) types\)")
+        offenders = []
+        for rel in (
+            "docs/TASK_DEFINITION_GUIDE.md",
+            "CLAUDE.md",
+            "README.md",
+            *sorted(str(p.relative_to(self.REPO_ROOT)) for p in (self.REPO_ROOT / "docs" / "tutorials").glob("*.md")),
+        ):
+            text = _normalized(self.REPO_ROOT / rel)
+            for pat in patterns:
+                offenders += [f"{rel}: {m.group(0)!r}" for m in re.finditer(pat, text) if int(m.group(1)) != count]
+        assert not offenders, (
+            f"the registry has {count} criterion types, but these surfaces state another count: "
+            f"{offenders}. The count is derived from `CriterionRegistry.list_types()` — update the prose."
+        )
 
     def test_skill_docs_surfaces_state_the_right_count(self):
         # The companion to the test above, which only checks that each NAME appears. These
@@ -2430,13 +2628,62 @@ class TestPluginArtifacts:
                 "bare `command not found` mid-task."
             )
 
+    def test_tutorial_08_row_table_matches_the_committed_jsonl(self):
+        # The page's Step-1 table claimed 21 rows against a file holding 28, with the
+        # `analyze` row count off by seven — added in Part 2 and never back-propagated. A
+        # reader sizing their own suite from that table sizes it from a number that has not
+        # been true for two revisions, and nothing in the build noticed.
+        #
+        # Derived, not duplicated: the JSONL is the source and the table is the surface, so
+        # this compares the two rather than pinning either.
+        import collections
+        import json
+        import re
+
+        page = (self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill-description.md").read_text(
+            encoding="utf-8"
+        )
+        rows_file = self.REPO_ROOT / "tasks" / "skills" / "lint-tasks-activation-rows.jsonl"
+        rows = [json.loads(ln) for ln in rows_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+        actual = collections.Counter(r["expected_skill"] for r in rows)
+        by_split = collections.Counter((r["expected_skill"], r.get("split")) for r in rows)
+
+        # | Kind | `expected_skill` | Total | train | test |
+        table = re.findall(
+            r"^\|\s*(?:Positive|Distractor|Sibling-owned)\s*\|\s*`([^`]*)`\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|",
+            page,
+            re.M,
+        )
+        assert table, "tutorial 08's Step-1 row table is gone or reshaped; this sensor reads it by column"
+
+        stated_total = 0
+        for raw_skill, total, train, test in table:
+            skill = "" if raw_skill == '""' else raw_skill
+            stated_total += int(total)
+            assert (int(total), int(train), int(test)) == (
+                actual[skill],
+                by_split[(skill, "train")],
+                by_split[(skill, "test")],
+            ), (
+                f"tutorial 08's table says {skill!r} has {total} rows ({train} train / {test} test); "
+                f"{rows_file.name} has {actual[skill]} ({by_split[(skill, 'train')]}/{by_split[(skill, 'test')]}). "
+                "Recompute the table from the file — a reader sizes their own suite from it."
+            )
+        assert stated_total == len(rows), (
+            f"tutorial 08's table rows sum to {stated_total}; the committed JSONL has {len(rows)} rows"
+        )
+        assert f"**{len(rows)} rows**" in page, (
+            f"tutorial 08 no longer states the committed row count as **{len(rows)} rows** in prose"
+        )
+
     def test_tutorial_08_shows_stage_b_as_three_separate_invocations(self):
         # The single most dangerous edit in this whole area. Suite rollups are keyed on
         # (variant, suite), so `--repeats 3` pools all three replicates into ONE suite.json
         # with one confusion matrix — the per-replicate F1 the activation gate compares
         # would not exist, and the gate would silently compare a number against itself.
         # Now that the page shows real command lines, "simplifying" them is a one-line edit.
-        page = self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md"
+        page = self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill-description.md"
         lines = page.read_text(encoding="utf-8").splitlines()
 
         # Matched on heading TEXT at any level: pinning `###` broke the first time the page
@@ -4208,9 +4455,9 @@ class TestCE060SplitLabelsAllOrNothing:
     @staticmethod
     def _split_labels(task, task_file_dir: Path) -> list[str | None]:
         """Each row's split label, using the runtime's own definition of "labelled"."""
-        from coder_eval.orchestration.task_loader import _load_dataset_rows, row_split_label
+        from coder_eval.orchestration.task_loader import load_dataset_rows, row_split_label
 
-        rows = _load_dataset_rows(task.dataset, task_file_dir)
+        rows = load_dataset_rows(task.dataset, task_file_dir)
         # The CONFIGURED field name, never the literal "split" — a dataset may name it
         # anything, and keying on the default would silently pass every such suite.
         return [row_split_label(row, task.dataset.split_field) for row in rows]
@@ -4243,52 +4490,36 @@ class TestCE060SplitLabelsAllOrNothing:
             f"nothing in the run reporting it. Label the remaining rows (do not exempt)."
         )
 
-    def _task_from_rows(self, tmp_path: Path, rows: list[dict], split_field: str = "split"):
-        """A minimal dataset-backed task over inline rows."""
-        from coder_eval.models import Dataset, FileExistsCriterion, TaskDefinition
-
-        return TaskDefinition(
-            task_id="t",
-            description="split-label fixture",
-            initial_prompt="${row.id}",
-            success_criteria=[FileExistsCriterion(description="d", path="out.txt")],
-            dataset=Dataset(rows=rows, split_field=split_field),
-        )
-
     def test_detects_a_partly_labelled_dataset(self, tmp_path: Path):
-        task = self._task_from_rows(
-            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}, {"id": "c"}]
-        )
+        task = _dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": "test"}, {"id": "c"}])
         assert self._offenders(task, tmp_path) == "2 of 3 rows carry a split label"
 
     def test_fully_labelled_dataset_is_not_flagged(self, tmp_path: Path):
-        task = self._task_from_rows(tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}])
+        task = _dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": "test"}])
         assert self._offenders(task, tmp_path) is None
 
     def test_fully_unlabelled_dataset_is_not_flagged(self, tmp_path: Path):
         # Legal and safe: `--split` then does not apply to this task at all.
-        task = self._task_from_rows(tmp_path, [{"id": "a"}, {"id": "b"}])
+        task = _dataset_task([{"id": "a"}, {"id": "b"}])
         assert self._offenders(task, tmp_path) is None
 
     def test_zero_counts_as_a_label(self, tmp_path: Path):
         # A falsy 0 is a real label, not a missing value — the split filter compares via
         # str(), so `--split 0` selects it. Treating it as unlabelled would make a fully
         # labelled dataset read as partly labelled.
-        task = self._task_from_rows(tmp_path, [{"id": "a", "split": 0}, {"id": "b", "split": 1}])
+        task = _dataset_task([{"id": "a", "split": 0}, {"id": "b", "split": 1}])
         assert self._offenders(task, tmp_path) is None
 
     def test_explicit_null_and_empty_string_count_as_unlabelled(self, tmp_path: Path):
         # Pins the (None, "") convention. A half-labelled JSONL carries explicit nulls, and
         # an empty string is the same "no value here" state.
-        task = self._task_from_rows(
-            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": None}, {"id": "c", "split": ""}]
-        )
+        task = _dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": None}, {"id": "c", "split": ""}])
         assert self._offenders(task, tmp_path) == "1 of 3 rows carry a split label"
 
     def test_rule_keys_on_the_configured_split_field(self, tmp_path: Path):
         # Not the literal "split". A dataset naming its field anything else would otherwise
         # read as fully unlabelled and pass no matter how it was labelled.
-        task = self._task_from_rows(tmp_path, [{"id": "a", "fold": "train"}, {"id": "b"}], split_field="fold")
+        task = _dataset_task([{"id": "a", "fold": "train"}, {"id": "b"}], split_field="fold")
         assert self._offenders(task, tmp_path) == "1 of 2 rows carry a split label"
 
     def test_expand_dataset_keeps_exactly_the_rows_the_convention_names(self, tmp_path: Path):
@@ -4308,10 +4539,23 @@ class TestCE060SplitLabelsAllOrNothing:
             {"id": "d", "split": None},
             {"id": "e", "split": ""},
         ]
-        task = self._task_from_rows(tmp_path, rows)
+        task = _dataset_task(rows)
         for split, expected in (("train", {"a"}), ("test", {"b"}), ("0", {"c"})):
             kept = {t.task_id.split("/")[-1] for t in expand_dataset(task, tmp_path, split=split)}
             assert kept == expected, f"split={split!r}: expand_dataset kept {kept}, expected {expected}"
+
+
+# Fields naming WHERE an artifact goes, not WHAT it must contain. A prompt may say
+# "write it to .github/workflows/evals.yml" — that removes filename nondeterminism from
+# the measurement without revealing the graded behaviour. `skill_name` is a locator for
+# the same reason: it names WHICH skill must engage, while the graded thing is the
+# engagement EVENT, which no prompt can supply. The outcome pattern this plugin
+# prescribes puts the skill name in every prompt by design.
+CE061_LOCATOR_FIELDS = ("path", "agent_file", "file_path", "command", "skill_name")
+
+# Shorter values collide by chance ("ci", "0.7"); a leak worth flagging is a substantive
+# string the author put in both places.
+CE061_MIN_LEAK_CHARS = 12
 
 
 @pytest.mark.lint
@@ -4329,23 +4573,28 @@ class TestCE061RowPromptsDoNotLeakWhatTheyGrade:
     with a recursive wildcard" while grading an explicit glob). That form needs a reader, and
     is what `lint-tasks` and code review are for. Guarding the blunt case is still worth it:
     it is the easy mistake, and it is silent.
+
+    One deliberate collision, documented rather than exempted: a literal (non-regex)
+    `command_executed.command_pattern` of >= CE061_MIN_LEAK_CHARS echoed verbatim in a
+    prompt IS flagged. That is correct — a pattern asserting *what ran* is graded
+    behaviour, not a locator. The `command` exemption covers `run_command.command`, the
+    command the CHECKER runs, which is a different field on a different criterion. No
+    in-repo task has the collision, so exempting `command_pattern` would be an unused
+    exemption weakening a real check.
     """
 
-    @pytest.mark.parametrize(
-        "path",
-        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
-        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
-    )
-    def test_repo_task_prompts_do_not_contain_the_graded_string(self, path: Path):
+    @classmethod
+    def _offenders(cls, task, task_file_dir: Path) -> list[str]:
+        """Every verbatim leak in the task's expanded rows.
 
-        from coder_eval.orchestration.task_loader import expand_dataset, load_task
-
-        task, _ = load_task(path)
-        if task.dataset is None:
-            pytest.skip("no dataset: block — nothing is row-substituted")
+        The rule's whole detection body lives here so the fixtures below and the repo scan
+        exercise the SAME code. Split, the repo scan would keep passing identically whether
+        or not the rule could still detect anything.
+        """
+        from coder_eval.orchestration.task_loader import expand_dataset
 
         offenders: list[str] = []
-        for row in expand_dataset(task, path.parent):
+        for row in expand_dataset(task, task_file_dir):
             prompt = (row.initial_prompt or "").lower()
             if not prompt:
                 continue
@@ -4354,24 +4603,154 @@ class TestCE061RowPromptsDoNotLeakWhatTheyGrade:
                 # it is a label, routinely echoes the scenario, and grades nothing.
                 dumped = criterion.model_dump()
                 dumped.pop("description", None)
-                # Location fields are exempt, and the distinction is the whole rule: a
-                # prompt MAY say WHERE to write ("call it .github/workflows/evals.yml"),
-                # which removes the agent's filename choice from the measurement without
-                # revealing anything graded. It may not say WHAT the artifact must contain.
-                for locator in ("path", "agent_file", "file_path", "command"):
+                for locator in CE061_LOCATOR_FIELDS:
                     dumped.pop(locator, None)
                 for value in _string_leaves(dumped):
-                    # Short values collide by chance ("ci", "0.7"); a leak worth flagging is
-                    # a substantive string the author put in both places.
-                    if len(value) >= 12 and value.lower() in prompt:
+                    if len(value) >= CE061_MIN_LEAK_CHARS and value.lower() in prompt:
                         offenders.append(f"{row.task_id}: prompt contains {value!r} ({criterion.type})")
+        return offenders
 
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_task_prompts_do_not_contain_the_graded_string(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        if task.dataset is None:
+            pytest.skip("no dataset: block — nothing is row-substituted")
+
+        offenders = self._offenders(task, path.parent)
         assert not offenders, (
             f"{path}: the prompt hands the agent the exact string a criterion grades it on, so "
             f"the row scores well whether or not the behaviour under test happened — and an "
             f"A/B arm that DELETED that behaviour would still pass. Describe the situation and "
             f"let the skill or the agent supply the method.\n\n" + "\n".join(f"  {o}" for o in offenders)
         )
+
+    def test_detects_a_leaking_row(self, tmp_path: Path):
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="Write a workflow that sets minimum-task-score to 0.8",
+            criteria=[FileCheckCriterion(description="d", path="out.yml", includes=["minimum-task-score"])],
+        )
+        offenders = self._offenders(task, tmp_path)
+        assert len(offenders) == 1 and "minimum-task-score" in offenders[0]
+
+    def test_locator_fields_are_exempt(self, tmp_path: Path):
+        # Naming WHERE the artifact goes removes filename nondeterminism from the
+        # measurement; it reveals nothing about what the artifact must contain.
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="Write it to .github/workflows/evals.yml",
+            criteria=[FileCheckCriterion(description="d", path=".github/workflows/evals.yml")],
+        )
+        assert self._offenders(task, tmp_path) == []
+
+    def test_skill_name_is_exempt(self, tmp_path: Path):
+        # THE regression this exemption exists for. `skill_name` names WHICH skill must
+        # engage; the graded thing is the engagement EVENT, which no prompt can supply —
+        # and the outcome-suite pattern this plugin prescribes puts the skill name in every
+        # prompt by design. Without the exemption, the first repo-committed outcome suite
+        # for a skill whose name reaches the length floor fails CE061 on its own engagement
+        # criterion.
+        from coder_eval.models import SkillTriggeredCriterion
+
+        assert len("optimize-skill") >= CE061_MIN_LEAK_CHARS, "fixture no longer exercises the floor"
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="Use the optimize-skill skill to improve this description",
+            criteria=[SkillTriggeredCriterion(description="d", skill_name="optimize-skill", expected_skill="")],
+        )
+        assert self._offenders(task, tmp_path) == []
+
+    @pytest.mark.parametrize(("delta", "flagged"), [(-1, False), (0, True)])
+    def test_the_length_floor_is_inclusive(self, tmp_path: Path, delta: int, flagged: bool):
+        # Both sides of the `>=`, which is the part a refactor actually breaks. The strings
+        # are DERIVED from CE061_MIN_LEAK_CHARS rather than spelled out: a hardcoded 11 and
+        # 12 would be a second declaration of the same number, which is the drift this
+        # fixture exists to prevent. (The literal VALUE of the floor is not pinned here on
+        # purpose — it is a tuning knob; what must not move silently is the comparison.)
+        from coder_eval.models import FileCheckCriterion
+
+        value = "x" * (CE061_MIN_LEAK_CHARS + delta)
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt=f"The answer is {value}",
+            criteria=[FileCheckCriterion(description="d", path="out.yml", includes=[value])],
+        )
+        assert bool(self._offenders(task, tmp_path)) is flagged
+
+    def test_description_is_not_scanned(self, tmp_path: Path):
+        # `description` is a label. It routinely echoes the scenario and grades nothing, so
+        # scanning it would flag every well-named criterion in the repo.
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="emit the deployment manifest",
+            criteria=[FileCheckCriterion(description="emit the deployment manifest", path="out.yml")],
+        )
+        assert self._offenders(task, tmp_path) == []
+
+    def test_nested_string_leaves_are_scanned(self, tmp_path: Path):
+        # Pins `_string_leaves`' recursion: a leak in the SECOND entry of a list must be
+        # caught, or a rule that only looked at scalar fields would pass this repo's suites
+        # while missing every `includes:` leak — the commonest shape there is.
+        from coder_eval.models import FileCheckCriterion
+
+        task = _dataset_task(
+            [{"id": "a"}],
+            prompt="the file must mention permissions-boundary",
+            criteria=[
+                FileCheckCriterion(description="d", path="out.yml", includes=["harmless", "permissions-boundary"])
+            ],
+        )
+        offenders = self._offenders(task, tmp_path)
+        assert len(offenders) == 1 and "permissions-boundary" in offenders[0]
+
+    def test_ce061_exemption_list_matches_claude_md(self):
+        # CE061_LOCATOR_FIELDS is the single source; CLAUDE.md's CE061 sentence is derived.
+        # Both directions, because the list already drifted once: CLAUDE.md named three of
+        # the four fields the code exempted, and nothing noticed. The repo automates exactly
+        # this class elsewhere (CE028 for the docs indexes, CE033 for the plugin reference).
+        import re
+
+        text = _normalized(Path(__file__).parent.parent / "CLAUDE.md")
+        sentence = next((s for s in text.split(". ") if "Location fields" in s), None)
+        assert sentence is not None, "CLAUDE.md no longer states CE061's exemption list"
+        backticked = set(re.findall(r"`([a-z_]+)`", sentence))
+        assert set(CE061_LOCATOR_FIELDS) <= backticked, (
+            f"CLAUDE.md's CE061 sentence omits {sorted(set(CE061_LOCATOR_FIELDS) - backticked)}"
+        )
+        assert backticked <= set(CE061_LOCATOR_FIELDS), (
+            f"CLAUDE.md's CE061 sentence names {sorted(backticked - set(CE061_LOCATOR_FIELDS))} as exempt, "
+            f"which the rule does not exempt"
+        )
+
+
+def _dataset_task(rows: list[dict], *, prompt: str = "${row.id}", criteria=None, split_field: str = "split"):
+    """A minimal dataset-backed task over inline rows, for the CE060/CE061 fixtures.
+
+    One builder for both rules: CE060 needs varying rows, CE061 varying prompts AND
+    criteria, and a per-class copy would fork the moment either grew a parameter.
+    Inline ``rows`` deliberately — no JSONL file, so the fixtures never touch disk.
+    """
+    from coder_eval.models import Dataset, FileExistsCriterion, TaskDefinition
+
+    return TaskDefinition(
+        task_id="t",
+        description="dataset-rule fixture",
+        initial_prompt=prompt,
+        success_criteria=criteria or [FileExistsCriterion(description="d", path="out.txt")],
+        dataset=Dataset(rows=rows, split_field=split_field),
+    )
 
 
 def _string_leaves(node: object) -> list[str]:

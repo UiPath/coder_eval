@@ -311,3 +311,121 @@ class TestPlanCommandValidation:
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "Bad experiment" in printed
+
+
+def _make_dataset_task(
+    rows: list[dict],
+    *,
+    prompt: str = "Do ${row.id}",
+    split_field: str = "split",
+) -> TaskDefinition:
+    """A dataset-backed task over INLINE rows, so the fixtures never touch disk."""
+    from coder_eval.models import Dataset
+
+    return TaskDefinition(
+        task_id="dataset-task",
+        description="A dataset task",
+        initial_prompt=prompt,
+        sandbox={"driver": "tempdir"},
+        success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],
+        dataset=Dataset(rows=rows, split_field=split_field),
+    )
+
+
+class TestPlanCommandDatasetPreview:
+    """`plan` expands datasets, so the pre-spend surface reports what a run will do.
+
+    Without this, the only way to learn a suite's resolved row count — the number every
+    cost estimate and every A/B comparison depends on — was to pay for a run.
+    """
+
+    def _run(self, task, task_file: Path, **kwargs):
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        resolved = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved, {}, 1)),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            exit_code = 0
+            try:
+                plan_command(task_files=[task_file], **kwargs)
+            except typer.Exit as e:
+                exit_code = e.exit_code
+        return " ".join(str(call) for call in mock_console.print.call_args_list), exit_code
+
+    def test_plan_prints_dataset_row_counts(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": f"r{i}"} for i in range(4)])
+        printed, exit_code = self._run(task, task_file)
+        assert exit_code == 0
+        assert "4 rows" in printed and "4 selected" in printed
+
+    def test_plan_split_filters_the_previewed_rows(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task(
+            [
+                {"id": "a", "split": "train"},
+                {"id": "b", "split": "train"},
+                {"id": "c", "split": "test"},
+                {"id": "d", "split": "test"},
+            ]
+        )
+        printed, exit_code = self._run(task, task_file, split="test")
+        assert exit_code == 0
+        assert "4 rows" in printed and "2 selected" in printed and "--split test" in printed
+
+    def test_plan_reports_an_unmatched_split_as_an_error_and_exits_1(self, tmp_path: Path) -> None:
+        # The pre-spend surface this phase exists to provide: learn the selector is wrong
+        # for free, rather than by watching a run abort.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": "test"}])
+        printed, exit_code = self._run(task, task_file, split="typo")
+        assert exit_code == 1
+        assert "'test', 'train'" in printed
+
+    def test_plan_leaves_a_non_dataset_task_unannotated(self, tmp_path: Path) -> None:
+        # A "1 row" line on a task with no dataset: block would be noise, and would imply
+        # a concept the task does not have.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        printed, exit_code = self._run(_make_task(), task_file)
+        assert exit_code == 0
+        assert "Dataset:" not in printed
+
+    def test_plan_leaves_an_unlabelled_dataset_unfiltered_under_split(self, tmp_path: Path) -> None:
+        # --split is global to the invocation, so an unlabelled task in a multi-task run
+        # must pass through whole — and the line must not imply the selector did anything.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": "a"}, {"id": "b"}, {"id": "c"}])
+        printed, exit_code = self._run(task, task_file, split="test")
+        assert exit_code == 0
+        assert "3 rows" in printed and "3 selected" in printed
+        assert "not labelled, all rows kept" in printed
+
+    def test_plan_catches_a_bad_row_substitution(self, tmp_path: Path) -> None:
+        # The value the expansion buys beyond a row count: a ${row.*} naming a field no row
+        # carries used to fail at run time, per row, after the sandbox was built.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": "a"}], prompt="Do ${row.missing}")
+        printed, exit_code = self._run(task, task_file)
+        assert exit_code == 1
+        assert "missing" in printed
+
+    def test_plan_warns_on_a_partly_labelled_dataset(self, tmp_path: Path) -> None:
+        # A warning, not an error: the run is legitimate, it is just measuring less than
+        # the file suggests. Exit stays 0.
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+        task = _make_dataset_task([{"id": "a", "split": "train"}, {"id": "b", "split": "train"}, {"id": "c"}])
+        printed, exit_code = self._run(task, task_file, split="train")
+        assert exit_code == 0
+        assert "⚠" in printed and "1 of 3 rows carry no 'split' label" in printed

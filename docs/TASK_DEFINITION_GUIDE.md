@@ -94,7 +94,7 @@ dataset:
 | `sample_per_stratum` | `null` | Stratified random sample: keep up to N rows per stratum. Overridden by CLI `--sample`. |
 | `stratify_field` | `"expected_skill"` | Row field whose value defines the stratum for `sample_per_stratum`. |
 | `sample_seed` | `null` | Seed for the stratified draw. Unset means the sample is **re-drawn every run**; set an integer to pin it. CLI `--sample` is separately fixed-seed and always reproducible. |
-| `split_field` | `"split"` | Row field naming the row's split (e.g. `train` / `test`). CLI `--split <name>` keeps only rows whose value here matches, **before** any sampling. A task whose rows never set this field is unaffected by `--split`. Splits are open strings. |
+| `split_field` | `"split"` | Row field naming the row's split (e.g. `train` / `test`). CLI `--split <name>` keeps only rows whose value here matches, **before** any sampling. A task whose rows never set this field is unaffected by `--split`; a task that sets it on *some* rows keeps the matching ones, drops the rest, and logs a WARNING naming the drop count; a task that sets it on every row but has none in the requested split aborts the run. Splits are open strings. |
 
 Full guide — row sources, substitution rules, sampling precedence, suite-level scoring, and worked
 examples: **[Bring Your Own Dataset](DATASETS.md)**.
@@ -663,7 +663,7 @@ This pattern is especially useful for A/B testing whether additional context imp
 
 ## Success Criteria
 
-Every task needs at least one success criterion. The framework supports 14 criterion types.
+Every task needs at least one success criterion. The framework supports 15 criterion types.
 
 ### Continuous Scoring
 
@@ -1272,7 +1272,11 @@ Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, 
 
 ### `skill_triggered`
 
-Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
+Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` **and which succeeded** (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that **successfully** reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
+
+> **Only a successful `Skill` call is engagement**, and the distinction matters more than it sounds. The common cause of a failed one is a skill carrying `disable-model-invocation: true`: the tool refuses the call outright (`cannot be used with Skill tool due to disable-model-invocation`), so the skill's body never loads and the agent continues on its own background knowledge — producing output plausible enough that nothing downstream looks wrong. Counting the attempt would report `yes` for a run the skill took no part in. The same reasoning excludes a call that is still in flight or was force-closed by a turn crash: for the `Skill` tool the body IS the tool result, so anything short of a delivered result loaded nothing.
+>
+> The file-read signal is gated too, but only where a failure proves nothing was read: a `Read`, `Glob` or `Grep` that errored (or has not resolved yet) names the path in its parameters while loading nothing, so it does not count. `Bash` is deliberately left ungated — `cat skills/x/SKILL.md | grep foo` exits non-zero *after* genuinely reading the file, which is exactly how an agent with no `Skill` tool engages a skill.
 
 Observed label is `"yes"` when either signal is found, else `"no"`. Expected label is `"yes"` iff `expected_skill == skill_name`. **Binary scoring:** `1.0` when observed matches expected, else `0.0`.
 
@@ -1288,7 +1292,7 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `skill_name` | *required* | The skill to detect — a `Skill` call whose `skill` parameter matches, or a file read under `skills/<skill_name>/` |
+| `skill_name` | *required* | The skill to detect — a **successful** `Skill` call whose `skill` parameter matches, or a **successful** file read under `skills/<skill_name>/` |
 | `expected_skill` | *required* | The row's expected skill (after `${row.*}` substitution); empty string `""` for negative rows where the skill should **not** fire |
 
 **Requires agent telemetry.** This criterion reads `turn_records`, so it only works against a real agent run (not a static check). With no turn records it reports `score=0.0` and an `error`.

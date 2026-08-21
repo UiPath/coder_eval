@@ -168,6 +168,15 @@ your `suite_thresholds` gate on are computed over fewer rows than you think. Eit
 every row or label none — never some. (With no labels anywhere, `--split` leaves the task
 untouched, which is safe.)
 
+**Keep the template's `run_limits:` block and its `agent.setting_sources: []`.** Both are
+there for the measurement, not just the bill. The caps buy *signal*: activation is decided in
+the first assistant turn, and a row that runs on is a row that can time out — and a timed-out
+row is excluded from the confusion matrix rather than scored, so it shrinks the denominator
+instead of showing up as a bad number. The empty `setting_sources` keeps the host project's
+`CLAUDE.md` out of every call, which is both a cost and a confound on a suite whose subject is
+the skill listing. Do not restate the numbers here; the template owns them. (Both are
+claude-code fields, so a Codex user drops them along with `agent.type`.)
+
 **Then make the skill reachable, which is the step that decides whether the suite measures
 anything.** The task runs in a fresh sandbox that contains none of the user's files, so the
 agent is offered no skills unless the task says where they live. That is the `agent.plugins`

@@ -40,6 +40,7 @@ from ..path_utils import build_task_run_dir
 from .config import BatchRunConfig
 from .config_merge import ConfigSource, Layer, merge_layers, resolve_root
 from .task_loader import (
+    SplitSelectorError,
     expand_dataset,
     load_task,
     resolve_agent_system_prompt,
@@ -554,7 +555,10 @@ def resolve_all_tasks(
 
     Task YAMLs that fail to load (YAML parse error, Pydantic validation,
     dataset expansion error) are recorded in the returned ``skipped`` list and
-    excluded from the resolved set rather than aborting the suite.
+    excluded from the resolved set rather than aborting the suite. The one
+    exception is ``SplitSelectorError``, which is re-raised: it describes a
+    malformed INVOCATION (a ``--split`` matching no labelled row) rather than a
+    malformed file, and demoting it produces a green run of zero rows.
 
     Per-task config-resolution failures (a task whose own YAML is incompatible
     with the resolved run — e.g. Claude-only ``sdk_options`` surviving a
@@ -630,6 +634,11 @@ def resolve_all_tasks(
                 sample_per_stratum=config.sample_per_stratum,
                 split=config.split,
             )
+        except SplitSelectorError:
+            # A CLI selector that matched nothing is user error, not repo state: demoted to
+            # skipped_tasks it yields a green run of zero rows, which is the loudest failure
+            # mode in the split workflow and the one a CI gate cannot see. Let it abort.
+            raise
         # Narrow set: real load failures only. We deliberately don't catch
         # AttributeError / TypeError / ImportError — those signal a regression
         # in load_task / expand_dataset and should crash loudly rather than

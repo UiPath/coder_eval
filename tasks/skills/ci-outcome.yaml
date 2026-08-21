@@ -181,11 +181,24 @@ success_criteria:
   # `found / total` over its `includes` — a constant sub-check would put a fixed
   # contribution in every row's score in every arm, compressing the variance the gate
   # reads and making `mean: 0.7` quietly weaker than it looks.
+  #
+  # Two `includes` slots because a scenario may ask for two things. `both-triggers` asks
+  # for a pull_request trigger AND a weekly cron, and graded on `cron:` alone a
+  # schedule-only workflow scored a clean 1.0 — while `cron:` is also what its sibling
+  # `schedule-weekly` grades, so the row discriminated nothing its sibling did not.
+  #
+  # The other nine rows set `expected_snippet_2` to the SAME value as `expected_snippet`.
+  # That is deliberate and is the part not to "improve": two identical entries score
+  # `0/2` or `2/2`, i.e. numerically identical to a single include, so no constant
+  # sub-check is introduced and the variance the `mean: 0.7` gate reads is untouched.
+  # A row with a genuinely second requirement is where the slot earns its place.
+  # (The note lives here because a JSONL cannot carry a comment.)
   - type: "file_check"
     description: "the workflow row ${row.id} asked for"
     path: "${row.expected_path}"
     includes:
       - "${row.expected_snippet}"
+      - "${row.expected_snippet_2}"
     suite_thresholds:
       mean: 0.7
       completion_rate: 1.0

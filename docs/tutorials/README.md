@@ -1,8 +1,9 @@
 ---
 description: >-
   Step-by-step Coder Eval tutorials — run your first AI coding-agent evaluation,
-  wire it into CI, browse results, write tasks, compare models, and isolate runs
-  in Docker.
+  wire it into CI, browse results, write tasks, compare models, isolate runs in
+  Docker, drive the whole loop from Claude Code, and A/B-test a skill's
+  description or body.
 ---
 
 # Tutorials
@@ -20,7 +21,7 @@ the task-file schema see the [Task Definition Guide](../TASK_DEFINITION_GUIDE.md
 | 05 | [Comparing two models](05-comparing-models.md) | Use the experiment layer to A/B two configurations |
 | 06 | [Running tasks in Docker isolation](06-use-docker-isolation.md) | Run each task in a fresh container; add task-specific dependencies |
 | 07 | [Driving Coder Eval from Claude Code](07-plugin-in-claude-code.md) | Install the plugin and drive the whole loop — scaffold, author, review, run, analyze — from slash commands |
-| 08 | [Optimizing a Skill Description](08-optimizing-a-skill.md) | Measure whether a skill's description can be improved — train/test splits, the reachability check that decides everything, and when to stop |
+| 08 | [Optimizing a Skill Description](08-optimizing-a-skill-description.md) | Measure whether a skill's description can be improved — train/test splits, the reachability check that decides everything, and when to stop |
 | 09 | [Optimizing a Skill Body](09-optimizing-a-skill-body.md) | Measure whether a skill's body can be improved — outcome suites, one fixture per suite, and checking the instrument works before spending |
 
 > Contributions welcome — add a numbered `NN-title.md` file and link it in the

@@ -257,7 +257,7 @@ Binary classifier: did the agent engage the target skill during the run?
 | Field | What it is |
 | --- | --- |
 | `expected_skill` | The row's expected skill (after substitution); empty string '' for negatives. |
-| `skill_name` | Only count Skill invocations whose 'skill' parameter matches this name. |
+| `skill_name` | Only count SUCCESSFUL Skill invocations whose 'skill' parameter matches this name (or a successful file read under skills/<name>/). |
 
 ### `uipath_eval`
 

@@ -53,7 +53,7 @@ dataset:
 ```
 
 ```json
-{"id": "pr-gate", "split": "train", "expected_skill": "ci", "scenario": "...", "expected_path": ".github/workflows/evals.yml", "expected_snippet": "minimum-task-score"}
+{"id": "pr-gate", "split": "train", "expected_skill": "ci", "scenario": "...", "expected_path": ".github/workflows/evals.yml", "expected_snippet": "minimum-task-score", "expected_snippet_2": "minimum-task-score"}
 ```
 
 Label every row or none. A *partly* labelled dataset is the one genuinely bad state: `--split`
@@ -110,10 +110,21 @@ success_criteria:
     path: "${row.expected_path}"
     includes:
       - "${row.expected_snippet}"
+      - "${row.expected_snippet_2}"
     suite_thresholds:
       mean: 0.7
       completion_rate: 1.0
 ```
+
+**Why two snippet slots when most rows need only one.** A scenario may ask for two things,
+and grading only the first lets a half-answer score full marks: `both-triggers` asks for a
+pull_request trigger *and* a weekly cron, and graded on `cron:` alone a schedule-only
+workflow scored 1.000 — while `cron:` is also what its sibling `schedule-weekly` grades, so
+the row discriminated nothing its sibling did not. Rows with a single requirement set
+`expected_snippet_2` to the **same value** as `expected_snippet`: two identical entries
+score `0/2` or `2/2`, numerically identical to a single include, so the uniform shape costs
+nothing. Every row must carry the field regardless — criteria are copied to every row, and a
+`${row.*}` naming a field some row lacks raises at expansion.
 
 Keep anything **constant** out of the gated criterion. `file_check` scores `found / total`
 over its `includes`, so folding a universal check into it puts a fixed contribution in every
@@ -231,16 +242,20 @@ coder-eval run tasks/skills/ci-outcome.yaml --split train -D run_limits.stop_ear
 
 In order, because each one makes every number below it meaningless if it fails:
 
-1. **The resolved row count is what you expect.** A mistyped split is reported as a skipped
-   task and the run still exits 0 — a green run of zero rows.
+1. **The resolved row count is what you expect.** A mistyped split now aborts the run with an
+   error naming the splits that exist, so it cannot slip through — but a *partial* row loss
+   (a half-labelled dataset) still can, and only the count shows it.
 2. **Engagement passes on every row.** Not most rows. A row where the skill never ran measures
    nothing, and Stage B's own promotion rule requires the skill to have engaged on every
    scored row.
 3. **The Skill calls actually succeeded.** This is the one this round learned, and it is not
    the same as check 2. Grep a `task.json` for the tool's `result_status`; an errored call
-   means the body never loaded, whatever the criterion says. On an older criterion that
-   distinction was invisible, so it is worth confirming directly the first time you run a
-   suite:
+   means the body never loaded, whatever the criterion says. The criterion now requires
+   `success` for a `Skill` call to count as engagement — so on a current coder-eval this grep
+   *confirms* what check 2 already enforces rather than working around it, and it is what
+   tells you **why** a row reports `no` (refused, still in flight, or crash-force-closed to
+   `unknown`). On an older criterion the distinction was invisible, which is what hid the
+   whole failure here:
 
    ```bash
    jq -r '.iterations[].commands[] | select(.tool_name=="Skill")
@@ -384,6 +399,6 @@ whole method exists to prevent.
 
 ## Next
 
-- [Tutorial 08 — Optimizing a Skill Description](08-optimizing-a-skill.md) — the activation
+- [Tutorial 08 — Optimizing a Skill Description](08-optimizing-a-skill-description.md) — the activation
   track, and another honest stop.
 - [Plugin guide](../PLUGIN.md) — every skill the plugin ships.

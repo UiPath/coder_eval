@@ -2160,31 +2160,41 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
-    def test_tool_call_fires_before_result(self) -> None:
-        # The decision latches on the tool CALL (ToolStartEvent): a Skill call
-        # whose result never arrives (a cut-short turn would strip it) still stops.
-        # No ToolEndEvent is ever fed.
+    def test_tool_call_does_not_fire_before_the_result(self) -> None:
+        # The ToolStart evaluation seam STAYS — but which criteria it can decide is
+        # now PER-CRITERION, not global. `skill_triggered`'s verdict is not decidable
+        # from the call: for the Skill tool the body IS the tool result, so an
+        # in-flight call (result_status=None) has delivered nothing and must not
+        # pass-stop. It decides one round later, at its ToolEnd (below). The seam
+        # still serves criteria whose verdict IS decidable from the call, such as
+        # `command_executed`.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller")])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+        # The matching resolved ToolEnd is what decides it.
+        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="sk-1"))])
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
-        # The in-flight call reports as the 1st tool call even without a ToolEnd.
-        assert watcher.info.tool_call_index == 1
 
-    def test_tool_call_distractor_fail_fires(self) -> None:
-        # A distractor (armed fail) fail-stops on the tool CALL that engages its
-        # skill, before any result arrives.
+    def test_tool_call_distractor_fail_does_not_fire_before_the_result(self) -> None:
+        # Same narrowing on the fail side: a distractor's engagement is only real
+        # once the body was actually delivered, so no fail-stop until the ToolEnd.
         watcher = _watcher([_skill_crit("weather-teller", "date-teller", stop_on_fail=True)])
         _feed(watcher, [_agent_start(), _turn_start(), _skill_start("weather-teller")])
+        assert watcher.info is None
+        _feed(watcher, [_tool_end(_skill_cmd("weather-teller", tool_id="sk-1"))])
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
 
-    def test_tool_call_latches_on_file_read_engagement(self) -> None:
+    def test_tool_call_does_not_latch_on_an_unresolved_file_read(self) -> None:
         # Off-Claude agents (antigravity/codex) engage a skill by READING its files
-        # (skills/<name>/...), not via a Skill tool call. The watcher must latch on
-        # that Read ToolStart — the file-path parameter carries the signal on the
-        # call itself, so early-stop fires off-Claude just as it does for Claude.
+        # (skills/<name>/...), not via a Skill tool call. `Read` is one of the three
+        # tools whose FAILURE means nothing was loaded, so an unresolved Read
+        # ToolStart — the path is in `parameters`, but the file may yet ENOENT — is
+        # not engagement. Antigravity is the agent this costs a round: its tool map
+        # renames view_file/search_directory/find_file to Read/Grep/Glob.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         read = CommandTelemetry(
             tool_name="Read",
@@ -2193,30 +2203,74 @@ class TestEarlyStopWatcher:
             parameters={"file_path": "/repo/skills/date-teller/SKILL.md"},
         )
         _feed(watcher, [_agent_start(), _turn_start(), ToolStartEvent(task_id="t", tool=read)])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+        # Resolved successfully, it decides.
+        read.result_status = "success"
+        _feed(watcher, [ToolEndEvent(task_id="t", tool=read)])
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
-    def test_tool_call_latches_before_unresolved_end(self) -> None:
-        # The call fires the stop in-loop; a later finalize() UNRESOLVED end for
-        # the SAME call is short-circuited (decision already latched) — no relabel,
-        # no double count.
+    def test_in_flight_then_errored_skill_call_never_stops_the_run(self) -> None:
+        # The refusal path end to end on the watcher, over ONE telemetry object
+        # mutated in place exactly as the agent mutates it on resolution. A skill
+        # carrying `disable-model-invocation: true` is refused: the call is
+        # dispatched (result_status=None), then resolves to "error". Neither seam
+        # may cut the run — the body never loaded, so the frozen check will score
+        # this row `no`, and a stop here would credit a skill that never ran.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        start = _skill_start("date-teller", tool_id="sk-1")
+        _feed(watcher, [_agent_start(), _turn_start(), start])
+        assert watcher.should_stop() is False
+        start.tool.result_status = "error"
+        _feed(watcher, [ToolEndEvent(task_id="t", tool=start.tool, status=ToolEndStatus.ERROR)])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_tool_call_latches_on_an_unresolved_bash_file_read(self) -> None:
+        # The Bash twin of the test above, and the path that still latches on the
+        # CALL: Codex reads a SKILL.md through the shell, and `cat … | grep foo`
+        # exits non-zero AFTER genuinely reading the file — so a status gate on Bash
+        # would drop real engagement. Bash is therefore ungated, and its ToolStart
+        # still decides. Which tool name carries the signal is agent-specific:
+        # Bash for Codex, Read/Grep/Glob for antigravity, the Skill tool for Claude.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        bash = CommandTelemetry(
+            tool_name="Bash",
+            tool_id="b1",
+            timestamp=_TS,
+            parameters={"command": "cat /repo/skills/date-teller/SKILL.md"},
+        )
+        _feed(watcher, [_agent_start(), _turn_start(), ToolStartEvent(task_id="t", tool=bash)])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        assert watcher.info.tool_call_index == 1
+
+    def test_unresolved_end_after_an_in_flight_skill_call_fires_nothing(self) -> None:
+        # The inverse of the old "the call latches, the UNRESOLVED end is a no-op":
+        # nothing latches on the call now, and the finalize() UNRESOLVED end must not
+        # fire one either — an "unknown" Skill call was force-closed by a crash
+        # before any body arrived, so it is not engagement on either seam. This is
+        # what keeps the live verdict and the frozen check agreeing: both score `no`.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller", tool_id="sk-1")])
-        fired = watcher.info
+        assert watcher.info is None
         _feed(watcher, [_unresolved_skill_end("date-teller", tool_id="sk-1")])
-        assert watcher.info is fired
-        assert watcher.info is not None
-        assert watcher.info.tool_call_index == 1
+        assert watcher.info is None
+        assert watcher.should_stop() is False
 
     def test_tool_call_index_counts_prior_resolved_calls(self) -> None:
         # A prior resolved, non-deciding tool is counted at its ToolEnd; the
-        # deciding in-flight call is then reported as the next (2nd) call.
+        # deciding call is then reported as the next (2nd) call. Pointed at a
+        # RESOLVED Skill ToolEnd so it keeps testing the INDEX rather than the
+        # in-flight deferral (which its own test above owns).
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         prior = _cmd("Bash", {"command": "ls"})  # not a skill engagement
         _feed(watcher, [_agent_start(), _turn_start(), _tool_end(prior)])
         assert watcher.info is None
-        _feed(watcher, [_skill_start("date-teller", tool_id="sk-1", sequence_number=1)])
+        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="sk-1"))])
         assert watcher.info is not None
         assert watcher.info.tool_call_index == 2
 
@@ -2232,8 +2286,9 @@ class TestEarlyStopWatcher:
         # A second AgentStart (as on a retry) must leave the origin untouched.
         _feed(watcher, [_agent_start(), _turn_start()])
         assert watcher._started_monotonic == origin
-        # The stop that follows anchors elapsed_seconds to that first origin.
-        _feed(watcher, [_skill_start("date-teller")])
+        # The stop that follows anchors elapsed_seconds to that first origin. A
+        # RESOLVED Skill ToolEnd, since an in-flight call no longer decides.
+        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="sk-1"))])
         assert watcher.info is not None
         assert watcher.info.elapsed_seconds >= 0.0
 
@@ -2611,10 +2666,35 @@ class TestOrchestratorEarlyStopWiring:
         assert result.all_criteria_passed(self._criteria()) is False
 
     async def test_tool_call_cut_without_tool_end(self, tmp_path) -> None:
-        # End-to-end: the deciding Skill CALL (a ToolStart with no ToolEnd) cuts
-        # the stream and records an early stop — the case that would otherwise run
-        # to the turn cap when a cut-short turn strips the result.
+        # THE TEST THAT STATES THE TRADE. A Skill CALL whose result never arrives
+        # (a cut-short turn strips it) no longer stops the run, so this run
+        # continues to its turn cap. That is the price, and it is the correct one:
+        # the old behaviour stopped the run AND the frozen check scored `yes` — a
+        # run credited to a skill whose body never reached the agent. Both rules
+        # are internally consistent; they disagree on whether "dispatched and never
+        # returned" is engagement. It is not. Do NOT "restore" the old behaviour to
+        # buy the stop back: the stop and the score would diverge again.
         events = [_agent_start(), _turn_start(), _skill_start(self._SKILL), _turn_start()]
+        result, agent, _success = await _run_wiring(
+            criteria=self._criteria(),
+            events=events,
+            scores=[1.0, 0.0],
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is None
+        assert agent.delivered == 4  # nothing cut: the whole stream was consumed
+
+    async def test_tool_call_with_a_resolved_end_still_cuts(self, tmp_path) -> None:
+        # The twin of the test above, and what makes it "one round later, not
+        # never": the SAME stream with a successful ToolEnd for that call still
+        # cuts and still reports CRITERION_PASSED.
+        events = [
+            _agent_start(),
+            _turn_start(),
+            _skill_start(self._SKILL),
+            _tool_end(_skill_cmd(self._SKILL, tool_id="sk-1")),
+            _turn_start(),
+        ]
         result, agent, _success = await _run_wiring(
             criteria=self._criteria(),
             events=events,
@@ -2623,8 +2703,8 @@ class TestOrchestratorEarlyStopWiring:
         )
         assert result.early_stop is not None
         assert result.early_stop.reason == EarlyStopReason.CRITERION_PASSED
-        # Cut at the ToolStart: the trailing turn_start is never delivered.
-        assert agent.delivered == 3
+        # Cut at the ToolEnd: the trailing turn_start is never delivered.
+        assert agent.delivered == 4
 
     async def test_fail_open_wiring_degrades_to_full_run(self, tmp_path) -> None:
         with patch.object(SkillTriggeredChecker, "live_verdict", side_effect=RuntimeError("boom")):

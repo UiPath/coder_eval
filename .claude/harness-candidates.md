@@ -457,14 +457,21 @@ with the two `action.yml` items above — one considered change to the action's 
   depend on, mirroring how CE030 pins doc/schema parity.
 ## From the split-field / optimize-skill plan (2026-08-12)
 
-- [ ] **A run whose every task is skipped exits 0 — a green run of zero tasks.** When
-  `resolve_all_tasks` demotes every task to `skipped_tasks` (a load failure, `skip: true`,
-  or now a `--split` selector matching no labelled row), the run reports success: nothing
+- [ ] **A run whose every task is skipped exits 0 — a green run of zero tasks.** *(Narrow case
+  CLOSED 2026-08-13: a `--split` selector that matches no labelled row now raises
+  `SplitSelectorError` out of `expand_dataset`, which `resolve_all_tasks` re-raises and the CLI
+  turns into a `typer.BadParameter` — exit 2. The GENERAL case below stays open: `skip: true`,
+  load failures and tag filters that match nothing all keep today's exit-0 behaviour, because
+  making those fatal changes exit semantics for deliberate quarantine workflows and needs its own
+  decision plus tests per case.)* When
+  `resolve_all_tasks` demotes every task to `skipped_tasks` (a load failure or `skip: true` —
+  no longer a `--split` typo, see above), the run reports success: nothing
   failed, so the exit gate in `cli/run_command.py` — which keys only on failed/errored tasks
-  and suite gates — passes. Verified directly: `coder-eval run <suite> --split holdou`
-  prints one yellow "1 task file(s) skipped" line and exits 0. This is pre-existing, but
-  `--split` makes it reachable by a one-character CLI typo rather than a broken file, and
-  the whole point of a test confirmation is that you trust its verdict. Not guarded, and
+  and suite gates — passes. Verified directly before the narrow fix: `coder-eval run <suite>
+  --split holdou` printed one yellow "1 task file(s) skipped" line and exited 0. `--split` was
+  what made it reachable by a one-character CLI typo rather than a broken file, and
+  the whole point of a test confirmation is that you trust its verdict. Still unguarded for
+  the remaining paths, and
   not a five-minute fix: making an all-skipped run non-green changes exit semantics for
   every skipped-task path (including deliberate `skip: true` suites and tag filters that
   match nothing), so it needs a decision about which of those should be fatal, plus tests
@@ -474,3 +481,7 @@ with the two `action.yml` items above — one considered change to the action's 
 - [ ] **Semantic answer-leak in a task prompt** — a prompt that describes the graded behaviour in *different words* ("list the paths explicitly rather than with a recursive wildcard" while grading an explicit glob) scores well whether or not the behaviour happened, and in an A/B an arm that deleted the rule still passes. CE061 catches only the verbatim form; the semantic form needs an LLM judge or a `lint-tasks` pass over this repo's own `tasks/`, neither of which is cheap or deterministic. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md, where 4 of 10 rows in a shipped worked example had it.
 - [ ] **A doc claim that contradicts merge semantics** — `optimize-skill` told users to declare `allowed_tools` in an experiment's `defaults: agent:`, which is a silent no-op because those fields merge by `replace` and the task layer outranks experiment defaults. Detecting "this prose recommends a config location that the merge order makes ineffective" would need the rule to model the layer stack against prose, which no existing rule shape supports. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md.
 - [x] **`_normalized()` not used by every prose sensor** — CLOSED: all 9 sites converted, and `test_no_sensor_inlines_the_normalization_idiom` now forbids the raw form. Original note: — 8 sensors in `tests/test_custom_lint.py` still inline `" ".join(path.read_text().split())`, so a future one copied from the wrong neighbour is defeated by a line wrap (the bug that let a stale skill count ship past 91 green tests). A rule forbidding the raw idiom in that file is easy; the conversion sweep was out of scope. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md.
+
+## From the optimize-skill review v2 plan (2026-08-13)
+
+- [ ] **"The ToolStart seam decides" is now a PER-CRITERION property, not a global invariant.** `command_executed`'s verdict is decidable from the tool call's inputs; `skill_triggered`'s is not (for the `Skill` tool the body is delivered AS the result, so an in-flight call engaged nothing). A new `LiveSuccessCriterion` must state which seam its `live_verdict` is decidable at, and a criterion that decides at the ToolStart on information only the result carries silently diverges from its own frozen check. Not mechanically detectable today: the property is about what a `live_verdict` implementation *reads*, which no AST rule can infer — a rule would have to know that `result_status` is the field distinguishing the two seams. A cheaper partial guard would be a test-level convention (every live criterion has a "not decided before the result" or "decided on the call" test), which is a sweep rather than a rule. — caught implementing Phase 1 of c/2026-08-13-optimize-skill-review-v2-fixes.md.

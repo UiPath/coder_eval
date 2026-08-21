@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import re
@@ -29,6 +30,28 @@ _SMOKE_SAMPLE_SEED = 0
 _ROW_VAR_PATTERN = re.compile(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}")
 _ROW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+logger = logging.getLogger(__name__)
+
+
+class SplitSelectorError(ValueError):
+    """A CLI ``--split`` selector eliminated every row of a labelled dataset.
+
+    Distinct from the other dataset errors on purpose. Those describe a malformed
+    FILE and are demoted to ``skipped_tasks`` so one bad task cannot abort a suite;
+    this one describes a malformed INVOCATION — the user asked for a split that does
+    not exist — and there is no per-task isolation argument for it, because the same
+    selector is applied to every task in the run. Demoted, it produces a yellow
+    warning and exit 0: a CI gate that ran zero evals and reported success.
+
+    That the abort is run-wide is the point, not a side effect: ``--split`` is global
+    to the invocation, so one labelled suite with no matching row means the selector
+    itself is wrong, and finishing the other suites would hide it.
+
+    A ``ValueError`` subclass so every existing ``except ValueError`` caller keeps
+    working; ``resolve_all_tasks`` re-raises it explicitly and the CLI turns it into
+    a ``typer.BadParameter``.
+    """
 
 
 def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
@@ -305,7 +328,7 @@ def _resolve_path(p: str, task_file_dir: Path) -> Path:
     return path if path.is_absolute() else (task_file_dir / path).resolve()
 
 
-def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, Any]]:
+def load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, Any]]:
     """Load dataset rows from inline list or one or more JSONL files."""
     if dataset.rows is not None:
         return [dict(r) for r in dataset.rows]
@@ -369,21 +392,30 @@ def row_split_label(row: dict[str, Any], field: str) -> str | None:
     return None if value is None or value == "" else str(value)
 
 
-def _reject_duplicate_row_ids(rows: list[dict[str, Any]], task: TaskDefinition) -> None:
-    """Raise if two rows share an id, considering the dataset as a whole.
+def _validate_row_ids(rows: list[dict[str, Any]], task: TaskDefinition) -> None:
+    """Validate every row's id against the dataset AS A WHOLE, before any narrowing.
 
-    Called before ``--split`` filtering and sampling narrow the row set: a duplicate id is
-    malformed data regardless of which rows a given invocation happens to select. Rows
-    missing the id field are skipped here — that is reported per-row during expansion,
-    where the row index is known.
+    All three id checks live here on purpose: "the dataset is well-formed" must not
+    depend on what a given invocation selected. Split the checks — duplicates whole-set,
+    missing/malformed per-selected-row — and a malformed row sitting in the ``test`` split
+    validates under every ``--split train`` run and surfaces only at promotion time, which
+    is the most expensive moment to learn it.
+
+    The ``Dataset row {i}`` index therefore counts over the whole dataset rather than the
+    selected subset, which is the more useful number: it points at the line in the file.
     """
     assert task.dataset is not None
     id_field = task.dataset.id_field
     seen: set[str] = set()
-    for row in rows:
+    for i, row in enumerate(rows):
         if id_field not in row:
-            continue
+            raise ValueError(f"Dataset row {i} for task '{task.task_id}' missing id_field '{id_field}': {row}")
         row_id = str(row[id_field])
+        if not _ROW_ID_PATTERN.match(row_id):
+            raise ValueError(
+                f"Dataset row id {row_id!r} must match {_ROW_ID_PATTERN.pattern}"
+                + " (letters, digits, underscore, hyphen, dot)"
+            )
         if row_id in seen:
             raise ValueError(f"Duplicate dataset row id for task '{task.task_id}': {row_id!r}")
         seen.add(row_id)
@@ -457,35 +489,40 @@ def expand_dataset(
             unlabelled when the field is absent, ``None``, or ``""``. A task
             whose rows are all unlabelled passes through unfiltered (``--split``
             is global to the invocation, so an unlabelled task in a multi-task
-            run must not fail); partial labelling keeps the matching rows and
-            drops the unlabelled ones; a *labelled* task with no matching row
-            raises. Note the raise is caught by ``resolve_all_tasks`` into
-            ``skipped_tasks``, so at the run level a mistyped split name is a
-            skipped suite rather than an aborted run.
+            run must not fail); partial labelling keeps the matching rows, drops
+            the unlabelled ones and logs a WARNING naming the drop count; a
+            *labelled* task with no matching row raises ``SplitSelectorError``.
+            That one is NOT demoted to ``skipped_tasks`` — ``resolve_all_tasks``
+            re-raises it, so a mistyped split name aborts the run instead of
+            producing a green run of zero rows.
 
     Returns:
         Expanded list of TaskDefinitions. Length is 1 when dataset is None.
 
     Raises:
-        ValueError: Empty dataset, duplicate row ids, missing id_field,
-            malformed row id, or a labelled dataset with no row in ``split``.
+        ValueError: Empty dataset, duplicate row ids, missing id_field, or a
+            malformed row id — all malformed-FILE errors, which
+            ``resolve_all_tasks`` demotes to ``skipped_tasks``.
+        SplitSelectorError: A labelled dataset has no row in ``split``. A
+            ``ValueError`` subclass, but ``resolve_all_tasks`` re-raises this one
+            (it describes a malformed INVOCATION, not a malformed file).
         FileNotFoundError: Dataset path does not exist.
     """
     if task.dataset is None:
         return [task]
 
-    rows = _load_dataset_rows(task.dataset, task_file_dir)
+    rows = load_dataset_rows(task.dataset, task_file_dir)
     if not rows:
         raise ValueError(f"Dataset for task '{task.task_id}' is empty")
 
     # --split filters BEFORE either sampler below: sampling first would leave an
     # unpredictable (possibly zero) number of rows per split, destroying the
     # train/test comparison the split exists to protect.
-    # Duplicate ids are a property of the DATASET, so check the whole row set BEFORE any
-    # filtering or sampling narrows it. Checking only what survives would let a duplicate
-    # sitting in an unselected split validate under every --split and surface only on a
-    # full run — and the split workflow always passes one.
-    _reject_duplicate_row_ids(rows, task)
+    # Row ids are a property of the DATASET, so check the whole row set BEFORE any
+    # filtering or sampling narrows it. Checking only what survives would let a malformed,
+    # id-less or duplicate row sitting in an unselected split validate under every --split
+    # and surface only on a full run — and the split workflow always passes one.
+    _validate_row_ids(rows, task)
 
     if split is not None:
         field = task.dataset.split_field
@@ -493,9 +530,26 @@ def expand_dataset(
         # value, so they cannot drift apart into two definitions of "labelled".
         labelled = [(r, label) for r in rows if (label := row_split_label(r, field)) is not None]
         if labelled:
-            rows = [r for r, label in labelled if label == split]
+            # A PARTLY labelled dataset is the dangerous state: the unlabelled rows are
+            # dropped (the safe direction), so the run succeeds and every metric is
+            # computed over a smaller suite than the file suggests. Say so. Guarded on an
+            # actual drop, not on --split being set — a fully labelled dataset drops
+            # nothing and must stay quiet, or the warning becomes noise and gets ignored.
+            matching = [r for r, label in labelled if label == split]
+            if len(labelled) != len(rows):
+                logger.warning(
+                    "Task '%s': --split %r kept %d of %d rows; %d row(s) carry no %r label and were "
+                    + "DROPPED. Every metric below is computed over the smaller set.",
+                    task.task_id,
+                    split,
+                    len(matching),
+                    len(rows),
+                    len(rows) - len(labelled),
+                    field,
+                )
+            rows = matching
             if not rows:
-                raise ValueError(
+                raise SplitSelectorError(
                     f"Dataset for task '{task.task_id}' has no rows in split {split!r} "
                     + f"(split_field={field!r}); labelled splits present: "
                     + f"{sorted({label for _, label in labelled})}"
@@ -524,17 +578,10 @@ def expand_dataset(
     id_field = task.dataset.id_field
     expanded: list[TaskDefinition] = []
 
-    for i, row in enumerate(rows):
-        if id_field not in row:
-            raise ValueError(f"Dataset row {i} for task '{task.task_id}' missing id_field '{id_field}': {row}")
+    for row in rows:
+        # No validation here: all three id checks ran over the whole dataset in
+        # _validate_row_ids, before filtering and sampling narrowed `rows`.
         row_id = str(row[id_field])
-        if not _ROW_ID_PATTERN.match(row_id):
-            raise ValueError(
-                f"Dataset row id {row_id!r} must match {_ROW_ID_PATTERN.pattern}"
-                + " (letters, digits, underscore, hyphen, dot)"
-            )
-        # Uniqueness is already enforced across the whole dataset by
-        # _reject_duplicate_row_ids, before filtering narrowed `rows`.
 
         data = task.model_dump(exclude_unset=True)
         if isinstance(data.get("initial_prompt"), str):

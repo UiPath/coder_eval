@@ -49,7 +49,7 @@ Running a suite additionally needs credentials for whichever agent the tasks use
 | --- | --- |
 | `/coder-eval:init` | Scans the repository for what is worth evaluating (Claude Code skills, an MCP server, a CLI), reports the findings, then scaffolds a task directory with one real task. |
 | `/coder-eval:check-skill` | Builds and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
-| `/coder-eval:optimize-skill` | Improves a skill along either of two tracks — the **description**, measured against an activation suite, or the **body**, measured against an outcome suite. Candidate edits become experiment variants; only what beats run-to-run noise and survives a held-out split is promoted. Walked end to end in [tutorial 08](tutorials/08-optimizing-a-skill.md) (description) and [tutorial 09](tutorials/09-optimizing-a-skill-body.md) (body). |
+| `/coder-eval:optimize-skill` | Improves a skill along either of two tracks — the **description**, measured against an activation suite, or the **body**, measured against an outcome suite. Candidate edits become experiment variants; only what beats run-to-run noise and survives a held-out split is promoted. Walked end to end in [tutorial 08](tutorials/08-optimizing-a-skill-description.md) (description) and [tutorial 09](tutorials/09-optimizing-a-skill-body.md) (body). |
 | `/coder-eval:task` | Turns a natural-language description into task YAML with criteria that check output *content*, validated through `coder-eval plan`. |
 | `/coder-eval:lint-tasks` | Reviews task YAML that already exists and reports, per task, criteria that cannot fail, prompts that leak the answer, fixtures with no cleanup and near-duplicates — each with a severity and a fix. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and writes `analysis.md`: systemic failure patterns, per-task findings, and concrete fixes. |
@@ -190,6 +190,11 @@ directories, so every file a skill reads travels with it under `reference/`:
   writes and `lint-tasks` applies to task files already on disk: could this task pass for
   the wrong reason, does it grade behavior or a self-report, do its fixtures reset and
   clean up.
+- `optimize-method.md` — the track-invariant method behind `optimize-skill`'s three stages:
+  the cost table, what each stage does and does not bound, why the activation and execution
+  gates use different machinery, and the paired-diff sign rule. Split out of `SKILL.md` for
+  the same reason as `task-rubric.md` — the method is identical on both tracks, so it lives
+  once and the skill keeps the procedure.
 - `cli-setup.md` — how the CLI-driving skills handle a missing `coder-eval`
   binary: offer the install, ask first, verify it worked.
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads: what is *inside*

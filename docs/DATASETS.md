@@ -149,11 +149,16 @@ Three behaviours are worth knowing before you rely on it:
   safe direction (an unlabelled row never leaks into a named split), but during an incremental
   migration it silently *shrinks* the suite, which moves the aggregate metrics `suite_thresholds`
   gates on. Finish labelling before you compare two runs.
-- **A labelled task with no row in the requested split is skipped, not fatal.** Expansion raises,
-  naming the splits that do exist, and the run records it in `run.json`'s `skipped_tasks` and carries
-  on with whatever else resolved. So a mistyped selector (`--split holdou`) produces a run of **zero
-  tasks that still exits 0** — check the skipped-task count, not just the exit code, when a split run
-  comes back suspiciously clean.
+- **A labelled task with no row in the requested split aborts the run.** Expansion raises
+  `SplitSelectorError`, naming the splits that do exist, and — unlike every other dataset error —
+  `resolve_all_tasks` re-raises it rather than recording a `skipped_tasks` entry. So a mistyped
+  selector (`--split holdou`) fails loudly with a non-zero exit instead of producing a green run of
+  zero tasks. The distinction is deliberate: the other errors describe a malformed *file*, and one
+  bad task must not abort a suite; this one describes a malformed *invocation*, and the same
+  selector applies to every task in the run.
+- **A partly labelled dataset logs a WARNING** naming how many rows were dropped, because that run
+  is legitimate but is measuring a smaller suite than the file suggests. `coder-eval plan --split
+  <name>` shows the same thing before you spend anything.
 
 **Stage 2 — the samplers**, over whatever survived the filter:
 

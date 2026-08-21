@@ -12,6 +12,13 @@
 # Replace every `my-skill` with the bare name of the skill under test (the directory name
 # of its SKILL.md), every `/my-plugin:my-skill` with its real slash command, and rewrite
 # outcome-rows.jsonl as real scenarios. Every REPLACE: marker is a placeholder.
+#
+# SIZING: the four rows in outcome-rows.jsonl are the illustrative MINIMUM, not a target.
+# A split halves each side, so four rows leave a two-row test half — exactly the token test
+# `/coder-eval:optimize-skill` warns against, which confirms nothing while reading as if it
+# did. Write as many real scenarios as the skill has distinct jobs before running a stage.
+# (The disclaimer lives here rather than beside the rows because a JSONL cannot carry a
+# comment — the same reason activation.yaml carries its twin of this note.)
 task_id: "my-skill-outcome"
 description: "Given that `my-skill` fired, does the agent produce the right outcome?"
 tags: [outcome]
@@ -134,7 +141,8 @@ dataset:
 #       tmp/arm/skills/<skill>/SKILL.md
 #
 # Do NOT instead ask the agent to find and read the SKILL.md itself. That looks like it
-# should work — a file read counts as engagement and genuinely loads the body — but the
+# should work — a SUCCESSFUL file read counts as engagement and genuinely loads the body —
+# but the
 # plugin lives at a host path the sandbox cannot discover. Tested: 0 of 2 rows located it,
 # both scored 0.000.
 #
@@ -163,9 +171,12 @@ success_criteria:
   # here, not in the criteria below. If it is not 1.0 on every row, fix the suite before
   # spending a stage.
   #
-  # Necessary but not sufficient: it counts READING the skill's SKILL.md as engagement, not
-  # only a Skill tool call, so a row can report engaged while the command it issued named a
-  # different skill. Check the trajectory when a number surprises you.
+  # Necessary but not sufficient: it counts SUCCESSFULLY READING the skill's SKILL.md as
+  # engagement, not only a Skill tool call, so a row can report engaged while the command it
+  # issued named a different skill. Check the trajectory when a number surprises you.
+  #
+  # A Skill call must have SUCCEEDED to count: a refused call (disable-model-invocation), one
+  # still in flight, or one force-closed by a turn crash delivered no body at all.
   - type: "skill_triggered"
     description: "my-skill engaged for row ${row.id}"
     skill_name: "my-skill"

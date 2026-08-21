@@ -105,7 +105,7 @@ nav:
       - 05 · Comparing two models: tutorials/05-comparing-models.md
       - 06 · Docker isolation: tutorials/06-use-docker-isolation.md
       - 07 · Driving Coder Eval from Claude Code: tutorials/07-plugin-in-claude-code.md
-      - 08 · Optimizing a Skill Description: tutorials/08-optimizing-a-skill.md
+      - 08 · Optimizing a Skill Description: tutorials/08-optimizing-a-skill-description.md
       - 09 · Optimizing a Skill Body: tutorials/09-optimizing-a-skill-body.md
   - Guides:
       - User Guide: USER_GUIDE.md

@@ -21,7 +21,7 @@ def _cmd(
     tool_name: str,
     parameters: dict[str, Any] | None = None,
     tool_id: str = "t1",
-    result_status: str = "success",
+    result_status: str | None = "success",
     result_summary: str | None = None,
 ) -> CommandTelemetry:
     return CommandTelemetry(
@@ -103,6 +103,85 @@ class TestSkillTriggeredChecker:
                 _cmd("Skill", {"skill": "uipath-flow"}, result_status="error"),
                 _cmd("Read", {"file_path": "/x/skills/uipath-flow/SKILL.md"}, tool_id="t2"),
             ],
+        )
+        assert result.observed_label == "yes" and result.score == 1.0
+
+    def test_pending_skill_call_is_not_engagement(self) -> None:
+        # `result_status=None` is an IN-FLIGHT call: the early-stop watcher evaluates on
+        # ToolStartEvent, before any result exists. For the Skill tool the body IS the tool
+        # result, so a call with no result yet has delivered nothing. Counting it made the
+        # live verdict pass on a call the frozen check would later score `no`.
+        result = _check(
+            expected_skill="uipath-flow",
+            skill_name="uipath-flow",
+            commands=[_cmd("Skill", {"skill": "uipath-flow"}, result_status=None)],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+
+    def test_unknown_skill_call_is_not_engagement(self) -> None:
+        # A turn that crashes force-closes its open tool calls to "unknown". A Skill call
+        # that never returned a result never delivered a body — including the refusal case
+        # where the crash beat the error result to the recorder.
+        result = _check(
+            expected_skill="uipath-flow",
+            skill_name="uipath-flow",
+            commands=[_cmd("Skill", {"skill": "uipath-flow"}, result_status="unknown")],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+
+    def test_excluded_skill_call_is_not_resurrected_by_its_own_parameters(self) -> None:
+        # The Skill branch is AUTHORITATIVE for a Skill call. Without that, a call the
+        # status gate excluded would fall through to the generic path scan and be counted
+        # again the moment any of its own parameters happened to contain a
+        # `skills/<name>/`-shaped substring — reintroducing exactly the false `yes` the
+        # gate exists to remove, and breaking monotonicity (absent -> present on a call
+        # that delivered nothing).
+        result = _check(
+            expected_skill="uipath-flow",
+            skill_name="uipath-flow",
+            commands=[_cmd("Skill", {"skill": "x", "hint": "see skills/uipath-flow/SKILL.md"}, result_status="error")],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+
+    def test_failed_read_of_a_skill_path_is_not_engagement(self) -> None:
+        # A failed Read puts the path in `parameters` while loading nothing. The path
+        # reference alone is not evidence the body reached the agent.
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Read", {"file_path": "/x/.agents/skills/my-skill/SKILL.md"}, result_status="error")],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+
+    def test_pending_read_of_a_skill_path_is_not_engagement(self) -> None:
+        # Same reason as the pending Skill call: counting the in-flight Read would
+        # reintroduce the live/frozen divergence one branch over.
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Read", {"file_path": "/x/.agents/skills/my-skill/SKILL.md"}, result_status=None)],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+
+    def test_failed_bash_read_still_counts(self) -> None:
+        # `Bash` is deliberately NOT gated: `cat SKILL.md | grep foo` exits non-zero AFTER
+        # genuinely reading the file. A blanket status gate would drop real off-Claude
+        # engagement, which is the whole file-read signal.
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Bash", {"command": "cat skills/my-skill/SKILL.md | grep foo"}, result_status="error")],
+        )
+        assert result.observed_label == "yes" and result.score == 1.0
+
+    def test_unknown_read_still_counts(self) -> None:
+        # Codex reconstructs genuinely-executed calls from the rollout with status
+        # "unknown"; for a READ that is a real read, so it keeps counting. Only "error"
+        # and the in-flight None are evidence that nothing loaded.
+        result = _check(
+            expected_skill="my-skill",
+            skill_name="my-skill",
+            commands=[_cmd("Read", {"file_path": "skills/my-skill/SKILL.md"}, result_status="unknown")],
         )
         assert result.observed_label == "yes" and result.score == 1.0
 
@@ -300,6 +379,26 @@ class TestSkillTriggeredGoldenCorpus:
                 [_cmd("Read", {"file_path": "skills/uipath-admin/SKILL.md"})],
                 "yes",
                 1.0,
+            ),
+            # Appended (not edited) when engagement narrowed to RESOLVED, SUCCESSFUL
+            # signals. Historical activation P/R/F1 computed before that change is not
+            # directly comparable if any run contained these two shapes — which is what
+            # these entries exist to make explicit.
+            (
+                "errored-skill-call-with-no-other-signal",
+                "uipath-admin",
+                "uipath-admin",
+                [_cmd("Skill", {"skill": "uipath-admin"}, tool_id="s1", result_status="error")],
+                "no",
+                0.0,
+            ),
+            (
+                "failed-read-of-skill-path",
+                "uipath-admin",
+                "uipath-admin",
+                [_cmd("Read", {"file_path": "skills/uipath-admin/SKILL.md"}, result_status="error")],
+                "no",
+                0.0,
             ),
         ],
     )

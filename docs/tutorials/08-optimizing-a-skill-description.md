@@ -29,8 +29,8 @@ it actually produced — including the part where the first attempt measured not
 test rows, baseline it, read the confusion matrix, and decide whether to spend anything.
 For `lint-tasks` the answer turns out to be no — about 20 agent runs settle it. The suite
 then points at a sibling that *does* have headroom, `analyze`, and the full three-stage A/B
-runs against that: roughly 350 further runs, ending in a promotion that survives the
-test.
+runs against that: **407 further runs** — the sum of the per-stage counts in the headings
+below, three Stage C attempts included — ending in a promotion that survives the test.
 
 All of it on Sonnet. Never Opus for a suite this size.
 
@@ -68,7 +68,7 @@ Do not hand-author it. Run the sibling skill:
 /coder-eval:check-skill lint-tasks
 ```
 
-That produces a task YAML plus a JSONL row file. The suite used here has **21 rows**,
+That produces a task YAML plus a JSONL row file. The committed suite has **28 rows**,
 counted by `expected_skill` — the field that actually decides a row's polarity:
 
 | Kind | `expected_skill` | Total | train | test |
@@ -76,7 +76,18 @@ counted by `expected_skill` — the field that actually decides a row's polarity
 | Positive | `lint-tasks` | 8 | 5 | 3 |
 | Distractor | `""` | 9 | 6 | 3 |
 | Sibling-owned | `task` | 3 | 2 | 1 |
-| Sibling-owned | `analyze` | 1 | 1 | 0 |
+| Sibling-owned | `analyze` | 8 | 4 | 4 |
+
+> **The table describes the file as committed; Part 1's runs did not use it.** Part 1 was
+> run against an earlier 14-train-row revision, and the `analyze` rows were added later, in
+> Part 2, before the file was committed. Every result block on this page names the revision
+> it was computed at, which is what reconciles Step 5's `analyze` recall of 0.000 (one row,
+> unlucky) with Step 6's two `analyze` train rows sitting at a stable 0.500.
+>
+> Re-running Part 1 today gives different numbers for a second and more interesting reason:
+> the description Part 2 promotes is already committed, so a re-run measures the *improved*
+> skill. [What you get running Part 1 today](#what-you-get-running-part-1-today)
+> has the measured comparison.
 
 **Label sibling rows by what should *fire*, not by whose territory it is.** Two rows here
 ask for project setup — work that belongs to `init`, which sets
@@ -213,10 +224,11 @@ before a later sibling misfire is observable, and authoritative precision needs 
 trajectory. A stock `check-skill` suite arms nothing, so on that suite this flag changes
 nothing.
 
-**Check the resolved row count, not just the exit code.** A mistyped split (`--split holdou`)
-is reported as a skipped task and the run still **exits 0** — a green run over zero rows.
+**Check the resolved row count.** A mistyped split (`--split holdou`) now aborts the run with an
+error naming the splits that exist, so it cannot pass silently — but a *partial* row loss still
+can, and only the count shows it.
 
-Result, 14 train rows:
+Result (**14 train rows — the revision these runs used**; the committed file has 17):
 
 | Skill | recall.yes | precision.yes | f1.yes |
 | --- | --- | --- | --- |
@@ -236,13 +248,15 @@ Python code"* — the two probes designed to catch it over-claiming.
 promotion gate — `min(candidate F1) > max(incumbent F1)` — cannot be satisfied by any
 candidate. Running the three A/B stages anyway, on this suite with three candidates and two
 survivors, would have cost `(3+1)×14 + 3×(2+1)×14 + 6×7` = **224 further agent runs** to
-chase a number that is not reachable.
+chase a number that is not reachable. (Arithmetic at the 14-train / 7-test revision these
+runs used — every stage count on this page is computed at the revision that stage actually
+ran against, which is why they do not all divide the same way.)
 
 The first finding is therefore about the change that prompted this: **the 66-character trim
 was safe.** That is now measured rather than assumed.
 
 The second finding is that **a ceiling result is as much a statement about the suite as about
-the description.** Fourteen well-separated rows could not distinguish a good description from
+the description.** Those fourteen well-separated rows could not distinguish a good description from
 a better one. If you need to tell those apart, the fix is more rows and harder ones — not a
 looser gate.
 
@@ -279,7 +293,9 @@ ranges.** Had this been a candidate description rather than an incumbent's quirk
 agreeing runs would have "proved" an improvement worth shipping. Report what replicates;
 treat anything else as a hypothesis.
 
-Note what the same three runs said about `analyze`:
+Note what the same three runs said about `analyze` (still the 14-train-row revision — two
+`analyze` rows then, four in the committed file, which is why re-running today gives a
+different baseline):
 
 ```
 an-1     expected=analyze   ['analyze', 'analyze', 'analyze']
@@ -311,6 +327,53 @@ two splits, three sittings — it never missed a positive and never took a distr
 about as much as a suite this size can say, and it is enough to conclude the trim did no
 harm.
 
+### What you get running Part 1 today
+
+Every number above was measured **before** the change Part 2 ends with. Re-running Part 1
+against the committed suite therefore does *not* reproduce them, and the reason is the
+point of the whole page rather than a defect in it.
+
+Re-run, three times, on the committed 17-row train split — 51 agent runs, minutes on Sonnet:
+
+```bash
+export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  --split train -D run_limits.stop_early=false
+```
+
+| Skill | recall.yes | precision.yes | f1.yes (3 runs) |
+| --- | --- | --- | --- |
+| `lint-tasks` | 1.000 | 1.000 | **1.000, 1.000, 1.000** |
+| `analyze` | 1.000 | 1.000 | **1.000, 1.000, 1.000** |
+| `task` | 1.000 | 0.667 / 0.667 / 1.000 | 0.800, 0.800, 1.000 |
+
+`completion_rate` is 1.000 on all three; no row was excluded.
+
+Three things to read off it:
+
+- **`lint-tasks` is still at ceiling.** Part 1's finding holds on a suite 3 train rows
+  larger than the one that produced it, which is the strongest form the claim can take here.
+- **`analyze`'s headroom is gone — because Part 2 closed it.** The description this page
+  promotes is committed (`4c7481c`), so the skill a re-run measures is the *improved* one.
+  Recall on `analyze` reads 1.000 where Part 1 recorded 0.000. The suite also grew from 2
+  `analyze` train rows to 4, so both the instrument and the subject changed; what is not in
+  doubt is the direction, and that the fix shipped.
+- **`hard-3` is still unstable, at exactly the rate Step 6 measured.** The `task` sibling
+  takes that distractor in **2 of 3** runs — the same two-in-three the earlier sitting
+  found, months later and on a different revision of the suite. A single run would have
+  shown precision 1.000 or 0.667 and either would have looked like a fact.
+
+That last one is the page's own lesson arriving unprompted: the instability is a property
+of the row, not of the sitting that first caught it. It is also why the suite gate reports
+a failure on two of the three runs — `precision.yes` dips under its 0.7 floor — and why the
+honest baseline for this suite is a range, not a number.
+
+The **test** split (now 11 rows, up from 7), run once, tells the same story: `lint-tasks` 1.000 /
+1.000 / **1.000**, `analyze` likewise, and `task` at precision 0.500 on one misfire. So
+Step 7's conclusion — that `lint-tasks` holds at ceiling on rows it was never checked
+against — survives a suite half again as large, and the `task` misfire is visible on both
+halves, which is what makes it a property of the skill rather than of one split.
+
 ---
 
 ## Part 2 — A full A/B that promotes (`analyze`)
@@ -321,6 +384,11 @@ harm.
 hypothesis, phrased as a claim about specific rows: **the description never names
 regression or comparison between runs**, so requests about things getting *worse* find
 nothing to match.
+
+> As in Part 1, every number below was measured **before** the change this part ends with,
+> and for the same reason: the winner is committed, so it is the incumbent now.
+> [What you get running Part 2 today](#what-you-get-running-part-2-today) re-runs Stage A
+> against the committed suite and reports where it stops.
 
 Three candidates, one per hypothesis, each differing from the incumbent only in `analyze`'s
 frontmatter `description`, each a full seven-skill snapshot:
@@ -441,10 +509,11 @@ precision.
 One incumbent invocation dropped a row and was excluded from the gate rather than averaged
 in. A gate computed over a shifting denominator is not a gate.
 
-#### Stage C, and a test split that could not answer the question
+#### Stage C, and a test split that could not answer the question (54 runs)
 
 The winner went to test as a **two-variant** experiment at `--repeats 3`, which is the one
-place `--repeats` is correct:
+place `--repeats` is correct. This attempt ran against the **9-row** test half — before the
+two fresh rows below were written — so 2 arms × 9 rows × 3 replicates = 54 runs:
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
@@ -475,7 +544,7 @@ exercise the failure mode, at promotion time, when you know what needs confirmin
 Write them as requests a real user would send, and commit to whatever they say — rows
 authored to flatter a candidate confirm nothing.
 
-#### And then the infrastructure lied to us
+#### And then the infrastructure lied to us (66 runs)
 
 The re-run returned a result that looked publishable and was worthless:
 
@@ -483,7 +552,10 @@ The re-run returned a result that looked publishable and was worthless:
 **Paired mean diff (incumbent - a-regression)**: +0.162 [95% CI +0.011, +0.312], d = 0.72, p = 0.038
 ```
 
-Read the sign: that says the **incumbent** was better, significantly. It is an artifact.
+Read the sign: that says the **incumbent** was better, significantly. (The header subtracts
+in variant declaration order, not better-minus-worse — with `incumbent` declared first, a
+candidate win reads negative. `/coder-eval:optimize-skill`'s Stage B and Stage C state the
+full rule; never resolve a direction from memory.) It is an artifact.
 `completion_rate` gives it away — `a-regression` lost 11 of 33 rows, the incumbent 6:
 
 ```
@@ -504,7 +576,7 @@ computed over an eroded, asymmetric sample is not evidence of anything.** This i
 `completion_rate` is a gateable metric, and why the first thing to read in a rollup is the
 denominator, not the effect. The run was discarded, not interpreted.
 
-#### Stage C, run properly
+#### Stage C, run properly (66 runs)
 
 With budget restored, the same experiment ran again over the 11-row test. Erosion this
 time was one row against `a-regression` and none against the incumbent — near-symmetric, and
@@ -551,6 +623,74 @@ never measuring.
 confirmed in direction on the test split (1.000 vs 0.909), no sibling regression anywhere, and
 precision never off 1.000 in any run of either stage.
 
+### What you get running Part 2 today
+
+Re-running Stage A against the committed suite measures a **different incumbent** — the one
+this page promotes — and the answer it returns is Part 1's stop condition, arriving on the
+skill that used to be the counter-example to it.
+
+The re-run is the same shape as the original Stage A: four arms over the same 17-row train
+split, **68 agent runs**, $3.84 and 12 minutes on Sonnet. Only the arms' contents changed.
+`a-regression` won round 1 and is committed, so it *is* the incumbent; the candidate set is
+therefore fresh — two of round 1's hypotheses re-expressed against the new incumbent, plus
+one the first round had no reason to ask:
+
+| Arm | Hypothesis | chars |
+| --- | --- | --- |
+| `incumbent` | round 1's promoted `a-regression`, as committed at `4c7481c` | 269 |
+| `a-results` | users say "results" and "scores"; the description says "run" (round 1's `b-results`) | 281 |
+| `b-symptom` | lead the trigger clause with symptoms, not the operation (round 1's `c-symptom`) | 242 |
+| `c-compact` | the length is not load-bearing — same trigger tokens, 53 fewer characters | 216 |
+
+```bash
+export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round2-triage.yaml \
+  --split train -D run_limits.stop_early=false
+```
+
+| Arm | analyze recall | precision | F1 | completion | `task` precision |
+| --- | --- | --- | --- | --- | --- |
+| **incumbent** | 1.000 | 1.000 | **1.000** | 1.000 | 0.667 |
+| `c-compact` | 1.000 | 1.000 | **1.000** | 1.000 | 1.000 |
+| `a-results` | 0.750 | 1.000 | 0.857 | 1.000 | 1.000 |
+| `b-symptom` | 0.750 | 1.000 | 0.857 | 1.000 | 0.667 |
+
+`lint-tasks` held recall and precision at 1.000 in every arm, and every arm scored all 17
+rows — so unlike the original Stage A, nothing here was ranked against a shifting
+denominator.
+
+**The round stops at Stage A, and that is the result.** With the incumbent at F1 1.000,
+`min(candidate F1) > max(incumbent F1)` cannot be satisfied by anything: the best a candidate
+can do is tie. Stage B and Stage C were not run. Establishing that cost 68 runs against the
+`(3+1)×17 + 3×(2+1)×17 + 2×11×3` = **287** the full three stages would have — which is what
+Stage A is for.
+
+Three things to read off it:
+
+- **The headroom Part 2 found is closed, measured by the instrument that found it.** Part 1
+  caught `analyze` missing "what regressed" in every run; the promoted description takes all
+  four `analyze` train rows here, in the same suite, at precision 1.000. Part 1's re-run says
+  this from the other side; this says it against three live challengers.
+- **`c-compact` ties at 1.000 with 53 fewer characters, and a tie does not promote.** On F1
+  the gate is indifferent to it. It is still a real finding about a *different* budget: these
+  seven descriptions total 1,577 of the 1,600-character listing cap, and `c-compact` hands 53
+  back. Acting on that means gating on length with F1 held constant — a different comparison
+  with its own replicates, not this one's leftovers. As it stands it is a single run, which
+  is exactly the evidence Step 6 says not to ship on.
+- **One row separates every arm that differs, and it is `an-4`** — *"Compare last week's eval
+  results with this week's and tell me what got worse."* Both losing candidates drop it and
+  nothing else; all sixteen other rows are identical across all four arms. The suite's entire
+  discriminating power sits in one prompt, which is the small-suite cost Step 1 warned about
+  and the reason a 0.857 here should not be read as a candidate being meaningfully worse.
+
+And the page's own instability turned up again, in a form that settles it further. `hard-3`
+engaged `task` in the `incumbent` and `b-symptom` arms and not in `a-results` or `c-compact`
+— arms whose `task` description is **byte-identical**, since only `analyze`'s description
+varies. A difference across arms that cannot differ in the relevant text is not an effect of
+the arm. Two in four, where Part 1 measured two in three, and this time with the confound
+ruled out by construction rather than by repetition.
+
 ---
 
 ## Reference
@@ -562,7 +702,7 @@ for `analyze`, above. In summary:
 
 | Stage | What it does | Replicates |
 | --- | --- | --- |
-| **A — triage** | All candidates + incumbent, one invocation, `--split train`. Rank by F1, discard anything at or below the incumbent. Decides nothing. | one run |
+| **A — triage** | All candidates + incumbent, one invocation, `--split train`. Rank by F1, discard anything at or below the incumbent. Promotes nothing on its own — but when every candidate lands at or below, it ends the round there, which against a ceiling incumbent it always will. | one run |
 | **B — gate** | Survivors + incumbent, `--split train`, **three separate `coder-eval run` invocations**. Promote only on `min(candidate) > max(incumbent)`. | three runs |
 | **C — confirm** | Best survivor vs. incumbent only, `--split test --repeats 3`. Read the rendered `## Paired Comparison` block. | `--repeats 3` |
 
@@ -616,8 +756,22 @@ options are to rename the skill, or to measure it somewhere the collision is abs
 - **A ceiling baseline means stop.** `lint-tasks` was perfect, so the loop declined to spend
   224 runs chasing a number the gate makes unreachable. Then it found the real headroom next
   door.
+- **A tie is not a promotion — and a promoted change puts its own skill at that ceiling.**
+  Re-running Part 2's Stage A today measures the description this page shipped: F1 1.000, so
+  the best of three fresh candidates could only match it and the round ended at Stage A for
+  68 runs of the 287 all three stages would have cost. The gate is `>`, not `≥`, exactly so
+  that a coin-flip tie cannot ship a change — including one that is genuinely better on some
+  other axis, as `c-compact` is on length.
 - **Two agreeing runs are not evidence.** The `task` misfire reproduced on both splits and
-  still turned out to be 2-in-3 variance. Only replicates told the difference.
+  still turned out to be 2-in-3 variance. Only replicates told the difference — and it is
+  still 2-in-3 today, on a later revision of the suite, which is about as clean a
+  demonstration as this page could ask for that the instability belongs to the row rather
+  than to the sitting that caught it.
+- **A promoted change makes its own baseline unreproducible, and that is success.** Re-run
+  Part 1 against this repository now and `analyze` reads 1.000 where it read 0.000, because
+  the description this page promotes is committed. Numbers in a walkthrough date the moment
+  the walkthrough works; say which revision each was measured at rather than quietly
+  refreshing them.
 - **A test only confirms failure modes it contains.** The first one here was a flat tie
   because every regression-phrased row sat in the train half. Fresh rows, authored to test the
   hypothesis rather than to flatter the candidate, are the fix.
