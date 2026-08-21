@@ -506,7 +506,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.3.3" },
     { name = "defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.1" },
     { name = "google-antigravity", marker = "extra == 'antigravity'", specifier = "==0.1.7" },
-    { name = "httpx2", specifier = ">=2.12.0" },
+    { name = "httpx2", specifier = ">=2.12.0,<3.0.0" },
     { name = "jmespath", specifier = ">=1.1.0" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.28.1" },

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx2
 import pytest
 
 from coder_eval.errors import JudgeInfrastructureError
@@ -149,16 +150,14 @@ async def test_invoke_bedrock_judge_raises_on_empty_model() -> None:
 async def test_invoke_bedrock_judge_wraps_transport_error(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
 ) -> None:
-    import httpx2 as _httpx
-
     def raising_post(*a: Any, **kw: Any) -> MagicMock:
-        raise _httpx.ConnectTimeout("connection timed out")
+        raise httpx2.ConnectTimeout("connection timed out")
 
     monkeypatch.setattr(judge_bedrock.httpx2, "AsyncClient", lambda: _make_async_client(raising_post))
     with pytest.raises(JudgeInfrastructureError, match="Bedrock invoke transport error") as excinfo:
         await _invoke()
     assert "connection timed out" in str(excinfo.value)
-    assert isinstance(excinfo.value.__cause__, _httpx.ConnectTimeout)
+    assert isinstance(excinfo.value.__cause__, httpx2.ConnectTimeout)
 
 
 async def test_invoke_bedrock_judge_strips_v1_suffix_in_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,14 +214,12 @@ async def test_invoke_bedrock_judge_403_fails_immediately(
 async def test_invoke_bedrock_judge_retries_connect_error_then_succeeds(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
 ) -> None:
-    import httpx2 as _httpx
-
     calls: list[int] = []
 
     def flaky_post(*a: Any, **kw: Any) -> MagicMock:
         calls.append(1)
         if len(calls) == 1:
-            raise _httpx.ConnectError("connection refused")
+            raise httpx2.ConnectError("connection refused")
         return _make_response(status_code=200, json_data=_tool_use_response())
 
     monkeypatch.setattr(judge_bedrock.httpx2, "AsyncClient", lambda: _make_async_client(flaky_post))

@@ -41,6 +41,13 @@ async def invoke_anthropic_judge_async(
     caller can reuse ``extract_verdict_from_anthropic_response`` — Anthropic's
     native shape (content blocks with ``type: tool_use``) is identical
     between this SDK call and the Bedrock httpx2-direct call.
+
+    ``temperature`` is forwarded via ``extra_body`` rather than as a top-level
+    kwarg: anthropic 1.0.0 dropped ``temperature``/``top_p``/``top_k`` from
+    ``AsyncMessages.create``'s typed signature, but the Messages API itself
+    still accepts ``temperature`` in the raw JSON body — the same body shape
+    the Bedrock path already sends it in — so ``extra_body`` keeps both judge
+    backends honoring ``LLMJudgeCriterion.temperature`` identically.
     """
     alias = to_anthropic_alias(model)
     client = AsyncAnthropic(timeout=timeout_seconds)
@@ -51,12 +58,17 @@ async def invoke_anthropic_judge_async(
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 max_tokens=max_tokens,
-                temperature=temperature,
-                tools=[tool_spec],  # type: ignore[arg-type]
+                tools=[tool_spec],  # pyright: ignore[reportArgumentType]
                 tool_choice={"type": "tool", "name": tool_spec["name"]},
+                extra_body={"temperature": temperature},
             )
         except APIError as e:
             # The SDK already retries transient failures internally (2 attempts
             # by default) — do not add another retry loop here.
             raise JudgeInfrastructureError(f"Anthropic judge API error: {e}") from e
+        except Exception as e:
+            # A signature/contract break (e.g. a removed or renamed kwarg after an
+            # SDK bump) must not be scored as an agent failure — see CLAUDE.md's
+            # CE039 rationale: an eval-infra fault is not the agent's fault.
+            raise JudgeInfrastructureError(f"Anthropic judge call failed: {e}") from e
     return response.model_dump()
