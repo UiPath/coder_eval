@@ -480,7 +480,7 @@ def _substitute_row_in_tree(obj: Any, row: dict[str, Any]) -> Any:
 #
 # The CLI half is DERIVED from `ROW_SELECTOR_FLAGS`, never respelled: that map is the one
 # declaration of how each selector is spelled on the command line, and a `--sample-per-stratum`
-# typed again here would keep printing the retired flag after a rename while CE043 stayed green.
+# typed again here would keep printing the retired flag after a rename while CE065 stayed green.
 _STRATIFIED_CLI_CAUSE = ROW_SELECTOR_FLAGS["sample_per_stratum"]
 _STRATIFIED_YAML_CAUSE = "dataset.sample_per_stratum"
 STRATIFIED_CAUSE_PREFIXES = (_STRATIFIED_CLI_CAUSE, _STRATIFIED_YAML_CAUSE)

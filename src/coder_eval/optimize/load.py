@@ -226,7 +226,7 @@ def row_cost_levels(clusters: Sequence[list[float]]) -> list[float]:
 
     The single definition of "what a row measured", called by :func:`cost_latency_guardrails` — for
     **both** its cost and its latency clusters — and by :func:`cost_quality_points`. Two
-    implementations of it is the CE037-class defect this repo already has a lint rule for, and one
+    implementations of it is the CE062-class defect this repo already has a lint rule for, and one
     definition is what makes the agreement test between those two surfaces writable at all. Named
     for cost because that is the reduction the two surfaces have to agree about; latency rides the
     same arithmetic.

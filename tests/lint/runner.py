@@ -24,11 +24,10 @@ from tests.lint.rules.ce032_criteria_path_seam import CriteriaPathSeam
 from tests.lint.rules.ce037_no_dead_private_helper import NoDeadPrivateHelper
 from tests.lint.rules.ce038_acquire_inside_try import AcquireInsideTry
 from tests.lint.rules.ce039_config_error_escalates import ConfigErrorEscalates
-from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
-from tests.lint.rules.ce037_single_f1_implementation import SingleF1Implementation
 from tests.lint.rules.ce040_bootstrap_p_floor_seam import BootstrapPFloorSeam
 from tests.lint.rules.ce041_no_model_dict_splat import NoModelDictSplat
 from tests.lint.rules.ce042_replicate_padding_seam import ReplicatePaddingSeam
+from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
 from tests.lint.rules.ce047_no_bare_assert_in_cli import NoBareAssertInCli
 from tests.lint.rules.ce048_no_bare_model_copy_update import NoBareModelCopyUpdate
 from tests.lint.rules.ce050_escape_untrusted_markup import EscapeUntrustedMarkup
@@ -36,6 +35,7 @@ from tests.lint.rules.ce051_importfrom_rules_handle_level import ImportFromRules
 from tests.lint.rules.ce053_run_tree_readers_reconcile import RunTreeReadersReconcile
 from tests.lint.rules.ce054_result_status_single_seam import ResultStatusSingleSeam
 from tests.lint.rules.ce059_no_sibling_private_imports import NoSiblingPrivateImports
+from tests.lint.rules.ce062_single_f1_implementation import SingleF1Implementation
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore

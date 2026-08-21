@@ -482,7 +482,7 @@ class TestEveryHeadlineRungIsReachableOnBothTracks:
         inside a BRANCH is the rung being rebuilt locally. A test rather than a CE rule: two call
         sites in one file, and a rule would need a scope nothing else in the tree shares. On the AST
         rather than on text, because the chains were heavily commented and a substring scan over
-        them is the fragile shape CE039 discourages.
+        them is the fragile shape CE064 discourages.
 
         **The boundary, so a green run is not mistaken for a proof.** It matches an `ast.Assign` to a
         `Name` whose id ends in `headline`, inside an `ast.If`, in the two functions the parametrize

@@ -221,8 +221,8 @@ class TestCE035WorkflowOutputParity:
 
 
 @pytest.mark.lint
-class TestCE038NestedForbidExtras:
-    """CE038: `extra="forbid"` must reach the nested models it appears to protect.
+class TestCE063NestedForbidExtras:
+    """CE063: `extra="forbid"` must reach the nested models it appears to protect.
 
     Pydantic does NOT propagate `model_config` into nested models. A container that declares
     `extra="forbid"` therefore rejects a typo at its own top level and silently DROPS one inside
@@ -273,10 +273,10 @@ class TestCE038NestedForbidExtras:
 
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
             return [annotation]
-        if depth >= TestCE038NestedForbidExtras.MAX_ANNOTATION_DEPTH:
+        if depth >= TestCE063NestedForbidExtras.MAX_ANNOTATION_DEPTH:
             return []
         return [
-            m for arg in typing.get_args(annotation) for m in TestCE038NestedForbidExtras._nested_models(arg, depth + 1)
+            m for arg in typing.get_args(annotation) for m in TestCE063NestedForbidExtras._nested_models(arg, depth + 1)
         ]
 
     def _offenders(self) -> list[str]:
@@ -364,8 +364,8 @@ class TestCE038NestedForbidExtras:
 
 
 @pytest.mark.lint
-class TestCE043RowSelectorParity:
-    """CE043 — `run` and `plan` must declare the same row-selector flags, described identically.
+class TestCE065RowSelectorParity:
+    """CE065 — `run` and `plan` must declare the same row-selector flags, described identically.
 
     `plan` is sold as the pre-spend preview of what `run` will execute. A selector `run` has
     and `plan` lacks makes the exact invocation the user is about to pay for un-previewable —

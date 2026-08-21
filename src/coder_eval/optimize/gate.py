@@ -20,7 +20,7 @@ CLI package. The skill drives these functions from a short inline ``python`` sni
 
 **F1 is never recomputed here.** Every metric comes from
 :func:`coder_eval.criteria._classification_aggregate.classification_metrics`, the criterion layer's
-own routine (CE037), so the gate cannot disagree with the numbers the run reported.
+own routine (CE062), so the gate cannot disagree with the numbers the run reported.
 
 **Four of the constants below are WATCHED** by the estimator-change protocol
 (``tests/lint/estimator_ledger.py``), and so is :data:`FLOOR_RESOLUTION`, which moved here from the
@@ -116,7 +116,7 @@ GATE_RESAMPLES = math.ceil(2.0 / (GATE_P_PRECISION**2 * (DEFAULT_ALPHA / GATE_MA
 # At rank 1 rather than on the execution track, where it used to live: `classify_confirm` needs it
 # too, and the two rank-2 track modules may not import each other — so keeping it there would
 # have meant a second declaration of the same number on the activation side, which is the
-# CE037/CE040 defect class. It is not a property of `weighted_score` in any case: both tracks'
+# CE062/CE040 defect class. It is not a property of `weighted_score` in any case: both tracks'
 # metrics are bounded [0, 1] and reported to three decimals, so a floor nine orders below that is
 # residue on either one.
 #
@@ -133,7 +133,7 @@ def classification_metric(pairs: list[tuple[str, str]], name: str) -> float:
 
     Empty pairs and an absent metric name both read 0.0, and both conventions are declared in
     ``_classification_aggregate`` rather than here — restating either at this call site would be
-    the second declaration CE037 exists to prevent.
+    the second declaration CE062 exists to prevent.
     """
     cm = classification_metrics(pairs)
     return cm.metric(name) if cm is not None else 0.0
@@ -501,7 +501,7 @@ def note_resolution_degraded(family_size: int, n_resamples: int, alpha: float) -
 #
 # It lives HERE rather than on either track's module because both need it and the layering forbids
 # the two rank-2 modules from importing each other — so per-track would mean two copies of
-# promotion-relevant arithmetic, which is the CE037/CE040 defect class exactly.
+# promotion-relevant arithmetic, which is the CE062/CE040 defect class exactly.
 _CONFIRM_REVERSED = "reversed"
 _CONFIRM_SHRANK = "shrank"
 _CONFIRM_REPRODUCED = "reproduced"
@@ -522,7 +522,7 @@ def classify_confirm(train_effect: float | None, test_effect: float | None, test
 
     Here rather than on either track because both need it and the layering forbids the two rank-2
     modules from importing each other — so per-track would mean two copies of promotion-relevant
-    arithmetic, which is the CE037/CE040 defect class exactly.
+    arithmetic, which is the CE062/CE040 defect class exactly.
     See .claude/decisions/2026-08-20-stage-c-confirmation.md for the rest.
     """
     if train_effect is None or test_effect is None:

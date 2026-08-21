@@ -130,7 +130,7 @@ def candidate_leaks(
     ``baseline_text`` is what makes it NEWLY: content the incumbent already had is not a leak the
     candidate introduced.
 
-    Shares its primitive with CE036 rather than reimplementing it: ``LEAK_LOCATOR_FIELDS``,
+    Shares its primitive with CE061 rather than reimplementing it: ``LEAK_LOCATOR_FIELDS``,
     ``LEAK_MIN_CHARS``, ``string_leaves`` and ``graded_strings`` live in
     :mod:`coder_eval.leak_detection`. The one behavioural difference is a parameter, not a fork —
     ``graded_strings(drop_type=True)`` here, because a skill BODY discussing eval criteria names

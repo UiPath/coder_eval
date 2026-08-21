@@ -11,16 +11,16 @@ is a directory, and handed `SKILL.md` alone the preflight comes back CLEAN for a
 bundled train-row content into `scripts/` or a reference file — byte-identical to a genuinely clean
 result, which is the worst shape a preflight can have.
 
-## Why it shares its primitive with CE036 rather than reimplementing it
+## Why it shares its primitive with CE061 rather than reimplementing it
 
 `LEAK_LOCATOR_FIELDS`, `LEAK_MIN_CHARS`, `string_leaves` and `graded_strings` are ONE declaration
-with TWO consumers pointing in opposite directions: CE036 asks whether a dataset row's PROMPT
+with TWO consumers pointing in opposite directions: CE061 asks whether a dataset row's PROMPT
 contains a value a criterion grades it on; `candidate_leaks` asks whether a candidate SKILL.md newly
 contains train-row content. A second copy would agree on ordinary input and diverge exactly where
 either was written for.
 
 They differ in one behaviour, and it is a parameter rather than a fork: `graded_strings(drop_type=)`.
-CE036 keeps the discriminator — a PROMPT saying "skill_triggered" is worth flagging — while
+CE061 keeps the discriminator — a PROMPT saying "skill_triggered" is worth flagging — while
 `candidate_leaks` drops it, because a skill BODY discussing eval criteria names types legitimately.
 
 The primitive lives in its own module rather than on `optimize.gate` because a task-lint rule

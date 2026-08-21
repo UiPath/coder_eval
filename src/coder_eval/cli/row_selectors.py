@@ -2,7 +2,7 @@
 
 ``plan`` is sold as the pre-spend preview of what ``run`` will execute, so the two commands
 must offer the same selectors and describe them the same way. Both import these, which is
-what stops one surface documenting a flag differently from the other. CE043 pins the pairing.
+what stops one surface documenting a flag differently from the other. CE065 pins the pairing.
 
 **Two strings, two jobs, neither duplicated.** ``RowSelection``'s field ``description``
 documents the *recorded value* — what a reader of ``run.json`` or the schema needs. These

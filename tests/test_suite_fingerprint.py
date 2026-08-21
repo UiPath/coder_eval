@@ -10,7 +10,7 @@ require constructor arguments, so that test means authoring and maintaining fift
 would be close to circular anyway — the implementation IS "every field minus the denylist". The real
 hazards are narrower:
 
-- **Denylist integrity** — every excluded key still names a real field, with a reason (CE038's
+- **Denylist integrity** — every excluded key still names a real field, with a reason (CE063's
   stale-licence lesson).
 - **Dump-settings mutation** — the actual rot path is someone adding `exclude_none=True`,
   `exclude_defaults=True` or `exclude_unset=True` to the dump, which silently drops fields. One
@@ -225,7 +225,7 @@ class TestWhatMovesTheDigest:
     @pytest.mark.parametrize(
         ("field", "value"),
         [
-            ("reference", {"code": "def solve(): return 42"}),
+            ("reference", {"directory": "solution"}),
             ("expected_commands", 4),
             ("pre_run", [{"command": "echo setup"}]),
             ("post_run", [{"command": "echo teardown"}]),
@@ -392,7 +392,7 @@ class TestTheTwoArgumentsAreDifferentThings:
 
 
 class TestDenylistIntegrity:
-    """Every exclusion names a real field and carries a reason — CE038's stale-licence lesson."""
+    """Every exclusion names a real field and carries a reason — CE063's stale-licence lesson."""
 
     def test_every_excluded_key_is_a_real_base_criterion_field(self) -> None:
         assert stale_denylist_keys() == set(), (

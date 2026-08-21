@@ -1,14 +1,14 @@
-"""The harness's ONE reader of Typer's resolved ``OptionInfo`` — shared by CE043 and CE046.
+"""The harness's ONE reader of Typer's resolved ``OptionInfo`` — shared by CE065 and CE046.
 
-Two rules ask questions about the same declarations: CE043 asks whether ``run`` and ``plan``
+Two rules ask questions about the same declarations: CE065 asks whether ``run`` and ``plan``
 declare the row selectors identically, CE046 whether every long flag reaches
-``docs/USER_GUIDE.md``. Reading ``param_decls`` two ways is precisely the drift CE043 exists to
+``docs/USER_GUIDE.md``. Reading ``param_decls`` two ways is precisely the drift CE065 exists to
 prevent, one level up — so both read it here.
 
 **The boundary, stated so a green ``make lint`` is not mistaken for a proof.** These functions read
 ``OptionInfo.param_decls``, which holds only the flags a command declares EXPLICITLY. A flag Typer
 derives from the parameter name (``sample: int | None = typer.Option(None)`` becoming ``--sample``)
-carries no ``param_decls`` and is invisible here — the same blind spot CE043 already declares.
+carries no ``param_decls`` and is invisible here — the same blind spot CE065 already declares.
 Short flags are filtered out by construction. Nothing here inspects behaviour: a command may
 declare a flag and ignore it entirely. And a flag counts as documented wherever its name appears
 in the guide — a mention inside a fenced example satisfies it as much as a table row does.
@@ -72,7 +72,7 @@ def _documents(guide_text: str, flag: str) -> bool:
     A bare substring test cannot fail for ``--sample``, which is a prefix of the real
     ``--sample-per-stratum`` — so deleting every mention of ``--sample`` from the guide would
     leave the check green on the strength of its longer sibling. Measured: exactly the flag family
-    CE043 exists for. The trailing character must therefore not continue the flag name.
+    CE065 exists for. The trailing character must therefore not continue the flag name.
     """
     return re.search(rf"{re.escape(flag)}(?![\w-])", guide_text) is not None
 

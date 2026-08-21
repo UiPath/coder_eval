@@ -23,7 +23,7 @@ would have caught only ONE of the two sites above — the allowlist half is not 
 it is the DRIFT BETWEEN the two, not the shape of either, that changed the score. The denylist
 mirror is recorded in ``.claude/harness-candidates.md`` rather than built.
 
-This is the CE037 / CE040 / CE042 family: one declaration of a rule, enforced structurally, so
+This is the CE062 / CE040 / CE042 family: one declaration of a rule, enforced structurally, so
 a second copy cannot silently disagree with the first.
 
 **What it detects, precisely.** Under ``src/coder_eval/criteria/``, every ``Compare`` node with

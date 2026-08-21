@@ -1,14 +1,14 @@
 """Verbatim-leak detection: is a substantive string from one place present in another?
 
-One declaration, THREE consumers pointing in different directions. CE036 asks whether a dataset
+One declaration, THREE consumers pointing in different directions. CE061 asks whether a dataset
 row's PROMPT contains a value a criterion grades it on. :func:`coder_eval.optimize.search.
 candidate_leaks` asks whether a candidate ``SKILL.md`` newly contains train-row content it should
-have generalized. CE057 asks CE036's question one indirection over, of an outcome row against
+have generalized. CE057 asks CE061's question one indirection over, of an outcome row against
 its ``expectations/<row id>.json``. Same primitive; a second copy would agree on ordinary input
 and diverge exactly where either one was written for — so widening `graded_strings` or
 `string_leaves` means auditing all THREE call sites.
 
-Its own module rather than three names on ``optimize.gate``: CE036 is a rule about *task files*
+Its own module rather than three names on ``optimize.gate``: CE061 is a rule about *task files*
 and ``optimize.gate`` is the optimize loop's library, so a task-lint test importing from the
 optimize gate inverts the dependency. Same separation ``pricing.py`` and ``path_utils.py`` already
 have.
@@ -54,7 +54,7 @@ def graded_strings(criterion: BaseSuccessCriterion, *, drop_type: bool) -> list[
     grades nothing) and every :data:`LEAK_LOCATOR_FIELDS` key, flattens what is left, and keeps
     values of at least :data:`LEAK_MIN_CHARS`.
 
-    ``drop_type`` additionally removes the discriminator. CE036 leaves it in: a row PROMPT
+    ``drop_type`` additionally removes the discriminator. CE061 leaves it in: a row PROMPT
     containing ``"skill_triggered"`` is itself worth flagging. ``candidate_leaks`` drops it,
     because a skill BODY that discusses eval criteria mentions criterion type names legitimately.
     Measured against this repo: ``skill_triggered`` is the only type name either shipped suite

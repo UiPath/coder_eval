@@ -235,12 +235,12 @@ class TestCandidateLeaks:
         assert candidate_leaks("write it to .github/workflows/evals.yml", "", rows) == []
 
     def test_the_skills_own_name_does_not_flag(self) -> None:
-        # CE036's `skill_name` exemption, pointed the other way: an outcome suite names the skill
+        # CE061's `skill_name` exemption, pointed the other way: an outcome suite names the skill
         # in every row by design, and the skill's own body names itself constantly.
         #
         # The floor guard is the whole test. A name shorter than LEAK_MIN_CHARS returns [] whether
         # or not `skill_name` is exempt, so without it this passes on a rule that exempts nothing.
-        # CE036's twin carries the identical assertion for the identical reason.
+        # CE061's twin carries the identical assertion for the identical reason.
         assert len("optimize-skill") >= LEAK_MIN_CHARS, "fixture no longer exercises the floor"
         rows = [
             _leak_row("r1", [SkillTriggeredCriterion(description="d", skill_name="optimize-skill", expected_skill="")])
@@ -263,7 +263,7 @@ class TestCandidateLeaks:
 
     def test_it_takes_no_min_chars_parameter(self) -> None:
         # One value, read from the constant. A parameter would be a second declaration of a
-        # number CE036 and this function must agree on.
+        # number CE061 and this function must agree on.
         assert "min_chars" not in inspect.signature(candidate_leaks).parameters
 
 

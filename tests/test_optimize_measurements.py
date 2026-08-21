@@ -784,7 +784,7 @@ class TestLineageHeadIsPersisted:
 
     def test_it_stores_no_score(self) -> None:
         # The number to beat is DERIVED from the head's row_scores. A second declaration is a
-        # second thing that can disagree — the drift CE037/CE040 and `_floor_key` exist to prevent.
+        # second thing that can disagree — the drift CE062/CE040 and `_floor_key` exist to prevent.
         assert "lineage_score" not in RoundScores.model_fields
         assert RoundScores.model_fields["lineage_head"].annotation == (str | None)
 

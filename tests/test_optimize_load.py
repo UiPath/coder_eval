@@ -310,7 +310,7 @@ class TestOneRowCostDefinition:
         """Both surfaces print the same number, because both route through row_cost_levels.
 
         This is the test that stops a second definition of "what a row cost" from appearing — the
-        CE037-class defect this repo already added a lint rule for in the F1 direction.
+        CE062-class defect this repo already added a lint rule for in the F1 direction.
         """
         per_row = {f"r{i}": (0.8, 0.5 + 0.1 * i) for i in range(8)}
         cost_quality_arm(tmp_path, "incumbent", per_row)

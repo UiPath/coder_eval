@@ -15,7 +15,7 @@ is what makes it DECLARED: one module, whose every function has a test.
 **What it detects, precisely.** Every ``coder_eval`` module imported by a ``python`` fence in the
 given markdown file, and any that is not ``coder_eval.optimize.api``. Fences are ``ast``-parsed, so a
 module path mentioned in PROSE is not an import and a fence importing ``pathlib`` or ``subprocess``
-is not a finding — only ``coder_eval`` imports are in scope. That is the CE039 lesson: a substring
+is not a finding — only ``coder_eval`` imports are in scope. That is the CE064 lesson: a substring
 scan over a heavily-prosed markdown file reports the documentation as the defect.
 
 Not a ``BaseRule`` in ``tests/lint/runner.py``, like CE026-CE033: that runner is AST-only over ``.py``

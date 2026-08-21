@@ -14,7 +14,7 @@ from tests.lint_tests.shared import REPO_ROOT, TESTS_ROOT, _dataset_task, _norma
 #
 # `task_yamls` parses for a top-level `task_id:` and globs BOTH extensions, which is why it exists:
 # these three rules hand-rolled `rglob("*.yaml")`, so a `.yml` task was invisible to every one of
-# them — measured, a `tasks/probe.yml` whose prompt leaked a graded value produced zero CE036 cases
+# them — measured, a `tasks/probe.yml` whose prompt leaked a graded value produced zero CE061 cases
 # and a green `make lint`. CLAUDE.md calls this reader "the ONE answer to which YAML files under this
 # tree are tasks" for exactly that reason.
 _REPO_TASKS = sorted(task_yamls(REPO_ROOT / "tasks"))
@@ -148,8 +148,8 @@ class TestCE034ArmedPositiveRequiresSuccess:
 
 
 @pytest.mark.lint
-class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
-    """CE036 — a dataset row's prompt must not contain the value a criterion grades it on.
+class TestCE061RowPromptsDoNotLeakWhatTheyGrade:
+    """CE061 — a dataset row's prompt must not contain the value a criterion grades it on.
 
     This repo's own task rubric (and the `lint-tasks` skill) call a prompt that supplies its
     own answer the most common way a suite scores well while measuring nothing. `lint-tasks`
@@ -249,7 +249,7 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
         # engage; the graded thing is the engagement EVENT, which no prompt can supply —
         # and the outcome-suite pattern this plugin prescribes puts the skill name in every
         # prompt by design. Without the exemption, the first repo-committed outcome suite
-        # for a skill whose name reaches the length floor fails CE036 on its own engagement
+        # for a skill whose name reaches the length floor fails CE061 on its own engagement
         # criterion.
         from coder_eval.leak_detection import LEAK_MIN_CHARS
         from coder_eval.models import SkillTriggeredCriterion
@@ -308,8 +308,8 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
         offenders = self._offenders(task, tmp_path)
         assert len(offenders) == 1 and "permissions-boundary" in offenders[0]
 
-    def test_ce036_exemption_list_matches_claude_md(self):
-        # LEAK_LOCATOR_FIELDS is the single source; CLAUDE.md's CE036 sentence is derived.
+    def test_ce061_exemption_list_matches_claude_md(self):
+        # LEAK_LOCATOR_FIELDS is the single source; CLAUDE.md's CE061 sentence is derived.
         # Both directions, because the list already drifted once: CLAUDE.md named three of
         # the four fields the code exempted, and nothing noticed. The repo automates exactly
         # this class elsewhere (CE028 for the docs indexes, CE033 for the plugin reference).
@@ -319,18 +319,18 @@ class TestCE036RowPromptsDoNotLeakWhatTheyGrade:
 
         text = _normalized(REPO_ROOT / "CLAUDE.md")
         sentence = next((s for s in text.split(". ") if "Location fields" in s), None)
-        assert sentence is not None, "CLAUDE.md no longer states CE036's exemption list"
+        assert sentence is not None, "CLAUDE.md no longer states CE061's exemption list"
         # The PARENTHESISED list only. Reading every backticked name in the whole sentence let a
         # field the sentence ALSO mentions in its trailing clause — `skill_name` does — be deleted
         # from the exemption list with this still passing (measured).
         listed = re.search(r"Location fields \(([^)]*)\)", sentence)
-        assert listed is not None, "CLAUDE.md's CE036 sentence no longer parenthesises the list"
+        assert listed is not None, "CLAUDE.md's CE061 sentence no longer parenthesises the list"
         backticked = set(re.findall(r"`([a-z_]+)`", listed.group(1)))
         assert set(LEAK_LOCATOR_FIELDS) <= backticked, (
-            f"CLAUDE.md's CE036 sentence omits {sorted(set(LEAK_LOCATOR_FIELDS) - backticked)}"
+            f"CLAUDE.md's CE061 sentence omits {sorted(set(LEAK_LOCATOR_FIELDS) - backticked)}"
         )
         assert backticked <= set(LEAK_LOCATOR_FIELDS), (
-            f"CLAUDE.md's CE036 sentence names {sorted(backticked - set(LEAK_LOCATOR_FIELDS))} as exempt, "
+            f"CLAUDE.md's CE061 sentence names {sorted(backticked - set(LEAK_LOCATOR_FIELDS))} as exempt, "
             f"which the rule does not exempt"
         )
 
@@ -340,7 +340,7 @@ class TestCE052TemplateTasksLoad:
     """CE052 — every task YAML under `templates/` must load through the real `load_task`.
 
     A `@pytest.mark.lint` class rather than a `BaseRule`: it reasons over YAML trees and needs the
-    loader itself, not one `.py` AST at a time — the same shape as CE060/CE036.
+    loader itself, not one `.py` AST at a time — the same shape as CE060/CE061.
 
     **What it caught.** `templates/ci-outcome-fixture/evals/activation.yaml` declared
     `suite_thresholds: {recall.yes: 0.7}` with no `dataset:` block, which
@@ -447,10 +447,10 @@ class TestCE052TemplateTasksLoad:
 class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
     """CE057 — an outcome row's prompt must not contain a value its EXPECTATIONS grade it on.
 
-    CE036's blind spot, one indirection over. An outcome suite's marking scheme does not live on
+    CE061's blind spot, one indirection over. An outcome suite's marking scheme does not live on
     any criterion: the criterion is a `run_command` naming a script, and every string the row is
     actually graded on sits in `outcome-grader/expectations/<row id>.json`. So the suite whose
-    scores an optimization round spends real money on is exactly the one CE036 cannot see into.
+    scores an optimization round spends real money on is exactly the one CE061 cannot see into.
 
     A leak here is worse than an ordinary one, for the reason the whole plan exists: a prompt that
     supplies its own answer scores well whether or not the behaviour under test happened, and in an
@@ -458,16 +458,16 @@ class TestCE057OutcomePromptsDoNotLeakTheirExpectations:
     comparison downstream can reveal it.
 
     **Class-wired, not a `BaseRule`.** Its subject is a JSONL plus a directory of JSON, not one
-    `.py` AST, so it follows CE043 / CE045 / CE052 rather than `tests/lint/rules/` — and nothing is
+    `.py` AST, so it follows CE065 / CE045 / CE052 rather than `tests/lint/rules/` — and nothing is
     added to `runner.py`, whose id-uniqueness assert covers `ALL_RULES` alone. The detection body
     lives in `tests/lint/outcome_prompt_leak.py`, a shared reader beside `skip_guards.py` and
     `task_yaml_discovery.py`, so the fixtures below and the repo scan exercise the SAME code.
 
     **Boundary**, stated so a green run is not mistaken for a proof: **verbatim only**, exactly as
-    CE036. A prompt describing the graded behaviour in other words still needs a reviewer. And the
+    CE061. A prompt describing the graded behaviour in other words still needs a reviewer. And the
     spec carve-out is the whole difficulty — an outcome prompt legitimately states output paths,
     sheet names and column names, because "follow the user's spec literally" is itself graded.
-    `LEAK_LOCATOR_FIELDS` is what draws that line, shared with CE036 rather than redrawn here.
+    `LEAK_LOCATOR_FIELDS` is what draws that line, shared with CE061 rather than redrawn here.
     """
 
     REPO_ROOT: ClassVar[Path] = REPO_ROOT

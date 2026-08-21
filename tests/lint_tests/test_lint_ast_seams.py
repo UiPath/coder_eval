@@ -22,8 +22,8 @@ from tests.lint_tests.shared import (
 
 
 @pytest.mark.lint
-class TestCE037SingleF1Implementation:
-    """CE037 flags a second `2 * p * r / (p + r)` anywhere but the canonical module.
+class TestCE062SingleF1Implementation:
+    """CE062 flags a second `2 * p * r / (p + r)` anywhere but the canonical module.
 
     A second F1 implementation agrees with the first on ordinary input and diverges exactly
     where a class has no predictions — so the gate would silently disagree with the numbers
@@ -36,7 +36,7 @@ class TestCE037SingleF1Implementation:
     def _run(src: str, filepath: str = "<test>"):
         import ast
 
-        from tests.lint.rules.ce037_single_f1_implementation import SingleF1Implementation
+        from tests.lint.rules.ce062_single_f1_implementation import SingleF1Implementation
 
         return SingleF1Implementation(filepath).check(ast.parse(src))
 

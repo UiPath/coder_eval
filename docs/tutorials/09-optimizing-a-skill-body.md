@@ -408,7 +408,7 @@ whole method exists to prevent.
   fixture clearing the skill's preconditions, criteria parameterized by row, the tool policy
   pinned — all of that was sound. It was the reachability underneath it that was not.
 - **Scenarios describe the situation; the body supplies the method.** A row naming the thing it
-  scores is measuring the prompt. `CE036` now fails the build on the verbatim form.
+  scores is measuring the prompt. `CE061` now fails the build on the verbatim form.
 - **A null result is still a result — once you know which null you have.** "The candidates did
   not beat the incumbent" and "the skill never ran" look identical in the numbers and mean
   opposite things.

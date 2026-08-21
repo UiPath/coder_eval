@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from coder_eval.models import BaseSuccessCriterion, RunLimits, TaskDefinition
 
 
-# Criterion keys excluded from the digest, mapped to the REASON — CE038's reason-carrying ``EXEMPT``
+# Criterion keys excluded from the digest, mapped to the REASON — CE063's reason-carrying ``EXEMPT``
 # shape, so a stale licence cannot outlive the trade it recorded.
 #
 # **A denylist, deliberately, and this is the one place in this family where that is the safe
@@ -222,7 +222,7 @@ def stale_denylist_keys() -> set[str]:
 
     Empty in a healthy tree. It exists so the denylist can be checked against the model rather than
     against a second list: a key that stops matching a real field is a licence that has outlived the
-    trade it recorded, which is CE038's ``EXEMPT`` lesson.
+    trade it recorded, which is CE063's ``EXEMPT`` lesson.
 
     Scoped to the BASE criterion, so a deliberate exclusion of a *subclass* field would be reported
     here as stale. There is none today, and adding one should be a decision this function forces.

@@ -1,4 +1,4 @@
-"""CE039 — a prose surface's arithmetic must be CHECKED BY COMPUTING IT, not by matching text.
+"""CE064 — a prose surface's arithmetic must be CHECKED BY COMPUTING IT, not by matching text.
 
 The plugin carries ~50 prose sensors and every one of them asserts a string is **present**.
 None asserts that what it says is **true**, and two false claims shipped past all of them in a
@@ -35,7 +35,7 @@ names, and — the concrete miss — a sentence that has lost half its words. Th
 front with the arms you are actually choosing between: the emptied-body / any arm that is cheap
 because it does less…"* shipped in ``12eee85`` with an orphaned fragment mid-sentence, survived
 three commits and ~50 token sensors, and was found by a human reading it: it deleted no token, so
-no presence sensor could see it, and it carries no arithmetic, so this rule could not either. CE039
+no presence sensor could see it, and it carries no arithmetic, so this rule could not either. CE064
 checks that a table's numbers are TRUE; nothing here checks that the prose parses as English.
 
 The evaluator's whitelist **is** its dispatch: :data:`_BINARY_OPS` and :data:`_UNARY_OPS` map an
@@ -49,7 +49,7 @@ between those halves and is RETIRED, because there is no longer a parity to keep
 
 Like CE026-CE031 and CE033-CE038 this is **not** a ``BaseRule`` in ``tests/lint/runner.py`` (that
 runner is an AST walk over ``src/**/*.py``); it reasons over Markdown and is wired as
-``tests/lint_tests/test_lint_computed_claims.py::TestCE039ComputedClaims``.
+``tests/lint_tests/test_lint_computed_claims.py::TestCE064ComputedClaims``.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "plugins" / "coder-eval"
 METHOD = PLUGIN_ROOT / "reference" / "optimize-method.md"
 SKILL = PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md"
 
-# The two surfaces CE039 demands coverage of. Both are read by an agent that spends money on what
+# The two surfaces CE064 demands coverage of. Both are read by an agent that spends money on what
 # they say, and both carry arithmetic a reader budgets from.
 COVERED_SURFACES = (METHOD, SKILL)
 
@@ -124,7 +124,7 @@ def _spans(cell: str) -> list[str]:
 
 
 def arithmetic_tables(text: str) -> list[MarkdownTable]:
-    """The tables CE039 requires coverage of: any whose BODY carries an arithmetic span.
+    """The tables CE064 requires coverage of: any whose BODY carries an arithmetic span.
 
     Deliberately tight. A table of stages, tracks or file names carries no arithmetic and demanding
     a computed claim for it would make the rule noisy — which is how a coverage gate stops being
@@ -232,7 +232,7 @@ def _check_cost_table(text: str, _tmp: Path) -> list[str]:
     """The cost table, checked against INVARIANTS OF THE COST MODEL rather than a retyped copy.
 
     A mirror of the table's own formulas would only detect that someone edited it; it could never
-    detect that the table is WRONG, which is the whole point of CE039. So each invariant follows
+    detect that the table is WRONG, which is the whole point of CE064. So each invariant follows
     from what the stages actually do, and each can fail on a genuinely mistaken table.
     """
     rows = _cost_rows(text)
@@ -770,7 +770,7 @@ def evaluate_claims(tmp: Path, claims: list[ComputedClaim] | None = None) -> lis
 def uncovered_tables(surface: Path, claims: list[ComputedClaim] | None = None) -> list[str]:
     """Arithmetic-bearing tables in ``surface`` that no claim registered against it names.
 
-    The coverage rule, and what makes CE039 a sensor CLASS rather than three bespoke sensors: a new
+    The coverage rule, and what makes CE064 a sensor CLASS rather than three bespoke sensors: a new
     table carrying arithmetic fails until someone registers a claim that computes it.
 
     The map is DERIVED from ``ComputedClaim.covers`` rather than kept beside ``CLAIMS`` — a

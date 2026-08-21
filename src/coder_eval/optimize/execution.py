@@ -903,7 +903,7 @@ def execution_gate(
     The primary statistic is :func:`coder_eval.reports_stats.paired_comparison` — the reporter's
     own paired *t* over per-row ``weighted_score``, which the method file already calls this
     track's primary instrument. It is REUSED, never re-derived: a second assembly of a statistic
-    this repo owns is the CE037-class defect, and it would let the gate disagree with the
+    this repo owns is the CE062-class defect, and it would let the gate disagree with the
     ``## Paired Comparison`` block a user reads beside it.
 
     **One ``run_dir`` per candidate.** ``paired_comparison`` fires only for exactly two variants,

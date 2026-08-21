@@ -479,7 +479,7 @@ with the two `action.yml` items above — one considered change to the action's 
   per case. A narrower option is to fail only when a CLI *selector* (`--split`, `--tags`)
   eliminated everything, since that is unambiguously a user error rather than repo state.
 
-- [ ] **Semantic answer-leak in a task prompt** — a prompt that describes the graded behaviour in *different words* ("list the paths explicitly rather than with a recursive wildcard" while grading an explicit glob) scores well whether or not the behaviour happened, and in an A/B an arm that deleted the rule still passes. CE036 catches only the verbatim form; the semantic form needs an LLM judge or a `lint-tasks` pass over this repo's own `tasks/`, neither of which is cheap or deterministic. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md, where 4 of 10 rows in a shipped worked example had it.
+- [ ] **Semantic answer-leak in a task prompt** — a prompt that describes the graded behaviour in *different words* ("list the paths explicitly rather than with a recursive wildcard" while grading an explicit glob) scores well whether or not the behaviour happened, and in an A/B an arm that deleted the rule still passes. CE061 catches only the verbatim form; the semantic form needs an LLM judge or a `lint-tasks` pass over this repo's own `tasks/`, neither of which is cheap or deterministic. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md, where 4 of 10 rows in a shipped worked example had it.
 - [ ] **A doc claim that contradicts merge semantics** — `optimize-skill` told users to declare `allowed_tools` in an experiment's `defaults: agent:`, which is a silent no-op because those fields merge by `replace` and the task layer outranks experiment defaults. Detecting "this prose recommends a config location that the merge order makes ineffective" would need the rule to model the layer stack against prose, which no existing rule shape supports. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md.
 - [x] **`_normalized()` not used by every prose sensor** — CLOSED: all 9 sites converted, and `test_no_sensor_inlines_the_normalization_idiom` now forbids the raw form. Original note: — 8 sensors in `tests/test_custom_lint.py` still inline `" ".join(path.read_text().split())`, so a future one copied from the wrong neighbour is defeated by a line wrap (the bug that let a stale skill count ship past 91 green tests). A rule forbidding the raw idiom in that file is easy; the conversion sweep was out of scope. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md.
 
@@ -492,8 +492,8 @@ with the two `action.yml` items above — one considered change to the action's 
       from one run dir" (it can) and a halving cost saving that was arithmetically a premium. Only
       `test_optimize_skill_snippet_names_the_public_gate_api` checks a claim against the code, and
       each such sensor is bespoke — there is no general form. — caught in the optimize-skill gate
-      corrections review, 2026-08-13.~~ **CLOSED 2026-08-14 by CE039** (`tests/lint/computed_claims.py`
-      + `tests/lint_tests/test_lint_computed_claims.py::TestCE039ComputedClaims`). The general form is a `ComputedClaim`
+      corrections review, 2026-08-13.~~ **CLOSED 2026-08-14 by CE064** (`tests/lint/computed_claims.py`
+      + `tests/lint_tests/test_lint_computed_claims.py::TestCE064ComputedClaims`). The general form is a `ComputedClaim`
       registry whose entries *compute* the claim, plus the coverage rule that makes it a class
       rather than N bespoke sensors: an arithmetic-bearing table in the two optimize surfaces that
       no registered claim names **fails**. Three claims shipped with it — `cost-table` (asserts
@@ -523,9 +523,9 @@ with the two `action.yml` items above — one considered change to the action's 
       have sensors forbidding rendered CONSTANTS (`MATERIALITY_FLOOR`, `GATE_RESAMPLES`,
       `DEFAULT_ALPHA`), but nothing stops a closed form being retyped into a paragraph — and one
       was, with a wrong factor, in the same change (`2*(1-R/M)^M` and its limit). It is the
-      CE037/CE040 class one level up, in prose. A narrow `^M`-shaped detector is cheap but would
+      CE062/CE040 class one level up, in prose. A narrow `^M`-shaped detector is cheap but would
       claim more generality than it has; defining "a formula" precisely enough to gate on is the
-      part that is not cheap. CE039 does not reach it: that rule covers arithmetic-bearing
+      part that is not cheap. CE064 does not reach it: that rule covers arithmetic-bearing
       TABLES, and this was a sentence. — caught in the same review.
 - [ ] A helper that takes caller-supplied keys must not index its own mappings directly.
       `cost_latency_guardrails` did `rows[rid]`, which was safe while its only caller passed the
@@ -545,7 +545,7 @@ with the two `action.yml` items above — one considered change to the action's 
 - [ ] A prose surface's claim about a NUMERIC CONSTANT in the code must be checked by reading the
       constant. `SKILL.md` shipped "`failed_samples[]` is capped, so it will not hand you fifteen"
       while `_FAILED_SAMPLE_LIMIT = 20` — the cap is *larger* than the number the sentence budgets
-      against, so the stated consequence was the reverse of the real one. CE039 cannot reach it:
+      against, so the stated consequence was the reverse of the real one. CE064 cannot reach it:
       that rule covers arithmetic-bearing TABLES, and this was a sentence naming a bare number.
       A `ComputedClaim` could bind this one instance, but the general rule ("every number in these
       surfaces that shadows a constant is derived from it") needs a way to know WHICH constant a
@@ -554,10 +554,10 @@ with the two `action.yml` items above — one considered change to the action's 
 - [ ] The exempt-locator list is criterion-agnostic and is now read by a second consumer pointing
       the other way. `LEAK_LOCATOR_FIELDS` omits `llm_judge.files` / `agent_judge.files`,
       `cli_called.log` and `uipath_eval.eval_set`, all locators by the module's own definition.
-      For CE036 that is pre-existing scope; for `candidate_leaks` it is a NEW false-positive
+      For CE061 that is pre-existing scope; for `candidate_leaks` it is a NEW false-positive
       channel in a checker whose whole design rationale is not firing more than it has to (a body
       that names its own output path gets flagged). Not done here because widening the list also
-      weakens the shipped CE036 rule and changes its derived CLAUDE.md sentence — a separate
+      weakens the shipped CE061 rule and changes its derived CLAUDE.md sentence — a separate
       decision, not a refactor. The mechanical half is easy: derive the list from every criterion
       field whose name matches a locator vocabulary, and fail when a criterion grows a
       location-shaped field nobody classified. — caught in the same review.
@@ -618,7 +618,7 @@ with the two `action.yml` items above — one considered change to the action's 
       watched now; the class is not closed. Both watch lists have anti-rename parity tests (a renamed constant
       or a moved fixture directory would make the job match nothing and pass silently), but a
       newly introduced resample count, alpha or tolerance is unwatched by default, and deleting a
-      tuple entry passes both `make test` and the job. CE039 solved exactly this rot for prose
+      tuple entry passes both `make test` and the job. CE064 solved exactly this rot for prose
       tables with a COVERAGE check — a table no claim names is a failure — and the same shape
       belongs here: "a module-level constant that looks statistical and is not watched is a
       failure". Not built with the protocol because "looks statistical" needs a design pass (a
@@ -691,7 +691,7 @@ with the two `action.yml` items above — one considered change to the action's 
       scans module source for banned tokens (`import typer`, `coder_eval.cli`, …); the new
       `reports_optimize.py` tripped it by *documenting* that it imports no such module. The instance
       was fixed by rewording (and saying why in the docstring), but the class is live for every
-      substring-scanning sensor in `tests/test_custom_lint.py` — the same fragility CE039 exists to
+      substring-scanning sensor in `tests/test_custom_lint.py` — the same fragility CE064 exists to
       discourage for arithmetic claims. A real guard means parsing rather than scanning: check
       `ast.Import`/`ast.ImportFrom` nodes instead of text, which is a sweep of every such sensor and
       a decision about the ones that legitimately scan prose. — caught in the optimize-gate
@@ -1043,10 +1043,10 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
       schema check only — it does not read the dataset file" since before the dataset preview
       landed, which was already false. Both were fixed by hand, twice, by reading. A rule would
       have to compare a docstring's claims with a command's behaviour, which is not mechanically
-      decidable; the tractable subset is a sensor per claim, on the CE039 `ComputedClaim` model.
+      decidable; the tractable subset is a sensor per claim, on the CE064 `ComputedClaim` model.
       — caught in the 2026-08-17 outcome-suite-mode plan, Phase 1 and final reviews.
 
-- [ ] **Nothing checks that a CE039 `ComputedClaim` still fails on a MUTATED table.** The
+- [ ] **Nothing checks that a CE064 `ComputedClaim` still fails on a MUTATED table.** The
       `headroom-ceiling` claim shipped able to pass over a table trimmed to a single row: every
       remaining cell recomputed correctly, so the check returned `[]` while the table said the
       opposite of what the claim exists to assert (deleting the one non-gap rule leaves "three of
@@ -1200,7 +1200,7 @@ log in `c/2026-08-16-optimize-public-skill-blog.md`. Findings 1, 2 and 4 are def
 - [ ] **One rendered fact derived TWICE in a block by independent expressions.** `facts.family_size`
       in the note ladder and `len(family)` in the trailing note: making them disagree passed the
       whole suite until a test was written for the one state where they differ (a family with an
-      unmeasured member). This is CE037/CE040's shape one level up — two DERIVATIONS of one number
+      unmeasured member). This is CE062/CE040's shape one level up — two DERIVATIONS of one number
       rather than two spellings of one formula — and the hard part is that neither expression is
       wrong in isolation. — caught in the same plan.
 

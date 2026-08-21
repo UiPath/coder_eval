@@ -278,7 +278,7 @@ class TestTheTutorialsAndGuides(PluginArtifactsBase):
         """`plan`'s flag table must name every selector the model declares.
 
         Derived from `ROW_SELECTOR_FLAGS` rather than a hand-typed list, so a fourth selector is
-        covered here automatically — the same reason CE043 reads the mapping instead of restating
+        covered here automatically — the same reason CE065 reads the mapping instead of restating
         it. This is the cheap, targeted half of a general "every long flag has a USER_GUIDE
         section" rule; it deliberately checks the `plan` section only, because that is the surface
         this pairing exists to keep honest. The table already lacked `--split` before the

@@ -583,7 +583,7 @@ def test_example_yaml_loads_via_pydantic() -> None:
 
 
 class TestClassificationMetricsExtraction:
-    """`classification_metrics()` is the single F1 implementation (CE037), and extracting it
+    """`classification_metrics()` is the single F1 implementation (CE062), and extracting it
     out of `overlay_classification_metrics` must not have moved a single number."""
 
     # Captured by running the PRE-extraction implementation against the fixture below. This

@@ -428,9 +428,9 @@ class TestCE046CliFlagsAreDocumented:
     **Boundary**, stated so a green run is not mistaken for a proof:
 
     - it pins DOCUMENTATION, never behaviour — a flag can be documented and do nothing;
-    - short flags (`-j`, `-e`) are out of scope by construction, matching CE043;
+    - short flags (`-j`, `-e`) are out of scope by construction, matching CE065;
     - a flag Typer DERIVES from the parameter name carries no `param_decls` and is invisible to
-      it — the same blind spot CE043 declares, stated on `tests/lint/cli_flags.py`;
+      it — the same blind spot CE065 declares, stated on `tests/lint/cli_flags.py`;
     - "documented" means the name appears anywhere in the guide, including inside a fenced
       example — the failure message names the flag table because that is where a row BELONGS,
       not because the check can tell one from the other.

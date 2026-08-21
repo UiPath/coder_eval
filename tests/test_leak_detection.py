@@ -1,6 +1,6 @@
 """Unit tests for the shared verbatim-leak primitive (`coder_eval.leak_detection`).
 
-The primitive has two consumers pointing in opposite directions — CE036 over a dataset row's
+The primitive has two consumers pointing in opposite directions — CE061 over a dataset row's
 prompt, `optimize.search.candidate_leaks` over a candidate skill body — so these tests exercise the
 extraction ITSELF rather than either containment direction. The one behavioural difference between
 the consumers is `drop_type`, and it gets its own test.
@@ -25,7 +25,7 @@ from coder_eval.models import (
 _CARRIERS: dict[str, BaseSuccessCriterion] = {
     "path": FileCheckCriterion(description="d", path="out.yml"),
     "command": RunCommandCriterion(description="d", command="echo hi"),
-    "agent_file": ReferenceComparisonCriterion(description="d", agent_file="agent.py"),
+    "agent_file": ReferenceComparisonCriterion(description="d", agent_file="agent.py", reference_file="solution.py"),
     "skill_name": SkillTriggeredCriterion(description="d", skill_name="my-skill", expected_skill=""),
 }
 
@@ -77,7 +77,7 @@ class TestGradedStrings:
         while protecting nothing, and it reads to a maintainer as though some criterion has it.
 
         Pinned as a SET rather than asserted empty, because `file_path` is dead today and removing
-        it changes CE036's shipped exemption list plus its derived CLAUDE.md sentence — a separate
+        it changes CE061's shipped exemption list plus its derived CLAUDE.md sentence — a separate
         decision from this module's extraction. This fails if a new dead entry appears, or if a
         criterion grows `file_path` and the pin stops being true.
         """
@@ -103,7 +103,7 @@ class TestDropType:
         return SkillTriggeredCriterion(description="d", skill_name="my-skill", expected_skill="")
 
     def test_false_retains_the_discriminator(self) -> None:
-        # CE036's setting: a row PROMPT containing "skill_triggered" is itself worth flagging.
+        # CE061's setting: a row PROMPT containing "skill_triggered" is itself worth flagging.
         assert "skill_triggered" in graded_strings(self._criterion(), drop_type=False)
 
     def test_true_omits_the_discriminator(self) -> None:

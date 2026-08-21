@@ -245,7 +245,7 @@ class TestTheVerdictCopySeamWritesOnlyDeclaredFields:
     `model_copy(update=)` lands in `__dict__` and is never serialized, so
     `set(model_dump()) == set(model_fields)` is true **even when the defect is present** — and
     `model_extra` is `None`, because that is only populated under `extra="allow"`. A sensor built
-    on either would assert something that cannot be false, which is the CE039 failure mode this
+    on either would assert something that cannot be false, which is the CE064 failure mode this
     repo already has a rule class for.
     """
 
@@ -384,7 +384,7 @@ def _coder_eval_imports(module: str, *, inside_type_checking: bool | None = None
     """`coder_eval` imports in a module, keyed by module path.
 
     AST-based, not a substring scan: these modules are heavily docstringed and a raw-text check
-    over them is exactly the fragile presence sensor CE039 exists to discourage.
+    over them is exactly the fragile presence sensor CE064 exists to discourage.
 
     ``inside_type_checking`` filters to imports inside (True) or outside (False) an
     ``if TYPE_CHECKING:`` body; ``None`` takes both.
@@ -1632,7 +1632,7 @@ class TestTheSharedFieldsAreDeclaredOnce:
     14 of the 18 carried different `description` text and four differed in required-ness. A
     re-declaration is now a licensed exception recorded in `_FIELD_OVERRIDES`, and this class
     asserts BOTH directions of that licence — an unrecorded override fails, and a recorded one that
-    no longer differs from the base fails too. That second half is the CE038 `EXEMPT` pattern: a
+    no longer differs from the base fails too. That second half is the CE063 `EXEMPT` pattern: a
     stale licence must not outlive the trade it recorded.
     """
 

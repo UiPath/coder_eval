@@ -901,7 +901,7 @@ you can undo rather than something you have to re-derive.
 
 A candidate that reproduces a train row's graded content verbatim scores well on that row whether
 or not the behaviour under test happened, and it teaches the skill nothing. It is the same defect
-CE036 catches in a task file, pointed the other way, and it is static — no runs, so read it here
+CE061 catches in a task file, pointed the other way, and it is static — no runs, so read it here
 rather than after a stage:
 
 ```python
@@ -942,7 +942,7 @@ candidate, which is why `proposal-prompt.md` puts the rule on the *proposer* as 
 **A hit is a reason to rewrite the candidate, not to abandon it.** Replace the span with a
 synthetic placeholder, or generalize it to the *category* of request it belongs to — the same rule
 `proposal-prompt.md` states about wording. And a clean result is not a proof: this catches the
-**verbatim** form only, exactly as CE036 does. A candidate that describes a train row's graded
+**verbatim** form only, exactly as CE061 does. A candidate that describes a train row's graded
 content in other words is a semantic leak, and that still needs you to read it.
 
 This is a different question from Stage A's `#### Check the corpus before shortlisting`, which asks

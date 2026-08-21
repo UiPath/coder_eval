@@ -10,8 +10,8 @@ from tests.lint_tests.shared import REPO_ROOT
 
 
 @pytest.mark.lint
-class TestCE039ComputedClaims:
-    """CE039: a prose surface's arithmetic must be checked by COMPUTING it, not by matching text.
+class TestCE064ComputedClaims:
+    """CE064: a prose surface's arithmetic must be checked by COMPUTING it, not by matching text.
 
     Every other prose sensor in this file asserts a string is PRESENT. None asserts that what it
     says is TRUE — and two false claims shipped past all of them in one change: "the statistic
@@ -592,7 +592,7 @@ class TestEstimatorLedger:
     def test_the_documented_watch_list_matches_the_code(self) -> None:
         """`docs/REPORT_SCHEMA.md` enumerates the watched constants; that list is derived here.
 
-        Two surfaces spelling one set is the drift CE036/`LEAK_LOCATOR_FIELDS` already needed a
+        Two surfaces spelling one set is the drift CE061/`LEAK_LOCATOR_FIELDS` already needed a
         two-way test for. Adding a constant to `WATCHED_CONSTANTS` without documenting it leaves a
         consumer reading a boundary the job no longer has.
         """

@@ -37,7 +37,7 @@ class ClassificationMetrics(NamedTuple):
         Consumers must call this rather than ``.metrics[name]`` or ``.metrics.get(name, 0.0)``:
         the 0.0 convention is owned by this module, and a default spelled at the call site is a
         second declaration of it that can drift. This particular rule is a convention, enforced
-        by review — CE037 guards the *arithmetic* next door, not this accessor.
+        by review — CE062 guards the *arithmetic* next door, not this accessor.
         """
         return self.metrics.get(name, 0.0)
 
@@ -45,7 +45,7 @@ class ClassificationMetrics(NamedTuple):
 def classification_metrics(pairs: list[tuple[str, str]]) -> ClassificationMetrics | None:
     """Accuracy / per-label precision, recall, F1 / micro + macro + weighted F1 / confusion.
 
-    **The single implementation of that arithmetic in this package** — CE037 fails the build on
+    **The single implementation of that arithmetic in this package** — CE062 fails the build on
     a second one anywhere under ``src/coder_eval/``. A consumer that re-derives F1 from the
     confusion counts inherits a div-by-zero convention that can drift from this one, and would
     then disagree with the gate the run itself applied.

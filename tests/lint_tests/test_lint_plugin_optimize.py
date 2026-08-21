@@ -876,7 +876,7 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
         #
         # DEFAULT_ALPHA rides the same sensor rather than a third near-identical one. The sizing
         # table put it at risk: it needs the Holm threshold in a cell, and the honest way to write
-        # that is `alpha/S` bound to the constant by the CE039 claim — not a retyped `0.05/5`.
+        # that is `alpha/S` bound to the constant by the CE064 claim — not a retyped `0.05/5`.
         from coder_eval.optimize.gate import GATE_RESAMPLES
         from coder_eval.reports_stats import DEFAULT_ALPHA
 
@@ -891,7 +891,7 @@ class TestTheOptimizeSkillSurfaces(PluginArtifactsBase):
             assert not present, (
                 f"{name} quotes {present} — the rendered value of "
                 + "; ".join(forbidden[f] for f in present)
-                + ". Write the symbol (`alpha`) and let the block or the CE039 claim bind it; the "
+                + ". Write the symbol (`alpha`) and let the block or the CE064 claim bind it; the "
                 + "rendered verdict reports the values it actually used."
             )
 
@@ -1050,7 +1050,7 @@ class TestCE066SkillImportsOnlyTheApi:
         assert find_foreign_imports(markdown) == [], why
 
     def test_a_module_path_in_prose_outside_any_fence_is_not_an_import(self, tmp_path):
-        # The CE039 lesson: a substring scan over a heavily-prosed file reports the documentation.
+        # The CE064 lesson: a substring scan over a heavily-prosed file reports the documentation.
         from tests.lint.skill_api_imports import find_foreign_imports
 
         markdown = tmp_path / "s.md"

@@ -1,4 +1,4 @@
-"""CE037: F1 may be computed in exactly one place — ``criteria/_classification_aggregate.py``.
+"""CE062: F1 may be computed in exactly one place — ``criteria/_classification_aggregate.py``.
 
 ``classification_metrics()`` owns the harmonic-mean arithmetic *and its div-by-zero
 convention* (precision / recall / F1 are ``0.0``, never ``NaN``, when the denominator is 0;
@@ -25,7 +25,7 @@ it further than it goes: algebraically equivalent rewrites (``tp / (tp + 0.5 * (
 copy-paste, which is the way a second implementation actually arrives; it is not a proof that
 no other code computes F1.
 
-Add ``# noqa: CE037`` on the offending line only if a module genuinely must compute its own
+Add ``# noqa: CE062`` on the offending line only if a module genuinely must compute its own
 (and say why) — the intended fix is to call ``classification_metrics``. A legitimate harmonic
 mean of two non-classification quantities is the other reason to suppress.
 """
@@ -76,7 +76,7 @@ def _sum_keys(node: ast.expr) -> set[str] | None:
 
 
 class SingleF1Implementation(BaseRule):
-    id = "CE037"
+    id = "CE062"
 
     def __init__(self, filepath: str) -> None:
         super().__init__(filepath)

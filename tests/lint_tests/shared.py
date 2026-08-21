@@ -361,7 +361,7 @@ def _assert_outcome_suite_shape(
        ``--split test`` silently re-run the train rows.
     2. **Split counts** as declared, checked through ``expand_dataset(..., split=...)``. The same
        question is answerable from a shell — ``coder-eval plan <suite> --split test`` has printed
-       the selected count since CE043, and ``/coder-eval:task``'s step 6 requires an author to run
+       the selected count since CE065, and ``/coder-eval:task``'s step 6 requires an author to run
        both splits — but a shell command is not a regression test, so the counts are pinned here
        against the real expander.
     3. **No surviving ``${row.`` anywhere** in the prompt or the expanded criteria —
@@ -634,9 +634,9 @@ def _record_fields_referenced(block: str) -> set[str]:
 
 
 def _dataset_task(rows: list[dict], *, prompt: str = "${row.id}", criteria=None, split_field: str = "split"):
-    """A minimal dataset-backed task over inline rows, for the CE060/CE036 fixtures.
+    """A minimal dataset-backed task over inline rows, for the CE060/CE061 fixtures.
 
-    One builder for both rules: CE060 needs varying rows, CE036 varying prompts AND
+    One builder for both rules: CE060 needs varying rows, CE061 varying prompts AND
     criteria, and a per-class copy would fork the moment either grew a parameter.
     Inline ``rows`` deliberately — no JSONL file, so the fixtures never touch disk.
     """

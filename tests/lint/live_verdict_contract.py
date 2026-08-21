@@ -66,7 +66,7 @@ the flip).
 Like CE025/CE030, this is intentionally NOT a ``BaseRule`` registered in
 ``tests/lint/runner.py`` (that runner is AST-only, one ``.py`` file at a time); it
 reasons over the criteria registry and executes checkers, and is wired as
-``tests/test_custom_lint.py::TestCE036LiveVerdictContract``.
+``tests/lint_tests/test_lint_ast_rules.py::TestCE036LiveVerdictContract``.
 """
 
 from __future__ import annotations

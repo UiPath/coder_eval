@@ -1,14 +1,14 @@
 """CE057's reader — does an outcome row's prompt contain a value its EXPECTATIONS grade it on?
 
-CE036 asks this of a criterion's own fields. It cannot see an outcome suite's real marking scheme,
+CE061 asks this of a criterion's own fields. It cannot see an outcome suite's real marking scheme,
 because that lives in a directory of JSON beside the suite (`outcome-grader/expectations/<row>.json`)
 which no criterion carries: the criterion is a `run_command` naming a script, and every string it
 grades on is one indirection away. So the suite that most needs the check is precisely the one
-CE036 is blind to.
+CE061 is blind to.
 
 A shared reader under ``tests/lint/`` rather than a numbered rule module, on the
 ``leak_detection.py`` / ``markdown_tables.py`` / ``task_yaml_discovery.py`` precedent — the rule
-itself is a ``@pytest.mark.lint`` class in ``tests/test_custom_lint.py`` (CE043 / CE045 / CE052's
+itself is a ``@pytest.mark.lint`` class in ``tests/test_custom_lint.py`` (CE065 / CE045 / CE052's
 shape), because its subject is a JSONL plus a directory of JSON rather than one ``.py`` AST, and
 ``tests/lint/rules/`` holds ``BaseRule`` modules only.
 
@@ -17,7 +17,7 @@ shape), because its subject is a JSONL plus a directory of JSON rather than one 
 opposite directions; this is the third. A second copy would agree on ordinary input and diverge
 exactly where one of them was written for.
 
-**The boundary, so a green run is not mistaken for a proof.** Like CE036 this catches the
+**The boundary, so a green run is not mistaken for a proof.** Like CE061 this catches the
 **verbatim** form only: the prompt literally contains a string the expectations assert. A prompt
 that describes the graded behaviour in other words still needs a reviewer. And the spec carve-out
 is the whole difficulty here — an outcome prompt legitimately states output paths, sheet names and

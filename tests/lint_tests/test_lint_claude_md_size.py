@@ -10,7 +10,7 @@ One number, in one place, so the next essay is a visible decision rather than a 
 an equality — shrinking further is always allowed.
 
 **What it does NOT check** is that the content is right. The derived sentences are guarded where they
-are derived: CE036's exemption list by `test_ce036_exemption_list_matches_claude_md`, every skill's
+are derived: CE061's exemption list by `test_ce061_exemption_list_matches_claude_md`, every skill's
 presence by `test_skill_docs_surfaces_list_every_skill`, the stated skill count by
 `test_skill_docs_surfaces_state_the_right_count`, and the docs-index tables by CE028. This only
 bounds the size.
@@ -47,7 +47,7 @@ def test_no_single_line_dominates_the_file() -> None:
 
     One line held 37% of the file, and a size ceiling can be satisfied while that stays true. A long
     line is also the shape that HIDES a derived sentence: nobody diffs a 33,000-character line, which
-    is how CE036's exemption list drifted from the code inside one.
+    is how CE061's exemption list drifted from the code inside one.
     """
     lines = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
     worst = max(lines, key=len)

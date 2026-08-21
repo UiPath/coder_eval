@@ -86,7 +86,7 @@ def _failed_names(*check_lists: Sequence[GuardrailCheck]) -> list[str]:
 
     One function rather than a comprehension in each verdict's ``failed_vetoes`` property, because
     two copies would put the polarity — ``not check.passed`` — in two places. That is the same shape
-    CE037 and CE040 police for duplicated arithmetic: two spellings agree today and diverge the
+    CE062 and CE040 police for duplicated arithmetic: two spellings agree today and diverge the
     moment either is touched, silently, because both remain plausible. The properties reduce to a
     field selection over this.
 
@@ -496,7 +496,7 @@ class ExecutionGateVerdict(GateVerdictBase):
 #
 # Read by `tests/test_optimize_layering.py`, which asserts BOTH directions: no subclass may
 # re-declare a base field absent from here, and every entry here must genuinely differ from the
-# base — in default, in description, or both. That second half is the CE038 `EXEMPT` pattern: a
+# base — in default, in description, or both. That second half is the CE063 `EXEMPT` pattern: a
 # stale licence must not outlive the trade it recorded.
 _FIELD_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("mean_diff", "optional here: the execution gate can return before any statistic exists"),

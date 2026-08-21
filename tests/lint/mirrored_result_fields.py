@@ -20,7 +20,7 @@ followed here exactly — the detection body is this shared reader beside ``skip
 ``BaseRule`` modules) and ``runner.py`` is untouched, since its id-uniqueness assert covers
 ``ALL_RULES`` alone.
 
-The model side is read by **runtime introspection** of ``CriterionResult.model_fields`` — the CE038
+The model side is read by **runtime introspection** of ``CriterionResult.model_fields`` — the CE063
 precedent, because the question is about resolved field metadata rather than source shape — and the
 checker side by an AST scan.
 
