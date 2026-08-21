@@ -5,10 +5,10 @@
 # One row per prompt; each row is scored on whether the agent engaged the skill.
 # Positive rows set expected_skill to the skill's name, distractor rows set "".
 #
-# Rows also carry a `split` — `tune` or `holdout`. `/coder-eval:optimize-skill`
-# proposes description rewrites against `tune` and confirms the winner on `holdout`,
+# Rows also carry a `split` — `train` or `test`. `/coder-eval:optimize-skill`
+# proposes description rewrites against `train` and confirms the winner on `test`,
 # so an improvement has to survive rows it was not fitted to. Select one with
-# `coder-eval run <this file> --split tune`; with no --split every row runs.
+# `coder-eval run <this file> --split train`; with no --split every row runs.
 #
 # A split HALVES each side, so it multiplies the sizing rule: a suite you intend to
 # optimize wants 16-24 of each polarity, not the 8-12 a one-shot check aims for.
@@ -46,7 +46,7 @@ agent:
 dataset:
   paths:
     - "activation-rows.jsonl"
-  # Row field naming each row's split. `coder-eval run --split tune` keeps only
+  # Row field naming each row's split. `coder-eval run --split train` keeps only
   # matching rows, and filters before any sampling so the selection is predictable.
   split_field: "split"
 

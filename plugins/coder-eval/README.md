@@ -27,7 +27,7 @@ once:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-You do not have to do this in advance. `init`, `task` and `check-skill` check
+You do not have to do this in advance. `init`, `task`, `check-skill` and `optimize-skill` check
 `coder-eval --version` before doing any work and, if it is missing, **offer to install it and
 ask first** — they never install unprompted, and they verify it worked before continuing.
 Running a suite also needs credentials for whichever agent the tasks use (e.g.
@@ -40,7 +40,7 @@ nor credentials — it only reads files.
 | --- | --- |
 | `/coder-eval:init` | Scans the repo for what is worth evaluating (skills, an MCP server, a CLI), then scaffolds a task directory with one real task. |
 | `/coder-eval:check-skill` | Generates and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
-| `/coder-eval:optimize-skill` | Turns that suite's confusion matrix into candidate description rewrites, A/B tests them as experiment variants, and promotes only what survives a held-out split. |
+| `/coder-eval:optimize-skill` | A/B tests candidate edits to a skill — its **description** (does it fire?) or its **body** (having fired, does it do the job?) — as experiment variants, promoting only what beats run-to-run noise and survives a held-out split. |
 | `/coder-eval:task` | Turns a natural-language description into a task YAML with the right success criteria. |
 | `/coder-eval:lint-tasks` | Reviews task YAML you already have and reports criteria that cannot fail, prompts that give away the answer, and fixtures with no cleanup. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and reports systemic failure patterns, per-task findings, and concrete fixes. |
@@ -64,7 +64,9 @@ real money across several rounds of runs. `check-skill`, `task`, `lint-tasks`, a
   *inside* a run directory.
 - `repo-layout.md` — how every skill finds *where* your eval tree is: discovered by
   content (`task_id:` files, `run.json`), never assumed to be `tasks/` and `runs/`.
-- `templates/` — the canonical activation suite `check-skill` copies into your repo.
+- `templates/` — the two canonical suites the skills copy into your repo: the activation
+  suite `check-skill` writes, and the outcome suite `optimize-skill`'s execution track
+  starts from.
 
 ## Links
 

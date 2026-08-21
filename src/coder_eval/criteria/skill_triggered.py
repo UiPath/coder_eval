@@ -63,9 +63,28 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """
     names: set[str] = set()
     if cmd.tool_name == "Skill":
-        skill = cmd.parameters.get("skill", "")
-        if isinstance(skill, str) and skill:
-            names.add(skill.split(":")[-1])
+        # An ERRORED Skill call is not engagement. The most important case is a skill
+        # carrying ``disable-model-invocation: true``: the tool refuses it outright
+        # ("cannot be used with Skill tool due to disable-model-invocation"), the body is
+        # never loaded, and the agent proceeds on its own prior knowledge. Counting the
+        # attempt would report `yes` for a run in which the skill did not participate at
+        # all — and because the agent still produces plausible output, nothing downstream
+        # looks wrong. Observed on 24 of 24 rows of a real outcome suite, where it made an
+        # entire A/B round measure the model's background knowledge instead of the skill.
+        if cmd.result_status == "error":
+            logger.debug(
+                "Skill call for %r errored (%s); not counting it as engagement",
+                cmd.parameters.get("skill"),
+                (cmd.result_summary or "")[:120],
+            )
+        else:
+            skill = cmd.parameters.get("skill", "")
+            if isinstance(skill, str) and skill:
+                names.add(skill.split(":")[-1])
+    # The file-read signal (Codex, or any agent reading a SKILL.md off disk) is scanned on
+    # every command regardless of tool, since it is a genuine engagement: the body really
+    # did reach the agent. This is deliberately NOT gated on result_status above — a failed
+    # *Skill tool call* loaded nothing, whereas a path reference means the file was opened.
     for value in cmd.parameters.values():
         if isinstance(value, str):
             names.update(_SKILL_PATH_RE.findall(value))

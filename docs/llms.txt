@@ -50,7 +50,8 @@ and A/B plumbing.
 - [05 · Comparing two models](https://coder-eval.com/docs/tutorials/05-comparing-models)
 - [06 · Docker isolation](https://coder-eval.com/docs/tutorials/06-use-docker-isolation)
 - [07 · Driving Coder Eval from Claude Code](https://coder-eval.com/docs/tutorials/07-plugin-in-claude-code)
-- [08 · Optimizing a skill description](https://coder-eval.com/docs/tutorials/08-optimizing-a-skill)
+- [08 · Optimizing a Skill Description](https://coder-eval.com/docs/tutorials/08-optimizing-a-skill)
+- [09 · Optimizing a Skill Body](https://coder-eval.com/docs/tutorials/09-optimizing-a-skill-body)
 <!-- docs-index:end:tutorials -->
 
 ## Source

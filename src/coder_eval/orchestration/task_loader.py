@@ -330,6 +330,11 @@ def _stratified_sample(
     Rows missing ``field`` fall into the "" stratum (this is where the activation
     dataset's shared negatives — ``expected_skill: ""`` — collect). ``seed=None``
     uses a fresh nondeterministic RNG, so the draw differs every run.
+
+    Note this missing-value convention is deliberately NOT ``row_split_label``'s: folding a
+    missing key to ``""`` groups it with the genuine-empty stratum, which is what stratifying
+    wants, but it also turns an explicit ``None`` into the string ``"None"``. The split
+    filter cannot tolerate that, hence two conventions rather than one.
     """
     rng = random.Random(seed)
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -339,6 +344,29 @@ def _stratified_sample(
     for grp in groups.values():
         out.extend(grp if len(grp) <= n else rng.sample(grp, n))
     return out
+
+
+def row_split_label(row: dict[str, Any], field: str) -> str | None:
+    """The row's split label, or ``None`` when the row is unlabelled.
+
+    Unlabelled means the key is absent, ``null``, or ``""`` — the "no value here"
+    convention extended to the explicit ``null`` a half-labelled JSONL carries. Any other
+    value is a real label and is compared via ``str()``, so a falsy ``0`` counts as
+    labelled rather than missing.
+
+    This is the single definition of the **split-filter** convention, shared by
+    ``expand_dataset`` and the lint rule that forbids a partly-labelled dataset — the one
+    genuinely dangerous state, because ``--split`` keeps the matching rows and silently
+    drops the unlabelled ones, so the run succeeds and every metric is computed over a
+    smaller suite than the file suggests.
+
+    Deliberately NOT the convention ``_stratified_sample`` uses: that one folds a missing
+    key to the ``""`` stratum via ``str(row.get(field, ""))``, which turns an explicit
+    ``None`` into the string ``"None"``. The two differ on purpose (see the note there),
+    so this function owns the split-filter rule only, not a global one.
+    """
+    value = row.get(field)
+    return None if value is None or value == "" else str(value)
 
 
 def _reject_duplicate_row_ids(rows: list[dict[str, Any]], task: TaskDefinition) -> None:
@@ -452,7 +480,7 @@ def expand_dataset(
 
     # --split filters BEFORE either sampler below: sampling first would leave an
     # unpredictable (possibly zero) number of rows per split, destroying the
-    # tune/holdout comparison the split exists to protect.
+    # train/test comparison the split exists to protect.
     # Duplicate ids are a property of the DATASET, so check the whole row set BEFORE any
     # filtering or sampling narrows it. Checking only what survives would let a duplicate
     # sitting in an unselected split validate under every --split and surface only on a
@@ -461,18 +489,16 @@ def expand_dataset(
 
     if split is not None:
         field = task.dataset.split_field
-        # Unlabelled means the key is absent, null, or "" — the same "no value here"
-        # convention _stratified_sample applies to a missing field, extended to the
-        # explicit null a half-labelled JSONL carries. Any other value, including a
-        # falsy 0, is a real label and compares via str() (also as _stratified_sample does).
-        labelled = [r for r in rows if r.get(field) not in (None, "")]
+        # One pass, one label per row: selecting and reporting both read the same computed
+        # value, so they cannot drift apart into two definitions of "labelled".
+        labelled = [(r, label) for r in rows if (label := row_split_label(r, field)) is not None]
         if labelled:
-            rows = [r for r in labelled if str(r[field]) == split]
+            rows = [r for r, label in labelled if label == split]
             if not rows:
                 raise ValueError(
                     f"Dataset for task '{task.task_id}' has no rows in split {split!r} "
                     + f"(split_field={field!r}); labelled splits present: "
-                    + f"{sorted({str(r[field]) for r in labelled})}"
+                    + f"{sorted({label for _, label in labelled})}"
                 )
         # else: no row in this task carries a split label -> --split does not apply here.
 

@@ -1,4 +1,12 @@
-# Optimizing a skill description
+---
+description: >-
+  Measure whether a Claude Code skill's description can be improved — build an
+  activation suite, split it into train and test rows, A/B candidate rewrites
+  as experiment variants, and promote only what survives rows it was never trained
+  on.
+---
+
+# Tutorial 08 — Optimizing a Skill Description
 
 `check-skill` tells you whether a skill triggers. This tutorial covers the next question:
 **can its description be made to trigger better, and how would you know?**
@@ -7,12 +15,22 @@ The honest answer is usually "measure first, and often the answer is don't chang
 walkthrough is a real run against a real skill in this repository, reported with the numbers
 it actually produced — including the part where the first attempt measured nothing at all.
 
-**What you will do:** build an activation suite for `lint-tasks`, split it into tune and
-holdout rows, baseline it, read the confusion matrix, and decide whether to spend anything.
+> **This page walks the activation track.** `/coder-eval:optimize-skill` has two:
+> **activation** — the frontmatter `description`, measured with an activation suite, asking
+> *does the skill fire when it should?* — and **execution**, which improves the skill
+> **body** instead, measured against an outcome suite with real success criteria, asking
+> *having fired, does it do the job?*
+>
+> They are different instruments for different failures: `skill_triggered` scores engagement
+> and is completely blind to the quality of the work that follows. If your skill fires
+> reliably and then does the wrong thing, execution is the track you want.
+
+**What you will do:** build an activation suite for `lint-tasks`, split it into train and
+test rows, baseline it, read the confusion matrix, and decide whether to spend anything.
 For `lint-tasks` the answer turns out to be no — about 20 agent runs settle it. The suite
 then points at a sibling that *does* have headroom, `analyze`, and the full three-stage A/B
 runs against that: roughly 350 further runs, ending in a promotion that survives the
-holdout.
+test.
 
 All of it on Sonnet. Never Opus for a suite this size.
 
@@ -27,7 +45,10 @@ not run anything yet.
 1. **It is model-invokable.** Its description actually enters the activation decision. A
    skill with `disable-model-invocation: true` — here `init`, `ci`, and `optimize-skill`
    itself — can never be optimized this way, because its description never competes for
-   anything. `optimize-skill` hard-stops on exactly that.
+   anything — so `optimize-skill` closes the **activation** track for such a skill and
+   routes it to the execution track instead, where the body is still measurable. (To
+   exercise one in a sandbox, the task's `initial_prompt` must invoke it by slash command;
+   asking in prose does not reach it.)
 2. **It has a real boundary dispute with a sibling.** `lint-tasks` reviews existing tasks;
    `task` authors new ones. *"Are my evals any good?"* and *"add a task for X"* genuinely
    misroute between them.
@@ -37,7 +58,9 @@ not run anything yet.
 4. **It supplies its own distractors.** The description mentions auditing and gaps, so
    *"audit my dependencies"* is a natural false-positive probe.
 
-## Step 1 — Build the suite
+## Part 1 — A ceiling result, and when to stop (`lint-tasks`)
+
+### Step 1 — Build the suite
 
 Do not hand-author it. Run the sibling skill:
 
@@ -48,7 +71,7 @@ Do not hand-author it. Run the sibling skill:
 That produces a task YAML plus a JSONL row file. The suite used here has **21 rows**,
 counted by `expected_skill` — the field that actually decides a row's polarity:
 
-| Kind | `expected_skill` | Total | tune | holdout |
+| Kind | `expected_skill` | Total | train | test |
 | --- | --- | --- | --- | --- |
 | Positive | `lint-tasks` | 8 | 5 | 3 |
 | Distractor | `""` | 9 | 6 | 3 |
@@ -68,7 +91,7 @@ polarity. A split **halves each side**, so a suite you intend to optimize wants 
 16–24 of each. This one is smaller than that, deliberately, so the tutorial stays affordable
 — and you will see the cost of that in the result.
 
-## Step 2 — Label the splits
+### Step 2 — Label the splits
 
 Add a `split` to every row and point the dataset at the field:
 
@@ -80,17 +103,17 @@ dataset:
 ```
 
 ```jsonl
-{"id": "pos-1", "expected_skill": "lint-tasks", "split": "tune",    "prompt": "..."}
-{"id": "pos-5", "expected_skill": "lint-tasks", "split": "holdout", "prompt": "Are my evals any good?"}
+{"id": "pos-1", "expected_skill": "lint-tasks", "split": "train",    "prompt": "..."}
+{"id": "pos-5", "expected_skill": "lint-tasks", "split": "test", "prompt": "Are my evals any good?"}
 ```
 
-Then select one at run time with `--split tune` or `--split holdout`. The filter runs
-**before** any sampling, so `--split tune --sample 8` is always drawn from tune rows alone.
+Then select one at run time with `--split train` or `--split test`. The filter runs
+**before** any sampling, so `--split train --sample 8` is always drawn from train rows alone.
 
-Keep both polarities on both sides. A holdout of only positives measures recall and calls it
+Keep both polarities on both sides. A test of only positives measures recall and calls it
 a result.
 
-## Step 3 — Make the skill reachable, and check that it worked
+### Step 3 — Make the skill reachable, and check that it worked
 
 This is the step that decides whether anything downstream means anything, so it gets a
 section of its own.
@@ -115,33 +138,32 @@ The intuitive path is the wrong one. For `.claude/skills/my-skill/SKILL.md` the 
 export SKILL_SOURCE_PATH="$(pwd)/plugins/coder-eval"   # the plugin root
 ```
 
-!!! danger "The first baseline for this tutorial scored recall 0.0"
-
-    It pointed one level too deep, at the bare skills directory. Nothing loaded, no `Skill`
-    tool was ever offered, and every positive row failed. On an earlier, smaller draft of
-    this suite — 10 tune rows rather than the 14 below — that produced:
-
-    ```
-    lint-tasks   recall.yes=0.000 precision.yes=0.000 f1.yes=0.000
-                 confusion: [('no','no',4), ('yes','no',3)]
-    ```
-
-    Note the confusion matrix accounts for only 7 of the 10 rows; the missing 3 are the
-    next section.
-
-    A wrong path is only a **warning**, never an error. The run completes, the report
-    renders, and the number it produces is indistinguishable from a skill whose description
-    is hopeless. In a one-shot check that misleads you once; in an optimization loop it
-    poisons everything — every candidate scores zero, nothing separates from the incumbent,
-    and you conclude your rewrites are all bad when your wiring is broken.
-
-    **So the first thing to check is never the description. It is whether recall is
-    non-zero at all.**
+> **The first baseline for this tutorial scored recall 0.0.** It pointed one level too deep,
+> at the bare skills directory. Nothing loaded, no `Skill` tool was ever offered, and every
+> positive row failed. On an earlier, smaller draft of this suite — 10 train rows rather than
+> the 14 below — that produced:
+>
+> ```
+> lint-tasks   recall.yes=0.000 precision.yes=0.000 f1.yes=0.000
+>              confusion: [('no','no',4), ('yes','no',3)]
+> ```
+>
+> Note the confusion matrix accounts for only 7 of the 10 rows; the missing 3 are the next
+> section.
+>
+> A wrong path is only a **warning**, never an error. The run completes, the report renders,
+> and the number it produces is indistinguishable from a skill whose description is hopeless.
+> In a one-shot check that misleads you once; in an optimization loop it poisons everything —
+> every candidate scores zero, nothing separates from the incumbent, and you conclude your
+> rewrites are all bad when your wiring is broken.
+>
+> **So the first thing to check is never the description. It is whether recall is non-zero
+> at all.**
 
 Point it at the plugin root and the same suite goes to `recall.yes=1.000`. Nothing about the
 descriptions changed.
 
-## Step 4 — Cap the run, or pay for exploration
+### Step 4 — Cap the run, or pay for exploration
 
 Activation is decided in the first assistant turn. Without caps the agent explores a sandbox
 that deliberately contains no eval files, and rows time out after five minutes each:
@@ -179,11 +201,11 @@ run_limits:
 
 That buys signal, not just cost.
 
-## Step 5 — Baseline on the tune split
+### Step 5 — Baseline on the train split
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
-  --split tune -D run_limits.stop_early=false
+  --split train -D run_limits.stop_early=false
 ```
 
 `stop_early: false` is insurance: if a suite arms early stop, a pass-stop can end a run
@@ -194,7 +216,7 @@ nothing.
 **Check the resolved row count, not just the exit code.** A mistyped split (`--split holdou`)
 is reported as a skipped task and the run still **exits 0** — a green run over zero rows.
 
-Result, 14 tune rows:
+Result, 14 train rows:
 
 | Skill | recall.yes | precision.yes | f1.yes |
 | --- | --- | --- | --- |
@@ -202,7 +224,7 @@ Result, 14 tune rows:
 | `task` | 1.000 | 1.000 | 1.000 |
 | `analyze` | 0.000 | 0.000 | 0.000 |
 
-## Step 6 — Read it, and decide whether to spend anything
+### Step 6 — Read it, and decide whether to spend anything
 
 **The target skill is at ceiling.** `lint-tasks` caught all five positives, including
 *"My evals are a mess. Can you go through them and tell me what to fix?"*, and stayed off all
@@ -224,7 +246,7 @@ the description.** Fourteen well-separated rows could not distinguish a good des
 a better one. If you need to tell those apart, the fix is more rows and harder ones — not a
 looser gate.
 
-### Where the headroom actually was
+#### Where the headroom actually was
 
 The sibling matrix is the part worth reading, and in a multi-skill plugin it usually is:
 
@@ -236,14 +258,14 @@ This is what sibling-owned rows buy you. A plain distractor would have said only
 something misfired; these say **where the request went**, which is the difference between
 "this description is vague" and "these two descriptions are fighting."
 
-### The finding that evaporated
+#### The finding that evaporated
 
 An earlier pair of runs showed something else: on both *"Set up coder-eval for this
 repository"* and *"Get evaluations going in this project from scratch"*, the `task` skill
 fired — apparently annexing setup work — dropping its precision to 0.667 and 0.500. It
 reproduced on **both splits**, which is normally the signal that a finding is real.
 
-Running the same tune split three more times settled it. The row fires **two times in
+Running the same train split three more times settled it. The row fires **two times in
 three**, on byte-identical prompts (`expected_skill` is a dataset label the criterion reads
 and the agent never sees, so nothing about the rows changed):
 
@@ -268,7 +290,32 @@ Recall **0.500 in all three runs**, precision 1.000 in all three. Perfectly stab
 consistently missed, no over-claiming. That is a hypothesis worth spending on — which is
 where the rest of this tutorial goes.
 
-## Optimizing the skill that actually had headroom
+### Step 7 — Confirm on the test split
+
+Even with nothing to promote, the test split is what turns "the trim was safe" from a claim
+about the rows you looked at into a claim about rows you did not.
+
+```bash
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  --split test -D run_limits.stop_early=false
+```
+
+| Skill | recall.yes | precision.yes | f1.yes |
+| --- | --- | --- | --- |
+| `lint-tasks` | 1.000 | 1.000 | **1.000** |
+| `task` | 1.000 | 1.000 | 1.000 |
+
+`lint-tasks` reproduces at ceiling on rows it was never checked against, including the
+oblique *"Are my evals any good?"*. Across every run in this tutorial — two wiring states,
+two splits, three sittings — it never missed a positive and never took a distractor. That is
+about as much as a suite this size can say, and it is enough to conclude the trim did no
+harm.
+
+---
+
+## Part 2 — A full A/B that promotes (`analyze`)
+
+### Optimizing the skill that actually had headroom
 
 `lint-tasks` had nothing to fix. `analyze` did, so the loop ran for real against it. The
 hypothesis, phrased as a claim about specific rows: **the description never names
@@ -284,7 +331,77 @@ frontmatter `description`, each a full seven-skill snapshot:
 | `b-results` | Users say "results" and "scores"; the description only says "run" |
 | `c-symptom` | Lead the trigger clause with symptoms rather than the operation |
 
-### Stage A — triage (68 runs)
+#### Wiring the arms: snapshots, then one experiment file per stage
+
+This is the part the numbers below cannot show, and the part most easily got wrong.
+
+Each candidate is a snapshot of the **whole plugin root**, not of one skill:
+
+```
+.optimize-skill/analyze/1-a-regression/
+    .claude-plugin/plugin.json   <- copy it if the source had one
+    skills/
+        analyze/SKILL.md         <- the arm's ONE varying part: its description
+        lint-tasks/SKILL.md      <- every sibling, copied unchanged
+        task/SKILL.md
+        ...                      <- all seven
+    reference/                   <- and everything else the root held
+```
+
+Both halves of that matter and both fail silently. **`plugin.json`**: with no manifest the
+namespace defaults to the *directory name*, so the arms would compete as `1-incumbent:analyze`
+against `1-a-regression:analyze` — differing in the name shown in the listing as well as in the
+description under test, on the very track where activation *is* a competition between listings.
+**The siblings**: a variant's `plugins` block *replaces* the task's, so this directory is the
+only skill source the arm gets. Snapshot one skill and every sibling criterion observes `no` in
+every arm, and the sibling half of the gate "passes" by measuring nothing.
+
+Add `.optimize-skill/` to `.gitignore` first — a round writes several copies of the whole
+plugin per arm.
+
+The experiment mounts each snapshot by absolute path, using the same `agent.plugins` mechanism
+the suite itself uses:
+
+```yaml
+experiment_id: "optimize-analyze-round-1"
+defaults:
+  run_limits:
+    stop_early: false
+variants:
+  - variant_id: "incumbent"
+    agent:
+      plugins:
+        - type: "local"
+          path: "/abs/path/to/.optimize-skill/analyze/1-incumbent"
+  - variant_id: "a-regression"
+    agent:
+      plugins:
+        - type: "local"
+          path: "/abs/path/to/.optimize-skill/analyze/1-a-regression"
+```
+
+Paths resolve against the **process working directory**, not the task file's, so write them
+absolute. And each `path` must be a plugin root holding `skills/` — the same trap as Step 3.
+
+**There is no flag that selects a subset of an experiment's variants**, so the arm set changes
+by writing another file. Three per round:
+
+| Stage | File | Arms |
+| --- | --- | --- |
+| A — triage | `round1-triage.yaml` | incumbent + all three candidates |
+| B — gate | `round1-gate.yaml` | incumbent + the two clean survivors |
+| C — confirm | `round1-confirm.yaml` | incumbent + `a-regression` only |
+
+Copying the triage file and deleting the arms that did not survive is one edit; reusing it
+instead costs several times the budgeted runs and, at Stage C, renders no
+`## Paired Comparison` block at all, because that block fires only for exactly two variants.
+
+#### Stage A — triage (68 runs)
+
+```bash
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-triage.yaml --split train
+```
 
 | Arm | analyze recall | precision | F1 | completion |
 | --- | --- | --- | --- | --- |
@@ -297,7 +414,18 @@ frontmatter `description`, each a full seven-skill snapshot:
 recall was computed over 3 analyze rows instead of 4. Check `completion_rate` before ranking
 anything. The two clean leaders went through to the gate.
 
-### Stage B — the gate (153 runs, three separate invocations)
+#### Stage B — the gate (153 runs, three separate invocations)
+
+Three `coder-eval run` commands, **not** `--repeats 3` — see the Reference section for why:
+
+```bash
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-gate.yaml --split train --run-dir runs/round1-gate-1
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-gate.yaml --split train --run-dir runs/round1-gate-2
+coder-eval run tasks/skills/lint-tasks-activation.yaml \
+  -e .optimize-skill/analyze/round1-gate.yaml --split train --run-dir runs/round1-gate-3
+```
 
 | Arm | run 1 | run 2 | run 3 | Range |
 | --- | --- | --- | --- | --- |
@@ -313,32 +441,18 @@ precision.
 One incumbent invocation dropped a row and was excluded from the gate rather than averaged
 in. A gate computed over a shifting denominator is not a gate.
 
-## Step 7 — Confirm on the holdout
+#### Stage C, and a test split that could not answer the question
 
-Even with nothing to promote, the holdout is what turns "the trim was safe" from a claim
-about the rows you looked at into a claim about rows you did not.
+The winner went to test as a **two-variant** experiment at `--repeats 3`, which is the one
+place `--repeats` is correct:
 
 ```bash
 coder-eval run tasks/skills/lint-tasks-activation.yaml \
-  --split holdout -D run_limits.stop_early=false
+  -e .optimize-skill/analyze/round1-confirm.yaml --split test --repeats 3
 ```
 
-| Skill | recall.yes | precision.yes | f1.yes |
-| --- | --- | --- | --- |
-| `lint-tasks` | 1.000 | 1.000 | **1.000** |
-| `task` | 1.000 | 1.000 | 1.000 |
-
-`lint-tasks` reproduces at ceiling on rows it was never checked against, including the
-oblique *"Are my evals any good?"*. Across every run in this tutorial — two wiring states,
-two splits, three sittings — it never missed a positive and never took a distractor. That is
-about as much as a suite this size can say, and it is enough to conclude the trim did no
-harm.
-
-### Stage C, and a holdout that could not answer the question
-
-The winner went to holdout as a **two-variant** experiment at `--repeats 3`, which is the one
-place `--repeats` is correct: `paired_comparison` fires only for exactly two variants and
-averages replicates per row before pairing.
+`paired_comparison` fires only for exactly two variants and averages replicates per row
+before pairing.
 
 Both arms scored `analyze` F1 **1.000**, and the paired block was a flat tie:
 
@@ -346,22 +460,22 @@ Both arms scored `analyze` F1 **1.000**, and the paired block was a flat tie:
 **Paired mean diff (incumbent - a-regression)**: +0.000 [95% CI +0.000, +0.000], p = 1.000
 ```
 
-That is not a confirmation. It is an **uninformative holdout**: its `analyze` rows happened
+That is not a confirmation. It is an **uninformative test**: its `analyze` rows happened
 to be ones the incumbent already caught, because every regression-phrased row had been put
-in the tune half. A holdout can only confirm a fix for a failure mode it actually contains.
+in the train half. A test can only confirm a fix for a failure mode it actually contains.
 
-The remedy is the one `optimize-skill` prescribes — author **fresh holdout rows** that
+The remedy is the one `optimize-skill` prescribes — author **fresh test rows** that
 exercise the failure mode, at promotion time, when you know what needs confirming:
 
 ```jsonl
-{"id": "an-6", "expected_skill": "analyze", "split": "holdout", "prompt": "Which of my tasks got worse after I switched the model?"}
-{"id": "an-7", "expected_skill": "analyze", "split": "holdout", "prompt": "Something in the suite degraded this week. Find out what."}
+{"id": "an-6", "expected_skill": "analyze", "split": "test", "prompt": "Which of my tasks got worse after I switched the model?"}
+{"id": "an-7", "expected_skill": "analyze", "split": "test", "prompt": "Something in the suite degraded this week. Find out what."}
 ```
 
 Write them as requests a real user would send, and commit to whatever they say — rows
 authored to flatter a candidate confirm nothing.
 
-### And then the infrastructure lied to us
+#### And then the infrastructure lied to us
 
 The re-run returned a result that looked publishable and was worthless:
 
@@ -390,9 +504,9 @@ computed over an eroded, asymmetric sample is not evidence of anything.** This i
 `completion_rate` is a gateable metric, and why the first thing to read in a rollup is the
 denominator, not the effect. The run was discarded, not interpreted.
 
-### Stage C, run properly
+#### Stage C, run properly
 
-With budget restored, the same experiment ran again over the 11-row holdout. Erosion this
+With budget restored, the same experiment ran again over the 11-row test. Erosion this
 time was one row against `a-regression` and none against the incumbent — near-symmetric, and
 pointing *against* the candidate, so any positive result is conservative:
 
@@ -406,7 +520,7 @@ incumbent      rows_total=33 rows_excluded=0 completion=1.000
 | incumbent | 0.833 | 1.000 | **0.909** | `task` precision 0.750 |
 | **`a-regression`** | **1.000** | **1.000** | **1.000** | all 1.000 |
 
-**The direction reproduces on rows the candidate was never tuned against**, which is what
+**The direction reproduces on rows the candidate was never trained against**, which is what
 Stage C is required to show. One row separates them — and it is one of the *fresh* rows
 authored at promotion time:
 
@@ -416,7 +530,7 @@ an-6  "Which of my tasks got worse after I switched the model?"
         a-regression   ['analyze', 'analyze', 'analyze']  3 of 3
 ```
 
-Every other holdout row is identical across the arms. The incumbent also shows the
+Every other test row is identical across the arms. The incumbent also shows the
 intermittent `task` misfire on the setup row once more (precision 0.750), consistent with
 the 2-in-3 rate measured earlier.
 
@@ -433,20 +547,24 @@ promotion metric; the paired block corroborates direction when it can and, at th
 size, it cannot. Report both, and do not let a null paired result overturn a metric it was
 never measuring.
 
-**Verdict: promote.** Gated on tune (1.000 vs 0.667, non-overlapping, three invocations),
-confirmed in direction on holdout (1.000 vs 0.909), no sibling regression anywhere, and
+**Verdict: promote.** Gated on train (1.000 vs 0.667, non-overlapping, three invocations),
+confirmed in direction on the test split (1.000 vs 0.909), no sibling regression anywhere, and
 precision never off 1.000 in any run of either stage.
 
-## The three stages, and when each applies
+---
+
+## Reference
+
+### The three stages, and when each applies
 
 They did not run for `lint-tasks`, because that incumbent was already perfect. They did run
 for `analyze`, above. In summary:
 
 | Stage | What it does | Replicates |
 | --- | --- | --- |
-| **A — triage** | All candidates + incumbent, one invocation, `--split tune`. Rank by F1, discard anything at or below the incumbent. Decides nothing. | one run |
-| **B — gate** | Survivors + incumbent, `--split tune`, **three separate `coder-eval run` invocations**. Promote only on `min(candidate) > max(incumbent)`. | three runs |
-| **C — confirm** | Best survivor vs. incumbent only, `--split holdout --repeats 3`. Read the rendered `## Paired Comparison` block. | `--repeats 3` |
+| **A — triage** | All candidates + incumbent, one invocation, `--split train`. Rank by F1, discard anything at or below the incumbent. Decides nothing. | one run |
+| **B — gate** | Survivors + incumbent, `--split train`, **three separate `coder-eval run` invocations**. Promote only on `min(candidate) > max(incumbent)`. | three runs |
+| **C — confirm** | Best survivor vs. incumbent only, `--split test --repeats 3`. Read the rendered `## Paired Comparison` block. | `--repeats 3` |
 
 **Stage B must be three invocations, not `--repeats 3`.** Suite rollups are keyed on
 `(variant, suite)` alone, so `--repeats` pools every replicate into a single `suite.json`
@@ -460,9 +578,9 @@ it corroborates the direction; it does not re-test the promotion metric.
 
 And be precise about what Stage B proves. The replicate spread measures agent stochasticity
 over a **fixed** set of rows. It does not correct for the survivors having been chosen on
-those same rows in Stage A. Stage B bounds run noise; **the holdout is what bounds the fit.**
+those same rows in Stage A. Stage B bounds run noise; **the test split is what bounds the fit.**
 
-## Two caveats about what else is in the sandbox
+### Two caveats about what else is in the sandbox
 
 **The machine's other skills are part of the experiment.** One distractor row engaged a
 skill named `review` — not from this plugin at all, but from the operator's own install.
@@ -500,10 +618,10 @@ options are to rename the skill, or to measure it somewhere the collision is abs
   door.
 - **Two agreeing runs are not evidence.** The `task` misfire reproduced on both splits and
   still turned out to be 2-in-3 variance. Only replicates told the difference.
-- **A holdout only confirms failure modes it contains.** The first one here was a flat tie
-  because every regression-phrased row sat in the tune half. Fresh rows, authored to test the
+- **A test only confirms failure modes it contains.** The first one here was a flat tie
+  because every regression-phrased row sat in the train half. Fresh rows, authored to test the
   hypothesis rather than to flatter the candidate, are the fix.
-- **A holdout confirms direction, not significance.** `a-regression` shipped on F1 1.000 vs
+- **A test confirms direction, not significance.** `a-regression` shipped on F1 1.000 vs
   0.909 on unseen rows while the paired *t*-test read exactly zero. At eleven pairs, across
   three criteria, that block cannot resolve a one-criterion gain — which is a fact about the
   test, not about the change. Report both and say which one you promoted on.
@@ -512,4 +630,6 @@ options are to rename the skill, or to measure it somewhere the collision is abs
 
 - [Comparing models](05-comparing-models.md) — the same experiment-variant machinery, applied to models instead of descriptions.
 - [Bring Your Own Dataset](../DATASETS.md) — split labels, sampling precedence, and suite-level thresholds in full.
-- [Claude Code plugin](../PLUGIN.md) — the other six skills.
+- [Tutorial 09 — Optimizing a Skill Body](09-optimizing-a-skill-body.md) — the execution
+  track: same method, different instrument, and another honest stop.
+- [Claude Code plugin](../PLUGIN.md) — all seven skills.

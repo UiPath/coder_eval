@@ -311,7 +311,7 @@ class Dataset(BaseModel):
     split_field: str = Field(
         default="split",
         description=(
-            "Row field naming the row's split (e.g. 'tune' / 'holdout' / 'holdback'). "
+            "Row field naming the row's split (e.g. 'train' / 'test' / 'holdback'). "
             "CLI --split <name> keeps only rows whose value for this field matches, and "
             "is applied BEFORE any sampling so a sampled split still has a predictable "
             "size. A row is unlabelled when this field is absent, null, or ''; a task "

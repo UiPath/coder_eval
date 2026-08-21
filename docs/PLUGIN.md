@@ -31,9 +31,9 @@ references, not packages, so the `coder-eval` binary is a separate step:
 uv tool install coder-eval    # or: pip install coder-eval
 ```
 
-You do not have to do it in advance. `init`, `task` and `check-skill` — the three
-skills that shell out to the CLI — check `coder-eval --version` before doing any
-work and, if it is missing, **offer to install it and ask first**. They never
+You do not have to do it in advance. `init`, `task`, `check-skill` and
+`optimize-skill` — the four that shell out to the CLI — check `coder-eval --version`
+before doing any work and, if it is missing, **offer to install it and ask first**. They never
 install unprompted: that writes outside your repository, so it is your call, and
 they verify the install worked before continuing. `analyze` and `ci` do not invoke
 the CLI, and `lint-tasks` needs neither the CLI nor credentials — it only reads
@@ -49,7 +49,7 @@ Running a suite additionally needs credentials for whichever agent the tasks use
 | --- | --- |
 | `/coder-eval:init` | Scans the repository for what is worth evaluating (Claude Code skills, an MCP server, a CLI), reports the findings, then scaffolds a task directory with one real task. |
 | `/coder-eval:check-skill` | Builds and runs an activation suite for one of your skills — does the agent engage it when it should, and leave it alone when it shouldn't? |
-| `/coder-eval:optimize-skill` | Takes an activation suite's confusion matrix and proposes description rewrites, A/B tests them as experiment variants, and promotes only what beats run-to-run noise and survives a held-out split. |
+| `/coder-eval:optimize-skill` | Improves a skill along either of two tracks — the **description**, measured against an activation suite, or the **body**, measured against an outcome suite. Candidate edits become experiment variants; only what beats run-to-run noise and survives a held-out split is promoted. Walked end to end in [tutorial 08](tutorials/08-optimizing-a-skill.md) (description) and [tutorial 09](tutorials/09-optimizing-a-skill-body.md) (body). |
 | `/coder-eval:task` | Turns a natural-language description into task YAML with criteria that check output *content*, validated through `coder-eval plan`. |
 | `/coder-eval:lint-tasks` | Reviews task YAML that already exists and reports, per task, criteria that cannot fail, prompts that leak the answer, fixtures with no cleanup and near-duplicates — each with a severity and a fix. Read-only. |
 | `/coder-eval:analyze` | Reads a finished run directory and writes `analysis.md`: systemic failure patterns, per-task findings, and concrete fixes. |
@@ -195,10 +195,12 @@ directories, so every file a skill reads travels with it under `reference/`:
 - `run-layout.md` — the on-disk run-directory contract `analyze` reads: what is *inside*
   a run directory.
 - `repo-layout.md` — how a skill finds *where* your eval tree is, by globbing for
-  `task_id:` files and `run.json` rather than assuming `tasks/` and `runs/`. All six
+  `task_id:` files and `run.json` rather than assuming `tasks/` and `runs/`. All seven
   skills read it, which is what lets them work in a repository that names or nests the
   tree differently.
-- `templates/` — the canonical activation suite `check-skill` copies.
+- `templates/` — the two canonical suites the skills copy: the activation suite
+  `check-skill` writes, and the outcome suite `optimize-skill`'s execution track starts
+  from.
 
 ## Related
 

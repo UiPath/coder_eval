@@ -1,0 +1,214 @@
+# Outcome suite template — the EXECUTION track's instrument, the twin of activation.yaml.
+#
+# Activation asks "did the skill fire?". This asks the other question: given that it
+# fired, did the agent produce the right outcome? So activation is held CONSTANT here —
+# every row invokes the skill explicitly — and what varies between arms is the skill BODY.
+#
+# THE RULE: an outcome suite is ONE dataset-backed task, one ROW per scenario. Not one
+# task file per scenario. `/coder-eval:optimize-skill` Step 4 carries the full reason
+# (it is about which tasks get a suite.json and what `--split` actually filters); the
+# short version is that a directory of separate task files silently measures nothing.
+#
+# Replace every `my-skill` with the bare name of the skill under test (the directory name
+# of its SKILL.md), every `/my-plugin:my-skill` with its real slash command, and rewrite
+# outcome-rows.jsonl as real scenarios. Every REPLACE: marker is a placeholder.
+task_id: "my-skill-outcome"
+description: "Given that `my-skill` fired, does the agent produce the right outcome?"
+tags: [outcome]
+
+# REPLACE: the skill under test must be REACHABLE by the sandboxed agent, or every row
+# scores 0 — which reads exactly like a skill whose body is bad.
+#
+# `path` must be a PLUGIN ROOT: a directory holding a `skills/` subdirectory, i.e.
+# `<path>/skills/<skill-name>/SKILL.md`. So for `.claude/skills/my-skill/SKILL.md` the
+# path is `.claude` — NOT `.claude/skills`. Pointing at a bare directory of skill
+# directories loads NOTHING, silently.
+#
+#   export SKILL_SOURCE_PATH=/abs/path/to/.claude
+#
+# An unset or wrong path is only a warning, so confirm the engagement criterion below
+# passes before trusting any low score.
+agent:
+  # The discriminator is required for `setting_sources` to be in schema — that one IS a
+  # claude-code field. `allowed_tools`, `disallowed_tools` and `permission_mode` live on the
+  # shared agent base and would resolve without it.
+  type: "claude-code"
+  plugins:
+    - type: "local"
+      path: "$SKILL_SOURCE_PATH"
+  # This measures the skill body. Injecting the host project's CLAUDE.md into every call
+  # is both expensive and a confound.
+  setting_sources: []
+  # REPLACE: the tools this skill's body actually instructs the agent to use.
+  #
+  # Declare them HERE, on the suite, and every arm of an A/B inherits one policy. Do not
+  # move them to an experiment's `defaults:`: these fields merge by REPLACE and the task
+  # layer outranks experiment defaults, so a suite declaring them overrides `defaults:`
+  # silently. Size the list to the UNION of
+  # what every arm's body names, not to the incumbent's set: a candidate whose whole
+  # hypothesis is "reach for a different tool" would otherwise be scored on the
+  # prohibition rather than on the instruction.
+  #
+  # Omitting this field allows ALL tools, which is why the risk here is a list drawn too
+  # narrow, never one drawn too wide.
+  #
+  # `Skill` is named for documentation rather than effect: the prompt's slash command
+  # arrives as a Skill tool call, which is what the engagement criterion observes — but the
+  # tool is available whether or not it is listed, so omitting it changes nothing.
+  allowed_tools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "Skill"]
+  # Deny sub-agent delegation. Left available, the model sometimes answers the slash command
+  # by dispatching an Agent that reads the skill in the CHILD, so no Skill call appears in
+  # the parent stream, engagement observes `no`, and the row measures nothing while still
+  # producing a plausible artifact. An allowlist cannot express this — Agent/Task stay
+  # available whatever `allowed_tools` says, so denial is the only lever.
+  disallowed_tools: ["Agent", "Task"]
+  permission_mode: "acceptEdits"
+
+# Outcome rows are FULL TASK RUNS — minutes and real tokens each, not the seconds an
+# activation probe costs. Do NOT copy an activation suite's caps here: those cap
+# `max_turns` at 2 on purpose, because activation is decided in the first assistant turn.
+# An outcome row truncated by such a cap scores as a body failure that never happened.
+#
+# `max_usd` is the brake, and it is PER ROW (each expanded row is its own task), so a
+# 10-row suite at 2.00 bounds one arm at ~$20 per replicate — ~$60 in a `--repeats 3` stage.
+# Multiply it out rather than reading the per-row figure as a stage total.
+#
+# Set it from a MEASURED row, generously. A real outcome row here cost $0.43, and a draft
+# cap of 0.50 sat 15% above that: a slightly longer row would have aborted as
+# COST_BUDGET_EXCEEDED and scored as a body failure that never happened — a fabricated
+# result of exactly the kind this file warns about. Leave several times the typical row's
+# cost of headroom; the brake exists for a runaway row, not a slow one.
+#
+# Two caveats: it is checked AFTER each turn is billed, so a row can overshoot by one turn;
+# and it is skipped entirely if no turn reports a cost, so confirm costs were recorded
+# before treating the cap as enforced.
+run_limits:
+  max_turns: 20
+  # Measured: outcome rows commonly run 100-200s, and a 300s turn cap turned one into an
+  # ERROR rather than a score. An errored row is EXCLUDED from the aggregate, so it shows up
+  # only as completion_rate < 1.0 and silently voids any cross-arm comparison.
+  turn_timeout: 900
+  task_timeout: 1800
+  max_usd: 2.00
+
+# ONE fixture serves EVERY row, and this is the constraint that most often has to be
+# designed around. Row substitution reaches `initial_prompt` and `success_criteria` only —
+# it NEVER reaches `sandbox:`, which is a task-level field. So every scenario starts from
+# the identical repository and the variation lives in the PROMPT.
+#
+# Two consequences worth reading before you write the rows:
+#   - A suite whose scenarios need different repo shapes ("a config already exists" vs.
+#     "there is none") is TWO suites, gated separately — not one suite with more rows.
+#   - The fixture must already satisfy whatever preconditions the skill checks before it
+#     will act at all. A skill that stops on a missing directory scores zero on every row
+#     of EVERY arm, which ties the whole round at the floor while reading exactly like
+#     "all my candidates are bad".
+sandbox:
+  template_sources:
+    # REPLACE: a directory beside this file holding the starting repository every
+    # scenario works from.
+    - type: "template_dir"
+      path: "./outcome-fixture"
+
+dataset:
+  paths:
+    - "outcome-rows.jsonl"
+  # Row field naming each row's split. `coder-eval run --split train` keeps only matching
+  # rows, and filters before any sampling so the selection is predictable. Propose against
+  # `train`, confirm the winner on `test`.
+  split_field: "split"
+
+# Invoke the skill EXPLICITLY, and pair the slash form with an imperative. Nothing expands
+# a slash command — `/my-plugin:my-skill` arrives as plain text the model may ignore.
+# Measured on a 6-row suite: slash alone 3/6 engaged, prose alone 5/6, slash + imperative 6/6.
+#
+# IF THE SKILL SETS `disable-model-invocation: true`, STOP AND READ THIS. The Skill tool
+# refuses the call ("cannot be used with Skill tool due to disable-model-invocation"), the
+# body is never loaded, and the agent answers from its own background knowledge — producing
+# output plausible enough that every criterion below scores it as though the skill wrote it.
+# Remove that frontmatter line from the target skill in EVERY arm's snapshot (incumbent
+# included): it reproduces what a real user gets, since typing the slash command does inject
+# the body, and keeps the arms identical apart from the text under test. Two lines:
+#
+#   cp -R <plugin-root> tmp/arm && sed -i '' '/^disable-model-invocation: true$/d' \
+#       tmp/arm/skills/<skill>/SKILL.md
+#
+# Do NOT instead ask the agent to find and read the SKILL.md itself. That looks like it
+# should work — a file read counts as engagement and genuinely loads the body — but the
+# plugin lives at a host path the sandbox cannot discover. Tested: 0 of 2 rows located it,
+# both scored 0.000.
+#
+# Engagement below 1.0 on every row means the suite is measuring a mixture of "did the
+# skill run" and "was the body good". That is also why `disallowed_tools` above denies
+# Agent/Task, and why scenarios should use this skill's own vocabulary rather than a
+# sibling's — the criterion below is a GATE on the baseline, not a diagnostic.
+#
+# Everything after it is the scenario, which is where per-row variation lives. Have each
+# scenario name the output path it wants: that removes the agent's filename choice from
+# the measurement without hinting at the content being graded.
+initial_prompt: |
+  Use the `my-plugin:my-skill` skill to handle this request. Invoke it with the
+  Skill tool and follow it before writing anything.
+
+  ${row.scenario}
+
+# Criteria are COPIED TO EVERY ROW, with ${row.<field>} substituted into every string
+# leaf. There is no per-scenario criterion list — heterogeneous assertions are expressed
+# by parameterizing a criterion with row fields, as `path`/`includes` do below.
+success_criteria:
+  # The engagement assertion, and the baseline's gate. It costs nothing extra (the
+  # trajectory is already recorded) and it separates the two failures that score
+  # identically low and look nothing alike: "the body gave bad instructions" and "the skill
+  # never ran". Check this FIRST on any arm that scores badly — a wrong plugin path fails
+  # here, not in the criteria below. If it is not 1.0 on every row, fix the suite before
+  # spending a stage.
+  #
+  # Necessary but not sufficient: it counts READING the skill's SKILL.md as engagement, not
+  # only a Skill tool call, so a row can report engaged while the command it issued named a
+  # different skill. Check the trajectory when a number surprises you.
+  - type: "skill_triggered"
+    description: "my-skill engaged for row ${row.id}"
+    skill_name: "my-skill"
+    expected_skill: "${row.expected_skill}"
+    # Engagement is a GATE, not a read-out, and this is the line that makes it one. An
+    # outcome suite where the skill did not run measures the model's background knowledge
+    # instead — plausibly enough that nothing else looks wrong. recall.yes is the right
+    # metric here: of the rows that should have engaged the skill, how many did. Every row
+    # of an outcome suite is a positive, so anything below 1.0 means the round is a mixture.
+    suite_thresholds:
+      recall.yes: 1.0
+
+  # Score OUTCOMES, not prose: what exists on disk and what ran.
+  - type: "file_check"
+    description: "the artifact row ${row.id} asked for"
+    path: "${row.expected_path}"
+    includes:
+      - "${row.expected_snippet}"
+    # Suite-level gate over all rows. `mean` is the average per-row score;
+    # `completion_rate` is the fraction of rows that produced a score at all — gate it at
+    # 1.0, because an arm that lost rows computed its score over a different denominator
+    # and is not comparable to one that did not. Raise `mean` once you have a baseline.
+    suite_thresholds:
+      mean: 0.7
+      completion_rate: 1.0
+
+  # OPTIONAL third slot — uncomment when a file's contents cannot express the assertion
+  # and something has to actually run. Add `verify_cmd` to each row.
+  #
+  # Left commented out on purpose: for most suites `file_check` above already asserts what
+  # this would, and a row-supplied shell command drags quoting and
+  # what-is-installed-in-the-sandbox concerns into every copy of this template.
+  #
+  # `${CLAUDE_PLUGIN_ROOT}/reference/criteria.md` lists every criterion type. Prefer any
+  # of them over `llm_judge` / `agent_judge`, which add variance to the very number the
+  # gate reads.
+  #
+  # - type: "run_command"
+  #   description: "row ${row.id}'s artifact actually works"
+  #   command: "${row.verify_cmd}"
+  #   expected_exit_code: 0
+
+# One last thing about the rows: cover what already WORKS, not only what is broken. A body
+# edit can silently break behaviour that used to pass, and only a row that covers it will
+# say so. This is the biggest practical difference from an activation suite, where the
+# confusion matrix shows regressions for free.

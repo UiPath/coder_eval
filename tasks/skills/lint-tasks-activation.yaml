@@ -1,6 +1,6 @@
 # Activation suite for the plugin's own `lint-tasks` skill, with `task` as the named
 # sibling. Written by following /coder-eval:check-skill, then split-labelled so
-# /coder-eval:optimize-skill can propose against `tune` and confirm on `holdout`.
+# /coder-eval:optimize-skill can propose against `train` and confirm on `test`.
 #
 # Reachability: `path` must be a PLUGIN ROOT — a directory holding a `skills/` subdirectory
 # (a `.claude-plugin/plugin.json` is optional; without one the namespace defaults to the

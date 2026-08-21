@@ -15,9 +15,17 @@ skill **discovers** the tree and **reports what it resolved** — it never assum
   easy to conflate, and picking `latest` at the wrong level is the failure that follows.)
 - **Experiments** — YAML carrying a `variants:` key, usually a sibling of the task tree.
 
-Prune `node_modules`, `.venv`, `.git`, `dist` and `build` from every glob. This is not
-optional: on a large repository an unpruned recursive glob is slow enough to look like a
-hang, and it promotes vendored fixtures into candidate eval trees.
+Prune `node_modules`, `.venv`, `.git`, `dist`, `build`, `tmp` and any **run store you have
+already found** from every glob. This is not optional: on a large repository an unpruned
+recursive glob is slow enough to look like a hang, and it promotes vendored fixtures into
+candidate eval trees.
+
+The run store matters most and is the easiest to forget, because it is a directory this very
+page tells you to go and find. Runs contain **agent-produced files** — including `SKILL.md`,
+task YAML and `*.jsonl` written by evaluated agents inside sandboxes. Glob without pruning it
+and a search for "this repository's skills" returns hundreds of artifacts from past runs,
+swamping the handful of real ones. Scratch directories (`tmp/`, test garbage) do the same.
+Those files are *outputs*, never inputs: never treat one as a definition of anything.
 
 **Directory names are not the signal.** Keying on `tasks/` or `runs/` would swap one
 hardcoded assumption for a wider one. A name is a **tiebreaker only**: when several

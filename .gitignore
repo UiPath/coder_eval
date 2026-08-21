@@ -72,3 +72,8 @@ refs/
 
 # Derived pyright config for the CE036 contract engine (tests/lint/pyright_config.py)
 .pyright-tests.json
+
+# /coder-eval:optimize-skill working tree: candidate skill snapshots,
+# per-stage experiment files and the round ledger. A snapshot is a full plugin
+# root copied per arm, so a round writes several megabytes of duplicated skills.
+.optimize-skill/

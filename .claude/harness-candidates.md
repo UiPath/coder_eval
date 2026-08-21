@@ -464,9 +464,13 @@ with the two `action.yml` items above — one considered change to the action's 
   and suite gates — passes. Verified directly: `coder-eval run <suite> --split holdou`
   prints one yellow "1 task file(s) skipped" line and exits 0. This is pre-existing, but
   `--split` makes it reachable by a one-character CLI typo rather than a broken file, and
-  the whole point of a holdout confirmation is that you trust its verdict. Not guarded, and
+  the whole point of a test confirmation is that you trust its verdict. Not guarded, and
   not a five-minute fix: making an all-skipped run non-green changes exit semantics for
   every skipped-task path (including deliberate `skip: true` suites and tag filters that
   match nothing), so it needs a decision about which of those should be fatal, plus tests
   per case. A narrower option is to fail only when a CLI *selector* (`--split`, `--tags`)
   eliminated everything, since that is unambiguously a user error rather than repo state.
+
+- [ ] **Semantic answer-leak in a task prompt** — a prompt that describes the graded behaviour in *different words* ("list the paths explicitly rather than with a recursive wildcard" while grading an explicit glob) scores well whether or not the behaviour happened, and in an A/B an arm that deleted the rule still passes. CE061 catches only the verbatim form; the semantic form needs an LLM judge or a `lint-tasks` pass over this repo's own `tasks/`, neither of which is cheap or deterministic. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md, where 4 of 10 rows in a shipped worked example had it.
+- [ ] **A doc claim that contradicts merge semantics** — `optimize-skill` told users to declare `allowed_tools` in an experiment's `defaults: agent:`, which is a silent no-op because those fields merge by `replace` and the task layer outranks experiment defaults. Detecting "this prose recommends a config location that the merge order makes ineffective" would need the rule to model the layer stack against prose, which no existing rule shape supports. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md.
+- [x] **`_normalized()` not used by every prose sensor** — CLOSED: all 9 sites converted, and `test_no_sensor_inlines_the_normalization_idiom` now forbids the raw form. Original note: — 8 sensors in `tests/test_custom_lint.py` still inline `" ".join(path.read_text().split())`, so a future one copied from the wrong neighbour is defeated by a line wrap (the bug that let a stale skill count ship past 91 green tests). A rule forbidding the raw idiom in that file is easy; the conversion sweep was out of scope. — caught in the final review of c/2026-08-13-optimize-skill-fixes.md.

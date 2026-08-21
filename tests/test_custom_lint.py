@@ -10,6 +10,7 @@ Run just these tests:
     make lint
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -343,6 +344,42 @@ def test_rule_ids_unique() -> None:
     """
     ids = [r.id for r in ALL_RULES]
     assert len(set(ids)) == len(ids), f"duplicate CE rule id(s): {sorted({i for i in ids if ids.count(i) > 1})}"
+
+
+@pytest.mark.lint
+def test_rule_ids_are_unique_across_baserules_and_test_classes() -> None:
+    """The uniqueness invariant, extended to the HALF `ALL_RULES` cannot see.
+
+    Roughly a third of the CE rules are not `BaseRule`s at all — CE026-CE031, CE033-CE036,
+    CE043 and CE060-CE061 are `@pytest.mark.lint` classes, because their subject is Markdown,
+    YAML, a resolved Typer signature or the whole `src/` tree rather than one `.py` AST. Those ids
+    live only in a class NAME, so `runner.py`'s import-time assert (and the test above) cannot see
+    them, and a class-wired id could silently collide with a `BaseRule`'s. A `# noqa` keys on the
+    id string, so a collision means one suppression quietly disarms two rules.
+
+    The subject is the `TestCE<NNN>` class names in this file, where EVERY rule surfaces — a
+    `BaseRule` has one testing it and a class-wired rule IS one. So two rules claiming one number
+    show up as two classes claiming it, whichever kind either is. (A single id appearing both in
+    `ALL_RULES` and on a test class is the normal shape, not a collision.)
+
+    Boundary: a `BaseRule` with no `TestCE<NNN>` class of its own contributes nothing here and
+    could still collide unseen — which is itself a reason to keep the convention.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    class_ids = [
+        m.group(1)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and (m := re.match(r"^Test(CE\d+)", node.name))
+    ]
+
+    assert len(class_ids) > 20, f"only {len(class_ids)} TestCE classes found — has the convention moved?"
+    duplicates = sorted({i for i in class_ids if class_ids.count(i) > 1})
+    assert not duplicates, (
+        f"{duplicates} are claimed by more than one rule. A `# noqa` keys on the id, so one "
+        "suppression would disarm both — renumber the newer one. Note `runner.py`'s import-time "
+        "assert cannot see this: it covers ALL_RULES, and roughly a third of the CE rules are "
+        "`@pytest.mark.lint` classes rather than BaseRules."
+    )
 
 
 @pytest.mark.lint
@@ -1074,6 +1111,25 @@ class TestCE028DocIndexParity:
         drift = tutorials_table_drift(self.REPO_ROOT, self._nav)
         assert drift is None, drift
 
+    def test_tutorials_avoid_mkdocs_only_admonitions(self):
+        # Tutorials are read on GitHub as often as on the docs site — from the repo, from a
+        # PR diff, from a search result. `!!! note` is mkdocs-material syntax that GitHub
+        # does not understand: it renders the marker as literal text and turns the indented
+        # body into an accidental code block. Tutorials 01-07 use plain `>` blockquotes,
+        # which render correctly in both, so this pins that convention for new ones.
+        #
+        # Scoped to tutorials on purpose: reference pages under docs/ are site-first and one
+        # (DATASETS.md) predates this rule.
+        offenders = []
+        for path in sorted((self.REPO_ROOT / "docs" / "tutorials").glob("*.md")):
+            for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if line.startswith("!!! ") or line.startswith("??? "):
+                    offenders.append(f"{path.relative_to(self.REPO_ROOT)}:{line_no}: {line.strip()}")
+        assert not offenders, (
+            "mkdocs-material admonition(s) in a tutorial — these render as literal text plus "
+            "a stray code block on GitHub. Use a `>` blockquote instead:\n  " + "\n  ".join(offenders)
+        )
+
     def test_real_mkdocs_yaml_parses_despite_env_tag(self):
         # The real mkdocs.yml carries `!ENV [CI, false]`; load_nav must tolerate it.
         nav = self._nav
@@ -1184,7 +1240,7 @@ PLUGIN_TEXT_FILES = sorted(
 # has no `Bash` at all (the `coder-eval plan` in its report is a suggestion to the user,
 # not a command it runs) — so none of those three needs the CLI.
 # `optimize-skill` drives the CLI harder than any other skill here — a baseline, a triage
-# stage, three gate invocations and a holdout confirmation, all `coder-eval run`.
+# stage, three gate invocations and a test confirmation, all `coder-eval run`.
 SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task", "optimize-skill"}
 
 # The skills that read the shared task-quality rubric. A rubric no skill reads is
@@ -1192,7 +1248,7 @@ SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task", "optimize-skill"}
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
 # Whether each skill must locate a repository's eval tree before it can do anything.
-# All six currently must, and each for its own reason: `analyze` needs the run store,
+# All seven currently must, and each for its own reason: `analyze` needs the run store,
 # `init` and `check-skill` must know where tasks already live before writing beside
 # them, `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob
 # into the workflow it emits. Every one of them used to carry its own hardcoded guess
@@ -1262,6 +1318,205 @@ SKILL_LISTING_BUDGET_CHARS = 1_600
 # `.claude/skills/` are deliberately absent: those are user-workspace paths the
 # skills legitimately scan and scaffold.
 REPO_PATH_TOKENS = ("docs/", "src/", ".claude/shared/", ".claude/commands/", "uv run", "../")
+
+
+# `_normalized`'s own implementation — the single legitimate use of the raw idiom, named
+# here so the guard below can exempt it without depending on where in the file it sits.
+_NORMALIZED_IMPL = 'return " ".join(path.read_text(encoding="utf-8").split())'
+
+
+def _normalized(path: Path) -> str:
+    """A surface's text with all whitespace collapsed to single spaces.
+
+    Every prose sensor in this file reads its surface through here, and
+    ``test_no_sensor_inlines_the_normalization_idiom`` keeps it that way. These documents are
+    hard-wrapped, so a phrase a sensor looks for routinely straddles a newline — and a raw
+    substring check then passes on exactly the text it exists to catch.
+
+    That is not hypothetical: `docs/PLUGIN.md` read ``All six\\n  skills read it`` while
+    the plugin shipped seven, and the count sensor stayed green through 91 lint tests
+    because the newline sat between the two words.
+    """
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def _wrong_skill_count_offenders(surfaces: dict[str, Path], *, count: int, auto: int) -> list[str]:
+    """Every place a surface states a skill count other than the real one.
+
+    A module-level function rather than a loop inside its test, so the self-test below can
+    run the REAL matcher against a hand-built file. That distinction is the whole point:
+    the previous self-test asserted things about ``_normalized`` in isolation, which left
+    the sensor itself free to be reverted to a raw ``read_text`` with every test still
+    green — a guard that guarded nothing, which is the exact failure class this file exists
+    to prevent.
+
+    Three phrasings are in use and all three are covered: ``<word> skills`` /
+    ``<word> slash commands`` (both READMEs, ``docs/PLUGIN.md``), ``x <digit>``
+    (``CLAUDE.md``'s ``SKILL.md`` x 6), and ``The other <word>`` (the model-invokable
+    subset, which is the skill count minus the explicit-invocation-only ones).
+    """
+    words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    assert count in words, f"{count} skills — extend `words` to cover the new count"
+    assert auto in words, f"{auto} model-invokable skills — extend `words`"
+
+    wrong_total = sorted(set(words.values()) - {words[count]})
+    wrong_subset = sorted(set(words.values()) - {words[auto]})
+
+    offenders: list[str] = []
+    for name, path in surfaces.items():
+        # Whitespace-collapsed, or a hard-wrapped "All six\n  skills" defeats every
+        # substring check below — which is exactly how the stale count shipped green.
+        text = _normalized(path)
+        offenders += [
+            f"{name}: '{word} {noun}'"
+            for word in wrong_total
+            for noun in ("skills", "slash commands")
+            if f"{word} {noun}" in text
+        ]
+        offenders += [f"{name}: 'The other {word}'" for word in wrong_subset if f"The other {word}" in text]
+        # The multiplication sign CLAUDE.md writes is given as an escape below, so ruff's
+        # ambiguous-character rules do not flag a literal one.
+        offenders += [
+            f"{name}: 'SKILL.md` \u00d7 {digit}'"
+            for digit in range(2, 9)
+            if digit != count and f"SKILL.md` \u00d7 {digit}" in text
+        ]
+    return offenders
+
+
+def _outcome_metric_vocabulary(criterion_type: str = "file_check") -> set[str]:
+    """The metric names a `suite_thresholds` on ``criterion_type`` may legitimately gate on.
+
+    Per criterion type, because the vocabularies genuinely differ: `file_check` inherits
+    `BaseCriterion.aggregate`'s summary stats, while a classification-style criterion such as
+    `skill_triggered` also emits `recall.yes` / `precision.yes` / `f1.yes`. Asserting one
+    type's thresholds against another's vocabulary would reject a perfectly valid gate.
+
+    Derived from TWO real sources, because they are genuinely separate and checking only
+    the first fails on the very template this repo ships:
+
+    * ``BaseCriterion.aggregate`` emits the summary stats (``count``/``mean``/``median``/
+      ``std``/``min``/``max``).
+    * ``completion_rate`` is **not** an ``aggregate()`` metric at all — it is injected
+      downstream by ``reports._attach_row_accounting`` alongside ``rows_total`` /
+      ``rows_excluded``.
+
+    Both halves are obtained by calling the real code, never by writing the names down.
+    """
+    from coder_eval.criteria import CriterionRegistry, init_criteria
+    from coder_eval.models import CriterionResult, FileCheckCriterion
+    from coder_eval.reports import _attach_row_accounting
+
+    init_criteria(validate=False)
+    checker = CriterionRegistry.get_checker(criterion_type)()
+    if criterion_type == "skill_triggered":
+        from coder_eval.models import ClassificationCriterionResult, SkillTriggeredCriterion
+
+        criterion = SkillTriggeredCriterion(description="d", skill_name="x", expected_skill="x")
+        per_row: list[CriterionResult] = [
+            ClassificationCriterionResult(
+                criterion_type=criterion_type, description="d", score=1.0, observed_label=label, expected_label=label
+            )
+            for label in ("yes", "no")
+        ]
+    else:
+        criterion = FileCheckCriterion(description="d", path="x")  # type: ignore[assignment]
+        per_row = [
+            CriterionResult(criterion_type=criterion_type, description="d", score=score, passed=score >= 0.9)
+            for score in (1.0, 0.0)
+        ]
+    aggregate = checker.aggregate(criterion, per_row)
+    assert aggregate is not None
+    return set(aggregate.metrics) | set(_attach_row_accounting(aggregate, 2, 2).metrics)
+
+
+def _assert_outcome_suite_shape(
+    path: Path,
+    *,
+    expected_rows: int,
+    expected_split_counts: dict[str, int],
+    skill_name: str,
+    invocation: str,
+) -> None:
+    """The structural contract every outcome suite must satisfy.
+
+    Asserted twice — once against the bundled template, once against the checked-in worked
+    example — so the two cannot drift into different shapes while both looking fine. Uses
+    the real ``load_task`` / ``expand_dataset``, never a re-implementation of either.
+
+    The contract:
+
+    1. **Dataset-backed**, expanding to exactly one task per row. This is the load-bearing
+       one: ``suite.json`` is written only for tasks the expander touched (rollups group on
+       ``suite_id``), and ``--split`` filters dataset *rows* — so a suite written as
+       separate task files gives an optimization round no rollup to rank on and makes
+       ``--split test`` silently re-run the train rows.
+    2. **Split counts** as declared, checked through ``expand_dataset(..., split=...)``
+       because ``coder-eval plan`` has no ``--split`` flag to check them from a shell.
+    3. **No surviving ``${row.`` anywhere** in the prompt or the expanded criteria —
+       substitution has to reach list leaves (``includes: ["${row.x}"]``), not just scalars.
+    4. **Every prompt invokes the skill explicitly**, in its opening lines — by slash form,
+       by an imperative naming it, or both. Holding activation constant is what makes the
+       body the only variable. Note this is deliberately NOT a check for the slash form
+       specifically: nothing expands a slash command, so `/plugin:skill` is plain text the
+       model may ignore, and the measured-most-reliable form is an explicit imperative
+       (6/6 engaged, against 3/6 for the slash form alone).
+    5. **An engagement criterion on every row** with a non-empty ``expected_skill`` —
+       what separates "the body gave bad instructions" from "the skill never ran".
+    """
+    import json
+
+    from coder_eval.orchestration.task_loader import expand_dataset, load_task
+
+    task, _source_yaml = load_task(path)
+    assert task.dataset is not None, (
+        f"{path.name} has no `dataset:` block — an outcome suite MUST be one dataset-backed "
+        "task with one row per scenario. Without it no suite.json is written (rollups group "
+        "on suite_id, which only the expander sets) and `--split test` silently re-runs the "
+        "train rows"
+    )
+    assert task.dataset.split_field, f"{path.name} has a dataset but no `split_field` — `--split` would filter nothing"
+
+    rows = expand_dataset(task, path.parent)
+    assert len(rows) == expected_rows, (
+        f"{path.name}: expected one task per dataset row ({expected_rows}), got {len(rows)}"
+    )
+
+    for split, count in expected_split_counts.items():
+        actual = len(expand_dataset(task, path.parent, split=split))
+        assert actual == count, f"{path.name}: `--split {split}` resolves {actual} rows, expected {count}"
+
+    for row in rows:
+        # `initial_prompt` is `str | None` (a task may use `initial_prompt_file`), so narrow
+        # it — otherwise moving the prompt to a file turns these into a TypeError.
+        assert row.initial_prompt, f"{row.task_id} has no initial_prompt"
+        assert "${row." not in row.initial_prompt, f"unsubstituted row placeholder in {row.task_id}'s prompt"
+        opening = row.initial_prompt.lstrip()[:300]
+        assert invocation in opening, (
+            f"{row.task_id}'s prompt does not invoke {invocation!r} in its opening lines. An "
+            "outcome suite holds activation CONSTANT so the body is the only variable; a prompt "
+            "that leaves engagement to chance yields a mixture of two effects and a gate that "
+            "can attribute neither"
+        )
+
+        rendered = json.dumps([c.model_dump() for c in row.success_criteria], default=str)
+        assert "${row." not in rendered, (
+            f"unsubstituted row placeholder in {row.task_id}'s criteria — substitution must reach "
+            'every string leaf including inside lists (`includes: ["${row.x}"]`)'
+        )
+
+        engagement = [
+            c
+            for c in row.success_criteria
+            if c.type == "skill_triggered" and c.skill_name == skill_name  # type: ignore[attr-defined]
+        ]
+        assert engagement, f"{row.task_id} carries no `skill_triggered` criterion naming {skill_name!r}"
+        for criterion in engagement:
+            assert criterion.expected_skill, (  # type: ignore[attr-defined]
+                f"{row.task_id}'s engagement criterion has an empty `expected_skill`, which asserts "
+                f"{skill_name!r} must NOT engage. An outcome suite holds activation CONSTANT — every "
+                "row is a positive, and a distractor row here inverts the suite's premise"
+            )
 
 
 def _skill_frontmatter(path: Path) -> dict:
@@ -1342,6 +1597,210 @@ class TestPluginArtifacts:
                 f"emit (available: {sorted(aggregate.metrics)})"
             )
 
+    def test_outcome_template_shape(self):
+        # The execution track's instrument. Everything the shared helper asserts is
+        # something that fails SILENTLY at full cost when it is wrong — see its docstring.
+        _assert_outcome_suite_shape(
+            self.TEMPLATES / "outcome.yaml",
+            expected_rows=4,
+            expected_split_counts={"train": 2, "test": 2},
+            skill_name="my-skill",
+            invocation="my-plugin:my-skill",
+        )
+
+    def test_outcome_template_scores_artifacts_not_prose(self):
+        # "Score outcomes, not prose" is the execution track's core instruction, and the
+        # template is what everyone copies. An LLM judge adds variance to the very number
+        # the gate reads, so a template that reached for one would teach the opposite of
+        # what optimize-skill says — and the added noise would be invisible in the result.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+        types = {c.type for c in task.success_criteria}
+
+        artifact_scoring = {"file_check", "json_check", "run_command", "cli_called", "command_executed"}
+        assert types & artifact_scoring, (
+            f"the outcome template's criteria are {sorted(types)} — none of them scores a real "
+            f"artifact or command ({sorted(artifact_scoring)}), which is the whole difference "
+            "between an outcome suite and an activation probe"
+        )
+        assert not types & {"llm_judge", "agent_judge"}, (
+            f"the outcome template reaches for a judge ({sorted(types & {'llm_judge', 'agent_judge'})}). "
+            "Judges add variance to the number the A/B gate reads; the template is the copied "
+            "default and must demonstrate deterministic scoring"
+        )
+
+    def test_outcome_template_thresholds_use_real_metric_keys(self):
+        # A threshold naming a metric nothing emits is not a loose gate — `_attach_row_accounting`
+        # records it with `actual_value=None` and `passed=False`, so the suite fails forever and
+        # the cause is a typo. Derived from real calls to BOTH sources; see the helper.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+
+        gated = [c for c in task.success_criteria if c.suite_thresholds]
+        assert gated, "the outcome template must gate the suite on something, or the round has no verdict"
+        for criterion in gated:
+            available = _outcome_metric_vocabulary(criterion.type)
+            for metric in criterion.suite_thresholds:
+                assert metric in available, (
+                    f"suite_thresholds names {metric!r}, which no aggregate emits for "
+                    f"{criterion.type!r} (available: {sorted(available)})"
+                )
+
+    def test_outcome_template_caps_cost(self):
+        # An outcome row is a FULL task run, so the template needs a per-row brake the
+        # activation template does not. An absolute floor, deliberately not a comparison
+        # against activation.yaml: that file ships no `run_limits:` block at all, so there
+        # is nothing to compare against.
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(self.TEMPLATES / "outcome.yaml")
+        limits = task.run_limits
+        assert limits is not None, "the outcome template ships no `run_limits:` — every row is a full task run"
+        assert limits.max_usd is not None, (
+            "the outcome template sets no `max_usd`. It is the per-row cost brake; without it a "
+            "single runaway row can consume a whole stage's budget"
+        )
+        assert limits.max_turns is not None and limits.max_turns >= 15, (
+            f"the outcome template caps max_turns at {limits.max_turns}. An activation suite caps "
+            "at 2 on purpose (activation is decided in the first assistant turn), but an outcome "
+            "row needs a whole task's budget — a row truncated by an activation-sized cap scores "
+            "as a body failure that never happened"
+        )
+
+    def test_outcome_rows_are_all_positive(self):
+        # The INVERSE of the activation template's polarity rule, and the two must not be
+        # confused. An activation suite needs distractors on both sides of the split; an
+        # outcome suite holds activation CONSTANT, so every row is a positive and a row with
+        # `expected_skill: ""` would assert the skill must not engage — inverting the premise.
+        import json
+
+        from coder_eval.orchestration.task_loader import row_split_label
+
+        rows = [
+            json.loads(line)
+            for line in (self.TEMPLATES / "outcome-rows.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert rows, "the outcome template ships no rows"
+        # `row_split_label`, not `r.get("split")`: truthiness would report a legitimate
+        # `"split": 0` as unlabelled, which is a SECOND definition of "labelled" competing
+        # with the runtime's. CE060 exists precisely to have one.
+        assert all(row_split_label(r, "split") is not None for r in rows), (
+            "every template row must carry a `split` — a PARTLY labelled dataset is the one bad "
+            "state: --split keeps the matching rows and drops the unlabelled ones, shrinking the "
+            "suite the metrics are computed over"
+        )
+        assert len({str(r["split"]) for r in rows}) >= 2, "outcome template rows collapsed to a single split"
+        blank = [r["id"] for r in rows if not r.get("expected_skill")]
+        assert not blank, (
+            f"outcome rows {blank} have an empty `expected_skill`, which asserts the skill must NOT "
+            "engage. The execution track holds activation constant — every row is a positive"
+        )
+
+    def test_checked_in_outcome_sample_matches_the_shipped_template_shape(self):
+        # `tasks/skills/ci-outcome.yaml` is the execution track's worked example, standing
+        # to it exactly as lint-tasks-activation.yaml stands to the activation track — and
+        # it is the suite the real A/B round runs against. Asserted through the SAME helper
+        # as the bundled template, so the shipped shape and the worked example cannot drift
+        # into disagreeing about what an outcome suite is.
+        #
+        # Note this establishes the guard rather than extending one: there is currently no
+        # equivalent for the checked-in activation sample either.
+        # (`test_lint_tasks_does_not_flag_the_shipped_activation_template` is a different
+        # thing — it guards lint-tasks' carve-out against the BUNDLED template and never
+        # reads tasks/.)
+        sample = self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml"
+        _assert_outcome_suite_shape(
+            sample,
+            expected_rows=10,
+            expected_split_counts={"train": 6, "test": 4},
+            skill_name="ci",
+            invocation="coder-eval:ci",
+        )
+
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(sample)
+        artifact_scoring = {"file_check", "json_check", "run_command", "cli_called", "command_executed"}
+        assert {c.type for c in task.success_criteria} & artifact_scoring, (
+            "the checked-in outcome sample scores nothing on disk — an outcome suite that "
+            "asserts only engagement is an activation suite with a bigger bill"
+        )
+
+    def test_checked_in_outcome_fixture_lets_the_skill_act(self):
+        # The fixture is load-bearing, and every way it can be wrong is SILENT at full cost.
+        # `ci` stops outright on a repo with no `.github/`, so a fixture missing it scores
+        # zero on every row of every arm — which ties an A/B round at the floor and reads
+        # exactly like three bad candidates. And a fixture workflow that mentions the
+        # harness by name flips `ci` into its "one already runs coder-eval, do not add a
+        # second" branch, so every row would measure the refusal path instead.
+        from coder_eval.orchestration.task_loader import load_task
+
+        sample = self.REPO_ROOT / "tasks" / "skills" / "ci-outcome.yaml"
+        task, _ = load_task(sample)
+        assert task.sandbox is not None and task.sandbox.template_sources, (
+            "ci-outcome.yaml mounts no fixture. Row substitution never reaches `sandbox:`, so "
+            "the fixture is the ONLY starting repository all 10 rows get — without one the "
+            "agent lands in an empty sandbox and `ci` refuses on every row"
+        )
+        fixture = Path(task.sandbox.template_sources[0].path)  # type: ignore[attr-defined]
+        assert fixture.is_dir(), f"the mounted fixture {fixture} does not exist"
+
+        workflows = sorted((fixture / ".github" / "workflows").glob("*.yml"))
+        assert workflows, (
+            f"{fixture} has no .github/workflows/*.yml. `ci` says so explicitly: 'If there is "
+            "no .github/ directory at all, say that this skill targets GitHub Actions and "
+            "stop' — so every row of every arm would score zero on a refusal"
+        )
+        for workflow in workflows:
+            assert "coder_eval" not in workflow.read_text(encoding="utf-8"), (
+                f"{workflow.name} names `coder_eval`, which trips `ci`'s 'a workflow already "
+                "runs coder-eval — do not add a second one' branch. Every row would then "
+                "measure the refusal path rather than the emission path"
+            )
+
+        # The eval tree the rows expect the agent to discover: deliberately `evals/` rather
+        # than `tasks/` (discovery is exercised, not a lucky guess) and at two depths, so a
+        # workflow using a `**` glob — which degrades to one level with globstar off — is
+        # detectably wrong rather than indistinguishable from a correct one.
+        # TASK depths only. Counting `evals/experiments/` would let this pass with
+        # `evals/suite/json-shape.yaml` — the file the assertion is entirely about — deleted.
+        depths = {
+            p.relative_to(fixture).parent.as_posix()
+            for p in (fixture / "evals").rglob("*.yaml")
+            if "experiments" not in p.parts
+        }
+        assert len(depths) >= 2, (
+            f"the fixture's eval tree sits at a single depth ({sorted(depths)}). `ci` forbids "
+            "`**` in the tasks: input because globstar is off and it silently drops a level — "
+            "with one depth, a candidate that ignores that rule scores identically to one that "
+            "follows it"
+        )
+
+    def test_bundled_plugin_root_references_resolve(self):
+        # Skills point at their own bundled files with `${CLAUDE_PLUGIN_ROOT}/...`, which is
+        # resolved by Claude Code at runtime and by nothing at authoring time. A pointer to a
+        # file that does not exist is therefore invisible until a user follows it — and the
+        # skills' whole value is handing over an artifact rather than describing one.
+        # Caught for real: optimize-skill shipped a pointer at reference/templates/outcome.yaml
+        # one commit before that file existed, past 344 green lint tests.
+        import re
+
+        broken: list[str] = []
+        for doc in (p for p in PLUGIN_TEXT_FILES if p.suffix == ".md"):
+            text = doc.read_text(encoding="utf-8")
+            for match in re.finditer(r"\$\{CLAUDE_PLUGIN_ROOT\}/([\w./-]+)", text):
+                target = match.group(1).rstrip(".")
+                if not (PLUGIN_ROOT / target).exists():
+                    broken.append(f"{doc.relative_to(PLUGIN_ROOT)} -> {target}")
+        assert not broken, (
+            f"these bundled files point at ${{CLAUDE_PLUGIN_ROOT}} paths that do not exist: "
+            f"{sorted(set(broken))}. An installed plugin is copied without its parent directories, "
+            "so the reference resolves to nothing and the skill hands the user a dead path."
+        )
+
     def test_reachability_guidance_names_the_plugin_root_layout(self):
         # A local plugin path must be a PLUGIN ROOT — a directory holding `skills/`, so the
         # skill sits at `<path>/skills/<name>/SKILL.md`. A manifest is optional (the
@@ -1361,6 +1820,7 @@ class TestPluginArtifacts:
             "docs/PLUGIN.md": self.REPO_ROOT / "docs" / "PLUGIN.md",
             "tutorial 07": self.REPO_ROOT / "docs" / "tutorials" / "07-plugin-in-claude-code.md",
             "tutorial 08": self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md",
+            "tutorial 09": self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md",
         }
         for name, path in surfaces.items():
             text = path.read_text(encoding="utf-8")
@@ -1438,18 +1898,23 @@ class TestPluginArtifacts:
 
     def test_activation_rows_split_both_polarities_both_sides(self):
         # `optimize-skill` and the template both require both polarities on BOTH sides of
-        # the split: a holdout of only positives measures recall and calls it a result, and
-        # a tune half with no distractors cannot see a candidate over-claiming. The shipped
+        # the split: a test of only positives measures recall and calls it a result, and
+        # a train half with no distractors cannot see a candidate over-claiming. The shipped
         # template is the worked example everyone copies, so the balance it demonstrates has
         # to hold — an edit that moved one row could break it silently.
         import json
+
+        from coder_eval.orchestration.task_loader import row_split_label
 
         rows = [
             json.loads(line)
             for line in (self.TEMPLATES / "activation-rows.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        assert all(r.get("split") for r in rows), (
+        # `row_split_label`, not `r.get("split")`: truthiness would report a legitimate
+        # `"split": 0` as unlabelled, which is a SECOND definition of "labelled" competing
+        # with the runtime's. CE060 exists precisely to have one.
+        assert all(row_split_label(r, "split") is not None for r in rows), (
             "every template row must carry a `split` — a PARTLY labelled dataset is the one "
             "bad state: --split keeps the matching rows and drops the unlabelled ones, "
             "shrinking the suite the metrics are computed over"
@@ -1462,7 +1927,7 @@ class TestPluginArtifacts:
             assert polarities == {True, False}, (
                 f"split {split!r} carries only {'positive' if True in polarities else 'distractor'} "
                 "rows — both splits need positives AND distractors, or one half of the "
-                "tune/holdout comparison measures nothing"
+                "train/test comparison measures nothing"
             )
 
     @pytest.mark.parametrize("skill", PLUGIN_SKILLS, ids=[p.parent.name for p in PLUGIN_SKILLS])
@@ -1594,7 +2059,7 @@ class TestPluginArtifacts:
         # review the prose rule is the only thing enforcing read-only. Deleting it would leave
         # a skill that advertises "Read-only." in its description with nothing behind it after
         # the first reply.
-        text = " ".join((PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md")
         assert "Never modify a file" in text, "lint-tasks lost its standing read-only prohibition"
         assert "standing, not per-turn" in text, (
             "lint-tasks no longer says its read-only rule outlives the frontmatter deny — the "
@@ -1639,7 +2104,7 @@ class TestPluginArtifacts:
         # every one of these instructions is something a well-meaning edit would "simplify"
         # away, leaving a skill that still reads plausibly and measures nothing. Same
         # deletion-sensor shape as the lint-tasks read-only guard above.
-        text = " ".join((PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "optimize-skill" / "SKILL.md")
 
         # The single most important invariant. Suite rollups pool replicates, so --repeats
         # writes ONE pooled suite.json and the per-replicate F1 the Stage B gate reads would
@@ -1656,9 +2121,9 @@ class TestPluginArtifacts:
         )
 
         for token, why in (
-            ("--split tune", "the tune split drives proposals and the gate"),
-            ("--split holdout", "the holdout split is what makes a promotion more than a fit"),
-            ("--split holdout --repeats 3", "Stage C's paired comparison needs replicates averaged per row"),
+            ("--split train", "the train split drives proposals and the gate"),
+            ("--split test", "the test split is what makes a promotion more than a fit"),
+            ("--split test --repeats 3", "Stage C's paired comparison needs replicates averaged per row"),
             ("stop_early", "an armed suite can pass-stop before a sibling misfire is observable"),
             ("agent.plugins", "reachability wiring — the mechanism, not an invented one"),
             ("recall 0.0", "the silent failure mode of a wrong plugin path"),
@@ -1673,8 +2138,165 @@ class TestPluginArtifacts:
             # the task's, so the round-slug dir is the arm's only skill source. Snapshot one
             # skill and every sibling criterion silently observes `no` in every arm.
             ("copied unchanged", "each arm's snapshot must include the sibling skills, not just the target"),
+            # The execution track measures the BODY, and an activation suite cannot grade a
+            # body — skill_triggered scores engagement only. Losing this collapses the two
+            # tracks onto one instrument that answers the wrong question.
+            ("wrong instrument", "the execution track must refuse to reuse an activation suite"),
+            # Inverse of the activation rule, and easy to "correct" into a bug: the body
+            # track invokes the skill from the prompt to hold activation constant, so what
+            # varies is the body alone.
+            ("Invoke the skill from the prompt", "the execution track holds activation constant by invoking the skill"),
+            # And it must be the SLASH form. Verified live: a `disable-model-invocation`
+            # skill is not offered to the model at all, so asking in prose returns "no such
+            # skill available" and the row measures nothing — while `/plugin:skill` in the
+            # prompt loads it, emits a real Skill tool call, and is detected by
+            # skill_triggered. Prose-instead-of-slash is the intuitive edit and it is silent.
+            ("Use the slash form", "prose cannot reach a disable-model-invocation skill; only the slash form loads it"),
+            # One variable per round. A body edit shipped alongside a description edit is
+            # unattributable, and the description change also moves activation.
+            ("Never run both tracks in one round", "tracks must not be combined in a single measurement"),
+            # A skill that cannot be model-invoked still has an optimizable body — routing
+            # to the execution track rather than stopping is the point of the two-track split.
+            ("route to the execution track", "disable-model-invocation must route to the body track, not hard-stop"),
+            # The whole execution track is predicated on this. suite.json is written only for
+            # tasks the dataset expander touched (rollups group on suite_id, which nothing
+            # else sets) and --split filters dataset ROWS — so a directory of separate task
+            # files gives Stage A no rollup to rank and makes Stage C's --split test silently
+            # re-run the train rows. "One task per scenario" is the intuitive shape and it is
+            # the broken one.
+            (
+                "ONE dataset-backed task",
+                "the outcome suite must be one dataset-backed task or Stage A has no rollup and Stage C re-runs train",
+            ),
+            (
+                "silently re-runs the train rows",
+                "the consequence that makes the dataset requirement non-optional, not a preference",
+            ),
+            # expand_dataset copies the SAME success_criteria onto every row, substituting
+            # ${row.*} into every string leaf. Per-scenario assertions are therefore
+            # parameterized by row fields; writing different criteria per scenario is
+            # unrepresentable, and discovering that after authoring the rows is expensive.
+            (
+                "Criteria are copied to every row",
+                "per-scenario assertions must be parameterized by row fields, never written per scenario",
+            ),
+            # Substitution reaches initial_prompt and success_criteria ONLY, never
+            # sandbox.template_sources — so a suite has exactly one fixture and scenario
+            # variation has to live in the prompt.
+            (
+                "Every row shares ONE sandbox fixture",
+                "row substitution never reaches sandbox:, so rows needing different repo shapes are two suites",
+            ),
+            (
+                "preconditions the skill under test checks",
+                "a fixture that fails the skill's own hard stop ties every arm at zero and reads as bad candidates",
+            ),
+            # There is no --variant flag, so the arm set changes by AUTHORING A NEW FILE.
+            # Re-passing the triage file at Stage B/C costs (N+1)/2x the budgeted runs and
+            # renders no paired block at all, with nothing in the output announcing it.
+            (
+                "no `--variant` filter",
+                "the arm set can only be changed by authoring a per-stage experiment file",
+            ),
+            (
+                "no `## Paired Comparison` block at all",
+                "the cost of re-passing the triage file at Stage B/C — more spend, strictly less evidence",
+            ),
+            (
+                "round<N>-triage.yaml",
+                "Stage A's own experiment file — the per-stage naming Steps 9/10 and the ledger depend on",
+            ),
+            (
+                "round<N>-gate.yaml",
+                "Stage B's own experiment file, which on the execution track must hold exactly two variants",
+            ),
+            (
+                "round<N>-confirm.yaml",
+                "Stage C's own experiment file — reusing the gate or triage file is the documented mistake",
+            ),
+            (
+                "because that block fires only for exactly two variants",
+                "the REASON the per-stage files matter: paired_comparison's exactly-two precondition",
+            ),
+            # The P1-5 mitigation: the skill supplies the artifact rather than relaying
+            # requirements to /coder-eval:task, which come back half-applied.
+            (
+                "reference/templates/outcome.yaml",
+                "the execution track must hand over the bundled outcome template, not point vaguely at one",
+            ),
+            (
+                "Hand over the template itself",
+                "relayed requirements come back half-applied and the user pays for a second round trip",
+            ),
+            # Step 5: the common path is that the suite is ALREADY labelled, so the
+            # unlabelled branches are the exception rather than the expected work.
+            (
+                "arrives labelled",
+                "a check-skill suite already carries splits — the labelling branches are for hand-authored ones",
+            ),
+            # A body naming a tool outside the allowlist fails identically in every arm and
+            # reads as "the body is bad". The activation track cannot have this confound.
+            (
+                "tool policy constant across arms",
+                "an unpinned tool policy makes a body that names a disallowed tool look like a bad body",
+            ),
+            # Per-row cost brake. Without it a runaway row eats a whole stage's budget.
+            ("run_limits.max_usd", "the per-row cost brake on an outcome suite, where every row is a full task run"),
+            # The inverse of the activation guidance. An activation suite caps max_turns at 2
+            # deliberately; carried over, an outcome row is truncated and scores as a body
+            # failure — a fabricated result, since the body was never allowed to finish.
+            # Anchored on the plain-prose consequence rather than the emphasized phrase: a
+            # sensor that depends on Markdown bold breaks on a rewrap without the
+            # instruction having been touched, which trains readers to distrust it.
+            (
+                "which is a fabricated result",
+                "carrying an activation suite's tight caps to an outcome suite fabricates body failures",
+            ),
         ):
             assert token in text, f"optimize-skill lost {token!r} — {why}"
+
+        # The paired-diff sign rule has to appear in BOTH gates that read the block —
+        # Stage B (execution) and Stage C — because each is a separate decision point and a
+        # reader lands on one or the other. Counted rather than `in text`: a presence check
+        # stays green when one of the two is deleted, which is exactly the edit to catch.
+        # The sign follows VARIANT DECLARATION ORDER (reports_stats builds vid_a/vid_b from
+        # variant_ids[0]/[1]), so with `incumbent` declared first a candidate win is NEGATIVE
+        # — and a reversed reading promotes the arm that lost, with every later number in the
+        # ledger corroborating it.
+        for phrase, expected in (("variant declaration order", 2), ("a candidate win reads negative", 2)):
+            assert text.count(phrase) >= expected, (
+                f"optimize-skill states {phrase!r} {text.count(phrase)} time(s); both the execution "
+                f"Stage B gate and Stage C must carry the paired-diff sign rule, so it needs {expected}"
+            )
+
+        # The cost table's symbols must match the prose that defines them. It shipped
+        # reading `M_tune`/`M_holdout` after the split values were renamed to train/test —
+        # invisible to every sensor above, because the rename deleted no instruction, and
+        # the table is the surface a reader budgets from.
+        for stale in ("M_tune", "M_holdout"):
+            assert stale not in text, (
+                f"optimize-skill's cost table still uses {stale!r} — the splits are `train`/`test`, "
+                "so the table names symbols the surrounding prose never defines"
+            )
+        for symbol in ("M_train", "M_test"):
+            assert symbol in text, f"optimize-skill's cost table lost {symbol!r}"
+
+        # The two gates use DIFFERENT machinery, on purpose, and the reason is subtle enough
+        # that a well-meaning edit would unify them. Activation compares F1, which the pooled
+        # suite.json cannot report per replicate -> three invocations. Execution compares
+        # per-row weighted_score, which `paired_comparison` already computes correctly over
+        # replicates -> `--repeats 3` on exactly two variants. Collapsing either into the
+        # other silently swaps the instrument for one that cannot see the metric.
+        assert "primary instrument" in text, (
+            "optimize-skill no longer says the paired comparison is the PRIMARY instrument on "
+            "the execution track — it is only corroboration on the activation track, and the "
+            "difference is what makes each gate valid for its own metric"
+        )
+        assert "deliberate departure" in text, (
+            "optimize-skill no longer flags that the execution gate departs from the "
+            "activation gate on purpose — unlabelled, the two look like an inconsistency to "
+            "be tidied away"
+        )
 
         # Its sibling's real name. `/coder-eval:skill-check` is a dangling command, and three
         # steps plus several edge cases hand control back to check-skill.
@@ -1715,42 +2337,180 @@ class TestPluginArtifacts:
         # surfaces also state the count in prose, and adding the sixth skill meant hand-editing
         # seven such sites across four files. Without this, a seventh ships with every count
         # silently wrong — the exact drift that repair was. Derived from disk: no count is
-        # written down here.
-        #
-        # Three phrasings are in use and all three are covered: "<word> skills" / "<word> slash
-        # commands" (both READMEs, docs/PLUGIN.md), "x <digit>" (CLAUDE.md's `SKILL.md` x 6),
-        # and "The other <word>" (the model-invokable subset, which is the skill count minus
-        # the explicit-invocation-only ones).
-        words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+        # written down here, and the matcher itself lives in `_wrong_skill_count_offenders`
+        # so the wrapped-phrase self-test below can exercise the real thing.
         count = len(PLUGIN_SKILLS)
-        assert count in words, f"{count} skills — extend `words` to cover the new count"
         auto = count - sum(1 for v in SKILL_DISABLE_MODEL_INVOCATION.values() if v)
-        assert auto in words, f"{auto} model-invokable skills — extend `words`"
-
-        wrong_total = sorted(set(words.values()) - {words[count]})
-        wrong_subset = sorted(set(words.values()) - {words[auto]})
-
-        offenders: list[str] = []
-        for surface in SKILL_DOC_SURFACES:
-            text = (self.REPO_ROOT / surface).read_text(encoding="utf-8")
-            offenders += [
-                f"{surface}: '{word} {noun}'"
-                for word in wrong_total
-                for noun in ("skills", "slash commands")
-                if f"{word} {noun}" in text
-            ]
-            offenders += [f"{surface}: 'The other {word}'" for word in wrong_subset if f"The other {word}" in text]
-            # The multiplication sign CLAUDE.md writes is given as an escape below, so
-            # ruff's ambiguous-character rules do not flag a literal one.
-            offenders += [
-                f"{surface}: 'SKILL.md` \u00d7 {digit}'"
-                for digit in range(2, 9)
-                if digit != count and f"SKILL.md` \u00d7 {digit}" in text
-            ]
+        offenders = _wrong_skill_count_offenders(
+            {surface: self.REPO_ROOT / surface for surface in SKILL_DOC_SURFACES},
+            count=count,
+            auto=auto,
+        )
         assert not offenders, (
             f"there are {count} shipped skills, but these surfaces still state another count: "
             f"{offenders}. Update the prose alongside the table."
         )
+
+    def test_no_sensor_inlines_the_normalization_idiom(self):
+        # `_normalized` exists because a hard wrap silently defeated a sensor and shipped a
+        # stale skill count past 91 green tests. The extraction only helps if every sensor
+        # actually uses it, and a new one is usually copied from a neighbour — so if the
+        # neighbour inlines the idiom, the bug propagates. This forbids the raw form.
+        source = Path(__file__).read_text(encoding="utf-8")
+        offenders = [
+            f"{n}: {line.strip()}"
+            for n, line in enumerate(source.splitlines(), 1)
+            # The one legitimate occurrence is `_normalized`'s own body, exempted by exact
+            # match rather than by line number so the guard survives edits above it.
+            if '" ".join(' in line
+            and ".read_text(" in line
+            and ".split()" in line
+            and line.strip() != _NORMALIZED_IMPL
+            # ...and skip this guard's own machinery, which must mention the pattern to test it.
+            and "_NORMALIZED_IMPL" not in line
+        ]
+        assert not offenders, (
+            "these lines inline the whitespace-normalization idiom instead of calling "
+            f"`_normalized()`: {offenders}. A sensor copied from one of them inherits the "
+            "wrapped-phrase blind spot that `_normalized` exists to close."
+        )
+
+    def test_count_sensor_catches_a_wrapped_phrase(self, tmp_path: Path):
+        # The self-test for the fix above, driven through the REAL matcher rather than
+        # through `_normalized` alone. That distinction is the whole value: asserting only
+        # that `_normalized` collapses whitespace leaves the sensor free to be reverted to a
+        # raw `read_text` with every test still green — a guard that guards nothing.
+        #
+        # `docs/PLUGIN.md` said "All six\n  skills read it" while seven shipped, and the
+        # count sensor passed 91 lint tests: the hard wrap put a newline between the two
+        # words the substring check needed adjacent.
+        surface = tmp_path / "PLUGIN.md"
+        surface.write_text("All six\n  skills read it, which is the point.\n", encoding="utf-8")
+
+        assert "six skills" not in surface.read_text(encoding="utf-8"), (
+            "this test's premise is gone: the wrapped form is now literally adjacent, so it "
+            "no longer demonstrates what the normalization buys"
+        )
+        assert _wrong_skill_count_offenders({"wrapped": surface}, count=7, auto=4) == ["wrapped: 'six skills'"], (
+            "the count sensor found nothing in a surface reading 'All six\\n  skills' while "
+            "seven ship. It has stopped collapsing whitespace, so any wrapped count phrase "
+            "slips past it — the exact bug that let the stale count ship green."
+        )
+
+        # The converse, so a passing sensor is not simply one that reports everything: the
+        # correct count in the same wrapped shape must yield no finding.
+        clean = tmp_path / "CLEAN.md"
+        clean.write_text("All seven\n  skills read it, which is the point.\n", encoding="utf-8")
+        assert _wrong_skill_count_offenders({"clean": clean}, count=7, auto=4) == []
+
+    def test_cli_driving_skills_are_named_in_the_install_prose(self):
+        # Both READMEs promise that the CLI-driving skills preflight `coder-eval --version`.
+        # SKILLS_REQUIRING_THE_CLI is the declared set, but nothing tied it to the prose, so
+        # `optimize-skill` joined the set and both files went on naming three of four — a
+        # first-run user of the fourth gets a bare `command not found`. Derived from the set,
+        # with no skill names written down here, so a fifth cannot ship silently either.
+        #
+        # Scoped to the install paragraph, not the whole file: every skill name appears
+        # SOMEWHERE in both documents, so a whole-file match would assert nothing at all.
+        for surface in ("plugins/coder-eval/README.md", "docs/PLUGIN.md"):
+            text = _normalized(self.REPO_ROOT / surface)
+            anchor = text.find("coder-eval --version")
+            assert anchor != -1, (
+                f"{surface} no longer mentions `coder-eval --version` — the install paragraph "
+                "this sensor anchors on is gone, so the promise it checks is unverifiable"
+            )
+            # The sentence naming the skills sits just before the anchor; take a generous
+            # window either side rather than guessing at sentence boundaries.
+            paragraph = text[max(0, anchor - 400) : anchor + 400]
+            missing = sorted(name for name in SKILLS_REQUIRING_THE_CLI if f"`{name}`" not in paragraph)
+            assert not missing, (
+                f"{surface}'s install paragraph does not name {missing}, which "
+                f"SKILLS_REQUIRING_THE_CLI declares must preflight `coder-eval --version`. A "
+                "user of an unnamed skill is told nothing about needing the CLI and meets a "
+                "bare `command not found` mid-task."
+            )
+
+    def test_tutorial_08_shows_stage_b_as_three_separate_invocations(self):
+        # The single most dangerous edit in this whole area. Suite rollups are keyed on
+        # (variant, suite), so `--repeats 3` pools all three replicates into ONE suite.json
+        # with one confusion matrix — the per-replicate F1 the activation gate compares
+        # would not exist, and the gate would silently compare a number against itself.
+        # Now that the page shows real command lines, "simplifying" them is a one-line edit.
+        page = self.REPO_ROOT / "docs" / "tutorials" / "08-optimizing-a-skill.md"
+        lines = page.read_text(encoding="utf-8").splitlines()
+
+        # Matched on heading TEXT at any level: pinning `###` broke the first time the page
+        # was legitimately restructured, which is a sensor failing for a reason that has
+        # nothing to do with what it guards.
+        def _is_heading(ln: str) -> bool:
+            return ln.lstrip("#") != ln and ln.lstrip("#").startswith(" ")
+
+        start = next(i for i, ln in enumerate(lines) if _is_heading(ln) and "Stage B" in ln)
+        end = next(i for i, ln in enumerate(lines[start + 1 :], start + 1) if _is_heading(ln))
+        block = "\n".join(lines[start:end])
+
+        assert block.count("--run-dir") >= 3, (
+            "tutorial 08's Stage B no longer shows THREE separate invocations with distinct "
+            f"--run-dir values (found {block.count('--run-dir')}). Three run directories are "
+            "what produce three suite.json files; the gate has nothing to read without them"
+        )
+        # Scoped to the fenced COMMANDS, not the prose: the section's own warning says
+        # "**not** `--repeats 3`", and a sensor that fired on the warning would be telling
+        # the author to delete the very sentence it exists to protect.
+        fenced, inside = [], False
+        for line in lines[start:end]:
+            if line.strip().startswith("```"):
+                inside = not inside
+                continue
+            if inside:
+                fenced.append(line)
+        commands = "\n".join(fenced)
+        assert "--repeats" not in commands, (
+            "tutorial 08's activation Stage B now RUNS `--repeats` — rollups pool replicates "
+            "into one suite.json, so the per-replicate F1 this gate compares would not exist. "
+            "`--repeats` is correct at Stage C only, where paired_comparison averages per row "
+            "BEFORE pairing"
+        )
+        assert "not** `--repeats 3`" in block, (
+            "tutorial 08's Stage B no longer WARNS against --repeats 3. The commands are now "
+            "shown, so the warning is what stops the next reader collapsing them"
+        )
+
+    def test_tutorial_09_keeps_the_claims_a_reader_most_needs(self):
+        # Tutorial 09 reports a NULL result, and the facts that make it useful are the ones
+        # an editor tightening a long page would trim first: the suite's shape, the setting
+        # that decided the outcome, why the round stopped, and the denominator rule. Same
+        # deletion-sensor shape as the optimize-skill guard above.
+        text = _normalized(self.REPO_ROOT / "docs" / "tutorials" / "09-optimizing-a-skill-body.md")
+
+        for token, why in (
+            (
+                "one dataset-backed task",
+                "the outcome suite's shape — separate task files produce no rollup to rank and "
+                "make --split test silently re-run the train rows",
+            ),
+            (
+                "disallowed_tools",
+                "denying sub-agent delegation is the setting that moved engaged rows from 0.333 "
+                "to 1.000; an allowlist cannot express it",
+            ),
+            (
+                "disable-model-invocation",
+                "the round's actual root cause: the Skill tool REFUSES such a call, so the body "
+                "never loads and every criterion scores the model's prior knowledge instead",
+            ),
+            (
+                "read the call's *parameters* and never its *result*",
+                "why it stayed hidden — the engagement criterion reported yes for a refused "
+                "call, which is what made four arms tie exactly",
+            ),
+            (
+                "completion_rate",
+                "an errored row is excluded from the aggregate, so it never shows up as a low "
+                "score — only as a denominator that shrank",
+            ),
+        ):
+            assert token in text, f"tutorial 09 lost {token!r} — {why}"
 
     def test_analyze_routes_fixes_to_the_right_layer(self):
         # A shallow keyword sensor: it guards against the guidance being DELETED, not
@@ -1760,7 +2520,7 @@ class TestPluginArtifacts:
         # Whitespace-collapsed so a reflowed paragraph does not fail it — these files are
         # hard-wrapped prose, and a sensor that breaks on rewrapping trains people to
         # distrust it.
-        text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md")
         assert "prompt_gap" in text, "analyze lost the `prompt_gap` root-cause token"
         for phrase in ("fix the prompt", "file the tool bug", "which layer"):
             assert phrase in text, (
@@ -1835,7 +2595,7 @@ class TestPluginArtifacts:
         # with the plugin's defaults produces work its maintainers have to undo — so the
         # precedence has to be stated, and the conventions adopted have to be reported
         # (otherwise "I followed the repo" is unfalsifiable).
-        text = " ".join((PLUGIN_ROOT / "skills" / "task" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "task" / "SKILL.md")
         assert "the repo wins" in text or "the repository wins" in text, (
             "task no longer says repo-local convention beats the bundled rubric — it will "
             "impose the plugin's defaults on a repository that already declared its own"
@@ -1844,7 +2604,7 @@ class TestPluginArtifacts:
             "task does not report WHICH conventions it adopted — an unreported precedence "
             "rule cannot be checked by the person reading the result"
         )
-        rubric = " ".join((PLUGIN_ROOT / "reference" / "task-rubric.md").read_text(encoding="utf-8").split())
+        rubric = _normalized(PLUGIN_ROOT / "reference" / "task-rubric.md")
         assert "the repo wins" in rubric or "the repository wins" in rubric, (
             "reference/task-rubric.md does not carry the same precedence line — the rubric "
             "is read at review time too, and must not contradict the authoring skill"
@@ -1855,7 +2615,7 @@ class TestPluginArtifacts:
         # drops the `agent:` config it supplies, so the gate measures something other than
         # what the suite measures locally; and a `version:` input that ignores the repo's
         # pin runs the gate on a different CLI than the repo is authored against.
-        text = " ".join((PLUGIN_ROOT / "skills" / "ci" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "ci" / "SKILL.md")
         assert "extra-args" in text and "experiment" in text, (
             "the ci skill does not say how to pass an experiment through to the run — a "
             "suite that resolves through one silently measures something else without it"
@@ -1901,7 +2661,7 @@ class TestPluginArtifacts:
         # skill is worse than doing nothing: two suites drift, and the user pays for both
         # on every run. The existence check therefore has to happen BEFORE row design,
         # which is where the token spend is committed.
-        text = " ".join((PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md")
         check = text.find("existing suite")
         assert check != -1 and "skill_triggered" in text, (
             "check-skill names no `existing suite` check — it will scaffold a parallel suite "
@@ -1921,7 +2681,7 @@ class TestPluginArtifacts:
     def test_check_skill_defers_to_an_experiment_supplied_plugins_block(self):
         # A task that redeclares what the experiment layer already provides drifts from it
         # silently — the same reason `task` tells authors to omit `agent:` entirely.
-        text = " ".join((PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "check-skill" / "SKILL.md")
         assert "experiment" in text and "agent.plugins" in text, (
             "check-skill no longer mentions an experiment-supplied `agent.plugins` block"
         )
@@ -1936,7 +2696,7 @@ class TestPluginArtifacts:
         # that already has a suite, it wrote a "first task" beside an existing tree and
         # reported success — so the inventory has to be able to END the skill, not just
         # precede it.
-        text = " ".join((PLUGIN_ROOT / "skills" / "init" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "init" / "SKILL.md")
         assert "already configured" in text or "already has" in text, (
             "init no longer recognizes an already-configured repository"
         )
@@ -1967,7 +2727,7 @@ class TestPluginArtifacts:
         # concrete heading plus the stop rule rather than on the token `pin`, which
         # appeared nowhere in this file before the section landed — so any passing
         # mention would have satisfied a looser test and guarded nothing.
-        text = " ".join((PLUGIN_ROOT / "reference" / "cli-setup.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "reference" / "cli-setup.md")
         assert "## Version pin" in text, (
             "reference/cli-setup.md lost its `## Version pin` section — the CLI-driving "
             "skills would go back to validating a pinned repository with whatever binary "
@@ -2884,7 +3644,7 @@ class TestRunRecordFieldVocabulary:
         # reading a real older run was told its correct extraction was wrong. The four
         # OTHER names in that sentence were never top-level in any generation and were
         # denied on purpose; rewriting the sentence must not take them with it.
-        text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
+        text = _normalized(PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md")
         assert "There is no top-level `turns`" not in text, (
             "analyze denies the legacy `turns` key absolutely again — it is what runs "
             "written before the rename actually carry. Make it conditional on the file."
@@ -3423,3 +4183,203 @@ class TestCE036LiveVerdictContract:
         )
         violations = permuted_violations(checker, case)
         assert any("NON-MONOTONIC" in v for v in violations), violations
+
+
+@pytest.mark.lint
+class TestCE060SplitLabelsAllOrNothing:
+    """CE060 — a dataset's split field must be on every row or on none, never on some.
+
+    `optimize-skill` calls a partly-labelled dataset "the dangerous state, because it does
+    not look like one", and it is right: ``--split`` keeps the rows whose label matches and
+    **silently drops the unlabelled ones**, so the run succeeds, the report renders, and
+    every metric is computed over a smaller suite than the file suggests. Nothing in the
+    output says how many rows went missing.
+
+    That is mechanically detectable, so per CLAUDE.md's standing instruction it becomes a
+    rule rather than a paragraph. Wired as a dedicated ``@pytest.mark.lint`` class rather
+    than a ``BaseRule`` because it reasons over YAML + JSONL, not over one ``.py`` AST —
+    the same shape as CE034 above.
+
+    Both legal states pass: fully labelled (``--split`` selects) and fully unlabelled
+    (``--split`` does not apply to the task at all, via ``expand_dataset``'s ``if labelled:``
+    branch). Only the mixture is a finding.
+    """
+
+    @staticmethod
+    def _split_labels(task, task_file_dir: Path) -> list[str | None]:
+        """Each row's split label, using the runtime's own definition of "labelled"."""
+        from coder_eval.orchestration.task_loader import _load_dataset_rows, row_split_label
+
+        rows = _load_dataset_rows(task.dataset, task_file_dir)
+        # The CONFIGURED field name, never the literal "split" — a dataset may name it
+        # anything, and keying on the default would silently pass every such suite.
+        return [row_split_label(row, task.dataset.split_field) for row in rows]
+
+    @classmethod
+    def _offenders(cls, task, task_file_dir: Path) -> str | None:
+        labels = cls._split_labels(task, task_file_dir)
+        labelled = [x for x in labels if x is not None]
+        if labelled and len(labelled) != len(labels):
+            return f"{len(labelled)} of {len(labels)} rows carry a split label"
+        return None
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_tasks_are_fully_labelled_or_not_at_all(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        if task.dataset is None:
+            pytest.skip("no dataset: block — the rule says nothing about it")
+
+        offender = self._offenders(task, path.parent)
+        assert offender is None, (
+            f"{path}: {offender}. A PARTLY labelled dataset is the one bad state — "
+            f"`--split` keeps the matching rows and silently DROPS the unlabelled ones, so "
+            f"every metric is computed over a smaller suite than the file suggests, with "
+            f"nothing in the run reporting it. Label the remaining rows (do not exempt)."
+        )
+
+    def _task_from_rows(self, tmp_path: Path, rows: list[dict], split_field: str = "split"):
+        """A minimal dataset-backed task over inline rows."""
+        from coder_eval.models import Dataset, FileExistsCriterion, TaskDefinition
+
+        return TaskDefinition(
+            task_id="t",
+            description="split-label fixture",
+            initial_prompt="${row.id}",
+            success_criteria=[FileExistsCriterion(description="d", path="out.txt")],
+            dataset=Dataset(rows=rows, split_field=split_field),
+        )
+
+    def test_detects_a_partly_labelled_dataset(self, tmp_path: Path):
+        task = self._task_from_rows(
+            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}, {"id": "c"}]
+        )
+        assert self._offenders(task, tmp_path) == "2 of 3 rows carry a split label"
+
+    def test_fully_labelled_dataset_is_not_flagged(self, tmp_path: Path):
+        task = self._task_from_rows(tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": "test"}])
+        assert self._offenders(task, tmp_path) is None
+
+    def test_fully_unlabelled_dataset_is_not_flagged(self, tmp_path: Path):
+        # Legal and safe: `--split` then does not apply to this task at all.
+        task = self._task_from_rows(tmp_path, [{"id": "a"}, {"id": "b"}])
+        assert self._offenders(task, tmp_path) is None
+
+    def test_zero_counts_as_a_label(self, tmp_path: Path):
+        # A falsy 0 is a real label, not a missing value — the split filter compares via
+        # str(), so `--split 0` selects it. Treating it as unlabelled would make a fully
+        # labelled dataset read as partly labelled.
+        task = self._task_from_rows(tmp_path, [{"id": "a", "split": 0}, {"id": "b", "split": 1}])
+        assert self._offenders(task, tmp_path) is None
+
+    def test_explicit_null_and_empty_string_count_as_unlabelled(self, tmp_path: Path):
+        # Pins the (None, "") convention. A half-labelled JSONL carries explicit nulls, and
+        # an empty string is the same "no value here" state.
+        task = self._task_from_rows(
+            tmp_path, [{"id": "a", "split": "train"}, {"id": "b", "split": None}, {"id": "c", "split": ""}]
+        )
+        assert self._offenders(task, tmp_path) == "1 of 3 rows carry a split label"
+
+    def test_rule_keys_on_the_configured_split_field(self, tmp_path: Path):
+        # Not the literal "split". A dataset naming its field anything else would otherwise
+        # read as fully unlabelled and pass no matter how it was labelled.
+        task = self._task_from_rows(tmp_path, [{"id": "a", "fold": "train"}, {"id": "b"}], split_field="fold")
+        assert self._offenders(task, tmp_path) == "1 of 2 rows carry a split label"
+
+    def test_expand_dataset_keeps_exactly_the_rows_the_convention_names(self, tmp_path: Path):
+        # Asserted against LITERAL expected sets, not against `row_split_label` — the helper
+        # is what `expand_dataset` now calls, so deriving the expectation from it would
+        # compare the code to itself and pass however wrong both were.
+        #
+        # These literals encode the convention the extraction had to preserve: `0` is a
+        # real label reached by `--split 0` (compared via str()), while explicit `null` and
+        # `""` are unlabelled and are reachable by no split at all.
+        from coder_eval.orchestration.task_loader import expand_dataset
+
+        rows = [
+            {"id": "a", "split": "train"},
+            {"id": "b", "split": "test"},
+            {"id": "c", "split": 0},
+            {"id": "d", "split": None},
+            {"id": "e", "split": ""},
+        ]
+        task = self._task_from_rows(tmp_path, rows)
+        for split, expected in (("train", {"a"}), ("test", {"b"}), ("0", {"c"})):
+            kept = {t.task_id.split("/")[-1] for t in expand_dataset(task, tmp_path, split=split)}
+            assert kept == expected, f"split={split!r}: expand_dataset kept {kept}, expected {expected}"
+
+
+@pytest.mark.lint
+class TestCE061RowPromptsDoNotLeakWhatTheyGrade:
+    """CE061 — a dataset row's prompt must not contain the value a criterion grades it on.
+
+    This repo's own task rubric (and the `lint-tasks` skill) call a prompt that supplies its
+    own answer the most common way a suite scores well while measuring nothing. `lint-tasks`
+    applies that rule to a *user's* files; nothing applied it to this repository's, and a
+    checked-in worked example shipped with four such rows.
+
+    Scope, stated plainly: this catches the **verbatim** form — the prompt literally contains
+    the string a criterion asserts. It cannot catch a *semantic* leak, where the prompt
+    describes the graded behaviour in different words ("list the paths explicitly rather than
+    with a recursive wildcard" while grading an explicit glob). That form needs a reader, and
+    is what `lint-tasks` and code review are for. Guarding the blunt case is still worth it:
+    it is the easy mistake, and it is silent.
+    """
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_task_prompts_do_not_contain_the_graded_string(self, path: Path):
+
+        from coder_eval.orchestration.task_loader import expand_dataset, load_task
+
+        task, _ = load_task(path)
+        if task.dataset is None:
+            pytest.skip("no dataset: block — nothing is row-substituted")
+
+        offenders: list[str] = []
+        for row in expand_dataset(task, path.parent):
+            prompt = (row.initial_prompt or "").lower()
+            if not prompt:
+                continue
+            for criterion in row.success_criteria:
+                # Every string the criterion asserts CONTENT on. `description` is excluded:
+                # it is a label, routinely echoes the scenario, and grades nothing.
+                dumped = criterion.model_dump()
+                dumped.pop("description", None)
+                # Location fields are exempt, and the distinction is the whole rule: a
+                # prompt MAY say WHERE to write ("call it .github/workflows/evals.yml"),
+                # which removes the agent's filename choice from the measurement without
+                # revealing anything graded. It may not say WHAT the artifact must contain.
+                for locator in ("path", "agent_file", "file_path", "command"):
+                    dumped.pop(locator, None)
+                for value in _string_leaves(dumped):
+                    # Short values collide by chance ("ci", "0.7"); a leak worth flagging is
+                    # a substantive string the author put in both places.
+                    if len(value) >= 12 and value.lower() in prompt:
+                        offenders.append(f"{row.task_id}: prompt contains {value!r} ({criterion.type})")
+
+        assert not offenders, (
+            f"{path}: the prompt hands the agent the exact string a criterion grades it on, so "
+            f"the row scores well whether or not the behaviour under test happened — and an "
+            f"A/B arm that DELETED that behaviour would still pass. Describe the situation and "
+            f"let the skill or the agent supply the method.\n\n" + "\n".join(f"  {o}" for o in offenders)
+        )
+
+
+def _string_leaves(node: object) -> list[str]:
+    """Every string in a nested dict/list, flattened."""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for v in node.values() for s in _string_leaves(v)]
+    if isinstance(node, list):
+        return [s for v in node for s in _string_leaves(v)]
+    return []

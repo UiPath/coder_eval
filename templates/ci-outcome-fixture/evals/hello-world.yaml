@@ -1,0 +1,13 @@
+task_id: "hello-world"
+description: "The agent writes a greeting module."
+tags: [smoke]
+
+initial_prompt: |
+  Create `widgets/greet.py` exporting `greet(name)` which returns "Hello, <name>!".
+
+success_criteria:
+  - type: "file_check"
+    description: "greet.py exists and defines greet()"
+    path: "widgets/greet.py"
+    includes:
+      - "def greet("
