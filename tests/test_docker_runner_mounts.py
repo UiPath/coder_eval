@@ -131,6 +131,18 @@ class TestValidateExtraMount:
         with pytest.raises(ValueError, match="shadows a framework-owned mount"):
             _validate_extra_mount(f"{real_dir}:$SNEAKY:ro")
 
+    def test_destination_var_carrying_a_colon_is_rejected(self, real_dir, monkeypatch):
+        """A ':' in an expanded value would add fields to the rebuilt spec."""
+        monkeypatch.setenv("SNEAKY", "/mnt/x:rw")
+        with pytest.raises(ValueError, match="introduced a ':'"):
+            _validate_extra_mount(f"{real_dir}:$SNEAKY:ro")
+
+    def test_source_var_carrying_a_colon_is_rejected(self, monkeypatch):
+        """Same guard on the source side, which is rebuilt the same way."""
+        monkeypatch.setenv("SNEAKY", "/mnt/x:rw")
+        with pytest.raises(ValueError, match="introduced a ':'"):
+            _validate_extra_mount("$SNEAKY:/mnt/y:ro")
+
     def test_malformed_no_colon(self):
         with pytest.raises(ValueError, match="expected `src:dst"):
             _validate_extra_mount("just-one-token")

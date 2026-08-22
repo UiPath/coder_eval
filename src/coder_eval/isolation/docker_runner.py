@@ -327,12 +327,15 @@ def _validate_extra_mount(spec: str) -> str:
     # Expanded before the absolute-path check: that is the point.
     expanded_src = os.path.expandvars(os.path.expanduser(src))
     dst = os.path.expandvars(os.path.expanduser(raw_dst))
+    # A variable whose value carries a ':' would add fields to the spec rebuilt
+    # at the bottom, silently moving the destination or widening the mode.
+    # The drive prefix is excluded: its colon is legitimate and already split off.
+    if ":" in dst or ":" in expanded_src[len(head) :]:
+        raise ValueError(f"Invalid extra_mounts entry {spec!r}: expansion introduced a ':' into a path.")
     if not dst.startswith("/"):
         # expandvars leaves an unset var verbatim, so typos land here.
         detail = f"{raw_dst!r}" if dst == raw_dst else f"{raw_dst!r} (expanded to {dst!r})"
-        raise ValueError(
-            f"Invalid extra_mounts entry {spec!r}: destination must be an absolute path, got {detail}."
-        )
+        raise ValueError(f"Invalid extra_mounts entry {spec!r}: destination must be an absolute path, got {detail}.")
     if mode not in ("ro", "rw"):
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: mode must be 'ro' or 'rw'.")
     if not Path(expanded_src).exists():
