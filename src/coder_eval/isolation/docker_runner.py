@@ -294,17 +294,10 @@ def _validate_extra_mount(spec: str) -> str:
     write portable specs. Returns the (possibly rewritten) spec to feed
     back into argv.
 
-    The destination is expanded for the same reason the source is, and it
-    matters more than it looks: ``env_passthrough`` forwards ``HOME`` with
-    the HOST value on purpose, so a container-side path that must line up
-    with ``$HOME`` (``$HOME/.uipath`` for the uip CLI's login state, say)
-    has a different literal value on every host. Without expansion the only
-    way to write that mount is to hardcode one host's home directory, which
-    then silently mounts to the wrong place everywhere else -- and a login
-    state the CLI cannot see reads as a capability failure, not a config
-    error.
-
     Notes:
+      - Destinations are expanded too. A container path that has to match a
+        host-valued var (``$SKILLS_REPO_PATH``) would otherwise have to be
+        hardcoded per machine.
       - Mode is REQUIRED. Forgetting ``:ro`` is the single most common way
         to accidentally hand the container RW access to a host directory,
         so we make the author write it explicitly.
@@ -331,14 +324,11 @@ def _validate_extra_mount(spec: str) -> str:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: empty source path.")
     if not raw_dst:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: empty destination path.")
-    # Expand ~ and $VAR on BOTH sides so authors can write portable specs.
-    # Destination expansion happens BEFORE the absolute-path check, since the
-    # whole point is to let `$HOME/...` resolve to an absolute path.
+    # Expanded before the absolute-path check: that is the point.
     expanded_src = os.path.expandvars(os.path.expanduser(src))
     dst = os.path.expandvars(os.path.expanduser(raw_dst))
     if not dst.startswith("/"):
-        # An unset variable is left verbatim by expandvars, so a typo'd name
-        # lands here. Show both forms or the message is a puzzle.
+        # expandvars leaves an unset var verbatim, so typos land here.
         detail = f"{raw_dst!r}" if dst == raw_dst else f"{raw_dst!r} (expanded to {dst!r})"
         raise ValueError(
             f"Invalid extra_mounts entry {spec!r}: destination must be an absolute path, got {detail}."
@@ -350,8 +340,7 @@ def _validate_extra_mount(spec: str) -> str:
     # Reject destinations that shadow framework-owned mounts inside the
     # container. ``/work`` substrings are caught too -- /work/foo would
     # land underneath our staging dir and shadow the input/output tree.
-    # Checked on the EXPANDED destination: `$HOME` could itself expand to a
-    # reserved path, and the raw form would sail past this gate.
+    # Expanded form: a var could itself expand to a reserved path.
     dst_norm = dst.rstrip("/") or "/"
     if dst_norm in _RESERVED_MOUNT_DESTS or dst_norm.startswith(CONTAINER_WORK_DIR + "/"):
         raise ValueError(
