@@ -2,6 +2,35 @@
 
 <!-- version list -->
 
+## v0.11.1 (2026-08-21)
+
+### Bug Fixes
+
+- **ci**: Pin pip floor to 26.2 to close PYSEC-2026-3721
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **codex**: Store command output whole in result_summary (+ code-review fixes)
+  ([#127](https://github.com/UiPath/coder_eval/pull/127),
+  [`3d09f0f`](https://github.com/UiPath/coder_eval/commit/3d09f0f4d966f619405058aca44aa982b1ba265a))
+
+- **deps**: Address PR #133 review — anthropic 1.0.0 dropped temperature kwarg
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **deps**: Bump anthropic to 1.0.0 and migrate Bedrock judge path to httpx2
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **deps**: Bump anthropic to 1.0.0, migrate Bedrock judge path to httpx2
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **deps**: Re-lock pip to 26.2.1 to actually close PYSEC-2026-3721
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+
 ## v0.11.0 (2026-08-19)
 
 ### Bug Fixes

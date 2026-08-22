@@ -40,7 +40,7 @@ SUBMIT_VERDICT_ANTHROPIC_TOOL: dict[str, Any] = {
     "description": _SUBMIT_VERDICT_DESCRIPTION,
     "input_schema": JudgeVerdict.model_json_schema(),
 }
-"""Anthropic-native tool spec for the Bedrock httpx-direct path and Anthropic SDK calls.
+"""Anthropic-native tool spec for the Bedrock httpx2-direct path and Anthropic SDK calls.
 
 Note: Anthropic uses ``input_schema``, not OpenAI's ``parameters``.
 """
@@ -132,7 +132,7 @@ def extract_verdict_from_anthropic_response(
     ``{"type": "tool_use", "name": "submit_verdict"}`` and validates the last
     one's ``input`` against ``JudgeVerdict``. Used by:
 
-    * The Bedrock httpx path (``invoke_bedrock_judge_async``) — raw JSON dict.
+    * The Bedrock httpx2 path (``invoke_bedrock_judge_async``) — raw JSON dict.
     * The Anthropic SDK Direct path (``invoke_anthropic_judge_async``) —
       response converted via ``Message.model_dump()``.
 
