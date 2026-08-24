@@ -70,5 +70,8 @@ refs/
 # SkillsBench tasks for testing
 /resources/
 
+# Derived pyright config for the CE036 contract engine (tests/lint/pyright_config.py)
+.pyright-tests.json
+
 # Local evalboard dataset for `next dev` (EVALBOARD_LOCAL_RUNS_DIR)
 evalboard/.local-runs/

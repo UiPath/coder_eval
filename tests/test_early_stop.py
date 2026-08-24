@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -91,27 +91,30 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from tests._fixtures.live_criteria import FROZEN_TS, make_command, make_turn
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 
-_TS = datetime(2026, 1, 1, 0, 0, 0)
+# Telemetry/turn primitives are shared with the CE036 contract-replay fixtures
+# (tests/lint/live_verdict_contract.py); the thin wrappers below keep this file's
+# historical call shape (tool-<name> ids, no sequence numbers) at every call site.
+_TS = FROZEN_TS
 
 
-def _cmd(tool_name: str, parameters: dict[str, Any], *, result_status: str = "success") -> CommandTelemetry:
-    return CommandTelemetry(
-        tool_name=tool_name,
-        tool_id=f"tool-{tool_name}",
-        timestamp=_TS,
-        parameters=parameters,
-        result_status=result_status,
-    )
+def _cmd(
+    tool_name: str,
+    parameters: dict[str, Any],
+    *,
+    result_status: Literal["success", "error", "unknown"] = "success",
+) -> CommandTelemetry:
+    return make_command(tool_name, parameters, tool_id=f"tool-{tool_name}", result_status=result_status)
 
 
 def _turn(*commands: CommandTelemetry) -> TurnRecord:
-    return TurnRecord(iteration=1, user_input="", agent_output="", commands=list(commands))
+    return make_turn(*commands)
 
 
 def _task(
@@ -2335,7 +2338,7 @@ async def _run_wiring(
     agent = _ScriptedAgent(events, turn)
     orch.agent = agent  # type: ignore[assignment]
 
-    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+    with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
         success = await orch._evaluation_loop()
     assert orch.result is not None
     return orch.result, agent, success
@@ -2458,7 +2461,7 @@ class TestOrchestratorEarlyStopWiring:
         agent = _ScriptedAgent(events, turn)
         orch.agent = agent  # type: ignore[assignment]
 
-        with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+        with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
             success = await orch._evaluation_loop()
 
         assert orch.result.early_stop is not None

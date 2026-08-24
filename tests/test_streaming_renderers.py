@@ -78,6 +78,28 @@ def test_tool_end_renders_success():
     assert "OK" in output or "ok" in output.lower()
 
 
+def test_tool_end_caps_long_result_summary_but_reports_full_length():
+    """A large (untruncated-at-capture) result_summary is capped for the terse
+    live feed, while the reported char count still reflects the full length."""
+    from coder_eval.streaming.renderers import _MAX_RESULT_LEN
+
+    renderer, buf = _make_renderer()
+    big = "Z" * 5000  # far beyond the display cap
+    renderer.on_event(
+        ToolEndEvent(
+            task_id="t1",
+            tool=_tool(tool_name="Bash", result_summary=big),
+            status=ToolEndStatus.OK,
+        )
+    )
+    output = buf.getvalue()
+    # true length is reported...
+    assert "(5000 chars)" in output
+    # ...but the console body is capped (not the full 5000 Z's dumped).
+    assert output.count("Z") <= _MAX_RESULT_LEN
+    assert "..." in output
+
+
 def test_tool_end_renders_error():
     """ToolEndEvent renders ERROR for failed results."""
     renderer, buf = _make_renderer()

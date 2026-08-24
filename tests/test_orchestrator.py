@@ -1670,7 +1670,7 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
     )
     orchestrator.success_checker = mock_checker
 
-    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+    with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
         success = await orchestrator._evaluation_loop()
 
     # Should NOT succeed
@@ -1788,7 +1788,7 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     orchestrator.success_checker = mock_checker
 
     with (
-        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
         success = await orchestrator._evaluation_loop()
@@ -1891,7 +1891,7 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     orchestrator.success_checker = mock_checker
 
     with (
-        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
         # TurnTimeoutError is non-retryable, so the loop re-raises after the
         # on_attempt_error callback has already stamped + appended the partial.
@@ -2108,10 +2108,10 @@ def test_finalize_result_logs_zero_score_when_no_criteria(tmp_path, caplog):
 
 @pytest.mark.asyncio
 async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
-    """Evaluate-only branch (agent is None) must call load_reference_code and
-    forward the resolved reference to SuccessChecker.check_all.
+    """Evaluate-only branch (agent is None) must still stage the reference and
+    forward it to SuccessChecker.check_all_async.
 
-    Regression: previously this branch called check_all without reference_code,
+    Regression: previously this branch called check_all without the reference,
     so judge-style criteria (llm_judge / agent_judge) silently saw no
     reference even when task.reference was set — surfaced as
     "include_reference=True but reference not set" in the judge_context log.
@@ -2126,8 +2126,9 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
         SandboxConfig,
     )
 
-    ref_path = tmp_path / "reference.txt"
-    ref_path.write_text("REFERENCE_CONTENT")
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir()
+    (ref_dir / "solution.txt").write_text("REFERENCE_CONTENT")
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
@@ -2147,13 +2148,13 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x", description="x")],
         task_timeout=None,
-        reference=ReferenceSource(file="reference.txt"),
+        reference=ReferenceSource(directory="reference"),
     )
 
     run_dir = tmp_path / "run" / "evaluate_only_ref"
     run_dir.mkdir(parents=True)
 
-    # task_file is what load_reference_code resolves the reference path against.
+    # task_file is what the reference directory path resolves against.
     task_yaml = tmp_path / "task.yaml"
     task_yaml.write_text("# placeholder")
 
@@ -2182,11 +2183,18 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
     )
     orchestrator.success_checker = mock_checker
 
+    # _setup() normally does this; the test drives _evaluation_loop directly.
+    await orchestrator._stage_reference()
     await orchestrator._evaluation_loop()
 
     mock_checker.check_all_async.assert_called_once()
     kwargs = mock_checker.check_all_async.call_args.kwargs
-    assert kwargs["reference_code"] == "REFERENCE_CONTENT"
+    staged = kwargs["reference_dir"]
+    assert staged is not None
+    # A per-run COPY, never the checked-out source — that is what makes the
+    # mode-000 window safe to apply under a parallel batch.
+    assert staged != ref_dir
+    assert (staged / "solution.txt").read_text() == "REFERENCE_CONTENT"
     # turn_records is empty in evaluate-only mode but the kwarg should still be wired.
     assert kwargs["turn_records"] == []
 

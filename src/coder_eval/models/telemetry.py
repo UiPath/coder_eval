@@ -410,6 +410,16 @@ class CommandTelemetry(BaseModel):
         result size from prompt-cache growth (which is unavailable when caching is
         disabled). Approximate, not the API's exact tokenizer count, but
         deterministic and always present. 0 when the tool returned no content.
+
+        This measure is only meaningful while ``result_summary`` stays whole: an
+        agent that truncates a command's output before recording it (as the Codex
+        agent once did with ``output[:100]``) silently under-reports that command's
+        result. Lint rule CE043 forbids truncating captured command output
+        (stdout/stderr) in the agents, so the "untruncated" contract holds for
+        command results across agents. (One-line summaries of non-command tool
+        items — e.g. collab/MCP status lines built by ``_summarize_tool_item`` —
+        are intentionally brief and out of scope.) Trim for DISPLAY in the
+        renderers/reports instead.
         """
         if not self.result_summary:
             return 0

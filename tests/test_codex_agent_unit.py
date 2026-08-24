@@ -104,3 +104,28 @@ class TestCodexTurnState:
         # A tool_use block was recorded into the open buffer (cut at the next
         # tokenUsage flush, not here), joinable to the command by tool_id.
         assert any(b.block_type == "tool_use" and b.tool_use_id == "c1" for b in state.open_blocks)
+
+    def test_command_output_recorded_whole_not_truncated(self):
+        # Regression for the Codex `output[:100]` bug (CE043): result_summary must
+        # carry the FULL command output so result_tokens reflects real tool-output
+        # size instead of being pinned at a ~31-token, 100-char cap.
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
+        state, commands, _messages = self._state(agent)
+
+        big_output = "X" * 4000  # far beyond the old 100-char clip
+        cmd_root = SimpleNamespace(
+            type="commandExecution",
+            id="c2",
+            command="cat big.txt",
+            exit_code=0,
+            aggregated_output=big_output,
+            duration_ms=5,
+        )
+        state.on_item_started(_item_notification("item/started", cmd_root))
+        state.on_item_completed(_item_notification("item/completed", cmd_root))
+
+        cmd = commands[0]
+        assert big_output in (cmd.result_summary or ""), "full output must be recorded, not truncated"
+        # result_tokens (ceil(len/4)) must scale with the real output, not ~31.
+        assert cmd.result_tokens >= len(big_output) // 4
+        assert cmd.result_tokens > 100

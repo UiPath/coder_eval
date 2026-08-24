@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import itertools
 from abc import ABC, abstractmethod
+from pathlib import PurePosixPath
 from typing import Annotated, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.enums import AgentKind
@@ -899,18 +900,20 @@ class FileCheckCriterion(BaseSuccessCriterion):
 
 
 class ReferenceComparisonCriterion(BaseSuccessCriterion):
-    """Compare agent code against reference solution.
+    """Compare agent code against one file of the reference solution.
 
-    Uses the top-level `reference` block from TaskDefinition.
-    The reference code is loaded by the orchestrator and passed to the success checker.
+    Requires the top-level `reference` block on TaskDefinition. `reference_file`
+    names the file to compare against *inside* `reference.directory` — the same
+    place judges address as `$REFERENCE_DIR/<path>`.
 
-    Pure data model - checking logic in SuccessChecker._check_reference_comparison()
+    Pure data model - checking logic in ReferenceComparisonChecker.
 
     Example YAML:
         success_criteria:
           - type: "reference_comparison"
             description: "Code structure matches reference"
             agent_file: "solution.py"
+            reference_file: "solution.py"
             comparison_method: "ast"
             similarity_threshold: 0.8
             weight: 1.0
@@ -926,6 +929,36 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     agent_file: str = Field(
         description="Path to agent's generated file (relative to sandbox root); may be a glob matching exactly one file"
     )
+
+    reference_file: str = Field(
+        description=(
+            "Path to the reference file to compare against, relative to the task's "
+            "reference.directory (i.e. $REFERENCE_DIR/<this path>). Must stay inside "
+            "that directory."
+        )
+    )
+
+    @field_validator("reference_file")
+    @classmethod
+    def _confined_reference_file(cls, v: str) -> str:
+        """Enforce the "must stay inside that directory" contract at LOAD time.
+
+        Mirrors ``ReferenceSource._non_empty_directory`` on the sibling field.
+        Left to check time, an empty/absolute/``..`` value surfaced as a config
+        error dressed up as an agent failure — the checker raises
+        ``CheckerMisuseError`` for that now, but a schema error at load is
+        earlier still and costs no tokens.
+        """
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("reference_comparison.reference_file must be a non-empty path.")
+        candidate = PurePosixPath(cleaned.replace("\\", "/"))
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(
+                "reference_comparison.reference_file must be RELATIVE to the task's reference.directory "
+                + f"and must not escape it (no leading '/', no '..' component); got {v!r}."
+            )
+        return cleaned
 
     comparison_method: Literal["ast", "token", "complexity"] = Field(
         default="ast",
@@ -1243,7 +1276,7 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
         default_factory=list,
         description=(
             "Paths whose contents are shown to the judge. Plain entries are sandbox-relative; "
-            "entries prefixed with '$TASK_DIR/' are read from the host filesystem relative to "
+            "entries prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host filesystem relative to "
             "the task YAML's parent directory (useful for shared rubrics outside the sandbox). "
             "Missing files are rendered as '<file not found>' so the rubric can penalize them."
         ),
@@ -1251,10 +1284,11 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     include_reference: bool = Field(
         default=True,
         description=(
-            "When true (default) and task.reference is set, include the reference solution in "
-            "the judge prompt. Silently omitted if no reference is configured. Never shown to "
-            "the agent. Set to false if you want the reference to drive a non-judge consumer "
-            "(e.g. ``reference_comparison``) without showing it to the LLM grader."
+            "When true (default) and task.reference is set, inline the WHOLE reference "
+            "directory into the judge prompt (one labelled block per file). Silently omitted "
+            "if no reference is configured. Never shown to the agent. Set to false to attach "
+            "only specific assets via ``$REFERENCE_DIR/<path>`` entries in ``files``, or to "
+            "let the reference drive ``reference_comparison`` without showing it to the grader."
         ),
     )
     include_agent_output: bool = Field(
@@ -1410,7 +1444,7 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         default_factory=list,
         description=(
             "Paths whose contents are pre-attached to the judge prompt. Plain entries are "
-            "sandbox-relative; entries prefixed with '$TASK_DIR/' are read from the host "
+            "sandbox-relative; entries prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host "
             "filesystem relative to the task YAML's parent directory (useful for shared rubrics "
             "outside the sandbox). Missing files are rendered as '<file not found>' so the "
             "rubric can penalize them. Empty by default — without entries, the judge inspects "
@@ -1420,12 +1454,12 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     include_reference: bool = Field(
         default=True,
         description=(
-            "When true (default) and task.reference is set, mount the reference for the judge. "
-            "For ``code`` / ``file`` references, the content is inlined into the prompt. For "
-            "``directory`` references, the tree is copied into ``_reference/`` in the judge's "
-            "working dir for Read/Glob browsing. Silently omitted if no reference is configured. "
-            "Set to false if a reference is configured for ``reference_comparison`` only and "
-            "should NOT be visible to the LLM grader."
+            "When true (default) and task.reference is set, copy the reference tree into "
+            "``_reference/`` in the judge's working dir for Read/Glob browsing. It is MOUNTED, "
+            "not inlined into the prompt — use ``$REFERENCE_DIR/<path>`` entries in ``files`` "
+            "to pre-attach specific assets as text. Silently omitted if no reference is "
+            "configured. Set to false if a reference is configured for ``reference_comparison`` "
+            "only and should NOT be visible to the judge."
         ),
     )
     include_agent_output: bool = Field(

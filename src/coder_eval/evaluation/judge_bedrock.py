@@ -14,7 +14,7 @@ agent_judge uses the Claude Code SDK subprocess instead — the two paths
 intentionally do not share an HTTP client.
 
 Async on purpose: this is llm_judge's only implementation of the network
-call (there is no sync twin) — ``httpx.AsyncClient`` lets the call yield the
+call (there is no sync twin) — ``httpx2.AsyncClient`` lets the call yield the
 event loop instead of blocking a thread-pool thread for the wait, so
 ``SuccessChecker.check_all_async`` awaits it directly without pinning a
 thread. (``check_all_async`` currently runs criteria sequentially; running
@@ -27,7 +27,7 @@ import asyncio
 import logging
 from typing import Any
 
-import httpx
+import httpx2
 
 from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.errors.categories import RetryConfig
@@ -90,13 +90,13 @@ async def invoke_bedrock_judge_async(
     attempts = _JUDGE_RETRY.max_retries + 1
     last_failure = ""
     last_exc: Exception | None = None
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         for attempt in range(attempts):
             if attempt:
                 await asyncio.sleep(compute_backoff(_JUDGE_RETRY, attempt - 1))
             try:
                 response = await client.post(url, headers=headers, json=body, timeout=timeout_seconds)
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 last_failure = f"Bedrock invoke transport error: {e}"
                 last_exc = e
                 logger.warning("Bedrock judge attempt %d/%d failed: %s", attempt + 1, attempts, last_failure)

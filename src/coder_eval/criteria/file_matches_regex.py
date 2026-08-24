@@ -25,7 +25,6 @@ class FileMatchesRegexChecker(BaseCriterion[FileMatchesRegexCriterion]):
         self,
         criterion: FileMatchesRegexCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: CheckContext | None = None,
@@ -35,7 +34,6 @@ class FileMatchesRegexChecker(BaseCriterion[FileMatchesRegexCriterion]):
         Args:
             criterion: File matches regex criterion
             sandbox: Sandbox instance for file access
-            reference_code: Not used for this criterion
 
         Returns:
             Result with binary score (1.0 if pattern matches as expected, 0.0 otherwise)

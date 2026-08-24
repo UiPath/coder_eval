@@ -2,6 +2,115 @@
 
 <!-- version list -->
 
+## v0.11.2 (2026-08-24)
+
+### Bug Fixes
+
+- **docker**: Expand ~ and $VAR in extra_mounts destinations
+  ([#128](https://github.com/UiPath/coder_eval/pull/128),
+  [`02dbf69`](https://github.com/UiPath/coder_eval/commit/02dbf694705fd3f7de4ce164230a70945f08a1ce))
+
+- **docker**: Reject expansions that inject a ':' into a mount path
+  ([#128](https://github.com/UiPath/coder_eval/pull/128),
+  [`02dbf69`](https://github.com/UiPath/coder_eval/commit/02dbf694705fd3f7de4ce164230a70945f08a1ce))
+
+### Documentation
+
+- **docker**: Trim the extra_mounts destination comments to scope
+  ([#128](https://github.com/UiPath/coder_eval/pull/128),
+  [`02dbf69`](https://github.com/UiPath/coder_eval/commit/02dbf694705fd3f7de4ce164230a70945f08a1ce))
+
+
+## v0.11.1 (2026-08-21)
+
+### Bug Fixes
+
+- **ci**: Pin pip floor to 26.2 to close PYSEC-2026-3721
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **codex**: Store command output whole in result_summary (+ code-review fixes)
+  ([#127](https://github.com/UiPath/coder_eval/pull/127),
+  [`3d09f0f`](https://github.com/UiPath/coder_eval/commit/3d09f0f4d966f619405058aca44aa982b1ba265a))
+
+- **deps**: Address PR #133 review — anthropic 1.0.0 dropped temperature kwarg
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **deps**: Bump anthropic to 1.0.0 and migrate Bedrock judge path to httpx2
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **deps**: Bump anthropic to 1.0.0, migrate Bedrock judge path to httpx2
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+- **deps**: Re-lock pip to 26.2.1 to actually close PYSEC-2026-3721
+  ([#133](https://github.com/UiPath/coder_eval/pull/133),
+  [`beecedd`](https://github.com/UiPath/coder_eval/commit/beeceddc521957d3cb53f944b7877dada1155548))
+
+
+## v0.11.0 (2026-08-19)
+
+### Bug Fixes
+
+- **docker**: Restore container access after the DAC cap drop, shield the task dir
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+- **reference**: Address code review and CodeQL findings
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+- **reference**: Address PR review — scoring correctness, fail-closed anti-cheat
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+- **reference**: Clear remaining CodeQL alerts
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+### Documentation
+
+- **reference**: Record why READ_ONLY_MODE exists, and what is left to wire
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+### Features
+
+- **reference**: Directory-only references + anti-cheat permission window
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+### Testing
+
+- **early-stop**: CE036 enforces the live_verdict determinism + monotonicity contract
+  ([#126](https://github.com/UiPath/coder_eval/pull/126),
+  [`d854004`](https://github.com/UiPath/coder_eval/commit/d854004a5ec4fce0dab16d17d809a93c448fa022))
+
+- **reference**: Skip host-side chmod assertions on Windows
+  ([#106](https://github.com/UiPath/coder_eval/pull/106),
+  [`56bffad`](https://github.com/UiPath/coder_eval/commit/56bffad6acc4c0b32357bd25334bedd403c2f0d0))
+
+
+## v0.10.2 (2026-08-18)
+
+### Continuous Integration
+
+- Exclude attestation sidecars from the PyPI artifact-identity assert
+  ([#124](https://github.com/UiPath/coder_eval/pull/124),
+  [`7d8a771`](https://github.com/UiPath/coder_eval/commit/7d8a771f51fc8694a90f55477d410a55235a4d8a))
+
+
+## v0.10.1 (2026-08-18)
+
+### Continuous Integration
+
+- Bump gh-action-pypi-publish to v1.14.2 to accept Metadata-Version 2.5
+  ([#123](https://github.com/UiPath/coder_eval/pull/123),
+  [`a65ee69`](https://github.com/UiPath/coder_eval/commit/a65ee69a65f97bb3e7e2fbff942c2a110b3c07ee))
+
+
 ## v0.10.0 (2026-08-18)
 
 ### Bug Fixes
