@@ -108,6 +108,41 @@ class TestValidateExtraMount:
         result = _validate_extra_mount("$MYDIR:/mnt/x")
         assert result.startswith(real_dir + ":")
 
+    def test_var_expansion_in_destination(self, real_dir, monkeypatch):
+        """``$VAR`` in the destination expands too."""
+        monkeypatch.setenv("HOME", "/home/someuser")
+        result = _validate_extra_mount(f"{real_dir}:$HOME/.uipath:rw")
+        assert result == f"{real_dir}:/home/someuser/.uipath:rw"
+
+    def test_home_expansion_in_destination(self, real_dir, monkeypatch):
+        """``~`` in the destination expands the same way the source does."""
+        monkeypatch.setenv("HOME", "/home/someuser")
+        result = _validate_extra_mount(f"{real_dir}:~/.uipath:ro")
+        assert result == f"{real_dir}:/home/someuser/.uipath:ro"
+
+    def test_unset_var_destination_rejected_with_both_forms(self, real_dir):
+        """An unset var is left verbatim, so it must fail loudly."""
+        with pytest.raises(ValueError, match="destination must be an absolute path"):
+            _validate_extra_mount(f"{real_dir}:$NO_SUCH_VAR_HERE/x:ro")
+
+    def test_destination_var_expanding_to_reserved_is_rejected(self, real_dir, monkeypatch):
+        """The shadow check runs on the expanded destination."""
+        monkeypatch.setenv("SNEAKY", "/work")
+        with pytest.raises(ValueError, match="shadows a framework-owned mount"):
+            _validate_extra_mount(f"{real_dir}:$SNEAKY:ro")
+
+    def test_destination_var_carrying_a_colon_is_rejected(self, real_dir, monkeypatch):
+        """A ':' in an expanded value would add fields to the rebuilt spec."""
+        monkeypatch.setenv("SNEAKY", "/mnt/x:rw")
+        with pytest.raises(ValueError, match="introduced a ':'"):
+            _validate_extra_mount(f"{real_dir}:$SNEAKY:ro")
+
+    def test_source_var_carrying_a_colon_is_rejected(self, monkeypatch):
+        """Same guard on the source side, which is rebuilt the same way."""
+        monkeypatch.setenv("SNEAKY", "/mnt/x:rw")
+        with pytest.raises(ValueError, match="introduced a ':'"):
+            _validate_extra_mount("$SNEAKY:/mnt/y:ro")
+
     def test_malformed_no_colon(self):
         with pytest.raises(ValueError, match="expected `src:dst"):
             _validate_extra_mount("just-one-token")
