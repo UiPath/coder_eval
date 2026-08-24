@@ -11,7 +11,7 @@ import { fmtDuration, fmtRunTime, fmtTimestamp } from "@/lib/format";
 import { passClass } from "@/lib/pass-rate";
 import { type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
-import { TimePerPassedTaskChart } from "./_overview/wall-clock-chart";
+import { EfficiencyCharts } from "./_overview/efficiency-charts";
 import { WindowSummary } from "./_overview/window-summary";
 import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 import { TableScroll } from "./_components/scroll-table";
@@ -282,20 +282,13 @@ export default async function Page({
                     windowStart={overview.windowStart}
                     windowEnd={overview.windowEnd}
                 />
-                <div className="pt-4 mt-2 border-t border-dashed border-gray-200 space-y-1">
-                    <h2
-                        className="text-sm font-semibold text-gray-900"
-                        title="Total wall clock ÷ tasks passed. Every task's seconds count, failures included; only passes count in the denominator, so a run that fails more reads slower."
-                    >
-                        Time per Passed Task
-                    </h2>
-                    <TimePerPassedTaskChart
-                        data={overview.runs}
-                        harnesses={overview.harnesses}
-                        windowStart={overview.windowStart}
-                        windowEnd={overview.windowEnd}
-                    />
-                </div>
+                <EfficiencyCharts
+                    data={overview.runs}
+                    harnesses={overview.harnesses}
+                    windowStart={overview.windowStart}
+                    windowEnd={overview.windowEnd}
+                    scoped={Boolean(activeTag || q)}
+                />
                 <div className="pt-2 border-t border-gray-100 space-y-2">
                     <ChipLegend />
                     <CollapsibleRail id="home-tagrail">

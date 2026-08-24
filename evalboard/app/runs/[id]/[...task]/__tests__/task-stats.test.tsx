@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { DurationStat, ExpectedTimeStat, TurnsStat } from "../task-stats";
+import { DurationStat, ExpectedTimeStat } from "../task-stats";
 
 function renderDuration(seconds: number | null, expected: number | null) {
     return render(
@@ -77,29 +77,6 @@ describe("ExpectedTimeStat", () => {
         render(
             <dl>
                 <ExpectedTimeStat expectedSeconds={null} />
-            </dl>,
-        );
-        expect(screen.getByText("—")).toBeInTheDocument();
-    });
-});
-
-describe("TurnsStat", () => {
-    test("renders a plain count, never tinted", () => {
-        render(
-            <dl>
-                <TurnsStat turns={12} />
-            </dl>,
-        );
-        const dd = screen.getByText("12");
-        expect(dd.tagName).toBe("DD");
-        expect(dd.className).toContain("text-gray-900");
-        expect(dd.className).not.toMatch(/text-(rose|amber|emerald)-/);
-    });
-
-    test("renders em dash when there is nothing to count", () => {
-        render(
-            <dl>
-                <TurnsStat turns={null} />
             </dl>,
         );
         expect(screen.getByText("—")).toBeInTheDocument();

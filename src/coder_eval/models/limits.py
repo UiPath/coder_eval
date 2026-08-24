@@ -37,17 +37,13 @@ class RunLimits(BaseModel):
     expected_turns: int | None = Field(
         default=None,
         ge=1,
-        deprecated=(
-            "Unused. Efficiency is measured in wall-clock seconds against a line "
-            "derived from run history; nothing reads this field. Remove it from your "
-            "task YAML — it will be dropped in the next minor release."
-        ),
         description=(
-            "DEPRECATED and ignored: a hand-written soft target for cumulative visible "
-            "turns. Retired because the numbers were never maintained, most of the "
-            "suite carried none, and a turn is not a unit of time (a Read and a "
-            "20-minute deploy both count 1). Still accepted so existing task YAMLs "
-            "keep resolving; use max_turns for a hard cap."
+            "Soft target for cumulative visible turns across a task. A 'turn' is one "
+            "entry in the Turn timeline: each tool call contributes 1, plus 1 for the "
+            "final reply when present. "
+            "When the running total exceeds this, the orchestrator logs a one-shot "
+            "warning and the report renders a badge — the run is NOT aborted "
+            "(use max_turns for a hard cap). None disables the check."
         ),
     )
     task_timeout: int | None = Field(

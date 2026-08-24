@@ -50,19 +50,9 @@ CONSUMED_MODELS: list[type[BaseModel]] = [
 ]
 
 # Fields legitimately consumed only via serialization (not a by-name attribute
-# read), with the reason. An entry here is a promise the field IS used, just not
-# through attribute access — or, for a deprecated field, that leaving it inert is
-# deliberate. Every entry must name a real field.
-EXEMPT: dict[str, dict[str, str]] = {
-    "RunLimits": {
-        "expected_turns": (
-            "deprecated and intentionally inert: efficiency is scored in wall-clock "
-            "seconds against a line derived from run history. Kept accepted because "
-            "RunLimits forbids extras and ~930 task YAMLs still declare it; dropped "
-            "in a later minor."
-        ),
-    },
-}
+# read), with the reason. Empty today; an entry here is a promise the field IS
+# used, just not through attribute access. Every entry must name a real field.
+EXEMPT: dict[str, dict[str, str]] = {}
 
 
 def consumed_attr_names(src_root: Path) -> set[str]:

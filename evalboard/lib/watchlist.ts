@@ -12,10 +12,11 @@
 import type { PerRun } from "./overview";
 import type { RunOverviewTask } from "./runs";
 import { timeRatio } from "./timing";
+import { turnRatio } from "./turns";
 
 export const FAIL_WEIGHT = 50;
 export const REG_WEIGHT = 30;
-export const TIME_WEIGHT = 20;
+export const TURN_WEIGHT = 20;
 
 export interface AttentionRow {
     skill: string;
@@ -24,10 +25,10 @@ export interface AttentionRow {
     score: number;
     failRate: number;
     regression: number;
-    timeOverage: number;
+    turnOverage: number;
     segFail: number;
     segReg: number;
-    segTime: number;
+    segTurn: number;
     passRate: number;
     recentPassRate: number;
     prevPassRate: number;
@@ -56,6 +57,12 @@ export interface VolatilityRow {
     volatility: number;
     sparkline: number[];
 }
+export interface TurnOverageRow {
+    skill: string;
+    avgTurnRatio: number;
+    avgTurns: number;
+    avgExpected: number;
+}
 export interface TimeOverageRow {
     skill: string;
     avgTimeRatio: number;
@@ -69,6 +76,13 @@ export interface WatchlistData {
     leaderboard: LeaderboardRow[];
     streaks: StreakRow[];
     volatility: VolatilityRow[];
+    turnOverage: TurnOverageRow[];
+    // Wall-clock sibling of turnOverage, reported alongside it while both
+    // efficiency signals run. Deliberately NOT folded into the attention score:
+    // the 50/30/20 fail/regression/turn split stays put so the ranking does not
+    // move while the derived expected-time line is still being watched. When the
+    // turn budget goes, attention() switches its third term to this ratio and
+    // this becomes the only overage list.
     timeOverage: TimeOverageRow[];
 }
 
@@ -146,7 +160,7 @@ export function leaderboard(runs: LoadedRun[]): LeaderboardRow[] {
 function attentionReason(r: {
     failRate: number;
     regression: number;
-    timeOverage: number;
+    turnOverage: number;
     passRate: number;
     prevPassRate: number;
     recentPassRate: number;
@@ -155,14 +169,14 @@ function attentionReason(r: {
     const parts = [
         FAIL_WEIGHT * r.failRate,
         REG_WEIGHT * r.regression,
-        TIME_WEIGHT * r.timeOverage,
+        TURN_WEIGHT * r.turnOverage,
     ];
     const top = parts.indexOf(Math.max(...parts));
     if (top === 1 && r.regression > 0) {
         return `Dropped ${pct(r.prevPassRate)} → ${pct(r.recentPassRate)} recently`;
     }
-    if (top === 2 && r.timeOverage > 0) {
-        return "Passing, but well over expected time";
+    if (top === 2 && r.turnOverage > 0) {
+        return "Passing, but well over turn budget";
     }
     if (r.passRate === 0) {
         return r.appeared === 1
@@ -191,7 +205,7 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
                 outcomes++;
                 taskIds.add(t.taskId);
                 if (isPass(t.status)) passes++;
-                const r = timeRatio(t.durationSeconds, t.expectedSeconds);
+                const r = turnRatio(t.totalTurns, t.expectedTurns);
                 if (r != null) ratios.push(r);
             }
         }
@@ -206,12 +220,12 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
             seq.length > 1 ? mean(seq.slice(1)) : recentPassRate;
         const regression = clamp01(prevPassRate - recentPassRate);
 
-        const timeOverage = ratios.length ? clamp01(mean(ratios) - 1) : 0;
+        const turnOverage = ratios.length ? clamp01(mean(ratios) - 1) : 0;
 
         const segFail = FAIL_WEIGHT * failRate;
         const segReg = REG_WEIGHT * regression;
-        const segTime = TIME_WEIGHT * timeOverage;
-        const score = segFail + segReg + segTime;
+        const segTurn = TURN_WEIGHT * turnOverage;
+        const score = segFail + segReg + segTurn;
         if (score <= 0) continue;
 
         rows.push({
@@ -220,17 +234,17 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
             score,
             failRate,
             regression,
-            timeOverage,
+            turnOverage,
             segFail,
             segReg,
-            segTime,
+            segTurn,
             passRate,
             recentPassRate,
             prevPassRate,
             reason: attentionReason({
                 failRate,
                 regression,
-                timeOverage,
+                turnOverage,
                 passRate,
                 prevPassRate,
                 recentPassRate,
@@ -325,6 +339,45 @@ export function volatility(runs: LoadedRun[]): VolatilityRow[] {
     );
 }
 
+export function turnOverage(runs: LoadedRun[]): TurnOverageRow[] {
+    const ratios = new Map<string, number[]>();
+    const turns = new Map<string, number[]>();
+    const expected = new Map<string, number[]>();
+    const push = (m: Map<string, number[]>, k: string, v: number) => {
+        const arr = m.get(k);
+        if (arr) arr.push(v);
+        else m.set(k, [v]);
+    };
+    for (const run of runs) {
+        for (const t of run.tasks) {
+            if (!t.skill) continue;
+            const r = turnRatio(t.totalTurns, t.expectedTurns);
+            if (r == null) continue;
+            push(ratios, t.skill, r);
+            push(turns, t.skill, t.totalTurns!);
+            push(expected, t.skill, t.expectedTurns!);
+        }
+    }
+    const rows: TurnOverageRow[] = [];
+    for (const [skill, rs] of ratios) {
+        const avgTurnRatio = mean(rs);
+        if (avgTurnRatio <= 1) continue;
+        rows.push({
+            skill,
+            avgTurnRatio,
+            avgTurns: mean(turns.get(skill)!),
+            avgExpected: mean(expected.get(skill)!),
+        });
+    }
+    return rows.sort(
+        (a, b) =>
+            b.avgTurnRatio - a.avgTurnRatio || a.skill.localeCompare(b.skill),
+    );
+}
+
+// Skills whose passing tasks run past the wall clock they are expected to need.
+// Same shape as turnOverage, over `expected_seconds` (derived per task per
+// harness by the eval runner) instead of a hand-written turn budget.
 export function timeOverage(runs: LoadedRun[]): TimeOverageRow[] {
     const ratios = new Map<string, number[]>();
     const seconds = new Map<string, number[]>();
@@ -370,6 +423,7 @@ export function buildWatchlist(perRun: PerRun[]): WatchlistData {
         leaderboard: leaderboard(runs),
         streaks: streaks(runs),
         volatility: volatility(runs),
+        turnOverage: turnOverage(runs),
         timeOverage: timeOverage(runs),
     };
 }

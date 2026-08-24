@@ -14,6 +14,7 @@ import type { RunPoint } from "@/lib/overview";
 // overview charts share this module and differ only by this key.
 export type HarnessMetric =
     | "successRate"
+    | "turnBudgetRate"
     | "withinExpectedTimeRate"
     | "timePerPassedTask";
 

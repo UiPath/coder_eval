@@ -52,7 +52,7 @@ def test_generate_markdown_snapshot_full():
     Triggers: multiple distinct models (Models line), all P0 metrics (scores,
     latency, assistant turns, crashed partials, ground-truth similarity), all four
     dynamic table columns (model/tags/similarity/cmd-efficiency incl. expected/actual),
-    run-time notes (max_turns_exhausted), generation metrics,
+    run-time notes (max_turns_exhausted + expected_turns_overage), generation metrics,
     token usage (incl. cache + cost), agent settings, installed tools, and a non-empty
     environment block. All inputs are fixed values so the output is deterministic.
     """
@@ -104,6 +104,7 @@ def test_generate_markdown_snapshot_full():
                 "commands_efficiency": 1.0,
                 "expected_commands": 3,
                 "actual_commands": 3,
+                "expected_turns_overage": [10, 5],
                 "iterations": [
                     {"iteration": 1, "crashed": True, "assistant_turn_count": 1, "duration_seconds": 2.0},
                 ],
@@ -1242,9 +1243,14 @@ def test_markdown_summary_crashed_partials_breakdown(task_turns, expected_line):
         assert expected_line in report_md
 
 
-def _summary_with_notes(*, max_turns_exhausted: bool = False) -> RunSummary:
+def _summary_with_notes(
+    *,
+    max_turns_exhausted: bool = False,
+    expected_turns_overage: list[int] | None = None,
+) -> RunSummary:
     task = _make_task_result("t1", "SUCCESS", 1.0, 10.0)
     task["max_turns_exhausted"] = max_turns_exhausted
+    task["expected_turns_overage"] = expected_turns_overage
     return RunSummary(
         run_id="r",
         start_time=datetime(2026, 5, 21, 12, 0, 0),
@@ -1260,9 +1266,25 @@ def _summary_with_notes(*, max_turns_exhausted: bool = False) -> RunSummary:
     )
 
 
-def test_generate_markdown_omits_runtime_notes_when_there_are_none():
+def test_generate_markdown_renders_expected_turns_marker_when_exceeded():
+    summary = _summary_with_notes(expected_turns_overage=[7, 5])
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "## Run-time Notes" in report_md
+    assert "expected_turns exceeded" in report_md
+    assert "7/5" in report_md
+
+
+def test_generate_markdown_no_expected_turns_marker_when_under():
+    # Under-budget: the dict carries no overage field — emit nothing.
+    summary = _summary_with_notes(expected_turns_overage=None)
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "expected_turns exceeded" not in report_md
+
+
+def test_generate_markdown_no_expected_turns_marker_when_unset():
     summary = _summary_with_notes()
     report_md = ReportGenerator.generate_markdown(summary)
+    assert "expected_turns exceeded" not in report_md
     assert "## Run-time Notes" not in report_md
 
 
@@ -1277,3 +1299,11 @@ def test_generate_markdown_no_max_turns_marker_when_not_exhausted():
     summary = _summary_with_notes(max_turns_exhausted=False)
     report_md = ReportGenerator.generate_markdown(summary)
     assert "max_turns exhausted" not in report_md
+
+
+def test_generate_markdown_renders_both_markers_when_both_fire():
+    summary = _summary_with_notes(max_turns_exhausted=True, expected_turns_overage=[7, 5])
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "max_turns exhausted" in report_md
+    assert "expected_turns exceeded" in report_md
+    assert "7/5" in report_md

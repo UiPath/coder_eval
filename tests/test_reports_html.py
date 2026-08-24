@@ -19,6 +19,7 @@ from coder_eval.models import (
     FinalStatus,
     PromptPrefix,
     SlowestCommandInfo,
+    TaskConfigRecord,
     TaskExperimentSummary,
     TokenUsage,
     TurnRecord,
@@ -883,6 +884,87 @@ def test_task_html_renders_cost_badge_in_header():
     # Header region ends at the </div> after ".header-bar"
     header = html[: html.index("<h2>") if "<h2>" in html else len(html)]
     assert "$0.5000" in header
+
+
+def _result_with_expected_turns(
+    resolved_run_limits: dict | None,
+    *,
+    commands_per_turn: list[int] | None = None,
+    final_reply: str | None = None,
+    task_config: bool = True,
+) -> EvaluationResult:
+    """Build an EvaluationResult that exercises expected_turns_overage.
+
+    Visible turns = sum(commands_per_turn) + (1 if final_reply else 0).
+    """
+    from coder_eval.models import CommandTelemetry, ResultSummary
+
+    seq = commands_per_turn or []
+    turns: list[TurnRecord] = []
+    for i, n in enumerate(seq, start=1):
+        is_last = i == len(seq)
+        turns.append(
+            TurnRecord(
+                iteration=i,
+                user_input=f"p{i}",
+                agent_output="ok",
+                commands=[
+                    CommandTelemetry(
+                        tool_name="Bash",
+                        tool_id=f"t{i}-{j}",
+                        timestamp=datetime.now(),
+                    )
+                    for j in range(n)
+                ],
+                result_summary=(
+                    ResultSummary(is_error=False, subtype="success", result=final_reply)
+                    if is_last and final_reply is not None
+                    else None
+                ),
+            )
+        )
+    result = _make_result(iterations=turns)
+    if task_config:
+        resolved: dict = {}
+        if resolved_run_limits is not None:
+            resolved["run_limits"] = resolved_run_limits
+        result.task_config = TaskConfigRecord(resolved=resolved, source_yaml="")
+    return result
+
+
+def test_task_html_renders_expected_turns_badge_when_exceeded():
+    # 6 tools + reply = 7 visible turns; budget 5 → 7/5 overage.
+    result = _result_with_expected_turns(
+        {"expected_turns": 5},
+        commands_per_turn=[2, 3, 1],
+        final_reply="done",
+    )
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "expected_turns exceeded" in html
+    assert "7/5" in html
+
+
+def test_task_html_no_expected_turns_badge_when_under():
+    # 7 visible turns under budget 10 → no badge.
+    result = _result_with_expected_turns(
+        {"expected_turns": 10},
+        commands_per_turn=[2, 3, 1],
+        final_reply="done",
+    )
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "expected_turns exceeded" not in html
+
+
+def test_task_html_no_expected_turns_badge_when_unset():
+    result = _result_with_expected_turns({"max_turns": 10}, commands_per_turn=[2, 3, 2])
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "expected_turns exceeded" not in html
+
+
+def test_task_html_no_expected_turns_badge_when_task_config_none():
+    result = _result_with_expected_turns(None, commands_per_turn=[2, 3, 2], task_config=False)
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "expected_turns exceeded" not in html
 
 
 def test_task_html_omits_cost_badge_when_cost_is_none():

@@ -17,11 +17,8 @@ import { ChipButton } from "../chips";
 import { VersionChip } from "@/app/_components/version-list";
 import { isInternal } from "@/lib/edition";
 import { displayedTurns } from "@/lib/turns";
-import {
-    DurationStat,
-    ExpectedTimeStat,
-    TurnsStat,
-} from "./task-stats";
+import { DurationStat, ExpectedTimeStat } from "./task-stats";
+import { ExpectedTurnsStat, TurnsStat } from "./turns-stat";
 import {
     ArtifactsSection,
     ConversationSection,
@@ -187,7 +184,7 @@ export default async function TaskPage({
                         </details>
                     )}
                 </div>
-                <dl className="grid grid-cols-2 md:grid-cols-7 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <dl className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Score
@@ -223,7 +220,9 @@ export default async function TaskPage({
                             task.actualCommands,
                             task.hasFinalReply,
                         )}
+                        expectedTurns={task.expectedTurns}
                     />
+                    <ExpectedTurnsStat expectedTurns={task.expectedTurns} />
                     <ExpectedTimeStat expectedSeconds={task.expectedSeconds} />
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">

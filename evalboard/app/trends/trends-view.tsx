@@ -9,7 +9,13 @@ import {
 import type { TagCount } from "@/lib/overview";
 import { fmtRunTime, fmtDuration, humanizeTaskId } from "@/lib/format";
 import { passClassRatio } from "@/lib/pass-rate";
-import { displayedTurns, fmtTurnsCount } from "@/lib/turns";
+import {
+    displayedTurns,
+    fmtTurnsCount,
+    tintForRatio,
+    turnRatio,
+    turnsCellClasses,
+} from "@/lib/turns";
 import {
     expectedTimeTitle,
     fmtTimeRatioCell,
@@ -325,8 +331,25 @@ function HistoryTable({
                                     : fmtUsd(e.totalCostUsd)}
                             </td>
                             <td
-                                className={`py-1 pr-3 text-right tabular-nums ${e.matureSkipped ? "text-gray-400" : "text-gray-700"}`}
-                                title={e.matureSkipped ? MATURE_TOOLTIP : undefined}
+                                className={`py-1 pr-3 text-right tabular-nums ${
+                                    e.matureSkipped
+                                        ? "text-gray-400"
+                                        : `font-medium ${turnsCellClasses(
+                                              tintForRatio(
+                                                  turnRatio(
+                                                      e.totalTurns,
+                                                      e.expectedTurns,
+                                                  ),
+                                              ),
+                                          )}`
+                                }`}
+                                title={
+                                    e.matureSkipped
+                                        ? MATURE_TOOLTIP
+                                        : e.expectedTurns != null
+                                          ? `expected_turns target: ${e.expectedTurns}`
+                                          : "no expected_turns target set"
+                                }
                             >
                                 {e.matureSkipped
                                     ? "—"

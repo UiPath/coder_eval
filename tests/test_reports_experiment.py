@@ -100,20 +100,48 @@ class TestTotalTurns:
         assert d["total_turns"] == 0
 
 
-class TestExpectedTurnsKeyIsGone:
-    def test_row_carries_no_turn_budget(self):
-        """The hand-written turn budget is not emitted, even when a task still sets it.
-
-        Efficiency is scored in seconds against a line derived from history and
-        stamped onto the row after the run, so a row-level copy of the deprecated
-        YAML value would just be a second, staler source of truth.
-        """
+class TestExpectedTurnsKey:
+    def test_emits_when_configured(self):
         result = _make_result(
             resolved={"run_limits": {"expected_turns": 12}},
-            turns=[_visible_turn(commands=4, reply="done")],
+            turns=[_turn(5)],
         )
         d = eval_result_to_task_dict(result)
-        assert "expected_turns" not in d
-        assert "expected_turns_overage" not in d
-        # Turn counts themselves are still reported; they are just not scored.
-        assert d["visible_turns"] == 5
+        assert d["expected_turns"] == 12
+
+    def test_none_when_unset(self):
+        result = _make_result(
+            resolved={"run_limits": {"max_turns": 10}},
+            turns=[_turn(5)],
+        )
+        d = eval_result_to_task_dict(result)
+        assert d["expected_turns"] is None
+
+    def test_none_when_task_config_none(self):
+        result = _make_result(task_config=False, turns=[_turn(5)])
+        d = eval_result_to_task_dict(result)
+        assert d["expected_turns"] is None
+
+    def test_none_when_invalid_type(self):
+        result = _make_result(
+            resolved={"run_limits": {"expected_turns": "ten"}},
+            turns=[_turn(5)],
+        )
+        d = eval_result_to_task_dict(result)
+        assert d["expected_turns"] is None
+
+    def test_none_when_zero(self):
+        result = _make_result(
+            resolved={"run_limits": {"expected_turns": 0}},
+            turns=[_turn(5)],
+        )
+        d = eval_result_to_task_dict(result)
+        assert d["expected_turns"] is None
+
+    def test_none_when_run_limits_not_dict(self):
+        result = _make_result(
+            resolved={"run_limits": "not-a-dict"},
+            turns=[_turn(5)],
+        )
+        d = eval_result_to_task_dict(result)
+        assert d["expected_turns"] is None

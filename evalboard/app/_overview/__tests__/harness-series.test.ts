@@ -19,6 +19,7 @@ function point(
         timestamp,
         harness,
         successRate,
+        turnBudgetRate: null,
         withinExpectedTimeRate,
         timePerPassedTask: null,
     };

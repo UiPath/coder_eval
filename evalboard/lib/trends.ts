@@ -59,6 +59,7 @@ export interface TaskHistoryEntry {
     weightedScore: number | null;
     actualCommands: number | null;
     totalTurns: number | null;
+    expectedTurns: number | null;
     expectedSeconds: number | null;
     hasFinalReply: boolean;
     componentShas: ComponentSha[];
@@ -306,6 +307,7 @@ export async function historyForTaskInner(
             weightedScore: t.weightedScore,
             actualCommands: t.actualCommands,
             totalTurns: t.totalTurns,
+            expectedTurns: t.expectedTurns,
             expectedSeconds: t.expectedSeconds,
             hasFinalReply: t.hasFinalReply,
             componentShas: overview.componentShas,

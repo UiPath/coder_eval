@@ -10,6 +10,7 @@ import {
     taskCarriesRepoTag,
     taskMatchesTag,
     timePerPassedTaskForTasks,
+    turnBudgetRateForTasks,
     withinExpectedTimeRateForTasks,
     type PerRun,
     type RunListingRow,
@@ -28,6 +29,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         weightedScore: null,
         actualCommands: null,
         totalTurns: null,
+        expectedTurns: null,
         expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
@@ -103,6 +105,107 @@ describe("summarizeListing", () => {
         expect(t.costPartial).toBe(false);
         expect(t.durationSeconds).toBeNull();
         expect(t.durationPartial).toBe(false);
+    });
+});
+
+describe("turnBudgetRateForTasks", () => {
+    test("null when no task in scope carries a budget", () => {
+        // No task carries an expected_turns budget, so none is eligible and the
+        // final eligible>0 check returns null (the chart shows a gap).
+        expect(turnBudgetRateForTasks([task({ visibleTurns: 5 })])).toBeNull();
+    });
+
+    test("100% when every budgeted SUCCESS task is within budget", () => {
+        expect(
+            turnBudgetRateForTasks([
+                task({ expectedTurns: 10, visibleTurns: 7 }),
+                task({ expectedTurns: 6, visibleTurns: 9 }), // exactly 1.5×
+            ]),
+        ).toBe(100);
+    });
+
+    test("computes the within-budget share", () => {
+        // 1 within, 1 over → 50% of 2 eligible.
+        expect(
+            turnBudgetRateForTasks([
+                task({ expectedTurns: 10, visibleTurns: 12 }), // within (<=15)
+                task({ expectedTurns: 10, visibleTurns: 16 }), // over (>15)
+            ]),
+        ).toBe(50);
+    });
+
+    test("excludes tasks without a budget from the denominator", () => {
+        // Only the budgeted task counts; the budget-less one is ignored.
+        expect(
+            turnBudgetRateForTasks([
+                task({ expectedTurns: 10, visibleTurns: 12 }),
+                task({ visibleTurns: 99 }),
+            ]),
+        ).toBe(100);
+    });
+
+    test("failed/crashed tasks count as over budget even when cheap", () => {
+        // A crashed task with a low visible count must NOT count as within budget;
+        // it's treated as having exhausted its turn budget (infinite turns).
+        const rate = turnBudgetRateForTasks([
+            task({ expectedTurns: 10, visibleTurns: 20 }), // SUCCESS, over → fail
+            task({ status: "FAILURE", expectedTurns: 10, visibleTurns: 2 }), // over
+            task({ status: "ERROR", expectedTurns: 10, visibleTurns: 1 }), // over
+        ]);
+        // All 3 eligible, none within budget → 0%.
+        expect(rate).toBe(0);
+    });
+
+    test("budget-less failures are excluded from the denominator", () => {
+        // Eligibility is symmetric: a failure with no expected_turns budget is
+        // excluded just like a budget-less success, so it cannot drag the rate
+        // down. Only the budgeted within-budget SUCCESS counts → 100%.
+        const rate = turnBudgetRateForTasks([
+            task({ expectedTurns: 10, visibleTurns: 7 }), // budgeted, within
+            task({ status: "FAILURE" }), // no budget → excluded
+        ]);
+        expect(rate).toBe(100);
+    });
+
+    test("budgeted SUCCESS with no visible-turn count is excluded", () => {
+        // A budgeted SUCCESS task we can't judge (visibleTurns == null) is
+        // dropped from the denominator rather than counted as over budget, so
+        // it neither helps nor hurts the rate.
+        const rate = turnBudgetRateForTasks([
+            task({ expectedTurns: 10, visibleTurns: 7 }), // budgeted, within
+            task({ expectedTurns: 10, visibleTurns: null }), // no turn data → excluded
+        ]);
+        // If the null-turns task were counted as over, this would be 50%.
+        expect(rate).toBe(100);
+    });
+
+    test("null when no task in scope carries a budget, even with failures", () => {
+        // A run that never opted into turn budgeting reports nothing rather than
+        // a failure-driven 0% — the chart shows a gap, not a misleading point.
+        expect(
+            turnBudgetRateForTasks([
+                task({ status: "FAILURE" }),
+                task({ status: "ERROR", visibleTurns: 3 }),
+                task({ visibleTurns: 5 }), // budget-less SUCCESS
+            ]),
+        ).toBeNull();
+    });
+
+    test("a budgeted failure counts as over budget (0%)", () => {
+        // Once a budget exists in scope, a failed task drags the rate down.
+        expect(
+            turnBudgetRateForTasks([
+                task({ status: "FAILURE", expectedTurns: 10, visibleTurns: 2 }),
+            ]),
+        ).toBe(0);
+    });
+
+    test("only reflects the tasks passed in (scoping contract)", () => {
+        // getOverview hands this function the already tag/q-scoped list, so the
+        // rate is whatever that subset implies — here a single within-budget task.
+        expect(
+            turnBudgetRateForTasks([task({ expectedTurns: 8, visibleTurns: 8 })]),
+        ).toBe(100);
     });
 });
 

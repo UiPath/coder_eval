@@ -15,7 +15,13 @@ import {
     StatusPill,
 } from "@/lib/pills";
 import { isPassStatus, perTaskPassCounts, statusSortRank } from "@/lib/status";
-import { displayedTurns, fmtTurnsCount } from "@/lib/turns";
+import {
+    displayedTurns,
+    fmtTurnsCount,
+    tintForRatio,
+    turnRatio,
+    turnsCellClasses,
+} from "@/lib/turns";
 import {
     expectedTimeTitle,
     fmtTimeRatioCell,
@@ -45,6 +51,7 @@ type SortKey =
 // TOKEN_COLUMN_HELP; the rest is grid-specific.
 const COLUMN_HELP: Partial<Record<SortKey, string>> = {
     ...TOKEN_COLUMN_HELP,
+    turns: "Visible turns: one per tool call plus one for the final reply. Tinted against the task's hand-written expected_turns budget (yellow past 1.25×, red past 1.5×); untinted when the task declares none.",
     vsExp: "Duration ÷ the time this task is expected to need. The expected time is derived per task, per harness by the eval runner (its fastest passing run, or p10 once there are ten) and stamped into the run — never hand-written. Past 2× counts as slow; a task its harness has never passed shows —.",
     cost: "Total billed cost for this task, reported by the SDK (summed across turns).",
 };
@@ -497,9 +504,6 @@ export function TaskGrid({
     // the token detail is one click away via the toolbar toggle.
     const [showTokens, setShowTokens] = useState(false);
 
-    // Which column's help popover is open (one at a time). Dismissed by a click
-    // outside any popover/trigger or by Escape.
-
     // How many rows share each taskId — i.e. the replicate count for that task.
     // Drives whether a row shows its replicate badge + ?r link (only when >1, so
     // single-run tasks aren't cluttered with a "#0").
@@ -646,16 +650,25 @@ export function TaskGrid({
                 <tbody>
                     {sorted.map((t) => {
                         const review = reviewsByTask?.get(t.taskId);
-                        // Efficiency is measured in seconds, and it lives in the
-                        // vs Expected cell rather than on Duration: a long task is not
-                        // a slow one. Turns stay a plain count — a Read and a
-                        // 20-minute deploy both count 1, which is why the turn
-                        // budget was retired.
+                        // Two efficiency signals, side by side while the
+                        // wall-clock one is being watched. Seconds live in the
+                        // vs Expected cell rather than on Duration: a long task
+                        // is not a slow one.
                         const timeRatioValue = timeRatio(
                             t.durationSeconds,
                             t.expectedSeconds,
                         );
                         const timeTint = tintForTimeRatio(timeRatioValue);
+                        // Color off the same visible-events count the cell
+                        // displays — not SDK num_turns (totalTurns), which the
+                        // visible-turns refactor dropped from the display and
+                        // is often null, leaving the cell silently uncolored.
+                        const turnsTint = tintForRatio(
+                            turnRatio(
+                                displayedTurns(t.actualCommands, t.hasFinalReply),
+                                t.expectedTurns,
+                            ),
+                        );
                         return (
                         <tr
                             key={`${t.taskId}#${t.replicateIndex ?? 0}`}
@@ -710,7 +723,14 @@ export function TaskGrid({
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtCost(t.totalCostUsd)}
                             </td>
-                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                            <td
+                                className={`py-3 px-4 text-right tabular-nums font-medium ${turnsCellClasses(turnsTint)}`}
+                                title={
+                                    t.expectedTurns != null
+                                        ? `expected_turns target: ${t.expectedTurns}`
+                                        : "no expected_turns target set"
+                                }
+                            >
                                 {fmtTurnsCount(
                                     displayedTurns(
                                         t.actualCommands,
@@ -796,6 +816,12 @@ export function TaskGrid({
                         t.expectedSeconds,
                     );
                     const timeTint = tintForTimeRatio(timeRatioValue);
+                    const turnsTint = tintForRatio(
+                        turnRatio(
+                            displayedTurns(t.actualCommands, t.hasFinalReply),
+                            t.expectedTurns,
+                        ),
+                    );
                     return (
                         <div
                             key={`${t.taskId}#${t.replicateIndex ?? 0}`}
@@ -863,6 +889,7 @@ export function TaskGrid({
                                             t.hasFinalReply,
                                         ),
                                     )}
+                                    valueClass={`font-medium ${turnsCellClasses(turnsTint)}`}
                                 />
                             </dl>
                             {showTokens && (

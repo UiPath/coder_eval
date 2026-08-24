@@ -13,7 +13,7 @@ import { harnessShortLabel } from "@/app/_components/harness-badge";
 import {
     FAIL_WEIGHT,
     REG_WEIGHT,
-    TIME_WEIGHT,
+    TURN_WEIGHT,
     type AttentionRow,
     type WatchlistData,
 } from "@/lib/watchlist";
@@ -38,6 +38,7 @@ const CAP = {
     leaderboard: 10,
     streaks: 8,
     volatility: 6,
+    turnOverage: 8,
     timeOverage: 8,
 } as const;
 
@@ -197,7 +198,7 @@ function HeroRow({
 }) {
     const w = (pts: number) => `${max > 0 ? (pts / max) * 100 : 0}%`;
     // Same argmax as attentionReason — which component drove the score.
-    const segs = [row.segFail, row.segReg, row.segTime];
+    const segs = [row.segFail, row.segReg, row.segTurn];
     const top = segs.indexOf(Math.max(...segs));
     const cell = (i: number, zero: boolean) =>
         top === i
@@ -208,12 +209,12 @@ function HeroRow({
     // Round for display first so the labels never contradict themselves
     // (e.g. a zero-point trend arrow or "1.0×" shown as over budget).
     const regPts = Math.round(row.regression * 100);
-    const timesX = (1 + Math.min(row.timeOverage, 1)).toFixed(1);
-    const overBudget = timesX !== "1.0";
+    const turnsX = (1 + Math.min(row.turnOverage, 1)).toFixed(1);
+    const overBudget = turnsX !== "1.0";
     const tip =
         `${row.reason}\n` +
         `pass ${pct(row.passRate)} · recent ${pct(row.recentPassRate)} vs prior ${pct(row.prevPassRate)}\n` +
-        `score ${Math.round(row.score)}/100 = ${row.segFail.toFixed(1)} fail (${FAIL_WEIGHT}·${row.failRate.toFixed(2)}) + ${row.segReg.toFixed(1)} reg (${REG_WEIGHT}·${row.regression.toFixed(2)}) + ${row.segTime.toFixed(1)} time (${TIME_WEIGHT}·${row.timeOverage.toFixed(2)})`;
+        `score ${Math.round(row.score)}/100 = ${row.segFail.toFixed(1)} fail (${FAIL_WEIGHT}·${row.failRate.toFixed(2)}) + ${row.segReg.toFixed(1)} reg (${REG_WEIGHT}·${row.regression.toFixed(2)}) + ${row.segTurn.toFixed(1)} turn (${TURN_WEIGHT}·${row.turnOverage.toFixed(2)})`;
     return (
         <div
             className="flex items-center gap-3.5 py-2.5 border-b border-gray-100 last:border-b-0"
@@ -241,7 +242,7 @@ function HeroRow({
             <div className="flex-1 min-w-[180px] h-[18px] rounded-[9px] bg-gray-100 overflow-hidden flex">
                 <span className="h-full bg-red-500" style={{ width: w(row.segFail) }} />
                 <span className="h-full bg-studio-blue" style={{ width: w(row.segReg) }} />
-                <span className="h-full bg-amber-400" style={{ width: w(row.segTime) }} />
+                <span className="h-full bg-amber-400" style={{ width: w(row.segTurn) }} />
             </div>
             <span className="text-[11.5px] tabular-nums flex">
                 <span className={`w-[64px] ${cell(0, row.failRate === 0)}`}>
@@ -254,7 +255,7 @@ function HeroRow({
                 </span>
                 <span className={`w-[80px] ${cell(2, !overBudget)}`}>
                     {overBudget
-                        ? `${row.timeOverage >= 1 ? "≥" : ""}${timesX}×`
+                        ? `${row.turnOverage >= 1 ? "≥" : ""}${turnsX}×`
                         : "on budget"}
                 </span>
             </span>
@@ -273,7 +274,7 @@ function HeroHeader() {
             <span className="flex text-[10px] uppercase tracking-wide text-gray-400">
                 <span className="w-[64px]">fail rate</span>
                 <span className="w-[100px]">pass trend</span>
-                <span className="w-[80px]">expected time</span>
+                <span className="w-[80px]">turn budget</span>
             </span>
         </div>
     );
@@ -326,7 +327,7 @@ export function WatchlistView({
                 </div>
                 <p className="text-gray-500 text-[11px] mt-1 mb-4">
                     Ranked by {FAIL_WEIGHT}·fail-rate + {REG_WEIGHT}·regression
-                    + {TIME_WEIGHT}·time-overage · bar = severity, scaled to
+                    + {TURN_WEIGHT}·turn-overage · bar = severity, scaled to
                     the top row · segments = what drove it
                 </p>
                 {data.topAttention.length === 0 ? (
@@ -362,7 +363,7 @@ export function WatchlistView({
                     </span>
                     <span>
                         <i className="inline-block w-2.5 h-2.5 rounded-sm bg-amber-400 mr-1.5 align-middle" />
-                        time-overage
+                        turn-overage
                     </span>
                     <span className="ml-auto text-gray-400">
                         hover a row for the score arithmetic
@@ -517,7 +518,43 @@ export function WatchlistView({
                 </Panel>
 
                 <Panel
-                    title="🐌 Slow-task offenders"
+                    title="🐌 Turn-overage offenders"
+                    sub="Passing, but grinding past budget"
+                >
+                    {data.turnOverage.length === 0 ? (
+                        <Empty>All within budget</Empty>
+                    ) : (
+                        <ExpandableList
+                            items={data.turnOverage}
+                            cap={CAP.turnOverage}
+                            sameLevel={(a, b) =>
+                                a.avgTurnRatio.toFixed(1) === b.avgTurnRatio.toFixed(1)
+                            }
+                            render={(r) => (
+                                <div
+                                    key={r.skill}
+                                    className="flex items-center gap-2 py-1.5 border-b border-gray-100 last:border-b-0 text-xs"
+                                >
+                                    <span className="font-mono text-[11px] text-gray-700 min-w-[105px]">
+                                        {r.skill}
+                                    </span>
+                                    <span className="flex-1 text-[11px] text-gray-500">
+                                        {Math.round(r.avgTurns)} turns /{" "}
+                                        {Math.round(r.avgExpected)} budget
+                                    </span>
+                                    <span
+                                        className={`ml-auto font-semibold rounded-full px-2.5 py-0.5 text-[11px] border ${r.avgTurnRatio > 1.5 ? "bg-red-50 text-red-700 border-red-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}
+                                    >
+                                        {r.avgTurnRatio.toFixed(1)}×
+                                    </span>
+                                </div>
+                            )}
+                        />
+                    )}
+                </Panel>
+
+                <Panel
+                    title="🐢 Slow-task offenders"
                     sub="Passing, but well past their expected time"
                 >
                     {data.timeOverage.length === 0 ? (

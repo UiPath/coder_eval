@@ -14,6 +14,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         weightedScore: null,
         actualCommands: null,
         totalTurns: null,
+        expectedTurns: null,
         expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
@@ -102,23 +103,23 @@ describe("attention score", () => {
         expect(topAttention.map((r) => r.skill)).toEqual(["chronic"]);
     });
 
-    test("time overage contributes for a passing-but-slow skill", () => {
+    test("turn overage contributes for a passing-but-bloated skill", () => {
         const runs = Array.from({ length: 2 }, (_, i) =>
             perRun(`2026-01-0${2 - i}`, [
                 task({
                     taskId: "a",
                     skill: "slow",
                     status: "SUCCESS",
-                    durationSeconds: 240,
-                    expectedSeconds: 120,
+                    totalTurns: 24,
+                    expectedTurns: 12,
                 }),
             ]),
         );
         const row = buildWatchlist(runs).topAttention[0];
         expect(row.failRate).toBe(0);
-        expect(row.timeOverage).toBe(1); // ratio 2 -> clamp(2-1,0,1)=1
+        expect(row.turnOverage).toBe(1); // ratio 2 -> clamp(2-1,0,1)=1
         expect(row.score).toBe(20);
-        expect(row.reason).toContain("expected time");
+        expect(row.reason).toContain("turn budget");
     });
 });
 
@@ -192,6 +193,32 @@ describe("turn overage", () => {
                     taskId: "a",
                     skill: "slow",
                     status: "SUCCESS",
+                    totalTurns: 18,
+                    expectedTurns: 12,
+                }),
+                task({
+                    taskId: "b",
+                    skill: "ok",
+                    status: "SUCCESS",
+                    totalTurns: 6,
+                    expectedTurns: 12,
+                }),
+            ]),
+        ]);
+        expect(data.turnOverage).toEqual([
+            { skill: "slow", avgTurnRatio: 1.5, avgTurns: 18, avgExpected: 12 },
+        ]);
+    });
+});
+
+describe("time overage", () => {
+    test("ranks skills whose passing tasks run past their expected time", () => {
+        const data = buildWatchlist([
+            perRun("2026-01-01", [
+                task({
+                    taskId: "a",
+                    skill: "slow",
+                    status: "SUCCESS",
                     durationSeconds: 180,
                     expectedSeconds: 120,
                 }),
@@ -213,6 +240,41 @@ describe("turn overage", () => {
             },
         ]);
     });
+
+    test("an unscored task contributes nothing", () => {
+        const data = buildWatchlist([
+            perRun("2026-01-01", [
+                task({
+                    taskId: "a",
+                    skill: "unscored",
+                    status: "SUCCESS",
+                    durationSeconds: 999,
+                    expectedSeconds: null,
+                }),
+            ]),
+        ]);
+        expect(data.timeOverage).toEqual([]);
+    });
+
+    test("time overage stays out of the attention score", () => {
+        // The 50/30/20 fail/regression/turn split is unchanged while both
+        // efficiency signals run, so a slow-but-passing skill with no turn
+        // budget scores 0 and never reaches the attention list.
+        const runs = Array.from({ length: 2 }, (_, i) =>
+            perRun(`2026-01-0${2 - i}`, [
+                task({
+                    taskId: "a",
+                    skill: "slow",
+                    status: "SUCCESS",
+                    durationSeconds: 240,
+                    expectedSeconds: 120,
+                }),
+            ]),
+        );
+        const data = buildWatchlist(runs);
+        expect(data.topAttention).toEqual([]);
+        expect(data.timeOverage[0].avgTimeRatio).toBe(2);
+    });
 });
 
 describe("empty window", () => {
@@ -225,6 +287,7 @@ describe("empty window", () => {
             leaderboard: [],
             streaks: [],
             volatility: [],
+            turnOverage: [],
             timeOverage: [],
         });
     });

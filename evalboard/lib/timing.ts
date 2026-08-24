@@ -3,8 +3,8 @@
 //
 // `expected_seconds` is derived per task, per harness by the eval runner (p10 of
 // past successful durations) and stamped into run.json. The dashboard reads that
-// stamp rather than deriving its own, so a number here still matches the ping
-// that announced the run.
+// stamp rather than deriving its own, so a number here always matches the line the
+// run was actually scored against.
 //
 // A task with no `expected_seconds` is *unscored*, not "within budget": too young
 // for history, or a run that predates stamping. Every helper returns null there.

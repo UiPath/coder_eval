@@ -18,6 +18,7 @@ function row(
         totalCostUsd: 0.1,
         actualCommands,
         totalTurns: null,
+        expectedTurns: null,
         expectedSeconds,
         hasFinalReply: false,
         inputTokens: null,
@@ -202,24 +203,47 @@ describe("TaskGrid — vs Expected column", () => {
 });
 
 describe("TaskGrid — Turns column", () => {
-    test("renders a plain count, never tinted against a budget", () => {
-        // Turns are data, not a scored signal: a Read and a 20-minute deploy
-        // both count 1, which is why the turn budget was retired.
+    // The turn budget still tints its own column, beside the wall-clock ratio.
+    // Both signals are shown while the derived expected-time line is watched.
+    test("colorizes the digits per ratio bucket (no background)", () => {
         render(
             <TaskGrid sourceId="skills"
                 runId="r1"
-                tasks={[row("over", 10, 50)]}
+                tasks={[
+                    row("over", 10, null, { expectedTurns: 5 }), // ratio 2.0 → red (> 1.5)
+                    row("mid", 7, null, { expectedTurns: 5 }), // ratio 1.4 → yellow (1.25 < r ≤ 1.5)
+                    row("under", 4, null, { expectedTurns: 10 }), // ratio 0.4 → green (≤ 1.25)
+                    row("notarget", 7, null), // black-ish default
+                ]}
             />,
         );
-        const cell = turnsCellFor("over");
-        expect(cell).toHaveTextContent("10");
-        expect(cell.className).not.toMatch(/text-(rose|amber|emerald)-/);
+
+        const overCell = turnsCellFor("over");
+        expect(overCell).toHaveTextContent("10");
+        expect(overCell.className).toContain("text-rose-700");
+        expect(overCell.className).not.toContain("bg-");
+        expect(overCell).toHaveAttribute("title", "expected_turns target: 5");
+
+        expect(turnsCellFor("mid").className).toContain("text-amber-700");
+        expect(turnsCellFor("under").className).toContain("text-emerald-700");
+
+        const noTargetCell = turnsCellFor("notarget");
+        expect(noTargetCell).toHaveTextContent("7");
+        expect(noTargetCell.className).toContain("text-gray-900");
+        expect(noTargetCell.className).not.toMatch(
+            /text-(rose|amber|emerald)-/,
+        );
+        expect(noTargetCell).toHaveAttribute(
+            "title",
+            "no expected_turns target set",
+        );
     });
 
     test("renders em dash when actualCommands is null", () => {
         render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("legacy", null, null)]} />);
         const cell = turnsCellFor("legacy");
         expect(cell).toHaveTextContent("—");
+        expect(cell.className).toContain("text-gray-900");
     });
 
     test("token columns are collapsed by default, revealed by the toggle", () => {
@@ -276,6 +300,10 @@ describe("TaskGrid — column tooltips", () => {
         expect(header("vs Expected")).toHaveAttribute(
             "title",
             expect.stringContaining("Duration ÷"),
+        );
+        expect(header("Turns")).toHaveAttribute(
+            "title",
+            expect.stringContaining("expected_turns"),
         );
         // No ⓘ buttons anywhere: each header carries its sort toggle and nothing else.
         for (const h of screen.getAllByRole("columnheader")) {

@@ -17,6 +17,7 @@ function row(
         totalCostUsd: 0.1,
         actualCommands: null,
         totalTurns: null,
+        expectedTurns: null,
         expectedSeconds: null,
         hasFinalReply: false,
         inputTokens: null,

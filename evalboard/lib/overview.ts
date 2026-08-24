@@ -14,6 +14,7 @@ import {
 import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./reviews";
 import { DEFAULT_SOURCE, type Source } from "./sources";
 import { withinExpectedTime } from "./timing";
+import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
 import { DEFAULT_HARNESS, normalizeHarness, orderHarnesses } from "./harness";
@@ -29,6 +30,20 @@ export interface RunPoint {
     // into one series per harness and color each by identity.
     harness: string;
     successRate: number | null;
+    // % of budgeted tasks whose visible turns stayed within 1.5× their
+    // expected_turns budget. Only tasks carrying a positive expected_turns
+    // budget are eligible — both SUCCESS and non-SUCCESS. A budgeted task that
+    // did not succeed counts as over budget (a failed run never "stayed within
+    // budget"); a budgeted SUCCESS task is over budget only if its visible
+    // turns exceed the tolerance. Tasks with no budget are excluded regardless
+    // of outcome, so the rate is stable under tag/q filtering. null when no
+    // task in scope carries a budget at all (the chart shows a gap rather than
+    // a failure-driven 0%). Same tag/q scoping as successRate.
+    //
+    // Superseded by the two wall-clock metrics below and kept only while both
+    // signals run side by side; the chart behind the "Turns" tab is the only
+    // reader left, so retiring the turn budget is that tab plus this field.
+    turnBudgetRate: number | null;
     // % of scored passing tasks that came in within 2× their expected wall clock.
     // Only tasks that passed AND carry a derived expected_seconds are eligible,
     // so the rate is stable under tag/q filtering. null when no task in scope is
@@ -40,10 +55,50 @@ export interface RunPoint {
     timePerPassedTask: number | null;
 }
 
+// The % of budgeted tasks whose visible turns stayed within 1.5× their
+// expected_turns budget; null when no task in scope carries a budget.
+//
+// Eligibility is symmetric: a task counts iff it carries a positive
+// expected_turns budget, whether or not it succeeded. A budgeted non-SUCCESS
+// task is treated as having exhausted its budget (infinite turns) and counts
+// against the rate — a failed run never "stayed within budget." A budgeted
+// SUCCESS task counts within budget only when its visible turns are within
+// tolerance (a budgeted SUCCESS with no visible-turn count can't be judged and
+// is excluded). Budget-less tasks are excluded regardless of outcome, so the
+// metric name stays literally true (every counted task had expected turns) and
+// the rate does not shift when filtering changes which co-scoped tasks happen
+// to be budgeted. Callers pass the already tag/q-scoped task list, so the rate
+// inherits that scoping. Exported for unit testing.
+//
+// NOTE: this headline aggregate folds failure into the metric (a budgeted
+// failure counts as over budget) and so diverges from the per-task "Turns"
+// cell tint (turns.ts::turnRatio), which is a pure efficiency signal blind to
+// pass/fail. See turnRatio's comment. The wall-clock rate below does not make
+// that trade: it scores passes only.
+export function turnBudgetRateForTasks(tasks: RunOverviewTask[]): number | null {
+    let eligible = 0;
+    let withinBudget = 0;
+    for (const t of tasks) {
+        const hasBudget = t.expectedTurns != null && t.expectedTurns >= 1;
+        if (!hasBudget) continue; // unbudgeted tasks never count, success or fail
+        if (t.status !== "SUCCESS") {
+            // A budgeted task that didn't succeed never stayed within budget.
+            eligible += 1;
+            continue;
+        }
+        const verdict = withinTurnBudget(t.visibleTurns, t.expectedTurns);
+        if (verdict === null) continue; // budgeted SUCCESS but no turn data → can't judge
+        eligible += 1;
+        if (verdict) withinBudget += 1;
+    }
+    // No budgeted task in scope → nothing to report (not a failure-driven 0%).
+    return eligible > 0 ? (withinBudget / eligible) * 100 : null;
+}
+
 // The % of scored passing tasks that came in within 2× their expected wall
 // clock; null when no task in scope is scored.
 //
-// Passing tasks only, unlike the turn budget this replaces: a task that crashed
+// Passing tasks only, unlike the turn budget above: a task that crashed
 // in 10 seconds did not blow a time budget, and counting it would make a
 // pass-to-timeout regression read as a gain. Failure is the pass rate's job.
 //
@@ -68,7 +123,9 @@ export function withinExpectedTimeRateForTasks(
 
 // Seconds of every task that ran, over the number that passed. Mirrors the
 // runner's headline (timing.py::time_per_passed_task) so a filtered front-page
-// view and the Slack ping compute the same thing on the same rows.
+// view and the block stamped into run.json compute the same thing on the same
+// rows. The Slack rollup does not report this yet — the metric is being watched
+// on the dashboard first.
 //
 // Mature-skipped rows leave BOTH sides. They are carried-forward passes with no
 // duration, so counting them only in the denominator divides real seconds by a
@@ -668,6 +725,7 @@ export async function getOverview(
             timestamp: date.getTime(),
             harness: runHarness,
             successRate: (row.tasksSucceeded / row.tasksRun) * 100,
+            turnBudgetRate: turnBudgetRateForTasks(scoped.tasks),
             withinExpectedTimeRate: withinExpectedTimeRateForTasks(
                 scoped.tasks,
             ),

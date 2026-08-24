@@ -1,4 +1,3 @@
-import { fmtTurnsCount } from "@/lib/turns";
 import {
     expectedTimeTitle,
     fmtTaskSeconds,
@@ -64,21 +63,6 @@ export function ExpectedTimeStat({
                 title={expectedTimeTitle(expectedSeconds)}
             >
                 {expectedSeconds != null ? fmtTaskSeconds(expectedSeconds) : "—"}
-            </dd>
-        </div>
-    );
-}
-
-// Plain turn count. Turns are still worth seeing on a task; they are no longer
-// scored against a budget (see lib/turns.ts).
-export function TurnsStat({ turns }: { turns: number | null }) {
-    return (
-        <div>
-            <dt className="text-xs text-gray-500 uppercase tracking-wide">
-                Turns
-            </dt>
-            <dd className="text-gray-900 font-medium mt-0.5 tabular-nums">
-                {fmtTurnsCount(turns)}
             </dd>
         </div>
     );
