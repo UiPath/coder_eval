@@ -16,6 +16,13 @@ import {
     turnRatio,
     turnsCellClasses,
 } from "@/lib/turns";
+import {
+    expectedTimeTitle,
+    fmtTimeRatioCell,
+    timeCellClasses,
+    timeRatio,
+    tintForTimeRatio,
+} from "@/lib/timing";
 import { MATURE_TOOLTIP } from "@/lib/pills";
 import { ChipLegend, MergedTagRail } from "@/app/_overview/tag-rail";
 import { ChipButton } from "@/app/runs/[id]/chips";
@@ -228,6 +235,12 @@ function HistoryTable({
                         <th className="py-1 pr-3 font-medium text-right">
                             Duration
                         </th>
+                        <th
+                            className="py-1 pr-3 font-medium text-right"
+                            title="duration ÷ this task's expected time on that harness"
+                        >
+                            vs Exp
+                        </th>
                         <th className="py-1 pr-3 font-medium text-right">
                             Cost
                         </th>
@@ -276,51 +289,77 @@ function HistoryTable({
                                         : (e.status ?? "—")}
                                 </span>
                             </td>
-                            <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
+                            <td
+                                className={`py-1 pr-3 text-right tabular-nums ${e.matureSkipped ? "text-gray-400" : "text-gray-700"}`}
+                                title={e.matureSkipped ? MATURE_TOOLTIP : undefined}
+                            >
                                 {e.matureSkipped
                                     ? "—"
                                     : fmtDuration(e.durationSeconds)}
+                            </td>
+                            <td
+                                className={`py-1 pr-3 text-right tabular-nums ${
+                                    e.matureSkipped
+                                        ? "text-gray-400"
+                                        : timeCellClasses(
+                                              tintForTimeRatio(
+                                                  timeRatio(
+                                                      e.durationSeconds,
+                                                      e.expectedSeconds,
+                                                  ),
+                                              ),
+                                          )
+                                }`}
+                                title={
+                                    e.matureSkipped
+                                        ? MATURE_TOOLTIP
+                                        : expectedTimeTitle(e.expectedSeconds)
+                                }
+                            >
+                                {e.matureSkipped
+                                    ? "—"
+                                    : fmtTimeRatioCell(
+                                          timeRatio(
+                                              e.durationSeconds,
+                                              e.expectedSeconds,
+                                          ),
+                                      )}
                             </td>
                             <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
                                 {e.matureSkipped
                                     ? "—"
                                     : fmtUsd(e.totalCostUsd)}
                             </td>
-                            {e.matureSkipped ? (
-                                // Not executed — no turns to compare to budget.
-                                <td
-                                    className="py-1 pr-3 text-right tabular-nums text-gray-400"
-                                    title={MATURE_TOOLTIP}
-                                >
-                                    —
-                                </td>
-                            ) : (
-                                (() => {
-                                    const tint = tintForRatio(
-                                        turnRatio(
-                                            e.totalTurns,
-                                            e.expectedTurns,
-                                        ),
-                                    );
-                                    return (
-                                        <td
-                                            className={`py-1 pr-3 text-right tabular-nums font-medium ${turnsCellClasses(tint)}`}
-                                            title={
-                                                e.expectedTurns != null
-                                                    ? `expected_turns target: ${e.expectedTurns}`
-                                                    : "no expected_turns target set"
-                                            }
-                                        >
-                                            {fmtTurnsCount(
-                                                displayedTurns(
-                                                    e.actualCommands,
-                                                    e.hasFinalReply,
-                                                ),
-                                            )}
-                                        </td>
-                                    );
-                                })()
-                            )}
+                            <td
+                                className={`py-1 pr-3 text-right tabular-nums ${
+                                    e.matureSkipped
+                                        ? "text-gray-400"
+                                        : `font-medium ${turnsCellClasses(
+                                              tintForRatio(
+                                                  turnRatio(
+                                                      e.totalTurns,
+                                                      e.expectedTurns,
+                                                  ),
+                                              ),
+                                          )}`
+                                }`}
+                                title={
+                                    e.matureSkipped
+                                        ? MATURE_TOOLTIP
+                                        : e.expectedTurns != null
+                                          ? `expected_turns target: ${e.expectedTurns}`
+                                          : "no expected_turns target set"
+                                }
+                            >
+                                {e.matureSkipped
+                                    ? "—"
+                                    : fmtTurnsCount(
+                                          displayedTurns(
+                                              e.actualCommands,
+                                              e.hasFinalReply,
+                                          ),
+                                      )}
+                            </td>
                             <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
                                 {e.matureSkipped
                                     ? "—"

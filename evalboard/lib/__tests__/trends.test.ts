@@ -14,6 +14,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         actualCommands: null,
         totalTurns: null,
         expectedTurns: null,
+        expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
         ...overrides,
@@ -178,7 +179,7 @@ describe("historyForTaskInner", () => {
                     taskId: "t1",
                     status: "SUCCESS",
                     totalTurns: 12,
-                    expectedTurns: 5,
+                    expectedSeconds: 100,
                 }),
             ]),
             perRun("r2", [
@@ -186,7 +187,7 @@ describe("historyForTaskInner", () => {
                     taskId: "t1",
                     status: "FAILED",
                     totalTurns: 3,
-                    expectedTurns: 5,
+                    expectedSeconds: 100,
                 }),
             ]),
         ]);
@@ -195,9 +196,9 @@ describe("historyForTaskInner", () => {
         // Sorted newest-first by runId.
         expect(entries[0].runId).toBe("r2");
         expect(entries[0].totalTurns).toBe(3);
-        expect(entries[0].expectedTurns).toBe(5);
+        expect(entries[0].expectedSeconds).toBe(100);
         expect(entries[1].totalTurns).toBe(12);
-        expect(entries[1].expectedTurns).toBe(5);
+        expect(entries[1].expectedSeconds).toBe(100);
     });
 
     test("legacy rows fall through as null", async () => {
@@ -206,7 +207,7 @@ describe("historyForTaskInner", () => {
         ]);
         const entries = await historyForTaskInner("t1", 10);
         expect(entries[0].totalTurns).toBeNull();
-        expect(entries[0].expectedTurns).toBeNull();
+        expect(entries[0].expectedSeconds).toBeNull();
     });
 
     test("flags mature-skipped entries; normal rows are false", async () => {

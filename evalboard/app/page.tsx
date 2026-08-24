@@ -11,7 +11,7 @@ import { fmtDuration, fmtRunTime, fmtTimestamp } from "@/lib/format";
 import { passClass } from "@/lib/pass-rate";
 import { type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
-import { TurnBudgetChart } from "./_overview/turn-budget-chart";
+import { EfficiencyCharts } from "./_overview/efficiency-charts";
 import { WindowSummary } from "./_overview/window-summary";
 import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 import { TableScroll } from "./_components/scroll-table";
@@ -282,24 +282,13 @@ export default async function Page({
                     windowStart={overview.windowStart}
                     windowEnd={overview.windowEnd}
                 />
-                <div className="pt-4 mt-2 border-t border-dashed border-gray-200 space-y-1">
-                    <h2 className="text-sm font-semibold text-gray-900">
-                        Within Expected Turns (%)
-                    </h2>
-                    <p className="text-xs text-gray-500">
-                        % of budgeted tasks that stayed within 1.5× their
-                        expected turns (a budgeted task that failed counts as
-                        over budget) · runs with no budgeted task are omitted
-                        rather than plotted at 0
-                        {activeTag || q ? " · scoped to the active filter" : ""}
-                    </p>
-                    <TurnBudgetChart
-                        data={overview.runs}
-                        harnesses={overview.harnesses}
-                        windowStart={overview.windowStart}
-                        windowEnd={overview.windowEnd}
-                    />
-                </div>
+                <EfficiencyCharts
+                    data={overview.runs}
+                    harnesses={overview.harnesses}
+                    windowStart={overview.windowStart}
+                    windowEnd={overview.windowEnd}
+                    scoped={Boolean(activeTag || q)}
+                />
                 <div className="pt-2 border-t border-gray-100 space-y-2">
                     <ChipLegend />
                     <CollapsibleRail id="home-tagrail">

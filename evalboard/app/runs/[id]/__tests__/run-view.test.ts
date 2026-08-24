@@ -16,6 +16,7 @@ function row(
         actualCommands: null,
         totalTurns: null,
         expectedTurns: null,
+        expectedSeconds: null,
         hasFinalReply: false,
         inputTokens: null,
         outputTokens: null,

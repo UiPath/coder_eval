@@ -5,6 +5,7 @@
 // client JS.
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { fmtTaskSeconds, TIME_BUDGET_TOLERANCE } from "@/lib/timing";
 import { humanizeTaskId } from "@/lib/format";
 import { passBarClass, passClassRatio } from "@/lib/pass-rate";
 import { HarnessSelector } from "@/app/_components/harness-selector";
@@ -38,6 +39,7 @@ const CAP = {
     streaks: 8,
     volatility: 6,
     turnOverage: 8,
+    timeOverage: 8,
 } as const;
 
 // Renders the first `cap` rows, then — if there are more — a native
@@ -544,6 +546,43 @@ export function WatchlistView({
                                         className={`ml-auto font-semibold rounded-full px-2.5 py-0.5 text-[11px] border ${r.avgTurnRatio > 1.5 ? "bg-red-50 text-red-700 border-red-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}
                                     >
                                         {r.avgTurnRatio.toFixed(1)}×
+                                    </span>
+                                </div>
+                            )}
+                        />
+                    )}
+                </Panel>
+
+                <Panel
+                    title="🐢 Slow-task offenders"
+                    sub="Passing, but well past their expected time"
+                >
+                    {data.timeOverage.length === 0 ? (
+                        <Empty>All within expected time</Empty>
+                    ) : (
+                        <ExpandableList
+                            items={data.timeOverage}
+                            cap={CAP.timeOverage}
+                            sameLevel={(a, b) =>
+                                a.avgTimeRatio.toFixed(1) === b.avgTimeRatio.toFixed(1)
+                            }
+                            render={(r) => (
+                                <div
+                                    key={r.skill}
+                                    className="flex items-center gap-2 py-1.5 border-b border-gray-100 last:border-b-0 text-xs"
+                                >
+                                    <span className="font-mono text-[11px] text-gray-700 min-w-[105px]">
+                                        {r.skill}
+                                    </span>
+                                    <span className="flex-1 text-[11px] text-gray-500">
+                                        {fmtTaskSeconds(r.avgSeconds)} /{" "}
+                                        {fmtTaskSeconds(r.avgExpectedSeconds)}{" "}
+                                        expected
+                                    </span>
+                                    <span
+                                        className={`ml-auto font-semibold rounded-full px-2.5 py-0.5 text-[11px] border ${r.avgTimeRatio > 1 + TIME_BUDGET_TOLERANCE ? "bg-red-50 text-red-700 border-red-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}
+                                    >
+                                        {r.avgTimeRatio.toFixed(1)}×
                                     </span>
                                 </div>
                             )}

@@ -13,6 +13,7 @@ import {
 } from "./runs";
 import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./reviews";
 import { DEFAULT_SOURCE, type Source } from "./sources";
+import { withinExpectedTime } from "./timing";
 import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
@@ -38,7 +39,20 @@ export interface RunPoint {
     // of outcome, so the rate is stable under tag/q filtering. null when no
     // task in scope carries a budget at all (the chart shows a gap rather than
     // a failure-driven 0%). Same tag/q scoping as successRate.
+    //
+    // Superseded by the two wall-clock metrics below and kept only while both
+    // signals run side by side; the chart behind the "Turns" tab is the only
+    // reader left, so retiring the turn budget is that tab plus this field.
     turnBudgetRate: number | null;
+    // % of scored passing tasks that came in within 2× their expected wall clock.
+    // Only tasks that passed AND carry a derived expected_seconds are eligible,
+    // so the rate is stable under tag/q filtering. null when no task in scope is
+    // scored (the chart shows a gap rather than a failure-driven 0%).
+    withinExpectedTimeRate: number | null;
+    // Seconds of every task that ran over the number that passed, for this run's
+    // scoped task set. Failures stay in the numerator on purpose. null when
+    // nothing in scope passed or no duration was recorded.
+    timePerPassedTask: number | null;
 }
 
 // The % of budgeted tasks whose visible turns stayed within 1.5× their
@@ -59,7 +73,8 @@ export interface RunPoint {
 // NOTE: this headline aggregate folds failure into the metric (a budgeted
 // failure counts as over budget) and so diverges from the per-task "Turns"
 // cell tint (turns.ts::turnRatio), which is a pure efficiency signal blind to
-// pass/fail. See turnRatio's comment.
+// pass/fail. See turnRatio's comment. The wall-clock rate below does not make
+// that trade: it scores passes only.
 export function turnBudgetRateForTasks(tasks: RunOverviewTask[]): number | null {
     let eligible = 0;
     let withinBudget = 0;
@@ -78,6 +93,52 @@ export function turnBudgetRateForTasks(tasks: RunOverviewTask[]): number | null 
     }
     // No budgeted task in scope → nothing to report (not a failure-driven 0%).
     return eligible > 0 ? (withinBudget / eligible) * 100 : null;
+}
+
+// The % of scored passing tasks that came in within 2× their expected wall
+// clock; null when no task in scope is scored.
+//
+// Passing tasks only, unlike the turn budget above: a task that crashed
+// in 10 seconds did not blow a time budget, and counting it would make a
+// pass-to-timeout regression read as a gain. Failure is the pass rate's job.
+//
+// Unscored tasks (a harness that has never passed the task, or a run predating
+// the stamp) are excluded, so the rate does not shift when filtering changes
+// which co-scoped tasks happen to be scored. Exported for unit testing.
+export function withinExpectedTimeRateForTasks(
+    tasks: RunOverviewTask[],
+): number | null {
+    let eligible = 0;
+    let within = 0;
+    for (const t of tasks) {
+        if (t.status !== "SUCCESS" || t.matureSkipped) continue;
+        const verdict = withinExpectedTime(t.durationSeconds, t.expectedSeconds);
+        if (verdict === null) continue; // unscored, or no duration → can't judge
+        eligible += 1;
+        if (verdict) within += 1;
+    }
+    // Nothing scored in scope → nothing to report (not a failure-driven 0%).
+    return eligible > 0 ? (within / eligible) * 100 : null;
+}
+
+// Seconds of every task that ran, over the number that passed. Mirrors the
+// runner's headline (timing.py::time_per_passed_task) so a filtered front-page
+// view and the block stamped into run.json compute the same thing on the same
+// rows. The Slack rollup does not report this yet — the metric is being watched
+// on the dashboard first.
+//
+// Mature-skipped rows leave BOTH sides. They are carried-forward passes with no
+// duration, so counting them only in the denominator divides real seconds by a
+// task count that never ran: on a codex nightly that reported 3m12s, including
+// them read 1m17s.
+export function timePerPassedTaskForTasks(
+    tasks: RunOverviewTask[],
+): number | null {
+    const executed = tasks.filter((t) => !t.matureSkipped);
+    const passed = executed.filter((t) => t.status === "SUCCESS").length;
+    if (!passed) return null;
+    const total = executed.reduce((a, t) => a + (t.durationSeconds ?? 0), 0);
+    return total > 0 ? total / passed : null;
 }
 
 export interface TagCount {
@@ -665,6 +726,10 @@ export async function getOverview(
             harness: runHarness,
             successRate: (row.tasksSucceeded / row.tasksRun) * 100,
             turnBudgetRate: turnBudgetRateForTasks(scoped.tasks),
+            withinExpectedTimeRate: withinExpectedTimeRateForTasks(
+                scoped.tasks,
+            ),
+            timePerPassedTask: timePerPassedTaskForTasks(scoped.tasks),
         });
     }
     runPoints.sort((a, b) => a.timestamp - b.timestamp);

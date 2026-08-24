@@ -9,7 +9,9 @@ import {
     summarizeListing,
     taskCarriesRepoTag,
     taskMatchesTag,
+    timePerPassedTaskForTasks,
     turnBudgetRateForTasks,
+    withinExpectedTimeRateForTasks,
     type PerRun,
     type RunListingRow,
 } from "../overview";
@@ -28,6 +30,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         actualCommands: null,
         totalTurns: null,
         expectedTurns: null,
+        expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
         ...overrides,
@@ -203,6 +206,155 @@ describe("turnBudgetRateForTasks", () => {
         expect(
             turnBudgetRateForTasks([task({ expectedTurns: 8, visibleTurns: 8 })]),
         ).toBe(100);
+    });
+});
+
+describe("withinExpectedTimeRateForTasks", () => {
+    test("null when no task in scope is scored", () => {
+        // Nothing carries a derived expected time, so nothing is eligible and the
+        // chart shows a gap rather than a point.
+        expect(
+            withinExpectedTimeRateForTasks([task({ durationSeconds: 120 })]),
+        ).toBeNull();
+    });
+
+    test("100% when every scored pass is within its line", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 70 }),
+                task({ expectedSeconds: 100, durationSeconds: 150 }), // exactly 1.5×
+            ]),
+        ).toBe(100);
+    });
+
+    test("computes the within-expected share", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }), // within
+                task({ expectedSeconds: 100, durationSeconds: 260 }), // over
+            ]),
+        ).toBe(50);
+    });
+
+    test("excludes unscored tasks from the denominator", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }),
+                task({ durationSeconds: 9999 }), // unscored → ignored
+            ]),
+        ).toBe(100);
+    });
+
+    test("failures are excluded, however long or short they ran", () => {
+        // The departure from the retired turn budget, which counted a budgeted
+        // failure as over budget. A 2-second crash did not blow a time budget,
+        // and counting a slow failure here would let a pass→timeout regression
+        // read as an efficiency gain once the slow pass stopped counting.
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }), // within
+                task({
+                    status: "FAILURE",
+                    expectedSeconds: 100,
+                    durationSeconds: 2,
+                }),
+                task({
+                    status: "TIMEOUT",
+                    expectedSeconds: 100,
+                    durationSeconds: 1200,
+                }),
+            ]),
+        ).toBe(100);
+    });
+
+    test("a scored pass with no duration is excluded rather than counted over", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 120 }),
+                task({ expectedSeconds: 100, durationSeconds: null }),
+            ]),
+        ).toBe(100);
+    });
+
+    test("null when a run only has failures, even scored ones", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ status: "FAILURE", expectedSeconds: 100, durationSeconds: 10 }),
+                task({ status: "ERROR", expectedSeconds: 100, durationSeconds: 3 }),
+            ]),
+        ).toBeNull();
+    });
+
+    test("only reflects the tasks passed in (scoping contract)", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 80, durationSeconds: 80 }),
+            ]),
+        ).toBe(100);
+    });
+});
+
+describe("timePerPassedTaskForTasks", () => {
+    test("mature-skipped passes leave both sides of the ratio", () => {
+        // Regression: counting carried-forward passes in the denominator only
+        // divided real seconds by tasks that never ran. A codex nightly whose
+        // runner block said 3m12s rendered as 1m17s on the front page.
+        const executed = [
+            task({ durationSeconds: 100 }),
+            task({ durationSeconds: 300 }),
+        ];
+        const carried = [
+            task({ durationSeconds: 0, matureSkipped: true }),
+            task({ durationSeconds: 0, matureSkipped: true }),
+        ];
+        expect(timePerPassedTaskForTasks([...executed, ...carried])).toBe(
+            timePerPassedTaskForTasks(executed),
+        );
+    });
+
+    test("a mature-skipped pass is not counted as within expected", () => {
+        expect(
+            withinExpectedTimeRateForTasks([
+                task({ expectedSeconds: 100, durationSeconds: 260 }), // over
+                task({
+                    expectedSeconds: 100,
+                    durationSeconds: 0,
+                    matureSkipped: true,
+                }),
+            ]),
+        ).toBe(0);
+    });
+
+    test("divides all seconds that ran by the number that passed", () => {
+        expect(
+            timePerPassedTaskForTasks([
+                task({ durationSeconds: 100 }),
+                task({ durationSeconds: 300 }),
+            ]),
+        ).toBe(200);
+    });
+
+    test("seconds burned failing stay in the numerator", () => {
+        // A run that spends its time failing is a worse run, and the headline
+        // says so: 400 seconds over the single pass.
+        expect(
+            timePerPassedTaskForTasks([
+                task({ durationSeconds: 100 }),
+                task({ status: "FAILURE", durationSeconds: 300 }),
+            ]),
+        ).toBe(400);
+    });
+
+    test("null when nothing passed", () => {
+        expect(
+            timePerPassedTaskForTasks([
+                task({ status: "FAILURE", durationSeconds: 300 }),
+            ]),
+        ).toBeNull();
+    });
+
+    test("null when no duration was recorded", () => {
+        expect(timePerPassedTaskForTasks([task({})])).toBeNull();
     });
 });
 

@@ -81,6 +81,18 @@ describe("toTaskRow", () => {
         const row = toTaskRow({ task_id: "x", expected_turns: null });
         expect(row.expectedTurns).toBeNull();
     });
+
+    test("propagates the stamped expected_seconds", () => {
+        const row = toTaskRow({ task_id: "x", expected_seconds: 104.5 });
+        expect(row.expectedSeconds).toBe(104.5);
+    });
+
+    test("a run predating the stamp reads as unscored, not on target", () => {
+        expect(toTaskRow({ task_id: "x" }).expectedSeconds).toBeNull();
+        expect(
+            toTaskRow({ task_id: "x", expected_seconds: null }).expectedSeconds,
+        ).toBeNull();
+    });
 });
 
 describe("aggregateSubAgentUsage", () => {

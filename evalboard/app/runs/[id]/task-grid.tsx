@@ -22,20 +22,24 @@ import {
     turnRatio,
     turnsCellClasses,
 } from "@/lib/turns";
+import {
+    expectedTimeTitle,
+    fmtTimeRatioCell,
+    timeCellClasses,
+    timeRatio,
+    tintForTimeRatio,
+} from "@/lib/timing";
 import { ChipButton } from "./chips";
 import { withSource } from "@/app/_lib/source-param";
 import { TableScroll } from "@/app/_components/scroll-table";
-import {
-    type ColHelp,
-    HelpPopover,
-    TOKEN_COLUMN_HELP,
-} from "@/app/_components/col-help";
+import { TOKEN_COLUMN_HELP } from "@/app/_components/col-help";
 
 type SortKey =
     | "task"
     | "status"
     | "score"
     | "duration"
+    | "vsExp"
     | "cost"
     | "turns"
     | "input"
@@ -43,17 +47,13 @@ type SortKey =
     | "cw"
     | "cr";
 
-// Per-column help shown from an ⓘ next to the header. Token-column copy is
-// shared with the message timeline via TOKEN_COLUMN_HELP; Cost is grid-specific
-// (the authoritative SDK total for the task).
-const COLUMN_HELP: Partial<Record<SortKey, ColHelp>> = {
+// Header tooltips. Token-column copy is shared with the message timeline via
+// TOKEN_COLUMN_HELP; the rest is grid-specific.
+const COLUMN_HELP: Partial<Record<SortKey, string>> = {
     ...TOKEN_COLUMN_HELP,
-    cost: {
-        title: "Cost (USD)",
-        body: "Total billed cost for this task, reported by the SDK (summed across turns).",
-        causes: "long runs, large context replayed each turn, verbose output, or an expensive model.",
-        fix: "fewer turns, less context, more concise output; use a cheaper model where acceptable.",
-    },
+    turns: "Visible turns: one per tool call plus one for the final reply. Tinted against the task's hand-written expected_turns budget (yellow past 1.25×, red past 1.5×); untinted when the task declares none.",
+    vsExp: "Duration ÷ the time this task is expected to need. The expected time is derived per task, per harness by the eval runner (its fastest passing run, or p10 once there are ten) and stamped into the run — never hand-written. Past 2× counts as slow; a task its harness has never passed shows —.",
+    cost: "Total billed cost for this task, reported by the SDK (summed across turns).",
 };
 
 // A mature task that was skipped this run has no detail page in THIS run, but it
@@ -278,6 +278,7 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     status: "asc",
     score: "desc",
     duration: "desc",
+    vsExp: "desc",
     cost: "desc",
     turns: "desc",
     input: "desc",
@@ -305,6 +306,11 @@ function compare(
             return (
                 (a.durationSeconds ?? -Infinity) -
                 (b.durationSeconds ?? -Infinity)
+            );
+        case "vsExp":
+            return (
+                (timeRatio(a.durationSeconds, a.expectedSeconds) ?? -Infinity) -
+                (timeRatio(b.durationSeconds, b.expectedSeconds) ?? -Infinity)
             );
         case "cost":
             return (
@@ -343,6 +349,7 @@ const COLUMNS: Array<{
     { key: "status", header: "Status" },
     { key: "score", header: "Score", align: "right" },
     { key: "duration", header: "Duration", align: "right" },
+    { key: "vsExp", header: "vs Expected", align: "right" },
     { key: "cost", header: "Cost", align: "right" },
     { key: "turns", header: "Turns", align: "right" },
     { key: "input", header: "In", align: "right" },
@@ -429,17 +436,30 @@ function Stat({
     label,
     value,
     valueClass = "text-gray-800",
+    sub,
+    subClass = "text-gray-500",
+    title,
 }: {
     label: string;
     value: string;
     valueClass?: string;
+    // Second line under the value, e.g. a duration's ratio to its expected time.
+    sub?: string;
+    subClass?: string;
+    // Hover text for the value, e.g. what a tinted ratio was measured against.
+    title?: string;
 }) {
     return (
-        <div className="min-w-0">
+        <div className="min-w-0" title={title}>
             <div className="text-[10px] uppercase tracking-wide text-gray-400">
                 {label}
             </div>
             <div className={`tabular-nums ${valueClass}`}>{value}</div>
+            {sub && (
+                <div className={`text-[10px] tabular-nums ${subClass}`}>
+                    {sub}
+                </div>
+            )}
         </div>
     );
 }
@@ -483,26 +503,6 @@ export function TaskGrid({
     // default on every screen — the grid opens to the 6 essential columns and
     // the token detail is one click away via the toolbar toggle.
     const [showTokens, setShowTokens] = useState(false);
-
-    // Which column's help popover is open (one at a time). Dismissed by a click
-    // outside any popover/trigger or by Escape.
-    const [openHelp, setOpenHelp] = useState<SortKey | null>(null);
-    useEffect(() => {
-        if (openHelp == null) return;
-        const onDown = (e: MouseEvent) => {
-            const el = e.target as Element | null;
-            if (!el?.closest("[data-col-help]")) setOpenHelp(null);
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setOpenHelp(null);
-        };
-        document.addEventListener("mousedown", onDown);
-        document.addEventListener("keydown", onKey);
-        return () => {
-            document.removeEventListener("mousedown", onDown);
-            document.removeEventListener("keydown", onKey);
-        };
-    }, [openHelp]);
 
     // How many rows share each taskId — i.e. the replicate count for that task.
     // Drives whether a row shows its replicate badge + ?r link (only when >1, so
@@ -623,70 +623,25 @@ export function TaskGrid({
                                         ? "ascending"
                                         : "descending"
                                     : "none";
-                            const help = COLUMN_HELP[col.key];
                             return (
                                 <th
                                     key={col.key}
                                     aria-sort={ariaSort}
-                                    className={`py-3 px-4 font-medium ${alignCls} ${stickyCls}`}
+                                    title={COLUMN_HELP[col.key]}
+                                    // nowrap: a narrow column sizes to its cells,
+                                    // which wraps a two-word header onto two lines.
+                                    className={`py-3 px-4 font-medium whitespace-nowrap ${alignCls} ${stickyCls}`}
                                 >
-                                    <span
-                                        className={`inline-flex items-center gap-1 ${
-                                            col.align === "right"
-                                                ? "flex-row-reverse"
-                                                : ""
-                                        }`}
+                                    <button
+                                        type="button"
+                                        onClick={() => onSort(col.key)}
+                                        className="inline-flex items-center gap-1 hover:text-gray-900"
                                     >
-                                        <button
-                                            type="button"
-                                            onClick={() => onSort(col.key)}
-                                            className="inline-flex items-center gap-1 hover:text-gray-900"
-                                        >
-                                            {col.header}
-                                            <span className="text-xs text-gray-400 w-3">
-                                                {arrow}
-                                            </span>
-                                        </button>
-                                        {help && (
-                                            <span
-                                                data-col-help
-                                                className="relative inline-flex"
-                                            >
-                                                <button
-                                                    type="button"
-                                                    aria-label={`What is ${col.header}?`}
-                                                    aria-expanded={
-                                                        openHelp === col.key
-                                                    }
-                                                    onClick={() =>
-                                                        setOpenHelp((cur) =>
-                                                            cur === col.key
-                                                                ? null
-                                                                : col.key,
-                                                        )
-                                                    }
-                                                    className={`flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-semibold leading-none transition-colors ${
-                                                        openHelp === col.key
-                                                            ? "border-studio-blue text-studio-blue"
-                                                            : "border-gray-300 text-gray-400 hover:border-gray-400 hover:text-gray-600"
-                                                    }`}
-                                                >
-                                                    i
-                                                </button>
-                                                {openHelp === col.key && (
-                                                    // All help columns sit on
-                                                    // the right side of the
-                                                    // table; open leftward so
-                                                    // the card stays inside the
-                                                    // overflow-hidden container.
-                                                    <HelpPopover
-                                                        help={help}
-                                                        align="right"
-                                                    />
-                                                )}
-                                            </span>
-                                        )}
-                                    </span>
+                                        {col.header}
+                                        <span className="text-xs text-gray-400 w-3">
+                                            {arrow}
+                                        </span>
+                                    </button>
                                 </th>
                             );
                         })}
@@ -695,6 +650,15 @@ export function TaskGrid({
                 <tbody>
                     {sorted.map((t) => {
                         const review = reviewsByTask?.get(t.taskId);
+                        // Two efficiency signals, side by side while the
+                        // wall-clock one is being watched. Seconds live in the
+                        // vs Expected cell rather than on Duration: a long task
+                        // is not a slow one.
+                        const timeRatioValue = timeRatio(
+                            t.durationSeconds,
+                            t.expectedSeconds,
+                        );
+                        const timeTint = tintForTimeRatio(timeRatioValue);
                         // Color off the same visible-events count the cell
                         // displays — not SDK num_turns (totalTurns), which the
                         // visible-turns refactor dropped from the display and
@@ -749,6 +713,12 @@ export function TaskGrid({
                             </td>
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtTableDuration(t.durationSeconds)}
+                            </td>
+                            <td
+                                className={`py-3 px-4 text-right tabular-nums font-medium ${timeCellClasses(timeTint)}`}
+                                title={expectedTimeTitle(t.expectedSeconds)}
+                            >
+                                {fmtTimeRatioCell(timeRatioValue)}
                             </td>
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtCost(t.totalCostUsd)}
@@ -841,6 +811,11 @@ export function TaskGrid({
             <div className="md:hidden space-y-2">
                 {sorted.map((t) => {
                     const review = reviewsByTask?.get(t.taskId);
+                    const timeRatioValue = timeRatio(
+                        t.durationSeconds,
+                        t.expectedSeconds,
+                    );
+                    const timeTint = tintForTimeRatio(timeRatioValue);
                     const turnsTint = tintForRatio(
                         turnRatio(
                             displayedTurns(t.actualCommands, t.hasFinalReply),
@@ -894,6 +869,13 @@ export function TaskGrid({
                                 <Stat
                                     label="Duration"
                                     value={fmtTableDuration(t.durationSeconds)}
+                                    sub={
+                                        timeRatioValue != null
+                                            ? fmtTimeRatioCell(timeRatioValue)
+                                            : undefined
+                                    }
+                                    subClass={timeCellClasses(timeTint)}
+                                    title={expectedTimeTitle(t.expectedSeconds)}
                                 />
                                 <Stat
                                     label="Cost"

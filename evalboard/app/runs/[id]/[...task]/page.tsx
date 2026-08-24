@@ -17,6 +17,7 @@ import { ChipButton } from "../chips";
 import { VersionChip } from "@/app/_components/version-list";
 import { isInternal } from "@/lib/edition";
 import { displayedTurns } from "@/lib/turns";
+import { DurationStat, ExpectedTimeStat } from "./task-stats";
 import { ExpectedTurnsStat, TurnsStat } from "./turns-stat";
 import {
     ArtifactsSection,
@@ -183,7 +184,7 @@ export default async function TaskPage({
                         </details>
                     )}
                 </div>
-                <dl className="grid grid-cols-2 md:grid-cols-7 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <dl className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Score
@@ -192,16 +193,10 @@ export default async function TaskPage({
                             {task.weightedScore?.toFixed(2) ?? "—"}
                         </dd>
                     </div>
-                    <div>
-                        <dt className="text-xs text-gray-500 uppercase tracking-wide">
-                            Duration
-                        </dt>
-                        <dd className="text-gray-900 font-medium mt-0.5 tabular-nums">
-                            {task.durationSeconds
-                                ? `${task.durationSeconds.toFixed(1)}s`
-                                : "—"}
-                        </dd>
-                    </div>
+                    <DurationStat
+                        durationSeconds={task.durationSeconds}
+                        expectedSeconds={task.expectedSeconds}
+                    />
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Cost
@@ -228,6 +223,7 @@ export default async function TaskPage({
                         expectedTurns={task.expectedTurns}
                     />
                     <ExpectedTurnsStat expectedTurns={task.expectedTurns} />
+                    <ExpectedTimeStat expectedSeconds={task.expectedSeconds} />
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Tokens

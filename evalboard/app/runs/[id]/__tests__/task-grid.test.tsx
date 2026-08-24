@@ -6,7 +6,7 @@ import { TaskGrid } from "../task-grid";
 function row(
     taskId: string,
     actualCommands: number | null,
-    expectedTurns: number | null,
+    expectedSeconds: number | null,
     extra: Partial<TaskResultSummary> = {},
 ): TaskResultSummary {
     return {
@@ -14,11 +14,12 @@ function row(
         replicateIndex: null,
         status: "SUCCESS",
         weightedScore: 1.0,
-        durationSeconds: 1.0,
+        durationSeconds: 100,
         totalCostUsd: 0.1,
         actualCommands,
         totalTurns: null,
-        expectedTurns,
+        expectedTurns: null,
+        expectedSeconds,
         hasFinalReply: false,
         inputTokens: null,
         outputTokens: null,
@@ -38,7 +39,7 @@ function revealTokens(): void {
     fireEvent.click(screen.getByRole("button", { name: /show tokens/i }));
 }
 
-function turnsCellFor(taskId: string): HTMLElement {
+function cellFor(taskId: string, index: number): HTMLElement {
     // Scope to the desktop <table>: below md the grid also renders each task as
     // a card (same link/values), so an unscoped query would match twice.
     const table = screen.getByRole("table");
@@ -47,9 +48,13 @@ function turnsCellFor(taskId: string): HTMLElement {
     });
     const tr = link.closest("tr")!;
     const cells = within(tr).getAllByRole("cell");
-    // Layout: Task, Status, Score, Duration, Cost, Turns, Out, Cache+, Cache↺
-    return cells[5]!;
+    return cells[index]!;
 }
+
+// Layout: Task, Status, Score, Duration, vs Exp, Cost, Turns, then the tokens
+const durationCellFor = (taskId: string) => cellFor(taskId, 3);
+const vsExpCellFor = (taskId: string) => cellFor(taskId, 4);
+const turnsCellFor = (taskId: string) => cellFor(taskId, 6);
 
 describe("TaskGrid — mature rows", () => {
     test("opens a popover linking to the run where it last executed", () => {
@@ -117,15 +122,97 @@ describe("TaskGrid — mature rows", () => {
     });
 });
 
+describe("TaskGrid — vs Expected column", () => {
+    // row() fixes durationSeconds at 100s, so expectedSeconds sets the ratio.
+    const ratioRows = [
+        row("over", 3, 40), // ratio 2.5 → red (> 2)
+        row("mid", 3, 56), // ratio 1.79 → 1.8× → yellow (1.5 < r ≤ 2)
+        row("under", 3, 250), // ratio 0.4 → green (≤ 1.5)
+        row("unscored", 3, null), // no line yet → em dash, no tint
+    ];
+
+    test("prints the ratio so it is readable without hovering", () => {
+        render(
+            <TaskGrid sourceId="skills" runId="r1" tasks={ratioRows} />,
+        );
+        expect(vsExpCellFor("over")).toHaveTextContent("2.5×");
+        expect(vsExpCellFor("mid")).toHaveTextContent("1.8×");
+        expect(vsExpCellFor("under")).toHaveTextContent("0.4×");
+        expect(vsExpCellFor("unscored")).toHaveTextContent("—");
+    });
+
+    test("colorizes the ratio per bucket (no background)", () => {
+        render(
+            <TaskGrid sourceId="skills" runId="r1" tasks={ratioRows} />,
+        );
+
+        const overCell = vsExpCellFor("over");
+        expect(overCell.className).toContain("text-rose-700");
+        expect(overCell.className).not.toContain("bg-");
+        expect(overCell).toHaveAttribute("title", "expected time: 0m40s");
+
+        expect(vsExpCellFor("mid").className).toContain("text-amber-700");
+        expect(vsExpCellFor("under").className).toContain("text-emerald-700");
+
+        const unscoredCell = vsExpCellFor("unscored");
+        expect(unscoredCell.className).toContain("text-gray-900");
+        expect(unscoredCell.className).not.toMatch(
+            /text-(rose|amber|emerald)-/,
+        );
+        expect(unscoredCell).toHaveAttribute(
+            "title",
+            "no expected time yet (needs a passing run on this harness)",
+        );
+    });
+
+    test("Duration stays untinted, so length is never mistaken for slowness", () => {
+        render(
+            <TaskGrid sourceId="skills" runId="r1" tasks={ratioRows} />,
+        );
+        for (const id of ["over", "mid", "under", "unscored"]) {
+            expect(durationCellFor(id).className).not.toMatch(
+                /text-(rose|amber|emerald)-/,
+            );
+        }
+    });
+
+    test("sorts by ratio, which is a different order than by duration", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[
+                    // Long but on pace; short but far past its line.
+                    row("long", 3, 400, { durationSeconds: 600 }), // 1.50×
+                    row("short", 3, 10, { durationSeconds: 30 }), // 3.00×
+                ]}
+            />,
+        );
+        const order = () =>
+            within(screen.getByRole("table"))
+                .getAllByRole("row")
+                .slice(1)
+                .map((tr) => within(tr).getAllByRole("cell")[0].textContent);
+
+        fireEvent.click(screen.getByRole("button", { name: /^Duration$/ }));
+        expect(order()[0]).toMatch(/long/i);
+
+        fireEvent.click(screen.getByRole("button", { name: /^vs Expected$/ }));
+        expect(order()[0]).toMatch(/short/i);
+    });
+});
+
 describe("TaskGrid — Turns column", () => {
+    // The turn budget still tints its own column, beside the wall-clock ratio.
+    // Both signals are shown while the derived expected-time line is watched.
     test("colorizes the digits per ratio bucket (no background)", () => {
         render(
             <TaskGrid sourceId="skills"
                 runId="r1"
                 tasks={[
-                    row("over", 10, 5), // ratio 2.0 → red (> 1.5)
-                    row("mid", 7, 5), // ratio 1.4 → yellow (1.25 < r ≤ 1.5)
-                    row("under", 4, 10), // ratio 0.4 → green (≤ 1.25)
+                    row("over", 10, null, { expectedTurns: 5 }), // ratio 2.0 → red (> 1.5)
+                    row("mid", 7, null, { expectedTurns: 5 }), // ratio 1.4 → yellow (1.25 < r ≤ 1.5)
+                    row("under", 4, null, { expectedTurns: 10 }), // ratio 0.4 → green (≤ 1.25)
                     row("notarget", 7, null), // black-ish default
                 ]}
             />,
@@ -135,16 +222,10 @@ describe("TaskGrid — Turns column", () => {
         expect(overCell).toHaveTextContent("10");
         expect(overCell.className).toContain("text-rose-700");
         expect(overCell.className).not.toContain("bg-");
-        expect(overCell).toHaveAttribute(
-            "title",
-            "expected_turns target: 5",
-        );
+        expect(overCell).toHaveAttribute("title", "expected_turns target: 5");
 
-        const midCell = turnsCellFor("mid");
-        expect(midCell.className).toContain("text-amber-700");
-
-        const underCell = turnsCellFor("under");
-        expect(underCell.className).toContain("text-emerald-700");
+        expect(turnsCellFor("mid").className).toContain("text-amber-700");
+        expect(turnsCellFor("under").className).toContain("text-emerald-700");
 
         const noTargetCell = turnsCellFor("notarget");
         expect(noTargetCell).toHaveTextContent("7");
@@ -167,8 +248,6 @@ describe("TaskGrid — Turns column", () => {
 
     test("token columns are collapsed by default, revealed by the toggle", () => {
         render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("x", 1, 1)]} />);
-        // Read the sort toggle (first button) per header — token columns also
-        // carry an ⓘ help button, so the bare th textContent isn't the label.
         const labels = () =>
             screen
                 .getAllByRole("columnheader")
@@ -183,6 +262,7 @@ describe("TaskGrid — Turns column", () => {
             "Status",
             "Score",
             "Duration",
+            "vs Expected",
             "Cost",
             "Turns",
         ]);
@@ -193,6 +273,7 @@ describe("TaskGrid — Turns column", () => {
             "Status",
             "Score",
             "Duration",
+            "vs Expected",
             "Cost",
             "Turns",
             "In",
@@ -203,38 +284,32 @@ describe("TaskGrid — Turns column", () => {
     });
 });
 
-describe("TaskGrid — column help popover", () => {
-    test("ⓘ toggles a static help card; Escape closes it", () => {
+describe("TaskGrid — column tooltips", () => {
+    test("definitions ride on the header title, not an ⓘ popover", () => {
         render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("x", 1, 1)]} />);
-        revealTokens(); // ⓘ help buttons live on the token columns
-        const trigger = screen.getByRole("button", {
-            name: /What is Cache R/i,
-        });
+        revealTokens();
+        const header = (label: string) =>
+            screen
+                .getAllByRole("columnheader")
+                .find((h) => h.textContent?.trim().startsWith(label))!;
 
-        expect(screen.queryByRole("tooltip")).toBeNull();
-
-        fireEvent.click(trigger);
-        const card = screen.getByRole("tooltip");
-        expect(card).toHaveTextContent("Cache-read tokens");
-        expect(card).toHaveTextContent("Common causes:");
-        expect(card).toHaveTextContent("Reduce by:");
-
-        fireEvent.keyDown(document, { key: "Escape" });
-        expect(screen.queryByRole("tooltip")).toBeNull();
-    });
-
-    test("opening one column's help closes another's", () => {
-        render(<TaskGrid sourceId="skills" runId="r1" tasks={[row("x", 1, 1)]} />);
-        revealTokens(); // ⓘ help buttons live on the token columns
-        fireEvent.click(screen.getByRole("button", { name: /What is Out/i }));
-        expect(screen.getByRole("tooltip")).toHaveTextContent("Output tokens");
-
-        fireEvent.click(
-            screen.getByRole("button", { name: /What is Cache R/i }),
+        expect(header("Cache R")).toHaveAttribute(
+            "title",
+            expect.stringContaining("Cache-read tokens"),
         );
-        const card = screen.getByRole("tooltip");
-        expect(card).toHaveTextContent("Cache-read tokens");
-        expect(card).not.toHaveTextContent("Output tokens");
+        expect(header("vs Expected")).toHaveAttribute(
+            "title",
+            expect.stringContaining("Duration ÷"),
+        );
+        expect(header("Turns")).toHaveAttribute(
+            "title",
+            expect.stringContaining("expected_turns"),
+        );
+        // No ⓘ buttons anywhere: each header carries its sort toggle and nothing else.
+        for (const h of screen.getAllByRole("columnheader")) {
+            expect(within(h).getAllByRole("button")).toHaveLength(1);
+        }
+        expect(screen.queryByRole("tooltip")).toBeNull();
     });
 });
 
