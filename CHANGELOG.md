@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.11.2 (2026-08-24)
+
+### Bug Fixes
+
+- **docker**: Expand ~ and $VAR in extra_mounts destinations
+  ([#128](https://github.com/UiPath/coder_eval/pull/128),
+  [`02dbf69`](https://github.com/UiPath/coder_eval/commit/02dbf694705fd3f7de4ce164230a70945f08a1ce))
+
+- **docker**: Reject expansions that inject a ':' into a mount path
+  ([#128](https://github.com/UiPath/coder_eval/pull/128),
+  [`02dbf69`](https://github.com/UiPath/coder_eval/commit/02dbf694705fd3f7de4ce164230a70945f08a1ce))
+
+### Documentation
+
+- **docker**: Trim the extra_mounts destination comments to scope
+  ([#128](https://github.com/UiPath/coder_eval/pull/128),
+  [`02dbf69`](https://github.com/UiPath/coder_eval/commit/02dbf694705fd3f7de4ce164230a70945f08a1ce))
+
+
 ## v0.11.1 (2026-08-21)
 
 ### Bug Fixes
