@@ -89,6 +89,19 @@ dev = [
 uipath = [
     "uipath>=2.10.31",
 ]
+# Optional extra that enables the `checker_context.api_route.route: litellm`
+# judge backend (llm_judge only) via the `litellm` library's `acompletion` —
+# it normalizes provider-specific quirks (Azure AI's api_base/api_key shape,
+# max_tokens vs max_completion_tokens naming, unsupported-param drops, ...)
+# so the judge transport doesn't hand-roll per-provider HTTP. NOT the same
+# thing as the LiteLLM PROXY (litellm/start-litellm.sh) the AGENT's own
+# `route: litellm` points at over HTTP — this extra calls the library
+# in-process. Without this extra, the framework still installs and runs;
+# the litellm-route judge path fails at dispatch with a clear hint pointing
+# back here.
+litellm = [
+    "litellm>=1.95.0,<2.0.0",
+]
 # Optional extra that enables Codex agent support:
 #   - CodexAgent implementation using official openai-codex SDK
 # Without this extra, the framework still installs and runs; Codex-dependent

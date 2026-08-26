@@ -32,6 +32,20 @@ class TestBuildSdkEnv:
         assert "PATH" not in env
         assert model is None
 
+    def test_direct_neutralizes_inherited_bedrock_creds(self):
+        """An explicit route: direct (e.g. via checker_context.api_route.route on a
+        run whose agent is on Bedrock) must not let the CLI's own
+        AWS_BEARER_TOKEN_BEDROCK auto-selection silently spend the operator's
+        Bedrock token instead of ANTHROPIC_API_KEY (PR #137 review)."""
+        env, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute())
+        assert env["AWS_BEARER_TOKEN_BEDROCK"] == ""
+        assert env["CLAUDE_CODE_USE_BEDROCK"] == ""
+
+    def test_direct_model_override_sets_anthropic_model(self):
+        env, model = ClaudeCodeAgent._build_sdk_env(DirectRoute(model="claude-haiku-4-5"))
+        assert env["ANTHROPIC_MODEL"] == "claude-haiku-4-5"
+        assert model == "claude-haiku-4-5"
+
     def test_bedrock_basic_env(self, monkeypatch):
         """BedrockRoute produces CLAUDE_CODE_USE_BEDROCK, token, region, and forwards PATH."""
         custom_path = f"/bedrock/bin{os.pathsep}/usr/bin"

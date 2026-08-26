@@ -14,6 +14,7 @@ existing tests / on-disk records keep matching.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -153,6 +154,50 @@ def extract_verdict_from_anthropic_response(
         saw_submit_verdict = True
         block_input = block.get("input")
         last_input = block_input if isinstance(block_input, dict) else None
+    if not saw_submit_verdict:
+        return None, "Judge did not call submit_verdict"
+    if last_input is None:
+        return None, "submit_verdict input must be an object"
+    try:
+        return JudgeVerdict.model_validate(last_input), None
+    except ValidationError as e:
+        return None, _format_validation_error(e)
+
+
+def extract_verdict_from_openai_response(
+    response: dict[str, Any],
+) -> tuple[JudgeVerdict | None, str | None]:
+    """Read the LAST ``submit_verdict`` tool call from an OpenAI Chat-Completions-shaped response.
+
+    Walks ``response["choices"][0]["message"]["tool_calls"]`` for entries named
+    ``submit_verdict``, JSON-decodes the last one's ``function.arguments``
+    string (OpenAI, unlike Anthropic, delivers tool args as a JSON string, not
+    a dict), and validates it against ``JudgeVerdict``. Used by
+    ``invoke_litellm_judge_async``.
+
+    LAST-call discipline + non-dict/undecodable guard, mirroring
+    ``extract_verdict_from_anthropic_response``: a final ``submit_verdict``
+    call whose arguments are missing, not valid JSON, or not an object is
+    treated as an invalid-args failure, not "did not call".
+    """
+    choices = response.get("choices") or []
+    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+    tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    saw_submit_verdict = False
+    last_input: dict[str, Any] | None = None
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict) or function.get("name") != SUBMIT_VERDICT_TOOL_NAME:
+            continue
+        saw_submit_verdict = True
+        arguments = function.get("arguments")
+        try:
+            decoded = json.loads(arguments) if isinstance(arguments, str) else None
+        except ValueError:
+            decoded = None
+        last_input = decoded if isinstance(decoded, dict) else None
     if not saw_submit_verdict:
         return None, "Judge did not call submit_verdict"
     if last_input is None:

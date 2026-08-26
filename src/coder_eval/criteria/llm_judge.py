@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from coder_eval.config import settings
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
 from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge_async
 from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge_async
@@ -15,14 +16,18 @@ from coder_eval.evaluation.judge_context import (
     format_details,
     scrub_reference,
 )
+from coder_eval.evaluation.judge_litellm import invoke_litellm_judge_async
 from coder_eval.evaluation.judge_usage import (
     token_usage_from_anthropic_dict,
+    token_usage_from_openai_dict,
 )
 from coder_eval.evaluation.verdict_tool import (
     SUBMIT_VERDICT_ANTHROPIC_TOOL,
     extract_verdict_from_anthropic_response,
+    extract_verdict_from_openai_response,
 )
 from coder_eval.models import (
+    DEFAULT_JUDGE_MODEL,
     BedrockRoute,
     CriterionResult,
     DirectRoute,
@@ -70,14 +75,14 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         ctx = context or CheckContext()
         route = ctx.route
         reference_dir = ctx.reference_dir
-        # criterion.model always carries a concrete default (DEFAULT_JUDGE_MODEL), so an
-        # explicit per-criterion `model:` is only distinguishable from "unset" via
-        # model_fields_set — a checker_context.api_route.model override (baked into
-        # route.model by resolve_evaluation_route) must not clobber a value the task
-        # author actually wrote.
-        judge_model = criterion.model
-        if "model" not in criterion.model_fields_set and route is not None and route.model:
-            judge_model = route.model
+        # Precedence: an explicit per-criterion `model:` always wins; otherwise fall
+        # back to `checker_context.api_route.model` (baked into route.model by
+        # resolve_evaluation_route — set only when a real override was given, never
+        # the agent's own model); otherwise DEFAULT_JUDGE_MODEL. `criterion.model` is
+        # `None` (not a materialized default) when unset, so this precedence survives
+        # a `model_dump(mode="json")` / reload round trip (e.g. the docker driver's
+        # task-serialization step) unlike a `model_fields_set` check would.
+        judge_model = criterion.model or (route.model if route is not None else None) or DEFAULT_JUDGE_MODEL
 
         # Master enablement gate. Skipped criteria don't make an LLM call and don't
         # affect cost; weighted score includes them as 1.0 so they don't penalize.
@@ -240,12 +245,23 @@ async def _invoke_tool_channel(
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
             response_usage = token_usage_from_anthropic_dict(anthropic_response, model=model)
         case LiteLLMRoute():
-            # Reachable now via an explicit `checker_context.api_route.route: litellm`
-            # override (see resolve_evaluation_route) — but there is no OpenAI-compatible
-            # transport yet (tracked separately), so fail loudly rather than silently
-            # scoring 0.0. (Explicit arm also keeps the match exhaustive so pyright
-            # flags any future route member.)
-            return None, "llm_judge: LiteLLM judge transport is not implemented yet", "(litellm route)", None
+            # Reachable via an explicit `checker_context.api_route.route: litellm`
+            # override (see resolve_evaluation_route). Dispatches through the
+            # `litellm` library (see invoke_litellm_judge_async's module docstring)
+            # rather than assuming one wire protocol — task authors point this at
+            # whatever gateway their judge model actually lives behind.
+            litellm_response = await invoke_litellm_judge_async(
+                route=route,
+                auth_token=settings.litellm_auth_token,
+                model=model,
+                system=system_msg,
+                user=user_msg,
+                temperature=criterion.temperature,
+                max_tokens=criterion.max_tokens,
+                tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
+            )
+            verdict, err = extract_verdict_from_openai_response(litellm_response)
+            response_usage = token_usage_from_openai_dict(litellm_response, model=model)
         case None:
             # Handled by the unconfigured-arm guard in _check_impl_async before
             # dispatch; defensive only.

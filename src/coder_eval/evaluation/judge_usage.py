@@ -64,3 +64,45 @@ def token_usage_from_anthropic_dict(resp: dict[str, Any], *, model: str | None =
             cache_read_tokens=tu.cache_read_input_tokens,
         )
     return tu
+
+
+def token_usage_from_openai_dict(resp: dict[str, Any], *, model: str | None = None) -> TokenUsage | None:
+    """Extract usage from an OpenAI Chat-Completions-shaped response dict.
+
+    ``invoke_litellm_judge_async`` (parsed ``/chat/completions`` JSON) carries an
+    OpenAI-shaped ``usage`` block: ``prompt_tokens``/``completion_tokens``, with
+    the cached prefix (if any) nested under ``prompt_tokens_details.cached_tokens``.
+    Returns ``None`` when usage is missing or carries no tokens.
+
+    Follows the OpenAI/Codex cache-bucket convention documented on
+    ``TokenUsage``: ``prompt_tokens`` is the FULL prompt inclusive of the cached
+    prefix, so the fresh (uncached) slice is ``prompt_tokens - cached_tokens``;
+    OpenAI bills no separate cache-write fee, so ``cache_creation_input_tokens``
+    is always 0 (mirrors ``CodexAgent._token_usage_from_sdk``).
+
+    ``model`` prices the call from the rate card, same as the Anthropic-shaped
+    extractor above.
+    """
+    u = resp.get("usage")
+    if not isinstance(u, dict):
+        return None
+    prompt_tokens = _coerce_int(u.get("prompt_tokens"))
+    details = u.get("prompt_tokens_details")
+    cached = _coerce_int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+    tu = TokenUsage(
+        uncached_input_tokens=max(prompt_tokens - cached, 0),
+        output_tokens=_coerce_int(u.get("completion_tokens")),
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=cached,
+    )
+    if tu.is_empty():
+        return None
+    if model:
+        tu.total_cost_usd = calculate_cost(
+            model,
+            uncached_input_tokens=tu.uncached_input_tokens,
+            output_tokens=tu.output_tokens,
+            cache_creation_tokens=tu.cache_creation_input_tokens,
+            cache_read_tokens=tu.cache_read_input_tokens,
+        )
+    return tu

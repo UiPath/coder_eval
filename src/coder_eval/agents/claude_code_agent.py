@@ -814,8 +814,21 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     env["ANTHROPIC_SMALL_FAST_MODEL"] = br.small_model
                 return {**base_env, **env}, br.model
 
-            case DirectRoute():
-                return base_env, None
+            case DirectRoute() as dr:
+                # Neutralize inherited Bedrock creds: the CLI auto-selects Bedrock
+                # DIRECT when AWS_BEARER_TOKEN_BEDROCK is present in the inherited
+                # environment (same auto-selection the LiteLLM arm above guards
+                # against), so an explicit `route: direct` (e.g. via
+                # checker_context.api_route.route on a run whose agent is on
+                # Bedrock) would otherwise silently spend the operator's Bedrock
+                # bearer token instead of ANTHROPIC_API_KEY (PR #137 review).
+                env = {
+                    "AWS_BEARER_TOKEN_BEDROCK": "",
+                    "CLAUDE_CODE_USE_BEDROCK": "",
+                }
+                if dr.model:
+                    env["ANTHROPIC_MODEL"] = dr.model
+                return {**base_env, **env}, dr.model
 
             case LiteLLMRoute() as cr:
                 # Point the SDK at the custom Anthropic-compatible endpoint (e.g.

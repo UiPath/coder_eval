@@ -69,8 +69,12 @@ async def test_invoke_tool_channel_handles_every_route(monkeypatch):
     async def _stub_anthropic(**_: object) -> dict[str, object]:
         return {}
 
+    async def _stub_litellm(**_: object) -> dict[str, object]:
+        return {}
+
     monkeypatch.setattr(llm_judge, "invoke_bedrock_judge_async", _stub_bedrock)
     monkeypatch.setattr(llm_judge, "invoke_anthropic_judge_async", _stub_anthropic)
+    monkeypatch.setattr(llm_judge, "invoke_litellm_judge_async", _stub_litellm)
     monkeypatch.setattr(llm_judge, "extract_verdict_from_anthropic_response", lambda _resp: (None, "stub"))
     monkeypatch.setattr(llm_judge, "token_usage_from_anthropic_dict", lambda _resp, **_kwargs: None)
     criterion = MagicMock()

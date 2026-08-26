@@ -1327,10 +1327,13 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
             "aggregate budget is exceeded (a degraded note is recorded)."
         ),
     )
-    model: str = Field(
-        default=DEFAULT_JUDGE_MODEL,
+    model: str | None = Field(
+        default=None,
         description=(
-            "Judge model id (e.g. 'anthropic.claude-sonnet-4-6'). "
+            "Judge model id (e.g. 'anthropic.claude-sonnet-4-6'). Leave unset to fall back to "
+            "checker_context.api_route.model when set, else the built-in default "
+            f"({DEFAULT_JUDGE_MODEL!r}) — the fallback is never the agent's own model, so an "
+            "unpinned judge grades identically across agent-model A/Bs. "
             "On a BedrockRoute / DirectRoute the value is auto-translated: "
             "trailing '-vN[:M]' suffixes and the 'anthropic.' prefix are stripped where "
             "the backend doesn't accept them; on Bedrock the cross-region inference-profile "

@@ -127,11 +127,21 @@ class LiteLLMRoute:
 
     Deliberately carries NO credential field — see ``BedrockRoute``'s docstring for
     why. ``ClaudeCodeAgent._build_sdk_env`` reads ``settings.litellm_auth_token`` itself.
+
+    ``include_temperature`` (checker side only — ``invoke_litellm_judge_async``):
+    whether the judge call sends ``temperature`` at all. Defaults to ``False``
+    because a gateway-routed model id (e.g. an Azure AI deployment) isn't in
+    ``litellm``'s static param-support table, so an unsupported ``temperature``
+    isn't caught by ``drop_params`` — it round-trips to the provider and back as
+    a live rejection before the judge retries without it. Defaulting to omitted
+    skips that wasted round trip for the common case; set ``True`` for a
+    gateway/model known to accept it.
     """
 
     base_url: str
     model: str | None = None
     small_model: str | None = None
+    include_temperature: bool = False
 
 
 ApiRoute = DirectRoute | BedrockRoute | LiteLLMRoute
@@ -273,15 +283,21 @@ def resolve_evaluation_route(
       ``ValueError`` if the string isn't a known ``ApiBackend`` or that backend
       isn't configured (see ``_resolve_backend_route``).
     - Agent on Bedrock/Direct (no ``backend_override``): the judge already runs
-      on Claude via that route, so reuse it unchanged — except ``model_override``,
-      if set, still replaces its ``model`` (the route object itself, e.g. a
-      shared ``BedrockRoute``, is otherwise reused as-is).
+      on Claude via that route, so reuse it — except its ``model`` is always
+      reset to ``model_override`` (``None`` when unset). The agent's own
+      env-sourced model (e.g. ``BEDROCK_MODEL``) must NOT leak into the judge's
+      default: ``route.model`` must mean "an explicit override was given", not
+      "whatever the agent happens to be using" — otherwise an unpinned judge
+      silently starts grading with a different model whenever the agent's
+      model changes, breaking before/after comparability (PR #137 review:
+      "the judge loses DEFAULT_JUDGE_MODEL as its floor").
     - Agent on LiteLLM (open-weight, no ``backend_override``): the agent route
       cannot serve a Claude judge, so pin evaluation to Bedrock (preferred, from
       the AWS bearer token) or Direct (``ANTHROPIC_API_KEY``), honoring
-      ``model_override`` there too. If neither is configured, fall back to a
-      ``DirectRoute`` with no judge transport so ``llm_judge`` fails with its
-      clean "unconfigured" error rather than silently scoring 0.0.
+      ``model_override`` there too — same "no override, no baked-in model" rule
+      as above. If neither backend is configured, fall back to a ``DirectRoute``
+      with no judge transport so ``llm_judge`` fails with its clean
+      "unconfigured" error rather than silently scoring 0.0.
     """
     if backend_override is not None:
         try:
@@ -291,9 +307,7 @@ def resolve_evaluation_route(
             raise ValueError(f"checker_context route {backend_override!r} is not a known backend ({valid})") from e
         return _resolve_backend_route(settings, backend, model_override=model_override)
     if isinstance(agent_route, BedrockRoute | DirectRoute):
-        if not model_override:
-            return agent_route
-        if isinstance(agent_route, BedrockRoute):
+        if isinstance(agent_route, BedrockRoute) and model_override:
             # Bedrock model ids must be region-qualified — reusing the agent's route
             # verbatim would ship a bare alias straight to the Bedrock API (400).
             qualified_model, _ = _bedrock_model_pair(model_override, None, agent_route.region)
@@ -301,8 +315,10 @@ def resolve_evaluation_route(
         return replace(agent_route, model=model_override)
     # agent_route is LiteLLMRoute → pin evaluation to a constant Claude backend.
     if settings.aws_bearer_token_bedrock and settings.aws_region:
-        judge_model = model_override or settings.bedrock_model or DEFAULT_JUDGE_MODEL
-        model, small_model = _bedrock_model_pair(judge_model, None, settings.aws_region)
+        if model_override:
+            model, small_model = _bedrock_model_pair(model_override, None, settings.aws_region)
+        else:
+            model, small_model = None, None
         return BedrockRoute(region=settings.aws_region, model=model, small_model=small_model)
     return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings), model=model_override)
 
