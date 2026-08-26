@@ -243,6 +243,11 @@ def _resolve_backend_route(settings: Settings, backend: ApiBackend, *, model_ove
                 model=judge_model,
                 small_model=small_model,
             )
+        case _:
+            # ApiBackend covers exactly BEDROCK/DIRECT/LITELLM above; this arm is
+            # unreachable but makes the match exhaustive so every path returns
+            # explicitly (CodeQL: mixed explicit/implicit returns, PR #137 review).
+            raise AssertionError(f"unhandled ApiBackend: {backend!r}")
 
 
 def resolve_evaluation_route(
