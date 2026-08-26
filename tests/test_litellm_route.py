@@ -227,14 +227,110 @@ class TestBackendOverride:
     def test_override_to_litellm_without_creds_raises(self, monkeypatch):
         agent_route = BedrockRoute(region="eu-north-1")
         settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
-        with pytest.raises(ValueError, match="requires LITELLM_BASE_URL and LITELLM_AUTH_TOKEN"):
+        with pytest.raises(ValueError, match="requires LITELLM_BASE_URL"):
             resolve_evaluation_route(settings, agent_route, backend_override="litellm")
+
+    def test_override_to_litellm_without_auth_token_but_with_auth_override(self, monkeypatch):
+        """An `auth` override (e.g. AWS creds for a provider with no `api_key`
+        concept) satisfies the credential requirement on its own — no
+        LITELLM_AUTH_TOKEN needed."""
+        agent_route = BedrockRoute(region="eu-north-1")
+        settings = self._isolated_settings(
+            monkeypatch, api_backend=ApiBackend.BEDROCK, litellm_base_url="http://gateway:4000"
+        )
+        ev = resolve_evaluation_route(
+            settings,
+            agent_route,
+            backend_override="litellm",
+            auth_override={"aws_access_key_id": "MY_KEY_ID"},
+        )
+        assert isinstance(ev, LiteLLMRoute)
+        assert ev.auth == {"aws_access_key_id": "MY_KEY_ID"}
+
+    def test_override_to_litellm_threads_params_and_auth(self, monkeypatch):
+        agent_route = BedrockRoute(region="eu-north-1")
+        settings = self._isolated_settings(
+            monkeypatch,
+            api_backend=ApiBackend.BEDROCK,
+            litellm_base_url="http://gateway:4000",
+            litellm_auth_token="sk-master",
+        )
+        ev = resolve_evaluation_route(
+            settings,
+            agent_route,
+            backend_override="litellm",
+            params_override={"aws_region_name": "eu-north-1"},
+            auth_override={"api_key": "OTHER_ENV_VAR"},
+        )
+        assert isinstance(ev, LiteLLMRoute)
+        assert ev.params == {"aws_region_name": "eu-north-1"}
+        assert ev.auth == {"api_key": "OTHER_ENV_VAR"}
 
     def test_unknown_backend_raises(self, monkeypatch):
         agent_route = DirectRoute()
         settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.DIRECT)
         with pytest.raises(ValueError, match="is not a known backend"):
             resolve_evaluation_route(settings, agent_route, backend_override="not-a-backend")
+
+
+class TestValidateCheckerContextShape:
+    """validate_checker_context_shape() — the load-time guard for
+    checker_context (previously 0% covered, per the PR #137 review)."""
+
+    @staticmethod
+    def _validate(value):
+        from coder_eval.models.tasks import validate_checker_context_shape
+
+        return validate_checker_context_shape(value)
+
+    def test_accepts_empty(self):
+        self._validate({})
+
+    def test_accepts_route_and_model(self):
+        self._validate({"api_route": {"route": "bedrock", "model": "claude-haiku-4-5"}})
+
+    def test_rejects_unknown_namespace(self):
+        with pytest.raises(ValueError, match="unknown namespace"):
+            self._validate({"api_rotue": {"route": "bedrock"}})
+
+    def test_rejects_unknown_api_route_key(self):
+        with pytest.raises(ValueError, match="unknown key"):
+            self._validate({"api_route": {"rotue": "bedrock"}})
+
+    def test_rejects_unknown_backend_name(self):
+        with pytest.raises(ValueError, match="not a known backend"):
+            self._validate({"api_route": {"route": "not-a-backend"}})
+
+    def test_accepts_params_and_auth_with_litellm_route(self):
+        self._validate(
+            {
+                "api_route": {
+                    "route": "litellm",
+                    "params": {"aws_region_name": "eu-north-1"},
+                    "auth": {"api_key": "MY_ENV_VAR"},
+                }
+            }
+        )
+
+    def test_rejects_params_without_litellm_route(self):
+        with pytest.raises(ValueError, match="require route: litellm"):
+            self._validate({"api_route": {"route": "bedrock", "params": {"x": 1}}})
+
+    def test_rejects_auth_without_litellm_route(self):
+        with pytest.raises(ValueError, match="require route: litellm"):
+            self._validate({"api_route": {"auth": {"api_key": "MY_ENV_VAR"}}})
+
+    def test_rejects_non_dict_params(self):
+        with pytest.raises(ValueError, match="params must be a mapping"):
+            self._validate({"api_route": {"route": "litellm", "params": "not-a-dict"}})
+
+    def test_rejects_non_dict_auth(self):
+        with pytest.raises(ValueError, match="auth must be a mapping"):
+            self._validate({"api_route": {"route": "litellm", "auth": "not-a-dict"}})
+
+    def test_rejects_non_string_auth_values(self):
+        with pytest.raises(ValueError, match="must map param name -> ENV VAR NAME"):
+            self._validate({"api_route": {"route": "litellm", "auth": {"api_key": 123}}})
 
 
 class TestEvalRouteWiring:

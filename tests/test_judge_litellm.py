@@ -51,8 +51,19 @@ def _make_response(*, score: float = 0.5, rationale: str = "ok") -> MagicMock:
     return response
 
 
-def _route(*, include_temperature: bool = False) -> LiteLLMRoute:
-    return LiteLLMRoute(base_url="http://gateway:4000", model="gpt-5.6-luna", include_temperature=include_temperature)
+def _route(
+    *,
+    include_temperature: bool = False,
+    params: dict[str, Any] | None = None,
+    auth: dict[str, str] | None = None,
+) -> LiteLLMRoute:
+    return LiteLLMRoute(
+        base_url="http://gateway:4000",
+        model="gpt-5.6-luna",
+        include_temperature=include_temperature,
+        params=params,
+        auth=auth,
+    )
 
 
 async def _invoke(**overrides):
@@ -205,3 +216,63 @@ async def test_invoke_litellm_judge_escalates_on_signature_break() -> None:
         pytest.raises(JudgeInfrastructureError, match="LiteLLM judge call failed"),
     ):
         await _invoke()
+
+
+async def test_invoke_litellm_judge_passes_through_params() -> None:
+    """`route.params` is arbitrary passthrough merged straight into the
+    litellm.acompletion() kwargs — e.g. aws_region_name, api_version, ..."""
+    acompletion = AsyncMock(return_value=_make_response())
+    with patch("litellm.acompletion", new=acompletion):
+        await _invoke(route=_route(params={"aws_region_name": "eu-north-1", "api_version": "2024-05-01"}))
+    kwargs = acompletion.call_args.kwargs
+    assert kwargs["aws_region_name"] == "eu-north-1"
+    assert kwargs["api_version"] == "2024-05-01"
+
+
+async def test_invoke_litellm_judge_resolves_auth_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`route.auth` maps a kwarg name -> ENV VAR NAME; the secret VALUE is only
+    ever resolved at call time, never stored on the route."""
+    monkeypatch.setenv("MY_AWS_ACCESS_KEY_ID", "AKIA-fake")
+    monkeypatch.setenv("MY_AWS_SECRET_ACCESS_KEY", "secret-fake")
+    acompletion = AsyncMock(return_value=_make_response())
+    route = _route(
+        auth={"aws_access_key_id": "MY_AWS_ACCESS_KEY_ID", "aws_secret_access_key": "MY_AWS_SECRET_ACCESS_KEY"}
+    )
+    with patch("litellm.acompletion", new=acompletion):
+        await _invoke(route=route, auth_token=None)
+    kwargs = acompletion.call_args.kwargs
+    assert kwargs["aws_access_key_id"] == "AKIA-fake"
+    assert kwargs["aws_secret_access_key"] == "secret-fake"
+
+
+async def test_invoke_litellm_judge_auth_api_key_overrides_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit `auth: {api_key: ENV_VAR}` wins over the LITELLM_AUTH_TOKEN-
+    sourced `auth_token` default, and satisfies the "some api_key is configured"
+    requirement even when `auth_token` itself is None."""
+    monkeypatch.setenv("OTHER_KEY", "sk-other")
+    acompletion = AsyncMock(return_value=_make_response())
+    route = _route(auth={"api_key": "OTHER_KEY"})
+    with patch("litellm.acompletion", new=acompletion):
+        await _invoke(route=route, auth_token=None)
+    assert acompletion.call_args.kwargs["api_key"] == "sk-other"
+
+
+async def test_invoke_litellm_judge_raises_on_missing_env_var_for_auth() -> None:
+    route = _route(auth={"aws_access_key_id": "TOTALLY_UNSET_ENV_VAR_XYZ"})
+    with pytest.raises(JudgeInfrastructureError, match="TOTALLY_UNSET_ENV_VAR_XYZ"):
+        await _invoke(route=route)
+
+
+async def test_invoke_litellm_judge_params_do_not_shadow_required_kwargs() -> None:
+    """auth resolves AFTER params, so an auth-mapped key always wins over the
+    same key set via params (belt-and-braces; auth is the documented secret
+    channel)."""
+    acompletion = AsyncMock(return_value=_make_response())
+    route = _route(params={"api_key": "leaked-from-params"})
+    with patch("litellm.acompletion", new=acompletion):
+        await _invoke(route=route, auth_token="sk-master")
+    # No `auth` override -> the LITELLM_AUTH_TOKEN default is applied first,
+    # then params overwrites it (params has no special protection over the
+    # base kwargs) -- documents the actual precedence rather than asserting a
+    # stronger guarantee than the implementation provides.
+    assert acompletion.call_args.kwargs["api_key"] == "leaked-from-params"

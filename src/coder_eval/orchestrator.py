@@ -151,12 +151,14 @@ _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|T
 
 
 class EvalRouteOverrides(NamedTuple):
-    """``checker_context.api_route``'s ``(backend, model)`` pair. Named fields
-    (rather than a bare tuple) so a future transposition at a call site is a
-    typo'd attribute, not a silent positional swap of backend vs. model."""
+    """``checker_context.api_route``'s override fields. Named fields (rather than
+    a bare tuple) so a future transposition at a call site is a typo'd attribute,
+    not a silent positional swap."""
 
     backend: str | None
     model: str | None
+    params: dict[str, Any] | None
+    auth: dict[str, str] | None
 
 
 def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
@@ -1477,6 +1479,8 @@ class Orchestrator:
         return EvalRouteOverrides(
             backend=str(backend) if backend is not None else None,
             model=str(model) if model is not None else None,
+            params=api_route.get("params"),
+            auth=api_route.get("auth"),
         )
 
     def _resolve_routes(self) -> None:
@@ -1489,7 +1493,12 @@ class Orchestrator:
         self.route = resolve_route(settings)
         overrides = self._eval_route_overrides()
         self.eval_route = resolve_evaluation_route(
-            settings, self.route, backend_override=overrides.backend, model_override=overrides.model
+            settings,
+            self.route,
+            backend_override=overrides.backend,
+            model_override=overrides.model,
+            params_override=overrides.params,
+            auth_override=overrides.auth,
         )
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)

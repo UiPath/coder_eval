@@ -27,6 +27,7 @@ Async on purpose: mirrors ``invoke_anthropic_judge_async`` /
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from coder_eval.errors import JudgeInfrastructureError
@@ -66,8 +67,20 @@ async def invoke_litellm_judge_async(
     # (including AssertionError) and downgrades it to a scored 0.0 — the
     # opposite of the intended "internal-contract violation escalates to
     # FinalStatus.ERROR" behavior.
-    if not auth_token:
-        raise JudgeInfrastructureError("checker_context route 'litellm' requires LITELLM_AUTH_TOKEN to be set")
+    #
+    # `route.auth` can supply ITS OWN auth entirely — a provider that doesn't
+    # use `api_key` at all (e.g. Bedrock's aws_access_key_id/
+    # aws_secret_access_key) has no reason to also need LITELLM_AUTH_TOKEN —
+    # so the plain LITELLM_AUTH_TOKEN requirement only applies when `auth` is
+    # empty too. `_resolve_backend_route` already enforces the same relaxed
+    # check at resolution time; this is the runtime backstop for a route
+    # built any other way.
+    if not auth_token and not route.auth:
+        msg = (
+            "checker_context route 'litellm' requires LITELLM_AUTH_TOKEN to be set, "
+            "or an explicit `auth: {api_key: ENV_VAR}` override"
+        )
+        raise JudgeInfrastructureError(msg)
 
     try:
         from litellm.exceptions import APIError, BadRequestError
@@ -88,11 +101,26 @@ async def invoke_litellm_judge_async(
         },
     }
 
+    def _resolve_auth() -> dict[str, str]:
+        """Resolve ``route.auth`` (kwarg name -> ENV VAR NAME) into kwarg name ->
+        secret value, right before the call so no resolved secret is ever stored
+        on the route object itself (only the env var *name* is)."""
+        if not route.auth:
+            return {}
+        resolved: dict[str, str] = {}
+        for param_name, env_var in route.auth.items():
+            value = os.environ.get(env_var)
+            if not value:
+                raise JudgeInfrastructureError(
+                    f"checker_context.api_route.auth[{param_name!r}] references env var {env_var!r}, which is not set"
+                )
+            resolved[param_name] = value
+        return resolved
+
     def _call_kwargs(*, include_temperature: bool) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": model,
             "api_base": route.base_url,
-            "api_key": auth_token,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -108,8 +136,16 @@ async def invoke_litellm_judge_async(
             # handled below by retrying once without `temperature`.
             "drop_params": True,
         }
+        if auth_token:
+            kwargs["api_key"] = auth_token
         if include_temperature:
             kwargs["temperature"] = temperature
+        # `params` is arbitrary passthrough (e.g. aws_region_name, api_version, ...);
+        # `auth` (resolved secrets) applies LAST so it always wins over both the
+        # LITELLM_AUTH_TOKEN default above and anything in `params`.
+        if route.params:
+            kwargs.update(route.params)
+        kwargs.update(_resolve_auth())
         return kwargs
 
     def _rejects_temperature(e: BadRequestError) -> bool:
