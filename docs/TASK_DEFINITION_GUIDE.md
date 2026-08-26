@@ -35,6 +35,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
   - [skill_triggered](#skill_triggered)
+  - [Checker Context](#checker-context)
 - [Reference Solutions](#reference-solutions)
 - [Pre-Run Commands](#pre-run-commands)
 - [Post-Run Commands](#post-run-commands)
@@ -1294,6 +1295,26 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 **Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#dataset) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
 
 **Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
+
+### Checker Context
+
+`checker_context` carries task-authored config for the success-checking side, namespaced by reserved key. Currently the only recognized namespace is **`api_route`**:
+
+```yaml
+success_criteria:
+  - type: llm_judge
+    prompt: "Grade the fix for correctness."
+
+checker_context:
+  api_route:
+    route: bedrock    # which backend the whole eval side (llm_judge/agent_judge/simulator) uses
+    model: claude-haiku-4-5   # model override for that route
+```
+
+- `route` selects which backend the WHOLE evaluation side calls (`llm_judge`, `agent_judge`, and the simulator all share one resolved eval route per run — this isn't per-criterion), **decoupled from the agent's own route** (a Claude agent can be graded by a differently-backed judge, or vice versa). This is a backend *name* (`direct` / `bedrock` / `litellm`), not a route object: credentials are never read from the task, always from the matching environment variables (`ANTHROPIC_API_KEY` for `direct`, `AWS_BEARER_TOKEN_BEDROCK`/`AWS_REGION` for `bedrock`, `LITELLM_BASE_URL`/`LITELLM_AUTH_TOKEN` for `litellm`). An unconfigured or unknown backend name raises at dispatch rather than silently falling back. **`route: litellm` resolves successfully but `llm_judge` has no OpenAI-compatible transport yet** — it fails with a clear "not implemented yet" error at grading time; use `bedrock` or `direct` for `llm_judge` today.
+- `model` overrides the model that resolved route uses — e.g. `llm_judge`'s judge model, when the criterion itself leaves `model:` unset (an explicit per-criterion `model:` always wins; below that, `checker_context.api_route.model`; below that, the backend's own env-configured default, e.g. `BEDROCK_MODEL`/`LITELLM_MODEL`). This works because every `ApiRoute` (`DirectRoute`/`BedrockRoute`/`LiteLLMRoute`) carries its own `model` field; the orchestrator bakes the override into the resolved route's `model` before any criterion runs, so `llm_judge` just reads `context.route.model` — it never reads `checker_context` directly. **`agent_judge` does not currently honor this override** — its sub-agent's model comes from the criterion's own `agent:` block (defaulted to a fixed judge model), independent of `checker_context.api_route.model`.
+
+`checker_context` merges shallow-per-namespace across `default_experiment.defaults.checker_context` → `experiment.defaults.checker_context` → `task.checker_context` → `variant.checker_context` (same 4-layer precedence as `agent`/`simulation`). So a judge-model A/B, or a judge-backend A/B, is a variant-level config change, not an edit to every task YAML.
 
 ## Reference Solutions
 

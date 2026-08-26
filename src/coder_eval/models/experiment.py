@@ -38,6 +38,14 @@ class ExperimentVariant(BaseModel):
         ge=1,
         description="Number of replicates for each task under this variant. None = inherit.",
     )
+    checker_context: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Partial TaskDefinition.checker_context overrides for this variant — currently the "
+            "reserved `api_route` namespace (`route`/`model`). Shallow-merged per-namespace onto the "
+            "task's (and/or experiment defaults') checker_context."
+        ),
+    )
     template_sources: list[TemplateSource] | None = Field(
         default=None, description="Additional template sources appended after task's base templates"
     )
@@ -98,6 +106,14 @@ class ExperimentDefaults(BaseModel):
         description="Default number of replicates across all variants. None = 1 (no repetition).",
     )
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config defaults")
+    checker_context: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Default TaskDefinition.checker_context applied to all variants — currently the reserved "
+            "`api_route` namespace (e.g. `{api_route: {model: gpt-5}}`). Shallow-merged per-namespace "
+            "with the task's and the variant's checker_context."
+        ),
+    )
     simulation: dict[str, Any] | None = Field(
         default=None,
         description=(

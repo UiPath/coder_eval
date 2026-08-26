@@ -5,6 +5,7 @@ import tempfile
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from coder_eval.agents import claude_code_agent as claude_code_agent_mod
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.config import Settings
 from coder_eval.models import AgentKind, BedrockRoute, DirectRoute, parse_agent_config
@@ -35,7 +36,8 @@ class TestBuildSdkEnv:
         """BedrockRoute produces CLAUDE_CODE_USE_BEDROCK, token, region, and forwards PATH."""
         custom_path = f"/bedrock/bin{os.pathsep}/usr/bin"
         monkeypatch.setenv("PATH", custom_path)
-        route = BedrockRoute(bearer_token="tok-123", region="us-east-1")
+        monkeypatch.setattr(claude_code_agent_mod.settings, "aws_bearer_token_bedrock", "tok-123")
+        route = BedrockRoute(region="us-east-1")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
         assert env["AWS_BEARER_TOKEN_BEDROCK"] == "tok-123"
@@ -44,26 +46,26 @@ class TestBuildSdkEnv:
 
     def test_bedrock_attribution_header_disabled(self):
         """disable_attribution_header=True sets CLAUDE_CODE_ATTRIBUTION_HEADER=0."""
-        route = BedrockRoute(bearer_token="t", region="r", disable_attribution_header=True)
+        route = BedrockRoute(region="r", disable_attribution_header=True)
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
 
     def test_bedrock_attribution_header_enabled(self):
         """disable_attribution_header=False omits the header key."""
-        route = BedrockRoute(bearer_token="t", region="r", disable_attribution_header=False)
+        route = BedrockRoute(region="r", disable_attribution_header=False)
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert "CLAUDE_CODE_ATTRIBUTION_HEADER" not in env
 
     def test_bedrock_model_override(self):
         """BedrockRoute.model returned as effective_model."""
-        route = BedrockRoute(bearer_token="t", region="r", model="eu.anthropic.claude-sonnet-4-6")
+        route = BedrockRoute(region="r", model="eu.anthropic.claude-sonnet-4-6")
         env, model = ClaudeCodeAgent._build_sdk_env(route)
         assert model == "eu.anthropic.claude-sonnet-4-6"
         assert env["ANTHROPIC_MODEL"] == "eu.anthropic.claude-sonnet-4-6"
 
     def test_bedrock_no_model_returns_none(self):
         """BedrockRoute without model returns None (use task config)."""
-        route = BedrockRoute(bearer_token="t", region="r")
+        route = BedrockRoute(region="r")
         env, model = ClaudeCodeAgent._build_sdk_env(route)
         assert model is None
         assert "ANTHROPIC_MODEL" not in env
@@ -80,7 +82,7 @@ class TestBuildSdkEnv:
     def test_propagates_plugin_tools_dir_on_bedrock_route(self, monkeypatch):
         """Pin must reach the SDK regardless of routing — bedrock edition."""
         monkeypatch.setenv("PLUGIN_TOOLS_DIR", "/pinned/tools/@uipath")
-        env, _ = ClaudeCodeAgent._build_sdk_env(BedrockRoute(bearer_token="t", region="r"))
+        env, _ = ClaudeCodeAgent._build_sdk_env(BedrockRoute(region="r"))
         assert env["PLUGIN_TOOLS_DIR"] == "/pinned/tools/@uipath"
 
     def test_omits_plugin_tools_dir_when_unset(self, monkeypatch):
@@ -103,13 +105,13 @@ class TestBuildSdkEnv:
 
     def test_bedrock_default_disables_attribution_header(self):
         """Default BedrockRoute (no explicit disable_attribution_header) sets CLAUDE_CODE_ATTRIBUTION_HEADER=0."""
-        route = BedrockRoute(bearer_token="t", region="r")
+        route = BedrockRoute(region="r")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
 
     def test_bedrock_small_model(self):
         """BedrockRoute.small_model appears in env as ANTHROPIC_SMALL_FAST_MODEL."""
-        route = BedrockRoute(bearer_token="t", region="r", small_model="eu.anthropic.claude-haiku-4-5")
+        route = BedrockRoute(region="r", small_model="eu.anthropic.claude-haiku-4-5")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "eu.anthropic.claude-haiku-4-5"
 
@@ -279,7 +281,7 @@ class TestResolveEffectiveModel:
 
     def test_config_model_overrides_bedrock_route_model(self):
         """Task/CLI model wins over BEDROCK_MODEL and is synced into env."""
-        route = BedrockRoute(bearer_token="t", region="us-east-2", model="us.anthropic.claude-sonnet-4-6")
+        route = BedrockRoute(region="us-east-2", model="us.anthropic.claude-sonnet-4-6")
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         agent = _make_agent(route, config_model="global.anthropic.claude-sonnet-4-6")
         effective = agent._resolve_effective_model("global.anthropic.claude-sonnet-4-6", env, route_model)
@@ -288,7 +290,7 @@ class TestResolveEffectiveModel:
 
     def test_route_model_used_when_config_none(self):
         """BEDROCK_MODEL is the fallback when no task/CLI model is set."""
-        route = BedrockRoute(bearer_token="t", region="us-east-2", model="us.anthropic.claude-sonnet-4-6")
+        route = BedrockRoute(region="us-east-2", model="us.anthropic.claude-sonnet-4-6")
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         agent = _make_agent(route)
         effective = agent._resolve_effective_model(None, env, route_model)
@@ -297,7 +299,7 @@ class TestResolveEffectiveModel:
 
     def test_bare_config_model_auto_prefixes_for_bedrock(self):
         """A bare --model on a Bedrock route gets the region's inference-profile prefix."""
-        route = BedrockRoute(bearer_token="t", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         agent = _make_agent(route, config_model="anthropic.claude-sonnet-4-6")
         effective = agent._resolve_effective_model("anthropic.claude-sonnet-4-6", env, route_model)
@@ -306,7 +308,7 @@ class TestResolveEffectiveModel:
 
     def test_both_none_returns_none(self):
         """No model anywhere → None, no env mutation."""
-        route = BedrockRoute(bearer_token="t", region="us-east-2")
+        route = BedrockRoute(region="us-east-2")
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         agent = _make_agent(route)
         effective = agent._resolve_effective_model(None, env, route_model)
@@ -320,7 +322,7 @@ class TestResolveEffectiveModel:
         by every Bedrock code path, so config_model must be injected into env on Bedrock even
         when _build_sdk_env left ANTHROPIC_MODEL absent.
         """
-        route = BedrockRoute(bearer_token="t", region="eu-north-1")  # no model
+        route = BedrockRoute(region="eu-north-1")  # no model
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         assert "ANTHROPIC_MODEL" not in env  # precondition
         agent = _make_agent(route, config_model="claude-sonnet-4-6")
@@ -340,9 +342,10 @@ class TestResolveEffectiveModel:
 class TestSdkOptionsDumpRedaction:
     """Test that _dump_sdk_options redacts sensitive values."""
 
-    def test_bedrock_token_redacted_in_dump(self):
+    def test_bedrock_token_redacted_in_dump(self, monkeypatch):
         """AWS_BEARER_TOKEN_BEDROCK must not appear in plain text in sdk_options dump."""
-        route = BedrockRoute(bearer_token="SECRET_TOKEN_123", region="us-east-1")
+        monkeypatch.setattr(claude_code_agent_mod.settings, "aws_bearer_token_bedrock", "SECRET_TOKEN_123")
+        route = BedrockRoute(region="us-east-1")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         opts = ClaudeAgentOptions(cwd=tempfile.gettempdir(), env=env)
         dump = dump_dataclass(opts)

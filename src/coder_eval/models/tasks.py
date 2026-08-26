@@ -17,7 +17,7 @@ from coder_eval.models.criteria import (
     RunCommandCriterion,
     SuccessCriterion,
 )
-from coder_eval.models.enums import AgentKind
+from coder_eval.models.enums import AgentKind, ApiBackend
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.merge_strategy import MergeField
@@ -76,6 +76,46 @@ REMOVED_CRITERION_TYPES: dict[str, str] = {
 """Criterion ``type:`` values that were removed, mapped to the migration hint the
 resulting error carries. Module-level for the same reason as
 :data:`NORMALIZED_CRITERION_ALIASES`."""
+
+
+def validate_checker_context_shape(value: dict[str, dict[str, Any]]) -> None:
+    """Reject an unknown ``checker_context`` namespace/key rather than silently
+    no-op'ing a typo. ``checker_context`` has no Pydantic schema of its own (it's
+    an open, namespaced bag — see ``TaskDefinition.checker_context``'s field
+    description), so a misspelled ``api_rotue`` or ``rotue:`` would otherwise
+    pass through, get merged across every experiment layer, and simply never be
+    read by ``Orchestrator._eval_route_overrides`` — an override silently doing
+    nothing, with no error anywhere. Called both from
+    ``TaskDefinition.validate_checker_context`` (catches a typo on the task's own
+    YAML) and from ``orchestration/experiment.py::_resolve_checker_context``
+    (catches one introduced only at the experiment-defaults/variant layer, which
+    bypasses the field validator since ``model_copy`` doesn't re-validate).
+    """
+    known_namespaces = {"api_route"}
+    unknown_namespaces = set(value) - known_namespaces
+    if unknown_namespaces:
+        msg = (
+            f"checker_context has unknown namespace(s) {sorted(unknown_namespaces)}; "
+            f"known namespaces: {sorted(known_namespaces)}"
+        )
+        raise ValueError(msg)
+    api_route = value.get("api_route")
+    if api_route is not None:
+        known_keys = {"route", "model"}
+        unknown_keys = set(api_route) - known_keys
+        if unknown_keys:
+            msg = (
+                f"checker_context.api_route has unknown key(s) {sorted(unknown_keys)}; known keys: {sorted(known_keys)}"
+            )
+            raise ValueError(msg)
+        route = api_route.get("route")
+        if route is not None:
+            try:
+                ApiBackend(route)
+            except ValueError as e:
+                valid = sorted(b.value for b in ApiBackend)
+                msg = f"checker_context.api_route.route {route!r} is not a known backend ({valid})"
+                raise ValueError(msg) from e
 
 
 class SimulationConfig(BaseModel):
@@ -438,6 +478,20 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         strategy="replace",  # not layer-merged today; replace = the engine default if it ever is
         description="List of criteria that must all pass for task success",
     )
+    checker_context: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Task-authored config for the success-checking side, namespaced by reserved key. Currently "
+            "the only recognized namespace is `api_route`, e.g. `{api_route: {route: litellm, model: "
+            "gpt-5}}`: `route` selects the backend the WHOLE evaluation side (llm_judge, agent_judge, the "
+            "simulator) calls, decoupled from the agent's own route; `model` overrides the model that "
+            "route uses. Both are consumed by the orchestrator (`resolve_evaluation_route`) BEFORE "
+            "`CheckContext` is built and baked into the resolved route's own `model` field — no criterion "
+            "ever reads `checker_context` directly, only `CheckContext.route.model`. Credentials are "
+            "always resolved from environment variables, never from this field. Merged shallow-per-"
+            "namespace across default -> experiment-defaults -> task -> variant."
+        ),
+    )
     run_limits: RunLimits | None = Field(
         default=None,
         description=(
@@ -714,4 +768,18 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         """Ensure at least one success criterion is defined."""
         if not v:
             raise ValueError("At least one success criterion must be defined")
+        return v
+
+    @field_validator("checker_context")
+    @classmethod
+    def validate_checker_context(cls, v: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Reject an unknown namespace/key rather than silently no-op'ing a typo.
+
+        Only catches a typo already present on the TASK's own YAML — a typo
+        introduced solely at the experiment-defaults/variant layer bypasses this
+        (``model_copy`` doesn't re-validate), so ``_resolve_checker_context``
+        (``orchestration/experiment.py``) calls the same shared checker after
+        merging, to catch those too.
+        """
+        validate_checker_context_shape(v)
         return v

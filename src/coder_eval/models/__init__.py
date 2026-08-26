@@ -187,6 +187,7 @@ from coder_eval.models.tasks import (
     ReferenceSource,
     SimulationConfig,
     TaskDefinition,
+    validate_checker_context_shape,
 )
 
 # Telemetry
@@ -368,6 +369,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "PreRunCommand",
     "ReferenceSource",
     "SimulationConfig",
+    "validate_checker_context_shape",
     # Mutations
     "PromptPrefix",
     "PromptSuffix",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from coder_eval.models.enums import ApiBackend
@@ -87,13 +87,26 @@ class DirectRoute:
     """
 
     judge_transport: JudgeTransport | None = "anthropic"
+    # Unlike BedrockRoute/LiteLLMRoute, the AGENT never reads this — the Claude Agent
+    # SDK picks its own default when unset. It exists so ``checker_context.api_route.model``
+    # (see resolve_evaluation_route) has somewhere to land when the eval side is on Direct.
+    model: str | None = None
 
 
 @dataclass(frozen=True)
 class BedrockRoute:
-    """Route through AWS Bedrock with bearer token authentication."""
+    """Route through AWS Bedrock with bearer token authentication.
 
-    bearer_token: str
+    Deliberately carries NO credential field: the bearer token is a secret, and
+    a route object flows through orchestrator state (``CheckContext``,
+    ``environment_info`` recording, logging) that has no business handling one.
+    Every consumer that actually needs the token (``ClaudeCodeAgent._build_sdk_env``
+    for the agent subprocess, ``judge_bedrock.invoke_bedrock_judge_async`` for the
+    judge's HTTP call) reads ``settings.aws_bearer_token_bedrock`` itself, via the
+    shared ``coder_eval.config.settings`` singleton — the same source ``resolve_route``
+    validated before constructing this route in the first place.
+    """
+
     region: str
     model: str | None = None  # Cross-region model ID, e.g. "eu.anthropic.claude-sonnet-4-6"
     small_model: str | None = None  # Cross-region small model ID
@@ -108,13 +121,15 @@ class LiteLLMRoute:
     gateway fronting Bedrock open-weight models).
 
     The Claude Code SDK is pointed at ``base_url`` via ``ANTHROPIC_BASE_URL`` and
-    authenticates with ``auth_token`` via ``ANTHROPIC_AUTH_TOKEN`` (bearer). The
-    ``model``/``small_model`` ids are passed **verbatim** (no Bedrock
-    inference-profile qualification) — the gateway maps them to its backend.
+    authenticates via ``ANTHROPIC_AUTH_TOKEN`` (bearer). The ``model``/``small_model``
+    ids are passed **verbatim** (no Bedrock inference-profile qualification) — the
+    gateway maps them to its backend.
+
+    Deliberately carries NO credential field — see ``BedrockRoute``'s docstring for
+    why. ``ClaudeCodeAgent._build_sdk_env`` reads ``settings.litellm_auth_token`` itself.
     """
 
     base_url: str
-    auth_token: str
     model: str | None = None
     small_model: str | None = None
 
@@ -128,6 +143,16 @@ ROUTE_NAMES: dict[type, str] = {
     BedrockRoute: "aws_bedrock",
     LiteLLMRoute: "litellm",
 }
+
+
+def _bedrock_model_pair(model: str | None, small_model: str | None, region: str) -> tuple[str | None, str | None]:
+    """Resolve ``(model, small_model)`` into Bedrock inference-profile ids, defaulting
+    ``small_model`` to ``model`` when unset. Shared by every ``BedrockRoute`` construction
+    site (``resolve_route``, ``_resolve_backend_route``, ``resolve_evaluation_route``'s
+    pin-to-Claude branch) so the qualification logic can't drift between them.
+    """
+    resolved_small = small_model or model
+    return to_bedrock_inference_profile(model, region), to_bedrock_inference_profile(resolved_small, region)
 
 
 def resolve_route(settings: Settings) -> ApiRoute:
@@ -155,13 +180,10 @@ def resolve_route(settings: Settings) -> ApiRoute:
             # ClaudeCodeAgent._build_sdk_env). Leaving it unset made every
             # WebFetch fail with "model issues" under the Bedrock backend. The main
             # model is always a valid fallback, so default to it.
-            small_model = settings.bedrock_small_model or settings.bedrock_model
-            return BedrockRoute(
-                bearer_token=settings.aws_bearer_token_bedrock,
-                region=settings.aws_region,
-                model=to_bedrock_inference_profile(settings.bedrock_model, settings.aws_region),
-                small_model=to_bedrock_inference_profile(small_model, settings.aws_region),
+            model, small_model = _bedrock_model_pair(
+                settings.bedrock_model, settings.bedrock_small_model, settings.aws_region
             )
+            return BedrockRoute(region=settings.aws_region, model=model, small_model=small_model)
         case ApiBackend.DIRECT:
             return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
         case ApiBackend.LITELLM:
@@ -177,39 +199,107 @@ def resolve_route(settings: Settings) -> ApiRoute:
             small_model = settings.litellm_small_model or settings.litellm_model
             return LiteLLMRoute(
                 base_url=settings.litellm_base_url,
-                auth_token=settings.litellm_auth_token,
                 model=settings.litellm_model,
                 small_model=small_model,
             )
 
 
-def resolve_evaluation_route(settings: Settings, agent_route: ApiRoute) -> ApiRoute:
+def _resolve_backend_route(settings: Settings, backend: ApiBackend, *, model_override: str | None = None) -> ApiRoute:
+    """Build the ``ApiRoute`` for an EXPLICITLY-requested backend, from the same
+    env-sourced ``Settings`` fields ``resolve_route`` reads for the agent —
+    credentials always come from the environment, never from a task/variant.
+
+    Used only by the ``checker_context.api_route`` override path (see
+    ``resolve_evaluation_route``): raises ``ValueError`` naming the missing env
+    var when that backend isn't configured, rather than silently falling back
+    to a different backend — an explicit override that can't be honored must
+    fail loudly, not degrade to a backend the task author didn't ask for.
+
+    ``model_override`` (``checker_context.api_route.model``) wins over the
+    backend's own env-configured default model when set.
+    """
+    match backend:
+        case ApiBackend.BEDROCK:
+            if not settings.aws_bearer_token_bedrock or not settings.aws_region:
+                raise ValueError(
+                    "checker_context route 'bedrock' requires AWS_BEARER_TOKEN_BEDROCK and AWS_REGION to be set"
+                )
+            judge_model = model_override or settings.bedrock_model or DEFAULT_JUDGE_MODEL
+            model, small_model = _bedrock_model_pair(judge_model, settings.bedrock_small_model, settings.aws_region)
+            return BedrockRoute(region=settings.aws_region, model=model, small_model=small_model)
+        case ApiBackend.DIRECT:
+            if not settings.anthropic_api_key:
+                raise ValueError("checker_context route 'direct' requires ANTHROPIC_API_KEY to be set")
+            return DirectRoute(judge_transport="anthropic", model=model_override)
+        case ApiBackend.LITELLM:
+            if not settings.litellm_base_url or not settings.litellm_auth_token:
+                raise ValueError(
+                    "checker_context route 'litellm' requires LITELLM_BASE_URL and LITELLM_AUTH_TOKEN to be set"
+                )
+            judge_model = model_override or settings.litellm_model
+            small_model = settings.litellm_small_model or judge_model
+            return LiteLLMRoute(
+                base_url=settings.litellm_base_url,
+                model=judge_model,
+                small_model=small_model,
+            )
+
+
+def resolve_evaluation_route(
+    settings: Settings,
+    agent_route: ApiRoute,
+    *,
+    backend_override: str | None = None,
+    model_override: str | None = None,
+) -> ApiRoute:
     """Resolve the route used by the *evaluation* side — the ``llm_judge`` /
     ``agent_judge`` criteria and the simulated user — which must stay on a
     constant Claude backend regardless of the agent under test, so grading and
     simulation stay comparable across models.
 
-    - Agent on Bedrock/Direct: the judge already runs on Claude via that route,
-      so reuse it unchanged (no behavior change for existing runs).
-    - Agent on LiteLLM (open-weight): the agent route cannot serve a Claude
-      judge, so pin evaluation to Bedrock (preferred, from the AWS bearer token)
-      or Direct (``ANTHROPIC_API_KEY``). If neither is configured, fall back to a
+    Both overrides come from the reserved ``checker_context.api_route`` namespace
+    (see ``TaskDefinition.checker_context``) — ``route`` (``backend_override``)
+    picks the backend, ``model`` (``model_override``) picks the model on
+    whichever route is resolved. Criteria never read either directly; they only
+    ever see the resulting ``CheckContext.route.model``.
+
+    - ``backend_override`` set: build that backend's route from env, regardless
+      of ``agent_route`` — an explicit task/variant choice always wins. Raises
+      ``ValueError`` if the string isn't a known ``ApiBackend`` or that backend
+      isn't configured (see ``_resolve_backend_route``).
+    - Agent on Bedrock/Direct (no ``backend_override``): the judge already runs
+      on Claude via that route, so reuse it unchanged — except ``model_override``,
+      if set, still replaces its ``model`` (the route object itself, e.g. a
+      shared ``BedrockRoute``, is otherwise reused as-is).
+    - Agent on LiteLLM (open-weight, no ``backend_override``): the agent route
+      cannot serve a Claude judge, so pin evaluation to Bedrock (preferred, from
+      the AWS bearer token) or Direct (``ANTHROPIC_API_KEY``), honoring
+      ``model_override`` there too. If neither is configured, fall back to a
       ``DirectRoute`` with no judge transport so ``llm_judge`` fails with its
       clean "unconfigured" error rather than silently scoring 0.0.
     """
+    if backend_override is not None:
+        try:
+            backend = ApiBackend(backend_override)
+        except ValueError as e:
+            valid = ", ".join(b.value for b in ApiBackend)
+            raise ValueError(f"checker_context route {backend_override!r} is not a known backend ({valid})") from e
+        return _resolve_backend_route(settings, backend, model_override=model_override)
     if isinstance(agent_route, BedrockRoute | DirectRoute):
-        return agent_route
+        if not model_override:
+            return agent_route
+        if isinstance(agent_route, BedrockRoute):
+            # Bedrock model ids must be region-qualified — reusing the agent's route
+            # verbatim would ship a bare alias straight to the Bedrock API (400).
+            qualified_model, _ = _bedrock_model_pair(model_override, None, agent_route.region)
+            return replace(agent_route, model=qualified_model)
+        return replace(agent_route, model=model_override)
     # agent_route is LiteLLMRoute → pin evaluation to a constant Claude backend.
     if settings.aws_bearer_token_bedrock and settings.aws_region:
-        judge_model = settings.bedrock_model or DEFAULT_JUDGE_MODEL
-        qualified = to_bedrock_inference_profile(judge_model, settings.aws_region)
-        return BedrockRoute(
-            bearer_token=settings.aws_bearer_token_bedrock,
-            region=settings.aws_region,
-            model=qualified,
-            small_model=qualified,
-        )
-    return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
+        judge_model = model_override or settings.bedrock_model or DEFAULT_JUDGE_MODEL
+        model, small_model = _bedrock_model_pair(judge_model, None, settings.aws_region)
+        return BedrockRoute(region=settings.aws_region, model=model, small_model=small_model)
+    return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings), model=model_override)
 
 
 def _resolve_direct_judge_transport(settings: Settings) -> JudgeTransport | None:

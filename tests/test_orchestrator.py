@@ -45,11 +45,11 @@ def test_format_routing_direct_judge_transport_none_renders_as_none():
 
 def test_format_routing_non_direct_routes_unchanged():
     """BedrockRoute keeps the original bare-name format — judge transport is a Direct-only concern."""
-    assert _format_routing(BedrockRoute(bearer_token="t", region="us-east-1")) == "aws_bedrock"
+    assert _format_routing(BedrockRoute(region="us-east-1")) == "aws_bedrock"
 
 
 def test_format_routing_litellm_shows_model():
-    out = _format_routing(LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="zai.glm-5"))
+    out = _format_routing(LiteLLMRoute(base_url="http://localhost:4000", model="zai.glm-5"))
     assert out.startswith("litellm")
     assert "zai.glm-5" in out
 
@@ -57,7 +57,7 @@ def test_format_routing_litellm_shows_model():
 def test_format_routing_litellm_effective_model_wins_over_route_default():
     """The --model override (effective_model) must be logged, not the route's LITELLM_MODEL default."""
     out = _format_routing(
-        LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="zai.glm-5"),
+        LiteLLMRoute(base_url="http://localhost:4000", model="zai.glm-5"),
         effective_model="deepseek.v3.2",
     )
     assert "deepseek.v3.2" in out
@@ -107,7 +107,7 @@ def test_record_route_environment_info_direct_none_serialized_as_string(tmp_path
 
 def test_record_route_environment_info_bedrock(tmp_path):
     orchestrator = _make_orchestrator_with_route(
-        tmp_path, BedrockRoute(bearer_token="t", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        tmp_path, BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
     )
     orchestrator._record_route_environment_info()
     assert orchestrator.result is not None
@@ -121,7 +121,7 @@ def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_p
     """LiteLLM route records host + model, but NEVER the auth token or full base_url."""
     orchestrator = _make_orchestrator_with_route(
         tmp_path,
-        LiteLLMRoute(base_url="http://localhost:4000", auth_token="sk-super-secret", model="zai.glm-5"),
+        LiteLLMRoute(base_url="http://localhost:4000", model="zai.glm-5"),
     )
     orchestrator._record_route_environment_info()
     assert orchestrator.result is not None

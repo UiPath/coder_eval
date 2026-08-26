@@ -35,6 +35,7 @@ from ..models import (
     VariantAggregate,
     VariantResult,
     apply_prompt_mutations,
+    validate_checker_context_shape,
 )
 from ..path_utils import build_task_run_dir
 from .config import BatchRunConfig
@@ -170,6 +171,46 @@ def _resolve_simulation(
         lineage["simulation"] = ConfigLineageEntry(value=merged, source=most_specific)
 
     return resolved
+
+
+def _resolve_checker_context(
+    default_experiment: ExperimentDefinition,
+    experiment: ExperimentDefinition,
+    task: TaskDefinition,
+    variant: ExperimentVariant,
+) -> dict[str, dict[str, Any]]:
+    """Merge ``checker_context`` across the 4-layer precedence chain.
+
+    Precedence (lowest to highest):
+      1. default_experiment.defaults.checker_context
+      2. experiment.defaults.checker_context
+      3. task.checker_context
+      4. variant.checker_context
+
+    Unlike ``agent``/``simulation``, ``checker_context`` is an open, namespaced bag
+    (not a fixed model) — a later layer's namespace merges shallowly onto the same
+    namespace from an earlier layer (per-key overwrite within the namespace),
+    rather than replacing the whole namespace. A namespace absent from a layer is
+    left untouched by that layer. Currently the only recognized namespace is
+    ``api_route`` (``route``/``model``).
+    """
+    layers: list[dict[str, dict[str, Any]] | None] = [
+        default_experiment.defaults.checker_context if default_experiment.defaults else None,
+        experiment.defaults.checker_context if experiment.defaults else None,
+        task.checker_context or None,
+        variant.checker_context,
+    ]
+    merged: dict[str, dict[str, Any]] = {}
+    for layer in layers:
+        if not layer:
+            continue
+        for namespace, patch in layer.items():
+            merged[namespace] = {**merged.get(namespace, {}), **patch}
+    # Catches a typo introduced only at the experiment-defaults/variant layer —
+    # TaskDefinition's own field validator only ever sees the task's raw YAML,
+    # not this merged result (model_copy doesn't re-validate).
+    validate_checker_context_shape(merged)
+    return merged
 
 
 def _resolve_repeats(
@@ -446,6 +487,7 @@ def resolve_task_for_variant(
     # Mirrors agent merge semantics — a later layer's keys overwrite earlier ones, and
     # the final dict is validated by building a SimulationConfig from it.
     resolved_simulation = _resolve_simulation(default_experiment, experiment, task, variant, lineage)
+    resolved_checker_context = _resolve_checker_context(default_experiment, experiment, task, variant)
 
     # Build resolved task (copy with overrides)
     resolved_task = task.model_copy(
@@ -456,6 +498,7 @@ def resolve_task_for_variant(
             "post_run": resolved_post_run,
             "pre_run": resolved_pre_run,
             "simulation": resolved_simulation,
+            "checker_context": resolved_checker_context,
         }
     )
 

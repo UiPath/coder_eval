@@ -63,6 +63,12 @@ class CheckContext:
     ``reference_comparison`` is entirely dependent on it and scores 0.0 without
     one. Checkers that consume neither field receive the context anyway (uniform
     ``_check_impl`` signature) and ignore it.
+
+    A judge model override (``checker_context.api_route.model``) is deliberately
+    NOT a separate field here — it's baked into ``route.model`` by the orchestrator
+    before this object is built (see ``resolve_evaluation_route``), so criteria
+    read one thing (``route.model``) regardless of whether the value came from an
+    env-configured backend default or a task-authored override.
     """
 
     route: "ApiRoute | None" = None

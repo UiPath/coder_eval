@@ -70,6 +70,14 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         ctx = context or CheckContext()
         route = ctx.route
         reference_dir = ctx.reference_dir
+        # criterion.model always carries a concrete default (DEFAULT_JUDGE_MODEL), so an
+        # explicit per-criterion `model:` is only distinguishable from "unset" via
+        # model_fields_set — a checker_context.api_route.model override (baked into
+        # route.model by resolve_evaluation_route) must not clobber a value the task
+        # author actually wrote.
+        judge_model = criterion.model
+        if "model" not in criterion.model_fields_set and route is not None and route.model:
+            judge_model = route.model
 
         # Master enablement gate. Skipped criteria don't make an LLM call and don't
         # affect cost; weighted score includes them as 1.0 so they don't penalize.
@@ -138,6 +146,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         # from the usage the backend reported in its response.
         verdict, parse_error, raw_verdict_text, response_usage = await _invoke_tool_channel(
             criterion=criterion,
+            model=judge_model,
             route=route,
             system_msg=_SYSTEM_PROMPT,
             user_msg=user_msg,
@@ -186,11 +195,17 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 async def _invoke_tool_channel(
     *,
     criterion: LLMJudgeCriterion,
+    model: str,
     route: "ApiRoute | None",
     system_msg: str,
     user_msg: str,
 ) -> tuple[JudgeVerdict | None, str | None, str, TokenUsage | None]:
     """Dispatch the tool-channel invocation by route, via non-blocking async clients.
+
+    ``model`` is the resolved judge model — ``criterion.model`` unless the task
+    left it unset and ``route.model`` (from ``checker_context.api_route.model``)
+    supplied a default (see ``_check_impl_async``); every backend call below
+    uses ``model``, never ``criterion.model`` directly.
 
     Returns ``(verdict, parse_error, raw_verdict_text, response_usage)``.
     ``raw_verdict_text`` is the JSON-dumped verdict for the transcript when
@@ -204,7 +219,7 @@ async def _invoke_tool_channel(
         case BedrockRoute():
             response = await invoke_bedrock_judge_async(
                 route=route,
-                model=criterion.model,
+                model=model,
                 system=system_msg,
                 user=user_msg,
                 temperature=criterion.temperature,
@@ -212,10 +227,10 @@ async def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(response)
-            response_usage = token_usage_from_anthropic_dict(response, model=criterion.model)
+            response_usage = token_usage_from_anthropic_dict(response, model=model)
         case DirectRoute():
             anthropic_response = await invoke_anthropic_judge_async(
-                model=criterion.model,
+                model=model,
                 system=system_msg,
                 user=user_msg,
                 temperature=criterion.temperature,
@@ -223,13 +238,14 @@ async def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
-            response_usage = token_usage_from_anthropic_dict(anthropic_response, model=criterion.model)
+            response_usage = token_usage_from_anthropic_dict(anthropic_response, model=model)
         case LiteLLMRoute():
-            # Defensive: the evaluation route is pinned to Bedrock/Direct by
-            # resolve_evaluation_route, so a LiteLLM route should never reach the
-            # judge. Fail loudly rather than silently scoring 0.0. (Explicit arm
-            # keeps the match exhaustive so pyright flags any future route member.)
-            return None, "llm_judge: evaluation route must be Bedrock/Direct, got LiteLLM", "(litellm route)", None
+            # Reachable now via an explicit `checker_context.api_route.route: litellm`
+            # override (see resolve_evaluation_route) — but there is no OpenAI-compatible
+            # transport yet (tracked separately), so fail loudly rather than silently
+            # scoring 0.0. (Explicit arm also keeps the match exhaustive so pyright
+            # flags any future route member.)
+            return None, "llm_judge: LiteLLM judge transport is not implemented yet", "(litellm route)", None
         case None:
             # Handled by the unconfigured-arm guard in _check_impl_async before
             # dispatch; defensive only.

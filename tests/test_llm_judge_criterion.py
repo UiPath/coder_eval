@@ -574,7 +574,7 @@ def _tool_use_block(score: float, rationale: str = "ok") -> dict:
 def test_judge_bedrock_route_uses_bedrock_invoker(sandbox: Sandbox) -> None:
     from coder_eval.models.routing import BedrockRoute
 
-    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    route = BedrockRoute(region="eu-north-1")
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with (
         patch(
@@ -615,7 +615,7 @@ def test_judge_direct_route_uses_anthropic_invoker(sandbox: Sandbox) -> None:
 def test_judge_bedrock_invoke_runtime_error_maps_to_score_zero(sandbox: Sandbox) -> None:
     from coder_eval.models.routing import BedrockRoute
 
-    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    route = BedrockRoute(region="eu-north-1")
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with patch(
         "coder_eval.criteria.llm_judge.invoke_bedrock_judge_async",
@@ -706,7 +706,7 @@ def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
     """Translation happens INSIDE the helper, not at the dispatch site."""
     from coder_eval.models.routing import BedrockRoute
 
-    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    route = BedrockRoute(region="eu-north-1")
     criterion = LLMJudgeCriterion(description="x", prompt="grade", model="anthropic.claude-opus-4-6-v1")
     with patch(
         "coder_eval.criteria.llm_judge.invoke_bedrock_judge_async",
@@ -1021,9 +1021,7 @@ def test_llm_judge_tool_channel_bedrock(sandbox: Sandbox) -> None:
     with patch(
         "coder_eval.criteria.llm_judge.invoke_bedrock_judge_async", new=AsyncMock(return_value=bedrock_response)
     ) as mock_invoke:
-        result = SuccessChecker(
-            sandbox, init_registry=False, route=BedrockRoute(bearer_token="t", region="us-east-1")
-        ).check(criterion)
+        result = SuccessChecker(sandbox, init_registry=False, route=BedrockRoute(region="us-east-1")).check(criterion)
     assert result.score == 0.81
     # Confirm we passed the Anthropic-native tool spec.
     kwargs = mock_invoke.call_args.kwargs
@@ -1100,9 +1098,7 @@ def test_judge_usage_bedrock_from_response(sandbox: Sandbox) -> None:
         score=0.6, usage={"input_tokens": 900, "output_tokens": 40, "cache_read_input_tokens": 100}
     )
     with patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge_async", new=AsyncMock(return_value=resp)):
-        result = SuccessChecker(
-            sandbox, init_registry=False, route=BedrockRoute(bearer_token="t", region="us-east-1")
-        ).check(criterion)
+        result = SuccessChecker(sandbox, init_registry=False, route=BedrockRoute(region="us-east-1")).check(criterion)
     assert isinstance(result, JudgeCriterionResult)
     assert result.token_usage is not None
     assert result.token_usage.uncached_input_tokens == 900

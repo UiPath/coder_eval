@@ -110,7 +110,7 @@ def test_llm_judge_bedrock_tool_channel(hello_sandbox: Sandbox) -> None:
     result = SuccessChecker(
         hello_sandbox,
         init_registry=False,
-        route=BedrockRoute(bearer_token=bearer, region=region),
+        route=BedrockRoute(region=region),
     ).check(criterion)
 
     assert result.error is None, f"Bedrock judge failed: {result.error}\n{result.details}"
