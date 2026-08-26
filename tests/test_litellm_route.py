@@ -243,36 +243,41 @@ class TestBackendOverride:
             resolve_evaluation_route(settings, agent_route, backend_override="not-a-backend")
 
 
-class TestValidateCheckerContextShape:
-    """validate_checker_context_shape() — the load-time guard for
-    checker_context (previously 0% covered, per the PR #137 review)."""
+class TestCheckerContextModel:
+    """CheckerContext/ApiRouteContext — the typed replacement for the old
+    hand-validated open dict (previously 0% covered, per the PR #137 review).
+    ``extra="forbid"`` + real field types now do what the hand-rolled
+    ``validate_checker_context_shape`` used to."""
 
     @staticmethod
     def _validate(value):
-        from coder_eval.models.tasks import validate_checker_context_shape
+        from coder_eval.models import CheckerContext
 
-        return validate_checker_context_shape(value)
+        return CheckerContext(**value)
 
     def test_accepts_empty(self):
         self._validate({})
 
     def test_accepts_route_and_model(self):
-        self._validate({"api_route": {"route": "bedrock", "model": "claude-haiku-4-5"}})
+        cc = self._validate({"api_route": {"route": "bedrock", "model": "claude-haiku-4-5"}})
+        assert cc.api_route is not None
+        assert cc.api_route.route == ApiBackend.BEDROCK
+        assert cc.api_route.model == "claude-haiku-4-5"
 
     def test_rejects_unknown_namespace(self):
-        with pytest.raises(ValueError, match="unknown namespace"):
+        with pytest.raises(ValueError, match=r"[Ee]xtra"):
             self._validate({"api_rotue": {"route": "bedrock"}})
 
     def test_rejects_unknown_api_route_key(self):
-        with pytest.raises(ValueError, match="unknown key"):
+        with pytest.raises(ValueError, match=r"[Ee]xtra"):
             self._validate({"api_route": {"rotue": "bedrock"}})
 
     def test_rejects_unknown_backend_name(self):
-        with pytest.raises(ValueError, match="not a known backend"):
+        with pytest.raises(ValueError):
             self._validate({"api_route": {"route": "not-a-backend"}})
 
     def test_accepts_params_and_env_params_with_litellm_route(self):
-        self._validate(
+        cc = self._validate(
             {
                 "api_route": {
                     "route": "litellm",
@@ -281,6 +286,9 @@ class TestValidateCheckerContextShape:
                 }
             }
         )
+        assert cc.api_route is not None
+        assert cc.api_route.params == {"aws_region_name": "eu-north-1"}
+        assert cc.api_route.env_params == {"api_key": "MY_ENV_VAR"}
 
     def test_rejects_params_without_litellm_route(self):
         with pytest.raises(ValueError, match="require route: litellm"):
@@ -291,16 +299,21 @@ class TestValidateCheckerContextShape:
             self._validate({"api_route": {"env_params": {"api_key": "MY_ENV_VAR"}}})
 
     def test_rejects_non_dict_params(self):
-        with pytest.raises(ValueError, match="params must be a mapping"):
+        with pytest.raises(ValueError):
             self._validate({"api_route": {"route": "litellm", "params": "not-a-dict"}})
 
     def test_rejects_non_dict_env_params(self):
-        with pytest.raises(ValueError, match="env_params must be a mapping"):
+        with pytest.raises(ValueError):
             self._validate({"api_route": {"route": "litellm", "env_params": "not-a-dict"}})
 
     def test_rejects_non_string_env_params_values(self):
-        with pytest.raises(ValueError, match="must map param name -> ENV VAR NAME"):
+        with pytest.raises(ValueError):
             self._validate({"api_route": {"route": "litellm", "env_params": {"api_key": 123}}})
+
+    def test_rejects_non_string_model(self):
+        """A YAML `model: 5` must be rejected here, not str()-ified downstream."""
+        with pytest.raises(ValueError):
+            self._validate({"api_route": {"route": "bedrock", "model": 5}})
 
 
 class TestEvalRouteWiring:

@@ -78,66 +78,52 @@ resulting error carries. Module-level for the same reason as
 :data:`NORMALIZED_CRITERION_ALIASES`."""
 
 
-def validate_checker_context_shape(value: dict[str, dict[str, Any]]) -> None:
-    """Reject an unknown ``checker_context`` namespace/key rather than silently
-    no-op'ing a typo. ``checker_context`` has no Pydantic schema of its own (it's
-    an open, namespaced bag — see ``TaskDefinition.checker_context``'s field
-    description), so a misspelled ``api_rotue`` or ``rotue:`` would otherwise
-    pass through, get merged across every experiment layer, and simply never be
-    read by ``Orchestrator._eval_route_overrides`` — an override silently doing
-    nothing, with no error anywhere. Called both from
-    ``TaskDefinition.validate_checker_context`` (catches a typo on the task's own
-    YAML) and from ``orchestration/experiment.py::_resolve_checker_context``
-    (catches one introduced only at the experiment-defaults/variant layer, which
-    bypasses the field validator since ``model_copy`` doesn't re-validate).
+class ApiRouteContext(BaseModel):
+    """``checker_context.api_route`` — see ``TaskDefinition.checker_context`` for
+    the full picture. A typed replacement for what used to be a hand-validated
+    open dict: ``extra="forbid"`` catches an unknown key (e.g. a misspelled
+    ``rotue:``) at load time for free, and ``model``/``params``/``env_params``
+    are now real types instead of ``Any`` — a YAML ``model: 5`` is rejected here
+    rather than silently ``str()``-ified into a model id downstream.
     """
-    known_namespaces = {"api_route"}
-    unknown_namespaces = set(value) - known_namespaces
-    if unknown_namespaces:
-        msg = (
-            f"checker_context has unknown namespace(s) {sorted(unknown_namespaces)}; "
-            f"known namespaces: {sorted(known_namespaces)}"
-        )
-        raise ValueError(msg)
-    api_route = value.get("api_route")
-    if api_route is not None:
-        known_keys = {"route", "model", "params", "env_params"}
-        unknown_keys = set(api_route) - known_keys
-        if unknown_keys:
-            msg = (
-                f"checker_context.api_route has unknown key(s) {sorted(unknown_keys)}; known keys: {sorted(known_keys)}"
-            )
-            raise ValueError(msg)
-        route = api_route.get("route")
-        if route is not None:
-            try:
-                ApiBackend(route)
-            except ValueError as e:
-                valid = sorted(b.value for b in ApiBackend)
-                msg = f"checker_context.api_route.route {route!r} is not a known backend ({valid})"
-                raise ValueError(msg) from e
-        # `params`/`env_params` only ever reach the litellm judge transport (see
-        # invoke_litellm_judge_async) — on any other backend they'd be silently
-        # dropped, which is worse than a load-time error.
-        params = api_route.get("params")
-        env_params = api_route.get("env_params")
-        if (params is not None or env_params is not None) and route != "litellm":
-            msg = "checker_context.api_route.params/env_params require route: litellm"
-            raise ValueError(msg)
-        if params is not None and not isinstance(params, dict):
-            raise ValueError(f"checker_context.api_route.params must be a mapping, got {type(params).__name__}")
-        if env_params is not None:
-            if not isinstance(env_params, dict):
-                raise ValueError(
-                    f"checker_context.api_route.env_params must be a mapping, got {type(env_params).__name__}"
-                )
-            bad = {k: v for k, v in env_params.items() if not isinstance(k, str) or not isinstance(v, str)}
-            if bad:
-                msg = (
-                    f"checker_context.api_route.env_params must map param name -> ENV VAR NAME "
-                    f"(both strings); got {bad!r}"
-                )
-                raise ValueError(msg)
+
+    model_config = ConfigDict(extra="forbid")
+
+    route: ApiBackend | None = Field(
+        default=None,
+        description="Backend the WHOLE evaluation side (llm_judge/agent_judge/simulator) calls.",
+    )
+    model: str | None = Field(default=None, description="Model override for the resolved route.")
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description="`route: litellm` only — arbitrary passthrough kwargs to litellm.acompletion.",
+    )
+    env_params: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "`route: litellm` only — maps a litellm.acompletion kwarg name to the ENV VAR NAME "
+            "(never the value) to resolve it from at call time."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_litellm_only_fields(self) -> Self:
+        """``params``/``env_params`` only ever reach the litellm judge transport
+        (see ``invoke_litellm_judge_async``) — on any other backend they'd be
+        silently dropped, which is worse than a load-time error."""
+        if (self.params is not None or self.env_params is not None) and self.route != ApiBackend.LITELLM:
+            raise ValueError("checker_context.api_route.params/env_params require route: litellm")
+        return self
+
+
+class CheckerContext(BaseModel):
+    """Task-authored config for the success-checking side. See
+    ``TaskDefinition.checker_context``'s field description for the full picture.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_route: ApiRouteContext | None = None
 
 
 class SimulationConfig(BaseModel):
@@ -500,25 +486,26 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         strategy="replace",  # not layer-merged today; replace = the engine default if it ever is
         description="List of criteria that must all pass for task success",
     )
-    checker_context: dict[str, dict[str, Any]] = Field(
-        default_factory=dict,
+    checker_context: CheckerContext | None = Field(
+        default=None,
         description=(
-            "Task-authored config for the success-checking side, namespaced by reserved key. Currently "
-            "the only recognized namespace is `api_route`, e.g. `{api_route: {route: litellm, model: "
-            "gpt-5}}`: `route` selects the backend the WHOLE evaluation side (llm_judge, agent_judge, the "
-            "simulator) calls, decoupled from the agent's own route; `model` overrides the model that "
-            "route uses. Both are consumed by the orchestrator (`resolve_evaluation_route`) BEFORE "
-            "`CheckContext` is built and baked into the resolved route's own `model` field — no criterion "
-            "ever reads `checker_context` directly, only `CheckContext.route.model`. Credentials are "
-            "always resolved from environment variables, never from this field — EXCEPT `route: litellm`, "
-            "whose call is built entirely from `params`/`env_params` (no implicit fallback to the agent's "
-            "own LITELLM_BASE_URL/LITELLM_AUTH_TOKEN): `params` is an arbitrary passthrough dict of extra "
-            "kwargs to the underlying `litellm.acompletion` call (e.g. `{api_base: https://my-gateway/v1}`), "
-            "and `env_params` maps a kwarg name to the ENV VAR NAME (not the value!) to resolve it from at "
-            "call time (e.g. `{api_key: MY_GATEWAY_TOKEN, aws_access_key_id: AWS_ACCESS_KEY_ID}`) — so an "
-            "arbitrary provider's config, including secrets, is representable without ever putting one in "
-            "the task YAML. `model` is required when `route: litellm` (no default open-weight/gateway model). "
-            "Merged shallow-per-namespace across default -> experiment-defaults -> task -> variant."
+            "Task-authored config for the success-checking side. Currently carries only `api_route` "
+            "(see ApiRouteContext), e.g. `{api_route: {route: litellm, model: gpt-5}}`: `route` selects "
+            "the backend the WHOLE evaluation side (llm_judge, agent_judge, the simulator) calls, "
+            "decoupled from the agent's own route; `model` overrides the model that route uses. Both "
+            "are consumed by the orchestrator (`resolve_evaluation_route`) BEFORE `CheckContext` is "
+            "built and baked into the resolved route's own `model` field — no criterion ever reads "
+            "`checker_context` directly, only `CheckContext.route.model`. Credentials are always "
+            "resolved from environment variables, never from this field — EXCEPT `route: litellm`, "
+            "whose call is built entirely from `params`/`env_params` (no implicit fallback to the "
+            "agent's own LITELLM_BASE_URL/LITELLM_AUTH_TOKEN): `params` is an arbitrary passthrough "
+            "dict of extra kwargs to the underlying `litellm.acompletion` call (e.g. `{api_base: "
+            "https://my-gateway/v1}`), and `env_params` maps a kwarg name to the ENV VAR NAME (not "
+            "the value!) to resolve it from at call time (e.g. `{api_key: MY_GATEWAY_TOKEN, "
+            "aws_access_key_id: AWS_ACCESS_KEY_ID}`) — so an arbitrary provider's config, including "
+            "secrets, is representable without ever putting one in the task YAML. `model` is required "
+            "when `route: litellm` (no default open-weight/gateway model). Merged field-by-field "
+            "across default -> experiment-defaults -> task -> variant (same engine as `agent`/`simulation`)."
         ),
     )
     run_limits: RunLimits | None = Field(
@@ -797,18 +784,4 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         """Ensure at least one success criterion is defined."""
         if not v:
             raise ValueError("At least one success criterion must be defined")
-        return v
-
-    @field_validator("checker_context")
-    @classmethod
-    def validate_checker_context(cls, v: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        """Reject an unknown namespace/key rather than silently no-op'ing a typo.
-
-        Only catches a typo already present on the TASK's own YAML — a typo
-        introduced solely at the experiment-defaults/variant layer bypasses this
-        (``model_copy`` doesn't re-validate), so ``_resolve_checker_context``
-        (``orchestration/experiment.py``) calls the same shared checker after
-        merging, to catch those too.
-        """
-        validate_checker_context_shape(v)
         return v

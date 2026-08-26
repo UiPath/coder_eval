@@ -35,6 +35,7 @@ from .models import (
     CONTAINER_REFERENCE_DIR,
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ROUTE_NAMES,
+    AgentJudgeCriterion,
     AgentKind,
     ApiRoute,
     BedrockRoute,
@@ -1473,14 +1474,14 @@ class Orchestrator:
         env-configured-default behavior. NOT currently ``-D``-reachable — task/variant
         YAML only.
         """
-        api_route = self.task.checker_context.get("api_route", {})
-        backend = api_route.get("route")
-        model = api_route.get("model")
+        api_route = self.task.checker_context.api_route if self.task.checker_context else None
+        if api_route is None:
+            return EvalRouteOverrides(backend=None, model=None, params=None, env_params=None)
         return EvalRouteOverrides(
-            backend=str(backend) if backend is not None else None,
-            model=str(model) if model is not None else None,
-            params=api_route.get("params"),
-            env_params=api_route.get("env_params"),
+            backend=api_route.route.value if api_route.route is not None else None,
+            model=api_route.model,
+            params=api_route.params,
+            env_params=api_route.env_params,
         )
 
     def _resolve_routes(self) -> None:
@@ -1500,8 +1501,39 @@ class Orchestrator:
             params_override=overrides.params,
             env_params_override=overrides.env_params,
         )
+        self._reject_litellm_eval_route_if_unsupported()
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+
+    def _reject_litellm_eval_route_if_unsupported(self) -> None:
+        """``checker_context.api_route.route: litellm`` dispatches ``llm_judge``
+        through the ``litellm`` library (protocol-agnostic — see
+        ``invoke_litellm_judge_async``'s module docstring), but ``agent_judge``
+        and the simulator run as real Claude Code CLI subprocesses that speak
+        the Anthropic Messages protocol only. Handing them a ``LiteLLMRoute``
+        built from arbitrary ``params``/``env_params`` (which may front an
+        OpenAI-/Vertex-shaped gateway with no Anthropic-compatible endpoint at
+        all) would either misroute onto the AGENT's own unrelated LiteLLM
+        settings or fail with a confusing SDK-level error — the exact
+        misrouting ``LiteLLMRoute``'s own docstring says must never happen.
+        Reject the combination loudly at resolution time instead.
+        """
+        if not isinstance(self.eval_route, LiteLLMRoute):
+            return
+        offenders: list[str] = []
+        if any(isinstance(c, AgentJudgeCriterion) and c.enabled for c in self.task.success_criteria):
+            offenders.append("an enabled agent_judge criterion")
+        if self.task.simulation is not None and self.task.simulation.enabled:
+            offenders.append("simulation.enabled")
+        if offenders:
+            named = " and ".join(offenders)
+            msg = (
+                f"checker_context.api_route.route: litellm is llm_judge-only (it dispatches through the "
+                f"litellm library in-process, not a real Claude Code subprocess), but this task also has "
+                f"{named}, which run as Claude Code sub-agents requiring an Anthropic-compatible endpoint. "
+                f"Use route: bedrock/direct instead, or remove/disable {named}."
+            )
+            raise ValueError(msg)
 
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.

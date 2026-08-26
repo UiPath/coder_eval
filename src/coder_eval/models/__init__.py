@@ -180,6 +180,8 @@ from coder_eval.models.tasks import (
     DEFAULT_SIMULATOR_MODEL,
     NORMALIZED_CRITERION_ALIASES,
     REMOVED_CRITERION_TYPES,
+    ApiRouteContext,
+    CheckerContext,
     CriteriaCheckTiming,
     Dataset,
     PostRunCommand,
@@ -187,7 +189,6 @@ from coder_eval.models.tasks import (
     ReferenceSource,
     SimulationConfig,
     TaskDefinition,
-    validate_checker_context_shape,
 )
 
 # Telemetry
@@ -359,6 +360,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "merge_strategy_of",
     # Tasks
     "TaskDefinition",
+    "ApiRouteContext",
+    "CheckerContext",
     "DEFAULT_SIMULATION_STOP_TOKEN",
     "DEFAULT_SIMULATOR_MODEL",
     "NORMALIZED_CRITERION_ALIASES",
@@ -369,7 +372,6 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "PreRunCommand",
     "ReferenceSource",
     "SimulationConfig",
-    "validate_checker_context_shape",
     # Mutations
     "PromptPrefix",
     "PromptSuffix",

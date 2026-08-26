@@ -105,6 +105,77 @@ def test_record_route_environment_info_direct_none_serialized_as_string(tmp_path
     assert orchestrator.result.environment_info["judge_transport"] == "none"
 
 
+class TestRejectLitellmEvalRouteIfUnsupported:
+    """checker_context.api_route.route: litellm dispatches llm_judge through the
+    litellm library in-process, but agent_judge and the simulator are real
+    Claude Code CLI subprocesses that speak Anthropic Messages only — handing
+    them an arbitrary litellm-fronted route would misroute or fail silently.
+    PR #137 review: 'route: litellm breaks the simulator and agent_judge.'"""
+
+    @staticmethod
+    def _orchestrator_with_criteria(tmp_path: Path, success_criteria, simulation=None) -> Orchestrator:
+        task_file = Path("tasks/hello_date.yaml")
+        task, _ = load_task(task_file)
+        task = task.model_copy(update={"success_criteria": success_criteria, "simulation": simulation})
+        orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
+        orchestrator.eval_route = LiteLLMRoute(model="gpt-5.6-luna")
+        return orchestrator
+
+    def test_llm_judge_only_is_fine(self, tmp_path):
+        from coder_eval.models import LLMJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(tmp_path, [LLMJudgeCriterion(description="x", prompt="grade")])
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+    def test_rejects_enabled_agent_judge(self, tmp_path):
+        from coder_eval.models import AgentJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")]
+        )
+        with pytest.raises(ValueError, match="agent_judge"):
+            orchestrator._reject_litellm_eval_route_if_unsupported()
+
+    def test_allows_disabled_agent_judge(self, tmp_path):
+        from coder_eval.models import AgentJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade", enabled=False)]
+        )
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+    def test_rejects_enabled_simulation(self, tmp_path):
+        from coder_eval.models import LLMJudgeCriterion, SimulationConfig
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path,
+            [LLMJudgeCriterion(description="x", prompt="grade")],
+            simulation=SimulationConfig(enabled=True, persona="p", goal="g"),
+        )
+        with pytest.raises(ValueError, match=r"simulation\.enabled"):
+            orchestrator._reject_litellm_eval_route_if_unsupported()
+
+    def test_allows_disabled_simulation(self, tmp_path):
+        from coder_eval.models import LLMJudgeCriterion, SimulationConfig
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path,
+            [LLMJudgeCriterion(description="x", prompt="grade")],
+            simulation=SimulationConfig(enabled=False, persona="p", goal="g"),
+        )
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+    def test_non_litellm_eval_route_is_never_checked(self, tmp_path):
+        """Bedrock/Direct eval routes are always fine with agent_judge/simulation."""
+        from coder_eval.models import AgentJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")]
+        )
+        orchestrator.eval_route = BedrockRoute(region="eu-north-1")
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+
 def test_record_route_environment_info_bedrock(tmp_path):
     orchestrator = _make_orchestrator_with_route(
         tmp_path, BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
@@ -122,6 +193,7 @@ def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_p
     from coder_eval.config import settings
 
     monkeypatch.setattr(settings, "litellm_base_url", "http://localhost:4000")
+    monkeypatch.setattr(settings, "litellm_auth_token", "sk-super-secret")
     orchestrator = _make_orchestrator_with_route(
         tmp_path,
         LiteLLMRoute(model="zai.glm-5"),
