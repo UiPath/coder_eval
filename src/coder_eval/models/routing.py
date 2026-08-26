@@ -229,6 +229,11 @@ def resolve_route(settings: Settings) -> ApiRoute:
                 model=settings.litellm_model,
                 small_model=small_model,
             )
+        case _:
+            # ApiBackend covers exactly BEDROCK/DIRECT/LITELLM above; this arm is
+            # unreachable but makes the match exhaustive so every path returns
+            # explicitly (CodeQL: mixed explicit/implicit returns).
+            raise AssertionError(f"unhandled ApiBackend: {settings.api_backend!r}")
 
 
 def _resolve_backend_route(

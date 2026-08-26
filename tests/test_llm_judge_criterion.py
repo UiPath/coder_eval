@@ -573,8 +573,6 @@ def _tool_use_block(score: float, rationale: str = "ok") -> dict:
 
 
 def _openai_tool_call_block(score: float, rationale: str = "ok") -> dict:
-    import json
-
     return {
         "choices": [
             {
@@ -600,8 +598,6 @@ def test_llm_judge_criterion_model_survives_json_round_trip() -> None:
     (isolation/docker_runner.py -> cli/run_task_internal_command.py::load_task).
     A `model_fields_set` sentinel would NOT survive this (every field is materialized
     by model_dump), silently making the judge-model override inert under --driver docker."""
-    import json
-
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     assert criterion.model is None
     reloaded = LLMJudgeCriterion.model_validate(json.loads(json.dumps(criterion.model_dump(mode="json"))))

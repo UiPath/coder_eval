@@ -119,9 +119,9 @@ def test_record_route_environment_info_bedrock(tmp_path):
 
 def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_path, monkeypatch):
     """LiteLLM route records host + model, but NEVER the auth token or full base_url."""
-    import coder_eval.orchestrator as orch_mod
+    from coder_eval.config import settings
 
-    monkeypatch.setattr(orch_mod.settings, "litellm_base_url", "http://localhost:4000")
+    monkeypatch.setattr(settings, "litellm_base_url", "http://localhost:4000")
     orchestrator = _make_orchestrator_with_route(
         tmp_path,
         LiteLLMRoute(model="zai.glm-5"),
