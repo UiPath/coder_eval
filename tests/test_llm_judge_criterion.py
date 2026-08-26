@@ -656,7 +656,7 @@ def test_judge_bedrock_route_with_explicit_route_model_still_wins(sandbox: Sandb
 def test_judge_litellm_route_uses_litellm_invoker(sandbox: Sandbox) -> None:
     from coder_eval.models.routing import LiteLLMRoute
 
-    route = LiteLLMRoute(base_url="http://gateway:4000", model="gpt-5-luna")
+    route = LiteLLMRoute(model="gpt-5-luna", params={"api_base": "http://gateway:4000"})
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with (
         patch(
@@ -673,7 +673,8 @@ def test_judge_litellm_route_uses_litellm_invoker(sandbox: Sandbox) -> None:
     assert kwargs["route"] is route
     # No explicit criterion.model set -> falls back to route.model (checker_context override).
     assert kwargs["model"] == "gpt-5-luna"
-    assert kwargs["temperature"] == criterion.temperature
+    # invoke_litellm_judge_async takes no `temperature` kwarg at all -- see its docstring.
+    assert "temperature" not in kwargs
     assert kwargs["max_tokens"] == criterion.max_tokens
     assert kwargs["tool_spec"]["name"] == "submit_verdict"
     assert m_bedrock.call_count == 0

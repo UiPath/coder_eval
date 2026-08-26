@@ -117,44 +117,49 @@ class BedrockRoute:
 
 @dataclass(frozen=True)
 class LiteLLMRoute:
-    """Route through a custom Anthropic-compatible endpoint (e.g. a LiteLLM
-    gateway fronting Bedrock open-weight models).
+    """Route through a custom endpoint — either the AGENT's own LiteLLM proxy
+    (an Anthropic-compatible gateway fronting Bedrock open-weight models), or,
+    on the CHECKER side (``checker_context.api_route.route: litellm``), an
+    arbitrary provider reached through the ``litellm`` library directly.
 
-    The Claude Code SDK is pointed at ``base_url`` via ``ANTHROPIC_BASE_URL`` and
-    authenticates via ``ANTHROPIC_AUTH_TOKEN`` (bearer). The ``model``/``small_model``
-    ids are passed **verbatim** (no Bedrock inference-profile qualification) — the
-    gateway maps them to its backend.
+    AGENT side: the Claude Code SDK is pointed at the gateway via
+    ``ANTHROPIC_BASE_URL``/``ANTHROPIC_AUTH_TOKEN``. Deliberately carries NO
+    ``base_url``/credential field for this — same reasoning as ``BedrockRoute``'s
+    docstring: this route object flows through orchestrator state
+    (``environment_info`` recording, logging) that has no business handling
+    config that should always be read live from the environment.
+    ``ClaudeCodeAgent._build_sdk_env`` reads ``settings.litellm_base_url``/
+    ``settings.litellm_auth_token`` itself, the same source ``resolve_route``
+    validated before constructing this route.
 
-    Deliberately carries NO credential field — see ``BedrockRoute``'s docstring for
-    why. ``ClaudeCodeAgent._build_sdk_env`` reads ``settings.litellm_auth_token`` itself.
+    CHECKER side (``invoke_litellm_judge_async``): unlike the agent path, this
+    is NOT sourced from ``coder_eval.config.settings`` at all — the task author
+    fully owns it via ``params``/``env_params`` below (a gateway-routed judge
+    model rarely reuses the same proxy/credential the AGENT's own LiteLLM
+    backend points at). There is no implicit fallback to
+    ``settings.litellm_base_url``/``settings.litellm_auth_token``; if the
+    provider needs ``api_base``/``api_key``, the task author sets them via
+    ``params``/``env_params`` like any other kwarg.
 
-    ``include_temperature`` (checker side only — ``invoke_litellm_judge_async``):
-    whether the judge call sends ``temperature`` at all. Defaults to ``False``
-    because a gateway-routed model id (e.g. an Azure AI deployment) isn't in
-    ``litellm``'s static param-support table, so an unsupported ``temperature``
-    isn't caught by ``drop_params`` — it round-trips to the provider and back as
-    a live rejection before the judge retries without it. Defaulting to omitted
-    skips that wasted round trip for the common case; set ``True`` for a
-    gateway/model known to accept it.
-
-    ``params``/``auth`` (checker side only, from ``checker_context.api_route.{params,auth}``):
-    ``litellm.acompletion`` takes dozens of provider-specific kwargs (``aws_access_key_id``,
-    ``vertex_project``, ``api_version``, ...) that this route has no dedicated field for.
-    ``params`` is passed through verbatim as extra kwargs. ``auth`` maps a kwarg name to
-    the ENV VAR NAME to resolve it from at call time — e.g. ``{aws_access_key_id:
-    AWS_ACCESS_KEY_ID}`` — so an arbitrary provider's auth shape is representable
-    without a secret ever landing in the task YAML. Both are ``None`` unless a task
-    author set them; ``auth``'s values are env var *names*, never secrets, so it is
-    safe to record verbatim in ``environment_info`` (unlike ``params``, which a task
-    author could — but shouldn't — put a raw secret into).
+    ``params``/``env_params`` (checker side only, from
+    ``checker_context.api_route.{params,env_params}``): ``litellm.acompletion``
+    takes dozens of provider-specific kwargs (``api_base``, ``api_key``,
+    ``aws_access_key_id``, ``vertex_project``, ``api_version``, ...) that this
+    route has no dedicated field for. ``params`` is passed through verbatim as
+    extra kwargs. ``env_params`` maps a kwarg name to the ENV VAR NAME to
+    resolve it from at call time — e.g. ``{api_key: LITELLM_AUTH_TOKEN,
+    aws_access_key_id: AWS_ACCESS_KEY_ID}`` — so an arbitrary provider's config
+    (including secrets) is representable without a secret ever landing in the
+    task YAML. Both are ``None`` unless a task author set them; ``env_params``'s
+    values are env var *names*, never secrets, so it is safe to record verbatim
+    in ``environment_info`` (unlike ``params``, which a task author could — but
+    shouldn't — put a raw secret into).
     """
 
-    base_url: str
     model: str | None = None
     small_model: str | None = None
-    include_temperature: bool = False
     params: dict[str, Any] | None = None
-    auth: dict[str, str] | None = None
+    env_params: dict[str, str] | None = None
 
 
 ApiRoute = DirectRoute | BedrockRoute | LiteLLMRoute
@@ -221,7 +226,6 @@ def resolve_route(settings: Settings) -> ApiRoute:
             # No inference-profile qualification: the id is passed verbatim to the gateway.
             small_model = settings.litellm_small_model or settings.litellm_model
             return LiteLLMRoute(
-                base_url=settings.litellm_base_url,
                 model=settings.litellm_model,
                 small_model=small_model,
             )
@@ -233,11 +237,9 @@ def _resolve_backend_route(
     *,
     model_override: str | None = None,
     params_override: dict[str, Any] | None = None,
-    auth_override: dict[str, str] | None = None,
+    env_params_override: dict[str, str] | None = None,
 ) -> ApiRoute:
-    """Build the ``ApiRoute`` for an EXPLICITLY-requested backend, from the same
-    env-sourced ``Settings`` fields ``resolve_route`` reads for the agent —
-    credentials always come from the environment, never from a task/variant.
+    """Build the ``ApiRoute`` for an EXPLICITLY-requested backend.
 
     Used only by the ``checker_context.api_route`` override path (see
     ``resolve_evaluation_route``): raises ``ValueError`` naming the missing env
@@ -246,10 +248,19 @@ def _resolve_backend_route(
     fail loudly, not degrade to a backend the task author didn't ask for.
 
     ``model_override`` (``checker_context.api_route.model``) wins over the
-    backend's own env-configured default model when set. ``params_override``/
-    ``auth_override`` (``checker_context.api_route.{params,auth}``) only ever
-    land on a ``LiteLLMRoute`` — ``validate_checker_context_shape`` rejects them
-    on any other backend at load time, so they're ignored here otherwise.
+    backend's own env-configured default model when set.
+
+    ``ApiBackend.LITELLM`` is the one exception to "env-sourced ``Settings``
+    fields, credentials always come from the environment": unlike
+    BEDROCK/DIRECT (which reuse the agent's own env-configured credentials, since
+    grading still needs to reach the SAME Claude backend), a checker-side litellm
+    route is not assumed to share the agent's LiteLLM proxy/gateway at all — it
+    is built ENTIRELY from ``params_override``/``env_params_override``
+    (``checker_context.api_route.{params,env_params}``), never from
+    ``settings.litellm_base_url``/``settings.litellm_auth_token``. Those two
+    settings fields are the AGENT's own LiteLLM-backend config (see
+    ``resolve_route``) — reusing them here would silently point the judge at
+    infrastructure the task author never named.
     """
     match backend:
         case ApiBackend.BEDROCK:
@@ -265,22 +276,16 @@ def _resolve_backend_route(
                 raise ValueError("checker_context route 'direct' requires ANTHROPIC_API_KEY to be set")
             return DirectRoute(judge_transport="anthropic", model=model_override)
         case ApiBackend.LITELLM:
-            if not settings.litellm_base_url:
-                raise ValueError("checker_context route 'litellm' requires LITELLM_BASE_URL to be set")
-            if not settings.litellm_auth_token and not auth_override:
+            if not model_override:
                 msg = (
-                    "checker_context route 'litellm' requires LITELLM_AUTH_TOKEN to be set, "
-                    "or an explicit `checker_context.api_route.auth` override"
+                    "checker_context route 'litellm' requires an explicit `checker_context.api_route.model` "
+                    "— there is no default open-weight/gateway model to fall back to"
                 )
                 raise ValueError(msg)
-            judge_model = model_override or settings.litellm_model
-            small_model = settings.litellm_small_model or judge_model
             return LiteLLMRoute(
-                base_url=settings.litellm_base_url,
-                model=judge_model,
-                small_model=small_model,
+                model=model_override,
                 params=params_override,
-                auth=auth_override,
+                env_params=env_params_override,
             )
         case _:
             # ApiBackend covers exactly BEDROCK/DIRECT/LITELLM above; this arm is
@@ -296,7 +301,7 @@ def resolve_evaluation_route(
     backend_override: str | None = None,
     model_override: str | None = None,
     params_override: dict[str, Any] | None = None,
-    auth_override: dict[str, str] | None = None,
+    env_params_override: dict[str, str] | None = None,
 ) -> ApiRoute:
     """Resolve the route used by the *evaluation* side — the ``llm_judge`` /
     ``agent_judge`` criteria and the simulated user — which must stay on a
@@ -306,8 +311,8 @@ def resolve_evaluation_route(
     All overrides come from the reserved ``checker_context.api_route`` namespace
     (see ``TaskDefinition.checker_context``) — ``route`` (``backend_override``)
     picks the backend, ``model`` (``model_override``) picks the model on
-    whichever route is resolved, and ``params``/``auth`` (``params_override``/
-    ``auth_override``) only ever apply when ``backend_override`` resolves to
+    whichever route is resolved, and ``params``/``env_params`` (``params_override``/
+    ``env_params_override``) only ever apply when ``backend_override`` resolves to
     ``litellm`` (see ``_resolve_backend_route``). Criteria never read any of
     these directly; they only ever see the resulting ``CheckContext.route``.
 
@@ -343,7 +348,7 @@ def resolve_evaluation_route(
             backend,
             model_override=model_override,
             params_override=params_override,
-            auth_override=auth_override,
+            env_params_override=env_params_override,
         )
     if isinstance(agent_route, BedrockRoute | DirectRoute):
         if isinstance(agent_route, BedrockRoute) and model_override:

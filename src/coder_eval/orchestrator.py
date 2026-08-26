@@ -158,7 +158,7 @@ class EvalRouteOverrides(NamedTuple):
     backend: str | None
     model: str | None
     params: dict[str, Any] | None
-    auth: dict[str, str] | None
+    env_params: dict[str, str] | None
 
 
 def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
@@ -1480,7 +1480,7 @@ class Orchestrator:
             backend=str(backend) if backend is not None else None,
             model=str(model) if model is not None else None,
             params=api_route.get("params"),
-            auth=api_route.get("auth"),
+            env_params=api_route.get("env_params"),
         )
 
     def _resolve_routes(self) -> None:
@@ -1498,7 +1498,7 @@ class Orchestrator:
             backend_override=overrides.backend,
             model_override=overrides.model,
             params_override=overrides.params,
-            auth_override=overrides.auth,
+            env_params_override=overrides.env_params,
         )
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
@@ -1537,7 +1537,9 @@ class Orchestrator:
         elif isinstance(self.route, LiteLLMRoute):
             # Host only (never the base_url or auth token) — mirrors the Codex
             # agent's host-only recording so secrets stay out of run artifacts.
-            self.result.environment_info["litellm_base_url_host"] = urlparse(self.route.base_url).hostname or ""
+            self.result.environment_info["litellm_base_url_host"] = (
+                urlparse(settings.litellm_base_url or "").hostname or ""
+            )
             if self.route.model:
                 self.result.environment_info["litellm_model"] = self.route.model
         # Agent-specific routing (e.g. Codex custom-endpoint / Azure). No-op for

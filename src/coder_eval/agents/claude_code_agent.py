@@ -836,7 +836,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 # merges {**os.environ, ..., **options.env} at spawn, so setting
                 # them here wins over the parent environment.
                 env = {
-                    "ANTHROPIC_BASE_URL": cr.base_url,
+                    "ANTHROPIC_BASE_URL": settings.litellm_base_url or "",
                     "ANTHROPIC_AUTH_TOKEN": settings.litellm_auth_token or "",
                     # Neutralize any inherited ANTHROPIC_API_KEY: auth on this
                     # route is the bearer ANTHROPIC_AUTH_TOKEN, and a stray

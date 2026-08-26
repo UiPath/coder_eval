@@ -101,7 +101,7 @@ def validate_checker_context_shape(value: dict[str, dict[str, Any]]) -> None:
         raise ValueError(msg)
     api_route = value.get("api_route")
     if api_route is not None:
-        known_keys = {"route", "model", "params", "auth"}
+        known_keys = {"route", "model", "params", "env_params"}
         unknown_keys = set(api_route) - known_keys
         if unknown_keys:
             msg = (
@@ -116,22 +116,27 @@ def validate_checker_context_shape(value: dict[str, dict[str, Any]]) -> None:
                 valid = sorted(b.value for b in ApiBackend)
                 msg = f"checker_context.api_route.route {route!r} is not a known backend ({valid})"
                 raise ValueError(msg) from e
-        # `params`/`auth` only ever reach the litellm judge transport (see
+        # `params`/`env_params` only ever reach the litellm judge transport (see
         # invoke_litellm_judge_async) — on any other backend they'd be silently
         # dropped, which is worse than a load-time error.
         params = api_route.get("params")
-        auth = api_route.get("auth")
-        if (params is not None or auth is not None) and route != "litellm":
-            msg = "checker_context.api_route.params/auth require route: litellm"
+        env_params = api_route.get("env_params")
+        if (params is not None or env_params is not None) and route != "litellm":
+            msg = "checker_context.api_route.params/env_params require route: litellm"
             raise ValueError(msg)
         if params is not None and not isinstance(params, dict):
             raise ValueError(f"checker_context.api_route.params must be a mapping, got {type(params).__name__}")
-        if auth is not None:
-            if not isinstance(auth, dict):
-                raise ValueError(f"checker_context.api_route.auth must be a mapping, got {type(auth).__name__}")
-            bad = {k: v for k, v in auth.items() if not isinstance(k, str) or not isinstance(v, str)}
+        if env_params is not None:
+            if not isinstance(env_params, dict):
+                raise ValueError(
+                    f"checker_context.api_route.env_params must be a mapping, got {type(env_params).__name__}"
+                )
+            bad = {k: v for k, v in env_params.items() if not isinstance(k, str) or not isinstance(v, str)}
             if bad:
-                msg = f"checker_context.api_route.auth must map param name -> ENV VAR NAME (both strings); got {bad!r}"
+                msg = (
+                    f"checker_context.api_route.env_params must map param name -> ENV VAR NAME "
+                    f"(both strings); got {bad!r}"
+                )
                 raise ValueError(msg)
 
 
@@ -505,12 +510,14 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             "route uses. Both are consumed by the orchestrator (`resolve_evaluation_route`) BEFORE "
             "`CheckContext` is built and baked into the resolved route's own `model` field — no criterion "
             "ever reads `checker_context` directly, only `CheckContext.route.model`. Credentials are "
-            "always resolved from environment variables, never from this field. `params`/`auth` (only "
-            "with `route: litellm`) extend this to the judge's underlying `litellm.acompletion` call: "
-            "`params` is an arbitrary passthrough dict of extra kwargs (e.g. `{aws_region_name: "
-            "eu-north-1}`), and `auth` maps a kwarg name to the ENV VAR NAME (not the value!) to resolve "
-            "it from at call time (e.g. `{aws_access_key_id: AWS_ACCESS_KEY_ID}`) — so an arbitrary "
-            "provider's auth shape is representable without ever putting a secret in the task YAML. "
+            "always resolved from environment variables, never from this field — EXCEPT `route: litellm`, "
+            "whose call is built entirely from `params`/`env_params` (no implicit fallback to the agent's "
+            "own LITELLM_BASE_URL/LITELLM_AUTH_TOKEN): `params` is an arbitrary passthrough dict of extra "
+            "kwargs to the underlying `litellm.acompletion` call (e.g. `{api_base: https://my-gateway/v1}`), "
+            "and `env_params` maps a kwarg name to the ENV VAR NAME (not the value!) to resolve it from at "
+            "call time (e.g. `{api_key: MY_GATEWAY_TOKEN, aws_access_key_id: AWS_ACCESS_KEY_ID}`) — so an "
+            "arbitrary provider's config, including secrets, is representable without ever putting one in "
+            "the task YAML. `model` is required when `route: litellm` (no default open-weight/gateway model). "
             "Merged shallow-per-namespace across default -> experiment-defaults -> task -> variant."
         ),
     )

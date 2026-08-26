@@ -4,7 +4,6 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from coder_eval.config import settings
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
 from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge_async
 from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge_async
@@ -252,11 +251,9 @@ async def _invoke_tool_channel(
             # whatever gateway their judge model actually lives behind.
             litellm_response = await invoke_litellm_judge_async(
                 route=route,
-                auth_token=settings.litellm_auth_token,
                 model=model,
                 system=system_msg,
                 user=user_msg,
-                temperature=criterion.temperature,
                 max_tokens=criterion.max_tokens,
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )

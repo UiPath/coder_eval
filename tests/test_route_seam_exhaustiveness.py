@@ -30,7 +30,7 @@ from coder_eval.orchestrator import Orchestrator, _format_routing
 _INSTANCES: list[object] = [
     DirectRoute(),
     BedrockRoute(region="eu-north-1", model="x"),
-    LiteLLMRoute(base_url="http://localhost:4000", model="m"),
+    LiteLLMRoute(model="m"),
 ]
 
 

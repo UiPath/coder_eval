@@ -49,7 +49,7 @@ def test_format_routing_non_direct_routes_unchanged():
 
 
 def test_format_routing_litellm_shows_model():
-    out = _format_routing(LiteLLMRoute(base_url="http://localhost:4000", model="zai.glm-5"))
+    out = _format_routing(LiteLLMRoute(model="zai.glm-5"))
     assert out.startswith("litellm")
     assert "zai.glm-5" in out
 
@@ -57,7 +57,7 @@ def test_format_routing_litellm_shows_model():
 def test_format_routing_litellm_effective_model_wins_over_route_default():
     """The --model override (effective_model) must be logged, not the route's LITELLM_MODEL default."""
     out = _format_routing(
-        LiteLLMRoute(base_url="http://localhost:4000", model="zai.glm-5"),
+        LiteLLMRoute(model="zai.glm-5"),
         effective_model="deepseek.v3.2",
     )
     assert "deepseek.v3.2" in out
@@ -117,11 +117,14 @@ def test_record_route_environment_info_bedrock(tmp_path):
     assert info["bedrock_model"] == "eu.anthropic.claude-sonnet-4-6"
 
 
-def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_path):
+def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_path, monkeypatch):
     """LiteLLM route records host + model, but NEVER the auth token or full base_url."""
+    import coder_eval.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod.settings, "litellm_base_url", "http://localhost:4000")
     orchestrator = _make_orchestrator_with_route(
         tmp_path,
-        LiteLLMRoute(base_url="http://localhost:4000", model="zai.glm-5"),
+        LiteLLMRoute(model="zai.glm-5"),
     )
     orchestrator._record_route_environment_info()
     assert orchestrator.result is not None
