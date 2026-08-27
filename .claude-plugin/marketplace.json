@@ -4,14 +4,28 @@
     "name": "UiPath",
     "url": "https://github.com/UiPath/coder_eval"
   },
-  "description": "Evaluate and benchmark AI coding agents and Claude Code skills.",
+  "description": "Test whether your Claude Code skills actually trigger, and benchmark AI coding agents against your own tasks.",
   "plugins": [
     {
       "name": "coder-eval",
+      "displayName": "Coder Eval",
       "source": "./plugins/coder-eval",
-      "description": "Author, run, and analyze coder-eval suites — including whether your Claude Code skills actually trigger.",
+      "description": "Test whether your Claude Code skills actually trigger — then author, run, and analyze the eval suite that proves it, locally or as a CI gate.",
+      "author": { "name": "UiPath", "url": "https://github.com/UiPath/coder_eval" },
+      "homepage": "https://coder-eval.com",
+      "repository": "https://github.com/UiPath/coder_eval",
+      "license": "Apache-2.0",
       "category": "testing",
-      "keywords": ["evaluation", "testing", "skills", "benchmark", "ci"]
+      "keywords": [
+        "claude-code-skills",
+        "skill-testing",
+        "skill-activation",
+        "evaluation",
+        "benchmark",
+        "agent-testing",
+        "ci"
+      ],
+      "tags": ["skills", "evals", "github-actions", "sandbox", "llm-judge"]
     }
   ]
 }
