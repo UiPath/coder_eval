@@ -10,6 +10,7 @@ Run just these tests:
     make lint
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -3273,3 +3274,79 @@ class TestCE036LiveVerdictContract:
         )
         violations = permuted_violations(checker, case)
         assert any("NON-MONOTONIC" in v for v in violations), violations
+
+
+@pytest.mark.lint
+class TestCE044PluginManifestParity:
+    """CE044 — the marketplace entry and the plugin manifest it points at are one surface.
+
+    Eight fields are byte-identical duplicates across the two manifests and nothing
+    compared them: the only test that read ``plugin.json`` at all was
+    ``test_action_version_pin.py``, and only its ``version``. A one-sided edit ships
+    two different one-liners — one in the ``/plugin`` browser, one in the installed copy.
+
+    The second half is the motivating defect: the marketplace schema allows both
+    ``keywords`` and a near-synonymous ``tags``, while the plugin-manifest schema has no
+    ``tags`` property at all, so discovery strings parked there are dropped from an
+    installed user's manifest and a future editor has no rule for where a new term goes.
+    An extra key on the entry now fails unless ``MARKETPLACE_ONLY`` records why.
+
+    Reasons over JSON files and a ``source`` path, so it is wired here rather than as a
+    ``BaseRule`` in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_manifests_agree_on_every_shared_field(self):
+        from tests.lint.plugin_manifest_parity import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, "plugin/marketplace manifest parity violations:\n" + "\n".join(f"  {f}" for f in findings)
+
+    def test_catches_a_one_sided_description_edit(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path, entry_extra={"description": "drifted"})
+        findings = check(tmp_path)
+        assert any("`description` differs" in f for f in findings), findings
+
+    def test_catches_a_discovery_key_the_manifest_cannot_mirror(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path, entry_extra={"tags": ["skills", "evals"]})
+        findings = check(tmp_path)
+        assert any("`tags` has no counterpart" in f for f in findings), findings
+
+    def test_catches_a_source_that_resolves_nowhere(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path, entry_extra={"source": "./plugins/gone"})
+        findings = check(tmp_path)
+        assert any("does not resolve" in f for f in findings), findings
+
+    def test_a_matching_pair_is_clean(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path)
+        assert check(tmp_path) == []
+
+    @staticmethod
+    def _write_pair(root: Path, entry_extra: dict | None = None) -> None:
+        """Write a minimal in-parity marketplace/manifest pair, then apply ``entry_extra``."""
+        shared = {
+            "name": "demo",
+            "displayName": "Demo",
+            "description": "a demo plugin",
+            "author": {"name": "UiPath"},
+            "homepage": "https://example.invalid",
+            "repository": "https://example.invalid/repo",
+            "license": "Apache-2.0",
+            "keywords": ["demo"],
+        }
+        entry = {**shared, "source": "./plugins/demo", "category": "testing", **(entry_extra or {})}
+        manifest_dir = root / "plugins" / "demo" / ".claude-plugin"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "plugin.json").write_text(json.dumps({**shared, "version": "1.0.0"}), encoding="utf-8")
+        market_dir = root / ".claude-plugin"
+        market_dir.mkdir(parents=True)
+        (market_dir / "marketplace.json").write_text(json.dumps({"name": "demo", "plugins": [entry]}), encoding="utf-8")
