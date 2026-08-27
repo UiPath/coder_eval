@@ -118,7 +118,7 @@ jobs:
           # so this stacks on the tool allowlist below, it does not replace it.
           # Keep this list in sync with the global CODEOWNERS maintainers
           # (.github/CODEOWNERS `*` line).
-          include_comments_by_actor: "akshaylive,tmatup,uipreliga,bai-uipath"
+          include_comments_by_actor: "akshaylive,tmatup,uipreliga,bai-uipath,CarlesUIPath"
           # Drop all bot comments (dependabot, renovate, etc.). Exclusion wins
           # over the include list if an actor somehow matches both.
           exclude_comments_by_actor: "*[bot]"
