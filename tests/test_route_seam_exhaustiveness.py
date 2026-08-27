@@ -91,7 +91,9 @@ def test_record_route_environment_info_handles_every_route():
     missing from its if/elif would record only api_routing — caught here since
     pyright can't check the isinstance chain."""
     for r in _INSTANCES:
-        fake = SimpleNamespace(route=r, eval_route=r, result=SimpleNamespace(environment_info={}), agent=None)
+        fake = SimpleNamespace(
+            route=r, eval_route=r, simulator_route=r, result=SimpleNamespace(environment_info={}), agent=None
+        )
         Orchestrator._record_route_environment_info(fake)  # type: ignore[arg-type]
         env = fake.result.environment_info
         assert env.get("api_routing") == ROUTE_NAMES[type(r)]

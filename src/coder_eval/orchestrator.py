@@ -35,7 +35,6 @@ from .models import (
     CONTAINER_REFERENCE_DIR,
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ROUTE_NAMES,
-    AgentJudgeCriterion,
     AgentKind,
     ApiRoute,
     BedrockRoute,
@@ -419,7 +418,14 @@ class Orchestrator:
 
         # API routing (initialized in _setup)
         self.route: ApiRoute | None = None
-        # Route for the evaluation side (llm_judge / agent_judge / simulated user):
+        # Route for the simulated user, a real Claude Code CLI subprocess like
+        # the agent under test. Resolved independently of eval_route /
+        # checker_context.api_route — that override is llm_judge-only and has
+        # no bearing on the simulator. Defaults to the same resolution as
+        # self.route (subprocess-safe by construction); intended to grow its
+        # own override mechanism later, unrelated to checker_context.
+        self.simulator_route: ApiRoute | None = None
+        # Route for the evaluation side (llm_judge / agent_judge):
         # pinned to a constant Claude backend so grading stays comparable when the
         # agent runs on an open-weight (LiteLLM) model. Equals self.route for the
         # Direct/Bedrock backends.
@@ -1485,14 +1491,16 @@ class Orchestrator:
         )
 
     def _resolve_routes(self) -> None:
-        """Resolve ``self.route``/``self.eval_route``, log routing, and build
-        ``self.success_checker``. Shared by the evaluate-only and normal setup
-        paths in ``_setup`` — identical logic, previously duplicated at each call
-        site. Requires ``self.sandbox`` to already be set.
+        """Resolve ``self.route``/``self.eval_route``/``self.simulator_route``,
+        log routing, and build ``self.success_checker``. Shared by the
+        evaluate-only and normal setup paths in ``_setup`` — identical logic,
+        previously duplicated at each call site. Requires ``self.sandbox`` to
+        already be set.
         """
         assert self.sandbox is not None
         self.route = resolve_route(settings)
         overrides = self._eval_route_overrides()
+        self.simulator_route = resolve_route(settings)
         self.eval_route = resolve_evaluation_route(
             settings,
             self.route,
@@ -1501,39 +1509,8 @@ class Orchestrator:
             params_override=overrides.params,
             env_params_override=overrides.env_params,
         )
-        self._reject_litellm_eval_route_if_unsupported()
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
-
-    def _reject_litellm_eval_route_if_unsupported(self) -> None:
-        """``checker_context.api_route.route: litellm`` dispatches ``llm_judge``
-        through the ``litellm`` library (protocol-agnostic — see
-        ``invoke_litellm_judge_async``'s module docstring), but ``agent_judge``
-        and the simulator run as real Claude Code CLI subprocesses that speak
-        the Anthropic Messages protocol only. Handing them a ``LiteLLMRoute``
-        built from arbitrary ``params``/``env_params`` (which may front an
-        OpenAI-/Vertex-shaped gateway with no Anthropic-compatible endpoint at
-        all) would either misroute onto the AGENT's own unrelated LiteLLM
-        settings or fail with a confusing SDK-level error — the exact
-        misrouting ``LiteLLMRoute``'s own docstring says must never happen.
-        Reject the combination loudly at resolution time instead.
-        """
-        if not isinstance(self.eval_route, LiteLLMRoute):
-            return
-        offenders: list[str] = []
-        if any(isinstance(c, AgentJudgeCriterion) and c.enabled for c in self.task.success_criteria):
-            offenders.append("an enabled agent_judge criterion")
-        if self.task.simulation is not None and self.task.simulation.enabled:
-            offenders.append("simulation.enabled")
-        if offenders:
-            named = " and ".join(offenders)
-            msg = (
-                f"checker_context.api_route.route: litellm is llm_judge-only (it dispatches through the "
-                f"litellm library in-process, not a real Claude Code subprocess), but this task also has "
-                f"{named}, which run as Claude Code sub-agents requiring an Anthropic-compatible endpoint. "
-                f"Use route: bedrock/direct instead, or remove/disable {named}."
-            )
-            raise ValueError(msg)
 
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.
@@ -2212,10 +2189,11 @@ class Orchestrator:
             config=sim_config,
             task_description=self.task.description,
             initial_prompt=initial_prompt,
-            # Pin the simulated user to the constant Claude eval route, not the
-            # agent's (possibly open-weight) route, so the simulator behaves
-            # identically across the models under test.
-            route=self.eval_route,
+            # simulator_route is resolved independently of eval_route/
+            # checker_context.api_route (see _resolve_routes) — the simulator
+            # is a real Claude Code CLI subprocess, same as the agent under
+            # test, not a checker/judge concern.
+            route=self.simulator_route,
         )
         await simulator.start()
 

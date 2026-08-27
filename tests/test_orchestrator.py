@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from coder_eval import orchestrator as orchestrator_module
 from coder_eval.models import (
     AgentKind,
     BedrockRoute,
@@ -105,75 +106,107 @@ def test_record_route_environment_info_direct_none_serialized_as_string(tmp_path
     assert orchestrator.result.environment_info["judge_transport"] == "none"
 
 
-class TestRejectLitellmEvalRouteIfUnsupported:
+class TestSimulatorRouteDecoupledFromCheckerContext:
     """checker_context.api_route.route: litellm dispatches llm_judge through the
-    litellm library in-process, but agent_judge and the simulator are real
-    Claude Code CLI subprocesses that speak Anthropic Messages only — handing
-    them an arbitrary litellm-fronted route would misroute or fail silently.
-    PR #137 review: 'route: litellm breaks the simulator and agent_judge.'"""
+    litellm library in-process. The simulator is a real Claude Code CLI
+    subprocess that speaks Anthropic Messages only — handing it an arbitrary
+    litellm-fronted route would misroute or fail silently.
+    PR #137 review: 'route: litellm breaks the simulator and agent_judge.'
+    Rather than rejecting the combination outright (the previous behavior),
+    self.simulator_route is now resolved independently of eval_route /
+    checker_context.api_route entirely (same resolution as the agent's own
+    route — subprocess-safe by construction) — see PR #2864 (skills repo)
+    review, which is what prompted this: 303/359 llm_judge tasks there have
+    simulation.enabled, so an experiment-wide litellm default broke all of
+    them at setup.
+
+    agent_judge is intentionally NOT covered here — it still shares
+    eval_route like before (out of scope for this pass; see the follow-up
+    discussion on PR #2864)."""
 
     @staticmethod
-    def _orchestrator_with_criteria(tmp_path: Path, success_criteria, simulation=None) -> Orchestrator:
+    def _orchestrator(tmp_path: Path, success_criteria, simulation=None, api_route=None) -> Orchestrator:
+        from coder_eval.models import CheckerContext
+
         task_file = Path("tasks/hello_date.yaml")
         task, _ = load_task(task_file)
-        task = task.model_copy(update={"success_criteria": success_criteria, "simulation": simulation})
+        checker_context = CheckerContext(api_route=api_route) if api_route is not None else None
+        task = task.model_copy(
+            update={
+                "success_criteria": success_criteria,
+                "simulation": simulation,
+                "checker_context": checker_context,
+                "sandbox": SandboxConfig(driver="tempdir", python=None),
+            }
+        )
         orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
-        orchestrator.eval_route = LiteLLMRoute(model="gpt-5.6-luna")
+        orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
         return orchestrator
 
-    def test_llm_judge_only_is_fine(self, tmp_path):
+    def _litellm_api_route(self):
+        from coder_eval.models import ApiBackend, ApiRouteContext
+
+        return ApiRouteContext(route=ApiBackend.LITELLM, model="gpt-5.6-luna")
+
+    def test_llm_judge_only_resolves_litellm_eval_route(self, tmp_path, monkeypatch):
         from coder_eval.models import LLMJudgeCriterion
 
-        orchestrator = self._orchestrator_with_criteria(tmp_path, [LLMJudgeCriterion(description="x", prompt="grade")])
-        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
-
-    def test_rejects_enabled_agent_judge(self, tmp_path):
-        from coder_eval.models import AgentJudgeCriterion
-
-        orchestrator = self._orchestrator_with_criteria(
-            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")]
+        orchestrator = self._orchestrator(
+            tmp_path, [LLMJudgeCriterion(description="x", prompt="grade")], api_route=self._litellm_api_route()
         )
-        with pytest.raises(ValueError, match="agent_judge"):
-            orchestrator._reject_litellm_eval_route_if_unsupported()
+        monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _s: DirectRoute(judge_transport="anthropic"))
+        orchestrator._resolve_routes()
+        assert isinstance(orchestrator.eval_route, LiteLLMRoute)
+        # simulator_route never derives from eval_route/checker_context at all,
+        # so it's unaffected regardless of whether this task even has a simulator.
+        assert not isinstance(orchestrator.simulator_route, LiteLLMRoute)
 
-    def test_allows_disabled_agent_judge(self, tmp_path):
-        from coder_eval.models import AgentJudgeCriterion
-
-        orchestrator = self._orchestrator_with_criteria(
-            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade", enabled=False)]
-        )
-        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
-
-    def test_rejects_enabled_simulation(self, tmp_path):
+    def test_enabled_simulation_never_gets_litellm(self, tmp_path, monkeypatch):
         from coder_eval.models import LLMJudgeCriterion, SimulationConfig
 
-        orchestrator = self._orchestrator_with_criteria(
+        orchestrator = self._orchestrator(
             tmp_path,
             [LLMJudgeCriterion(description="x", prompt="grade")],
             simulation=SimulationConfig(enabled=True, persona="p", goal="g"),
+            api_route=self._litellm_api_route(),
         )
-        with pytest.raises(ValueError, match=r"simulation\.enabled"):
-            orchestrator._reject_litellm_eval_route_if_unsupported()
+        monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _s: DirectRoute(judge_transport="anthropic"))
+        orchestrator._resolve_routes()  # no raise -- this used to be rejected
+        assert isinstance(orchestrator.eval_route, LiteLLMRoute)
+        assert not isinstance(orchestrator.simulator_route, LiteLLMRoute)
 
-    def test_allows_disabled_simulation(self, tmp_path):
-        from coder_eval.models import LLMJudgeCriterion, SimulationConfig
-
-        orchestrator = self._orchestrator_with_criteria(
-            tmp_path,
-            [LLMJudgeCriterion(description="x", prompt="grade")],
-            simulation=SimulationConfig(enabled=False, persona="p", goal="g"),
-        )
-        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
-
-    def test_non_litellm_eval_route_is_never_checked(self, tmp_path):
-        """Bedrock/Direct eval routes are always fine with agent_judge/simulation."""
+    def test_agent_judge_still_shares_eval_route(self, tmp_path, monkeypatch):
+        """Documents current scope: agent_judge is NOT decoupled in this pass —
+        it still reads success_checker.route (== eval_route), which can be a
+        LiteLLMRoute if checker_context.api_route.route: litellm is set."""
         from coder_eval.models import AgentJudgeCriterion
 
-        orchestrator = self._orchestrator_with_criteria(
-            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")]
+        orchestrator = self._orchestrator(
+            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")], api_route=self._litellm_api_route()
         )
-        orchestrator.eval_route = BedrockRoute(region="eu-north-1")
-        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+        monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _s: DirectRoute(judge_transport="anthropic"))
+        orchestrator._resolve_routes()
+        assert isinstance(orchestrator.eval_route, LiteLLMRoute)
+        assert orchestrator.success_checker is not None
+        assert orchestrator.success_checker.route is orchestrator.eval_route
+
+    def test_non_litellm_override_leaves_simulator_route_unaffected(self, tmp_path, monkeypatch):
+        """simulator_route always equals the agent's own resolution, independent
+        of any checker_context.api_route override (bedrock/direct included)."""
+        from coder_eval.models import AgentJudgeCriterion, ApiBackend, ApiRouteContext
+
+        orchestrator = self._orchestrator(
+            tmp_path,
+            [AgentJudgeCriterion(description="x", prompt="grade")],
+            api_route=ApiRouteContext(route=ApiBackend.BEDROCK),
+        )
+        monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _s: DirectRoute(judge_transport="anthropic"))
+        monkeypatch.setattr(orchestrator_module.settings, "aws_bearer_token_bedrock", "token")
+        monkeypatch.setattr(orchestrator_module.settings, "aws_region", "eu-north-1")
+        orchestrator._resolve_routes()
+        assert isinstance(orchestrator.eval_route, BedrockRoute)
+        assert isinstance(orchestrator.simulator_route, DirectRoute)
+        assert orchestrator.simulator_route is not orchestrator.eval_route
 
 
 def test_record_route_environment_info_bedrock(tmp_path):
