@@ -35,6 +35,7 @@ from .models import (
     CONTAINER_REFERENCE_DIR,
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ROUTE_NAMES,
+    AgentJudgeCriterion,
     AgentKind,
     ApiRoute,
     BedrockRoute,
@@ -1500,7 +1501,10 @@ class Orchestrator:
         assert self.sandbox is not None
         self.route = resolve_route(settings)
         overrides = self._eval_route_overrides()
-        self.simulator_route = resolve_route(settings)
+        # Same resolution as self.route (subprocess-safe by construction) — not
+        # yet independently overridable, so this is an alias rather than a
+        # second call, until simulator_route grows its own override mechanism.
+        self.simulator_route = self.route
         self.eval_route = resolve_evaluation_route(
             settings,
             self.route,
@@ -1509,8 +1513,36 @@ class Orchestrator:
             params_override=overrides.params,
             env_params_override=overrides.env_params,
         )
+        self._reject_litellm_agent_judge_if_unsupported()
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+
+    def _reject_litellm_agent_judge_if_unsupported(self) -> None:
+        """``checker_context.api_route.route: litellm`` dispatches ``llm_judge``
+        through the ``litellm`` library (protocol-agnostic — see
+        ``invoke_litellm_judge_async``'s module docstring), but ``agent_judge``
+        runs as a real Claude Code CLI subprocess that speaks the Anthropic
+        Messages protocol only. Handing it a ``LiteLLMRoute`` built from
+        arbitrary ``params``/``env_params`` would silently misroute it onto the
+        AGENT's own unrelated ambient LiteLLM proxy settings (``ClaudeCodeAgent``
+        ignores ``LiteLLMRoute.params``/``env_params`` entirely and falls back
+        to ``settings.litellm_base_url``/``litellm_auth_token``) rather than
+        raising — the exact misrouting ``LiteLLMRoute``'s own docstring says
+        must never happen. Reject the combination loudly at resolution time
+        instead. The simulator doesn't need this check: ``simulator_route``
+        never derives from ``checker_context.api_route`` in the first place.
+        """
+        if not isinstance(self.eval_route, LiteLLMRoute):
+            return
+        if any(isinstance(c, AgentJudgeCriterion) and c.enabled for c in self.task.success_criteria):
+            msg = (
+                "checker_context.api_route.route: litellm is llm_judge-only (it dispatches through the "
+                "litellm library in-process, not a real Claude Code subprocess), but this task also has "
+                "an enabled agent_judge criterion, which runs as a Claude Code sub-agent requiring an "
+                "Anthropic-compatible endpoint. Use route: bedrock/direct instead, or remove/disable the "
+                "agent_judge criterion."
+            )
+            raise ValueError(msg)
 
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.
@@ -1522,10 +1554,11 @@ class Orchestrator:
         assert self.result is not None
         assert self.route is not None
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
-        # The evaluation side (llm_judge / agent_judge / simulated user) may run on
-        # a different, constant backend — pinned to Claude when the agent is on
-        # LiteLLM — so record it: a run then shows what actually graded/simulated
-        # it, distinct from the agent's api_routing.
+        # The evaluation side (llm_judge / agent_judge) may run on a different,
+        # constant backend — pinned to Claude when the agent is on LiteLLM — so
+        # record it: a run then shows what actually graded it, distinct from the
+        # agent's api_routing. The simulator is NOT part of this: simulator_route
+        # always mirrors self.route, so it never diverges from api_routing above.
         if self.eval_route is not None:
             self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
             # bedrock_model/litellm_model below are sourced from self.route (the

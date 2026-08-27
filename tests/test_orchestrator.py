@@ -120,9 +120,9 @@ class TestSimulatorRouteDecoupledFromCheckerContext:
     simulation.enabled, so an experiment-wide litellm default broke all of
     them at setup.
 
-    agent_judge is intentionally NOT covered here — it still shares
-    eval_route like before (out of scope for this pass; see the follow-up
-    discussion on PR #2864)."""
+    agent_judge is NOT decoupled the same way — it still shares eval_route,
+    so the litellm+agent_judge combination is still rejected outright, exactly
+    like before this pass (see test_agent_judge_rejects_litellm_eval_route)."""
 
     @staticmethod
     def _orchestrator(tmp_path: Path, success_criteria, simulation=None, api_route=None) -> Orchestrator:
@@ -175,20 +175,22 @@ class TestSimulatorRouteDecoupledFromCheckerContext:
         assert isinstance(orchestrator.eval_route, LiteLLMRoute)
         assert not isinstance(orchestrator.simulator_route, LiteLLMRoute)
 
-    def test_agent_judge_still_shares_eval_route(self, tmp_path, monkeypatch):
-        """Documents current scope: agent_judge is NOT decoupled in this pass —
-        it still reads success_checker.route (== eval_route), which can be a
-        LiteLLMRoute if checker_context.api_route.route: litellm is set."""
+    def test_agent_judge_rejects_litellm_eval_route(self, tmp_path, monkeypatch):
+        """agent_judge is NOT decoupled from eval_route the way the simulator
+        is — it still reads success_checker.route (== eval_route), which would
+        be an unsupported LiteLLMRoute if checker_context.api_route.route:
+        litellm is set. Rather than silently sharing it (the previous gap),
+        _resolve_routes rejects the combination loudly, same as before this
+        pass — this closes the gap the simulator-decoupling PR temporarily left
+        open (see _reject_litellm_agent_judge_if_unsupported)."""
         from coder_eval.models import AgentJudgeCriterion
 
         orchestrator = self._orchestrator(
             tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")], api_route=self._litellm_api_route()
         )
         monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _s: DirectRoute(judge_transport="anthropic"))
-        orchestrator._resolve_routes()
-        assert isinstance(orchestrator.eval_route, LiteLLMRoute)
-        assert orchestrator.success_checker is not None
-        assert orchestrator.success_checker.route is orchestrator.eval_route
+        with pytest.raises(ValueError, match="agent_judge"):
+            orchestrator._resolve_routes()
 
     def test_non_litellm_override_leaves_simulator_route_unaffected(self, tmp_path, monkeypatch):
         """simulator_route always equals the agent's own resolution, independent
