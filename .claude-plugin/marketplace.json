@@ -3,6 +3,7 @@
   "name": "coder-eval",
   "owner": {
     "name": "UiPath",
+    "email": "coder-eval@uipath.com",
     "url": "https://github.com/UiPath/coder_eval"
   },
   "description": "Test whether your Claude Code skills actually trigger, and benchmark AI coding agents against your own tasks.",
