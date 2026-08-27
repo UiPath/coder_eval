@@ -2,6 +2,87 @@
 
 <!-- version list -->
 
+## v0.11.3 (2026-08-27)
+
+### Bug Fixes
+
+- **checker-context**: Typed model, reject litellm+agent_judge/sim, live test
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+- **eval-routing**: Restore DEFAULT_JUDGE_MODEL floor + add litellm judge transport
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+- **evalboard**: Exclude carried-forward passes from the wall-clock aggregates
+  ([#125](https://github.com/UiPath/coder_eval/pull/125),
+  [`dd918e6`](https://github.com/UiPath/coder_eval/commit/dd918e68a454f39c8254f74fe2e4f346cff3a16f))
+
+- **release**: Pin python-semantic-release + GitPython to unbreak version bump
+  ([#139](https://github.com/UiPath/coder_eval/pull/139),
+  [`ef74014`](https://github.com/UiPath/coder_eval/commit/ef74014d3dd4b389f794e0cba743fc67ed430df8))
+
+- **routing**: Make _resolve_backend_route's match exhaustive
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+### Continuous Integration
+
+- Retrigger checks (GH Actions appeared stalled repo-wide)
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+- Retrigger checks (previous push did not trigger CI)
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+- **fix**: Install litellm extra for pyright, address CodeQL findings
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+### Documentation
+
+- **timing**: Trim justification prose from the wall-clock comments
+  ([#125](https://github.com/UiPath/coder_eval/pull/125),
+  [`dd918e6`](https://github.com/UiPath/coder_eval/commit/dd918e68a454f39c8254f74fe2e4f346cff3a16f))
+
+### Features
+
+- **eval-routing**: Decouple judge/agent_judge backend+model from the agent's own route
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+- **eval-routing**: Decouple judge/agent_judge backend+model from the agent's route
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+- **evalboard**: Chart seconds per passed task on the overview
+  ([#125](https://github.com/UiPath/coder_eval/pull/125),
+  [`dd918e6`](https://github.com/UiPath/coder_eval/commit/dd918e68a454f39c8254f74fe2e4f346cff3a16f))
+
+- **evalboard**: Read the time ratio without hovering
+  ([#125](https://github.com/UiPath/coder_eval/pull/125),
+  [`dd918e6`](https://github.com/UiPath/coder_eval/commit/dd918e68a454f39c8254f74fe2e4f346cff3a16f))
+
+- **evalboard**: Replace the turn-budget signal with time per passed task
+  ([#125](https://github.com/UiPath/coder_eval/pull/125),
+  [`dd918e6`](https://github.com/UiPath/coder_eval/commit/dd918e68a454f39c8254f74fe2e4f346cff3a16f))
+
+- **evalboard**: Run the wall-clock signal beside the turn budget, behind tabs
+  ([#125](https://github.com/UiPath/coder_eval/pull/125),
+  [`dd918e6`](https://github.com/UiPath/coder_eval/commit/dd918e68a454f39c8254f74fe2e4f346cff3a16f))
+
+- **litellm-judge**: Support arbitrary litellm kwargs via params/auth
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+### Refactoring
+
+- **litellm-judge**: Drop settings coupling, rename auth to env_params
+  ([#137](https://github.com/UiPath/coder_eval/pull/137),
+  [`727bb7b`](https://github.com/UiPath/coder_eval/commit/727bb7bee459b43c51af93067907687c5e04cfc8))
+
+
 ## v0.11.2 (2026-08-24)
 
 ### Bug Fixes
