@@ -3350,3 +3350,129 @@ class TestCE044PluginManifestParity:
         market_dir = root / ".claude-plugin"
         market_dir.mkdir(parents=True)
         (market_dir / "marketplace.json").write_text(json.dumps({"name": "demo", "plugins": [entry]}), encoding="utf-8")
+
+
+@pytest.mark.lint
+class TestCE045PluginPathIsAPluginRoot:
+    """CE045 — a claude-code local plugin path must name a plugin ROOT, not a skills dir.
+
+    `agent.plugins: [{type: local, path: X}]` reaches the Claude Code SDK as a
+    plugin directory, so a skill is found at `X/skills/<name>/SKILL.md`. Point X
+    one level deeper — at the directory that holds the skill directories — and
+    NOTHING loads. Probed against the real CLI:
+
+        claude --plugin-dir <root>/.claude/skills  ->  no skills
+        claude --plugin-dir <root>/.claude         ->  `.claude:probe-alpha`
+
+    Six surfaces once said `.claude/skills` in unison: `check-skill`, `ci`, the
+    bundled `activation.yaml`, `docs/PLUGIN.md`, and tutorial 07 twice. The cost
+    of that is invisible and total — every activation suite the plugin generated
+    reported recall 0.0, which the template's own comment calls "reads exactly
+    like a broken skill", and `ci` wrote the same path into users' SCHEDULED
+    workflows, where it renders as a permanent red indistinguishable from the
+    drift the schedule exists to detect.
+
+    Nothing held those six in agreement, which is why they drifted together. The
+    unit under test is the VALUE, not the prose: a path whose last segment is
+    `skills` cannot be a plugin root, whatever the sentence around it claims.
+
+    Codex is deliberately out of scope. `codex_agent._setup_skills` scans BOTH
+    layouts (`<path>/<skill>/` and `<path>/skills/<skill>/`), so a skills
+    directory is valid there — see the plugin-path row in
+    docs/agents/HARNESS_PARITY.md. The rule keys on `SKILL_SOURCE_PATH`, the
+    variable the claude-code plugin emits, so `PLUGIN_PATH` in the Codex docs is
+    untouched.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    # `SKILL_SOURCE_PATH=<value>`, with or without `export`, quotes, or YAML `key: value`
+    # framing — the same assignment appears as shell, as a GitHub Actions `env:` line, and
+    # as a comment in the bundled template.
+    _ASSIGNMENT = re.compile(r"""SKILL_SOURCE_PATH\s*=\s*["']?([^"'\s]+)["']?""")
+
+    # Only the surfaces a claude-code user reads. Globbed, not enumerated: a seventh
+    # surface must be caught by existing, not by remembering to add it here.
+    _GLOBS = ("plugins/coder-eval/**/*.md", "plugins/coder-eval/**/*.yaml", "docs/**/*.md")
+
+    def _surfaces(self) -> list[Path]:
+        found: list[Path] = []
+        for pattern in self._GLOBS:
+            found.extend(self.REPO_ROOT.glob(pattern))
+        return sorted(found)
+
+    @staticmethod
+    def _is_skills_dir(value: str) -> bool:
+        """Does this path's last segment name a skills directory rather than a plugin root?"""
+        return value.rstrip("/").rsplit("/", 1)[-1] == "skills"
+
+    def test_no_surface_points_skill_source_path_at_a_skills_dir(self):
+        offenders: list[str] = []
+        for path in self._surfaces():
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for value in self._ASSIGNMENT.findall(line):
+                    if self._is_skills_dir(value):
+                        rel = path.relative_to(self.REPO_ROOT)
+                        offenders.append(f"{rel}:{lineno}: {value}")
+
+        assert not offenders, (
+            "SKILL_SOURCE_PATH must name a PLUGIN ROOT — a directory holding `skills/` — so the "
+            "skill resolves at `<path>/skills/<name>/SKILL.md`. These point one level too deep, "
+            "which loads no skills at all and reports recall 0.0 on every positive row:\n  "
+            + "\n  ".join(offenders)
+            + "\nFor `.claude/skills/my-skill/SKILL.md` the root is `.claude`, not `.claude/skills`."
+        )
+
+    def test_literal_plugin_paths_in_tasks_are_plugin_roots(self):
+        # The env-var form is the plugin's convention, but a task may hardcode a path.
+        # Same failure, no variable to inspect, so check the YAML value directly.
+        import yaml
+
+        offenders: list[str] = []
+        for path in sorted(self.REPO_ROOT.glob("tasks/**/*.yaml")):
+            try:
+                doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError:
+                continue  # malformed YAML is another rule's problem
+            if not isinstance(doc, dict):
+                continue
+            agent = doc.get("agent")
+            if not isinstance(agent, dict) or str(agent.get("type", "claude-code")) != "claude-code":
+                continue  # Codex tolerates either layout; see the class docstring
+            for plugin in agent.get("plugins") or []:
+                if not isinstance(plugin, dict) or plugin.get("type") != "local":
+                    continue
+                value = str(plugin.get("path") or "")
+                if "$" in value:
+                    continue  # an env var's value is covered by the assignment check above
+                if value and self._is_skills_dir(value):
+                    offenders.append(f"{path.relative_to(self.REPO_ROOT)}: {value}")
+
+        assert not offenders, (
+            "A local plugin `path` must be a plugin root holding `skills/`, not the skills "
+            "directory itself:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_the_rule_would_catch_the_bug_it_was_written_for(self):
+        # Mutation guard: the pre-fix value must be rejected and the fixed one accepted,
+        # so a loosened matcher fails here rather than passing a regression through.
+        assert self._is_skills_dir(".claude/skills")
+        assert self._is_skills_dir("$(pwd)/.claude/skills/")
+        assert self._is_skills_dir("${{ github.workspace }}/.claude/skills")
+        assert not self._is_skills_dir(".claude")
+        assert not self._is_skills_dir("$(pwd)/.claude")
+        assert not self._is_skills_dir("/abs/path/to/.claude")
+        # A directory merely CONTAINING the word is a plugin root, not an offender.
+        assert not self._is_skills_dir("my-skills")
+        assert not self._is_skills_dir(".claude/skills/pdf-forms")
+
+    def test_the_matcher_sees_every_framing_the_surfaces_use(self):
+        # The three real shapes: shell export, Actions `env:` line, template comment.
+        for line, expected in (
+            ('export SKILL_SOURCE_PATH="$(pwd)/.claude"', "$(pwd)/.claude"),
+            ("  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude", "${{"),
+            ("#   export SKILL_SOURCE_PATH=/abs/path/to/.claude", "/abs/path/to/.claude"),
+        ):
+            found = self._ASSIGNMENT.findall(line)
+            assert found, f"matcher missed {line!r}"
+            assert found[0].startswith(expected), (found, expected)

@@ -366,10 +366,36 @@ class TestRestrictPermissions:
 
         monkeypatch.setattr("coder_eval.fs_permissions.signal.signal", _refuse)
         registry = _PermissionStack()
-        registry.ensure_crash_handlers()
-        registry.ensure_crash_handlers()
 
-        assert len(attempts) == 4, "a failed install must be retried on the next call, not latched"
+        # Compare the two calls' signal SETS, not a running total of 4. `signal.signal`
+        # is patched module-wide for the duration of this test, so anything else in the
+        # process that reaches fs_permissions while it runs lands in `attempts` too — and
+        # under `-n auto` that depends on which tests share this worker. A count assertion
+        # therefore failed on a schedule change with `attempts == [INT, TERM, INT, TERM,
+        # INT]`, reporting a latch bug that did not exist. The set form is insensitive to
+        # a stray duplicate while still proving the retry: if the install were latched,
+        # the second call would record nothing at all.
+        registry.ensure_crash_handlers()
+        first = set(attempts)
+        attempts.clear()
+        registry.ensure_crash_handlers()
+        second = set(attempts)
+
+        # Lift the patch HERE, not at teardown. `signal.signal` is patched module-wide,
+        # and the async-test teardown restores SIGINT by calling
+        # `signal.signal(SIGINT, default_int_handler)` — which would hit `_refuse` and
+        # raise `ValueError` out of teardown, failing the test for a reason it does not
+        # test. That surfaced only when a scheduling change moved this test to a
+        # different `-n auto` worker, so it read as a flake rather than as the fixed
+        # ordering hazard it is.
+        monkeypatch.undo()
+
+        expected = {signal.SIGINT, signal.SIGTERM}
+        assert first == expected, f"first install did not attempt both signals: {sorted(first)}"
+        assert second == expected, (
+            "a failed install must be retried on the next call, not latched — the second "
+            f"call attempted {sorted(second)}"
+        )
 
     @pytest.mark.parametrize("previous_is_callable", [True, False])
     async def test_signal_handler_restores_then_chains(self, guarded_dir, monkeypatch, previous_is_callable):
