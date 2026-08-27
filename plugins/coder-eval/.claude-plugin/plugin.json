@@ -1,6 +1,6 @@
 {
   "name": "coder-eval",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "description": "Author, run, and analyze coder-eval suites — including whether your Claude Code skills actually trigger.",
   "author": { "name": "UiPath", "url": "https://github.com/UiPath/coder_eval" },
   "homepage": "https://coder-eval.com",

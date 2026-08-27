@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.11.4 (2026-08-27)
+
+### Chores
+
+- Add @CarlesUIPath as a code owner ([#140](https://github.com/UiPath/coder_eval/pull/140),
+  [`8fff865`](https://github.com/UiPath/coder_eval/commit/8fff8651589b2e43922321c689a66bb3aa41330d))
+
+- Sync PR-review comment allowlist with CODEOWNERS
+  ([#140](https://github.com/UiPath/coder_eval/pull/140),
+  [`8fff865`](https://github.com/UiPath/coder_eval/commit/8fff8651589b2e43922321c689a66bb3aa41330d))
+
+### Features
+
+- **docker**: Bake litellm extra into the docker image
+  ([#142](https://github.com/UiPath/coder_eval/pull/142),
+  [`3f4ae36`](https://github.com/UiPath/coder_eval/commit/3f4ae363b15024e2a033cf92ccda6befaef3a8b9))
+
+
 ## v0.11.3 (2026-08-27)
 
 ### Bug Fixes
