@@ -48,12 +48,16 @@ COPY src/ ./src/
 # experiments/default.yaml is force-included by hatchling per pyproject.toml.
 COPY experiments/default.yaml ./experiments/default.yaml
 
-# Codex and Antigravity are always baked into the image -- peers to the
-# claude-code agent installed above -- so all built-in agents ship in every
-# build. `openai-codex` (+ its pinned cli-bin) and `google-antigravity` (which
-# bundles its `localharness` binary as a manylinux wheel) come from public PyPI,
-# so this needs no private-index credentials. The RUN below always passes
-# `--extra codex --extra antigravity`.
+# Codex, Antigravity, and litellm are always baked into the image -- codex/
+# antigravity are peers to the claude-code agent installed above, so all
+# built-in agents ship in every build; litellm backs the `checker_context.
+# api_route.route: litellm` judge dispatch (see pyproject.toml's `litellm`
+# extra), which every DockerRunner-isolated task needs available IN-container
+# since the checker runs there too, not just on the host. `openai-codex`
+# (+ its pinned cli-bin), `google-antigravity` (which bundles its
+# `localharness` binary as a manylinux wheel), and `litellm` all come from
+# public PyPI, so this needs no private-index credentials. The RUN below
+# always passes `--extra codex --extra antigravity --extra litellm`.
 #
 # CODER_EVAL_UV_EXTRAS carries ADDITIONAL opt-in extras on top of those; it
 # defaults to none. `make docker-image-full` passes `--extra uipath`, which
@@ -67,10 +71,10 @@ ARG CODER_EVAL_UV_EXTRAS=""
 # newer than the gate window); callers may override.
 ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex,google-antigravity"
 
-# All extras (codex, antigravity, and the opt-in uipath) resolve from public
-# PyPI per uv.lock, so the build needs no private-index credentials.
+# All extras (codex, antigravity, litellm, and the opt-in uipath) resolve from
+# public PyPI per uv.lock, so the build needs no private-index credentials.
 RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS}" && \
-    uv export --frozen --extra codex --extra antigravity ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
+    uv export --frozen --extra codex --extra antigravity --extra litellm ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
 
 # Sanity check: the in-container entrypoint subcommand must be wired up.
 RUN coder-eval _run-task-internal --help > /dev/null
