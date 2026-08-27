@@ -60,9 +60,11 @@ The mechanics:
 - The simulator is a **tools-disabled Claude Code agent** with `allowed_tools: []`, an explicit
   deny-list, and no plugins or settings sources. It is pure text-in / text-out, and it **cannot see
   the sandbox** — no files, no terminal, no agent reasoning. Only what the agent writes in the chat.
-- The simulator shares the coding agent's resolved `ApiRoute`, so backend and model come from the
-  run's routing (`--backend direct` / `--backend bedrock`) rather than from the `simulation:` block.
-  There is no model field here to set.
+- The simulator runs on the run's resolved *evaluation* `ApiRoute` — the coding agent's own route
+  (`--backend direct` / `--backend bedrock`) unless `checker_context.api_route.route` overrides it
+  (see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context)). The **model** is separately
+  pinned by `simulation.model` (see [Simulation](TASK_DEFINITION_GUIDE.md#simulation)), not inherited
+  from the route — so an A/B varying the subject model doesn't silently vary the simulated user too.
 
 **Agent-kind constraint.** The *subject* agent can be any registered kind — the dialog driver only
 calls the agent's `communicate()`, so Codex and plugin agents work. The *simulator*, however, is

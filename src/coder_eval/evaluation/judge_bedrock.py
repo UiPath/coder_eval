@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx2
 
+from coder_eval.config import settings
 from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.errors.categories import RetryConfig
 from coder_eval.errors.retry import compute_backoff
@@ -67,9 +68,17 @@ async def invoke_bedrock_judge_async(
 
     Raises:
         ValueError: ``model`` empty.
-        JudgeInfrastructureError: retries exhausted, non-retryable HTTP failure
-            (e.g. 400/401/403), or a non-dict JSON body.
+        JudgeInfrastructureError: no bearer token configured; retries exhausted;
+            non-retryable HTTP failure (e.g. 400/401/403); or a non-dict JSON body.
     """
+    # Raise (not assert): this call runs inside LLMJudgeChecker's
+    # handle_criterion_errors(_async) wrapper, which catches plain Exception
+    # (including AssertionError) and downgrades it to a scored 0.0 — the
+    # opposite of the intended "internal-contract violation escalates to
+    # FinalStatus.ERROR" behavior. JudgeInfrastructureError is in
+    # _ESCALATING_EXCEPTIONS, so it propagates instead of being scored.
+    if settings.aws_bearer_token_bedrock is None:
+        raise JudgeInfrastructureError("Bedrock requires aws_bearer_token_bedrock")
     qualified = to_bedrock_model(model, route.region)
     url = f"https://bedrock-runtime.{route.region}.amazonaws.com/model/{qualified}/invoke"
     body = {
@@ -82,7 +91,7 @@ async def invoke_bedrock_judge_async(
         "tool_choice": {"type": "tool", "name": tool_spec["name"]},
     }
     headers = {
-        "Authorization": f"Bearer {route.bearer_token}",
+        "Authorization": f"Bearer {settings.aws_bearer_token_bedrock}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }

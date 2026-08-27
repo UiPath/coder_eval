@@ -381,7 +381,6 @@ def test_resolve_route_bedrock():
     )
     route = resolve_route(s)
     assert isinstance(route, BedrockRoute)
-    assert route.bearer_token == "tok-123"
     assert route.region == "us-east-1"
     assert route.model == "eu.anthropic.claude-sonnet-4-6"
 

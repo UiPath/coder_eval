@@ -27,6 +27,13 @@ def _make_response(*, status_code: int = 200, json_data: Any = None, text: str =
     return response
 
 
+@pytest.fixture(autouse=True)
+def _bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """invoke_bedrock_judge_async reads the bearer token from settings, not the
+    route, so every test needs one set regardless of whether it inspects it."""
+    monkeypatch.setattr(judge_bedrock.settings, "aws_bearer_token_bedrock", "test-token")
+
+
 @pytest.fixture
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Capture backoff sleeps instead of actually sleeping."""
@@ -40,7 +47,7 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 def _route() -> BedrockRoute:
-    return BedrockRoute(bearer_token="test-token", region="eu-north-1")
+    return BedrockRoute(region="eu-north-1")
 
 
 def _tool_use_response(score: float = 0.5, rationale: str = "ok") -> dict[str, Any]:

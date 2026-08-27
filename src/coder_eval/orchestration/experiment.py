@@ -19,6 +19,7 @@ import yaml
 from ..models import (
     AgentConfig,
     BaseAgentConfig,
+    CheckerContext,
     ConfigLineageEntry,
     ExperimentDefinition,
     ExperimentResult,
@@ -168,6 +169,50 @@ def _resolve_simulation(
     most_specific: ConfigSource | None = next((src for src, patch in reversed(sim_specs) if patch is not None), None)
     if most_specific is not None:
         lineage["simulation"] = ConfigLineageEntry(value=merged, source=most_specific)
+
+    return resolved
+
+
+def _resolve_checker_context(
+    default_experiment: ExperimentDefinition,
+    experiment: ExperimentDefinition,
+    task: TaskDefinition,
+    variant: ExperimentVariant,
+    lineage: dict[str, ConfigLineageEntry],
+) -> CheckerContext:
+    """Merge ``checker_context`` across the 4-layer precedence chain.
+
+    Precedence (lowest to highest):
+      1. default_experiment.defaults.checker_context
+      2. experiment.defaults.checker_context
+      3. task.checker_context
+      4. variant.checker_context
+
+    Mirrors ``_resolve_simulation``: runs through the generic resolver
+    (``merge_layers`` over ``CheckerContext``) so a later layer's fields
+    overwrite earlier ones (nested ``api_route`` merges field-by-field, the
+    type-aware default for a nested ``BaseModel``), then the merged dict is
+    validated by constructing a ``CheckerContext`` — which raises a helpful,
+    typed error (unknown key, wrong value type, `params`/`env_params` without
+    `route: litellm`) rather than a hand-rolled shape check. Lineage stays
+    coarse: a single ``checker_context`` entry crediting the most-specific source.
+    """
+    specs: list[tuple[ConfigSource, dict[str, Any] | None]] = [
+        ("default", default_experiment.defaults.checker_context if default_experiment.defaults else None),
+        ("experiment-defaults", experiment.defaults.checker_context if experiment.defaults else None),
+        ("task", task.checker_context.model_dump(exclude_unset=True) if task.checker_context else None),
+        ("variant", variant.checker_context),
+    ]
+    layers = [Layer(source=src, patch=patch) for src, patch in specs if patch is not None]
+    if not layers:
+        return CheckerContext()
+
+    merged = merge_layers((CheckerContext,), layers, lineage_root="checker_context")
+    resolved = CheckerContext(**merged)
+
+    most_specific: ConfigSource | None = next((src for src, patch in reversed(specs) if patch is not None), None)
+    if most_specific is not None:
+        lineage["checker_context"] = ConfigLineageEntry(value=merged, source=most_specific)
 
     return resolved
 
@@ -446,6 +491,7 @@ def resolve_task_for_variant(
     # Mirrors agent merge semantics — a later layer's keys overwrite earlier ones, and
     # the final dict is validated by building a SimulationConfig from it.
     resolved_simulation = _resolve_simulation(default_experiment, experiment, task, variant, lineage)
+    resolved_checker_context = _resolve_checker_context(default_experiment, experiment, task, variant, lineage)
 
     # Build resolved task (copy with overrides)
     resolved_task = task.model_copy(
@@ -456,6 +502,7 @@ def resolve_task_for_variant(
             "post_run": resolved_post_run,
             "pre_run": resolved_pre_run,
             "simulation": resolved_simulation,
+            "checker_context": resolved_checker_context,
         }
     )
 

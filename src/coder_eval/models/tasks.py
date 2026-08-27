@@ -17,7 +17,7 @@ from coder_eval.models.criteria import (
     RunCommandCriterion,
     SuccessCriterion,
 )
-from coder_eval.models.enums import AgentKind
+from coder_eval.models.enums import AgentKind, ApiBackend
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.merge_strategy import MergeField
@@ -76,6 +76,54 @@ REMOVED_CRITERION_TYPES: dict[str, str] = {
 """Criterion ``type:`` values that were removed, mapped to the migration hint the
 resulting error carries. Module-level for the same reason as
 :data:`NORMALIZED_CRITERION_ALIASES`."""
+
+
+class ApiRouteContext(BaseModel):
+    """``checker_context.api_route`` — see ``TaskDefinition.checker_context`` for
+    the full picture. A typed replacement for what used to be a hand-validated
+    open dict: ``extra="forbid"`` catches an unknown key (e.g. a misspelled
+    ``rotue:``) at load time for free, and ``model``/``params``/``env_params``
+    are now real types instead of ``Any`` — a YAML ``model: 5`` is rejected here
+    rather than silently ``str()``-ified into a model id downstream.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    route: ApiBackend | None = Field(
+        default=None,
+        description="Backend the WHOLE evaluation side (llm_judge/agent_judge/simulator) calls.",
+    )
+    model: str | None = Field(default=None, description="Model override for the resolved route.")
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description="`route: litellm` only — arbitrary passthrough kwargs to litellm.acompletion.",
+    )
+    env_params: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "`route: litellm` only — maps a litellm.acompletion kwarg name to the ENV VAR NAME "
+            "(never the value) to resolve it from at call time."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_litellm_only_fields(self) -> Self:
+        """``params``/``env_params`` only ever reach the litellm judge transport
+        (see ``invoke_litellm_judge_async``) — on any other backend they'd be
+        silently dropped, which is worse than a load-time error."""
+        if (self.params is not None or self.env_params is not None) and self.route != ApiBackend.LITELLM:
+            raise ValueError("checker_context.api_route.params/env_params require route: litellm")
+        return self
+
+
+class CheckerContext(BaseModel):
+    """Task-authored config for the success-checking side. See
+    ``TaskDefinition.checker_context``'s field description for the full picture.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_route: ApiRouteContext | None = None
 
 
 class SimulationConfig(BaseModel):
@@ -437,6 +485,28 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
     success_criteria: list[SuccessCriterion] = MergeField(
         strategy="replace",  # not layer-merged today; replace = the engine default if it ever is
         description="List of criteria that must all pass for task success",
+    )
+    checker_context: CheckerContext | None = Field(
+        default=None,
+        description=(
+            "Task-authored config for the success-checking side. Currently carries only `api_route` "
+            "(see ApiRouteContext), e.g. `{api_route: {route: litellm, model: gpt-5}}`: `route` selects "
+            "the backend the WHOLE evaluation side (llm_judge, agent_judge, the simulator) calls, "
+            "decoupled from the agent's own route; `model` overrides the model that route uses. Both "
+            "are consumed by the orchestrator (`resolve_evaluation_route`) BEFORE `CheckContext` is "
+            "built and baked into the resolved route's own `model` field — no criterion ever reads "
+            "`checker_context` directly, only `CheckContext.route.model`. Credentials are always "
+            "resolved from environment variables, never from this field — EXCEPT `route: litellm`, "
+            "whose call is built entirely from `params`/`env_params` (no implicit fallback to the "
+            "agent's own LITELLM_BASE_URL/LITELLM_AUTH_TOKEN): `params` is an arbitrary passthrough "
+            "dict of extra kwargs to the underlying `litellm.acompletion` call (e.g. `{api_base: "
+            "https://my-gateway/v1}`), and `env_params` maps a kwarg name to the ENV VAR NAME (not "
+            "the value!) to resolve it from at call time (e.g. `{api_key: MY_GATEWAY_TOKEN, "
+            "aws_access_key_id: AWS_ACCESS_KEY_ID}`) — so an arbitrary provider's config, including "
+            "secrets, is representable without ever putting one in the task YAML. `model` is required "
+            "when `route: litellm` (no default open-weight/gateway model). Merged field-by-field "
+            "across default -> experiment-defaults -> task -> variant (same engine as `agent`/`simulation`)."
+        ),
     )
     run_limits: RunLimits | None = Field(
         default=None,

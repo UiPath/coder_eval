@@ -81,6 +81,8 @@ class SuccessChecker:
                 ``agent_judge``) can route through the same backend (Direct /
                 Bedrock) as the main coding agent. ``None`` is acceptable
                 for non-sub-agent criteria; ``agent_judge`` requires a route.
+                Any ``checker_context.api_route.model`` override is already
+                baked into ``route.model`` by ``resolve_evaluation_route``.
         """
         self.sandbox = sandbox
         self._checker_instances: dict[str, BaseCriterion[Any]] = {}

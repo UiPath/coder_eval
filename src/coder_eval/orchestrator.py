@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from .agent import Agent
@@ -35,6 +35,7 @@ from .models import (
     CONTAINER_REFERENCE_DIR,
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ROUTE_NAMES,
+    AgentJudgeCriterion,
     AgentKind,
     ApiRoute,
     BedrockRoute,
@@ -148,6 +149,17 @@ async def _pump_stream(
 # ``ClaudeCodeAgent._format_messages``; this regex is telemetry-only (utterance
 # extraction for the per-task log), not a correctness-critical parser.
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
+
+
+class EvalRouteOverrides(NamedTuple):
+    """``checker_context.api_route``'s override fields. Named fields (rather than
+    a bare tuple) so a future transposition at a call site is a typo'd attribute,
+    not a silent positional swap."""
+
+    backend: str | None
+    model: str | None
+    params: dict[str, Any] | None
+    env_params: dict[str, str] | None
 
 
 def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
@@ -1276,12 +1288,7 @@ class Orchestrator:
             self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
-            self.route = resolve_route(settings)
-            self.eval_route = resolve_evaluation_route(settings, self.route)
-            logger.info(
-                "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
-            )
-            self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+            self._resolve_routes()
             self._record_route_environment_info()
             return
 
@@ -1347,10 +1354,7 @@ class Orchestrator:
         self.result.sandbox_path = str(sandbox_dir)
 
         # Determine API routing from settings.api_backend enum
-        self.route = resolve_route(settings)
-        self.eval_route = resolve_evaluation_route(settings, self.route)
-        logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
-        self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+        self._resolve_routes()
 
         # Create and start the agent. For a no-op (type: none) task this dispatches
         # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
@@ -1456,6 +1460,81 @@ class Orchestrator:
         if isinstance(path, str) and path:
             self.sandbox.set_command_base_path(path)
 
+    def _eval_route_overrides(self) -> EvalRouteOverrides:
+        """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
+
+        A task/variant-authored choice for the WHOLE evaluation side (``llm_judge``,
+        ``agent_judge``, the simulator all share one ``eval_route``), decoupled from
+        the agent's own route/model — resolved into a credentialed ``ApiRoute`` (from
+        env vars) by ``resolve_evaluation_route``, which bakes ``model`` into the
+        resolved route's own ``model`` field. Reserved under one ``api_route``
+        namespace (not per-criterion-type): there is exactly one eval route per run,
+        not one per criterion. Either element is ``None`` when unset, in which case
+        ``resolve_evaluation_route`` falls back to its existing pin-to-Claude /
+        env-configured-default behavior. NOT currently ``-D``-reachable — task/variant
+        YAML only.
+        """
+        api_route = self.task.checker_context.api_route if self.task.checker_context else None
+        if api_route is None:
+            return EvalRouteOverrides(backend=None, model=None, params=None, env_params=None)
+        return EvalRouteOverrides(
+            backend=api_route.route.value if api_route.route is not None else None,
+            model=api_route.model,
+            params=api_route.params,
+            env_params=api_route.env_params,
+        )
+
+    def _resolve_routes(self) -> None:
+        """Resolve ``self.route``/``self.eval_route``, log routing, and build
+        ``self.success_checker``. Shared by the evaluate-only and normal setup
+        paths in ``_setup`` — identical logic, previously duplicated at each call
+        site. Requires ``self.sandbox`` to already be set.
+        """
+        assert self.sandbox is not None
+        self.route = resolve_route(settings)
+        overrides = self._eval_route_overrides()
+        self.eval_route = resolve_evaluation_route(
+            settings,
+            self.route,
+            backend_override=overrides.backend,
+            model_override=overrides.model,
+            params_override=overrides.params,
+            env_params_override=overrides.env_params,
+        )
+        self._reject_litellm_eval_route_if_unsupported()
+        logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
+        self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+
+    def _reject_litellm_eval_route_if_unsupported(self) -> None:
+        """``checker_context.api_route.route: litellm`` dispatches ``llm_judge``
+        through the ``litellm`` library (protocol-agnostic — see
+        ``invoke_litellm_judge_async``'s module docstring), but ``agent_judge``
+        and the simulator run as real Claude Code CLI subprocesses that speak
+        the Anthropic Messages protocol only. Handing them a ``LiteLLMRoute``
+        built from arbitrary ``params``/``env_params`` (which may front an
+        OpenAI-/Vertex-shaped gateway with no Anthropic-compatible endpoint at
+        all) would either misroute onto the AGENT's own unrelated LiteLLM
+        settings or fail with a confusing SDK-level error — the exact
+        misrouting ``LiteLLMRoute``'s own docstring says must never happen.
+        Reject the combination loudly at resolution time instead.
+        """
+        if not isinstance(self.eval_route, LiteLLMRoute):
+            return
+        offenders: list[str] = []
+        if any(isinstance(c, AgentJudgeCriterion) and c.enabled for c in self.task.success_criteria):
+            offenders.append("an enabled agent_judge criterion")
+        if self.task.simulation is not None and self.task.simulation.enabled:
+            offenders.append("simulation.enabled")
+        if offenders:
+            named = " and ".join(offenders)
+            msg = (
+                f"checker_context.api_route.route: litellm is llm_judge-only (it dispatches through the "
+                f"litellm library in-process, not a real Claude Code subprocess), but this task also has "
+                f"{named}, which run as Claude Code sub-agents requiring an Anthropic-compatible endpoint. "
+                f"Use route: bedrock/direct instead, or remove/disable {named}."
+            )
+            raise ValueError(msg)
+
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.
 
@@ -1472,6 +1551,13 @@ class Orchestrator:
         # it, distinct from the agent's api_routing.
         if self.eval_route is not None:
             self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
+            # bedrock_model/litellm_model below are sourced from self.route (the
+            # AGENT's route) — record the judge/simulator's own model separately so
+            # a checker_context.api_route.model override (or the LiteLLM-agent
+            # pinned-to-Bedrock default) is visible in run artifacts, not just
+            # inferable from the agent's model.
+            if self.eval_route.model:
+                self.result.environment_info["eval_model"] = self.eval_route.model
         if isinstance(self.route, BedrockRoute):
             self.result.environment_info["aws_region"] = self.route.region
             if self.route.model:
@@ -1483,7 +1569,9 @@ class Orchestrator:
         elif isinstance(self.route, LiteLLMRoute):
             # Host only (never the base_url or auth token) — mirrors the Codex
             # agent's host-only recording so secrets stay out of run artifacts.
-            self.result.environment_info["litellm_base_url_host"] = urlparse(self.route.base_url).hostname or ""
+            self.result.environment_info["litellm_base_url_host"] = (
+                urlparse(settings.litellm_base_url or "").hostname or ""
+            )
             if self.route.model:
                 self.result.environment_info["litellm_model"] = self.route.model
         # Agent-specific routing (e.g. Codex custom-endpoint / Azure). No-op for

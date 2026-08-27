@@ -35,6 +35,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
   - [skill_triggered](#skill_triggered)
+- [Checker Context](#checker-context)
 - [Reference Solutions](#reference-solutions)
 - [Pre-Run Commands](#pre-run-commands)
 - [Post-Run Commands](#post-run-commands)
@@ -63,6 +64,7 @@ reference: { ... }                    # Optional reference solution (a directory
 pre_run: [ ... ]                      # Optional pre-run commands (before agent starts)
 post_run: [ ... ]                     # Optional post-run commands
 dataset: { ... }                      # Optional dataset fan-out (one task -> N row-tasks)
+checker_context: { ... }              # Optional: backend/model for the evaluation side (judge, simulator)
 ```
 
 ### `dataset`
@@ -1295,6 +1297,40 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 
 **Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
 
+## Checker Context
+
+`checker_context` carries task-authored config for the success-checking side, namespaced by reserved key. Currently the only recognized namespace is **`api_route`**:
+
+```yaml
+success_criteria:
+  - type: llm_judge
+    prompt: "Grade the fix for correctness."
+
+checker_context:
+  api_route:
+    route: bedrock    # which backend the whole eval side (llm_judge/agent_judge/simulator) uses
+    model: claude-haiku-4-5   # model override for that route
+```
+
+- `route` selects which backend the WHOLE evaluation side calls (`llm_judge`, `agent_judge`, and the simulator all share one resolved eval route per run — this isn't per-criterion), **decoupled from the agent's own route** (a Claude agent can be graded by a differently-backed judge, or vice versa). This is a backend *name* (`direct` / `bedrock` / `litellm`), not a route object. For `direct`/`bedrock` credentials are never read from the task, always from the matching environment variables (`ANTHROPIC_API_KEY` for `direct`, `AWS_BEARER_TOKEN_BEDROCK`/`AWS_REGION` for `bedrock`). An unconfigured or unknown backend name raises at dispatch rather than silently falling back. **`route: litellm` dispatches `llm_judge` through the `litellm` library** (the `coder-eval[litellm]` extra, `litellm.acompletion`) rather than assuming one wire protocol — a gateway-routed judge model (e.g. an Azure AI `/openai/v1` deployment) rarely speaks Anthropic Messages, so this lets `model` carry its own provider hint (e.g. `azure/gpt-5.6-luna`) and get that provider's actual request/response shape handled by the library. Unlike the other two backends, `route: litellm` has NO implicit env-var fallback — see `params`/`env_params` below, which is how it's configured. `model` is required for `route: litellm` (there is no default open-weight/gateway model).
+- `model` overrides the model that resolved route uses for **`llm_judge` only** — when the criterion itself leaves `model:` unset (precedence: an explicit per-criterion `model:` always wins; below that, `checker_context.api_route.model`; below that, the built-in `DEFAULT_JUDGE_MODEL`). This floor is deliberate and never the agent's own model — an unpinned judge must grade identically regardless of which model the agent under test is using, so `resolve_evaluation_route` never lets the agent's env-configured model (e.g. `BEDROCK_MODEL`) leak into `route.model` on its own; `route.model` is set only when this override was actually given. This works because every `ApiRoute` (`DirectRoute`/`BedrockRoute`/`LiteLLMRoute`) carries its own `model` field; the orchestrator bakes the override into the resolved route's `model` before any criterion runs, so `llm_judge` just reads `context.route.model` — it never reads `checker_context` directly. **`agent_judge` and the simulator do not honor this override** — `agent_judge`'s sub-agent model comes from the criterion's own `agent:` block (defaulted to a fixed judge model), and the simulator's model is pinned by `SimulationConfig.model` (see [Simulation](#simulation) below) — both independent of `checker_context.api_route.model` by design, for the same "measuring instrument stays fixed" reason.
+- `params`/`env_params` (**`route: litellm` only**) are how the call is actually configured — there is no fallback to the agent's own `LITELLM_BASE_URL`/`LITELLM_AUTH_TOKEN` env vars, since a gateway-routed judge model rarely reuses the agent's own LiteLLM proxy/credential. They also cover any of the dozens of other provider-specific kwargs `litellm.acompletion` accepts (`aws_access_key_id`, `vertex_project`, `api_version`, ...), which have no dedicated field on `LiteLLMRoute`:
+  ```yaml
+  checker_context:
+    api_route:
+      route: litellm
+      model: azure/gpt-5.6-luna
+      params:                       # arbitrary literal passthrough kwargs to litellm.acompletion
+        api_version: "2024-05-01"
+      env_params:                   # param name -> ENV VAR NAME (never the secret itself)
+        api_base: LITELLM_BASE_URL
+        api_key: LITELLM_AUTH_TOKEN
+  ```
+  `params` is merged straight into the `litellm.acompletion(**kwargs)` call — litellm validates the param names itself, so there's no allowlist to keep in sync here. `env_params` maps a kwarg name to the *name* of an environment variable; the value is resolved right before the call, so no secret is ever written into task/experiment YAML — this is how an arbitrary provider's config, including secrets (IAM keys, an Azure AD token, a service-account path, ...), is representable without a dedicated field per provider. `env_params` is resolved after `params`, so it always wins for the same key. Rejected at task-load time if given without `route: litellm`. For an Azure deployment, pin `api_version` via `params` to whatever API version the agent side is actually configured for (e.g. Codex's `CODEX_API_VERSION`) — the judge has no way to inherit it, and a mismatched version can hit a different shape of the same endpoint.
+  **`route: litellm` is `llm_judge`-only** — `agent_judge` and the simulator run as real Claude Code CLI subprocesses that speak the Anthropic Messages protocol, so pointing them at an arbitrary litellm-fronted gateway (which may speak an entirely different wire protocol) isn't representable. The orchestrator rejects the combination at resolution time (a clear error, not a silent misroute) if the task has an enabled `agent_judge` criterion or `simulation.enabled: true` alongside `route: litellm` — use `route: bedrock`/`direct` for those instead.
+
+`checker_context` merges shallow-per-namespace across `default_experiment.defaults.checker_context` → `experiment.defaults.checker_context` → `task.checker_context` → `variant.checker_context` (same 4-layer precedence as `agent`/`simulation`). So a judge-model A/B, or a judge-backend A/B, is a variant-level config change, not an edit to every task YAML.
+
 ## Reference Solutions
 
 A reference solution is always a **directory**, given relative to the task YAML's own directory:
@@ -1577,7 +1613,7 @@ simulation:
 | `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
 | `model` | `anthropic.claude-sonnet-4-6` | Model that plays the simulated user. Auto-translated to the run's backend (Bedrock inference profile / bare Anthropic alias), the same way [`llm_judge`](#llm_judge)'s `model` is. |
 
-The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute`, so temperature and sampling are resolved at the route level (same `-b` flag as the coding agent) and are not configured on this block. The **model is not**: it is pinned by `model` above. Inheriting it from the route meant `BEDROCK_MODEL` decided who the simulated user was, so an A/B varying the subject model silently varied its interlocutor too. Hold `model` fixed across variants for the same reason you hold a judge model fixed — the simulator is part of the measuring instrument, not the thing being measured.
+The simulator runs as a tools-disabled Claude Code agent on the run's resolved *evaluation* `ApiRoute` (the coding agent's own route unless [`checker_context.api_route.route`](#checker-context) overrides it), so temperature and sampling are resolved at the route level (same `-b` flag as the coding agent by default) and are not configured on this block. The **model is not**: it is pinned by `model` above. Inheriting it from the route meant `BEDROCK_MODEL` decided who the simulated user was, so an A/B varying the subject model silently varied its interlocutor too. Hold `model` fixed across variants for the same reason you hold a judge model fixed — the simulator is part of the measuring instrument, not the thing being measured.
 
 **Semantics:**
 

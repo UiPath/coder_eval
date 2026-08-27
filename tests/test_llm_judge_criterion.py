@@ -20,6 +20,7 @@ from coder_eval.models import (
     LLMJudgeCriterion,
     TurnRecord,
 )
+from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.sandbox import Sandbox
 
 
@@ -571,10 +572,42 @@ def _tool_use_block(score: float, rationale: str = "ok") -> dict:
     }
 
 
+def _openai_tool_call_block(score: float, rationale: str = "ok") -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "submit_verdict",
+                                "arguments": json.dumps({"score": score, "rationale": rationale}),
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+
+def test_llm_judge_criterion_model_survives_json_round_trip() -> None:
+    """Regression test for PR #137 review Axis 2: an unset LLMJudgeCriterion.model
+    must stay unset (None) after a model_dump(mode="json") / reload round trip —
+    the exact shape the docker driver's task serialization performs
+    (isolation/docker_runner.py -> cli/run_task_internal_command.py::load_task).
+    A `model_fields_set` sentinel would NOT survive this (every field is materialized
+    by model_dump), silently making the judge-model override inert under --driver docker."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    assert criterion.model is None
+    reloaded = LLMJudgeCriterion.model_validate(json.loads(json.dumps(criterion.model_dump(mode="json"))))
+    assert reloaded.model is None
+
+
 def test_judge_bedrock_route_uses_bedrock_invoker(sandbox: Sandbox) -> None:
     from coder_eval.models.routing import BedrockRoute
 
-    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    route = BedrockRoute(region="eu-north-1")
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with (
         patch(
@@ -587,10 +620,60 @@ def test_judge_bedrock_route_uses_bedrock_invoker(sandbox: Sandbox) -> None:
     m_bedrock.assert_called_once()
     kwargs = m_bedrock.call_args.kwargs
     assert kwargs["route"] is route
-    assert kwargs["model"] == criterion.model
+    # No explicit criterion.model and no checker_context override on the route ->
+    # falls back to DEFAULT_JUDGE_MODEL, never the agent's own model.
+    assert kwargs["model"] == DEFAULT_JUDGE_MODEL
     assert kwargs["temperature"] == criterion.temperature
     assert kwargs["max_tokens"] == criterion.max_tokens
     assert kwargs["tool_spec"]["name"] == "submit_verdict"
+    assert m_anthropic.call_count == 0
+
+
+def test_judge_bedrock_route_with_explicit_route_model_still_wins(sandbox: Sandbox) -> None:
+    """A route.model that IS set (a real checker_context.api_route.model override,
+    as resolve_evaluation_route only ever produces) is honored — contrast with
+    the routing-level regression test in test_litellm_route.py, which asserts
+    resolve_evaluation_route itself never bakes the agent's own model into
+    route.model absent such an override."""
+    from coder_eval.models.routing import BedrockRoute
+
+    route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-opus-4-1")
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with (
+        patch(
+            "coder_eval.criteria.llm_judge.invoke_bedrock_judge_async", new=AsyncMock(return_value=_tool_use_block(0.7))
+        ) as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock()),
+    ):
+        SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert m_bedrock.call_args.kwargs["model"] == "eu.anthropic.claude-opus-4-1"
+
+
+def test_judge_litellm_route_uses_litellm_invoker(sandbox: Sandbox) -> None:
+    from coder_eval.models.routing import LiteLLMRoute
+
+    route = LiteLLMRoute(model="gpt-5-luna", params={"api_base": "http://gateway:4000"})
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with (
+        patch(
+            "coder_eval.criteria.llm_judge.invoke_litellm_judge_async",
+            new=AsyncMock(return_value=_openai_tool_call_block(0.9)),
+        ) as m_litellm,
+        patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge_async", new=AsyncMock()) as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock()) as m_anthropic,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert result.score == 0.9
+    m_litellm.assert_called_once()
+    kwargs = m_litellm.call_args.kwargs
+    assert kwargs["route"] is route
+    # No explicit criterion.model set -> falls back to route.model (checker_context override).
+    assert kwargs["model"] == "gpt-5-luna"
+    # invoke_litellm_judge_async takes no `temperature` kwarg at all -- see its docstring.
+    assert "temperature" not in kwargs
+    assert kwargs["max_tokens"] == criterion.max_tokens
+    assert kwargs["tool_spec"]["name"] == "submit_verdict"
+    assert m_bedrock.call_count == 0
     assert m_anthropic.call_count == 0
 
 
@@ -615,7 +698,7 @@ def test_judge_direct_route_uses_anthropic_invoker(sandbox: Sandbox) -> None:
 def test_judge_bedrock_invoke_runtime_error_maps_to_score_zero(sandbox: Sandbox) -> None:
     from coder_eval.models.routing import BedrockRoute
 
-    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    route = BedrockRoute(region="eu-north-1")
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with patch(
         "coder_eval.criteria.llm_judge.invoke_bedrock_judge_async",
@@ -706,7 +789,7 @@ def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
     """Translation happens INSIDE the helper, not at the dispatch site."""
     from coder_eval.models.routing import BedrockRoute
 
-    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    route = BedrockRoute(region="eu-north-1")
     criterion = LLMJudgeCriterion(description="x", prompt="grade", model="anthropic.claude-opus-4-6-v1")
     with patch(
         "coder_eval.criteria.llm_judge.invoke_bedrock_judge_async",
@@ -1021,9 +1104,7 @@ def test_llm_judge_tool_channel_bedrock(sandbox: Sandbox) -> None:
     with patch(
         "coder_eval.criteria.llm_judge.invoke_bedrock_judge_async", new=AsyncMock(return_value=bedrock_response)
     ) as mock_invoke:
-        result = SuccessChecker(
-            sandbox, init_registry=False, route=BedrockRoute(bearer_token="t", region="us-east-1")
-        ).check(criterion)
+        result = SuccessChecker(sandbox, init_registry=False, route=BedrockRoute(region="us-east-1")).check(criterion)
     assert result.score == 0.81
     # Confirm we passed the Anthropic-native tool spec.
     kwargs = mock_invoke.call_args.kwargs
@@ -1100,9 +1181,7 @@ def test_judge_usage_bedrock_from_response(sandbox: Sandbox) -> None:
         score=0.6, usage={"input_tokens": 900, "output_tokens": 40, "cache_read_input_tokens": 100}
     )
     with patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge_async", new=AsyncMock(return_value=resp)):
-        result = SuccessChecker(
-            sandbox, init_registry=False, route=BedrockRoute(bearer_token="t", region="us-east-1")
-        ).check(criterion)
+        result = SuccessChecker(sandbox, init_registry=False, route=BedrockRoute(region="us-east-1")).check(criterion)
     assert isinstance(result, JudgeCriterionResult)
     assert result.token_usage is not None
     assert result.token_usage.uncached_input_tokens == 900

@@ -252,7 +252,7 @@ class TestOrchestratorJoinHook:
         )
         monkeypatch.setattr(orch_mod.settings, "litellm_cost_log", str(log))
         fake = SimpleNamespace(
-            route=LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="deepseek/deepseek-v4-pro"),
+            route=LiteLLMRoute(model="deepseek/deepseek-v4-pro"),
             result=_result([_turn(0, static_cost=0.5)]),
             _cost_correlation_run_id=run_id,
             _cost_attempt_nonce="att1",
@@ -265,7 +265,7 @@ class TestOrchestratorJoinHook:
     def test_join_never_raises_on_bad_log(self, tmp_path, monkeypatch):
         monkeypatch.setattr(orch_mod.settings, "litellm_cost_log", str(tmp_path / "does-not-exist.jsonl"))
         fake = SimpleNamespace(
-            route=LiteLLMRoute(base_url="http://x:4000", auth_token="k"),
+            route=LiteLLMRoute(),
             result=_result([_turn(0, static_cost=0.5)]),
             _cost_correlation_run_id="R",
             _cost_attempt_nonce="att1",
@@ -289,7 +289,7 @@ class TestOrchestratorJoinHook:
         )
         monkeypatch.setattr(orch_mod.settings, "litellm_cost_log", str(log))
         fake = SimpleNamespace(
-            route=LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="deepseek/deepseek-v4-pro"),
+            route=LiteLLMRoute(model="deepseek/deepseek-v4-pro"),
             result=_result([_turn(0, static_cost=0.5), _turn(1, static_cost=0.5)]),
             _cost_correlation_run_id=run_id,
             _cost_attempt_nonce="att1",

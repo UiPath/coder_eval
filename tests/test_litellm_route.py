@@ -46,18 +46,24 @@ class TestResolveEvaluationRoute:
             monkeypatch.delenv(var, raising=False)
         return Settings(_env_file=None, **kwargs)
 
-    def test_bedrock_agent_route_is_reused_unchanged(self, monkeypatch):
-        route = BedrockRoute(bearer_token="tok", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+    def test_bedrock_agent_route_is_reused_with_model_reset(self, monkeypatch):
+        # Same region/other fields reused verbatim, but `model` is reset to None
+        # (no checker_context override) rather than carrying over the agent's own
+        # env-sourced model — see TestResolveEvaluationRouteJudgeFloor.
+        route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
         settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
-        assert resolve_evaluation_route(settings, route) is route
+        ev = resolve_evaluation_route(settings, route)
+        assert ev is not route
+        assert ev == BedrockRoute(region="eu-north-1", model=None)
 
-    def test_direct_agent_route_is_reused_unchanged(self, monkeypatch):
-        route = DirectRoute(judge_transport="anthropic")
+    def test_direct_agent_route_is_reused_with_model_reset(self, monkeypatch):
+        route = DirectRoute(judge_transport="anthropic", model="gpt-4")
         settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.DIRECT)
-        assert resolve_evaluation_route(settings, route) is route
+        ev = resolve_evaluation_route(settings, route)
+        assert ev == DirectRoute(judge_transport="anthropic", model=None)
 
     def test_litellm_agent_pins_evaluation_to_bedrock_when_aws_creds_present(self, monkeypatch):
-        agent = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="zai.glm-5")
+        agent = LiteLLMRoute(model="zai.glm-5")
         settings = self._isolated_settings(
             monkeypatch,
             api_backend=ApiBackend.LITELLM,
@@ -66,13 +72,13 @@ class TestResolveEvaluationRoute:
         )
         ev = resolve_evaluation_route(settings, agent)
         assert isinstance(ev, BedrockRoute)
-        assert ev.bearer_token == "aws-tok"
         assert ev.region == "eu-north-1"
-        # Judge + simulator run on a Claude model, region-qualified.
-        assert ev.model == "eu.anthropic.claude-sonnet-4-6"
+        # No checker_context override -> model is None, so llm_judge falls back
+        # to DEFAULT_JUDGE_MODEL rather than an env-sourced value.
+        assert ev.model is None
 
     def test_litellm_agent_falls_back_to_direct_when_only_anthropic_key(self, monkeypatch):
-        agent = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="zai.glm-5")
+        agent = LiteLLMRoute(model="zai.glm-5")
         settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.LITELLM, anthropic_api_key="sk-ant")
         ev = resolve_evaluation_route(settings, agent)
         assert isinstance(ev, DirectRoute)
@@ -81,11 +87,233 @@ class TestResolveEvaluationRoute:
     def test_litellm_agent_unconfigured_yields_direct_with_no_transport(self, monkeypatch):
         # No Bedrock creds and no ANTHROPIC_API_KEY → DirectRoute(None), which makes
         # llm_judge fail with its clean "unconfigured" error rather than scoring 0.0.
-        agent = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="zai.glm-5")
+        agent = LiteLLMRoute(model="zai.glm-5")
         settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.LITELLM)
         ev = resolve_evaluation_route(settings, agent)
         assert isinstance(ev, DirectRoute)
         assert ev.judge_transport is None
+
+
+class TestResolveEvaluationRouteJudgeFloor:
+    """Regression coverage for PR #137 review Axis 8 ('the judge loses
+    DEFAULT_JUDGE_MODEL as its floor'): resolve_evaluation_route must never bake
+    the agent's own env-sourced model into the eval route's `model` unless a real
+    checker_context.api_route.model override was given — otherwise an unpinned
+    llm_judge silently starts grading with a different model whenever the
+    agent's model changes (BEDROCK_MODEL), breaking before/after comparability.
+    """
+
+    @staticmethod
+    def _isolated_settings(monkeypatch, **kwargs):
+        for var in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION", "ANTHROPIC_API_KEY", "BEDROCK_MODEL"):
+            monkeypatch.delenv(var, raising=False)
+        return Settings(_env_file=None, **kwargs)
+
+    def test_bedrock_agent_route_no_override_strips_agent_model(self, monkeypatch):
+        # Simulates an agent route built with a real BEDROCK_MODEL (e.g. opus),
+        # reused for the eval side with no checker_context override -> the eval
+        # route's model must be None so llm_judge falls back to DEFAULT_JUDGE_MODEL,
+        # not the agent's model.
+        agent_route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-opus-4-1")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
+        ev = resolve_evaluation_route(settings, agent_route)
+        assert isinstance(ev, BedrockRoute)
+        assert ev.model is None
+
+    def test_bedrock_agent_route_with_override_qualifies_model(self, monkeypatch):
+        agent_route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-opus-4-1")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
+        ev = resolve_evaluation_route(settings, agent_route, model_override="claude-haiku-4-5")
+        assert isinstance(ev, BedrockRoute)
+        assert ev.model == "eu.anthropic.claude-haiku-4-5"
+
+    def test_direct_agent_route_no_override_strips_agent_model(self, monkeypatch):
+        agent_route = DirectRoute(judge_transport="anthropic", model="gpt-4")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.DIRECT)
+        ev = resolve_evaluation_route(settings, agent_route)
+        assert isinstance(ev, DirectRoute)
+        assert ev.model is None
+
+    def test_litellm_agent_pin_to_bedrock_no_override_strips_bedrock_model(self, monkeypatch):
+        # Agent on LiteLLM (open-weight); AWS creds present with a real
+        # BEDROCK_MODEL configured for some unrelated purpose. No override ->
+        # the pinned eval route must NOT inherit BEDROCK_MODEL.
+        agent_route = LiteLLMRoute(model="zai.glm-5")
+        settings = self._isolated_settings(
+            monkeypatch,
+            api_backend=ApiBackend.LITELLM,
+            aws_bearer_token_bedrock="aws-tok",
+            aws_region="eu-north-1",
+            bedrock_model="claude-opus-4-1",
+        )
+        ev = resolve_evaluation_route(settings, agent_route)
+        assert isinstance(ev, BedrockRoute)
+        assert ev.model is None
+
+    def test_litellm_agent_pin_to_bedrock_with_override(self, monkeypatch):
+        agent_route = LiteLLMRoute(model="zai.glm-5")
+        settings = self._isolated_settings(
+            monkeypatch,
+            api_backend=ApiBackend.LITELLM,
+            aws_bearer_token_bedrock="aws-tok",
+            aws_region="eu-north-1",
+        )
+        ev = resolve_evaluation_route(settings, agent_route, model_override="claude-haiku-4-5")
+        assert isinstance(ev, BedrockRoute)
+        assert ev.model == "eu.anthropic.claude-haiku-4-5"
+
+
+class TestBackendOverride:
+    """resolve_evaluation_route(backend_override=...) — the checker_context.api_route.route
+    override path, dispatched through _resolve_backend_route. Zero coverage before this PR
+    review (Axis 3 blocker)."""
+
+    @staticmethod
+    def _isolated_settings(monkeypatch, **kwargs):
+        for var in (
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_REGION",
+            "ANTHROPIC_API_KEY",
+            "LITELLM_BASE_URL",
+            "LITELLM_AUTH_TOKEN",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        return Settings(_env_file=None, **kwargs)
+
+    def test_override_to_bedrock_builds_route_from_env(self, monkeypatch):
+        agent_route = DirectRoute()
+        settings = self._isolated_settings(
+            monkeypatch,
+            api_backend=ApiBackend.DIRECT,
+            aws_bearer_token_bedrock="aws-tok",
+            aws_region="eu-north-1",
+        )
+        ev = resolve_evaluation_route(settings, agent_route, backend_override="bedrock")
+        assert isinstance(ev, BedrockRoute)
+        assert ev.region == "eu-north-1"
+
+    def test_override_to_bedrock_without_creds_raises(self, monkeypatch):
+        agent_route = DirectRoute()
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.DIRECT)
+        with pytest.raises(ValueError, match="requires AWS_BEARER_TOKEN_BEDROCK and AWS_REGION"):
+            resolve_evaluation_route(settings, agent_route, backend_override="bedrock")
+
+    def test_override_to_direct_builds_route_from_env(self, monkeypatch):
+        agent_route = BedrockRoute(region="eu-north-1")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK, anthropic_api_key="sk-ant")
+        ev = resolve_evaluation_route(settings, agent_route, backend_override="direct")
+        assert isinstance(ev, DirectRoute)
+        assert ev.judge_transport == "anthropic"
+
+    def test_override_to_direct_without_key_raises(self, monkeypatch):
+        agent_route = BedrockRoute(region="eu-north-1")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
+        with pytest.raises(ValueError, match="requires ANTHROPIC_API_KEY"):
+            resolve_evaluation_route(settings, agent_route, backend_override="direct")
+
+    def test_override_to_litellm_builds_route_from_params_and_env_params(self, monkeypatch):
+        """No dependency on settings.litellm_base_url/litellm_auth_token at all —
+        the checker's litellm route is built entirely from params/env_params."""
+        agent_route = BedrockRoute(region="eu-north-1")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
+        ev = resolve_evaluation_route(
+            settings,
+            agent_route,
+            backend_override="litellm",
+            model_override="gpt-5.6-luna",
+            params_override={"api_base": "http://gateway:4000"},
+            env_params_override={"api_key": "MY_ENV_VAR"},
+        )
+        assert isinstance(ev, LiteLLMRoute)
+        assert ev.model == "gpt-5.6-luna"
+        assert ev.params == {"api_base": "http://gateway:4000"}
+        assert ev.env_params == {"api_key": "MY_ENV_VAR"}
+
+    def test_override_to_litellm_without_model_raises(self, monkeypatch):
+        """There is no default open-weight/gateway model to fall back to."""
+        agent_route = BedrockRoute(region="eu-north-1")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
+        with pytest.raises(ValueError, match=r"requires an explicit `checker_context\.api_route\.model`"):
+            resolve_evaluation_route(settings, agent_route, backend_override="litellm")
+
+    def test_unknown_backend_raises(self, monkeypatch):
+        agent_route = DirectRoute()
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.DIRECT)
+        with pytest.raises(ValueError, match="is not a known backend"):
+            resolve_evaluation_route(settings, agent_route, backend_override="not-a-backend")
+
+
+class TestCheckerContextModel:
+    """CheckerContext/ApiRouteContext — the typed replacement for the old
+    hand-validated open dict (previously 0% covered, per the PR #137 review).
+    ``extra="forbid"`` + real field types now do what the hand-rolled
+    ``validate_checker_context_shape`` used to."""
+
+    @staticmethod
+    def _validate(value):
+        from coder_eval.models import CheckerContext
+
+        return CheckerContext(**value)
+
+    def test_accepts_empty(self):
+        self._validate({})
+
+    def test_accepts_route_and_model(self):
+        cc = self._validate({"api_route": {"route": "bedrock", "model": "claude-haiku-4-5"}})
+        assert cc.api_route is not None
+        assert cc.api_route.route == ApiBackend.BEDROCK
+        assert cc.api_route.model == "claude-haiku-4-5"
+
+    def test_rejects_unknown_namespace(self):
+        with pytest.raises(ValueError, match=r"[Ee]xtra"):
+            self._validate({"api_rotue": {"route": "bedrock"}})
+
+    def test_rejects_unknown_api_route_key(self):
+        with pytest.raises(ValueError, match=r"[Ee]xtra"):
+            self._validate({"api_route": {"rotue": "bedrock"}})
+
+    def test_rejects_unknown_backend_name(self):
+        with pytest.raises(ValueError):
+            self._validate({"api_route": {"route": "not-a-backend"}})
+
+    def test_accepts_params_and_env_params_with_litellm_route(self):
+        cc = self._validate(
+            {
+                "api_route": {
+                    "route": "litellm",
+                    "params": {"aws_region_name": "eu-north-1"},
+                    "env_params": {"api_key": "MY_ENV_VAR"},
+                }
+            }
+        )
+        assert cc.api_route is not None
+        assert cc.api_route.params == {"aws_region_name": "eu-north-1"}
+        assert cc.api_route.env_params == {"api_key": "MY_ENV_VAR"}
+
+    def test_rejects_params_without_litellm_route(self):
+        with pytest.raises(ValueError, match="require route: litellm"):
+            self._validate({"api_route": {"route": "bedrock", "params": {"x": 1}}})
+
+    def test_rejects_env_params_without_litellm_route(self):
+        with pytest.raises(ValueError, match="require route: litellm"):
+            self._validate({"api_route": {"env_params": {"api_key": "MY_ENV_VAR"}}})
+
+    def test_rejects_non_dict_params(self):
+        with pytest.raises(ValueError):
+            self._validate({"api_route": {"route": "litellm", "params": "not-a-dict"}})
+
+    def test_rejects_non_dict_env_params(self):
+        with pytest.raises(ValueError):
+            self._validate({"api_route": {"route": "litellm", "env_params": "not-a-dict"}})
+
+    def test_rejects_non_string_env_params_values(self):
+        with pytest.raises(ValueError):
+            self._validate({"api_route": {"route": "litellm", "env_params": {"api_key": 123}}})
+
+    def test_rejects_non_string_model(self):
+        """A YAML `model: 5` must be rejected here, not str()-ified downstream."""
+        with pytest.raises(ValueError):
+            self._validate({"api_route": {"route": "bedrock", "model": 5}})
 
 
 class TestEvalRouteWiring:
@@ -100,8 +328,8 @@ class TestEvalRouteWiring:
         from coder_eval import orchestrator as orch_mod
         from coder_eval.orchestrator import Orchestrator
 
-        eval_route = BedrockRoute(bearer_token="t", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
-        agent_route = LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="zai.glm-5")
+        eval_route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        agent_route = LiteLLMRoute(model="zai.glm-5")
         captured: dict = {}
 
         class _SpySimulator:
@@ -140,8 +368,8 @@ class TestResolveRouteCustom:
         )
         route = resolve_route(settings)
         assert isinstance(route, LiteLLMRoute)
-        assert route.base_url == "http://localhost:4000"
-        assert route.auth_token == "sk-master"
+        # base_url/auth_token are NOT stored on the route (read live from
+        # settings by _build_sdk_env) -- only model/small_model live here.
         assert route.model == "deepseek.v3.2"
 
     def test_rejects_scheme_less_base_url(self):
@@ -253,10 +481,12 @@ class TestValidateApiKeysCustom:
 class TestBuildSdkEnvCustom:
     """_build_sdk_env() for the LiteLLM route."""
 
-    def test_custom_route_env_has_anthropic_vars_only(self):
+    def test_custom_route_env_has_anthropic_vars_only(self, monkeypatch):
+        from coder_eval.agents import claude_code_agent as claude_code_agent_mod
+
+        monkeypatch.setattr(claude_code_agent_mod.settings, "litellm_auth_token", "sk-1")
+        monkeypatch.setattr(claude_code_agent_mod.settings, "litellm_base_url", "http://x:4000")
         route = LiteLLMRoute(
-            base_url="http://x:4000",
-            auth_token="sk-1",
             model="deepseek.v3.2",
             small_model="deepseek.v3.2",
         )
@@ -273,7 +503,7 @@ class TestBuildSdkEnvCustom:
         assert "AWS_REGION" not in env
 
     def test_custom_route_no_model_omits_model_vars(self):
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        route = LiteLLMRoute()
         env, model = ClaudeCodeAgent._build_sdk_env(route)
         assert model is None
         assert "ANTHROPIC_MODEL" not in env
@@ -284,7 +514,7 @@ class TestBuildSdkEnvCustom:
 
         custom_path = f"/custom/bin{os.pathsep}/usr/bin"
         monkeypatch.setenv("PATH", custom_path)
-        env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1"))
+        env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute())
         assert env["PATH"] == custom_path
 
     def test_custom_route_neutralizes_inherited_anthropic_api_key(self, monkeypatch):
@@ -292,20 +522,20 @@ class TestBuildSdkEnvCustom:
         empty in options.env (not merely omitted) — else it would fight the
         bearer auth_token against the gateway."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "leaked-key")
-        env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1"))
+        env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute())
         assert env["ANTHROPIC_API_KEY"] == ""
 
     def test_cost_log_tags_become_custom_headers(self):
         """cost_log_tags → ANTHROPIC_CUSTOM_HEADERS as newline-separated
         `Name: Value` pairs (the format Claude Code forwards verbatim), so the
         proxy-side cost log can join each call back to the run/task/turn."""
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek/deepseek-v4-pro")
+        route = LiteLLMRoute(model="deepseek/deepseek-v4-pro")
         tags = {"x-ce-run-id": "abc123", "x-ce-task-id": "calc/v1", "x-ce-iteration": "2"}
         env, _ = ClaudeCodeAgent._build_sdk_env(route, cost_log_tags=tags)
         assert env["ANTHROPIC_CUSTOM_HEADERS"] == "x-ce-run-id: abc123\nx-ce-task-id: calc/v1\nx-ce-iteration: 2"
 
     def test_no_cost_log_tags_omits_custom_headers(self):
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        route = LiteLLMRoute()
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert "ANTHROPIC_CUSTOM_HEADERS" not in env
         env2, _ = ClaudeCodeAgent._build_sdk_env(route, cost_log_tags={})
@@ -314,7 +544,7 @@ class TestBuildSdkEnvCustom:
     def test_cost_log_tags_ignored_on_non_litellm_routes(self):
         """The tag is a LiteLLM-only concern; Bedrock/Direct must not emit it."""
         tags = {"x-ce-run-id": "abc123"}
-        bedrock = BedrockRoute(bearer_token="t", region="eu-north-1", model="x")
+        bedrock = BedrockRoute(region="eu-north-1", model="x")
         env_b, _ = ClaudeCodeAgent._build_sdk_env(bedrock, cost_log_tags=tags)
         assert "ANTHROPIC_CUSTOM_HEADERS" not in env_b
         env_d, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), cost_log_tags=tags)
@@ -335,7 +565,7 @@ class TestBuildSdkEnvCustom:
         assert AgentRegistry.get(AgentKind.CLAUDE_CODE).agent_class.supports_cost_log_tags is True
         assert AgentRegistry.get(AgentKind.NONE).agent_class.supports_cost_log_tags is False
 
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek/deepseek-v4-pro")
+        route = LiteLLMRoute(model="deepseek/deepseek-v4-pro")
         # A none-agent constructs fine on a LiteLLM route (the gate omits the kwarg)...
         assert create_agent(AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route) is not None
         # ...and it WOULD crash if the kwarg were forwarded — exactly what the gate prevents.
@@ -347,7 +577,7 @@ class TestBuildSdkEnvCustom:
     def test_cost_log_tags_reject_header_injection(self):
         # A task_id/variant_id carrying a CR/LF would inject extra headers into every
         # SDK->proxy request; the seam must reject it (single-line ASCII only).
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        route = LiteLLMRoute()
         with pytest.raises(ValueError, match="single-line ASCII"):
             ClaudeCodeAgent._build_sdk_env(route, cost_log_tags={"x-ce-task-id": "ok\nAuthorization: Bearer forged"})
 
@@ -356,7 +586,7 @@ class TestResolveEffectiveModelCustom:
     """_resolve_effective_model() on the LiteLLM route — no prefixing."""
 
     def test_config_model_synced_verbatim(self):
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek.v3.2")
+        route = LiteLLMRoute(model="deepseek.v3.2")
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         agent = _make_agent(route, config_model="zai.glm-5")
         effective = agent._resolve_effective_model("zai.glm-5", env, route_model)
@@ -364,14 +594,14 @@ class TestResolveEffectiveModelCustom:
         assert env["ANTHROPIC_MODEL"] == "zai.glm-5"  # no eu./anthropic. prefix
 
     def test_route_model_used_when_config_none(self):
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek.v3.2")
+        route = LiteLLMRoute(model="deepseek.v3.2")
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         agent = _make_agent(route)
         effective = agent._resolve_effective_model(None, env, route_model)
         assert effective == "deepseek.v3.2"
 
     def test_both_none_returns_none(self):
-        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        route = LiteLLMRoute()
         env, route_model = ClaudeCodeAgent._build_sdk_env(route)
         agent = _make_agent(route)
         effective = agent._resolve_effective_model(None, env, route_model)
@@ -444,7 +674,7 @@ class TestRepriceWiring:
         from coder_eval.agents.claude_code_agent import _ClaudeTurnState
 
         agent = _make_agent(
-            LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="zai.glm-5"),
+            LiteLLMRoute(model="zai.glm-5"),
             config_model="zai.glm-5",
         )
         stub = SimpleNamespace(

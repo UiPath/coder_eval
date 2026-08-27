@@ -80,7 +80,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -385,7 +385,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
@@ -843,8 +843,8 @@ jobs:
           python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
-      - name: Install project dependencies (with codex extra)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex
+      - name: Install project dependencies (with codex + litellm extras)
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
 
       - name: Verify required secrets are present
         run: |
@@ -854,14 +854,17 @@ jobs:
           fi
           echo "CODEX_API_KEY present."
 
-      - name: Run Codex live tests
+      - name: Run Codex + litellm-judge live tests
         run: |
           mkdir -p tmp
           # Run serially: `-n0` overrides the global `-n auto` (addopts).
           # Parallel xdist workers share ~/.codex and race the Codex SQLite
           # state migration (`duplicate column name: thread_id`); serial init
-          # migrates the fresh DB exactly once.
-          .venv/bin/pytest tests/test_codex_agent_live.py \
+          # migrates the fresh DB exactly once. test_litellm_judge_live.py
+          # reuses these same CODEX_* secrets to exercise
+          # checker_context.api_route.route: litellm end-to-end (PR #137
+          # review: "nothing in the repo exercises the feature").
+          .venv/bin/pytest tests/test_codex_agent_live.py tests/test_litellm_judge_live.py \
             -m live -n0 -v --tb=short --strict-markers -ra \
             --junit-xml=tmp/junit-codex-live.xml
 
@@ -878,7 +881,7 @@ jobs:
           passed = total - skipped - errors - failures
           print(f"codex-live passed={passed} skipped={skipped} errors={errors} failures={failures}")
           if passed < 1:
-              sys.exit("test_codex_agent_live.py reported zero PASSED tests (missing API key / silent skip?)")
+              sys.exit("Live Codex/litellm-judge tests reported zero PASSED tests (missing API key / silent skip?)")
           PY
 
       - name: Upload Codex live-test artifacts on failure
