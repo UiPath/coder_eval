@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "coder-eval",
   "displayName": "Coder Eval",
   "version": "0.11.4",
