@@ -18,6 +18,7 @@ function row(
 ): TaskResultSummary {
     return {
         taskId,
+        variantId: null,
         replicateIndex: null,
         status: "SUCCESS",
         weightedScore: 1.0,
@@ -81,5 +82,57 @@ describe("RunView — Pass-rate / Failed tiles for repeated runs", () => {
         // "replicate runs" sub-line.
         expect(screen.getByText(/1\s*\/\s*2$/)).toBeInTheDocument();
         expect(screen.queryByText(/replicate runs/)).toBeNull();
+    });
+});
+
+describe("RunView — multi-variant runs replace the pooled pass rate", () => {
+    // Arm A passes everything, arm B fails everything. The pooled rate would be
+    // 50%, which describes neither configuration; the whole point of the tile
+    // change is that this number no longer appears anywhere on the page.
+    const AB = [
+        row("X", { variantId: "A", status: "SUCCESS", totalCostUsd: 0.1, durationSeconds: 1 }),
+        row("Y", { variantId: "A", status: "SUCCESS", totalCostUsd: 0.1, durationSeconds: 1 }),
+        row("X", { variantId: "B", status: "FAILURE", totalCostUsd: 0.3, durationSeconds: 5 }),
+        row("Y", { variantId: "B", status: "FAILURE", totalCostUsd: 0.3, durationSeconds: 5 }),
+    ];
+
+    test("each arm gets its own rate and the blended rate is gone", () => {
+        render(<RunView sourceId="skills" runId="r1" tasks={AB} />);
+
+        expect(screen.getByText("100%")).toBeInTheDocument();
+        expect(screen.getByText("0%")).toBeInTheDocument();
+        // The blended 50% must not be rendered at all.
+        expect(screen.queryByText("50%")).toBeNull();
+        expect(screen.getByText(/2 arms · spread 100 pts/)).toBeInTheDocument();
+    });
+
+    test("spend and elapsed time keep their pooled total, split by arm on the sub-line", () => {
+        render(<RunView sourceId="skills" runId="r1" tasks={AB} />);
+
+        // Pooled totals stay: a run's cost is real however many arms produced it.
+        expect(screen.getByText("$0.80")).toBeInTheDocument();
+        expect(screen.getByText("12s")).toBeInTheDocument();
+        // ...with the per-arm split replacing p50/p90, which would describe a
+        // pooled population that does not exist.
+        expect(screen.getByText("A $0.20 · B $0.60")).toBeInTheDocument();
+        expect(screen.getByText("A 2s · B 10s")).toBeInTheDocument();
+        expect(screen.queryByText(/p50/)).toBeNull();
+    });
+
+    test("a single-arm run is untouched: pooled rate and p50/p90 as before", () => {
+        render(
+            <RunView
+                sourceId="skills"
+                runId="r1"
+                tasks={[
+                    row("X", { variantId: "only", status: "SUCCESS" }),
+                    row("Y", { variantId: "only", status: "FAILURE" }),
+                ]}
+            />,
+        );
+        expect(screen.getByText("50%")).toBeInTheDocument();
+        expect(screen.queryByText(/arms · spread/)).toBeNull();
+        // Both the cost and time tiles carry one, hence getAll.
+        expect(screen.getAllByText(/p50/).length).toBe(2);
     });
 });
