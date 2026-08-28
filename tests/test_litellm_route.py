@@ -317,18 +317,21 @@ class TestCheckerContextModel:
 
 
 class TestEvalRouteWiring:
-    """The orchestrator must hand the simulated user the eval_route (constant
-    Claude), never the agent's (possibly open-weight) route — guards the
-    simulation path the senior review flagged as untested."""
+    """The orchestrator must hand the simulated user simulator_route — resolved
+    independently of eval_route/checker_context.api_route (that override is
+    llm_judge-only and has no bearing on the simulator, a real Claude Code CLI
+    subprocess) — and never the agent's (possibly open-weight) route — guards
+    the simulation path the senior review flagged as untested."""
 
-    async def test_simulator_receives_eval_route_not_agent_route(self, monkeypatch):
+    async def test_simulator_receives_simulator_route_not_agent_or_eval_route(self, monkeypatch):
         from pathlib import Path
         from types import SimpleNamespace
 
         from coder_eval import orchestrator as orch_mod
         from coder_eval.orchestrator import Orchestrator
 
-        eval_route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        eval_route = LiteLLMRoute(model="gpt-5.6-luna")  # llm_judge-only override
+        simulator_route = BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
         agent_route = LiteLLMRoute(model="zai.glm-5")
         captured: dict = {}
 
@@ -347,13 +350,16 @@ class TestEvalRouteWiring:
             agent=object(),
             success_checker=object(),
             eval_route=eval_route,
+            simulator_route=simulator_route,
             route=agent_route,
         )
         with pytest.raises(RuntimeError, match="__stop_dialog__"):
             await Orchestrator._simulation_dialog_loop(fake, initial_prompt="hi", sandbox_dir=Path("/tmp"))
-        # If someone reverts to route=self.route this flips to the litellm route.
-        assert captured["route"] is eval_route
+        # If someone reverts to route=self.route this flips to the agent route; if
+        # someone reverts to route=self.eval_route this flips to the litellm override.
+        assert captured["route"] is simulator_route
         assert captured["route"] is not agent_route
+        assert captured["route"] is not eval_route
 
 
 class TestResolveRouteCustom:

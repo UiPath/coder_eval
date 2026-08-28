@@ -1,5 +1,5 @@
 ---
-description: Turn a natural-language description into one or more coder-eval task YAML files — minimal prompts, weighted success criteria that check output content, validated with `coder-eval plan`. Use when the user wants to write, add, or generate an evaluation task.
+description: Turn a natural-language description into coder-eval task YAML — minimal prompts, weighted criteria that check output content, validated with `coder-eval plan`. Use when the user wants to write, add, or generate an evaluation task.
 allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 ---
 

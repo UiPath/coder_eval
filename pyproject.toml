@@ -1,6 +1,6 @@
 [project]
 name = "coder-eval"
-version = "0.11.4"
+version = "0.11.5"
 description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
@@ -126,6 +126,25 @@ codex = [
 antigravity = [
     "google-antigravity==0.1.7",
 ]
+# Optional extra that enables OpenCode agent support.
+#
+# Deliberately EMPTY, and that is not an oversight. OpenCode ships as a Node CLI
+# (`npm install -g opencode-ai`), and OpenCodeAgent drives that binary over a
+# subprocess reading `opencode run --format json` — it imports no third-party
+# Python package, so there is nothing for a Python extra to install. The extra
+# exists to keep the opt-in surface uniform across harnesses (`--extra opencode`
+# is a real, documented step) and to give the prerequisite a single home in the
+# packaging metadata.
+#
+# NOTE: the `opencode-ai` package on PyPI is an HTTP client for `opencode serve`,
+# a DIFFERENT integration surface than the CLI this harness drives. Do not add it
+# here to make the list non-empty: nothing imports it, and listing it would imply
+# a dependency that does not exist.
+#
+# Without the CLI on PATH the framework still installs and runs; OpenCode tasks
+# fail at start() with a clear hint pointing back here.
+# See docs/agents/OPENCODE.md.
+opencode = []
 
 [project.scripts]
 coder-eval = "coder_eval.cli:app"

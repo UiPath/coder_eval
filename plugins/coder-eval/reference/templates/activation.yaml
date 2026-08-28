@@ -10,11 +10,24 @@ tags: [activation]
 
 # REPLACE: the skill under test must be REACHABLE by the sandboxed agent, or every
 # positive row scores 0 and the suite reports recall 0.0 — which reads exactly like a
-# broken skill. `path` is the directory CONTAINING the skill's directory (for
-# `.claude/skills/my-skill/SKILL.md` that is `.claude/skills`), supplied through an
-# environment variable so the committed suite stays portable across machines and CI:
+# broken skill. `path` must be a PLUGIN ROOT: a directory holding a `skills/`
+# subdirectory, so the skill sits at `<path>/skills/<skill-name>/SKILL.md`. For
+# `.claude/skills/my-skill/SKILL.md` that root is `.claude`, NOT `.claude/skills` —
+# pointing one level too deep loads nothing at all. Supply it through an environment
+# variable so the committed suite stays portable across machines and CI.
 #
-#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills
+# PREFER A MINIMAL ROOT holding only the skill under test. A plugin root loads the whole
+# plugin, so agents/, commands/ and hooks/ sitting beside skills/ reach the evaluated
+# agent too — a project subagent that can answer the request will depress recall for
+# reasons unrelated to the skill, and makes the number repo-dependent:
+#
+#   SKILL_ROOT=$(mktemp -d) && mkdir -p "$SKILL_ROOT/skills"
+#   ln -s /abs/path/to/.claude/skills/my-skill "$SKILL_ROOT/skills/my-skill"
+#   export SKILL_SOURCE_PATH="$SKILL_ROOT"
+#
+# The whole-tree form works too, with that caveat:
+#
+#   export SKILL_SOURCE_PATH=/abs/path/to/.claude
 #
 # An unset variable is logged as a warning and leaves the skill unreachable, so check
 # the first run's recall before trusting a low score.

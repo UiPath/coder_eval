@@ -153,11 +153,30 @@ find**, resolved against the checkout:
 ```yaml
 env: |
   ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
-  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude/skills
+  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude
 ```
 
 Use the directory the repository actually keeps skills in, from step 1, not the path
-above. This is the one omission the scheduled trigger cannot survive: unset, the skill is
+above — and note **what level that variable points at**. A local plugin path must be a
+**plugin root**: a directory holding a `skills/` subdirectory, so the skill sits at
+`<path>/skills/<name>/SKILL.md`. For `.claude/skills/my-skill/SKILL.md` that is `.claude`,
+**not** `.claude/skills`. Pointing one level too deep loads nothing at all and produces the
+same permanent red as leaving it unset.
+
+If the suite stages a minimal root (which `/coder-eval:check-skill` recommends, so that
+sibling subagents and commands under `.claude` cannot confound the measurement), the
+workflow has to build it before the run — a scheduled job has no shell history to
+inherit it from:
+
+```yaml
+- name: Stage the skill under test as a minimal plugin root
+  run: |
+    mkdir -p "$RUNNER_TEMP/skill-root/skills"
+    cp -R "${{ github.workspace }}/.claude/skills/my-skill" "$RUNNER_TEMP/skill-root/skills/"
+    echo "SKILL_SOURCE_PATH=$RUNNER_TEMP/skill-root" >> "$GITHUB_ENV"
+```
+
+This is the one omission the scheduled trigger cannot survive: unset, the skill is
 never offered to the sandboxed agent, every positive row scores 0, and the job fails its
 `recall` threshold every week — a permanent red that looks exactly like the drift the
 schedule exists to detect, so the real thing goes unnoticed when it arrives.

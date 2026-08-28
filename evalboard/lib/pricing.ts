@@ -116,7 +116,17 @@ function p(
 // pricing key — mirror of src/coder_eval/pricing.py::_normalize_model, since the
 // recorded model_used arrives qualified (e.g. "converse/zai.glm-5",
 // "eu.anthropic.claude-sonnet-4-6"). Idempotent on already-bare ids.
-const _ROUTING_PREFIXES = ["bedrock/converse/", "bedrock/", "converse/"];
+// "openrouter/" is here for the same reason it is in _normalize_model: a harness
+// that addresses OpenRouter natively (OpenCode) records the model WITH its
+// provider prefix ("openrouter/deepseek/deepseek-v4-pro"), while the rate keys
+// are the bare vendor/model ids the LiteLLM route records. Without the strip the
+// same model normalizes differently depending on which harness produced the run.
+const _ROUTING_PREFIXES = [
+    "bedrock/converse/",
+    "bedrock/",
+    "converse/",
+    "openrouter/",
+];
 const _REGION_PREFIXES = ["eu.", "us.", "apac.", "global."];
 function normalizeModel(model: string): string {
     let m = model.trim();
