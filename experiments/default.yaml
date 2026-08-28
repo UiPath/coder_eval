@@ -59,7 +59,9 @@ defaults:
     allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
 
     # Claude Code plugins to load (null = none)
-    # Example: [{"type": "local", "path": "/path/to/skills"}]
+    # `path` must be a PLUGIN ROOT: a directory holding skills/, so the skill sits at
+    # <path>/skills/<name>/SKILL.md. One level deeper loads nothing on claude-code.
+    # Example: [{"type": "local", "path": "/path/to/plugin-root"}]
     plugins: null
 
     # Additional patterns to ignore during file change detection (beyond defaults)

@@ -5,7 +5,8 @@ was the field that broke that promise hardest: Claude Code enforced it, and Code
 Antigravity accepted it and never read it, so `max_turns: 6` ran capped on one
 backend and unbounded on the other two.
 
-This page is the contract for what each run limit means per harness.
+This page is the contract for what each run limit means per harness, plus the shared
+`agent` fields whose meaning still differs across them.
 
 ## The table
 
@@ -101,6 +102,60 @@ timeout.
 A timeout is a *failure* (partial turn captured, error status); the turn cap is a
 *clean stop*. Conflating them is the mistake this page exists to prevent: a task
 whose cap fires should not look like a task whose harness hung.
+
+## `agent.plugins[].path` accepts different depths per harness
+
+Not a run limit, but the same promise: one task file, three harnesses, same meaning.
+This field breaks it silently.
+
+| | claude-code | codex | antigravity |
+|---|---|---|---|
+| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted |
+| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted |
+
+claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
+live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
+parents the skill directories and no skill loads. Codex
+(`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
+both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
+
+So `.claude/skills` works on two backends out of three and fails on the third — and
+fails without an error. The agent simply is not offered the skill, every positive row
+of an activation suite scores 0, and the suite reports recall 0.0. That is
+indistinguishable from a skill that never triggers, which is the finding such a suite
+exists to produce. It shipped in six documentation surfaces at once for exactly this
+reason.
+
+Probe it — but **read the namespace, not the presence**. Claude Code discovers a
+project's own `./.claude/skills/` natively, independent of `--plugin-dir`, so run
+from a repo root and BOTH commands list the skill: the deeper one only looks
+correct. The plugin loaded iff the name carries the root's prefix.
+
+```bash
+# Run from a directory that is NOT the skill's own repo root.
+claude --plugin-dir /path/to/root        # lists `root:<skill>`  <- plugin loaded
+claude --plugin-dir /path/to/root/skills # lists nothing         <- loaded nothing
+```
+
+A bare `<skill>` with no prefix is project discovery, not your plugin.
+
+**Write the plugin root.** It is correct on all three, so there is never a reason to
+write the deeper form. For `.claude/skills/my-skill/SKILL.md` that is `.claude`.
+
+Note what else that pulls in: a plugin root loads the **whole** plugin, so an
+`agents/`, `commands/` or `hooks/` directory sitting beside `skills/` becomes visible
+to the evaluated agent as well. Verified — a root holding `skills/probe-beta/`,
+`agents/probe-subagent.md` and `commands/probe-cmd.md` offers all three as
+`root:probe-beta`, `root:probe-subagent` and `root:probe-cmd`. Pointing a suite at a
+repo's `.claude` therefore hands the agent every project subagent, which can answer a
+request the skill was supposed to answer. Stage a minimal root when the suite must
+isolate one skill.
+
+`SKILL_SOURCE_PATH` — the variable `/coder-eval:check-skill` emits — is held to the
+plugin-root shape by lint rule CE045. The rule keys on that variable name only; it is
+**not** a statement that other variables may use the deeper form. `$PLUGIN_PATH`, for
+one, feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code,
+so the same requirement applies there and is unlinted.
 
 ## Reproducing
 
