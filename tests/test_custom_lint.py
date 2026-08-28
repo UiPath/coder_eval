@@ -105,6 +105,48 @@ class TestCE043NoCommandOutputTruncation:
 
 
 @pytest.mark.lint
+class TestCE046EnvInfoSpreadsSuper:
+    """CE046 flags a get_environment_info override that drops the base spread."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce046_env_info_spreads_super import EnvInfoSpreadsSuper
+
+        return EnvInfoSpreadsSuper("<test>").check(ast.parse(src))
+
+    def test_flags_bare_dict_override(self):
+        src = "class FooAgent:\n    def get_environment_info(self):\n        return {'foo_model': self.model}"
+        assert self._run(src)
+
+    def test_allows_super_spread(self):
+        src = (
+            "class FooAgent:\n    def get_environment_info(self):\n"
+            "        return {**super().get_environment_info(), 'foo_model': self.model}"
+        )
+        assert not self._run(src)
+
+    def test_allows_super_spread_via_dict_call(self):
+        src = (
+            "class FooAgent:\n    def get_environment_info(self):\n"
+            "        info = dict(super().get_environment_info())\n        return info"
+        )
+        assert not self._run(src)
+
+    def test_allows_base_that_emits_marker_directly(self):
+        # The base Agent.get_environment_info is the marker's source, not an override.
+        src = (
+            "class Agent:\n    def get_environment_info(self):\n"
+            "        return {'system_prompt_semantics': self.system_prompt_semantics}"
+        )
+        assert not self._run(src)
+
+    def test_ignores_classes_without_the_method(self):
+        assert not self._run("class FooAgent:\n    def other(self):\n        return {}")
+
+
+@pytest.mark.lint
 class TestCE017ModelsLazyAgentImports:
     """CE017 flags only module-level agents/plugins imports inside models/."""
 

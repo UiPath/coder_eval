@@ -50,6 +50,19 @@ class TestSkillTriggeredChecker:
         )
         assert result.score == 1.0 and result.observed_label == "yes" and result.expected_label == "yes"
 
+    def test_only_the_canonical_skill_parameter_is_read(self) -> None:
+        """The criterion is agent-agnostic: it knows ONE key.
+
+        A harness whose skill tool names the argument differently renames it at the
+        agent boundary (OpenCode's `name` -> `skill`, `_OPENCODE_ARG_RENAME`) — see
+        tests/test_opencode_agent.py::TestCrossHarnessNormalization. Accepting
+        alternatives here instead would make every future harness edit a criterion
+        that must know nothing about harnesses, and `parameters` is substring-scanned
+        just below, so widening the key set here is the riskier of the two places.
+        """
+        result = _check(expected_skill="", skill_name="uipath-flow", commands=[_cmd("Skill", {"name": "uipath-flow"})])
+        assert result.score == 1.0 and result.observed_label == "no"
+
     def test_no_skill_tn(self) -> None:
         result = _check(expected_skill="", skill_name="uipath-flow", commands=[_cmd("Read", {"file_path": "x"})])
         assert result.score == 1.0 and result.observed_label == "no" and result.expected_label == "no"

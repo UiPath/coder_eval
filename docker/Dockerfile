@@ -49,15 +49,21 @@ COPY src/ ./src/
 COPY experiments/default.yaml ./experiments/default.yaml
 
 # Codex, Antigravity, and litellm are always baked into the image -- codex/
-# antigravity are peers to the claude-code agent installed above, so all
-# built-in agents ship in every build; litellm backs the `checker_context.
-# api_route.route: litellm` judge dispatch (see pyproject.toml's `litellm`
-# extra), which every DockerRunner-isolated task needs available IN-container
-# since the checker runs there too, not just on the host. `openai-codex`
-# (+ its pinned cli-bin), `google-antigravity` (which bundles its
-# `localharness` binary as a manylinux wheel), and `litellm` all come from
-# public PyPI, so this needs no private-index credentials. The RUN below
-# always passes `--extra codex --extra antigravity --extra litellm`.
+# antigravity are peers to the claude-code agent installed above; litellm backs
+# the `checker_context.api_route.route: litellm` judge dispatch (see
+# pyproject.toml's `litellm` extra), which every DockerRunner-isolated task
+# needs available IN-container since the checker runs there too, not just on the
+# host. `openai-codex` (+ its pinned cli-bin), `google-antigravity` (which
+# bundles its `localharness` binary as a manylinux wheel), and `litellm` all
+# come from public PyPI, so this needs no private-index credentials. The RUN
+# below always passes `--extra codex --extra antigravity --extra litellm`.
+#
+# NOT every built-in agent ships here: `opencode` is registered unconditionally
+# but its CLI is a Node package (`npm install -g opencode-ai`), absent from this
+# image, and no OpenCode credentials are in SandboxConfig.env_passthrough -- so
+# `--driver docker` does not support it. Adding it means a pinned version that
+# travels with the release tag (as CLAUDE_CODE_VERSION does) plus an
+# env_passthrough block; see docs/agents/OPENCODE.md "Running in Docker".
 #
 # CODER_EVAL_UV_EXTRAS carries ADDITIONAL opt-in extras on top of those; it
 # defaults to none. `make docker-image-full` passes `--extra uipath`, which

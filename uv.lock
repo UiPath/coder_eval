@@ -564,7 +564,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.24.1" },
     { name = "uipath", marker = "extra == 'uipath'", specifier = ">=2.10.31" },
 ]
-provides-extras = ["dev", "uipath", "litellm", "codex", "antigravity"]
+provides-extras = ["dev", "uipath", "litellm", "codex", "antigravity", "opencode"]
 
 [[package]]
 name = "colorama"
