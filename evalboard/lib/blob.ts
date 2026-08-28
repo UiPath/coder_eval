@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { BlobServiceClient, ContainerClient } from "@azure/storage-blob";
+import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
 
 const ACCOUNT = "coderevaltests";
 
@@ -40,6 +41,12 @@ export function isValidTaskId(id: unknown): id is string {
 
 function assertValidId(id: string, label: string): void {
     if (!isValidId(id)) {
+        throw new Error(`Invalid ${label}: ${JSON.stringify(id)}`);
+    }
+}
+
+function assertValidVariantId(id: string, label: string): void {
+    if (!isValidVariantId(id)) {
         throw new Error(`Invalid ${label}: ${JSON.stringify(id)}`);
     }
 }
@@ -322,11 +329,15 @@ export async function ensureTaskDir(
     runId: string,
     taskId: string,
     destRoot: string,
+    // Which arm of a multi-variant run to fetch. Defaults to the single arm a
+    // non-experiment run writes, so every existing call site is unchanged.
+    variantId: string = DEFAULT_VARIANT_ID,
 ): Promise<void> {
     assertValidId(runId, "runId");
     assertValidTaskId(taskId, "taskId");
+    assertValidVariantId(variantId, "variantId");
     if (LOCAL_RUNS_DIR) return;
-    return dedupe(`task:${container}:${runId}/${taskId}`, async () => {
+    return dedupe(`task:${container}:${runId}/${variantId}/${taskId}`, async () => {
         // Activation cases live in the nested sub-run (<runId>/activation/...),
         // so their row + per-case dir come from there; skills tasks from the
         // top-level run. Fetch the matching run.json for the row lookup.
@@ -337,13 +348,16 @@ export async function ensureTaskDir(
         const c = await getContainer(container);
         const ops: Promise<void>[] = [];
         // `listBlobsFlat` recurses, so both the flat legacy layout
-        // (`default/<task>/task.json`) and the nested replicate layout
-        // (`default/<task>/00/task.json`) download unchanged — the prefix
+        // (`<variant>/<task>/task.json`) and the nested replicate layout
+        // (`<variant>/<task>/00/task.json`) download unchanged — the prefix
         // scope is the task subtree either way. `resolveTaskContentDir` in
         // runs.ts then picks the right shape at render time.
+        //
+        // The activation sub-run is single-variant by construction (it is a
+        // nested run of its own), so it keeps the literal `default` segment.
         const prefix = activation
-            ? `${runId}/activation/default/${taskId}/`
-            : `${runId}/default/${taskId}/`;
+            ? `${runId}/activation/${DEFAULT_VARIANT_ID}/${taskId}/`
+            : `${runId}/${variantId}/${taskId}/`;
         for await (const blob of c.listBlobsFlat({ prefix })) {
             // Agent sandboxes that run Python leave a `.venv/` tree (hundreds
             // of files, tens of MB) under the task dir. No UI page reads it,

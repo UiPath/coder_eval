@@ -57,7 +57,36 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
 
 `<task-id>` is the same string the eval framework writes to
 `task_results[].task_id` (e.g., `skill-flow-calculator`) and equals the
-subdir name under `<run-id>/default/`.
+subdir name under `<run-id>/<variant-id>/`.
+
+## Variants (A/B runs)
+
+A coder_eval experiment that declares `variants:` runs every task once per arm
+and writes each arm to its own subtree (`<run-id>/<variant-id>/<task-id>/<NN>/`),
+stamping `variant_id` on every `run.json` row. An experiment with no `variants:`
+still writes one arm, named `default` — which is why a single-arm run and a
+multi-arm run have the same shape on disk.
+
+Evalboard reads that directly:
+
+- The run page adds a **By variant** strip under the headline tiles: pass rate,
+  task count, cost and time per arm. It appears only when a run has more than one
+  arm.
+- The task grid gains a **Variant** column and keeps one row per (task, arm).
+  Replicates of one arm still collapse into a single row; **arms never collapse
+  into each other** — that difference is the measurement.
+- Task detail is addressed by `?v=<variant-id>` alongside `?r=<replicate>`, so
+  each arm opens its own transcript, log, criteria and artifacts.
+
+Every one of those is inert on a run without variants: the column is dropped, the
+strip is hidden, and no link carries `?v=`. Cross-run comparison (two separate
+run ids) is a different feature and is not what this does.
+
+Statistics are deliberately not computed here. Whether a gap between arms is
+real is a question about variance, and coder_eval already answers it in the
+experiment report it writes beside `run.json` (`experiment.md` — win rates,
+per-task comparison, most divergent tasks, paired comparison with Welch t-test
+and bootstrap CIs).
 
 ## Sources
 
@@ -104,9 +133,10 @@ Two invariants worth preserving if you add a source:
 
 - `/api/file?run=<id>&path=<relpath>[&src=<source>]` serves `.flow`, `.uipx`,
   etc. with path-traversal guard (`resolveSafePath`).
-- `/api/download?run=<id>[&task=<id>][&src=<source>]` streams a zip of a task
-  folder (with `task`) or the whole run (without). Files are gathered by `collectTaskFiles`
-  / `collectRunFiles`, which reuse the `walkArtifacts` noise filter, and zipped
-  by `lib/zip.ts` (a dependency-free DEFLATE writer).
+- `/api/download?run=<id>[&task=<id>][&v=<variant>][&src=<source>]` streams a zip
+  of a task folder (with `task`, from the named arm) or the whole run (without).
+  Files are gathered by `collectTaskFiles` / `collectRunFiles`, which reuse the
+  `walkArtifacts` noise filter, and zipped by `lib/zip.ts` (a dependency-free
+  DEFLATE writer).
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red
   (`bg-red-50 text-red-700`), on a white background.

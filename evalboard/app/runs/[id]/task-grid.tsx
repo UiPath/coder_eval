@@ -15,6 +15,7 @@ import {
     StatusPill,
 } from "@/lib/pills";
 import { isPassStatus, perTaskPassCounts, statusSortRank } from "@/lib/status";
+import { DEFAULT_VARIANT_ID, taskVariantKey, variantsOf } from "@/lib/variants";
 import {
     displayedTurns,
     fmtTurnsCount,
@@ -36,6 +37,7 @@ import { TOKEN_COLUMN_HELP } from "@/app/_components/col-help";
 
 type SortKey =
     | "task"
+    | "variant"
     | "status"
     | "score"
     | "duration"
@@ -54,6 +56,7 @@ const COLUMN_HELP: Partial<Record<SortKey, string>> = {
     turns: "Visible turns: one per tool call plus one for the final reply. Tinted against the task's hand-written expected_turns budget (yellow past 1.25×, red past 1.5×); untinted when the task declares none.",
     vsExp: "Duration ÷ the time this task is expected to need. The expected time is derived per task, per harness by the eval runner (its fastest passing run, or p10 once there are ten) and stamped into the run — never hand-written. Past 2× counts as slow; a task its harness has never passed shows —.",
     cost: "Total billed cost for this task, reported by the SDK (summed across turns).",
+    variant: "Experiment arm this row was produced by. A run declaring `variants:` executes every task once per arm and keeps each arm's output in its own subtree, so the same task appears once per arm and the two rows are separate measurements — never collapsed together.",
 };
 
 // A mature task that was skipped this run has no detail page in THIS run, but it
@@ -218,10 +221,18 @@ function TaskIdCell({
     // For a collapsed replicate row, link to the SAME replicate the row's
     // status/score/cost describe (the representative), not implicitly to
     // replicate 0 — so clicking a green "Passed" row lands on the passing run.
+    //
+    // On a multi-variant run the arm is part of the row's identity, so it has to
+    // travel in the link too; without ?v= both arms of a task would open the
+    // same (first-matching) transcript. A default-arm row omits the param, so
+    // every link on an ordinary run is unchanged.
+    const variant = t.variantId ?? DEFAULT_VARIANT_ID;
+    const params = new URLSearchParams();
+    if (replicateCount > 1) params.set("r", String(t.replicateIndex ?? 0));
+    if (variant !== DEFAULT_VARIANT_ID) params.set("v", variant);
+    const qs = params.toString();
     const href = withSource(
-        replicateCount > 1
-            ? `/runs/${runId}/${t.taskId}?r=${t.replicateIndex ?? 0}`
-            : `/runs/${runId}/${t.taskId}`,
+        `/runs/${runId}/${t.taskId}${qs ? `?${qs}` : ""}`,
         sourceId,
     );
     return (
@@ -236,6 +247,38 @@ function TaskIdCell({
                 </span>
             )}
         </Link>
+    );
+}
+
+// Palette for the variant chip. An A/B run is read by scanning for its arms, so
+// each arm needs a stable colour — assigned by position in the run's sorted arm
+// list, which is deterministic for a given run and identical between the table
+// and the mobile cards. Cycles for runs with more arms than colours; the label
+// is always the arm's own id, so the colour is a scanning aid and never the only
+// signal.
+const VARIANT_CHIP_CLASSES = [
+    "bg-indigo-50 border-indigo-200 text-indigo-700",
+    "bg-teal-50 border-teal-200 text-teal-700",
+    "bg-orange-50 border-orange-200 text-orange-700",
+    "bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700",
+];
+
+function VariantChip({
+    variantId,
+    variantIds,
+}: {
+    variantId: string;
+    variantIds: string[];
+}) {
+    const idx = Math.max(0, variantIds.indexOf(variantId));
+    return (
+        <span
+            className={`inline-block rounded border px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap ${
+                VARIANT_CHIP_CLASSES[idx % VARIANT_CHIP_CLASSES.length]
+            }`}
+        >
+            {variantId}
+        </span>
     );
 }
 
@@ -285,6 +328,7 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     output: "desc",
     cw: "desc",
     cr: "desc",
+    variant: "asc",
 };
 
 function compare(
@@ -295,6 +339,10 @@ function compare(
     switch (key) {
         case "task":
             return a.taskId.localeCompare(b.taskId);
+        case "variant":
+            return (a.variantId ?? DEFAULT_VARIANT_ID).localeCompare(
+                b.variantId ?? DEFAULT_VARIANT_ID,
+            );
         case "status":
             return statusSortRank(a.status) - statusSortRank(b.status);
         case "score":
@@ -346,6 +394,8 @@ const COLUMNS: Array<{
     align?: "right";
 }> = [
     { key: "task", header: "Task" },
+    // Only rendered when the run has more than one arm — see visibleColumns.
+    { key: "variant", header: "Variant" },
     { key: "status", header: "Status" },
     { key: "score", header: "Score", align: "right" },
     { key: "duration", header: "Duration", align: "right" },
@@ -504,12 +554,19 @@ export function TaskGrid({
     // the token detail is one click away via the toolbar toggle.
     const [showTokens, setShowTokens] = useState(false);
 
-    // How many rows share each taskId — i.e. the replicate count for that task.
-    // Drives whether a row shows its replicate badge + ?r link (only when >1, so
-    // single-run tasks aren't cluttered with a "#0").
+    // Experiment arms present in this run. One entry (or none) on an ordinary
+    // run, in which case every variant affordance below stays hidden and the
+    // grid renders exactly as it did before variants were readable.
+    const variantIds = useMemo(() => variantsOf(tasks), [tasks]);
+    const hasVariants = variantIds.length > 1;
+
+    // How many rows share each (variant, task) — i.e. the replicate count for
+    // that arm of that task. Drives whether a row shows its replicate badge +
+    // ?r link (only when >1, so single-run tasks aren't cluttered with a "#0").
     const replicateCounts = useMemo(() => {
         const m = new Map<string, number>();
-        for (const t of tasks) m.set(t.taskId, (m.get(t.taskId) ?? 0) + 1);
+        for (const t of tasks)
+            m.set(taskVariantKey(t), (m.get(taskVariantKey(t)) ?? 0) + 1);
         return m;
     }, [tasks]);
 
@@ -519,28 +576,34 @@ export function TaskGrid({
     // page's pass-rate tile all apply the same "any replicate passed" rule.
     const replicatePassCounts = useMemo(() => perTaskPassCounts(tasks), [tasks]);
 
-    // Collapse replicates to one row per task: repeated runs share a taskId, so
-    // the grid shows a single entry with a k/N ✓ badge; the per-run detail is
-    // selectable on the task page. The representative is chosen so its status,
-    // score, cost, duration AND detail link all describe the SAME run: prefer a
-    // passing replicate when any passed (else the lowest-index one), breaking
-    // ties by lowest replicateIndex for stability. Pick BEFORE sorting so a
-    // metric-sorted view still shows one row per task.
+    // Collapse replicates to one row per (variant, task): repeated runs share a
+    // taskId, so the grid shows a single entry with a k/N ✓ badge; the per-run
+    // detail is selectable on the task page. The representative is chosen so its
+    // status, score, cost, duration AND detail link all describe the SAME run:
+    // prefer a passing replicate when any passed (else the lowest-index one),
+    // breaking ties by lowest replicateIndex for stability. Pick BEFORE sorting
+    // so a metric-sorted view still shows one row per task.
+    //
+    // Replicates collapse; ARMS DO NOT. Two variants of one task are separate
+    // measurements of separate configurations — collapsing them would let a pass
+    // in one arm hide a failure in the other, which is the whole signal an A/B
+    // run exists to show.
     const collapsed = useMemo(() => {
         const byTask = new Map<string, TaskResultSummary>();
         for (const t of tasks) {
-            const cur = byTask.get(t.taskId);
+            const key = taskVariantKey(t);
+            const cur = byTask.get(key);
             if (!cur) {
-                byTask.set(t.taskId, t);
+                byTask.set(key, t);
                 continue;
             }
             const curPass = isPassStatus(cur.status);
             const tPass = isPassStatus(t.status);
             if (curPass !== tPass) {
                 // A passing replicate always wins over a non-passing one.
-                if (tPass) byTask.set(t.taskId, t);
+                if (tPass) byTask.set(key, t);
             } else if ((t.replicateIndex ?? 0) < (cur.replicateIndex ?? 0)) {
-                byTask.set(t.taskId, t);
+                byTask.set(key, t);
             }
         }
         return [...byTask.values()];
@@ -573,8 +636,13 @@ export function TaskGrid({
         );
     };
 
+    // The Variant column only carries information on a run that actually has more
+    // than one arm; on every ordinary run it would be a column of identical
+    // "default" cells, so it is dropped and the grid renders as it always has.
     const visibleColumns = COLUMNS.filter(
-        (c) => showTokens || !TOKEN_KEYS.has(c.key),
+        (c) =>
+            (showTokens || !TOKEN_KEYS.has(c.key)) &&
+            (hasVariants || c.key !== "variant"),
     );
 
     return (
@@ -671,7 +739,7 @@ export function TaskGrid({
                         );
                         return (
                         <tr
-                            key={`${t.taskId}#${t.replicateIndex ?? 0}`}
+                            key={`${taskVariantKey(t)}#${t.replicateIndex ?? 0}`}
                             className="group border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
                         >
                             <td className="py-3 px-4 text-gray-700 sticky left-0 z-10 bg-white group-hover:bg-gray-50">
@@ -682,10 +750,10 @@ export function TaskGrid({
                                         className="text-gray-900 hover:text-studio-blue font-semibold"
                                         matureSourceRuns={matureSourceRuns}
                                         replicateCount={
-                                            replicateCounts.get(t.taskId) ?? 1
+                                            replicateCounts.get(taskVariantKey(t)) ?? 1
                                         }
                                         replicatePassCount={
-                                            replicatePassCounts.get(t.taskId) ?? 0
+                                            replicatePassCounts.get(taskVariantKey(t)) ?? 0
                                         }
                                         sourceId={sourceId}
                                     />
@@ -699,6 +767,16 @@ export function TaskGrid({
                                     />
                                 </div>
                             </td>
+                            {hasVariants && (
+                                <td className="py-3 px-4">
+                                    <VariantChip
+                                        variantId={
+                                            t.variantId ?? DEFAULT_VARIANT_ID
+                                        }
+                                        variantIds={variantIds}
+                                    />
+                                </td>
+                            )}
                             <td className="py-3 px-4">
                                 {t.matureSkipped ? (
                                     <MaturePill />
@@ -824,7 +902,7 @@ export function TaskGrid({
                     );
                     return (
                         <div
-                            key={`${t.taskId}#${t.replicateIndex ?? 0}`}
+                            key={`${taskVariantKey(t)}#${t.replicateIndex ?? 0}`}
                             className="rounded-lg border border-gray-200 bg-white p-3 space-y-2"
                         >
                             <div className="flex items-start justify-between gap-2">
@@ -834,14 +912,23 @@ export function TaskGrid({
                                     className="min-w-0 break-words font-semibold text-gray-900 hover:text-studio-blue"
                                     matureSourceRuns={matureSourceRuns}
                                     replicateCount={
-                                        replicateCounts.get(t.taskId) ?? 1
+                                        replicateCounts.get(taskVariantKey(t)) ?? 1
                                     }
                                         replicatePassCount={
-                                            replicatePassCounts.get(t.taskId) ?? 0
+                                            replicatePassCounts.get(taskVariantKey(t)) ?? 0
                                         }
                                     sourceId={sourceId}
                                 />
-                                <span className="shrink-0">
+                                <span className="shrink-0 flex items-center gap-1.5">
+                                    {hasVariants && (
+                                        <VariantChip
+                                            variantId={
+                                                t.variantId ??
+                                                DEFAULT_VARIANT_ID
+                                            }
+                                            variantIds={variantIds}
+                                        />
+                                    )}
                                     {t.matureSkipped ? (
                                         <MaturePill />
                                     ) : (

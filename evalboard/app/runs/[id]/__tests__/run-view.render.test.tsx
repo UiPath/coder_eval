@@ -18,6 +18,7 @@ function row(
 ): TaskResultSummary {
     return {
         taskId,
+        variantId: null,
         replicateIndex: null,
         status: "SUCCESS",
         weightedScore: 1.0,

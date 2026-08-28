@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { TaskResultSummary } from "@/lib/runs";
-import { computeRunMetrics } from "../run-view";
+import { computeRunMetrics, computeVariantMetrics } from "../run-view";
 
 function row(
     taskId: string,
@@ -8,6 +8,7 @@ function row(
 ): TaskResultSummary {
     return {
         taskId,
+        variantId: null,
         replicateIndex: null,
         status: "SUCCESS",
         weightedScore: 1.0,
@@ -112,5 +113,58 @@ describe("computeRunMetrics — per-task pass rate across replicates", () => {
         expect(m.taskTotal).toBe(m.total);
         expect(m.taskPassed).toBe(m.passed);
         expect(m.taskFailed).toBe(m.failedTotal);
+    });
+});
+
+describe("computeVariantMetrics", () => {
+    // Every ordinary run: nothing to compare, so the strip stays hidden and the
+    // headline tiles are the whole story, exactly as before.
+    test("a run with fewer than two arms reports nothing", () => {
+        expect(computeVariantMetrics([row("A"), row("B")])).toEqual([]);
+        expect(
+            computeVariantMetrics([
+                row("A", { variantId: "only" }),
+                row("B", { variantId: "only" }),
+            ]),
+        ).toEqual([]);
+    });
+
+    // The whole point: a blended 50% would hide that one arm passed everything
+    // and the other failed everything.
+    test("each arm is scored on its own rows", () => {
+        const rows = computeVariantMetrics([
+            row("A", { variantId: "live-v1", status: "SUCCESS" }),
+            row("B", { variantId: "live-v1", status: "SUCCESS" }),
+            row("A", { variantId: "preview-v2", status: "FAILURE" }),
+            row("B", { variantId: "preview-v2", status: "FAILURE" }),
+        ]);
+        expect(rows.map((r) => r.variantId)).toEqual(["live-v1", "preview-v2"]);
+        expect(rows[0].metrics.pct).toBe(100);
+        expect(rows[1].metrics.pct).toBe(0);
+        expect(rows[0].metrics.taskTotal).toBe(2);
+        expect(rows[1].metrics.taskTotal).toBe(2);
+    });
+
+    // Cost and duration must not be pooled either — an arm that is cheaper is a
+    // finding, and pooling would erase it.
+    test("cost and duration are per arm, not pooled", () => {
+        const rows = computeVariantMetrics([
+            row("A", { variantId: "a", totalCostUsd: 1, durationSeconds: 10 }),
+            row("A", { variantId: "b", totalCostUsd: 3, durationSeconds: 30 }),
+        ]);
+        expect(rows[0].metrics.cost).toBeCloseTo(1, 10);
+        expect(rows[1].metrics.cost).toBeCloseTo(3, 10);
+        expect(rows[0].metrics.duration).toBeCloseTo(10, 10);
+        expect(rows[1].metrics.duration).toBeCloseTo(30, 10);
+    });
+
+    // Rows with no variant_id belong to the default arm, so a run that mixes
+    // stamped and unstamped rows still resolves to two arms, not three.
+    test("unstamped rows fall into the default arm", () => {
+        const rows = computeVariantMetrics([
+            row("A", { variantId: null }),
+            row("A", { variantId: "other" }),
+        ]);
+        expect(rows.map((r) => r.variantId)).toEqual(["default", "other"]);
     });
 });
