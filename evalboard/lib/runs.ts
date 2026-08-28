@@ -2044,6 +2044,35 @@ function rowMatches(
     );
 }
 
+// The arm a task URL resolves to when it names none. Only `experiments/
+// default.yaml` calls its arm `default`; every other experiment names its own
+// (`sonnet`/`opus`, `baseline`, `e2e`/`smoke`), so an experiment run has no
+// `default` row at all and a bare /runs/<id>/<task> would match nothing and
+// 404. Trends, the watchlist and every pre-variant bookmark still emit exactly
+// that form, so an unnamed arm resolves to the task's first arm in the order
+// the grid lists them. An explicitly named arm is returned untouched — a URL
+// asking for an arm the run does not have still 404s downstream rather than
+// quietly rendering a different one.
+export async function resolveVariantId(
+    runId: string,
+    taskId: string,
+    requested: string | null,
+    source: Source = DEFAULT_SOURCE,
+): Promise<string> {
+    if (requested != null) return requested;
+    const data = isActivationTaskId(taskId)
+        ? await readActivationRunJson(runId, source)
+        : await readRunJson(runId, source);
+    const arms = new Set<string>();
+    for (const t of data?.task_results ?? []) {
+        if (t.task_id === taskId) arms.add(t.variant_id ?? DEFAULT_VARIANT_ID);
+    }
+    // No rows (unknown task, unreadable run.json) keeps the default arm, so the
+    // caller still 404s the way it did before variants were addressable.
+    if (arms.size === 0 || arms.has(DEFAULT_VARIANT_ID)) return DEFAULT_VARIANT_ID;
+    return [...arms].sort()[0];
+}
+
 // Replicate indices present for a task in this run, ascending (e.g. [0, 1, 2]
 // for a task run 3×). Drives the task page's run selector. A non-repeated or
 // legacy run yields [0] (rows carry no replicate_index → treated as 0); an

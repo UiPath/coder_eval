@@ -7,6 +7,7 @@ import {
     readTaskDetail,
     readTaskReplicates,
     replicateDirName,
+    resolveVariantId,
 } from "@/lib/runs";
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "@/lib/variants";
 import { readTaskReview } from "@/lib/reviews";
@@ -56,9 +57,17 @@ export default async function TaskPage({
     // Experiment arm from ?v=NAME. A run with variants stores each arm's content
     // under its own <runId>/<variantId>/ subtree and repeats the task id once per
     // arm, so without this both arms would resolve to the same transcript. An
-    // absent or malformed value falls back to the single arm a non-experiment run
-    // writes, which is what every pre-variant URL means.
-    const variantId = isValidVariantId(v) ? v : DEFAULT_VARIANT_ID;
+    // absent or malformed value names no arm, and resolveVariantId picks the
+    // task's first — `default` on an ordinary run, so every pre-variant URL
+    // resolves exactly as it did, and the leading arm on an experiment run,
+    // whose arms are named and would otherwise leave a bare link with nothing
+    // to match.
+    const variantId = await resolveVariantId(
+        id,
+        taskId,
+        isValidVariantId(v) ? v : null,
+        source,
+    );
     const task = await readTaskDetail(id, taskId, replicate, source, variantId);
     if (!task) notFound();
 

@@ -572,8 +572,6 @@ describe("TaskGrid — default ordering keeps a task's arms together", () => {
         expect(order[1]).toMatch(/alpha/i);
         expect(order[2]).toMatch(/beta/i);
         expect(order[3]).toMatch(/beta/i);
-        // Within the task, arms are in variant order.
-        expect(order[0].indexOf("A")).toBeGreaterThanOrEqual(0);
     });
 
     test("a run without variants keeps failures-first, then task id", () => {

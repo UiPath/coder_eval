@@ -87,7 +87,12 @@ Evalboard reads that directly:
   disagree ends up with one row at the top of the grid and the other at the
   bottom.
 - Task detail is addressed by `?v=<variant-id>` alongside `?r=<replicate>`, so
-  each arm opens its own transcript, log, criteria and artifacts.
+  each arm opens its own transcript, log, criteria and artifacts. A link that
+  names no arm resolves to the task's first — `default` on an ordinary run, the
+  leading arm on an experiment run, whose arms are all named and which therefore
+  has no `default` subtree for a bare link to land in. A link naming an arm the
+  run does not have is a 404, not a fallback: the point of addressing an arm is
+  that you get that arm or nothing.
 
 Every one of those is inert on a run without variants: the column is dropped, the
 tiles keep their existing pooled numbers and percentiles, and no link carries

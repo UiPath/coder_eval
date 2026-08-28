@@ -169,6 +169,42 @@ describe("multi-variant reads", () => {
     });
 });
 
+describe("resolving an unnamed arm", () => {
+    // Every experiment but experiments/default.yaml names its own arms, so an
+    // experiment run has no `default` row. Trends, the watchlist and every
+    // pre-variant bookmark link to /runs/<id>/<task> with no arm, which would
+    // otherwise match nothing and 404 — a regression from the pre-variant page.
+    test("a variant-less URL resolves to the task's first arm", async () => {
+        const { resolveVariantId, readTaskDetail } = await loadRuns();
+        const arm = await resolveVariantId(AB_RUN, TASK, null);
+        expect(arm).toBe("live-v1");
+        expect((await readTaskDetail(AB_RUN, TASK, 0, undefined, arm))?.status).toBe(
+            "SUCCESS",
+        );
+    });
+
+    test("a run whose arm is the default one still resolves to it", async () => {
+        const { resolveVariantId } = await loadRuns();
+        expect(await resolveVariantId(LEGACY_RUN, TASK, null)).toBe("default");
+    });
+
+    // Resolution only fills in an arm nobody asked for. A URL naming an arm the
+    // run does not have must keep 404ing rather than land on a different one.
+    test("an explicitly named arm is returned untouched", async () => {
+        const { resolveVariantId } = await loadRuns();
+        expect(await resolveVariantId(AB_RUN, TASK, "no-such-arm")).toBe(
+            "no-such-arm",
+        );
+    });
+
+    test("an unknown task keeps the default arm", async () => {
+        const { resolveVariantId } = await loadRuns();
+        expect(await resolveVariantId(AB_RUN, "no-such-task", null)).toBe(
+            "default",
+        );
+    });
+});
+
 describe("collectTaskFiles under variants", () => {
     test("zips the named arm's folder", async () => {
         const { collectTaskFiles } = await loadRuns();
