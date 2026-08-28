@@ -14,7 +14,18 @@ tags: [activation]
 # subdirectory, so the skill sits at `<path>/skills/<skill-name>/SKILL.md`. For
 # `.claude/skills/my-skill/SKILL.md` that root is `.claude`, NOT `.claude/skills` —
 # pointing one level too deep loads nothing at all. Supply it through an environment
-# variable so the committed suite stays portable across machines and CI:
+# variable so the committed suite stays portable across machines and CI.
+#
+# PREFER A MINIMAL ROOT holding only the skill under test. A plugin root loads the whole
+# plugin, so agents/, commands/ and hooks/ sitting beside skills/ reach the evaluated
+# agent too — a project subagent that can answer the request will depress recall for
+# reasons unrelated to the skill, and makes the number repo-dependent:
+#
+#   SKILL_ROOT=$(mktemp -d) && mkdir -p "$SKILL_ROOT/skills"
+#   ln -s /abs/path/to/.claude/skills/my-skill "$SKILL_ROOT/skills/my-skill"
+#   export SKILL_SOURCE_PATH="$SKILL_ROOT"
+#
+# The whole-tree form works too, with that caveat:
 #
 #   export SKILL_SOURCE_PATH=/abs/path/to/.claude
 #

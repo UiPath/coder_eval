@@ -98,7 +98,7 @@ agent:
 | `permission_mode` | default **`acceptEdits`** | `default` / `acceptEdits` / `plan` / `bypassPermissions` — semantics come from the Claude Code SDK. `plan` is read-only; `bypassPermissions` grants full autonomy. |
 | `allowed_tools` | `list[str] \| null` | Tool allowlist. Unset ⇒ all tools allowed. |
 | `disallowed_tools` | `list[str] \| null` | Tool denylist. (`ToolSearch` is always appended for Bedrock parity.) |
-| `plugins` | `list[{type: local, path}]` | Local plugin/skill directories; `$VAR` in `path` is expanded and resolved to an absolute path. |
+| `plugins` | `list[{type: local, path}]` | Local plugin roots; `$VAR` in `path` is expanded and resolved to an absolute path. **`path` must hold a `skills/` subdirectory** — a bare directory of skill directories loads nothing here, though Codex and Antigravity accept it. See [Harness parity](HARNESS_PARITY.md#agentpluginspath-accepts-different-depths-per-harness). |
 | `system_prompt` | `str \| null` | **Appended** to the default Claude Code system prompt (via the SDK's `claude_code` preset) — the default's behavioral guidance is kept unless `system_prompt_mode: replace` opts out. Mutually exclusive with `system_prompt_file`. An empty or whitespace-only value is treated as unset. |
 | `system_prompt_mode` | `"append"` (default) / `"replace"` | `replace` sends `system_prompt` as the **entire** system prompt (no preset) and requires a non-blank `system_prompt` / `system_prompt_file` (validated at load). Used by judge sub-agents and the user simulator, which must not carry the coding-agent persona; rarely needed in tasks — see [the migration note](#migrating-tasks-that-set-system_prompt). |
 | `system_prompt_file` | `str \| null` | Path (relative to the task YAML) loaded into `system_prompt` at resolution. Works with either `system_prompt_mode`. |
@@ -183,6 +183,16 @@ simulator force `[]` for the same reason.)
   that call and scores skill-activation suites.
 - **Plugins** are supplied as `plugins: [{type: local, path: …}]`; the path is
   env-expanded and resolved to an absolute path before being handed to the SDK.
+  It must name a **plugin root** — a directory holding `skills/`, so the skill
+  resolves at `<path>/skills/<name>/SKILL.md`. One level deeper loads nothing, with
+  no error: every positive row of an activation suite then scores 0 and the suite
+  reports recall 0.0, which reads exactly like a skill that never triggers. Codex
+  and Antigravity scan both depths, so this is claude-code-only — see
+  [Harness parity](HARNESS_PARITY.md#agentpluginspath-accepts-different-depths-per-harness).
+- A plugin root loads **everything** the plugin declares, not only `skills/`: an
+  `agents/`, `commands/` or `hooks/` directory beside it becomes visible to the
+  evaluated agent too. Point at a minimal root when the suite must measure one
+  skill in isolation.
 - **`PLUGIN_TOOLS_DIR`** pins the canonical `node_modules/@uipath` directory for
   UiPath CLI plugin discovery; when unset the sandbox derives it from the resolved
   `uip` binary. See [User Guide → Environment Variables](../USER_GUIDE.md#environment-variables).

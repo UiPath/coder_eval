@@ -126,18 +126,36 @@ indistinguishable from a skill that never triggers, which is the finding such a 
 exists to produce. It shipped in six documentation surfaces at once for exactly this
 reason.
 
-Probe it in one command, against whichever harness you doubt:
+Probe it — but **read the namespace, not the presence**. Claude Code discovers a
+project's own `./.claude/skills/` natively, independent of `--plugin-dir`, so run
+from a repo root and BOTH commands list the skill: the deeper one only looks
+correct. The plugin loaded iff the name carries the root's prefix.
 
 ```bash
-claude --plugin-dir "$(pwd)/.claude"        # loads .claude:<skill>
-claude --plugin-dir "$(pwd)/.claude/skills" # loads nothing
+# Run from a directory that is NOT the skill's own repo root.
+claude --plugin-dir /path/to/root        # lists `root:<skill>`  <- plugin loaded
+claude --plugin-dir /path/to/root/skills # lists nothing         <- loaded nothing
 ```
+
+A bare `<skill>` with no prefix is project discovery, not your plugin.
 
 **Write the plugin root.** It is correct on all three, so there is never a reason to
 write the deeper form. For `.claude/skills/my-skill/SKILL.md` that is `.claude`.
-`SKILL_SOURCE_PATH` — the variable `/coder-eval:check-skill` emits — is held to this by
-lint rule CE045; `PLUGIN_PATH` in the Codex docs is deliberately outside that rule,
-since a skills directory is valid there.
+
+Note what else that pulls in: a plugin root loads the **whole** plugin, so an
+`agents/`, `commands/` or `hooks/` directory sitting beside `skills/` becomes visible
+to the evaluated agent as well. Verified — a root holding `skills/probe-beta/`,
+`agents/probe-subagent.md` and `commands/probe-cmd.md` offers all three as
+`root:probe-beta`, `root:probe-subagent` and `root:probe-cmd`. Pointing a suite at a
+repo's `.claude` therefore hands the agent every project subagent, which can answer a
+request the skill was supposed to answer. Stage a minimal root when the suite must
+isolate one skill.
+
+`SKILL_SOURCE_PATH` — the variable `/coder-eval:check-skill` emits — is held to the
+plugin-root shape by lint rule CE045. The rule keys on that variable name only; it is
+**not** a statement that other variables may use the deeper form. `$PLUGIN_PATH`, for
+one, feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code,
+so the same requirement applies there and is unlinted.
 
 ## Reproducing
 

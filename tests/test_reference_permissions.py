@@ -357,39 +357,39 @@ class TestRestrictPermissions:
         latch ``_handlers_installed = True`` regardless, so the one retry that
         could have succeeded (from the main thread) never happened.
         """
-        monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
         attempts: list[int] = []
 
         def _refuse(signum, _handler):
             attempts.append(signum)
             raise ValueError("not the main thread")
 
-        monkeypatch.setattr("coder_eval.fs_permissions.signal.signal", _refuse)
         registry = _PermissionStack()
 
-        # Compare the two calls' signal SETS, not a running total of 4. `signal.signal`
-        # is patched module-wide for the duration of this test, so anything else in the
-        # process that reaches fs_permissions while it runs lands in `attempts` too — and
-        # under `-n auto` that depends on which tests share this worker. A count assertion
-        # therefore failed on a schedule change with `attempts == [INT, TERM, INT, TERM,
-        # INT]`, reporting a latch bug that did not exist. The set form is insensitive to
-        # a stray duplicate while still proving the retry: if the install were latched,
-        # the second call would record nothing at all.
-        registry.ensure_crash_handlers()
-        first = set(attempts)
-        attempts.clear()
-        registry.ensure_crash_handlers()
-        second = set(attempts)
+        # SCOPE the patches, do not lift them by hand. `signal.signal` is patched
+        # process-wide, and the async teardown restores SIGINT by calling
+        # `signal.signal(SIGINT, default_int_handler)` — which hits `_refuse` and raises
+        # `ValueError` out of teardown, failing the test for something it does not test.
+        # An explicit `undo()` after the calls fixed the happy path only: if
+        # `ensure_crash_handlers` itself raised — the very regression this test exists to
+        # catch — the undo would be skipped and the teardown ValueError would MASK the
+        # real failure. A context manager restores on every exit path.
+        with monkeypatch.context() as mp:
+            mp.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
+            mp.setattr("coder_eval.fs_permissions.signal.signal", _refuse)
 
-        # Lift the patch HERE, not at teardown. `signal.signal` is patched module-wide,
-        # and the async-test teardown restores SIGINT by calling
-        # `signal.signal(SIGINT, default_int_handler)` — which would hit `_refuse` and
-        # raise `ValueError` out of teardown, failing the test for a reason it does not
-        # test. That surfaced only when a scheduling change moved this test to a
-        # different `-n auto` worker, so it read as a flake rather than as the fixed
-        # ordering hazard it is.
-        monkeypatch.undo()
+            registry.ensure_crash_handlers()
+            first = set(attempts)
+            attempts.clear()
+            registry.ensure_crash_handlers()
+            second = set(attempts)
 
+        # Compare the two calls' signal SETS, not a running total of 4. Anything else in
+        # the process that reaches fs_permissions inside the window lands in `attempts`
+        # too, and under `-n auto` that depends on which tests share this worker — a count
+        # assertion failed on a schedule change with `[INT, TERM, INT, TERM, INT]`,
+        # reporting a latch bug that did not exist. The set form tolerates a stray
+        # duplicate while still proving the retry: a latched install records nothing at
+        # all on the second call.
         expected = {signal.SIGINT, signal.SIGTERM}
         assert first == expected, f"first install did not attempt both signals: {sorted(first)}"
         assert second == expected, (

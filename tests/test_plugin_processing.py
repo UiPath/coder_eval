@@ -1,5 +1,6 @@
 """Tests for Claude Code plugin processing."""
 
+import logging
 from pathlib import Path
 
 from coder_eval.utils import process_plugins
@@ -101,3 +102,56 @@ class TestProcessPlugins:
         result = process_plugins(plugins)
         # Path unchanged (braced var not expanded when not set)
         assert "${UNDEFINED_VAR}" in result[0]["path"]
+
+
+class TestPluginRootWarning:
+    """A local plugin path must be a plugin ROOT, and claude-code says nothing when it isn't.
+
+    `--plugin-dir <path>` resolves a skill at `<path>/skills/<name>/SKILL.md`. Aim one
+    level deeper — at the bare directory of skill directories — and the SDK loads
+    nothing at all, with no error. Every positive row of an activation suite then
+    scores 0 and the suite reports recall 0.0, indistinguishable from a skill that
+    never triggers. That shipped in six documentation surfaces before anyone noticed.
+
+    Codex (`codex_agent._setup_skills`) and Antigravity
+    (`antigravity_agent._resolve_skills_paths`) accept BOTH depths and already log
+    when they link zero skills. claude-code — the one harness where the wrong depth is
+    fatal — was the only one that stayed silent, and a repo-scoped lint rule cannot
+    reach the user repos where `/coder-eval:check-skill` writes these suites.
+    """
+
+    def test_plugin_root_with_skills_dir_is_quiet(self, tmp_path, caplog):
+        (tmp_path / "skills" / "demo").mkdir(parents=True)
+        (tmp_path / "skills" / "demo" / "SKILL.md").write_text("---\n---\n", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING):
+            process_plugins([{"type": "local", "path": str(tmp_path)}])
+
+        assert "no skills/ subdirectory" not in caplog.text
+
+    def test_bare_skills_dir_warns(self, tmp_path, caplog):
+        # The exact shape six surfaces once prescribed: point at `.claude/skills` itself.
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "demo").mkdir(parents=True)
+        (skills_dir / "demo" / "SKILL.md").write_text("---\n---\n", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING):
+            process_plugins([{"type": "local", "path": str(skills_dir)}])
+
+        assert "no skills/ subdirectory" in caplog.text
+        assert "PLUGIN ROOT" in caplog.text
+
+    def test_missing_directory_does_not_warn_about_layout(self, tmp_path, caplog):
+        # A path that does not exist is a different failure with its own signal; claiming
+        # a layout problem about it would send the reader looking in the wrong place.
+        with caplog.at_level(logging.WARNING):
+            process_plugins([{"type": "local", "path": str(tmp_path / "nope")}])
+
+        assert "no skills/ subdirectory" not in caplog.text
+
+    def test_non_local_plugin_is_not_checked(self, tmp_path, caplog):
+        # The plugin-root contract is about `type: local`; leave other source types alone.
+        with caplog.at_level(logging.WARNING):
+            process_plugins([{"type": "github", "path": str(tmp_path)}])
+
+        assert "no skills/ subdirectory" not in caplog.text

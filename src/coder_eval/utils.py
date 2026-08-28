@@ -79,7 +79,24 @@ def process_plugins(
             # Expand all env vars in the path, then resolve relative paths
             # against the process cwd (not the sandbox cwd) so plugins are found
             expanded = expand_env_vars(path)
-            processed_plugin["path"] = str(Path(expanded).resolve())
+            resolved = Path(expanded).resolve()
+            processed_plugin["path"] = str(resolved)
+
+            # Loud: claude-code loads a local plugin as a PLUGIN ROOT, so its skills must
+            # sit at <path>/skills/<name>/SKILL.md. Point one level deeper — at the bare
+            # directory of skill directories — and the SDK loads NOTHING, with no error:
+            # every positive row of an activation suite scores 0 and the suite reports
+            # recall 0.0, which reads exactly like a skill that never triggers. This
+            # function is claude-code-only (see the module docstring); Codex and
+            # Antigravity scan both depths and warn for themselves. Warn rather than
+            # raise — a plugin may legitimately ship only agents/, commands/ or hooks/.
+            if plugin.get("type") == "local" and resolved.is_dir() and not (resolved / "skills").is_dir():
+                log.warning(
+                    f"Plugin path has no skills/ subdirectory, so it loads no skills: {resolved}. "
+                    "A local plugin path must be a PLUGIN ROOT holding skills/ "
+                    "(for .claude/skills/my-skill/SKILL.md that is .claude, not .claude/skills). "
+                    "See docs/agents/HARNESS_PARITY.md."
+                )
 
         processed.append(processed_plugin)
 

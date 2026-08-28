@@ -170,12 +170,31 @@ subdirectory**, so that the skill sits at `<path>/skills/<skill-name>/SKILL.md`.
 directory's own name.
 
 For `.claude/skills/pdf-forms/SKILL.md` that root is **`.claude`**, not `.claude/skills`.
-Pointing at a bare directory of skill directories loads nothing at all. Tell the user to
-export it before running, and to use the same variable in CI:
+Pointing at a bare directory of skill directories loads nothing at all.
+
+**Stage a minimal root rather than pointing at `.claude` itself.** A plugin root loads
+the WHOLE plugin, not just its skills: an `agents/`, `commands/` or `hooks/` directory
+sitting beside `skills/` becomes visible to the evaluated agent too. Point at a repo's
+`.claude` and you hand the agent every project subagent and command — and a subagent
+that can answer the request is a confound, not a detail. If `.claude/agents/pdf-expert.md`
+exists while you measure `pdf-forms`, the agent may delegate to it instead of calling the
+skill; `skill_triggered` records `no`, and recall drops for a reason that has nothing to
+do with the skill's description. It also makes the number repo-dependent, so two suites
+are no longer comparable.
+
+So build a root that contains exactly the unit under test, and point at that:
 
 ```bash
-export SKILL_SOURCE_PATH="$(pwd)/.claude"
+SKILL_ROOT="$(mktemp -d)"
+mkdir -p "$SKILL_ROOT/skills"
+ln -s "$(pwd)/.claude/skills/pdf-forms" "$SKILL_ROOT/skills/pdf-forms"
+export SKILL_SOURCE_PATH="$SKILL_ROOT"
 ```
+
+Use `cp -R` instead of `ln -s` where symlinks are awkward (Windows, some CI images). If
+the user prefers the one-liner, `export SKILL_SOURCE_PATH="$(pwd)/.claude"` still works —
+say plainly that it also exposes everything else under `.claude`, so a low recall may be
+the siblings rather than the skill.
 
 Keep it an environment variable rather than baking an absolute path into the YAML — the
 suite is committed and re-run on other machines. If the variable is unset the skill is simply
